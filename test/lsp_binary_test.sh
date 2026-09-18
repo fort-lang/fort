@@ -23,9 +23,8 @@ if [ $# -ne 1 ]; then
     exit 2
 fi
 server=$1
-# A binary that is missing or unbuilt is a broken environment and not a failing
-# module, so it exits 2, as test/pipeline_test.sh and test/stage_usage_test.sh
-# do for the same case.
+# A missing binary is a broken environment and not a failing module. The test
+# exits 2 for this case, as test/pipeline_test.sh does.
 if [ ! -x "$server" ]; then
     echo "lsp-binary: not built: $server" >&2
     exit 2

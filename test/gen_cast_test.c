@@ -1,10 +1,9 @@
 // Unit tests of the cast matrix in the emitted IR (toolchain.md 6 item 12):
 // which instruction each conversion lowers to, and which conversions lower to
 // no instruction at all. A wrong answer here is silent -- a program that casts
-// wrongly still runs and still agrees with itself -- so every row the
-// bootstrap admits is pinned against the emitted text. The float rows have no
-// test: the bootstrap refuses floats before code generation
-// (bootstrap-unsupported.txt).
+// wrongly still runs and still agrees with itself. Each supported row has a
+// direct emitted-text assertion. The C compiler rejects floats before code
+// generation.
 // D3.14
 #include <stdbool.h>
 #include <stdint.h>
@@ -80,12 +79,9 @@ TEST(a_bool_widens_to_a_byte_because_its_value_is_one_bit, {
     // answer there makes the cast the identity: the `i1` is then stored into
     // the byte slot as it stands. Both modules run the same and `opt` accepts
     // the `store i1`, so the difference is visible in the text alone -- the
-    // mutation that made gen_int_bits answer 8 left all 78 unit tests of that
-    // tree and ten of the eleven tests of the lang label green, and turned
-    // only `diff-ir` red, on one of 492 compared files. It is the one rule of
-    // the emitter that no named assertion held. Every other target width is
-    // blind to it, since a `zext i1` to `i32` reads the same whether the
-    // source is called one bit wide or eight.
+    // mutation that made gen_int_bits answer 8 exposed a missing direct
+    // assertion. Every other target width is blind to it. A `zext i1` to
+    // `i32` reads the same for a one-bit or eight-bit source width.
     // D3.3, D19.2, T-078: the audit that measured the mutation
     TEST_ASSERT_TRUE(emit(in_main("    bool b = true;\n    u8 n = cast(b, u8);\n"
                                   "    println(n);\n")));

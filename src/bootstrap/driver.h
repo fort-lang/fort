@@ -17,14 +17,12 @@
 //
 // `--tokens` stops one pass earlier still: it lexes the entry file alone,
 // opening no import and parsing nothing, and writes the token dump of lexer.h
-// to stdout (toolchain.md 1). It is what holds the two compilers' lexers
-// against each other while src/fort is written.
+// to stdout (toolchain.md 1).
 // D14.1
 //
 // `--ast` stops between the two: it lexes and parses the entry file alone,
 // opening no import and checking nothing, and writes the S-expression of
-// ast_dump.h to stdout (toolchain.md 1). It is what holds the two compilers'
-// parsers against each other the same way.
+// ast_dump.h to stdout (toolchain.md 1).
 // D14.1
 //
 // The file mirrors what the self-hosted compiler will do: no unions, no

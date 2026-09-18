@@ -1707,14 +1707,18 @@ Sections:
   list or select a predecessor. CMake applies the configured checked or release mode to each source
   stage.
   `FORT_STAGE1_COMPILER` can name an external compiler. This mode skips the list and builds HEAD
-  directly. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external compiler.
+  directly. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external compiler. Bootstrap mode rejects
+  an external compiler. External-stage1 mode builds no C compiler target and registers no C
+  compiler test. A successful native build proves the bootstrap edge.
   Add a pin only when the current last pin cannot build a required later revision. A new pin must
   build with its predecessor and build its successor. Both builds must pass on both supported host
   systems before the pin enters the list.
-  The C compiler remains the independent implementation for differential tests.
+  The project does not maintain C-to-fort parity.
 - rationale: One C compiler can start the same source chain on both supported systems. CMake records
   all dependencies and rebuilds only the affected stages.
-- history: Amended 2026-09-17 (T-159). Removed the supplied-seed workflow after CMake took control
+- history: Amended 2026-09-17 (T-160). The two exclusive modes replace the C parity role. The
+  native build proves the C-to-bootstrap-0 edge. External-stage1 mode contains no C compiler test.
+  Amended 2026-09-17 (T-159). Removed the supplied-seed workflow after CMake took control
   of the complete graph. Amended 2026-09-17 (T-155). The C compiler replaces the user-supplied
   executable seed.
   Decided 2026-09-16 (T-150). The earlier chain used a supplied target seed from one source
@@ -2277,6 +2281,8 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   Apple code signatures can differ when only the output path differs.
   The toolchain snapshots the first binary before it links the second at that path.
   Amended 2026-09-15 (T-140): two `-S` runs may use different `-o` paths without changing IR.
+  Amended 2026-09-17 (T-160): the project removed C-to-fort comparisons. The fixed-point CTest
+  entry is now `fixpoint`.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).
@@ -2426,7 +2432,7 @@ language server to use them, while the server itself lands after the bootstrap f
   other failure (D11.4), and a server that must survive a
   malformed document runs the analysis where it can observe that abort. The protocol, the wire
   format and the server's own structure are not decided here and land after the bootstrap fixpoint,
-  which the ctest `bootstrap` and `tools/fixpoint.sh` perform (T-039); this decision fixes only what
+  which the ctest `fixpoint` and `tools/fixpoint.sh` perform (T-039); this decision fixes only what
   the compiler's modules must be for such a server to be possible at all.
 - history: Amended 2026-09-12 (T-105): two citations. The first said the protocol and the server
   "land after the bootstrap fixpoint (D19.5)". D19.5 requires the emitted text to be a function of
@@ -2444,6 +2450,7 @@ language server to use them, while the server itself lands after the bootstrap f
   sentence names now. Amended 2026-09-13 (T-109): D19.5's rule states both comparisons itself from
   that date, so the sentence above about what its rule "still says" describes the log as it stood
   on 2026-09-12.
+  Amended 2026-09-17 (T-160): the fixed-point CTest entry is now `fixpoint`.
 
 ## D21 Compile-time selection
 

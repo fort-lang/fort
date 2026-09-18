@@ -3,8 +3,7 @@
 // per token to stdout.
 // D14.1
 //
-// It is the observation point the self-hosted lexer is verified at, so what
-// the suite asserts is the contract tools/diff_tokens.sh relies on: the dump
+// The suite holds the lexer output contract: the dump
 // is the whole of stdout, a lexical error is reported on stderr and still
 // leaves the file dumped whole, and nothing else of the pipeline runs -- no
 // `--cc` is spawned, no temporary is created, no import is opened. The

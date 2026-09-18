@@ -201,8 +201,7 @@ plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitig
   Before worktree removal, write gate numbers into the ticket log, not the gate-log path.
   The log dies with the worktree. Record exit status, the self-hosted count, and the ctest line.
   Re-read each count constant that two branches changed after a rebase or merge.
-  Equal increments can merge silently and leave a wrong total. T-097 found two such increments:
-  `CLEAN_FILES` was 394 instead of 395; `CORPUS_FILES` was 238 instead of 239.
+  Equal increments can merge silently and leave a wrong total. T-097 found two wrong totals.
   Run the tool that owns each count and read its failure.
 
 ### Self-Updating Context (the routing rule)

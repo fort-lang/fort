@@ -59,6 +59,12 @@ bullet at a time and without a rewrite.
 
 ## 2. Unit tests in C
 
+- The Linux C-started build registers 68 C unit suites. Each suite has the labels `unit` and
+  `bootstrap`. These suites test the C implementation. Darwin and external-stage1 builds register
+  none of these suites (T-160).
+- New C unit suites use inline source or local sandbox fixtures. Only a bootstrap-library contract
+  can read the bootstrap-0 standard library. `runtime_sig_test` and `check_conv_test` are the two
+  contract suites. They also have the label `bootstrap-contract`.
 - Unit tests: `test/<component>_test.c` with `test/test.h`; the suite name is the file stem and
   `test/` already holds one per component, `runtime_test.c` being the C runtime's and not the
   compiler's, so check the name is free before writing the file (a shell redirection overwrites a
@@ -120,15 +126,10 @@ bullet at a time and without a rewrite.
 - Language tests: `test/lang/run_tests.py [filter]` (decisions D14.4, D14.5; toolchain.md 7.3
   describes every option and verdict). `test/lang/xfail.txt` lists tests the compiler cannot
   pass yet; a listed test that passes fails the run, so shrink the list in the same commit that
-  makes tests pass. `test/lang/bootstrap-unsupported.txt` lists tests that use features the C
-  bootstrap deliberately lacks (floats, the nested array and span levels of D3.6, do-while,
-  `?:`, `$cfg`, and `$if`; function pointers are in its subset, D3.10), and
-  `test/lang/unsupported-stage2.txt` is the same list for stage2. Stage2 implements all six
-  families, so its list is empty (T-043, T-044, T-041, T-156, T-157). Keep these features out
-  of core tests, or
-  split them into their own test, so the core tests exercise stage1. `run_tests.py --lint`
+  makes tests pass. The product compiler runs the complete corpus with the current standard
+  library. The harness has no bootstrap expectation list. `run_tests.py --lint`
   validates directives without a compiler and runs before every test run;
-  `run_tests.py --check-json` is a mode of its own (ctest `lang_check_json`, also run by
+  `run_tests.py --check-json` is a mode of its own (ctest `lang-json`, also run by
   check-lang) that holds the document of `fort --check --json` against the text form on every fail
   test and ignores `xfail.txt`, since it judges the
   two forms of one run rather than the test. It also selects a test with an `index.json` beside
@@ -247,19 +248,15 @@ bullet at a time and without a rewrite.
   **The working directory is any directory, and the ignore line names one** (T-127). A hand run
   from the **top of the worktree** writes `./sandbox<n>/`, which `test/fort/sandbox*/` does not
   match. One run of `check_test.bin` from there left 196 `sandbox<n>/main.ft` files in the root,
-  and the next `tools/diff_ir.sh` read `found 1132 .ft files, expected exactly 936` and exited 1.
+  and the next source count included all 196 files.
   `git status --short` did show all 196, which is the one advantage of the root over
   `test/fort/`, and it is why this line is a rule about the working directory and not a second
-  `.gitignore` entry. Remove them with `rm -rf sandbox[0-9]*` and read
-  `find . -name '*.ft' -not -path './build/*' | wc -l` against `FT_FILES` before you run any
-  oracle.
-- Two corpora beside `test/lang` run through the same `run_tests.py`, which takes the corpus root
-  as `--root`: ctest `lang-stage2` (label `lang`) holds the language corpus against stage2 with
-  `--xfail test/lang/xfail-stage2.txt`, which started as the whole corpus (`run/`, `fail/`,
-  `programs/`) and is empty as of T-038, stage2 passing every test of it;
-  ctest `fort-modules` (label `lang`) runs
-  `test/fort/<x>_test.ft`, the tests of the compiler's own modules. Both are commands of
-  `check-lang`, so the gate runs them. A `test/fort` test is an ordinary run test in the D14.5
+  `.gitignore` entry. Remove them with `rm -rf sandbox[0-9]*`. Then run the
+  source counter that reported the mismatch.
+- Two corpora run through `run_tests.py`, which takes their root as `--root`.
+  CTest `lang` runs the product language corpus with `xfail.txt`. CTest
+  `fort-modules` runs `test/fort/<x>_test.ft` against the compiler modules.
+  Both are commands of `check-lang`. A `test/fort` test is an ordinary run test in the D14.5
   directives whose header carries `//! flags: -I ../../src/fort` (the compiler's working
   directory is the corpus root, so the path has two `..`, not three). **`test/fort` holds the
   tests of `src/lsp` as well**, and a test of a server module carries `-I ../../src` beside that
@@ -381,44 +378,8 @@ bullet at a time and without a rewrite.
   the flush around it, and `diag_mute_test.ft` and `driver_test.ft` call it rather than repeating
   the redirect. A mute that kept printing passed the directive form of that test and failed the
   captured form.
-  **`lang-stage2` does not pass `--no-unsupported`; it passes a list of its own, and
-  `xfail-stage2.txt` is empty.** It did pass the flag until T-038 measured what the flag costs.
-  `bootstrap-unsupported.txt` demands that the compiler *reject* the features the C bootstrap
-  lacks; stage2 is the transliteration of that compiler and rejects them for the same reasons,
-  so with the flag stage2 passes 519 of the 538 tests and nineteen entries stay in
-  `xfail-stage2.txt` for ever, while without it stage2
-  passes all 538 and the file holds nothing. Take the stronger property. The argument the flag
-  was added on -- that inheriting the list would keep twenty entries in the file for ever -- runs
-  the other way: it is the flag that keeps nineteen of them. (`bootstrap-unsupported.txt` holds
-  twenty entries and stage2 fails nineteen of them under the flag: it passes
-  `fail/constants/002_float_to_int.ft` whatever the flag says.)
-  **Two compilers, two lists** (T-043). The two subsets stopped being equal when `src/fort`
-  gained the nested array and span levels of D3.6 (`i32[3][4]`, `i32[4]@`, `u8@@`, `node@[4]`)
-  that `src/bootstrap` refuses: those tests must be *rejected* under stage1 and must *run* under
-  stage2, which one shared list cannot say. `test/lang/unsupported-stage2.txt` is stage2's list
-  and `bootstrap-unsupported.txt` stays stage1's; `lang-stage2` names the first with
-  `--unsupported`. Neither run excuses a test. A ticket that gives stage2 a feature stage1 lacks
-  takes the entry out of stage2's list alone. It also raises `NESTED_FILES`, `FORM_FILES`,
-  `FLOAT_FILES`, `CFG_FILES`, or `IF_FILES` in `tools/diff_ast.sh`. The script skips exactly the
-  files that stage1 refuses for a nested level, a `do`-`while`, a `?:`, a float literal, `$cfg`,
-  or `$if`. It holds
-  each number as an equality: the differential compares two
-  trees, and a file only one compiler parses has no second tree. The second family carries one
-  guard more, since its two forms are whole constructs and not a type suffix: stage2 must not
-  report the refusal stage1 reports, which is what says the divergence is the intended one.
-  T-044 is the second ticket of this shape, and two of its answers are worth keeping. A `fail`
-  test whose subject is not the rejection -- `fail/operators/008_mixed_mutability_ternary.ft`
-  asserts that the two arms of a `?:` must have one type -- leaves stage2's list like any `run`
-  test, because stage2 now reports the error the test annotates. And a **new** test of such a
-  feature is added to stage1's list, never to stage2's, since stage1 must still reject it.
-  T-041 is the third. Floats emptied stage2's list. T-156 adds `$cfg` as the fifth family.
-  T-157 adds `$if` as the sixth family. Both keep that list empty. Five counters now share one
-  loop in `diff_ast.sh`. A file that holds two
-  constructs is counted by the first matching test. Read the five numbers from the script's own
-  failures. Do not compute them.
-  ctest `stage-usage` (label `unit`) diffs stage1's and stage2's `--help`, `--version` and
-  usage line, which is what holds the option table `src/fort/main.ft` copies from
-  `src/bootstrap/driver.c` to it.
+  **Product compiler scope.** The `lang` test uses `xfail.txt`. It runs the complete product
+  corpus with the current standard library (T-160).
 
 - **A test that drives a program over a pipe must size the script against the pipe, which holds
   64 KiB.** Nothing drains the pipe while the program under test reads it, so a script above the
@@ -439,273 +400,16 @@ bullet at a time and without a rewrite.
   since it runs an x86-64 binary under qemu). Hold such a script against a wrong binary before
   trusting it: this one exits 1 for `/bin/cat` and for `build/<preset>/fort` (T-064).
 
-## 5. Differential oracles and the fixed point
+## 5. Product tests and the fixed point
 
-- **The fixed point is the ctest `bootstrap` (T-039) and the gate runs it.** CMake gives
-  `tools/fixpoint.sh` the last bootstrap compiler and `build/fort`. The script uses `build/fort`
-  as stage2. It builds stage3 and stage4 under `<build-dir>/fixpoint/<mode>/`. It does that twice:
-  once in checked mode and once with
-  `--release`. The two modes emit different code, because checked arithmetic traps and release
-  arithmetic does not (D11.1), so a fixed point in one mode does not prove the other. In each mode
-  it holds stage2's module for `src/fort` against stage3's, runs `opt-18 -passes=verify` over both
-  (D19.1), and compares the stage3 and stage4 binaries byte for byte. The module comes first
-  because it names the guilty program: two identical modules that link to different bytes are
-  clang or the linker. It is label `lang` and a command of `check-lang`, so `check-all` and the
-  gate run it. It costs 12.2 s under `debug`, 12.7 s under `asan` and 14.4 s under `ubsan`
-  (measured 2026-09-12, before T-131 added the third compile), against 259 s for the whole of
-  `check-all` under `debug`: most of the
-  work is clang, which no preset instruments, and the stage2 and stage3 runs, which qemu runs and
-  no preset instruments either. `tools/vm run 'ctest --preset debug -R bootstrap'` asks in one line.
-  **Why the pair moved one hop along, and why D19.5 is unchanged** (T-131). The compiler that
-  builds HEAD is the last pin of `tools/bootstrap.ref`, and the last pin and HEAD are different
-  programs. Their `-S` texts differ on any commit that touches the emitter, so a comparison of the
-  pin's module with stage2's would go red on a change that is not a defect. Both members of the
-  pair D19.5 compares must embody HEAD's sources. stage2 and stage3 are the first such pair:
-  HEAD's sources through two different compilers. stage3 and stage4 are the second, and their
-  binaries are the artefact comparison. Two distinct stages, one input, two `-S` runs and no
-  third, which is what D19.5 asks for and what its last sentence forbids.
-  **Its binary comparison is the artefact check `tools/diff_ir.sh` cannot make.** That script
-  compares the two emitters' module for `src/fort/main.ft` among the other files it walks --
-  `grep -n 'PROGRAM_FILES=' tools/diff_ir.sh` reads 530 on 2026-09-14 -- and it is the
-  stronger oracle for the emitter, but the step from "the two modules agree" to "stage2 and stage3
-  are the same bytes" needs two assumptions that nothing checked before T-039: `clang` must be
-  deterministic over one input and one command line, and `diff_ir.sh` compiles `main.ft` from the
-  top of the worktree with `-I src/fort -I test/fort/support`, so the module it compares is not
-  byte for byte the module that built stage2. Read the two halves of the `bootstrap` test apart.
-  The **binary** comparison retires both assumptions, because it compiles and compares the
-  artefacts themselves. The module comparison beside it rests on neither, since it compares two
-  texts and links nothing, and it answers a different question: which of the two emitters is
-  wrong. The binary half is also the only check in the repository that holds stage1's clang
-  command line against stage2's. A different `-O` level, a different link order or a different
-  `--target` in `src/fort/driver.ft` leaves both modules byte-identical and makes the binaries
-  differ, which `test/driver_test.c` and `test/fort/driver_cc_test.ft` cannot see: each holds one
-  compiler against its own written text.
-  **A file path reaches the binary, so the two stages of a mode differ in nothing the module
-  holds.** They differ in the `-o` path, which no module holds, and in `--cc`, which `-S` never
-  reads; everything else is spelled the same way. The compiler names each
-  file the path it opened it by (D14.2) and writes that path into the module as a `@.file.N`
-  string (D19.6). Compiling `src/fort/main.ft` by its absolute path and by its relative path from
-  the top of the worktree gives two binaries that differ in 27233 of 480088 bytes, and both run.
-  CMake builds `build/fort` with the same absolute entry and source-root paths that the script
-  uses. The script writes no file another test reads. The `lang-stage2`, `diff-ir`, and
-  `stage-usage` tests judge `build/fort`.
-  **A comparison needs the guard that its inputs exist.** The script removes each binary and each
-  module before it writes it, checks that the compiler wrote the binary, and holds each module
-  against the first line of D19.1 before it compares the two: two empty files compare equal and
-  `opt` accepts an empty module, so a compiler that exits 0 and writes nothing would otherwise
-  read as a fixed point. `tools/diff_ir.sh` carries the same guard for the same reason. A stub
-  `fort` that exits 0 and writes nothing is how both were proved: it prints
-  `exited 0 and wrote no ...` and exits 1, and a stub that writes empty modules prints
-  `is no module to compare`.
-- **Phase B has four differential oracles, and the third is the only one that can see a false
-  positive.** `tools/diff_tokens.sh` and `tools/diff_ast.sh` compare stage1's and stage2's
-  `--tokens` and `--ast` over every `.ft` file of the repository; `tools/diff_check.sh` compares
-  `fort --check` over the files stage1 checks clean, which is where the compiler's own thirteen
-  thousand lines of fort and the standard library are; `tools/diff_ir.sh` (T-038, ctest `diff-ir`,
-  a command of `check-lang`) compares `fort -S` byte for byte over every `.ft` file stage1
-  compiles into a module -- every `run` and `programs` test, every `test/fort` module test, and
-  `src/fort/main.ft`, which is the compiler emitting itself. That last is the strongest single
-  case there is, and the script is the strongest of the four, since D19.5 makes the text a
-  function of the program alone, so a type the checker built differently, a constant it folded
-  differently or a symbol it resolved differently all reach the text. What it cannot see is a
-  construct the corpus does not spell, and whether stage1's own text is right.
-  The language corpus under stage2 holds the
-  diagnostics a ported pass must *report*; only diff_check holds the ones it must not, and T-035
-  measured the difference: reverting T-082's `identity_only` in `named_type` left the whole
-  495-test stage2 corpus green and was caught by diff_check, on
-  `run/structs/008_recursive_span_first.ft`. The unit suite the same ticket added
-  (`check_resolve_test.ft`) catches it too, and that is the shape to aim for -- the differential
-  finds the class, a named assertion pins it -- so do not read the story as "the differential is
-  enough".
-  **T-078 measured the same shape from the other side, in the emitter, and found one rule that
-  only `diff_ir.sh` held.** It broke, one at a time, the line implementing each of the 72
-  decisions `src/bootstrap/gen.c`, `gen_expr.c`, `gen_stmt.c` and `gen_data.c` cite. 69 of the 72
-  turned a test red, and 68 of those died in the emitted-text suites. The 69th is the one to
-  learn from. `gen_int_bits` answering 8 bits for a `bool` instead of 1 left all 78 unit tests of
-  that tree green. It left ten of the eleven tests of the `lang` label green. It turned only
-  `diff-ir` red, on 1 of 492 compared files. A pure differential says that stage1 and stage2
-  disagree. It never says which of them is wrong, so the same mistake ported into `src/fort`
-  takes the last witness away. The assertion that now states the rule is
-  `a_bool_widens_to_a_byte_because_its_value_is_one_bit` in `test/gen_cast_test.c`. It needs an
-  **8-bit** target: a `zext i1` to `i32` reads the same whether the source is called one bit wide
-  or eight. Read a differential's red as "the class is here", never as the rule's witness. The
-  method, the runner and the traps of that audit are in section 7, beside T-077's.
-  **The differentials use the C oracle library, not a production pin** (T-151). `diff_check.sh`
-  and `diff_ir.sh` name `<build-dir>/oracle/std` on both sides. The build extracts it from
-  `tools/bootstrap-oracle.ref`. This keeps the frozen C language subset independent from the
-  source pins in `tools/bootstrap.ref`. Giving both compilers one directory also keeps their
-  emitted paths equal. HEAD's `std/*.ft` files stay in the file list and are compared one by one
-  until one uses a form the C compiler refuses. The fixed point and `fort-modules` judge HEAD's
-  complete standard root and compiler sources.
-  All four scripts carry the same `FT_FILES` equality, so a ticket that adds or removes a `.ft`
-  file changes **four** lines in the same commit, and `diff_check.sh` and `diff_ir.sh` each carry
-  a second equality, `CLEAN_FILES` and `PROGRAM_FILES`, because a comparison that shrank would
-  otherwise pass while seeing less. `diff_ast.sh` carries four more, one for each syntax family
-  stage1 alone refuses: `NESTED_FILES`, `FORM_FILES` (a `do`-`while` or a `?:`), `FLOAT_FILES`
-  `CFG_FILES` (`$cfg`) and `IF_FILES` (`$if`). So a `.ft` that uses one family moves two
-  constants and not one, and
-  T-042 moved **seven lines** for eleven files, four constants over five files: `FT_FILES` 842 to
-  853 on four lines, `FORM_FILES` 12 to 13 for `std/math.ft`, `FLOAT_FILES` 63 to 67 for four
-  tests, and `CORPUS_FILES` 604 to 615 in `test/highlight_test.py`. Count the lines and not the
-  names: `git diff main...HEAD -U0 | grep -cE '^\+.*[A-Z_]+_FILES *='` prints one line for each,
-  which is the number a ticket must move. Read each new value off the failure of the tool that
-  owns it and never compute one: two branches that raise one constant by the same step merge with
-  no conflict and are then both wrong. T-107 measured that case on a rebase over T-077: five
-  counters conflicted and `PROGRAM_FILES` did not, because both branches had written 502 over the
-  501 they shared, and the answer is 503. **The one that does not conflict is the dangerous one**,
-  since nothing in the rebase asks you to look at it. So after a rebase read every counter of the
-  six off its own tool, not only the ones git stopped on.
-  **The command anchors on the assignment and not on the start of the line, because one of these
-  constants is not at the start of a line.** `test/parser_recovery_test.c` declares its
-  `CORPUS_FILES` inside an `enum` line, so the earlier command,
-  `grep -E '^\+[A-Z_]*FILES'`, could never see it: it printed 7 for T-045's diff where the answer
-  is 8. The thing that counts the count constants was itself miscounting. It entered this file
-  with T-042 (74dddb3) and stood until T-045 measured it, because it returned a number and a
-  number reads as an answer. Use the command above, and check what it prints against the
-  constants you know you touched.
-  **A line can move a file from one bucket of `diff_ast.sh` to another, and the two constants
-  then move in opposite directions** (T-127). The bucket is not the first construct stage1
-  refuses. stage1 reports every one of them, and `diff_ast.sh` greps the whole of stage1's
-  stderr in one fixed order -- `NESTED_MESSAGES`, then `FORM_MESSAGES`, then `FLOAT_MESSAGES` --
-  and the first grep that matches takes the file. So a file that draws two messages counts in the
-  higher bucket, wherever the two constructs stand in it.
-  **A `?:` with a float arm draws no `?:` message at all**, which is what moved
-  `test/lang/fail/constants/010`. `parse_ternary` (`src/bootstrap/parser.c:1250`) calls
-  `unsupported(p, loc, "?:")` only after both arms parse, and `parse_primary`
-  (`parser.c:1023`) returns `NULL` for a float literal, so the `n->b == NULL || n->c == NULL`
-  test above it returns first. Measured on `main`: that file held four `?:`, every one with a
-  float arm, and `build/debug/bootstrap/stage1/fort --ast` printed 12 `float literals` messages
-  and no `?:`.
-  The column plays no part. `println(n > 0 ? 1 : 2.5);` stood in that file with the `?` at
-  column 19 and `2.5` at column 25, and stage1 still reported only the float, at `20:25`.
-  T-127 added `println((n > 0 ? 'a' : 'b') == 1.5);`, whose two arms are char literals and parse,
-  so stage1 reports `?:` at `48:20` beside 13 `float literals`, the `FORM_MESSAGES` grep matches
-  first, and `FORM_FILES` went 15 to 16 while `FLOAT_FILES` went 68 to 67, on one file and with
-  no file added. To predict the bucket, run `fort --ast <file>` and read every message it prints,
-  not the source. Run the script twice as well: it reports one bucket at a time, `NESTED_FILES`
-  first, then `FORM_FILES`, then `FLOAT_FILES`, so the second failure is invisible until the
-  first is fixed.
-  **A search root moves a second equality, and a new file may move none.** The two rules are the
-  same rule read from each end. `-I src`, which T-063 added to `diff_check.sh` and to
-  `diff_ir.sh` so that the language server resolves, took `CLEAN_FILES` from 458 to 472 and
-  `PROGRAM_FILES` from 471 to 492, because a root that resolves an import moves a file out of the
-  skipped bucket and into the compared one. T-042 added eleven files and moved neither, because
-  stage1 refuses all eleven and the refused count rose by eleven with them. So the two second
-  equalities do not follow from the number of files a ticket adds in either direction, and two
-  branches that both moved them cannot add their increments: **rebase, then read all seven
-  numbers again, one command per file** (T-063, rebased onto T-042).
-  **A `fail` test moves two numbers a `run` test does not.** The first is
-  `test/parser_recovery_test.c`'s `CORPUS_FILES`, which counts the `fail` corpus alone; the second
-  is the comment on `lang_check_json-stage2` in `CMakeLists.txt`, whose three numbers are the
-  corpus total, the `fail` tests and the tests `--check-json` selects, and a `fail` test carries
-  diagnostics so it moves all three. A `run` test moves the total alone. So ask which kind of test
-  you added before you count, and read
-  `test/lang/run_tests.py --check-json --list | wc -l` and `| grep -c '^fail/'` for the second
-  pair rather than adding one to the comment. **Take one off that `wc -l`**: the last line `--list`
-  prints is its own summary (`222 tests`) and not a test, so the pipe answers 223 where the comment
-  says 222. T-107 read 641 and 223 for a branch whose numbers are 640 and 222, and found the
-  off-by-one only because the two moves disagreed: its two `run` tests raised the total by two and
-  the selected count by none, while `wc -l` claimed both had risen by one from a base one too high.
-  `| grep -c '^fail/'` counts no summary line and needs no correction.
-  T-045 is the worked example and moved **eight lines**, in six files, over five different
-  constants. Ten `.ft` files that stage1 checks clean and one `fail` test that it refuses took
-  `FT_FILES` 876 to 887 on four lines, `CLEAN_FILES` 472 to 482, `PROGRAM_FILES` 492 to 501 --
-  nine of the ten hold a `main`, and `std/sort.ft` does not -- `CORPUS_FILES` 638 to 648 in
-  `test/highlight_test.py`, which does not walk the `fail` directory, and `CORPUS_FILES` 233 to
-  234 in `test/parser_recovery_test.c`, which walks nothing else. The `CMakeLists.txt` comment
-  moved with them, 628 to 638 tests, 219 to 220 `fail` tests and 221 to 222 selected. So the
-  number of lines is not the number of constants, and neither is the number of files.
-  **The four oracles and the fixed point see nothing of `?:`, by construction** (T-126). stage1
-  refuses the construct and stage2 types it, so every file that spells `?:` leaves the compared
-  set: `diff_ast.sh` counts it in `FORM_FILES` and skips it, `diff_check.sh` and `diff_ir.sh` drop
-  it with the files stage1 refuses, and `tools/fixpoint.sh` compares two binaries and not an
-  answer. stage2's answer for a `?:` is therefore held by `test/fort/*_test.ft` and by the `run`
-  tests of `bootstrap-unsupported.txt`, and by nothing else. T-117 moved one such answer with
-  nothing red: `println(n > 0 ? 4294967296 : 1)` was refused before it and prints 4294967296
-  after it. A ticket that changes the default type, the operand rules or the arms of a conditional
-  writes the assertion itself, because no differential will.
-  **The same holds for `diff_ir.sh`'s `opt -passes=verify`, which T-127 added below** (T-127).
-  The verify stands inside the loop that skips the files stage1 refuses, so neither module of such
-  a file reaches LLVM there. The family is the one this entry names, widened by the other two
-  buckets: a `?:`, a `do`-`while`, a float literal or a nested array or span level. Counted on
-  2026-09-14: 409 of the 936 `.ft` files are skipped, 84 of them are programs stage2 compiles into
-  a module, and all 84 stand under `test/lang`, where `lang-stage2` passes `--verify-ir` and reads
-  them. So the gap is empty today and it is not closed: the first such program under `test/fort`,
-  `test/tty` or `src/` would have its stage2 module verified by nothing. `CMakeLists.txt` says
-  this beside `lang-stage2`, which T-043 gave `--verify-ir` for exactly this reason.
-- **`diff_ir.sh` asks a second and absolute question of each module: does LLVM read it** (T-127).
-  The differential half says the two emitters agree, and two modules that agree may both be
-  wrong. So the script runs `opt -passes=verify` over each module before it compares them, and
-  the verified count is an equality, twice `PROGRAM_FILES`, so a run cannot pass while seeing
-  less. On 2026-09-14 that reads `527 programs` and `1054 modules`, and it costs 68.5 s to
-  84.6 s under `debug`.
-  **What it adds beyond `run_tests.py --verify-ir`, which runs the same `opt`.** CMake passes
-  that flag to `lang` and `fort-modules` under stage1 and to `lang-stage2` under stage2. 350 of
-  the 527 programs stand under `test/lang` and were already verified under both compilers. The
-  other 177 are 173 `test/fort` module tests, 2 `test/tty` programs, `src/lsp/main.ft` and
-  `src/fort/main.ft`. `fort-modules` is the only run of `test/fort` and it uses stage1, and there
-  is no stage2 twin of it, so 176 of those 177 had their stage2 module verified by nothing;
-  `src/fort/main.ft` is the exception, which `tools/fixpoint.sh` verifies under both compilers in
-  both build modes. What that buys is 176 files, and it is not "every program in the repository":
-  the script reads only the files stage1 compiles, and the bullet above gives the 409 it skips and
-  the 84 of those that `lang-stage2` alone verifies.
-  **Both guards of the verify were written wrong first, and both are now mutation-measured**
-  (T-127, the review round). The `verified` equality read `status -eq 0 && verified -ne
-  compared * 2`, and every path that skips a verify sets `status` to 1 on the way, so it could
-  never fire; it now holds `verified` against `PROGRAM_FILES * 2` whatever `status` is. A stage1
-  module the verifier refused used to `continue`, so stage2's module was never emitted and one
-  stage1 defect hid every stage2 defect on the same file. The A/B, with an `opt` wrapper that
-  refuses two calls in a row: the old script printed two refusals, both `stage1`, on two different
-  files and no `verified` line; the new one prints `stage1` and `stage2` for one file and
-  `verified 1052 modules, expected 1054`. **Write the equality against the constant, not against a
-  counter the same run computes.**
-  The mutant is T-128's own defect: `git show c2ad3e4 -- src/` reverse applied to both compilers
-  leaves the modules identical and turns `diff-ir` red on
-  `test/lang/run/constants/014`, with `'%t8' defined with type 'i32' but expected 'i64'`.
-- **A verifier reads only the shapes the corpus spells, so a generated corpus stands beside the
-  measured one** (T-127). T-127 lived because no program of its shape existed, not because no
-  `opt` ran. `tools/sweep_untyped.sh` is that generated corpus: it builds one program per row of
-  `tools/sweep_untyped.txt` and puts each in one of six classes -- REPORTED (the checker refused
-  the row and named a reason), FRAME (it refused above the row and never read it), RAN with its
-  output, TRAP with its status, CC-FAIL (the checker passed it and clang refused the module) and
-  SILENT (it ran and printed nothing). CC-FAIL and SILENT fail the run, and every row carries the
-  class it must reach under stage1 and under stage2, so a row that changes class or answer fails
-  it as well. The 163 rows cover the four routes of `check_operands`, every context D4.1 names,
-  the two positions it says are not contexts, every operator family of D6.2 with an untyped
-  operand on each side, the three run-time errors of D6.13 at both widths, both ends of D4.4's
-  exact range, the return position and the float clause of D4.5. On 2026-09-14 stage1 reads
-  `59 reported, 16 refused at the frame, 77 ran, 11 trapped, 0 refused by clang, 0 silent` and
-  stage2 reads `64 reported, 0 refused at the frame, 88 ran, 11 trapped, 0 refused by clang,
-  0 silent`.
-  **A generated corpus needs three guards a hand-written test gets for free** (T-127, the review
-  round). Its first version had none of them. (a) **Hold the compiler to the two statuses of
-  D14.1**, 0 and 1, and require an `error:` line with a refusal: reading any non-zero status as a
-  diagnostic let a compiler that segfaults on every row pass 72 of 152 rows and print
-  `152 reported, 0 refused by clang, 0 silent`. The classes BAD-STATUS and NO-DIAGNOSTIC name the
-  two faults and no row may expect either. (b) **Make the list declare its own length**, here
-  `!rows 163`, and hold it as an equality, or a deleted row passes in silence. Check the row shape
-  too: a row cut down to its two class columns parsed with `body=REPORTED` and matched itself.
-  (c) **Give a refusal above the row its own class.** stage1 stops at `f64 d = zf(0.5);`, the line
-  the float frame writes above the row, so the 16 rows of section E read FRAME and a reader does
-  not count 16 refusals as 16 measurements.
-  Nothing in the gate runs it, because a generated corpus is a
-  question a ticket asks and not a rule the project keeps: it costs 8.5 s under stage1 and
-  21.2 s under stage2, and a ticket that touches constants, the default type or the operand
-  rules runs it by hand.
-  Its two command lines are in the script's header. It is not a substitute for a `run` or `fail`
-  test: a row that becomes a rule of the language moves into `test/lang`, as T-127's two programs
-  did.
-- **A ported pass is judged on its diagnostics one by one, with a script and not a reading.**
-  For every message the ported file builds -- each `check_error` text and each run of `msg_str`
-  pieces between `check_msg_begin` and `check_msg_end` -- ask whether any suite under `test/fort`
-  holds a piece of it. T-035's review ran that over five suites and found **22 diagnostics with no
-  fort test, 11 of them asserted by the very C suites the ticket was porting**, because only 6 of
-  its 85 test-function names matched a C `TEST` name: the suite was a re-derivation and nothing
-  mechanically caught what fell out. `tools/diag_coverage.py` is that script; it reports
-  candidates, and a composed message whose only distinctive piece is a shared hint is a false
-  positive, so the few it leaves are verified by hand and the count is written into the ticket.
-  Run it before claiming any coverage universal, and name the *measured* list rather than "every
-  rule is tested".
+- Product tests use `build/<preset>/fort` and `build/<preset>/std`. They do not compare the C
+  compiler with the fort compiler.
+- The ctest `fixpoint` compiles HEAD twice. It compares the two LLVM modules and the two compiler
+  binaries. It also verifies both modules with LLVM.
+- A successful native build proves the bootstrap edge. The C compiler builds bootstrap-0.
+  Bootstrap-0 builds the next compiler in the C-started chain.
+- External-stage1 mode uses an external compiler to build HEAD. It registers no bootstrap tests
+  and no C unit suites (T-160).
 
 ## 6. Generated code and the cross pipeline
 
@@ -791,11 +495,8 @@ bullet at a time and without a rewrite.
   holds it (T-097).
 - **A mutation audit measures what the corpus holds, which the ratio cannot.** T-077 broke, one at
   a time, one line of each of the 88 decisions `src/fort/check.ft` and `src/fort/check_stmt.ft`
-  cite. It ran five oracles against each mutant, in cost order: the 219 `fail` tests under stage2
-  (8 s), the 415 `run`, `programs` and `ffi` tests (35 s), the check documents (13 s), the
-  `test/fort` tests (13 s for the 15 the first run selected, 120 s for all 161) and
-  `tools/diff_check.sh` (39 s). A stage2 rebuild after one edit costs 5 s, so a mutant costs about
-  45 s when the first oracle catches it and about 115 s when none does. **79 of the 88 went red,
+  cite. It ran the fail tests, run tests, check documents, and fort module tests against each
+  mutant. **79 of the 88 went red,
   4 survived and 5 could not be broken by a mutation at all**; the five are the rows where a
   citation names a rule another pass holds, and each is a build error or a lint failure rather
   than a test.
@@ -810,30 +511,12 @@ bullet at a time and without a rewrite.
   survival against 15 of 21 until the four were re-run against all 161.
   **Do not edit the test tree while a batch runs.** A harness that reads a file during the write
   reports a failure that belongs to no mutation.
-  **Raise every file counter in the commit that adds the file.** A new `.ft` raises `FT_FILES` in
-  the four `tools/diff_*.sh`; `CLEAN_FILES` in `diff_check.sh` if stage1 checks it clean;
-  `PROGRAM_FILES` in `diff_ir.sh` if it compiles into a module; `CORPUS_FILES` in
-  `test/parser_recovery_test.c` if it is a `fail` test and in `test/highlight_test.py` if it is
-  not; and `NESTED_FILES`, `FORM_FILES`, `FLOAT_FILES`, `CFG_FILES` or `IF_FILES` in
-  `diff_ast.sh` if it uses a nested array or span level, a `do`-`while` or a `?:`, a float,
-  `$cfg`, or `$if`. A new `.c` or `.h`
-  under `src/` or
-  `test/` raises no counter of that list, and one counter fires on all three extensions:
-  `test_the_corpus_the_lint_reads_is_the_measured_one` in `test/knowledge_lint_test.py`, which
-  holds the number of files `tools/knowledge_lint.py` reads at 370 (T-145). A counter left behind
-  fails `diff_check.sh` for every later mutant, which then reads as caught when nothing caught it.
+  **Raise each active file counter in the commit that adds the file.** `CORPUS_FILES` in
+  `test/parser_recovery_test.c` counts fail tests. The same name in `test/highlight_test.py`
+  counts its source corpus. The knowledge lint also holds its measured source count.
   **A new target code directory needs a `SOURCE_GLOBS` route or an `EXCLUDED` reason** (T-144).
   T-145 adds two darwin test programs under `test/darwin/` and routes them into the grammar corpus.
   Run `tools/darwin net` on the darwin arm64 host to compare C layout and four darwin programs.
-  The pin 0 library lacks `libc.errno_slot()` (T-145).
-  Stage1 refuses `std/darwin/net.ft` under pin 0.
-  The pin 0 network address lacks the darwin length field, so stage1 refuses
-  `test/darwin/net_layout.ft`.
-  `CLEAN_FILES` and `PROGRAM_FILES` each grow by 1 for `test/darwin/net_errors.ft`.
-  **Two branches that each raise one counter by one merge with no conflict and leave it wrong**:
-  `CLEAN_FILES` went 393 to 394 twice and the truth was 395, which cost T-107 an hour. After the
-  second merge of a branch that adds or removes a source file, run the tool that owns each
-  counter and read the number off its failure rather than off the diff.
   **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
   program, and a claim read off the source are three things, and an audit that gives them one word
   hides which rows a reader may rely on.
@@ -944,8 +627,8 @@ bullet at a time and without a rewrite.
   `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
   `test/fort_lint` and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
   ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
-  writes it there, as it does for `CORPUS_FILES` in `test/parser_recovery_test.c` and `FT_FILES` in
-  `tools/diff_tokens.sh`. The other `.ft` of the repository are listed in `EXCLUDED_DIRS`, each
+  writes it there, as it does for `CORPUS_FILES` in `test/parser_recovery_test.c`.
+  The other `.ft` files are listed in `EXCLUDED_DIRS`, each
   because it is meant to hold a lexical error (`test/lang/fail`, `test/highlight/scopes.ft`,
   `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
   directory of fort is a red test rather than a corpus nobody tokenizes -- which is what
@@ -1101,8 +784,7 @@ bullet at a time and without a rewrite.
   above does, with `git diff --numstat main...HEAD` and the tool's convention: net lines, raw
   `wc -l`, comments and blank lines on both sides. T-131 measured 469 net lines of build, tool and
   harness against 258 net lines of test, which is 0.55. Its log says why it cannot reach 3:1.
-  A CMake graph needs a real build. The ctests `cmake-bootstrap` and `bootstrap`, with a cold
-  `tools/vm workflow debug`, hold that graph.
+  A CMake graph needs a real build. A native workflow and the `fixpoint` test hold that graph.
 - **The corpus is smaller than the sizing table of `spec/toolchain.md` 7.6, and T-046 measured by
   how much.** That table sizes the corpus at 565 `run` and 370 `fail` files, 935 together. On
   47f98c2 the corpus holds 643 tests: 400 under `run`, 222 under `fail` and 21 under `programs`,

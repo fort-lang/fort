@@ -264,61 +264,6 @@ if(FORT_ENABLE_BOOTSTRAP)
     endif()
 endif()
 
-if(FORT_ENABLE_BOOTSTRAP)
-    # The C differential compiler uses this frozen root.
-    set(FORT_ORACLE_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap-oracle.ref")
-    file(STRINGS "${FORT_ORACLE_REF}" FORT_ORACLE_LINES REGEX "^bootstrap-0 ")
-    list(LENGTH FORT_ORACLE_LINES FORT_ORACLE_LINE_COUNT)
-    if(NOT FORT_ORACLE_LINE_COUNT EQUAL 1 OR
-       NOT FORT_ORACLE_LINES MATCHES "^bootstrap-0[ \t]+([0-9a-f]+)$")
-        message(FATAL_ERROR "tools/bootstrap-oracle.ref must name one bootstrap-0 SHA")
-    endif()
-    set(FORT_ORACLE_SHA "${CMAKE_MATCH_1}")
-    set(FORT_ORACLE_DIR "${CMAKE_BINARY_DIR}/oracle")
-    set(FORT_ORACLE_STAMP "${FORT_ORACLE_DIR}/.tree-${FORT_ORACLE_SHA}")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_ORACLE_REF}")
-    execute_process(
-        COMMAND git cat-file -t "${FORT_ORACLE_SHA}"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        RESULT_VARIABLE FORT_ORACLE_VERIFY_STATUS
-        OUTPUT_VARIABLE FORT_ORACLE_OBJECT_TYPE
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    if(NOT FORT_ORACLE_VERIFY_STATUS EQUAL 0 OR
-       NOT FORT_ORACLE_OBJECT_TYPE STREQUAL "commit")
-        message(FATAL_ERROR "tools/bootstrap-oracle.ref names no usable commit object")
-    endif()
-    add_custom_command(
-        OUTPUT "${FORT_ORACLE_STAMP}"
-        COMMAND "${CMAKE_COMMAND}"
-                -DROOT=${CMAKE_SOURCE_DIR}
-                -DSHA=${FORT_ORACLE_SHA}
-                -DOUTPUT=${FORT_ORACLE_DIR}
-            -DTARGET=${FORT_TARGET}
-                -P "${CMAKE_SOURCE_DIR}/cmake/extract_tree.cmake"
-        DEPENDS "${FORT_ORACLE_REF}" "${CMAKE_SOURCE_DIR}/cmake/extract_tree.cmake"
-        COMMENT "Extracting the C differential-oracle standard root"
-        VERBATIM
-    )
-    add_custom_target(fort_oracle_tree ALL DEPENDS "${FORT_ORACLE_STAMP}")
-    set(FORT_ORACLE_STD_DIR "${FORT_ORACLE_DIR}/std")
-
-    add_test(NAME c-bootstrap
-        COMMAND bash "${FORT_TEST_DIR}/c_bootstrap_test.sh" "${FORT_TARGET}"
-                "$<TARGET_FILE:fort_stage1>" "${CMAKE_BINARY_DIR}/c-bootstrap"
-                "${FORT_ORACLE_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_OPT_PATH}")
-    set_tests_properties(c-bootstrap PROPERTIES LABELS lang)
-
-    add_test(NAME c-bootstrap-bridge
-        COMMAND bash "${FORT_TEST_DIR}/c_bootstrap_bridge_test.sh" "${FORT_TARGET}"
-                "$<TARGET_FILE:fort_stage1>"
-                "${FORT_BOOTSTRAP_DIR}/bootstrap-0/fort"
-                "${FORT_BOOTSTRAP_DIR}/bootstrap-0/target/std"
-                "${FORT_TARGET_CC_PATH}" "${FORT_OPT_PATH}")
-    set_tests_properties(c-bootstrap-bridge PROPERTIES LABELS lang)
-endif()
-
 # ---- the self-hosted compiler --------------------------------------------------
 file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
 set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/cmake/bootstrap_tree.cmake")
@@ -399,13 +344,12 @@ add_custom_command(
         -o "${FORT_HEAD_BINARY}" "${FORT_HEAD_ENTRY}"
     DEPENDS ${FORT_HEAD_STD_DEPENDENCY} ${FORT_FORT_SOURCES}
             ${FORT_PREVIOUS_DEPENDENCY}
-    COMMENT "Building working-tree HEAD with the last bootstrap compiler"
+    COMMENT "Building working-tree HEAD with its predecessor compiler"
     VERBATIM
 )
 
 # Keep the target name and output path distinct inside Ninja. The target copies
 # the graph output to the public build/fort path.
-set(FORT_GRAPH_BINARY "${FORT_HEAD_BINARY}")
 add_custom_target(fort ALL
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${FORT_HEAD_BINARY}" "${CMAKE_BINARY_DIR}/fort"
@@ -434,13 +378,6 @@ add_test(NAME darwin-probe-target
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(darwin-probe-target PROPERTIES LABELS unit)
 
-if(FORT_ENABLE_BOOTSTRAP)
-    add_test(NAME cmake-bootstrap
-        COMMAND bash "${FORT_TEST_DIR}/cmake_bootstrap_test.sh" "${FORT_GRAPH_BINARY}"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    set_tests_properties(cmake-bootstrap PROPERTIES LABELS unit)
-endif()
-
 set(FORT_GRAPH_FIXPOINT_COMMAND
     bash "${CMAKE_SOURCE_DIR}/tools/fixpoint.sh" "${CMAKE_BINARY_DIR}/cmake-fixpoint"
     --compiler "${FORT_COMPILER_BINARY}"
@@ -450,10 +387,10 @@ set(FORT_GRAPH_FIXPOINT_COMMAND
     --std "${FORT_STD_DIR}"
     --source-root "${FORT_FORT_SRC_DIR}"
     --opt "${FORT_OPT_PATH}")
-add_test(NAME bootstrap
+add_test(NAME fixpoint
     COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(bootstrap PROPERTIES LABELS lang)
+set_tests_properties(fixpoint PROPERTIES LABELS lang)
 
 # ---- the language server -------------------------------------------------------
 # fort_lsp is src/lsp compiled by the production compiler. It stands at the
@@ -483,7 +420,7 @@ add_custom_command(
     DEPENDS fort "${FORT_COMPILER_BINARY}"
             "${CMAKE_SOURCE_DIR}/tools/build_lsp.sh"
             ${FORT_LSP_SOURCES} ${FORT_STD_OUTPUTS}
-    COMMENT "Compiling src/lsp with stage2 into fort-lsp"
+    COMMENT "Compiling src/lsp with the product compiler into fort-lsp"
     VERBATIM
 )
 add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
@@ -497,8 +434,8 @@ add_test(NAME lsp-binary
 set_tests_properties(lsp-binary PROPERTIES LABELS lang)
 
 if(FORT_TARGET STREQUAL "darwin")
-    # The remaining targets build the C compiler and its linux differential
-    # tests. They do not belong to the darwin graph.
+    # The remaining targets build and test the C compiler. They do not belong
+    # to the darwin graph.
     return()
 endif()
 
@@ -570,9 +507,8 @@ endforeach()
 # defines it (toolchain.md 5.1), the second holds D9.8's closure-wide rule
 # against the library's own declarations (D9.10). Both need the sources.
 #
-# They read the C oracle root and not HEAD's. Both suites parse the file with
-# the C front end. HEAD's std/rt.ft is held against the fort table by each
-# program that stage2 builds.
+# Both suites parse the standard root that bootstrap-0 uses. This makes them
+# contracts between the C implementation and its bootstrap library.
 foreach(std_reader runtime_sig_test check_conv_test)
     if(TARGET "${std_reader}")
         target_compile_definitions("${std_reader}"
@@ -621,16 +557,14 @@ add_custom_target(check
 )
 add_dependencies(check fort fort_std)
 if(FORT_ENABLE_BOOTSTRAP)
-    add_dependencies(check fort_oracle_tree)
     if(FORT_UNIT_TEST_TARGETS)
         add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
     endif()
 endif()
 
 # The language tests (toolchain.md 7, D14.4, D14.5): test/lang/run_tests.py
-# drives the compiler over test/lang. The ctest `lang` (label lang) and the
-# check-lang target run the same command, and `lang_check_json` the cross-check
-# of the check mode (D20.2); `lang_lint` validates the directives and
+# drives the compiler over test/lang. The ctests `lang` and `lang-json` use
+# the product compiler. `lang_lint` validates the directives, and
 # `lang_selftest` runs the harness's own unit tests (both label unit).
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
 
@@ -649,40 +583,13 @@ endif()
 # compiles, so every module the emitter writes is verified from here on
 # (D19.1, toolchain.md 6).
 #
-# --std-dir is the C oracle library and not HEAD's. This keeps the frozen C
-# language subset independent from the production source pins.
-if(FORT_ENABLE_BOOTSTRAP)
-    set(FORT_LANG_COMMAND
-        "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
-        --fort "$<TARGET_FILE:fort_stage1>"
-        --std-dir "${FORT_ORACLE_STD_DIR}"
-        --cc "${FORT_TARGET_CC_PATH}"
-        --opt "${FORT_OPT_PATH}"
-        --verify-ir
-        -j "${FORT_LANG_JOBS}"
-    )
-    add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
-    set_tests_properties(lang PROPERTIES
-        LABELS lang
-        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
-
-    # The check mode over the same corpus: `fort --check --json` on every fail
-    # test, held against the text form of D14.2 (D20.1, D20.2).
-    add_test(NAME lang_check_json COMMAND ${FORT_LANG_COMMAND} --check-json)
-    set_tests_properties(lang_check_json PROPERTIES
-        LABELS lang
-        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
-endif()
-
 # The compiler's own modules: test/fort/<x>_test.ft is a run test in the
 # directives of D14.5 that imports a module of src/fort with `-I` and asserts
 # what its comments promise. The harness takes the corpus root, so the same
 # run_tests.py judges both.
 #
-# stage2 compiles them and not stage1 (T-131). They import HEAD's src/fort,
-# which may use any form the last pin implements, so stage1 is the wrong
-# compiler for them from here on. That makes this test label lang: it runs an
-# x86-64 binary under qemu.
+# The product compiler compiles these modules. They import the current source
+# and use the current standard library.
 set(FORT_MODULE_TEST_DIR "${FORT_TEST_DIR}/fort")
 set(FORT_MODULE_TEST_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
@@ -699,87 +606,27 @@ set_tests_properties(fort-modules PROPERTIES
     LABELS lang
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
-# The language corpus against stage2, with the expected failures of
-# xfail-stage2.txt: the compiler being written in fort is held against the
-# same tests as the one it replaces, and an entry leaves that list in the
-# commit that makes its tests pass (D14.4). stage2 is an x86-64 binary, so
-# every run of it here goes through qemu.
-#
-# It does not pass --no-unsupported, and T-038 measured why. stage2 rejects
-# almost every feature bootstrap-unsupported.txt lists, for the reasons stage1
-# rejects it. With the flag, stage2 passed 519 of 538 tests and nineteen
-# entries stayed in xfail-stage2.txt for ever; without it, stage2 passed all
-# 538 and the file is empty. The stronger property is the one asserted.
-#
-# It passes --verify-ir for a reason T-043 created (the other two commands
-# always did). Until that ticket, every module stage2 emitted was emitted by
-# stage1 as well and read by `opt` on the stage1 command; now the tests that
-# use a nested array or span level, a `?:`, a `do`-`while`, a float, `$cfg`, or `$if`
-# compile under stage2 alone. diff_ir.sh skips them because stage1 refuses them, and
-# test/fort/support/gen_env.ft runs no `opt` by design. Without the flag no
-# verifier would read that IR at all.
-#
-# It passes a list of its own instead (T-043). The two compilers no longer
-# refuse the same set: src/fort reads the nested array and span levels of D3.6
-# and src/bootstrap does not, so the tests that use them must be rejected
-# under stage1 and must compile and run under stage2. One list per compiler
-# says exactly that, and each name is judged by one rule or the other and
-# never excused. T-044 is the second ticket of that shape, T-041 is the third,
-# T-156 is the fourth, and T-157 is the fifth:
-# stage2 implements `do`-`while` and `?:` (D6.6, D7.5), floats (D2.6, D3.1,
-# D18), `$cfg` (D21.1), and `$if` (D21.2). Stage1 refuses all six families.
-# Stage2's list is empty. Every entry stays in stage1's list, which is frozen.
-set(FORT_LANG_STAGE2_COMMAND
+# The product language test uses the current compiler and standard library.
+# It verifies each module that the compiler emits (D19.1).
+set(FORT_LANG_COMMAND
     "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
     --fort "${FORT_COMPILER_BINARY}"
     --std-dir "${FORT_STD_DIR}"
     --cc "${FORT_TARGET_CC_PATH}"
     --opt "${FORT_OPT_PATH}"
-    --xfail "${FORT_LANG_DIR}/xfail-stage2.txt"
-    --unsupported "${FORT_LANG_DIR}/unsupported-stage2.txt"
+    --xfail "${FORT_LANG_DIR}/xfail.txt"
     --verify-ir
     -j "${FORT_LANG_JOBS}"
 )
-add_test(NAME lang-stage2 COMMAND ${FORT_LANG_STAGE2_COMMAND})
-set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
+add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
+set_tests_properties(lang PROPERTIES LABELS lang)
 
-# The check mode of stage2 over the same corpus: `fort --check --json` on every
+# The product check mode runs over the same corpus. It uses `fort --check --json` on every
 # fail test, held against the text form of D14.2, and `--index` on every test
 # with a golden index.json beside it, held against that file byte for byte
-# (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
-#
-# --check-json selects two groups of tests and no other. It selects every
-# `fail` test, which checks a diagnostic document, and every test with a golden
-# index.json beside it, which checks the clean compile document. The diagnostic
-# half grows with each new `fail` test. The clean half stays small, because a
-# short list of golden files covers it. Read the counts off the harness:
-# `run_tests.py --list` prints the corpus and `run_tests.py --check-json --list`
-# prints the selection. Each list ends with one summary line, so `wc -l` reports
-# one more than the count. This comment held those three counts until T-133
-# deleted them. Six tickets had found them stale, because no tool reads a
-# comment and nothing goes red. `git show 7b5c625:CMakeLists.txt` holds the
-# history those six tickets wrote here (T-133).
-#
-# Against a golden the comparison is stricter than a diff of two compilers for
-# the value and the order of every record, since it holds both compilers
-# against a file in the repository; it is weaker for whitespace, because
-# run_tests.py re-serialises the records with separators of its own before it
-# compares.
-# --check-json ignores the expectation list, so the --xfail of the stage2
-# command above does not apply here. It is a command of check-lang as well as
-# a ctest, which is what makes the gate run it.
-add_test(NAME lang_check_json-stage2 COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json)
-set_tests_properties(lang_check_json-stage2 PROPERTIES LABELS lang)
-
-# src/fort/main.ft carries the option table of toolchain.md 1 and the version
-# string of src/bootstrap/driver.h as a second copy of what driver.c prints.
-# Both binaries exist here, so the two copies are held against each other by
-# running them: --help, --version and the usage line, byte for byte.
-if(FORT_ENABLE_BOOTSTRAP)
-    add_test(NAME stage-usage
-        COMMAND bash "${FORT_TEST_DIR}/stage_usage_test.sh" "${CMAKE_BINARY_DIR}")
-    set_tests_properties(stage-usage PROPERTIES LABELS unit)
-endif()
+# (D20.2, D20.3). The harness reports the current measured count.
+add_test(NAME lang-json COMMAND ${FORT_LANG_COMMAND} --check-json)
+set_tests_properties(lang-json PROPERTIES LABELS lang)
 
 add_test(NAME stage2-ast-variadic
     COMMAND bash "${FORT_TEST_DIR}/stage2_ast_variadic_test.sh" "${FORT_COMPILER_BINARY}"
@@ -803,56 +650,6 @@ add_test(NAME stage2-import-if
             "${FORT_STD_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(stage2-import-if PROPERTIES LABELS unit)
-
-if(FORT_ENABLE_BOOTSTRAP)
-# The two lexers over the whole repository: `fort --tokens` writes one line per
-# token (D14.1, toolchain.md 1). tools/diff_tokens.sh compares dumps,
-# diagnostics and exit statuses for 964 of 971 files. It separately measures
-# three `$cfg` files and four `$if` files that the frozen C compiler cannot lex.
-# It is the oracle for the common subset. It has label lang because it runs the
-# x86-64 stage2 binary under qemu once per file.
-add_test(NAME diff-tokens
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(diff-tokens PROPERTIES LABELS lang)
-
-# The two parsers over the whole repository, the same comparison one pass
-# later: `fort --ast` writes the file's syntax tree as one S-expression
-# (D14.1, toolchain.md 1) and tools/diff_ast.sh compares stage1's with
-# stage2's, together with their diagnostics and their exit statuses. It skips
-# measured families for nested types, forms, floats, `$cfg`, and `$if`. It is the
-# oracle for syntax that both parsers accept.
-add_test(NAME diff-ast
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(diff-ast PROPERTIES LABELS lang)
-
-# The two checkers over the whole repository, one pass later again: `fort
-# --check` runs the front end and stops (D20.1), and tools/diff_check.sh
-# compares the diagnostics and the exit statuses of every .ft file stage1
-# checks clean. It is the half of the checker's oracle the language corpus
-# cannot see: a corpus of failing tests holds the diagnostics stage2 reports,
-# while this holds the ones it must not, over the compiler's own sources and
-# the standard library among the rest.
-add_test(NAME diff-check
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(diff-check PROPERTIES LABELS lang)
-
-# The two emitters over the whole repository, one pass later again: `fort -S`
-# writes the program's LLVM IR module and stops before --cc (toolchain.md 2),
-# and D19.5 makes that text a function of the program alone, so
-# tools/diff_ir.sh compares stage1's module with stage2's byte for byte over
-# every .ft file stage1 compiles -- every `run` and `programs` test, every
-# module test of test/fort, and src/fort/main.ft, which is the compiler
-# emitting itself. It is the oracle the transliterated emitter is judged
-# against, and it sees the whole front end with it.
-add_test(NAME diff-ir
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
-            --opt "${FORT_OPT_PATH}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(diff-ir PROPERTIES LABELS lang)
-endif()
 
 # The interactive half of D11.5 (toolchain.md 5.3): a program whose stdout is
 # a terminal flushes each line as it writes it. No language test can see that,
@@ -970,14 +767,9 @@ set_tests_properties(gate_ft_manifest PROPERTIES LABELS unit)
 # `fort --index` (D20.3) rather than tokenizing fort a second time, so it needs
 # a compiler.
 #
-# stage2 is that compiler and stage1 is not (T-131). The lint must read every
-# fort source of the repository, HEAD's src/fort and HEAD's std included, and
-# those may use any form the last pin implements. Until T-131 stage1 ran it and
-# a second ctest, fort_lint_float, ran stage2 over the two sources stage1
-# cannot read; one compiler that reads them all replaces the pair, and
-# `SKIPPED` in tools/fort_lint.py is empty. It is label lang rather than unit
-# because it runs an x86-64 binary under qemu, and it names --std-dir because
-# the library does not stand beside that binary.
+# The product compiler reads all fort sources in the repository. The test has
+# label lang because it runs an x86-64 binary under qemu. It names --std-dir
+# because the library does not stand beside that binary.
 add_test(NAME fort_lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
@@ -1023,46 +815,21 @@ add_test(NAME extension_selftest
     WORKING_DIRECTORY "${FORT_EDITORS_DIR}/vscode")
 set_tests_properties(extension_selftest PROPERTIES LABELS unit)
 
-if(FORT_ENABLE_BOOTSTRAP)
-    add_custom_target(check-lang
-        COMMAND ${FORT_LANG_COMMAND}
-        COMMAND ${FORT_LANG_COMMAND} --check-json
-        COMMAND ${FORT_MODULE_TEST_COMMAND}
-        COMMAND ${FORT_LANG_STAGE2_COMMAND}
-        COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
-        COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-                --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-        COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
-                --opt "${FORT_OPT_PATH}"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
-        COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Running the language tests"
-        USES_TERMINAL
-        VERBATIM
-    )
-    add_dependencies(check-lang fort fort_std fort_lsp fort_oracle_tree)
-else()
-    add_custom_target(check-lang
-        COMMAND ${FORT_MODULE_TEST_COMMAND}
-        COMMAND ${FORT_LANG_STAGE2_COMMAND}
-        COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
-        COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-                --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-        COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
-        COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Running the language tests"
-        USES_TERMINAL
-        VERBATIM
-    )
-    add_dependencies(check-lang fort fort_std fort_lsp)
-endif()
+add_custom_target(check-lang
+    COMMAND ${FORT_MODULE_TEST_COMMAND}
+    COMMAND ${FORT_LANG_COMMAND}
+    COMMAND ${FORT_LANG_COMMAND} --check-json
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+            --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
+    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+    COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
+    COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Running the language tests"
+    USES_TERMINAL
+    VERBATIM
+)
+add_dependencies(check-lang fort fort_std fort_lsp)
 
 add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)

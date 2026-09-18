@@ -109,10 +109,7 @@ file (D14.1). Options and the entry file may appear in any order.
   2:1-2:1 0 "" end of file
   ```
 
-  Both compilers write those bytes: `tools/diff_tokens.sh` compares stage1's dump with stage2's,
-  together with their diagnostics and their exit statuses, over every `.ft` file in the
-  repository, and that is how the self-hosted lexer is held against the bootstrap's (the ctest
-  `diff-tokens`).
+  Compiler unit tests hold this format.
 - `--ast` runs the lexer and the parser over the entry file and stops there: it resolves no
   import, checks nothing and needs no standard library, so it is what a compiler with a parser
   and no checker can do (D14.1). It writes the entry file's syntax tree to stdout as one
@@ -152,10 +149,7 @@ file (D14.1). Options and the entry file may appear in any order.
   (module (fn (type (void)) f (params) (block (var x (type (prim i32) mut) (int 1)))))
   ```
 
-  Both compilers write those bytes: `tools/diff_ast.sh` compares stage1's tree with stage2's,
-  together with their diagnostics and their exit statuses, over every `.ft` file in the
-  repository, and that is how the self-hosted parser is held against the bootstrap's (the ctest
-  `diff-ast`).
+  Compiler unit tests hold this format.
 - In the fort compiler's `--ast` form, a C extern with `...` prints a bare `...` last in its
   `(params ...)` group. The mark is not a `(param ...)` child.
   A fixed extern prints no mark, and a fort definition cannot print this mark (D8.3, D9.8).
@@ -1465,9 +1459,6 @@ test/
     run_tests.py               runs every language test below
     run_tests_test.py          the harness's own unit tests
     xfail.txt                  tests the compiler cannot pass yet
-    bootstrap-unsupported.txt  tests stage1 must reject
-    xfail-stage2.txt           tests stage2 cannot pass yet
-    unsupported-stage2.txt     tests stage2 must reject
     run/<area>/NNN_name.ft     compile, run, compare
     fail/<area>/NNN_name.ft    must not compile, with annotated errors
     run/modules/<name>/main.ft multi-file run test; the directory is the root
@@ -1567,46 +1558,15 @@ exit status other than 0 or 1 (2 is a usage, toolchain or internal error, D14.1)
 a compiler timeout, a failure of the harness's own `link:` step and a program that cannot be started
 are `ERROR`, not a verdict about the test; a program that times out is a `FAIL`.
 
-Two expectation files beside the harness list path prefixes of tests (relative to `test/lang`,
-`#` comments allowed). `xfail.txt` names the tests the compiler cannot pass yet: a listed test
+One expectation file beside the harness lists path prefixes of tests (relative to `test/lang`,
+`#` comments allowed). `xfail.txt` names the tests the compiler cannot pass yet. A listed test
 that fails or errors is `XFAIL`, a listed test that passes is `XPASS` and fails the run, so the
-list shrinks in the commit that makes tests pass. `bootstrap-unsupported.txt` names the tests
-that use features the C bootstrap deliberately lacks (floats, the nested array and span levels
-of D3.6, `do`-`while`, `?:`, `$cfg`, and `$if`; function pointers are in its subset, D3.10).
-Each is judged as a `fail` test, whatever its own kind. The compiler must exit 1 and report one
-diagnostic. At least one of those diagnostics must contain `not supported by the bootstrap
-compiler`, or must stand in a file of the test itself. The two shapes answer two cases and
-neither one covers both. A test refused inside the library's import closure gets no diagnostic
-that names the test: `run/stdlib/096_math_limits.ft` imports `std.math`, whose `?:` the C
-bootstrap refuses, and all nine of its diagnostics name `std/math.ft`. A test that spells a form
-added after the pinned tree the C bootstrap compiles (`notes/compiler.md` 8) gets an ordinary
-syntax error in its own file, with none of those words, because that compiler never learned to
-name the form. Amended 2026-09-14 (T-131), which added the second shape; until then the words
-were the only expectation.
-`--xfail` and `--unsupported` name other lists; `--no-xfail` and `--no-unsupported` ignore
-them. Each compiler has one list of each kind: `xfail-stage2.txt` and `unsupported-stage2.txt`
-are stage2's, and the CMake test `lang-stage2` names both, because stage2 reads the nested
-levels stage1 refuses, implements the `do`-`while` and `?:` stage1 refuses (D6.6, D7.5) and
-accepts the floats stage1 refuses (D2.6, D3.1), and must be judged for all of them like any
-other test.
+list shrinks in the commit that makes tests pass. `--xfail` names another list.
+`--no-xfail` ignores the list.
 
-Each compiler answers for its own list. `unsupported-stage2.txt` is the list the self-hosted
-compiler is run with, and it is empty. The six families are nested array and span levels,
-`do`-`while` and `?:`, floats, `$cfg`, and `$if`. Stage2 implements all six families. It refuses
-nothing that the corpus holds and answers for each test. Entries for those families stay in
-`bootstrap-unsupported.txt`. The C bootstrap is frozen against general feature work.
-
-T-153 is one bounded exception. The C bootstrap reads and checks explicit C variable tails for
-the Darwin bootstrap platform (D9.8). Linux fixed extern declarations keep their LLVM bytes.
-Four non-float variable-tail tests therefore leave `bootstrap-unsupported.txt`. The two float
-variable-tail tests stay because the C bootstrap still rejects floats. This exception does not
-add general stage1 parity and does not permit another language feature.
-
-An entry arrives in stage2's list when stage2 refuses a test that stage1's list also holds, and
-leaves it the day stage2 implements the feature. Neither run passes `--no-unsupported`, so neither
-compiler is excused any test of the corpus. Amended 2026-09-16 (T-153).
-Amended 2026-09-16 (T-156): the source compiler adds `$cfg` to the source-only families.
-Amended 2026-09-16 (T-157): the source compiler adds `$if` to the source-only families.
+The C compiler is frozen against general language work. It changes only for a specified C defect
+or to keep the native C-to-bootstrap-0 edge working on a supported host. Product tests do not run
+the C compiler (T-046, T-160).
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
 reason where there is one, then a summary, and exits with 1 if any test is `FAIL`, `XPASS` or
@@ -1841,7 +1801,9 @@ implementable; the design is to be planned in the implementation phase.
   `FORT_ENABLE_BOOTSTRAP=OFF` requires this external compiler. Add a pin only when the current last
   pin cannot build a required later revision. A new pin must build with its predecessor and build
   its successor. Both builds must pass on both supported host systems before the pin enters the list.
-  The C compiler remains the second implementation for differential tests.
+  The C unit suites test the C implementation. Product tests use the current compiler and
+  current standard library. A successful native build proves the C-to-bootstrap-0 edge.
+  External-stage1 mode registers no bootstrap tests. The project does not maintain C-to-fort parity.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
   passes below, invokes `--cc` over the emitted module (D14.3) and maps failures to exit
   statuses.

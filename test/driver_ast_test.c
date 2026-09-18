@@ -3,8 +3,7 @@
 // its syntax tree to stdout as one S-expression.
 // D14.1
 //
-// It is the observation point the self-hosted parser is verified at, so what
-// the suite asserts is the contract tools/diff_ast.sh relies on: the tree is
+// The suite holds the parser output contract: the tree is
 // the whole of stdout and ends in one newline, a syntax error is reported on
 // stderr and still leaves the file's tree written whole, and nothing else of
 // the pipeline runs -- no `--cc` is spawned, no temporary is created, no

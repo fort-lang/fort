@@ -11,10 +11,8 @@
 // that may hold a space.
 // D20.4, D2.5, D2.7
 //
-// The dump is what tools/diff_tokens.sh compares between this lexer and
-// src/fort/lexer.ft over every .ft file in the repository, so the format is
-// pinned here and in test/fort/lexer_dump_test.ft, which asserts the same
-// lines of the same sources against the other implementation.
+// This suite pins the dump format. test/fort/lexer_dump_test.ft pins the fort
+// implementation directly.
 #include <stdint.h>
 #include <string.h>
 

@@ -238,9 +238,9 @@ came here.
   not this shape. What holds the rule, and why a `fail` test alone does not, is
   `notes/testing.md` 3. Mutation-measured on 2026-09-14: swapping the two
   places of the extern conflict takes `unit-check_extern` red and `lang` to 5 failed in stage1,
-  and `fort-modules` red and `lang-stage2` to 5 failed in stage2; swapping them at the
+  and `fort-modules` red and `lang` to 5 failed in stage2; swapping them at the
   redeclaration takes `unit-modules_closure` and `lang` red in stage1 and `fort-modules` and
-  `lang-stage2` red in stage2.
+  `lang` red in stage2.
 
 ## 6. The IR emitter
 
@@ -315,8 +315,7 @@ came here.
   `i64` parameter or `fort_rt_fail_div_zero` a 64-bit line number left the whole gate green. The
   fort table (`src/fort/runtime_sig.ft`) cannot read that file -- a `test/fort` program runs in a
   temporary directory holding only itself -- so `test/fort/runtime_sig_test.ft` holds every row
-  against the text of 5.1 transcribed into it, and `tools/diff_ir.sh` holds the two tables against
-  each other over every program the corpus spells. A narrow result carries its extension attribute
+  against the text of 5.1 transcribed into it. A narrow result carries its extension attribute
   on the definition *and* at the call site (`define dso_local zeroext i1 @"std.rt.str_eq"(...)`,
   `%t = call zeroext i1 @...`), which is why a form in `RT_SIG` is a type text with its attribute
   and not a type. `opt` accepts a call site whose attributes differ from the callee's and LLVM
@@ -512,8 +511,8 @@ floats into `std/rt.ft`, which stands in every closure, so pin 0 asked for that 
 build: with the file deleted the build gave `std/rt_float.ft:1:1: error: cannot read` and
 stopped, measured on 2026-09-14 at 6c56459. Nothing about the language was in the way -- every
 pin implements floats. So T-132 took `bootstrap-1`, the commit of the fold itself, whose
-`src/fort` names `rt_float` nowhere; the commit after it deleted the file and lowered `FT_FILES`
-from 946 to 945 and `CORPUS_FILES` from 687 to 686. Invariant 3 below lists both reasons now.
+`src/fort` names `rt_float` nowhere. The next commit deleted the file. Invariant 3 below lists
+both reasons now.
 
 **What the fold costs, measured on 2026-09-14 (T-132), against the split T-096 measured on the
 same day.** A program that prints no float paid nothing for the split. It pays 105,914 bytes of
@@ -569,75 +568,9 @@ the closure**, called or not, and external linkage carries each one past the lin
 the 14 stands on its own `define` line and appears nowhere else in the module, and `nm` finds all
 14 in the binary:
 
-**What blocked the fold until T-131 was the checker and not floats being hard.**
-`load_runtime` (`src/bootstrap/modules.c:906`) puts the whole of `std.rt` into every closure stage1
-reads, and `base_type` (`src/bootstrap/check.c:476`) refuses `f64` on sight, so a declaration
-nothing names is enough. Measured on 2026-09-14: a copy of `std/rt.ft` carrying only
-`fn probe_f64(f64 v) void { return; }` -- no literal, no body, no arithmetic -- gives
-`not supported by the bootstrap compiler: floats` and exit 1 for a program whose only call is
-`println(1)`. `src/fort` itself holds **no float value**: every `f64` in its seven mentioning files
-is a comment, a string literal or an enum member, which it must be, since stage1 builds stage2
-today. So the compiler never needs float arithmetic; a float **spelling** in a module it loads is
-what it refuses. The gate is one branch, and behind it there is nothing to reach:
-`grep -c 'f64\|f32'` over `src/bootstrap/types.c`, `gen_expr.c` and `consts.c` reads 0, 0, 0
-against 10 and 13 in `src/fort/gen_expr.ft` and `consts.ft` (T-096, and a user's question on
-2026-09-14 that found it).
-
-```sh
-grep -o '^define .*@"std\.rt\.[a-z_0-9]*"' /tmp/int.ll | sed 's/.*@//' | sort -u > /tmp/d.txt
-grep -o 'call [^@]*@"std\.rt\.[a-z_0-9]*"' /tmp/int.ll | sed 's/.*@//' | sort -u > /tmp/c.txt
-comm -23 /tmp/d.txt /tmp/c.txt > /tmp/u.txt; wc -l < /tmp/u.txt
-while read -r n; do printf '%s ' "$(grep -c -- "$n" /tmp/int.ll)"; done < /tmp/u.txt; echo
-nm /tmp/int | sed 's/.* //' | sort -u > /tmp/nm.txt
-comm -12 /tmp/nm.txt <(sed 's/"//g' /tmp/u.txt | sort -u) | wc -l
-```
-
-**The emitter cannot drop a definition nothing names, and that is why the fold costs anything**
-(T-132 read `src/fort/gen_stmt.ft`, `gen_module` and `gen_program`, and ran nothing). `gen_module`
-walks the declarations of one module three times -- structs, then globals, then every
-`k_fn_decl` with a body -- and writes each one out; `gen_program` calls it once for each module of
-the closure in dependency order. There is no call graph anywhere in the emitter, and there could
-not be one in this shape: the emitter is a single forward pass that appends text (D19.1), so a
-reachability filter needs a whole pass before it that walks every body of every module, starts
-from `main`, `fort_entry` and the entry points the compiler itself calls, and treats a function
-whose address is taken as reached (D3.10 makes that possible in any expression). Linkage does not
-substitute for it: clang runs no dead-code pass at the optimisation level the driver uses, and
-every definition carries external linkage today. So the drop is a pass of its own and a ticket of
-its own; T-096's `14 of 48` measurement is the evidence that it pays beyond this ticket.
-
-`std/math.ft` is the second such module (T-042) and it costs more, because an `import std.math`
-is an ordinary import and no closure rule hides it: stage1 parses the whole closure, so it
-refuses every program that imports the module, with
-`not supported by the bootstrap compiler: ?:` pointing into `std/math.ft`, even when the program
-names no float and calls `abs_i32` alone. Every test of the module is therefore in
-`test/lang/bootstrap-unsupported.txt` and stage2 alone runs them. That shape is the general one
-since T-132: `std/rt.ft` holds a float as well, and the compiler no longer loads a library module
-for the closure of a program that holds one.
-
-`std/sort.ft` is the counter-example and it is the cheaper shape (T-045). The module holds no
-float, no `?:` and no `do`-`while`, so stage1 parses its whole closure and accepts it: the module
-and the nine `run` tests T-045 added raised `CLEAN_FILES` from 472 to 482, which is every file
-that was meant to check clean, and `test/lang/bootstrap-unsupported.txt` gained no line. The
-eleventh file is a `fail` test, which stage1 refuses because that is what it is for. A library
-module written inside the bootstrap subset costs nothing at all, and one that leaves it refuses
-every importer, so read
-`bootstrap-unsupported.txt` before you spell a `?:` in `std/`.
-
-**The consequence costs a build: no module of `src/fort/` may import `std.math`, and no std
-module in the closure of `src/fort` may either.** stage1 compiles `src/fort` into stage2, so such
-an import makes stage1 refuse the compiler itself and the bootstrap stops. `src/fort` imports
-`std.io`, `std.libc`, `std.mem`, `std.str`, `std.strbuf`, `std.strmap` and `std.sys`, and
-`std.rt` through them, so those seven and `std.rt` are closed against `std.math` as well.
-
-The rule is wider than the compiler: **a std module that a stage1-compiled program imports may
-not import `std.math` either**, or stage1 refuses that program. The worked example is in the
-tree. `std/vec.ft:10` declares a private `u64 U64_MAX = 18446744073709551615;`, which duplicates
-`math.U64_MAX` digit for digit, and **that duplicate must stay**: 16 files under `test/lang`
-import `std.vec` (`grep -rl 'import std.vec' test/lang`), none of them is in `xfail.txt` or in
-`bootstrap-unsupported.txt`, so stage1 compiles all 16 and an `import std.math` in `std/vec.ft`
-would refuse all 16 at once. The tidy-up that deletes the duplicate is the change to refuse.
-Copy the limit into the module that needs it, with a comment naming this rule, until stage1 is
-gone.
+**Product library scope.** Product tests use the current compiler and current standard library.
+The C compiler does not run this corpus. Only two C contract suites read the bootstrap-0 standard
+library (T-160).
 
 ## 8. The port to fort
 
@@ -660,20 +593,17 @@ gone.
   And every read of a source file goes through `session.read_source`, which answers from the
   overlay a `session.set_source` installed before it opens anything, so a server points the
   compiler at an editor buffer without touching a pass. Each module's header comment also records
-  whether it uses a function-pointer dispatch table (D3.10) or the switches the C used, so a port
-  stays comparable with its oracle.
-- **A port answers to its C oracle, not to a reading of the rule.** `diag.ft` first enforced the
+  whether it uses a function-pointer dispatch table (D3.10) or a switch.
+- **A port uses direct unit tests.** `diag.ft` first enforced the
   twenty-diagnostics-per-file cap of D14.2 inside `report` and charged a note to the budget, which
   reads like the decision and is not what the compiler does: `src/bootstrap/diag.c` counts a file's
   errors only (`diag_note` touches no counter) and the cap is checked by `lexer.c` and `parser.c`
   before they report, so `check.c` and `modules.c` are uncapped. The divergence is stage-visible --
-  25 type errors would have printed 20 under stage2 and 25 under stage1 -- and a stage2 that
-  reports differently from stage1 is what the fixpoint work has to not fight. So when a ported
-  module can enforce a rule in a place the C does not, read the C: the oracle is where the rule
-  lives, and a difference is a bug even when the new place looks tidier.
-- **The completed translation from the bootstrap into fort.** During Phase B, stage1 compiled
-  stage2. A compiler source could use only what the bootstrap accepted.
-  `test/lang/bootstrap-unsupported.txt` records that list: no floats (`f32`,
+  25 type errors would have printed 20 in the fort compiler and 25 in the C compiler. Direct
+  unit tests now hold the required behavior of each implementation. The project does not maintain
+  C-to-fort parity (T-160).
+- **The completed translation from the bootstrap into fort.** During Phase B, the C compiler
+  built the fort compiler. Compiler sources used only the bootstrap subset: no floats (`f32`,
   `f64`, float literals), no second array or span level in one written type (`i32[3][4]`,
   `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while`, no `?:` and no `$cfg` (T-156).
   The source compiler alone supports configuration expressions. Function pointers are inside
@@ -700,105 +630,20 @@ gone.
      A new pin must build with its predecessor and build its successor. Both builds must pass on both
      supported hosts. Each pin is an ancestor of HEAD. A shallow clone that lacks one pin cannot
      bootstrap.
-  5. **The C compiler has two bounded jobs.** It builds `bootstrap-0` in production. It also remains
-     the second implementation for differential tests against the frozen oracle standard root.
+  5. **The C compiler has one production job.** It builds `bootstrap-0`.
+
+  **The C compiler stays frozen against general language work** (T-046, T-160). Change it only to
+  fix a specified C defect or to keep the native C-to-bootstrap-0 edge working on a supported host.
+  It does not track the fort compiler's language behavior. The one exception is its IR form: the
+  user had it emit the fort compiler's IR on both targets, with fixed externs, `nobuiltin`
+  declarations, `sret` call sites, `inline-asm` stack probes and no PIE link flag (D9.8, D9.9,
+  D10.8, D14.3).
 
   Set `FORT_STAGE1_COMPILER` to build HEAD with an external compiler and no listed revision.
   `FORT_ENABLE_BOOTSTRAP=OFF` requires this setting.
+  `FORT_ENABLE_BOOTSTRAP=ON` rejects it. External-stage1 mode reads no pin and registers no
+  bootstrap tests. A successful native build proves the bootstrap edge.
 
-  The C differential oracle reads `build/<preset>/oracle/std`. The build extracts that source from
-  `tools/bootstrap-oracle.ref`. This ref is not a production compiler pin. It lets the C differential
-  compiler read a standard root inside its language subset.
-
-  **The C-started chain before the supplied-seed amendment** (T-131). From T-131 through T-150,
-  stage1 built two
-  Linux-only source pins before the last pin built HEAD. Five invariants kept that chain valid.
-  D14.7 replaces those invariants. Git history keeps their exact rules and measurements.
-  **What the freeze of T-046 becomes.** The C compiler has the two jobs in invariant 5. Its second
-  job stands and
-  is the reason the directory stays -- it is the second
-  independent implementation that `tools/diff_tokens.sh`, `diff_ast.sh`, `diff_check.sh` and
-  `diff_ir.sh` compare against over 946 `.ft` files. So a change to `src/bootstrap` is a bug fix
-  or a differential fix. T-153 adds one bounded target-bootstrap exception: explicit C variable
-  tails required by the Darwin bootstrap platform. It keeps Linux fixed-extern IR unchanged and
-  moves only the four non-float tests. The two float tests stay unsupported. This exception
-  does not restore the old carve-out or general stage1 parity. No other edit is needed to let the
-  C bootstrap parse a form in HEAD's `std`, because it reads the oracle root. The four edits the
-  old carve-out paid for are below, as the record of what the rule cost while it stood.
-  Until T-131 the rule read: `src/bootstrap` accepts a bug fix, and the smallest
-  type-layer edit that lets it parse and check a form `std/` uses. A bug fix makes stage1 answer
-  the way the specification already says it must, and the ticket that writes one names the
-  decision it restores. The second half was T-086's, and the
-  reason was that stage1 checked every `.ft` file in the repository: it compiled `src/fort` and the
-  import closure of `std/` into stage2, so any form `std/` spelled forced a stage1 change, and a
-  corpus test of a new feature had to be **refused** with the exact words `not supported by the
-  bootstrap compiler` (`run_tests.py`'s `judge_unsupported`), which was a stage1 edit as well.
-  T-086 gave `std.libc` a `void mut* own malloc` and paid the smaller of the two: nine code
-  sites in `types.c`, `types.h` and `check.c`, no new diagnostic and no new code path.
-  T-135 is the second such edit and paid less: two sites, `parse_alloc_type` in `parser.c` and
-  the `TYPE_POS_ALLOC` arm of `check_type_at` in `check.c`, both of which got shorter.
-  T-085 is the third, and it is a bug fix rather than that second half: it narrows a rule both
-  compilers state, so stage1 must narrow with stage2 or `tools/diff_check.sh` reports a
-  divergence. Three sites: `type_cast_adds_mut` in `types.c`, the one call of it in
-  `type_cast_allowed`, and the clause of `check_cast` that names it in the diagnostic. The rule
-  it carries is uniform over the positions of a type, so the smallest edit that reaches the
-  forms `std/` spells is the whole rule; a stage1 that took `new(void mut*, n)` for `std/vec.ft`
-  and refused `new(ast.sym*, cap)` for `src/fort/gen.ft` would need a condition that the rule
-  does not have, and more code than the rule. Measure both ways before you call an edit
-  the smallest. Count them
-  and list them, including the mechanical ones: the ticket's first inventory named six, and the
-  two it missed were `type_build`'s call of `type_voidptr` and the `TYPE_POS_ALLOC` arm of
-  `check_type_at`, which is the one site of the nine that changes what an existing program
-  means.
-  **T-136 is the fourth, and it is neither of the two halves: it replaces a form rather than
-  widening one**, so stage1 stops parsing trees it parses today. The user ratified a Deviation for
-  it on 2026-09-14; the ticket records the reasoning. Nine code sites, all reached by the new
-  shape of a signature: in `parser.c` the forward declaration of `parse_return_type`,
-  `parse_fn_type_params`, the `TOK_KW_FN` arm of `parse_base_type`, `at_decl_start`,
-  `parse_fn_decl`, `parse_fn_top_decl` and `parse_extern_decl`; in `types.c` the `TYPE_FN` arm of
-  `spell_base`; and in `check.c` the text `check_main` prints, which quotes a signature. Three
-  more lines are comments that quote one. `at_decl_start` lost its speculative parse with the
-  change: `fn` followed by a name and then a `(` is a definition, and a `fn` followed by `(` at
-  once is a function type, so two tokens of lookahead decide what a return type used to.
-  Except for the bounded T-153 variable-tail extension, every feature goes to `src/fort` alone
-  from T-131 on. A feature leaves `test/lang/unsupported-stage2.txt` when stage2 gains it. An entry
-  stays in `test/lang/bootstrap-unsupported.txt` unless this section names a bounded exception.
-  The ctest `lang` holds that list: stage1 runs over the whole corpus with it and with an empty
-  `xfail.txt`, so a test the list names must be refused and a test it does not name must pass. T-046
-  measured both directions on 47f98c2 and found the two sets equal: 111 of the 643 corpus tests
-  carry that diagnostic under stage1, 111 entries stand in the list, and neither side holds a test
-  the other lacks. The list holds 113 entries on 2026-09-14, read off
-  `grep -vc "^#" test/lang/bootstrap-unsupported.txt`.
-  **"Refused" is two shapes and not one, since T-131.** A listed test must exit 1 with at least
-  one diagnostic, and at least one diagnostic must carry those words or must stand in a file of
-  the test itself (`spec/toolchain.md` 7.3). A feature added after the last pin reaches stage1 as
-  an ordinary syntax error, because stage1 never learned to name it, and that is the second shape.
-  The first shape is what a test refused inside the library's closure reports, where no diagnostic
-  names the test at all: 6 of the 113 are that case, measured on 2026-09-14 by deleting the
-  words clause and re-running the 113.
-  A compiler that accepts a construct its own source may not hold is this
-  section (T-041, floats).
-  **The demonstration the chain owes, and where it stands.** `std/rt.ft` spells a `?:` in
-  `print_bool` (D7.5), which stage1 refuses and which is in every import closure. The build
-  succeeds, and `build/<preset>/fort --check std/rt.ft` prints
-  `std/rt.ft:417:20: error: not supported by the bootstrap compiler: ?:`. Do not remove it to
-  tidy the runtime: it is the one place the invariant is visible to a reader, and
-  `tools/diff_ast.sh`'s `FORM_FILES` counts it.
-  **`src/lsp` is under no such rule**: stage2 compiles it, so it may use anything `src/fort`
-  implements (D20.5). A file of it is reached as `lsp.<name>` through the search root `src`,
-  because two files of one closure that share a module path emit one set of symbols (T-063).
-  T-039 and not T-046 is the gate for the language server, because the server needs a self-hosted
-  compiler that reproduces itself and not the frozen bootstrap. The ctest
-  `bootstrap` is what says the compiler reproduces itself.
-  **T-063 wrote the first module of `src/lsp` and stayed inside the subset anyway**, and the
-  measurement says why. A file stage1 refuses is skipped by `diff_ast.sh`, by `diff_check.sh` and
-  by `diff_ir.sh`, so a module with a float in it leaves three of the four differential oracles.
-  (The ctest `fort-modules` drove `test/fort` with stage1 until T-131 moved it to stage2, which is
-  the one part of that measurement the chain changed.) `src/lsp/json.ft` therefore names no float
-  type: a JSON number answers the bits of its binary64 value through `flt.flt_parse`, the
-  compiler's own literal reader, and a caller that wants the value copies the bits into an `f64`
-  as the float search of `std/rt.ft` does. The choice is each module's to make again, and the
-  first one that needs a float pays for the corpus.
   - No unions, no bitfields, no anonymous struct or union members: a fat tagged struct with a
     kind enum and every field in the open, which is what `ast.h`, `types.h` and `sym.h` already
     are.
@@ -898,42 +743,8 @@ gone.
     caller that passed NULL ignores the result anyway: same behaviour, no null to reason about.
   - Nesting deeper than 256 is a compile error (D2.11), parentheses, blocks, brackets and type
     suffixes together.
-  A ported module is judged against the C one it replaces: the same unit suite runs over both, so
-  the oracle is the existing test, not a reading of the new code. A module that the two compilers
-  can both be made to *show* -- the lexer, through `fort --tokens`, and the parser, through
-  `fort --ast` (D14.1) -- gets a differential oracle as well, and that one is worth building
-  before the port: `tools/diff_tokens.sh` compares
-  the two token dumps, their diagnostics and their exit statuses over every `.ft` file in the
-  repository (the ctest `diff-tokens`, a command of `check-lang` so that the gate runs it), and it
-  caught every mutation the port was probed with. Two guards make it an oracle rather than a
-  ritual, and both were added after a review broke it: `FT_FILES` is the exact number of `.ft`
-  files, so a ticket that adds or removes one changes that line in the same commit and no file
-  can slip out of the comparison; and stage1's own answer is held against what a lexer must
-  produce -- exit 0 or 1 and a dump ending in the end-of-file token -- before the two are
-  compared, because two compilers that both refuse `--tokens` agree about everything, and the
-  script passed over the whole corpus with both binaries replaced by a stub. The same check is
-  what a path with a space needs, since word-splitting the file list makes both compilers fail
-  alike. `tools/diff_ast.sh` (the ctest `diff-ast`, T-033) is the same script one pass later over
-  the S-expression of `fort --ast`, with the same two guards and the same `FT_FILES` equality, so
-  a ticket that adds a `.ft` file raises the constant in **both** scripts. Read what such an
-  oracle cannot see before trusting it: the AST dump prints no position, so a node's range and
-  its name range (D20.4) are invisible to it and are pinned instead by
-  `test/fort/parser_range_test.ft`, whose expected values are the ones `test/parser_loc_test.c`
-  asserts of the C parser, source for source. Both scripts also see only what the corpus
-  **spells**, which is not the same as what the language has: T-080 removed `::` from the
-  language and then gave the fort lexer alone a rule that still lexed one, and both scripts
-  stayed green over the whole corpus, because after the same ticket no `.ft` file held a `::`
-  outside a string literal or a comment. A construct the corpus does not write is held by the
-  two lexer suites (`test/lexer_test.c` and `test/fort/lexer_test.ft`) and by nothing else, so a
-  ticket that *removes* a construct writes the assertion that it is gone into both of them
-  rather than trusting the differential. A tree dump is one long line, so the script reports
-  the first differing byte and a window of each side rather than a `diff` of two whole trees.
-  **The root of `test/fort` holds tests and nothing else** -- a `.ft` directly there whose
-  stem does not end in `_test` is a lint failure, since `run_tests.py` registers every root `.ft`
-  as a test -- so a fixture common to several suites is either repeated in each or put in
-  `test/fort/support/`; what that directory is and what it costs is under **Build and test**
-  above, in one place rather than two. `tools/lines.py` counts
-  `src/fort`, so the ported lines carry the test-to-code ratio like any others.
+  Each ported module has direct unit tests. The project does not maintain C-to-fort parity
+  (T-160).
   Eight more facts the first ports paid for: five from T-032 (`prim.ft`, `consts.ft`,
   `types.ft`) -- keywords, `new(T, n)`, `==`, enum ordering, the forked tests -- and three from
   T-033 (`ast.ft`, `parser.ft`, `test/fort/support/parse_env.ft`) -- joining strings, the
@@ -1017,15 +828,5 @@ gone.
     assembly they call. Every function keeps its C name, so the two emitters are still read side
     by side name by name.
 
-**A feature stage2 has and stage1 lacks is written without using it** (T-041, floats). The
-compiler may accept a construct its own source may not hold, and the two halves of that are
-separate: the checker and the emitter gain the construct, and the code that implements it stays in
-the bootstrap subset. `src/fort/flt.ft` holds an IEEE 754 value as the `u64` of its binary64
-pattern and computes on it with integer arithmetic over bignums, because a float variable in the
-compiler's own source would stop stage1 building stage2. Three costs a ticket of this shape pays:
-`tools/diff_ast.sh` cannot compare a file the two parsers disagree about, so it skips the ones
-whose stage1 diagnostics carry the refusal and holds the number skipped as an equality; the corpus
-needs one unsupported list per compiler (`notes/testing.md`); and the differential oracles see
-less, so the new construct is pinned by named assertions -- `test/fort/gen_float_test.ft` for the
-emitted text and `test/fort/check_float_test.ft` for the checker's answers -- rather than by
-stage1's output.
+**The fort compiler can implement language forms that the C compiler does not implement.**
+Product tests hold these forms directly. The project does not maintain C-to-fort parity (T-160).

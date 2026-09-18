@@ -411,8 +411,10 @@ without a rewrite.
   runtime object). `tools/vm workflow <preset>` configures, builds and runs ctest; build
   directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
   -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
-- Targets: `fort_core` (static library, `src/bootstrap/*.c` except `main.c`, globbed), `fort_stage1`
-  (the C compiler), `fort` (`build/<preset>/fort`, the source compiler), `fort_std` (a copy of
+- C-started mode builds `fort_core` and `fort_stage1`. The C compiler builds bootstrap-0 (T-160).
+  The last source compiler builds working-tree HEAD as `fort`. External-stage1 mode builds only
+  HEAD with `FORT_STAGE1_COMPILER`. It does not create C compiler or C unit-test targets.
+  Both modes build `fort_std`, a copy of
   `std/*.ft` and `std/<target>/*.ft` in `build/<preset>/std`, which is
   what the compiler reads as `--std-dir`; `FORT_TARGET_CC`, a clang (default `clang`) with
   `--target=${FORT_TARGET_TRIPLE}` (default `x86_64-linux-gnu`), is what the driver runs over the
@@ -467,8 +469,8 @@ without a rewrite.
   `build/<preset>/fort` is HEAD built by the last source pin (T-155).
   CMake validates the list and owns all extraction and build edges. `FORT_STAGE1_COMPILER` names an
   external compiler and skips the list. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external path.
-  `build/<preset>/oracle/std` comes from `tools/bootstrap-oracle.ref`. Only the C differential tests
-  use it.
+  `FORT_ENABLE_BOOTSTRAP=ON` rejects that external path. External-stage1 mode reads no pin
+  (T-160).
   `tools/target linux|darwin workflow|gate` is the common host interface (T-152).
   The workflow runs CMake directly on the selected host. `tools/vm gate` enters the linux VM once,
   then runs `tools/target linux gate` there.

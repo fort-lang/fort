@@ -17,7 +17,7 @@ top of the file.
 - `programs/*.ft`: larger programs that exercise many features at once, treated as run tests.
   `programs/wc.ft` is the worked example of `spec/stdlib.md` section 4 byte for byte below
   its directives, so a change to one is a change to the other; `programs/cat.ft` is the
-  example of section 2.4 with its `?:` written as an `if`, which stage1 admits.
+  example of section 2.4 with its final `?:` written as an `if`.
 
 `NNN` starts at `001` within each area, with no gaps. Tests use only the core language and the
 builtins; standard-library tests go under the `stdlib` area once the library exists.
@@ -66,9 +66,8 @@ path contains a filter) and prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERRO
 test plus a summary; `--lint` validates the directives without a compiler, `--list` lists the
 tests, `-v` shows the commands and outputs of failures and `--keep` keeps the temporary
 directories. From the VM, `tools/vm check-lang` runs it with the debug build. `xfail.txt` lists
-the tests the compiler cannot pass yet (a listed test that passes fails the run) and
-`bootstrap-unsupported.txt` the tests the C bootstrap must reject with `not supported by the
-bootstrap compiler`; see `spec/toolchain.md` 7.3. `python3 -m unittest run_tests_test` runs
+the tests the product compiler cannot pass yet. A listed test that passes fails the run.
+`python3 -m unittest run_tests_test` runs
 the harness's own tests.
 
 ## How a test is judged

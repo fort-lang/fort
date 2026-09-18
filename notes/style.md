@@ -447,7 +447,7 @@ every one matches.
   header names. The deliverable of an audit ticket **is** its table -- T-077, T-078, T-115 and
   T-116 are all tables -- so a malformed table is a deliverable nobody can read (T-077, T-078,
   T-111). *A number a tool can re-derive belongs to the tool and not to prose.* Six tickets found
-  the three counts of the `lang_check_json-stage2` comment in `CMakeLists.txt` stale (T-042,
+  the three counts of the `--check-json` comment in `CMakeLists.txt` stale (T-042,
   T-043, T-124, T-126, T-128, T-157). T-133 deleted those counts. It named
   `run_tests.py --list` and `run_tests.py --check-json --list` as the way to read them. Five more
   places still set the corpus target at three lines for each source line, after the user dropped

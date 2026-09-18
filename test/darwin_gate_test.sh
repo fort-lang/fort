@@ -32,8 +32,7 @@ sockaddr_fixture=run/ffi/013_sockaddr_layout.ft
 conditional_fixture=run/modules/conditional_imports
 args=(--fort build/darwin/fort --std-dir build/darwin/std \
       --cc "$cc" --target "$target" --opt "$opt" \
-      --xfail test/lang/xfail-stage2.txt \
-      --unsupported test/lang/unsupported-stage2.txt \
+      --xfail test/lang/xfail.txt \
       --exclude-exact "$trap_fixture" --exclude-exact "$errno_fixture" \
       --exclude-exact "$sockaddr_fixture" \
       --exclude-exact "$conditional_fixture")

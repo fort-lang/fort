@@ -56,7 +56,7 @@ unit    =   6.02 sec*proc (78 tests)
 The following tests FAILED:
           3 - unit-gen_cast (Failed)
          17 - unit-gen_own (Subprocess aborted)
-         41 - lang-stage2 (Timeout)
+         41 - lang (Timeout)
 Errors while running CTest
 """
 
@@ -123,7 +123,7 @@ class TestFailingTests(unittest.TestCase):
         # A plain failure, an abort and a timeout: all three are red, and the
         # parser that read only `(Failed)` reported a third of this round.
         self.assertEqual(mutate.failing_tests(CTEST_OUTPUT),
-                         ["unit-gen_cast", "unit-gen_own", "lang-stage2"])
+                         ["unit-gen_cast", "unit-gen_own", "lang"])
 
     def test_it_reads_no_name_out_of_a_green_run(self):
         self.assertEqual(mutate.failing_tests(GREEN_OUTPUT), [])
@@ -132,7 +132,7 @@ class TestFailingTests(unittest.TestCase):
     def test_it_keeps_the_order_and_drops_a_repeat(self):
         doubled = CTEST_OUTPUT + "          3 - unit-gen_cast (Failed)\n"
         self.assertEqual(mutate.failing_tests(doubled),
-                         ["unit-gen_cast", "unit-gen_own", "lang-stage2"])
+                         ["unit-gen_cast", "unit-gen_own", "lang"])
 
     def test_a_passing_line_of_the_progress_report_is_not_a_failure(self):
         # `  4/78 Test  #4: unit-gen_call ... Passed` starts with digits and a
@@ -209,7 +209,7 @@ class TestRunRound(unittest.TestCase):
         self.assertEqual(row["verdict"], "caught")
         self.assertEqual(row["stage"], "narrow")
         self.assertEqual(row["tests"],
-                         ["unit-gen_cast", "unit-gen_own", "lang-stage2"])
+                         ["unit-gen_cast", "unit-gen_own", "lang"])
         # The wide stage costs 320 s to 420 s and the round has its answer.
         self.assertNotIn("ctest -L unit", guest.commands)
         self.assertIn("unit-gen_own (Subprocess aborted)", kept)

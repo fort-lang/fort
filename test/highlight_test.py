@@ -72,7 +72,7 @@ CORPUS_DIRS = (
 # because a floor cannot see a directory that stopped being walked: a ticket
 # that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
 # failure and writes it here, as it does for CORPUS_FILES in
-# test/parser_recovery_test.c and FT_FILES in tools/diff_tokens.sh.
+# test/parser_recovery_test.c.
 CORPUS_FILES = 705
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total. A

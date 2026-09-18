@@ -1073,86 +1073,6 @@ class Judging(unittest.TestCase):
             ("FAIL", "program timed out"),
         )
 
-    def test_judge_unsupported_takes_the_bootstrap_diagnostic_anywhere(self):
-        """The shape every entry of the list had before T-131: the words, in
-        the test's file or in a module of the library's closure."""
-        message = run_tests.UNSUPPORTED_MESSAGE
-        test = run_tests.Test("fail/a.ft", "fail/a.ft", "fail")
-        self.assertEqual(
-            run_tests.judge_unsupported(
-                test, proc(1, stderr=("fail/a.ft:2:1: error: floats %s\n" % message).encode())
-            ),
-            ("PASS", ""),
-        )
-        self.assertEqual(
-            run_tests.judge_unsupported(
-                test, proc(1, stderr=("std/math.ft:9:1: error: %s: ?:\n" % message).encode())
-            ),
-            ("PASS", ""),
-        )
-
-    def test_judge_unsupported_takes_a_plain_error_in_the_tests_own_file(self):
-        """The shape T-131 adds: the C bootstrap meets a form added after pin
-        0 and reports an ordinary syntax error, with none of the words."""
-        test = run_tests.Test("fail/a.ft", "fail/a.ft", "fail")
-        self.assertEqual(
-            run_tests.judge_unsupported(test, proc(1, stderr=b"fail/a.ft:2:1: error: other\n")),
-            ("PASS", ""),
-        )
-
-    def test_judge_unsupported_takes_a_plain_error_in_a_file_of_a_directory_test(self):
-        multi = run_tests.Test("fail/dir", "fail/dir/main.ft", "fail")
-        self.assertEqual(
-            run_tests.judge_unsupported(
-                multi, proc(1, stderr=b"fail/dir/other.ft:2:1: error: nonsense\n")
-            ),
-            ("PASS", ""),
-        )
-
-    def test_judge_unsupported_refuses_an_error_about_another_test(self):
-        """The guard the file clause is for: a compiler that reports about
-        something that is not this test passes neither shape."""
-        message = run_tests.UNSUPPORTED_MESSAGE
-        test = run_tests.Test("fail/a.ft", "fail/a.ft", "fail")
-        self.assertEqual(
-            run_tests.judge_unsupported(test, proc(1, stderr=b"fail/b.ft:2:1: error: other\n")),
-            ("FAIL", "no diagnostic in fail/a.ft and none containing '%s'" % message),
-        )
-        multi = run_tests.Test("fail/dir", "fail/dir/main.ft", "fail")
-        self.assertEqual(
-            run_tests.judge_unsupported(
-                multi, proc(1, stderr=b"fail/directory/other.ft:2:1: error: other\n")
-            )[0],
-            "FAIL",
-        )
-
-    def test_judge_unsupported_refuses_a_compiler_that_says_nothing(self):
-        message = run_tests.UNSUPPORTED_MESSAGE
-        test = run_tests.Test("fail/a.ft", "fail/a.ft", "fail")
-        self.assertEqual(
-            run_tests.judge_unsupported(test, proc(1, stderr=message.encode())),
-            ("FAIL", "compiler exited 1 without diagnostics"),
-        )
-        self.assertEqual(
-            run_tests.judge_unsupported(test, proc(0)),
-            ("FAIL", "compiled successfully, expected exit 1"),
-        )
-        self.assertEqual(run_tests.judge_unsupported(test, proc(2))[0], "ERROR")
-
-    def test_owns_file(self):
-        """A directory test owns every file under it and a single-file test
-        owns itself. The prefix is a path prefix: `fail/dir` does not own
-        `fail/directory/x.ft`."""
-        one = run_tests.Test("fail/a.ft", "fail/a.ft", "fail")
-        self.assertTrue(run_tests.owns_file(one, "fail/a.ft"))
-        self.assertFalse(run_tests.owns_file(one, "fail/a.ft.bak"))
-        self.assertFalse(run_tests.owns_file(one, "std/rt.ft"))
-        multi = run_tests.Test("fail/dir", "fail/dir/main.ft", "fail")
-        self.assertTrue(run_tests.owns_file(multi, "fail/dir/main.ft"))
-        self.assertTrue(run_tests.owns_file(multi, "fail/dir/other.ft"))
-        self.assertTrue(run_tests.owns_file(multi, "fail/dir"))
-        self.assertFalse(run_tests.owns_file(multi, "fail/directory/other.ft"))
-
     def test_apply_expectations(self):
         self.assertEqual(run_tests.apply_expectations("PASS", "", False), ("PASS", ""))
         self.assertEqual(run_tests.apply_expectations("FAIL", "why", False), ("FAIL", "why"))
@@ -1164,8 +1084,8 @@ class Judging(unittest.TestCase):
         )
         # An XPASS names the list actually in use, which --xfail may change.
         self.assertEqual(
-            run_tests.apply_expectations("PASS", "", True, "xfail-stage2.txt"),
-            ("XPASS", "listed in xfail-stage2.txt but passed"),
+            run_tests.apply_expectations("PASS", "", True, "other-xfail.txt"),
+            ("XPASS", "listed in other-xfail.txt but passed"),
         )
 
 
@@ -1350,8 +1270,7 @@ class EndToEnd(TempRoot):
             //! run
             //! stdout:
             //| 1.5
-            //@ exit 1
-            //@ stderr run/lexical/001_floats.ft:6:5: error: not supported by the bootstrap compiler
+            //@ program echo 1.5
             """,
         )
         write(
@@ -1417,7 +1336,6 @@ class EndToEnd(TempRoot):
             """,
         )
         write(self.corpus, "xfail.txt", "run/control/004_wrong_output.ft\nrun/control/005\n")
-        write(self.corpus, "bootstrap-unsupported.txt", "run/lexical/001_floats.ft\n")
 
     def test_run(self):
         self.write_corpus()
@@ -1447,19 +1365,18 @@ class EndToEnd(TempRoot):
         )
         self.assertEqual(status, 1)
 
-    def test_filters_and_no_unsupported(self):
+    def test_filters(self):
         self.write_corpus()
-        status, lines = self.run_main("--no-unsupported", "floats", "001_echo")
+        status, lines = self.run_main("floats", "001_echo")
         self.assertEqual(
             lines,
             [
                 "PASS run/control/001_echo.ft",
-                "FAIL run/lexical/001_floats.ft: compiler exited 1: run/lexical/001_floats.ft:6:5: "
-                "error: not supported by the bootstrap compiler",
-                "run_tests.py: 2 tests: 1 passed, 1 failed, 0 xfail, 0 xpass, 0 errors",
+                "PASS run/lexical/001_floats.ft",
+                "run_tests.py: 2 tests: 2 passed, 0 failed, 0 xfail, 0 xpass, 0 errors",
             ],
         )
-        self.assertEqual(status, 1)
+        self.assertEqual(status, 0)
 
     def test_all_pass_exits_zero(self):
         self.write_corpus()

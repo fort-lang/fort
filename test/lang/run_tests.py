@@ -5,10 +5,8 @@ Every test is a `.ft` file whose expected behavior is encoded in `//!`
 directives; a directory containing `main.ft` is one multi-file test. Each test
 is compiled with `fort` from `test/lang` as the working directory, run in a
 fresh temporary directory, and judged against its directives. `xfail.txt`
-lists the tests the compiler cannot pass yet (a listed test that passes is an
-XPASS and fails the run); `bootstrap-unsupported.txt` lists the tests that use
-features the C bootstrap deliberately lacks, which must be rejected with the
-bootstrap diagnostic. `--lint` validates the directives without a compiler and
+lists the tests the compiler cannot pass yet. A listed test that passes is an
+XPASS and fails the run. `--lint` validates the directives without a compiler, and
 `--verify-ir` runs the LLVM verifier over the module of every test that
 compiles. `--check-json` is a mode of its own: it runs `fort --check --json`
 over every fail test and holds the document of D20.2 against the text form of
@@ -53,8 +51,6 @@ REPEATABLE = ("link", "stderr", "error-any")
 HEADER_MARKERS = ("//!", "//<", "//|")
 
 XFAIL_NAME = "xfail.txt"
-UNSUPPORTED_NAME = "bootstrap-unsupported.txt"
-UNSUPPORTED_MESSAGE = "not supported by the bootstrap compiler"
 # `--cc` must be a clang and its target is named on the command line (D14.1).
 DEFAULT_CC = "clang"
 DEFAULT_TARGET = "x86_64-linux-gnu"
@@ -776,52 +772,6 @@ def judge_run(test, compile_proc, link_proc, run_proc):
     return "PASS", ""
 
 
-def owns_file(test, file):
-    """The file belongs to the test: the test itself, or one of its directory."""
-    if file in (test.entry, test.path):
-        return True
-    return test.multi and file.startswith(test.path + "/")
-
-
-def judge_unsupported(test, compile_proc, root=ROOT):
-    """A test the compiler's list names must be refused, and refused by it.
-
-    Refused: exit 1 with at least one diagnostic, never exit 0 (toolchain.md
-    7.3). By it: at least one of those diagnostics must stand in a file of the
-    test itself, or must carry UNSUPPORTED_MESSAGE.
-
-    Why two shapes and not one (T-131). Until T-131 the C bootstrap grew a
-    `not supported by the bootstrap compiler` diagnostic for each feature it
-    lacks, because it compiled the whole repository and a listed test had to
-    say why it was refused. It compiles pin 0's tree now, so a feature added
-    after pin 0 reaches it as a plain syntax error from its lexer or its
-    parser, with no such words. The test's own file is what says the refusal
-    is about the test: a compiler that reports nothing, or that reports only
-    about a module of the library, passes neither shape and fails.
-
-    The second shape is not the first with more words. A listed test that
-    spells no unsupported form of its own is refused inside the library's
-    closure -- run/stdlib/096_math_limits.ft imports std.math, whose `?:` the
-    C bootstrap refuses -- so its diagnostics name `std/math.ft` and never the
-    test. Nine such diagnostics, measured on 2026-09-14, and no diagnostic in
-    the test. The first shape alone would fail it.
-    """
-    verdict, reason = judge_compile(compile_proc, False)
-    if verdict:
-        return verdict, reason
-    diagnostics = parse_diagnostics(compile_proc.stderr, root)
-    if not diagnostics:
-        return "FAIL", "compiler exited 1 without diagnostics"
-    if any(UNSUPPORTED_MESSAGE in d.message for d in diagnostics):
-        return "PASS", ""
-    if any(owns_file(test, d.file) for d in diagnostics):
-        return "PASS", ""
-    return "FAIL", "no diagnostic in %s and none containing '%s'" % (
-        test.path,
-        UNSUPPORTED_MESSAGE,
-    )
-
-
 # ---- the check document (D20.2) -------------------------------------------------------
 
 
@@ -1201,9 +1151,8 @@ def apply_expectations(verdict, reason, xfail, label=XFAIL_NAME):
     """Map a verdict through the expectation list: a listed failure is expected, a pass is not.
 
     ERROR is covered too: a listed test is one the compiler cannot handle yet,
-    however it fails (the stage1 scaffold exits 2 on every input). `label` is
-    the list in use, since a run may be given another one with --xfail (stage2
-    has its own, xfail-stage2.txt) and an XPASS must name the file to edit.
+    however it fails. `label` is the list in use, since a run can use another
+    file with --xfail and an XPASS must name the file to edit.
     """
     if not xfail:
         return verdict, reason
@@ -1384,7 +1333,7 @@ def execute_check_json(config, test):
             shutil.rmtree(workdir, ignore_errors=True)
 
 
-def execute(config, test, unsupported):
+def execute(config, test):
     """Compile, link and run one test in a fresh temporary directory; return its Result.
 
     The compiler runs with the corpus root as working directory (D14.4) and
@@ -1399,15 +1348,12 @@ def execute(config, test, unsupported):
     procs = []
     try:
         prog = os.path.join(workdir, "prog")
-        if unsupported or test.kind == "fail":
+        if test.kind == "fail":
             proc = run_process(
                 compile_command(config, test, prog), config.root, env, config.timeout
             )
             procs.append(proc)
-            if unsupported:
-                verdict, reason = judge_unsupported(test, proc, config.root)
-            else:
-                verdict, reason = judge_fail(test, proc, config.root)
+            verdict, reason = judge_fail(test, proc, config.root)
             return Result(test, verdict, reason, procs, workdir)
         link_proc = None
         if test.links:
@@ -1507,14 +1453,6 @@ def parse_args(argv):
     )
     parser.add_argument("--no-xfail", action="store_true", help="ignore the expected-failure list")
     parser.add_argument(
-        "--unsupported",
-        default=None,
-        help="bootstrap-unsupported list (default: %s)" % UNSUPPORTED_NAME,
-    )
-    parser.add_argument(
-        "--no-unsupported", action="store_true", help="ignore the bootstrap-unsupported list"
-    )
-    parser.add_argument(
         "--exclude-exact",
         action="append",
         default=[],
@@ -1541,7 +1479,7 @@ def expectation_file(given, default):
 
 
 def load_corpus(root, args):
-    """Discover and parse the corpus; return (tests, problems, xfail, unsupported)."""
+    """Discover and parse the corpus; return its tests, problems, and expected failures."""
     tests, problems = discover(root)
     for test in tests:
         load_test(root, test)
@@ -1551,20 +1489,13 @@ def load_corpus(root, args):
         path = expectation_file(args.xfail, root / XFAIL_NAME)
         xfail = load_expectations(path)
         problems.extend(expectation_problems(args.xfail or XFAIL_NAME, xfail, tests))
-    unsupported = []
-    if not args.no_unsupported:
-        path = expectation_file(args.unsupported, root / UNSUPPORTED_NAME)
-        unsupported = load_expectations(path)
-        problems.extend(
-            expectation_problems(args.unsupported or UNSUPPORTED_NAME, unsupported, tests)
-        )
-    return tests, problems, xfail, unsupported
+    return tests, problems, xfail
 
 
 def main(argv=None):
     args = parse_args(argv)
     root = Path(args.root).resolve()
-    tests, problems, xfail, unsupported = load_corpus(root, args)
+    tests, problems, xfail = load_corpus(root, args)
     # The name an XPASS tells the reader to edit: the list actually in use.
     xfail_label = os.path.basename(args.xfail) if args.xfail else XFAIL_NAME
     selected = select(tests, args.filters)
@@ -1618,7 +1549,7 @@ def main(argv=None):
     counts = dict.fromkeys(VERDICTS, 0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.j)) as pool:
         futures = [
-            pool.submit(execute, config, test, listed(test, unsupported)) for test in selected
+            pool.submit(execute, config, test) for test in selected
         ]
         for test, future in zip(selected, futures):
             result = future.result()

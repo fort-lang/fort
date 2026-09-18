@@ -203,9 +203,7 @@ bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out);
 /// with the spelling escaped so that a token holding a newline, a tab, a quote or
 /// a byte outside printable ASCII still occupies one line. The end of the range is
 /// the position after the token's last byte: no token holds a line break, so it is
-/// `<col> + <len>` on the token's own line. src/fort/lexer.ft writes the same
-/// bytes, and tools/diff_tokens.sh holds the two dumps against each other over
-/// every .ft file in the repository.
+/// `<col> + <len>` on the token's own line. Direct lexer tests hold this format.
 /// D2.9, D14.1
 void tok_dump(const tokvec_t* v, sb_t* out);
 

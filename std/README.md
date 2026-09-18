@@ -17,11 +17,8 @@ written.
 `std.libc`, `std.net` and `std.os` have one source for each target, in `std/linux/` and
 `std/darwin/`. The other modules stand in `std/` and serve both targets.
 
-`std.math` holds f64 and f32 functions, so the C bootstrap refuses it: a program that imports
-`std.math` is one stage1 rejects whole, whatever part of the module it uses, and its tests are in
-`test/lang/bootstrap-unsupported.txt` (T-042). `std.rt` holds floats too since T-132 folded the
-float printers of D18.1 into it, and the C bootstrap never reads this tree's `std.rt`: it reads
-pin 0's library (`notes/compiler.md` 8, invariant 5).
+`std.math` holds f64 and f32 functions. Product tests use this current standard library.
+The C compiler reads only the standard library of bootstrap-0.
 
 `std.rt` is the only runtime there is. A `print`, a `new` and a `panic` are calls to its entry
 points, which the compiler emits by their mangled names (D9.7, D12.2), and the module declares no

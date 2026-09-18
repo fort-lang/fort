@@ -11,11 +11,7 @@
 #             learns something, so this is a good outcome.
 #   FRAME     the checker refused before it reached the row: it exited 1 and
 #             its first diagnostic points at a line above the row's own. The
-#             row itself is then unmeasured, and the class says so. The stage1
-#             column of section E is this class and not REPORTED: stage1
-#             parses the type `f64` and refuses a float literal (D2.6), so it
-#             stops at `f64 d = zf(0.5);`, the last line the float frame
-#             writes before the row.
+#             row itself is then unmeasured, and the class says so.
 #   RAN       the checker accepted it, clang built it and the program printed
 #             something. The answer is in the list beside the program, so a
 #             wrong answer is a failure here and not a pass.
@@ -39,7 +35,6 @@
 #                   script read every non-zero status as a diagnostic, so a
 #                   compiler that died on every row would have reported
 #                   `152 reported, 0 refused by clang, 0 silent` and exited 0.
-#                   tools/diff_ast.sh holds stage1 to the same two statuses.
 #   NO-DIAGNOSTIC   the checker exited 1 and wrote no `error:` line. A refusal
 #                   that names nothing teaches the author nothing.
 #
@@ -61,19 +56,15 @@
 #
 # The list format is one row per line:
 #
-#   <stage1 class> <stage2 class> <body>
+#   <class> <body>
 #
 # `<body>` is the statement list that goes into main, and it may hold several
 # statements. A class is REPORTED, FRAME, CC-FAIL, SILENT, RAN:<output> or
 # TRAP:<status>, where <output> is what the program prints with every run of
-# whitespace replaced by `_` and <status> is the exit status. The two compilers
-# differ on the rows that hold a float literal or a `?:`, which stage1 refuses
-# at the lexer, which is why each row carries two classes and not one.
+# whitespace replaced by `_` and <status> is the exit status.
 #
-# A row with fewer than three fields is a usage error and not a failing row.
-# A row cut down to its two classes would otherwise parse with `body=REPORTED`
-# and match its own expectation while testing nothing. A class the list
-# misspells is a usage error for the same reason.
+# A row without a body is a usage error. A class the list misspells is also a
+# usage error.
 #
 # The list states its own length in a directive, `!rows <n>`, and the script
 # holds it as an equality. Without it a deleted row passes in silence: every
@@ -87,11 +78,7 @@
 #          `i32[4] mut a`, each through a call so that it is a run-time value.
 #          The body is the statement list of main.
 #   float  base plus `fn zf(f64 v) f64` and `fn zg(f32 v) f32`, and main
-#          declaring `f64 d = zf(0.5);` as well. stage1 parses the two types
-#          and refuses the literal `0.5` (D2.6), so it stops one line above
-#          every row of this frame and the stage1 column of them all is FRAME.
-#          That is the right answer for a compiler with no floats, and FRAME
-#          rather than REPORTED says the row itself went unread.
+#          declaring `f64 d = zf(0.5);` as well.
 #   ret    base plus `fn r(i32 n) i64`, whose body is the row. main prints
 #          `r(z(1))`. This is the one frame that puts the row in a return
 #          position.
@@ -125,14 +112,6 @@ if [ ! -f "$list" ]; then
     exit 2
 fi
 
-# Which column of the list this run reads. The public build/fort path and the
-# old stage2 path select stage2. The C bootstrap path selects stage1.
-case $compiler in
-    */bootstrap/stage1/fort) stage=1 ;;
-    build/*/fort|*/build/*/fort|*stage2*) stage=2 ;;
-    *) stage=1 ;;
-esac
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -150,9 +129,8 @@ wrong=0
 # so a list without the directive is a usage error and not a silent pass.
 want_rows=-1
 
-# A class a row may expect. The list is checked against it so that a typo, or
-# a row cut down to its two classes, is a usage error rather than a row that
-# matches itself.
+# A class a row may expect. The list is checked so that a typo, or a row cut
+# down to its class, is a usage error rather than a row that tests nothing.
 valid_class() {
     case $1 in
         REPORTED|FRAME|CC-FAIL|SILENT) return 0 ;;
@@ -194,30 +172,24 @@ while IFS= read -r line; do
             exit 2
             ;;
     esac
-    # Three fields and not two. A row cut down to its two classes leaves
-    # `body` holding the second class, which then matches itself.
+    # Two fields. A row without a body tests nothing.
     case $line in
-        *' '*' '*) ;;
+        *' '*) ;;
         *)
-            echo "sweep_untyped.sh: a row needs three fields: $line" >&2
+            echo "sweep_untyped.sh: a row needs two fields: $line" >&2
             exit 2
             ;;
     esac
-    expect1=${line%% *}
-    rest=${line#* }
-    expect2=${rest%% *}
-    body=${rest#* }
-    for class in "$expect1" "$expect2"; do
-        if ! valid_class "$class"; then
-            echo "sweep_untyped.sh: no such class: $class" >&2
-            echo "sweep_untyped.sh: row: $line" >&2
-            exit 2
-        fi
-    done
-    if [ "$stage" -eq 1 ]; then
-        expect=$expect1
-    else
-        expect=$expect2
+    expect=${line%% *}
+    body=${line#* }
+    case $body in
+        *[![:space:]]*) ;;
+        *) echo "sweep_untyped.sh: a row body must not be empty: $line" >&2; exit 2 ;;
+    esac
+    if ! valid_class "$expect"; then
+        echo "sweep_untyped.sh: no such class: $expect" >&2
+        echo "sweep_untyped.sh: row: $line" >&2
+        exit 2
     fi
     rows=$((rows + 1))
 
@@ -358,7 +330,7 @@ while IFS= read -r line; do
     fi
 done <"$list"
 
-echo "$rows rows under stage$stage: $reported reported, $framed refused at the" \
+echo "$rows rows: $reported reported, $framed refused at the" \
      "frame, $ran ran, $trapped trapped, $ccfail refused by clang," \
      "$silent silent, $badstatus with a bad status, $nodiag with no diagnostic"
 

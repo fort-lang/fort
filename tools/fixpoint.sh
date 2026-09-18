@@ -51,9 +51,9 @@
 # 27233 of 480088 bytes. Both binaries run.
 #
 # It also writes no file that another test reads. <build-dir>/fort belongs to
-# CMake. The lang-stage2, diff-ir, and stage-usage tests judge that binary.
+# CMake. Product tests judge that binary.
 #
-# ctest runs it as the test `bootstrap`, label lang.
+# ctest runs it as the test `fixpoint`, label lang.
 set -eu
 
 usage() {
@@ -183,7 +183,7 @@ compile() {
 # is_module <file> -- the file holds a module of D19.1 and not nothing. Two
 # empty files compare equal and opt accepts an empty module, so a compiler
 # that exits 0 and writes nothing would otherwise read as a fixed point.
-# tools/diff_ir.sh carries the same guard.
+# This guard makes an empty output a failure.
 is_module() {
     if [ ! -s "$1" ]; then
         echo "fixpoint.sh: $1 is empty" >&2
@@ -217,7 +217,7 @@ check_mode() {
     local two_ll=$work/$mode/stage2.ll
     local three_ll=$work/$mode/stage3.ll
 
-    echo "== $mode: using build/fort from the CMake bootstrap graph"
+    echo "== $mode: using build/fort from the CMake product graph"
     mkdir -p "$work/$mode"
 
     echo "== $mode: stage3"
