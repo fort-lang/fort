@@ -6,7 +6,6 @@
 #include <stdint.h>
 
 // The sizes the type rules fix.
-// D3.1, D3.15
 enum { PTR_SIZE = 8, PTR_ALIGN = 8, SPAN_SIZE = 16, ENUM_SIZE = 4 };
 
 // ---- table and interning ---------------------------------------------------------
@@ -159,7 +158,6 @@ const type_t* type_voidptr(type_table_t* tt, bool own, bool mut) {
     key.own = own;
     // The storage behind a `void*` has no type, and `void mut*` says a caller
     // may write it.
-    // D3.11
     key.mut = mut;
     return intern(tt, &key);
 }
@@ -241,11 +239,10 @@ const type_t* type_fn(type_table_t* tt,
     return intern(tt, &key);
 }
 
-// A nominal type is one node per declaration, since its identity is its
-// declaration: a second call with the same `decl` gives the node the first one
-// made, so no two nodes of one struct can split the types built from it. A NULL
+// A nominal type has one node per declaration because the declaration defines
+// identity. Another call with the same `decl` returns the first node. Thus, one
+// struct cannot split its derived types across nodes. A NULL
 // `decl` is anonymous and always makes a node.
-// D3.12
 static const type_t* nominal(type_table_t* tt, type_kind_t kind, str_t name, const void* decl) {
     if (decl != NULL) {
         for (uint64_t i = 0; i < tt->nodes.len; i++) {
@@ -299,7 +296,6 @@ bool type_is_scalar(const type_t* t) {
 
 // Skips the fixed arrays around a type: the node whose storage the arrays'
 // elements share.
-// D5.2
 static const type_t* behind_arrays(const type_t* t) {
     while (t->kind == TYPE_ARRAY) {
         t = t->elem;
@@ -307,10 +303,9 @@ static const type_t* behind_arrays(const type_t* t) {
     return t;
 }
 
-// A reference that reaches a level: a pointer, a `void*` or a span, not a
-// string, whose characters are never mutable and which has no target level. The
+// Whether a reference reaches a storage level. Pointers, `void*`, and spans do.
+// Strings do not because their characters are immutable and have no target level. The
 // level a `void*` reaches has no type, and `void mut*` marks it writable.
-// D3.11, D5.2
 static bool has_target_level(const type_t* t) {
     return t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_SPAN;
 }
@@ -368,10 +363,9 @@ bool type_is_owning_aggregate(const type_t* t) {
 // ---- identity --------------------------------------------------------------------
 
 // The identity: with `bits` false the `mut` and `own` marks of the reference
-// chain are ignored and only its shape is compared. A function type is compared
-// whole either way: the marks of its parameters and result are part of its
-// identity, not of the chain that reaches it.
-// D3.10, D3.12
+// chain are ignored and only its shape is compared. A function type is always
+// compared whole. Its parameter and result marks are part of its identity, not
+// the chain that reaches it.
 static bool same(const type_t* a, const type_t* b, bool bits) {
     if (a == b) {
         return true;
@@ -391,14 +385,13 @@ static bool same(const type_t* a, const type_t* b, bool bits) {
     case TYPE_PTR:
     case TYPE_VOIDPTR:
     case TYPE_SPAN:
-        // The elem of a `void*` is always `void`, so the recursion ends there
+        // The elem of a `void*` is always `void`, so the recursion ends there,
         // and only its marks decide.
-        // D3.11
         return (!bits || (a->own == b->own && a->mut == b->mut)) && same(a->elem, b->elem, bits);
     case TYPE_ARRAY:
         return a->len == b->len && same(a->elem, b->elem, bits);
     case TYPE_FN:
-        // D3.10: `fn void(node mut*)` and `fn void(node*)` are two types
+        // `fn (node mut*) void` and `fn (node*) void` are two types
         if (a->noreturn != b->noreturn || a->nparams != b->nparams ||
             !same(a->elem, b->elem, true)) {
             return false;
@@ -425,12 +418,10 @@ bool type_same_shape(const type_t* a, const type_t* b) {
 }
 
 // ---- implicit conversions --------------------------------------------------------
-// D5.4, D17.4
 
-// Whether `src` converts to `dst` at a chain position where every level
-// between the binding and this reference is immutable in `dst` when
-// `prefix_immutable`, and some reference outside it is `own` in `dst` when
-// `outer_own`.
+// Whether `src` converts to `dst` at one chain position. `prefix_immutable`
+// means each earlier destination level is immutable. `outer_own` means an outer
+// destination reference owns its value.
 static bool convertible(const type_t* dst,
                         const type_t* src,
                         bool prefix_immutable,
@@ -447,15 +438,14 @@ static bool convertible(const type_t* dst,
     case TYPE_ERROR:
         return true;
     case TYPE_PRIM:
-        // D3.14, D5.4: the only implicit conversions drop marks
+        // the only implicit conversions drop marks
         return dst->prim == src->prim;
     case TYPE_STRUCT:
     case TYPE_ENUM:
     case TYPE_FN:
-        // D3.10: nominal, and no variance for function types
+        // nominal, and no variance for function types
         return type_equal(dst, src);
     case TYPE_ARRAY:
-        // D5.2
         return dst->len == src->len &&
                convertible(dst->elem, src->elem, prefix_immutable, outer_own);
     case TYPE_STRING:
@@ -465,23 +455,21 @@ static bool convertible(const type_t* dst,
         break;
     }
     if (dst->mut && !src->mut) {
-        // D3.14, D5.4
         return false;
     }
     if (src->mut && !dst->mut && !prefix_immutable) {
-        // D5.4: the C `T** -> const T**` hole
+        // the C `T** -> const T**` hole
         return false;
     }
     if (dst->own && !src->own) {
-        // D17.3, D17.4
         return false;
     }
     if (src->own && !dst->own && (!prefix_immutable || outer_own)) {
-        // D17.4: else the inner objects would be owned by nobody
+        // else the inner objects would be owned by nobody
         return false;
     }
     if (dst->elem == NULL) {
-        // D3.7, D5.2: a `string` has no level behind it
+        // a `string` has no level behind it
         return true;
     }
     return convertible(dst->elem, src->elem, prefix_immutable && !dst->mut, outer_own || dst->own);
@@ -493,7 +481,7 @@ bool type_assignable(const type_t* dst, const type_t* src) {
         return true;
     }
     if (src->kind == TYPE_NULL) {
-        // D10.5, D3.5, D3.7: never a span or a string, whose zero is `{}`
+        // The null literal never converts to a span or string. Their zero is `{}`.
         return dst->kind == TYPE_PTR || dst->kind == TYPE_VOIDPTR || dst->kind == TYPE_FN;
     }
     if (dst->kind == TYPE_NULL || dst->kind == TYPE_VOID || src->kind == TYPE_VOID) {
@@ -503,14 +491,12 @@ bool type_assignable(const type_t* dst, const type_t* src) {
 }
 
 // ---- casts -----------------------------------------------------------------------
-// D3.14
 
 // Whether a type belongs to the string family: `string`, `char@` or `u8@` with
 // any marks. These spellings, and only these, cast among themselves: the header
 // is reinterpreted, `own` may be added or dropped, and `mut` may be dropped.
 // Adding `mut` is refused here as everywhere, so `cast("abc", u8 mut@)` no
 // longer aliases read-only bytes as writable ones.
-// D3.14, D17.12
 static bool string_family(const type_t* t) {
     if (t->kind == TYPE_STRING) {
         return true;
@@ -538,29 +524,25 @@ static bool scalar_cast_allowed(const type_t* dst, const type_t* src) {
     bool src_num = src_int || type_is_float(src);
     bool dst_num = dst_int || type_is_float(dst);
     if (src_num && dst_num) {
-        // D3.14: widening, narrowing, sign change, rounding, saturation
+        // widening, narrowing, sign change, rounding, saturation
         return true;
     }
     if (dst_int) {
-        // D3.2, D3.3, D3.9, D3.14: `bool` gives 0 or 1, `char` its byte
+        // `bool` gives 0 or 1. `char` gives its byte.
         return is_prim(src, PRIM_BOOL) || is_prim(src, PRIM_CHAR) || src->kind == TYPE_ENUM;
     }
     if (src_int) {
-        // D3.3, D3.14
         return is_prim(dst, PRIM_CHAR) || dst->kind == TYPE_ENUM;
     }
-    // D3.14: go through an integer
+    // go through an integer
     return false;
 }
 
-// Whether `src` loses an `own` under a reference `dst` still owns, at any
-// depth: the inner objects would then be owned by nobody, which no cast
-// licenses either.
-// D17.4
+// Whether `src` loses `own` below a reference that `dst` still owns. Such a cast
+// would leave inner objects without an owner and is not allowed.
 static bool own_orphaned(const type_t* dst, const type_t* src, bool outer_own) {
     while (dst->kind == TYPE_ARRAY || type_is_reference(dst)) {
         if (dst->kind == TYPE_ARRAY) {
-            // D5.2
             dst = dst->elem;
             src = src->elem;
             continue;
@@ -578,21 +560,19 @@ static bool own_orphaned(const type_t* dst, const type_t* src, bool outer_own) {
     return false;
 }
 
-// The span row of the matrix: a span casts to a span of the same element type
-// whose marks differ only in mutability, dropped at any level, and whose `own`
-// marks may be added or dropped at any reference. The element type must be the
-// same: the marks inside a function type are part of its identity, so
-// `fn void(node mut*)@` does not cast to `fn void(node*)@`. The drop alone is
-// this row's work, because `type_cast_adds_mut` already refused every span
-// whose marks add one.
-// D3.10, D3.14
+// Applies the span row of the cast matrix. Spans must have the same element
+// type. Their marks can differ only by dropped mutability at any level.
+// Ownership marks can change at any reference. Function parameter and result
+// marks are part of element identity. Thus,
+// A span of `fn (node mut*) void` does not cast to a span of `fn (node*) void`.
+// The drop alone is this row's work. `type_cast_adds_mut` already refused every
+// span whose marks add one.
 static bool span_cast_allowed(const type_t* dst, const type_t* src) {
     return type_same_shape(dst, src) && !own_orphaned(dst, src, false);
 }
 
 // Whether `t` marks any level `mut`, at this position or below it. A fixed
 // array shares the storage of its elements and adds no level of its own.
-// D3.14, D5.2
 static bool marks_mut(const type_t* t) {
     if (t->kind == TYPE_ARRAY) {
         return marks_mut(t->elem);
@@ -610,10 +590,9 @@ static bool marks_mut(const type_t* t) {
     return marks_mut(t->elem);
 }
 
-// D3.14
 bool type_cast_adds_mut(const type_t* dst, const type_t* src) {
     if (dst->kind == TYPE_ARRAY) {
-        // D5.2: the array adds no level, so the two chains stay in step
+        // the array adds no level, so the two chains stay in step
         if (src->kind == TYPE_ARRAY) {
             return type_cast_adds_mut(dst->elem, src->elem);
         }
@@ -643,7 +622,6 @@ bool type_cast_adds_mut(const type_t* dst, const type_t* src) {
     return type_cast_adds_mut(dst->elem, src->elem);
 }
 
-// D3.10, D3.14
 const type_t* type_without_mut(type_table_t* tt, const type_t* t) {
     switch (t->kind) {
     case TYPE_PTR:
@@ -653,7 +631,7 @@ const type_t* type_without_mut(type_table_t* tt, const type_t* t) {
     case TYPE_SPAN:
         return type_span(tt, type_without_mut(tt, t->elem), t->own, false);
     case TYPE_ARRAY:
-        // D5.2: the array holds no mark of its own
+        // the array holds no mark of its own
         return type_array(tt, type_without_mut(tt, t->elem), t->len);
     default:
         return t;
@@ -674,14 +652,12 @@ bool type_cast_allowed(const type_t* dst, const type_t* src) {
     // Any conversion that only drops mutability or ownership is a cast too, a no-op
     // the implicit rules already cover. This is the only way a fixed array or a
     // struct converts at all: every other row that names them is an error.
-    // D3.14
     if (type_assignable(dst, src)) {
         return true;
     }
     // One rule over every row below: a cast never adds `mut`, from any source.
     // `void*`, `u64` and `string` are sources like the rest, so
     // `cast(cast(p, void*), u8 mut*)` fails here at the second cast.
-    // D3.14
     if (type_cast_adds_mut(dst, src)) {
         return false;
     }
@@ -689,16 +665,16 @@ bool type_cast_allowed(const type_t* dst, const type_t* src) {
         return scalar_cast_allowed(dst, src);
     }
     if (is_ptr_like(src)) {
-        // D3.11, D3.14: and to `u64`; a function pointer only through `void*`
+        // and to `u64`; a function pointer only through `void*`
         return is_ptr_like(dst) || is_u64(dst) ||
                (src->kind == TYPE_VOIDPTR && dst->kind == TYPE_FN);
     }
     if (is_u64(src)) {
-        // D3.14: an address comes back from `u64` alone
+        // an address comes back from `u64` alone
         return is_ptr_like(dst);
     }
     if (src->kind == TYPE_FN) {
-        // D3.14: not even another function type
+        // not even another function type
         return dst->kind == TYPE_VOIDPTR;
     }
     if (string_family(src) && string_family(dst)) {
@@ -712,15 +688,12 @@ bool type_cast_allowed(const type_t* dst, const type_t* src) {
 
 // ---- sizes and layout ------------------------------------------------------------
 
-// The largest object the compiler admits, 2^63 - 1 bytes: a type whose size
-// would exceed it is "type is too large" at the declaration that introduces
-// it.
-// D3.4
+// The largest permitted object is 2^63 - 1 bytes. A declaration reports
+// "type is too large" when its type would exceed this limit.
 static const uint64_t TYPE_MAX_SIZE = (uint64_t)INT64_MAX;
 
 // `v` rounded up to a multiple of `align` in `*out`; false when the result
 // would exceed TYPE_MAX_SIZE.
-// D3.4
 static bool round_up(uint64_t v, uint64_t align, uint64_t* out) {
     if (align == 0) {
         fatal_internal("alignment 0");
@@ -753,7 +726,6 @@ static bool size_checked(const type_t* t, uint64_t* out);
 
 // `len * sizeof(elem)` in `*out`; false when the product would exceed
 // TYPE_MAX_SIZE.
-// D3.4
 static bool array_size(const type_t* t, uint64_t* out) {
     uint64_t elem = 0;
     if (!size_checked(t->elem, &elem)) {
@@ -768,7 +740,6 @@ static bool array_size(const type_t* t, uint64_t* out) {
 
 // The size of `t` in `*out`; false when it would exceed TYPE_MAX_SIZE. Every
 // size the compiler computes goes through here, so no size arithmetic can wrap.
-// D3.4
 static bool size_checked(const type_t* t, uint64_t* out) {
     switch (t->kind) {
     case TYPE_VOID:
@@ -783,19 +754,17 @@ static bool size_checked(const type_t* t, uint64_t* out) {
     case TYPE_PTR:
     case TYPE_VOIDPTR:
     case TYPE_FN:
-        // D3.1, D3.15
         *out = PTR_SIZE;
         return true;
     case TYPE_SPAN:
     case TYPE_STRING:
-        // D3.5, D3.7: the fat pointer `{ptr, len}`
+        // the fat pointer `{ptr, len}`
         *out = SPAN_SIZE;
         return true;
     case TYPE_ARRAY:
-        // D3.4, D3.15: elements are contiguous
+        // elements are contiguous
         return array_size(t, out);
     case TYPE_ENUM:
-        // D3.9
         *out = ENUM_SIZE;
         return true;
     case TYPE_STRUCT:
@@ -896,8 +865,8 @@ bool type_layout_struct(const type_t* s,
         if (type_layout_pending(f) != NULL) {
             fatal_internal("layout with a pending field");
         }
-        // D3.8, D9.9: each field at the next multiple of its alignment
-        // D3.4: a field or a total past the ceiling is too large
+        // each field at the next multiple of its alignment
+        // a field or a total past the ceiling is too large
         uint64_t size = 0;
         uint64_t a = type_alignof(f);
         if (!size_checked(f, &size) || !round_up(off, a, &off) || off > TYPE_MAX_SIZE - size) {
@@ -909,12 +878,12 @@ bool type_layout_struct(const type_t* s,
         if (a > align) {
             align = a;
         }
-        // D17.7: an `own` field makes the struct an owning aggregate
+        // an `own` field makes the struct an owning aggregate
         if ((type_is_reference(f) && f->own) || type_is_owning_aggregate(f)) {
             owning = true;
         }
     }
-    // D3.8: rounded up to the alignment, as C lays the same struct out
+    // rounded up to the alignment, as C lays the same struct out
     if (!round_up(off, align, &l->size)) {
         type_layout_fail(s);
         return false;
@@ -931,12 +900,10 @@ bool type_layout_struct(const type_t* s,
 // parentheses.
 enum { SPINE_MAX = 64 };
 
-// The suffixes of one spelled type, from the outermost inward, then the base: a
-// group of reference suffixes, a group of fixed-array suffixes and a second group
-// of reference suffixes, any of them empty. A chain no declaration can write,
-// which is one with an array suffix after a trailing reference suffix, stops at
-// the node that would need it and spells the rest in parentheses.
-// D3.6
+// Holds suffixes from the outermost inward, followed by the base. The groups are
+// references, fixed arrays, and trailing references. Each group can be empty.
+// A chain with an array after a trailing reference cannot be written directly.
+// Collection stops there and puts the remaining type in parentheses.
 typedef struct {
     const type_t* nodes[SPINE_MAX];
     uint32_t n;
@@ -951,7 +918,6 @@ static bool is_array_node(const type_t* t) {
 }
 
 // A `*` or `@` suffix: the two that introduce a reference.
-// D3.6
 static bool is_ref_node(const type_t* t) {
     return t->kind == TYPE_PTR || t->kind == TYPE_VOIDPTR || t->kind == TYPE_SPAN;
 }
@@ -960,7 +926,7 @@ static void spine_collect(spine_t* sp, const type_t* t) {
     bool seen_array = false;
     bool seen_ref_after_array = false;
     sp->n = 0;
-    // D3.6: an array behind a reference behind an array has no spelling
+    // an array behind a reference behind an array has no spelling
     while (sp->n < SPINE_MAX) {
         if (is_array_node(t)) {
             if (seen_ref_after_array) {
@@ -1017,7 +983,7 @@ static void spell_base(const type_t* t, sb_t* out) {
         sb_append(out, "<error>");
         return;
     case TYPE_FN:
-        // D8.1: the result comes last, as it does in a declaration
+        // the result comes last, as it does in a declaration
         sb_append(out, "fn (");
         for (uint32_t i = 0; i < t->nparams; i++) {
             if (i > 0) {
@@ -1041,11 +1007,9 @@ static void spell_base(const type_t* t, sb_t* out) {
     fatal_internal("spelling a reference as a base");
 }
 
-// The mutability of the storage that holds what the node at `i` introduces: the
-// target of the first reference outside it, since a fixed array between them
-// shares its storage with its elements, or level 0 when no reference is outside
-// it.
-// D5.2, D5.3
+// Returns the mutability of storage for the node at `i`. The first outer
+// reference reaches that storage. Fixed arrays between them share storage with
+// their elements. Without an outer reference, level 0 holds it.
 static bool holder_mut(const spine_t* sp, uint32_t i, bool mut0) {
     for (uint32_t j = i; j > 0; j--) {
         if (is_ref_node(sp->nodes[j - 1])) {
@@ -1057,10 +1021,8 @@ static bool holder_mut(const spine_t* sp, uint32_t i, bool mut0) {
 
 // One suffix with the markers of its position: `own` for a reference that owns
 // its target, `mut` for the storage the suffix's own value occupies. A reference
-// held by a fixed array prints no `mut`, and neither does an array that is not
-// the last of its group: they share one storage, whose marker is written after
-// the last length of the group.
-// D5.3, D17.2
+// held by a fixed array prints no `mut`. A non-final array in its group also
+// prints no `mut`. They share storage, whose marker follows the final length.
 static void spell_suffix(const spine_t* sp, uint32_t i, bool mut0, sb_t* out) {
     const type_t* t = sp->nodes[i];
     if (is_array_node(t)) {
@@ -1082,10 +1044,9 @@ static void spell_suffix(const spine_t* sp, uint32_t i, bool mut0, sb_t* out) {
     }
 }
 
-// The suffixes in source order: the reference group nearest the base first,
-// innermost first, then the array group outermost first, then the trailing
-// reference group, innermost first.
-// D3.6
+// Writes suffixes in source order. It writes the base reference group
+// innermost first. It writes arrays outermost first. It then writes trailing
+// references innermost first.
 static void spell_suffixes(const spine_t* sp, bool mut0, sb_t* out) {
     for (uint32_t i = sp->n; i > sp->end_array; i--) {
         spell_suffix(sp, i - 1, mut0, out);
@@ -1101,10 +1062,9 @@ static void spell_suffixes(const spine_t* sp, bool mut0, sb_t* out) {
 static void spell(const type_t* t, bool mut0, sb_t* out) {
     spine_t sp;
     spine_collect(&sp, t);
-    // The base position: the storage of the values of the base type, which is the
-    // target of the innermost reference, or the binding when the type has no suffix.
+    // The base position stores base-type values. The innermost reference reaches
+    // it. The binding stores it when the type has no suffix.
     // An array between them takes the marker.
-    // D5.3
     const bool base_mut =
         sp.n == 0 ? mut0 : (is_ref_node(sp.nodes[sp.n - 1]) && sp.nodes[sp.n - 1]->mut);
     if (sp.paren) {
@@ -1113,7 +1073,7 @@ static void spell(const type_t* t, bool mut0, sb_t* out) {
         sb_push(out, ')');
     } else {
         spell_base(sp.base, out);
-        // D3.7, D17.2: `string` takes `own` after the base type
+        // `string` takes `own` after the base type
         if (sp.base->kind == TYPE_STRING && sp.base->own) {
             sb_append(out, " own");
         }
@@ -1133,7 +1093,6 @@ void type_to_str_decl(const type_t* t, bool mut0, sb_t* out) {
 }
 
 // ---- builder ---------------------------------------------------------------------
-// D3.6
 
 static type_build_t build_error(const char* msg) {
     type_build_t r;
@@ -1144,13 +1103,12 @@ static type_build_t build_error(const char* msg) {
 }
 
 // A `*` or `@` suffix, the two that introduce a reference.
-// D3.6
 static bool suffix_is_ref(const type_suffix_t* s) {
     return s->kind == SUFFIX_PTR || s->kind == SUFFIX_SPAN;
 }
 
-// The three groups of a suffix list: [0, e) references applying to the base,
-// [e, a) fixed arrays, [a, n) references applying to the whole array.
+// Splits a suffix list into three groups. [0, e) holds base references. [e, a)
+// holds fixed arrays. [a, n) holds whole-array references.
 typedef struct {
     uint32_t e;
     uint32_t a;
@@ -1174,10 +1132,9 @@ static bool split_groups(const type_suffix_t* s, uint32_t n, groups_t* g) {
     return i == n;
 }
 
-// The index of the k-th suffix applied, innermost first: reference suffixes read
-// inside-out, so each group is applied in source order, and the array group reads
-// outside-in, so it is applied in reverse.
-// D3.6
+// Returns the index of applied suffix k, innermost first. Reference groups apply
+// in source order because they read inside-out. The array group applies in
+// reverse because it reads outside-in.
 static uint32_t apply_order(const groups_t* g, uint32_t k) {
     if (k >= g->e && k < g->a) {
         return g->a - 1 - (k - g->e);
@@ -1185,16 +1142,13 @@ static uint32_t apply_order(const groups_t* g, uint32_t k) {
     return k;
 }
 
-// The markers of every position, before anything is built. A position marks the
-// storage of what it follows, and a fixed array shares its storage with its
-// elements, so a `mut` on the position an array suffix follows belongs after that
-// array's length instead.
-// D5.3
+// Checks each position marker before building. A position marks storage for the
+// item it follows. A fixed array shares storage with its elements. Thus, `mut`
+// for that storage follows the array length.
 static const char* check_positions(
     const type_t* base, bool base_own, bool base_mut, const type_suffix_t* s, uint32_t n) {
-    // D3.11, D5.3: `void` is a return type or the base of a pointer, and the
-    // only marker it takes is the `mut` of `void mut*`, which marks the storage
-    // that pointer reaches. `void mut`, `void own`, `void@` and `void[4]` name
+    // `void` is a return type or pointer base. It accepts only the `mut` in
+    // `void mut*`, which marks reached storage. `void mut`, `void own`, `void@` and `void[4]` name
     // no storage at all.
     if (base->kind == TYPE_VOID) {
         const bool base_of_ptr = n > 0 && s[0].kind == SUFFIX_PTR;
@@ -1251,11 +1205,10 @@ type_build_t type_build(type_table_t* tt,
     if (bad != NULL) {
         return build_error(bad);
     }
-    // Build innermost first. A position's `mut` marks the storage of what it
-    // follows, which the next reference outward reaches, or the binding when no
-    // reference is outside it; a fixed array shares that storage with its elements
-    // and adds no level.
-    // D5.2, D5.3
+    // Build innermost first. A position's `mut` marks storage for the item it
+    // follows. The next outer reference reaches that storage. Without an outer
+    // reference, the binding holds it. A fixed array shares the storage with its
+    // elements and adds no level.
     const type_t* t = base_own ? type_string(tt, true) : base;
     bool pending_mut = base_mut;
     for (uint32_t k = 0; k < n; k++) {

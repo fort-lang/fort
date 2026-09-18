@@ -1,11 +1,8 @@
-// The statements of the checker (core-language.md 6); see check.h.
-// D7, D8.4
+// The statements of the checker; see check.h.
 //
-// One function per statement form, the scope chain opened and closed as
-// blocks are entered and left, and the structural rule of termination in
-// check_terminates, which reads the annotations the pass left rather than
-// walking the tree a second time.
-// D7.9, D8.4
+// Checks statements and manages block scopes. Each statement form has one
+// function. check_terminates applies structural termination rules. It reads
+// annotations from this pass instead of walking the tree again.
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -22,7 +19,6 @@
 #include "types.h"
 
 // ---- locals ------------------------------------------------------------------------
-// D7.1, D7.9
 
 sym_t* check_declare_local(
     check_t* ck, ast_node_t* node, sym_kind_t kind, const type_t* type, bool mut0) {
@@ -43,7 +39,7 @@ sym_t* check_declare_local(
         msg_str(&ck->msg, " is already declared in this block");
         check_msg_end(ck, node->name_loc);
     } else if (outer != NULL) {
-        // D7.9, D14.2: reported at the inner declaration
+        // reported at the inner declaration
         check_msg_begin(ck);
         msg_quote(&ck->msg, node->name);
         msg_str(&ck->msg,
@@ -62,7 +58,6 @@ sym_t* check_declare_local(
 
 // `Type name = init;`: the initializer is checked before the name is declared,
 // so a local is visible only after its own declaration.
-// D7.1, D7.9
 static void check_local(check_t* ck, ast_node_t* n) {
     const check_type_t t = check_type(ck, n->a, TYPE_POS_BINDING);
     const type_t* type = t.type;
@@ -81,11 +76,9 @@ static void check_local(check_t* ck, ast_node_t* n) {
 }
 
 // ---- assignment --------------------------------------------------------------------
-// D7.2, D5.7
 
 // The operator of a compound assignment: `lv op= e` has the operand rules and
 // the overflow behavior of `lv op e`.
-// D7.2
 static int32_t compound_operator(int32_t op) {
     switch (op) {
     case TOK_PLUS_ASSIGN:
@@ -121,7 +114,6 @@ static int32_t compound_operator(int32_t op) {
 }
 
 // Assignment, compound assignment, `++` and `--` all require a mutable lvalue.
-// D5.7
 static bool check_target(check_t* ck, ast_node_t* n, expr_t* lv, const char* verb) {
     if (check_poisoned(lv->type)) {
         return false;
@@ -140,7 +132,7 @@ static bool check_target(check_t* ck, ast_node_t* n, expr_t* lv, const char* ver
         msg_str(&ck->msg, verb);
         msg_str(&ck->msg, " immutable ");
         if (lv->sym != NULL) {
-            // D5.5, D5.7: the diagnostic says which value is immutable
+            // the diagnostic says which value is immutable
             if (lv->sym->kind == SYM_FIELD) {
                 msg_str(&ck->msg, "field ");
             }
@@ -165,7 +157,7 @@ static void check_assign(check_t* ck, ast_node_t* n) {
     }
     expr_t rhs;
     if (!ok) {
-        // D14.2: the target already failed, so the operator says nothing
+        // the target already failed, so the operator says nothing
         check_expr_default(ck, n->b, &rhs);
         return;
     }
@@ -180,7 +172,7 @@ static void check_incdec(check_t* ck, ast_node_t* n) {
     if (!check_target(ck, n->a, &lv, "modify")) {
         return;
     }
-    // D7.2: integer types only, with the checks of `+` and `-`
+    // integer types only, with the checks of `+` and `-`
     if (lv.type->kind != TYPE_PRIM || !prim_is_integer(lv.type->prim)) {
         if (check_pointer_arithmetic(ck, n->loc, n->op, lv.type)) {
             return;
@@ -196,33 +188,29 @@ static void check_incdec(check_t* ck, ast_node_t* n) {
 
 // An expression statement is a call whose result is discarded, unless the
 // result owns memory nothing could then free.
-// D7.3, D17.8
 static void check_call_stmt(check_t* ck, ast_node_t* n) {
     expr_t e;
     check_expr(ck, n->a, &e);
     if (check_poisoned(e.type)) {
         return;
     }
-    // D17.7, D17.8
     (void)check_owning_temporary(
         ck, n->loc, &e, "bind it to an 'own' place, pass it on or 'del' it");
 }
 
 // ---- control flow ------------------------------------------------------------------
-// D7.4, D7.5
 
 static void check_if(check_t* ck, ast_node_t* n) {
     check_condition(ck, n->a, "a condition");
     check_block(ck, n->b);
     if (n->c != NULL) {
-        // D7.4
         check_stmt(ck, n->c);
     }
 }
 
 static void check_while(check_t* ck, ast_node_t* n, bool tail) {
     ck->loops++;
-    // D7.5: the separate scopes give this for free
+    // the separate scopes give this for free
     if (tail) {
         check_block(ck, n->a);
         check_condition(ck, n->b, "a condition");
@@ -235,7 +223,6 @@ static void check_while(check_t* ck, ast_node_t* n, bool tail) {
 
 // `for (init; cond; step) { }`: a variable declared in `init` is scoped to the
 // loop, so the header and the body share one scope.
-// D7.5
 static void check_for(check_t* ck, ast_node_t* n) {
     scope_t header;
     scope_init(&header, SCOPE_BLOCK, ck->scope);
@@ -256,17 +243,14 @@ static void check_for(check_t* ck, ast_node_t* n) {
     scope_free(&header);
 }
 
-// `for (T x: coll) { }`: the collection is a fixed array, span or string, the
-// variable a fresh copy of each element, and the loop lends an owning
-// collection.
-// D7.5, D17.10
+// Checks `for (T x: coll) { }`. The collection is an array, span, or string.
+// The variable gets a fresh element copy. The loop borrows an owning collection.
 static void check_range_for(check_t* ck, ast_node_t* n) {
     scope_t header;
     scope_init(&header, SCOPE_BLOCK, ck->scope);
     ck->scope = &header;
     expr_t coll;
     check_operand(ck, n->b, &coll);
-    // D17.8, D17.10
     if (check_owning_temporary(ck, n->b->loc, &coll, "the loop only lends its collection")) {
         coll.type = type_error(&ck->types);
     }
@@ -286,7 +270,7 @@ static void check_range_for(check_t* ck, ast_node_t* n) {
     }
     const type_t* want = elem;
     if (elem != NULL && type_is_reference(elem) && elem->own) {
-        // D17.10: the element type loses its outermost `own`
+        // the element type loses its outermost `own`
         want = check_lend(ck, elem);
     }
     if (!check_poisoned(decl.type) && type_is_reference(decl.type) && decl.type->own) {
@@ -299,7 +283,7 @@ static void check_range_for(check_t* ck, ast_node_t* n) {
         check_msg_type(ck, decl.type);
         check_msg_end(ck, n->a->loc);
     } else if (elem != NULL && check_owning(elem) && !type_is_reference(elem)) {
-        // D17.10: a copy would need a `move`, so iterate by index
+        // a copy would need a `move`, so iterate by index
         check_error(ck, n->b->loc, "the elements are owning: iterate by index");
     }
     (void)check_declare_local(ck, n, SYM_LOCAL, decl.type, decl.mut0);
@@ -311,7 +295,6 @@ static void check_range_for(check_t* ck, ast_node_t* n) {
 }
 
 // ---- switch ------------------------------------------------------------------------
-// D7.6, D7.7
 
 // Whether any label of the switch has the value `v`, which is how both the
 // duplicate rule and the exhaustiveness rule read the clauses.
@@ -338,7 +321,6 @@ static const ast_node_t* label_with_value(check_t* ck,
 }
 
 // Every member of the enum is listed, or the switch has a `default`.
-// D7.7
 static bool check_exhaustive(check_t* ck, ast_node_t* n, const type_t* t) {
     const sym_t* s = (const sym_t*)t->decl;
     if (s == NULL || s->node == NULL) {
@@ -364,7 +346,7 @@ static bool check_exhaustive(check_t* ck, ast_node_t* n, const type_t* t) {
         complete = false;
     }
     if (!complete) {
-        // D14.2: reported at the closing brace of the switch
+        // reported at the closing brace of the switch
         check_msg_end(ck, check_close_brace(n->loc));
     }
     return complete;
@@ -372,12 +354,10 @@ static bool check_exhaustive(check_t* ck, ast_node_t* n, const type_t* t) {
 
 static void check_switch(check_t* ck, ast_node_t* n) {
     expr_t op;
-    // D4.5
     check_expr_default(ck, n->a, &op);
     const type_t* t = op.type;
     if (!check_poisoned(t) && t->kind != TYPE_ENUM &&
         (t->kind != TYPE_PRIM || t->prim == PRIM_BOOL || prim_is_float(t->prim))) {
-        // D7.6
         check_msg_begin(ck);
         msg_str(&ck->msg, "cannot switch on ");
         check_msg_type(ck, t);
@@ -388,13 +368,11 @@ static void check_switch(check_t* ck, ast_node_t* n) {
     ck->switches++;
     for (uint64_t i = 0; i < ast_len(n); i++) {
         ast_node_t* clause = ast_child(n, i);
-        // D14.2
         if (clause->kind != AST_CASE) {
             continue;
         }
         if ((clause->flags & AST_FLAG_DEFAULT) != 0) {
             if (first_default != NULL) {
-                // D7.6
                 check_error(ck, clause->loc, "a switch has at most one 'default'");
             }
             first_default = clause;
@@ -402,7 +380,6 @@ static void check_switch(check_t* ck, ast_node_t* n) {
         for (uint64_t k = 0; k < ast_len(clause); k++) {
             ast_node_t* label = ast_child(clause, k);
             expr_t e;
-            // D7.6
             check_expr_as(ck, label, t, "a case label", &e);
             if (check_poisoned(e.type)) {
                 continue;
@@ -412,14 +389,12 @@ static void check_switch(check_t* ck, ast_node_t* n) {
                 continue;
             }
             if (label_with_value(ck, n, e.value, label) != NULL) {
-                // D7.6
                 check_msg_begin(ck);
                 msg_str(&ck->msg, "duplicate case value ");
                 cv_to_str(e.value, &ck->msg);
                 check_msg_end(ck, label->loc);
             }
         }
-        // D7.6
         check_block(ck, clause->a);
     }
     ck->switches--;
@@ -433,12 +408,10 @@ static void check_switch(check_t* ck, ast_node_t* n) {
 }
 
 // ---- defer, return, break and continue ---------------------------------------------
-// D7.8, D7.11, D8.5
 
 // `return` may not appear inside deferred code: it would leave the function in
 // the middle of an unwind. `break` and `continue` may, and bind to a loop or a
 // switch written inside the deferred block.
-// D7.8
 static bool check_return_outside_defer(check_t* ck, ast_node_t* n) {
     if (ck->defers == 0) {
         return true;
@@ -452,7 +425,7 @@ static void check_return(check_t* ck, ast_node_t* n) {
         return;
     }
     if (check_poisoned(ck->ret)) {
-        // D14.2: the signature failed, so the error type silences this
+        // the signature failed, so the error type silences this
         if (n->a != NULL) {
             expr_t e;
             check_expr_default(ck, n->a, &e);
@@ -460,13 +433,11 @@ static void check_return(check_t* ck, ast_node_t* n) {
         return;
     }
     if (ck->ret_noreturn) {
-        // D8.5
         check_error(ck, n->loc, "'return' in a noreturn function");
         return;
     }
     if (n->a == NULL) {
         if (!ck->ret_void) {
-            // D7.11
             check_msg_begin(ck);
             msg_str(&ck->msg, "'return' without a value in a function returning ");
             check_msg_type(ck, ck->ret);
@@ -475,36 +446,31 @@ static void check_return(check_t* ck, ast_node_t* n) {
         return;
     }
     if (ck->ret_void) {
-        // D7.11
         check_error(ck, n->loc, "'return' with a value in a void function");
         expr_t e;
         check_expr_default(ck, n->a, &e);
         return;
     }
     expr_t e;
-    // D17.5, D17.7: the one `own` place reached without `move`
+    // the one `own` place reached without `move`
     check_return_value(ck, n, ck->ret, &e);
 }
 
-// The enclosing loops and switches are the ones `check_defer` left reachable, so
-// a `break` or a `continue` inside deferred code counts only what stands inside
-// the deferred block.
-// D7.5, D7.6, D7.8
+// Counts loops and switches that `check_defer` left reachable. A `break` or
+// `continue` in deferred code sees only constructs inside the deferred block.
 static void check_break(check_t* ck, ast_node_t* n, bool cont) {
-    // D7.6
     if (cont ? ck->loops == 0 : ck->loops == 0 && ck->switches == 0) {
         check_error(
             ck, n->loc, cont ? "'continue' outside a loop" : "'break' outside a loop or switch");
     }
 }
 
-// `break` and `continue` in deferred code bind to the innermost loop or switch
-// inside the deferred block, so the constructs around the `defer` are out of
-// reach while it is checked. With none inside, they are errors, and the error is
-// the one a `break` outside every loop and switch gets anywhere else.
-// D7.8
+// A `break` or `continue` in deferred code binds inside the deferred block.
+// Constructs around the `defer` are not reachable while it is checked. Without
+// an inner target, these statements are errors. The message matches a `break`
+// outside all loops and switches.
 static void check_defer(check_t* ck, ast_node_t* n) {
-    // D7.8: the parser has already enforced this
+    // the parser has already enforced this
     const uint64_t loops = ck->loops;
     const uint64_t switches = ck->switches;
     ck->loops = 0;
@@ -517,13 +483,10 @@ static void check_defer(check_t* ck, ast_node_t* n) {
 }
 
 // ---- terminating statements --------------------------------------------------------
-// D8.4
 
-// A `break` that targets the statement: the walk does not enter a nested loop
-// or switch, which a `break` inside would target instead, and it does not enter
-// deferred code, whose `break` targets a loop or a switch inside the deferred
-// block.
-// D7.6, D7.8
+// Whether a `break` targets this statement. The walk skips nested loops and
+// switches because their breaks target them. It also skips deferred code because
+// its breaks target constructs inside the deferred block.
 static bool has_break(const ast_node_t* n) {
     if (n == NULL) {
         return false;
@@ -556,7 +519,6 @@ static bool has_break(const ast_node_t* n) {
 }
 
 // `while (true)`: the literal, which is the only spelling the rule gives.
-// D8.4
 static bool is_true_literal(const ast_node_t* n) {
     return n != NULL && n->kind == AST_BOOL && n->ival != 0;
 }
@@ -569,18 +531,14 @@ bool check_terminates(const ast_node_t* n) {
     case AST_RETURN:
         return true;
     case AST_CALL_STMT:
-        // D8.4
         return n->a != NULL && (n->a->ann & CHECK_ANN_NORETURN) != 0;
     case AST_IF:
-        // D8.4
         return n->c != NULL && check_terminates(n->b) && check_terminates(n->c);
     case AST_WHILE:
         return is_true_literal(n->a) && !has_break(n->b);
     case AST_FOR:
-        // D8.4
         return n->b == NULL && !has_break(n->d);
     case AST_SWITCH: {
-        // D8.4, D7.7
         if ((n->ann & CHECK_ANN_EXHAUSTIVE) == 0 || ast_len(n) == 0) {
             return false;
         }
@@ -595,12 +553,11 @@ bool check_terminates(const ast_node_t* n) {
     case AST_BLOCK: {
         const uint64_t count = ast_len(n);
         for (uint64_t i = 0; i < count; i++) {
-            // D14.2: what the block would have terminated with is unknown
+            // what the block would have terminated with is unknown
             if (ast_child(n, i)->kind == AST_ERROR) {
                 return true;
             }
         }
-        // D8.4
         return count > 0 && check_terminates(ast_child(n, count - 1));
     }
     default:
@@ -614,7 +571,6 @@ bool check_terminates(const ast_node_t* n) {
 void check_stmt(check_t* ck, ast_node_t* n) {
     switch (n->kind) {
     case AST_BLOCK:
-        // D7.3
         check_block(ck, n);
         break;
     case AST_VAR_DECL:
@@ -660,7 +616,6 @@ void check_stmt(check_t* ck, ast_node_t* n) {
         check_break(ck, n, true);
         break;
     case AST_ERROR:
-        // D14.2
         ck->block_errs++;
         break;
     default:
@@ -694,7 +649,7 @@ void check_function_body(check_t* ck, ast_node_t* fn, const sym_t* sym) {
     ck->switches = 0;
     ck->defers = 0;
     ck->block_errs = 0;
-    // D7.9: a local may not reuse a parameter's name
+    // a local may not reuse a parameter's name
     scope_t params;
     scope_init(&params, SCOPE_BLOCK, NULL);
     ck->scope = &params;
@@ -713,12 +668,11 @@ void check_function_body(check_t* ck, ast_node_t* fn, const sym_t* sym) {
     check_block(ck, fn->b);
     if (ck->block_errs == 0 && !check_poisoned(ck->ret) && !check_terminates(fn->b)) {
         if (ck->ret_noreturn) {
-            // D8.5
             check_error(ck,
                         check_close_brace(fn->b->loc),
                         "a noreturn function must end in a terminating statement");
         } else if (!ck->ret_void) {
-            // D8.4, D14.2: reported at the body's closing brace
+            // reported at the body's closing brace
             check_error(ck, check_close_brace(fn->b->loc), "missing return");
         }
     }

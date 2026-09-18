@@ -1,24 +1,5 @@
-// Namespaces and scopes of the bootstrap compiler (module-system.md 5): the
-// module namespace holding a file's declarations and import bindings, the
-// block scopes nested inside it, and the universe of builtins.
-// D7.9, D12.2
-//
-// One namespace per module holds functions, extern functions, structs, enums,
-// constants, globals and import bindings, and any two of them with the same
-// name collide, whatever their kinds. Lookup of an unqualified name goes from
-// the innermost block outward, then the module namespace, then the universe; a
-// local may shadow a module-level or universe name but never an enclosing
-// local or parameter, which is why the block scopes are searched apart from
-// the module namespace (scope_find_in_blocks).
-// D7.9
-//
-// Enum members are not in a namespace: `color.red` is the only spelling, so a
-// scope never holds one.
-// D3.9
-//
-// The file mirrors what the self-hosted compiler will do: no unions, no
-// function pointers, no macros beyond constants, a strmap from the name to the
-// position of the binding in a vector the scope owns.
+// Stores module namespaces, block scopes, and built-in names.
+// Lookup searches blocks, the module, and then the universe.
 #ifndef FORT_SCOPE_H
 #define FORT_SCOPE_H
 
@@ -30,21 +11,19 @@
 #include "diag.h"
 #include "str.h"
 
-/// What a bound name denotes. The module-level kinds are the importable
-/// declarations of module-system.md 3; BIND_MODULE and BIND_SYMBOL are the two
-/// import bindings, which are not importable in turn since there is no re-export.
-/// D9.3
+// Identifies what a bound name denotes.
+// Import bindings do not become exports of the importing module.
 typedef enum {
     BIND_NONE = 0,   // never stored; the kind of a binding that was not found
-    BIND_FN,         // D8.1: `fn`
-    BIND_EXTERN_FN,  // D9.8: `extern fn`
-    BIND_STRUCT,     // D3.8: `struct`
-    BIND_ENUM,       // D3.9: `enum`
-    BIND_VAR,        // D7.10: a module-level constant or `mut` global
-    BIND_MODULE,     // D9.3: `import a.b;`: the name denotes a module
+    BIND_FN,         // `fn`
+    BIND_EXTERN_FN,  // `extern fn`
+    BIND_STRUCT,     // `struct`
+    BIND_ENUM,       // `enum`
+    BIND_VAR,        // a module-level constant or `mut` global
+    BIND_MODULE,     // `import a.b;`: the name denotes a module
     BIND_SYMBOL,     // `import a.b.c;`: the name denotes a declaration of a.b
-    BIND_LOCAL,      // D7.1: a local of a block
-    BIND_PARAM,      // D8.1: a parameter
+    BIND_LOCAL,      // a local of a block
+    BIND_PARAM,      // a parameter
     BIND_KIND_COUNT, // one past the last kind, for tables
 } bind_kind_t;
 
@@ -58,9 +37,8 @@ struct binding {
     const binding_t* to;    // BIND_SYMBOL: the declaration in the other module
 };
 
-/// A namespace or a block: the module namespace has no parent, every block
-/// scope has one.
-/// D7.9
+// A namespace or a block: the module namespace has no parent, every block
+// scope has one.
 typedef enum {
     SCOPE_MODULE,
     SCOPE_BLOCK,
@@ -74,66 +52,57 @@ struct scope {
     ptrvec_t items;  // binding_t*, in declaration order, owned by the scope
 };
 
-/// Zero-initialized storage is not a valid scope: scope_init sets the kind and
-/// the parent, which NULL makes a module namespace.
+// Zero-initialized storage is not a valid scope: scope_init sets the kind and
+// the parent, which NULL makes a module namespace.
 void scope_init(scope_t* s, scope_kind_t kind, scope_t* parent);
 
-/// Releases every binding and the index; the scope is empty and usable
-/// afterwards.
+// Releases every binding and the index; the scope is empty and usable
+// afterwards.
 void scope_free(scope_t* s);
 
-/// Binds `name` in `s` and returns the new binding, or NULL when `s` already
-/// binds the name: any two entries of one namespace collide whatever their kinds,
-/// and the caller reports the collision against scope_find.
-/// D7.9
+// Binds `name` in `s` and returns the new binding. Returns NULL when `s`
+// already binds the name. Entries in one namespace collide regardless of kind.
+// The caller reports the collision against scope_find.
 binding_t* scope_declare(
     scope_t* s, str_t name, bind_kind_t kind, loc_t loc, const ast_node_t* node);
 
-/// The binding of `name` in `s` alone, or NULL.
+// The binding of `name` in `s` alone, or NULL.
 const binding_t* scope_find(const scope_t* s, str_t name);
 
-/// The binding of `name` in `s`, then in every enclosing scope, or NULL. The
-/// universe of step 3 is scope_is_universe.
-/// D7.9
+// The binding of `name` in `s`, then in every enclosing scope, or NULL. The
+// universe of step 3 is scope_is_universe.
 const binding_t* scope_lookup(const scope_t* s, str_t name);
 
-/// The binding of `name` in `s` and its enclosing block scopes, stopping before
-/// the module namespace: the locals and parameters a new local may not reuse the
-/// name of, as opposed to the module-level names it may shadow.
-///
-/// A scope holds every binding declared in it so far, so the other rule, that a
-/// local is visible only after its own declaration (`i32 x = x;` is an error), is
-/// the caller's: declare the local after checking its initializer.
-/// D7.9
+// Finds `name` in `s` and its enclosing block scopes. The search stops before
+// the module namespace. A new local cannot reuse these local and parameter
+// names. It can shadow module names.
+//
+// A scope holds each binding declared in it so far. The caller enforces
+// visibility after declaration. It declares a local after checking its
+// initializer. Thus, `i32 x = x;` is an error.
 const binding_t* scope_find_in_blocks(const scope_t* s, str_t name);
 
-/// The bindings of `s` in declaration order.
+// The bindings of `s` in declaration order.
 uint64_t scope_count(const scope_t* s);
 const binding_t* scope_at(const scope_t* s, uint64_t i);
 
-/// Whether the binding denotes a declaration, as opposed to one of the two import
-/// bindings: what `import a.b.c;` needs of `c` for its symbol reading, since
-/// import bindings are not re-exported.
-/// D9.3
+// Whether the binding denotes a declaration instead of an import binding.
+// `import a.b.c;` requires `c` to name a declaration. Import bindings are not
+// re-exported.
 bool bind_is_declaration(const binding_t* b);
 
 // ---- the universe -----------------------------------------------------------------
-// D12.2
 
-/// The builtins, looked up after every scope: `del`, `move`, `assert`, `panic`,
-/// `print`, `println`, `eprint`, `eprintln`, `fprint` and `fprintln`.
-/// D12.2
+// The builtins, looked up after every scope: `del`, `move`, `assert`, `panic`,
+// `print`, `println`, `eprint`, `eprintln`, `fprint`, and `fprintln`.
 enum { UNIVERSE_COUNT = 10 };
 
-/// Whether `name` is a universe name. A module-level declaration or a local may
-/// shadow one, which is then inaccessible in that scope, so this is a question
-/// and never an error on its own.
-/// D7.9
+// Whether `name` is a universe name. A module declaration or local can shadow
+// one. The universe name is then inaccessible in that scope. This query does
+// not report an error.
 bool scope_is_universe(str_t name);
 
-/// The `i`-th universe name, in the order module-system.md 5 lists them; `i`
-/// must be less than UNIVERSE_COUNT.
-/// D12.2
+// The `i`-th universe name. `i` must be less than UNIVERSE_COUNT.
 str_t scope_universe_at(uint64_t i);
 
 #endif

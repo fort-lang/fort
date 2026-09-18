@@ -1,24 +1,5 @@
-// comptime: select `$if` branches before module closure construction and name
-// collection.
-// D21.2
-//
-// A condition can use literals, `$cfg`, and unconditional immutable
-// declarations in its own module. The declaration table is built before any
-// condition is evaluated, so those constants are order-independent. A
-// condition cannot use an import, a conditional declaration, or a run-time
-// value. Constant dependencies are lazy and carry four states, which reports
-// a cycle at the reference that closes it.
-//
-// Selection writes two flags on each k_compile_if node. The tree keeps both
-// branches for `--ast`. Later passes read only the selected branch. The walk
-// enters both branches of run-time control flow, but only one branch of a
-// compile-time condition. Thus, it does not evaluate a nested condition in an
-// inactive branch.
-//
-// Re-entrancy: one selector value owns its table and message buffer. It writes
-// only the tree passed to select_module and releases all temporary storage
-// before it returns.
-// D20.5
+/// Selects `$if` branches before module loading collects names.
+/// Conditions use literals, `$cfg`, and unconditional immutable declarations.
 import ast;
 import consts;
 import containers;
@@ -124,8 +105,8 @@ fn find(selector mut* s, string name) entry mut* {
     return null;
 }
 
-/// Adds one unconditional immutable declaration. A duplicate is left for the
-/// ordinary namespace pass, which gives the full redeclaration diagnostic.
+// Adds one unconditional immutable declaration. A duplicate is left for the
+// ordinary namespace pass, which gives the full redeclaration diagnostic.
 fn add_constant(selector mut* s, ast.node mut* decl) void {
     if (decl->kind != ast.ast_kind.k_var_decl || decl->a == null
         || (decl->a->flags & ast.FLAG_MUT) != 0 || find(s, decl->name) != null) {
@@ -194,8 +175,7 @@ fn convert_value(value in, prim.prim_kind target, value mut* out) bool {
     return true;
 }
 
-/// Gives an untyped constant its type when no context supplies one.
-/// D4.1, D4.5
+// Gives an untyped constant its type when no context supplies one.
 fn default_value(selector mut* s, ast.node* n, value in, value mut* out) bool {
     if (in.typed) {
         *out = in;
@@ -699,9 +679,8 @@ fn local_types_can_match(local_type a, local_type b) bool {
     return local_match_type(a, b, &matched);
 }
 
-/// Checks type rules that syntax proves without resolving a name or folding a
-/// value. It does not evaluate the skipped expression.
-/// D6.2, D6.6, D21.2
+// Checks type rules that syntax proves without resolving a name or folding a
+// value. It does not evaluate the skipped expression.
 fn validate_unselected(selector mut* s, ast.node mut* n) bool {
     if (n == null) {
         return true;
@@ -884,9 +863,8 @@ fn integer_operand(value v) bool {
         && (!v.typed || prim.prim_is_integer(v.primitive));
 }
 
-/// A shift takes no common operand type. The count does not change the left
-/// operand, and its range comes from the left operand's width.
-/// D6.2
+// A shift takes no common operand type. The count does not change the left
+// operand, and its range comes from the left operand's width.
 fn eval_shift(selector mut* s, ast.node mut* n, lexer.tok_kind op, value a, value b,
                   value mut* out) bool {
     if (!integer_operand(a)) {
@@ -1119,9 +1097,8 @@ fn fixed_array_suffix(ast.node* t) ast.node* {
     return first;
 }
 
-/// Reads the outer length from a fixed-array name or array literal. The
-/// operand is not evaluated.
-/// D3.4, D4.6, D21.2
+// Reads the outer length from a fixed-array name or array literal. The
+// operand is not evaluated.
 fn eval_fixed_array_len(selector mut* s, ast.node mut* n, value mut* out) bool {
     if (n->name != "len" || n->a == null) {
         return expression_error(s, n, "only fixed-array '.len' is available in a $if condition");
@@ -1188,8 +1165,8 @@ fn eval_fixed_array_len(selector mut* s, ast.node mut* n, value mut* out) bool {
     return true;
 }
 
-/// Whether `name` is an unconditional type of this module. Conditional and
-/// qualified names need ordinary name collection and remain unavailable.
+// Whether `name` is an unconditional type of this module. Conditional and
+// qualified names need ordinary name collection and remain unavailable.
 fn has_same_module_type(selector* s, ast.node* name) bool {
     if (s->imports || name->a != null) {
         return false;
@@ -1207,8 +1184,8 @@ fn has_same_module_type(selector* s, ast.node* name) bool {
     return false;
 }
 
-/// Whether a selection type contains a name that this module does not declare.
-/// Array lengths are expressions, so this walk does not inspect them.
+// Whether a selection type contains a name that this module does not declare.
+// Array lengths are expressions, so this walk does not inspect them.
 fn type_has_unresolved_name(selector* s, ast.node* t) bool {
     if (t == null) {
         return false;
@@ -1235,10 +1212,9 @@ fn type_has_unresolved_name(selector* s, ast.node* t) bool {
     return false;
 }
 
-/// Computes a type size without ordinary name collection. Selection resolves
-/// an unconditional same-module name. Only an indirection can use that name,
-/// because selection does not compute a named value layout.
-/// D3.15, D4.6, D21.2
+// Computes a type size without ordinary name collection. Selection resolves
+// an unconditional same-module name. Only an indirection can use that name
+// because selection does not compute a named value layout.
 fn eval_sizeof(selector mut* s, ast.node mut* n, value mut* out) bool {
     ast.node* t = n->a;
     if (t == null || t->kind != ast.ast_kind.k_type || t->a == null) {
@@ -1441,7 +1417,6 @@ fn select_tree(selector mut* s, ast.node mut* n) void {
 /// Selects each import `$if` before declaration names exist, then selects the
 /// declaration and statement forms. The caller stops before it constructs a
 /// module namespace when this reports an error.
-/// D21.2, D21.3
 fn select_module(session.session mut* sess, ast.node mut* module) bool {
     selector mut s = selector{sess, module, {}, 0, strbuf.create(), true, true};
     defer del(s.entries);

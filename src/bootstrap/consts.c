@@ -1,7 +1,7 @@
-// Exact constant folding (consts.h). Every integer computation runs on the
-// unsigned magnitudes with the overflow builtins; nothing here relies on
-// signed overflow or on the conversion of an out-of-range value to a signed
-// type, so the file is clean under -fsanitize=undefined.
+// Exact constant folding (consts.h). Each integer computation uses unsigned
+// magnitudes and overflow builtins. No code depends on signed overflow or
+// out-of-range conversion to a signed type. Thus, the file is clean under
+// -fsanitize=undefined.
 #include "consts.h"
 
 #include <stdbool.h>
@@ -149,10 +149,9 @@ uint64_t cv_bits(cval_t v) {
     return v.neg ? UINT64_C(0) - v.mag : v.mag;
 }
 
-// The value whose low 64 bits are `bits` and whose bits above are all
-// `high` (the infinite two's-complement extension; `high` is `neg` for a
-// CV_INT): non-negative when `high` is clear, else bits - 2^64, which lies in
-// the constant range exactly when bits >= 2^63.
+// Builds the value with low bits `bits` and all higher bits `high`. `high`
+// equals `neg` for a CV_INT. A clear `high` gives a nonnegative value. Otherwise,
+// the value is bits - 2^64. It fits the constant range when bits >= 2^63.
 static bool int_from_bits(bool high, uint64_t bits, cval_t* out) {
     if (!high) {
         *out = int_make(false, bits);
@@ -202,7 +201,6 @@ bool cv_eq(cval_t a, cval_t b) {
 }
 
 // ---- untyped arithmetic -----------------------------------------------------
-// D4.4
 
 // The sum of two signed magnitudes, exact; the raw pair is validated by the
 // caller through int_check.
@@ -264,7 +262,7 @@ bool cv_div(cval_t a, cval_t b, cval_t* out) {
         *out = cv_none();
         return false;
     }
-    // D6.13: truncation toward zero
+    // truncation toward zero
     return int_check(a.neg != b.neg, a.mag / b.mag, out);
 }
 
@@ -275,7 +273,7 @@ bool cv_rem(cval_t a, cval_t b, cval_t* out) {
         *out = cv_none();
         return false;
     }
-    // D6.13: the remainder takes the dividend's sign, so always in range
+    // the remainder takes the dividend's sign, so always in range
     return int_check(a.neg, a.mag % b.mag, out);
 }
 
@@ -491,20 +489,19 @@ bool cv_cast(cval_t v, prim_kind_t t, cval_t* out) {
         *out = cv_from_char(cv_bits(cv_as_int(v)) & CV_CHAR_MAX);
         return true;
     }
-    // D3.14: integer to bool, and bool to char, are not casts
-    // T-041: floats are not in the bootstrap; void is never a value
+    // integer to bool, and bool to char, are not casts
+    // floats are not in the bootstrap; void is never a value
     *out = cv_none();
     return false;
 }
 
 // ---- typed folding ------------------------------------------------------------
 
-// Every cv_typed_* and cv_wrap_* function documents that its value operands
-// already have the integer type `t`, so a value outside that type is a bug in the
-// checker, not a program error: it fails loudly rather than folding
-// `cv_typed_and(-1, 5, u8)` to 5. A shift count is not a value operand, any
-// integer type being admitted there, so the shifts guard their left operand only.
-// D6.2
+// Each cv_typed_* and cv_wrap_* function requires value operands of integer type
+// `t`. Another value indicates a checker defect, not a program error. This
+// function fails instead of folding `cv_typed_and(-1, 5, u8)` to 5. A shift
+// count is not a value operand. Any integer type is accepted there, so shifts
+// guard only their left operand.
 static void require_typed(cval_t v, prim_kind_t t) {
     require_int(v);
     if (!int_fits(v, t)) {
@@ -546,13 +543,13 @@ bool cv_typed_mul(cval_t a, cval_t b, prim_kind_t t, cval_t* out) {
 bool cv_typed_div(cval_t a, cval_t b, prim_kind_t t, cval_t* out) {
     require_typed(a, t);
     require_typed(b, t);
-    // D6.13: MIN / -1 is 2^(w-1), which the range check rejects
+    // MIN / -1 is 2^(w-1), which the range check rejects
     cval_t r = cv_none();
     return typed_check(cv_div(a, b, &r), r, t, out);
 }
 
 bool cv_typed_rem(cval_t a, cval_t b, prim_kind_t t, cval_t* out) {
-    // D6.13: MIN % -1 is 0 exactly but a run-time error
+    // MIN % -1 is 0 exactly but a run-time error
     cval_t q = cv_none();
     cval_t r = cv_none();
     return typed_check(cv_typed_div(a, b, t, &q) && cv_rem(a, b, &r), r, t, out);
@@ -561,7 +558,7 @@ bool cv_typed_rem(cval_t a, cval_t b, prim_kind_t t, cval_t* out) {
 bool cv_typed_neg(cval_t a, prim_kind_t t, cval_t* out) {
     require_typed(a, t);
     if (!prim_is_signed(t)) {
-        // D6.2: the checker never asks to negate an unsigned constant
+        // the checker never asks to negate an unsigned constant
         fatal_internal("unary minus on an unsigned type");
     }
     cval_t r = cv_none();
@@ -597,7 +594,6 @@ bool cv_typed_xor(cval_t a, cval_t b, prim_kind_t t, cval_t* out) {
 }
 
 // A shift count for the width of `t`: 0..width-1, else false.
-// D6.2
 static bool typed_shift_count(cval_t count, prim_kind_t t, unsigned* n) {
     require_int(count);
     if (count.neg || count.mag >= int_width(t)) {
@@ -614,7 +610,7 @@ bool cv_typed_shl(cval_t a, cval_t count, prim_kind_t t, cval_t* out) {
         *out = cv_none();
         return false;
     }
-    // D6.2: the bits shifted out are discarded, never checked
+    // the bits shifted out are discarded, never checked
     *out = int_from_truncated(cv_bits(a) << n, t);
     return true;
 }
@@ -652,10 +648,8 @@ cval_t cv_wrap_mul(cval_t a, cval_t b, prim_kind_t t) {
 
 // ---- diagnostics --------------------------------------------------------------
 
-// One byte inside a literal delimited by `quote`, with the escapes of the source
-// form: `\n \t \r \0 \\`, the delimiter itself, and `\xHH` for every other
-// byte outside printable ASCII.
-// D2.8
+// Escapes one byte in a literal delimited by `quote`. It uses source escapes for
+// `\n \t \r \0 \\` and the delimiter. Other nonprintable bytes use `\xHH`.
 static void escape_char(uint64_t code, char quote, sb_t* out) {
     if (code == (uint64_t)(unsigned char)quote) {
         sb_push(out, '\\');
@@ -698,7 +692,6 @@ static void char_to_str(uint64_t code, sb_t* out) {
 
 // The bytes of a string literal between double quotes, escaped as they would be
 // written in source, so a diagnostic stays on one line.
-// D2.8, D2.9
 static void str_to_str(str_t s, sb_t* out) {
     sb_push(out, '"');
     for (uint64_t k = 0; k < s.len; k++) {

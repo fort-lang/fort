@@ -1,33 +1,5 @@
-// check_stmt: the statements of the checker (core-language.md 6), the
-// transliteration of src/bootstrap/check_stmt.c: one function per statement
-// form, the scope chain opened and closed as blocks are entered and left,
-// and the structural rule of termination in check_terminates, which reads
-// the annotations the pass left rather than walking the tree a second time.
-// D7, D7.9, D8.4
-//
-// Why this is a module of its own. src/bootstrap/check.c and
-// src/bootstrap/check_stmt.c call each other -- the statements use the
-// expressions, and check_module's last loop checks the function bodies -- and
-// two fort modules cannot, since circular imports are a compile error. The
-// edge that closes the cycle is cut at check_function_body, so everything this
-// module holds is what the C keeps in check_stmt.c plus the three functions of
-// check.c that reach into it: check_module_bodies, which is check_module's
-// last loop, and check_module and check_program, which call it. check.ft
-// carries check_module_decls and check_module_finish, the two halves of
-// check_module either side of that loop; a caller checks a module or a closure
-// through this module, which is the only place either is complete.
-// D9.5
-//
-// Re-entrancy: every function here takes the checker it works on, nothing is
-// module-level mutable state, and a block scope dies with the block it was
-// opened for. Nothing ends the process: where the C calls fatal_internal on a
-// tree its own parser cannot produce, this panics at the precondition that was
-// broken.
-// D20.5, D13.3
-//
-// Dispatch: none. check_stmt is one switch over the node kind, as the C wrote
-// it, and no table of function pointers.
-// D3.10
+/// Checks statements and completes module and program checks.
+/// It records scopes, termination, and expression annotations.
 import ast;
 import check;
 import consts;
@@ -39,13 +11,11 @@ import scope;
 import types;
 
 // ---- locals ------------------------------------------------------------------------
-// D7.1, D7.9
 
-/// Declares `n` as a local or a parameter of the innermost scope and gives it a
-/// symbol. A name already declared in the same block is an error, and so is one
-/// that reuses an enclosing local's or a parameter's name; a module-level or
-/// universe name may be shadowed.
-/// D7.9
+// Declares `n` as a local or a parameter of the innermost scope and gives it a
+// symbol. A name already declared in the same block is an error. Reusing an
+// enclosing local or parameter name is also an error. Module and universe names
+// can be shadowed.
 fn check_declare_local(check.checker mut* ck, ast.node mut* n,
                                     ast.sym_kind kind, types.node* ty, bool mut0) ast.sym mut* {
     ast.sym mut* s = check.check_sym_new(ck, kind, n->name, n, ck->fn_sym);
@@ -65,7 +35,7 @@ fn check_declare_local(check.checker mut* ck, ast.node mut* n,
         check.msg_str(ck, " is already declared in this block");
         check.check_msg_end(ck, n->name_loc);
     } else if (outer != null) {
-        // D7.9, D14.2: reported at the inner declaration
+        // reported at the inner declaration
         check.check_msg_begin(ck);
         check.msg_quote(ck, n->name);
         if (outer->kind == scope.bind_kind.b_param) {
@@ -85,9 +55,8 @@ fn check_declare_local(check.checker mut* ck, ast.node mut* n,
     return s;
 }
 
-/// `Type name = init;`: the initializer is checked before the name is declared,
-/// so a local is visible only after its own declaration.
-/// D7.1, D7.9
+// `Type name = init;`: the initializer is checked before the name is declared,
+// so a local is visible only after its own declaration.
 fn check_local(check.checker mut* ck, ast.node mut* n) void {
     check.written_type t = check.check_type(ck, n->a, check.type_pos.pos_binding);
     types.node* mut ty = t.ty;
@@ -107,11 +76,9 @@ fn check_local(check.checker mut* ck, ast.node mut* n) void {
 }
 
 // ---- assignment --------------------------------------------------------------------
-// D7.2, D5.7
 
-/// The operator of a compound assignment: `lv op= e` has the operand rules and
-/// the overflow behavior of `lv op e`.
-/// D7.2
+// The operator of a compound assignment: `lv op= e` has the operand rules and
+// the overflow behavior of `lv op e`.
 fn compound_operator(i32 op) i32 {
     switch (check.op_of(op)) {
     case lexer.tok_kind.plus_assign:
@@ -145,8 +112,7 @@ fn compound_operator(i32 op) i32 {
     }
 }
 
-/// Assignment, compound assignment, `++` and `--` all require a mutable lvalue.
-/// D5.7
+// Assignment, compound assignment, `++` and `--` all require a mutable lvalue.
 fn check_target(check.checker mut* ck, ast.node* n, check.expr* lv, string verb) bool {
     if (check.check_poisoned(lv->ty)) {
         return false;
@@ -165,7 +131,7 @@ fn check_target(check.checker mut* ck, ast.node* n, check.expr* lv, string verb)
         check.msg_str(ck, verb);
         check.msg_str(ck, " immutable ");
         if (lv->sym != null) {
-            // D5.5, D5.7: the diagnostic says which value is immutable
+            // the diagnostic says which value is immutable
             if (lv->sym->kind == ast.sym_kind.s_field) {
                 check.msg_str(ck, "field ");
             }
@@ -194,7 +160,7 @@ fn check_assign(check.checker mut* ck, ast.node mut* n) void {
     }
     check.expr mut rhs = check.expr{};
     if (!ok) {
-        // D14.2: the target already failed, so the operator says nothing
+        // the target already failed, so the operator says nothing
         check.check_expr_default(ck, n->b, &rhs);
         return;
     }
@@ -209,7 +175,7 @@ fn check_incdec(check.checker mut* ck, ast.node mut* n) void {
     if (!check_target(ck, n->a, &lv, "modify")) {
         return;
     }
-    // D7.2: integer types only, with the checks of `+` and `-`
+    // integer types only, with the checks of `+` and `-`
     if (lv.ty->kind != types.type_kind.k_prim || !prim.prim_is_integer(lv.ty->prim)) {
         if (check.check_pointer_arithmetic(ck, n->loc, n->op, lv.ty)) {
             return;
@@ -223,35 +189,30 @@ fn check_incdec(check.checker mut* ck, ast.node mut* n) void {
     }
 }
 
-/// An expression statement is a call whose result is discarded, unless the
-/// result owns memory nothing could then free.
-/// D7.3, D17.8
+// An expression statement is a call whose result is discarded, unless the
+// result owns memory nothing could then free.
 fn check_call_stmt(check.checker mut* ck, ast.node mut* n) void {
     check.expr mut e = check.expr{};
     check.check_expr(ck, n->a, &e);
     if (check.check_poisoned(e.ty)) {
         return;
     }
-    // D17.7, D17.8
     check.check_owning_temporary(ck, n->loc, &e,
                                  "bind it to an 'own' place, pass it on or 'del' it");
 }
 
 // ---- control flow ------------------------------------------------------------------
-// D7.4, D7.5
 
 fn check_if(check.checker mut* ck, ast.node mut* n) void {
     check.check_condition(ck, n->a, "a condition");
     check_block(ck, n->b);
     if (n->c != null) {
-        // D7.4
         check_stmt(ck, n->c);
     }
 }
 
-/// Checks only the branch the early selector chose. Each branch is a block and
-/// keeps its ordinary local scope.
-/// D21.2
+// Checks only the branch the early selector chose. Each branch is a block and
+// keeps its ordinary local scope.
 fn check_compile_if(check.checker mut* ck, ast.node mut* n) void {
     ast.node mut* mut current = n;
     while (current != null && current->kind == ast.ast_kind.k_compile_if) {
@@ -272,7 +233,7 @@ fn check_compile_if(check.checker mut* ck, ast.node mut* n) void {
 
 fn check_while(check.checker mut* ck, ast.node mut* n, bool tail) void {
     ck->loops += 1;
-    // D7.5: the separate scopes give this for free
+    // the separate scopes give this for free
     if (tail) {
         check_block(ck, n->a);
         check.check_condition(ck, n->b, "a condition");
@@ -283,9 +244,8 @@ fn check_while(check.checker mut* ck, ast.node mut* n, bool tail) void {
     ck->loops -= 1;
 }
 
-/// `for (init; cond; step) { }`: a variable declared in `init` is scoped to the
-/// loop, so the header and the body share one scope.
-/// D7.5
+// `for (init; cond; step) { }`: a variable declared in `init` is scoped to the
+// loop, so the header and the body share one scope.
 fn check_for(check.checker mut* ck, ast.node mut* n) void {
     scope.scope mut header = scope.scope{};
     scope.init(&header, scope.scope_kind.s_block, ck->scope);
@@ -306,17 +266,14 @@ fn check_for(check.checker mut* ck, ast.node mut* n) void {
     scope.free(&header);
 }
 
-/// `for (T x: coll) { }`: the collection is a fixed array, span or string, the
-/// variable a fresh copy of each element, and the loop lends an owning
-/// collection.
-/// D7.5, D17.10
+// Checks `for (T x: coll) { }`. The collection is an array, span, or string.
+// The variable gets a fresh element copy. The loop borrows an owning collection.
 fn check_range_for(check.checker mut* ck, ast.node mut* n) void {
     scope.scope mut header = scope.scope{};
     scope.init(&header, scope.scope_kind.s_block, ck->scope);
     ck->scope = &header;
     check.expr mut coll = check.expr{};
     check.check_operand(ck, n->b, &coll);
-    // D17.8, D17.10
     if (check.check_owning_temporary(ck, n->b->loc, &coll, "the loop only lends its collection")) {
         coll.ty = types.type_error(&ck->types);
     }
@@ -336,7 +293,7 @@ fn check_range_for(check.checker mut* ck, ast.node mut* n) void {
     }
     types.node* mut want = elem;
     if (elem != null && types.type_is_reference(elem) && elem->is_own) {
-        // D17.10: the element type loses its outermost `own`
+        // the element type loses its outermost `own`
         want = check.check_lend(ck, elem);
     }
     if (!check.check_poisoned(decl.ty) && types.type_is_reference(decl.ty) && decl.ty->is_own) {
@@ -350,7 +307,7 @@ fn check_range_for(check.checker mut* ck, ast.node mut* n) void {
         check.check_msg_type(ck, decl.ty);
         check.check_msg_end(ck, n->a->loc);
     } else if (elem != null && check.check_owning(elem) && !types.type_is_reference(elem)) {
-        // D17.10: a copy would need a `move`, so iterate by index
+        // a copy would need a `move`, so iterate by index
         check.check_error(ck, n->b->loc, "the elements are owning: iterate by index");
     }
     check_declare_local(ck, n, ast.sym_kind.s_local, decl.ty, decl.mut0);
@@ -362,10 +319,9 @@ fn check_range_for(check.checker mut* ck, ast.node mut* n) void {
 }
 
 // ---- switch ------------------------------------------------------------------------
-// D7.6, D7.7
 
-/// Whether any label of the switch has the value `v`, which is how both the
-/// duplicate rule and the exhaustiveness rule read the clauses.
+// Whether any label of the switch has the value `v`, which is how both the
+// duplicate rule and the exhaustiveness rule read the clauses.
 fn label_with_value(check.checker* ck, ast.node* sw, consts.cval v, ast.node* before) ast.node* {
     u64 mut i = 0;
     while (i < ast.ast_len(sw)) {
@@ -389,8 +345,7 @@ fn label_with_value(check.checker* ck, ast.node* sw, consts.cval v, ast.node* be
     return null;
 }
 
-/// Every member of the enum is listed, or the switch has a `default`.
-/// D7.7
+// Every member of the enum is listed, or the switch has a `default`.
 fn check_exhaustive(check.checker mut* ck, ast.node mut* n, types.node* t) bool {
     ast.sym* s = check.nominal_sym(t);
     if (s == null || s->node == null) {
@@ -418,7 +373,7 @@ fn check_exhaustive(check.checker mut* ck, ast.node mut* n, types.node* t) bool 
         complete = false;
     }
     if (!complete) {
-        // D14.2: reported at the closing brace of the switch
+        // reported at the closing brace of the switch
         check.check_msg_end(ck, check.check_close_brace(n->loc));
     }
     return complete;
@@ -426,13 +381,11 @@ fn check_exhaustive(check.checker mut* ck, ast.node mut* n, types.node* t) bool 
 
 fn check_switch(check.checker mut* ck, ast.node mut* n) void {
     check.expr mut op = check.expr{};
-    // D4.5
     check.check_expr_default(ck, n->a, &op);
     types.node* mut t = op.ty;
     if (!check.check_poisoned(t) && t->kind != types.type_kind.k_enum
         && (t->kind != types.type_kind.k_prim || t->prim == prim.prim_kind.prim_bool
             || prim.prim_is_float(t->prim))) {
-        // D7.6
         check.check_msg_begin(ck);
         check.msg_str(ck, "cannot switch on ");
         check.check_msg_type(ck, t);
@@ -445,13 +398,11 @@ fn check_switch(check.checker mut* ck, ast.node mut* n) void {
     while (i < ast.ast_len(n)) {
         ast.node mut* clause = check.ast_child_mut(n, i);
         i += 1;
-        // D14.2
         if (clause->kind != ast.ast_kind.k_case) {
             continue;
         }
         if ((clause->flags & ast.FLAG_DEFAULT) != 0) {
             if (first_default != null) {
-                // D7.6
                 check.check_error(ck, clause->loc, "a switch has at most one 'default'");
             }
             first_default = clause;
@@ -461,7 +412,6 @@ fn check_switch(check.checker mut* ck, ast.node mut* n) void {
             ast.node mut* label = check.ast_child_mut(clause, k);
             k += 1;
             check.expr mut e = check.expr{};
-            // D7.6
             check.check_expr_as(ck, label, t, "a case label", &e);
             if (check.check_poisoned(e.ty)) {
                 continue;
@@ -471,14 +421,12 @@ fn check_switch(check.checker mut* ck, ast.node mut* n) void {
                 continue;
             }
             if (label_with_value(ck, n, e.value, label) != null) {
-                // D7.6
                 check.check_msg_begin(ck);
                 check.msg_str(ck, "duplicate case value ");
                 check.msg_value(ck, e.value);
                 check.check_msg_end(ck, label->loc);
             }
         }
-        // D7.6
         check_block(ck, clause->a);
     }
     ck->switches -= 1;
@@ -492,12 +440,10 @@ fn check_switch(check.checker mut* ck, ast.node mut* n) void {
 }
 
 // ---- defer, return, break and continue ---------------------------------------------
-// D7.8, D7.11, D8.5
 
-/// `return` may not appear inside deferred code: it would leave the function in
-/// the middle of an unwind. `break` and `continue` may, and bind to a loop or a
-/// switch written inside the deferred block.
-/// D7.8
+// `return` may not appear inside deferred code: it would leave the function in
+// the middle of an unwind. `break` and `continue` may, and bind to a loop or a
+// switch written inside the deferred block.
 fn check_return_outside_defer(check.checker mut* ck, ast.node* n) bool {
     if (ck->defers == 0) {
         return true;
@@ -511,7 +457,7 @@ fn check_return(check.checker mut* ck, ast.node mut* n) void {
         return;
     }
     if (check.check_poisoned(ck->ret)) {
-        // D14.2: the signature failed, so the error type silences this
+        // the signature failed, so the error type silences this
         if (n->a != null) {
             check.expr mut e = check.expr{};
             check.check_expr_default(ck, n->a, &e);
@@ -519,13 +465,11 @@ fn check_return(check.checker mut* ck, ast.node mut* n) void {
         return;
     }
     if (ck->ret_noreturn) {
-        // D8.5
         check.check_error(ck, n->loc, "'return' in a noreturn function");
         return;
     }
     if (n->a == null) {
         if (!ck->ret_void) {
-            // D7.11
             check.check_msg_begin(ck);
             check.msg_str(ck, "'return' without a value in a function returning ");
             check.check_msg_type(ck, ck->ret);
@@ -534,23 +478,19 @@ fn check_return(check.checker mut* ck, ast.node mut* n) void {
         return;
     }
     if (ck->ret_void) {
-        // D7.11
         check.check_error(ck, n->loc, "'return' with a value in a void function");
         check.expr mut e = check.expr{};
         check.check_expr_default(ck, n->a, &e);
         return;
     }
     check.expr mut e = check.expr{};
-    // D17.5, D17.7: the one `own` place reached without `move`
+    // the one `own` place reached without `move`
     check.check_return_value(ck, n, ck->ret, &e);
 }
 
-/// The enclosing loops and switches are the ones `check_defer` left reachable, so
-/// a `break` or a `continue` inside deferred code counts only what stands inside
-/// the deferred block.
-/// D7.5, D7.6, D7.8
+// Counts loops and switches that `check_defer` left reachable. A `break` or
+// `continue` in deferred code sees only constructs inside the deferred block.
 fn check_break(check.checker mut* ck, ast.node mut* n, bool cont) void {
-    // D7.6
     if (cont) {
         if (ck->loops == 0) {
             check.check_error(ck, n->loc, "'continue' outside a loop");
@@ -560,13 +500,12 @@ fn check_break(check.checker mut* ck, ast.node mut* n, bool cont) void {
     }
 }
 
-/// `break` and `continue` in deferred code bind to the innermost loop or switch
-/// inside the deferred block, so the constructs around the `defer` are out of
-/// reach while it is checked. With none inside, they are errors, and the error is
-/// the one a `break` outside every loop and switch gets anywhere else.
-/// D7.8
+// A `break` or `continue` in deferred code binds inside the deferred block.
+// Constructs around the `defer` are not reachable while it is checked. Without
+// an inner target, these statements are errors. The message matches a `break`
+// outside all loops and switches.
 fn check_defer(check.checker mut* ck, ast.node mut* n) void {
-    // D7.8: the parser has already enforced this
+    // the parser has already enforced this
     u64 loops = ck->loops;
     u64 switches = ck->switches;
     ck->loops = 0;
@@ -579,13 +518,10 @@ fn check_defer(check.checker mut* ck, ast.node mut* n) void {
 }
 
 // ---- terminating statements --------------------------------------------------------
-// D8.4
 
-/// A `break` that targets the statement: the walk does not enter a nested loop
-/// or switch, which a `break` inside would target instead, and it does not enter
-/// deferred code, whose `break` targets a loop or a switch inside the deferred
-/// block.
-/// D7.6, D7.8
+// Whether a `break` targets this statement. The walk skips nested loops and
+// switches because their breaks target them. It also skips deferred code because
+// its breaks target constructs inside the deferred block.
 fn has_break(ast.node* n) bool {
     if (n == null) {
         return false;
@@ -620,15 +556,13 @@ fn has_break(ast.node* n) bool {
     return false;
 }
 
-/// `while (true)`: the literal, which is the only spelling the rule gives.
-/// D8.4
+// `while (true)`: the literal, which is the only spelling the rule gives.
 fn is_true_literal(ast.node* n) bool {
     return n != null && n->kind == ast.ast_kind.k_bool && n->ival != 0;
 }
 
-/// Whether the statement terminates: it never falls through to the statement
-/// after it.
-/// D8.4
+// Whether the statement terminates: it never falls through to the statement
+// after it.
 fn check_terminates(ast.node* n) bool {
     if (n == null) {
         return false;
@@ -637,10 +571,8 @@ fn check_terminates(ast.node* n) bool {
     case ast.ast_kind.k_return:
         return true;
     case ast.ast_kind.k_call_stmt:
-        // D8.4
         return n->a != null && (n->a->ann & check.ANN_NORETURN) != 0;
     case ast.ast_kind.k_if:
-        // D8.4
         return n->c != null && check_terminates(n->b) && check_terminates(n->c);
     case ast.ast_kind.k_compile_if:
         if ((n->flags & ast.FLAG_SELECT_THEN) != 0) {
@@ -650,10 +582,8 @@ fn check_terminates(ast.node* n) bool {
     case ast.ast_kind.k_while:
         return is_true_literal(n->a) && !has_break(n->b);
     case ast.ast_kind.k_for:
-        // D8.4
         return n->b == null && !has_break(n->d);
     case ast.ast_kind.k_switch:
-        // D8.4, D7.7
         if ((n->ann & check.ANN_EXHAUSTIVE) == 0 || ast.ast_len(n) == 0) {
             return false;
         }
@@ -670,13 +600,12 @@ fn check_terminates(ast.node* n) bool {
         u64 count = ast.ast_len(n);
         u64 mut k = 0;
         while (k < count) {
-            // D14.2: what the block would have terminated with is unknown
+            // what the block would have terminated with is unknown
             if (ast.ast_child(n, k)->kind == ast.ast_kind.k_error) {
                 return true;
             }
             k += 1;
         }
-        // D8.4
         return count > 0 && check_terminates(ast.ast_child(n, count - 1));
     default:
         return false;
@@ -685,14 +614,12 @@ fn check_terminates(ast.node* n) bool {
 
 // ---- blocks and bodies -------------------------------------------------------------
 
-/// One statement of a body: the node kinds the parser produces for a statement,
-/// and nothing else -- a node of any other kind is a tree this compiler's parser
-/// cannot build, so it is a broken precondition and not a program error.
-/// D7.3, D13.3
+// Checks one statement in a body. The parser produces only the listed node
+// kinds. Any other kind breaks the precondition because this parser cannot
+// produce it. It is not a program error.
 fn check_stmt(check.checker mut* ck, ast.node mut* n) void {
     switch (n->kind) {
     case ast.ast_kind.k_block:
-        // D7.3
         check_block(ck, n);
     case ast.ast_kind.k_var_decl:
         check_local(ck, n);
@@ -725,16 +652,14 @@ fn check_stmt(check.checker mut* ck, ast.node mut* n) void {
     case ast.ast_kind.k_continue:
         check_break(ck, n, true);
     case ast.ast_kind.k_error:
-        // D14.2
         ck->block_errs += 1;
     default:
         panic("check_stmt.check_stmt: not a statement");
     }
 }
 
-/// A block and the scope it opens. A null node, or one that is not a block, is
-/// the body a syntax error left behind: nothing to check.
-/// D7.3, D7.9
+// A block and the scope it opens. A null node, or one that is not a block, is
+// the body a syntax error left behind: nothing to check.
 fn check_block(check.checker mut* ck, ast.node mut* n) void {
     if (n == null || n->kind != ast.ast_kind.k_block) {
         return;
@@ -751,9 +676,8 @@ fn check_block(check.checker mut* ck, ast.node mut* n) void {
     scope.free(&block);
 }
 
-/// The body of one function: the parameters in a scope of their own around it,
-/// the statements, and the terminating rule at the end.
-/// D8.4, D8.5
+// The body of one function: the parameters in a scope of their own around it,
+// the statements, and the terminating rule at the end.
 fn check_function_body(check.checker mut* ck, ast.node mut* decl, ast.sym mut* s) void {
     types.node* signature = s->ty;
     bool poisoned = check.check_poisoned(signature) || signature->kind != types.type_kind.k_fn;
@@ -770,7 +694,7 @@ fn check_function_body(check.checker mut* ck, ast.node mut* decl, ast.sym mut* s
     ck->switches = 0;
     ck->defers = 0;
     ck->block_errs = 0;
-    // D7.9: a local may not reuse a parameter's name
+    // a local may not reuse a parameter's name
     scope.scope mut params = scope.scope{};
     scope.init(&params, scope.scope_kind.s_block, null);
     ck->scope = &params;
@@ -791,11 +715,10 @@ fn check_function_body(check.checker mut* ck, ast.node mut* decl, ast.sym mut* s
     check_block(ck, decl->b);
     if (ck->block_errs == 0 && !check.check_poisoned(ck->ret) && !check_terminates(decl->b)) {
         if (ck->ret_noreturn) {
-            // D8.5
             check.check_error(ck, check.check_close_brace(decl->b->loc),
                               "a noreturn function must end in a terminating statement");
         } else if (!ck->ret_void) {
-            // D8.4, D14.2: reported at the body's closing brace
+            // reported at the body's closing brace
             check.check_error(ck, check.check_close_brace(decl->b->loc), "missing return");
         }
     }
@@ -808,12 +731,12 @@ fn check_function_body(check.checker mut* ck, ast.node mut* decl, ast.sym mut* s
 
 // ---- the module and the closure ----------------------------------------------------
 
-/// The bodies of a module, which come last, when every declaration of it has a
-/// type. It is the loop src/bootstrap/check.c runs between the two halves
-/// check.ft carries. Precondition: the module parsed, so `m->ast` is not null.
+// The bodies of a module, which come last, when every declaration of it has a
+// type. It is the loop src/bootstrap/check.c runs between the two halves
+// check.ft carries. Precondition: the module parsed, so `m->ast` is not null.
 fn check_module_bodies(check.checker mut* ck, modules.module* m) void {
     if (m->ast == null) {
-        // D14.2, D13.3: check_module stops before this call
+        // check_module stops before this call
         panic("check_stmt.check_module_bodies: the module did not parse");
     }
     check_declaration_bodies(ck, m->ast);
@@ -848,10 +771,10 @@ fn check_declaration_bodies(check.checker mut* ck, ast.node mut* list) void {
     }
 }
 
-/// Checks one module: its declarations, its function bodies, then the rules
-/// the whole module answers for. Every module it imports must have been
-/// checked already, which check_program's order guarantees. Returns whether it
-/// reported no error.
+// Checks one module: its declarations, its function bodies, then the rules
+// the whole module answers for. Every module it imports must have been
+// checked already, which check_program's order guarantees. Returns whether it
+// reported no error.
 fn check_module(check.checker mut* ck, modules.module* m) bool {
     if (m->ast == null) {
         return true;
@@ -863,12 +786,9 @@ fn check_module(check.checker mut* ck, modules.module* m) bool {
     return ck->errors == before;
 }
 
-/// Checks the closure: every module the loader put in the dependency order first,
-/// then every other module that parsed, deepest first, so that a file whose import
-/// failed is still checked and an editor sees its own errors. A module that did
-/// not parse is not checked. Returns whether none reported an error. The index
-/// walk reads the same order, which is why neither builds one of its own.
-/// D9.10, D14.2, D20.1
+/// Checks modules in dependency order, then checks other parsed modules deepest first.
+/// This order gives editors diagnostics from files with failed imports.
+/// Returns true when no module reports an error.
 fn check_program(check.checker mut* ck, modules.module_set* set) bool {
     bool mut ok = true;
     u64 mut i = 0;

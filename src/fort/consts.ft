@@ -1,102 +1,31 @@
-// consts: compile-time constant values and exact folding (type-system.md 10),
-// the transliteration of src/bootstrap/consts.h and .c.
-// D4
-//
-// An untyped integer constant is an exact integer in [-2^63, 2^64 - 1], held
-// as a sign and a 64-bit magnitude: `neg` implies 1 <= mag <= 2^63, and zero
-// is never negative. Every operation computes the exact result and reports a
-// result outside that range, or a division by zero, by returning false; the
-// caller turns that into the compile error. Nothing here wraps unless the
-// operation is a `cast` or a wrapping operator.
-// D4.4, D3.14, D11.2
-//
-// A float constant is the binary64 bit pattern of a finite value, held and
-// computed on by flt.ft, since the compiler's own source has no float type.
-// Every float constant is finite: one that is not is an error, so each
-// fold below answers false where the exact result leaves the format and the
-// checker reports it. An f32 constant holds the binary64 of its binary32
-// value, which that format holds exactly.
-//
-// The other kinds are the remaining constants: `bool`, a char literal
-// (a code point 0..255 whose default type is `char`), `null`, a string literal
-// (a view of its decoded bytes) and "none", the value of an expression that is
-// not constant.
-// D4.3
-//
-// Bitwise `& | ^` on untyped integers: the operands are taken as
-// two's-complement bit patterns with infinite sign extension, that is the
-// mathematical bitwise operation on integers as in Go, and the result must lie
-// in the constant range. It agrees with `~c` being `-c - 1`: `-1 & x` is `x`,
-// `-1 | x` is `-1`, `-1 ^ 0xFFFFFFFFFFFFFFFF` is `-2^64` and hence an error;
-// only `^` can leave the range.
-// D4.4
-//
-// Two families of operations:
-// - untyped folding (cv_add ... cv_shr, cv_compare): exact.
-// D4.4
-//
-// - typed folding (cv_typed_*, cv_wrap_*): the operands already have the
-//   integer type `t`, every operand fits it, and the result must fit it too
-//   or the operation is a compile error (`i32 A = 2147483647; A + 1` is an
-//   error, not a trap), except that `cast`, the wrapping operators and `<<`
-//   wrap exactly as at run time.
-// D3.14, D4.6, D6.2, D11.2
-//
-// Arithmetic. The C computes on unsigned magnitudes and detects an overflow
-// with __builtin_add_overflow and __builtin_mul_overflow, which fort does not
-// have; each of the three sites tests the operands before it computes, since
-// in fort the computation itself would trap rather than report. Where the C
-// means to wrap -- the two's-complement pattern of a negative value, and the
-// `+% -% *%` family -- the wrapping operators say so, so that both build
-// modes agree; every other operator here is the checked one and a trap in it
-// would be a bug in this file, not a program error.
-// D11.1
-//
-// Names: the functions keep the `cv_` of their C originals so that a reader
-// holds the two files against each other name by name, and the enum members
-// keep the `cv_` of the C constants because `bool`, `char` and `null` are
-// keywords.
-// D2.4
-//
-// Re-entrancy: nothing here is state. A cval is a value passed and returned by
-// value, no function allocates, and a violated precondition -- folding on a
-// value of the wrong kind, which the checker cannot produce -- is a panic at
-// the call that broke it rather than an exit in a leaf, which is what
-// src/bootstrap/consts.c's fatal_internal is. A panic aborts like any other
-// failure, so what it buys is a documented boundary and a stated precondition,
-// not in-process recovery.
-// D20.5, D13.3, D11.4
-//
-// Dispatch: none. The case analysis is the switches the C wrote.
-// D3.10
+/// Represents compile-time constants and folds them exactly.
+/// Untyped integer operations fail on overflow or division by zero.
+/// Typed and wrapping operations follow their target integer type.
 import flt;
 import prim;
 import std.strbuf;
 
-/// The magnitude of the most negative constant, 2^63.
-/// D1.4: a module constant is UPPER_CASE
+// The magnitude of the most negative constant, 2^63.
 u64 NEG_MAX_MAG = 9223372036854775808;
 
-/// The largest u64 there is, which the C spells UINT64_MAX.
+// The largest u64 there is, which the C spells UINT64_MAX.
 u64 U64_MAX = 18446744073709551615;
 
-/// The largest i64 there is, the ceiling cv_to_i64 holds a magnitude against.
+// The largest i64 there is, the ceiling cv_to_i64 holds a magnitude against.
 u64 I64_MAX_MAG = 9223372036854775807;
 
-/// The number of bits of a u64, the widest integer.
+// The number of bits of a u64, the widest integer.
 u64 WORD_BITS = 64;
 
-/// The largest shift count of untyped folding (a count in `0..63`; the value
-/// range has 64 magnitude bits).
-/// D4.4
+// The largest shift count of untyped folding (a count in `0..63`; the value
+// range has 64 magnitude bits).
 u64 CV_SHIFT_MAX = 63;
 
-/// The last code point of a char literal.
-/// D2.7, D2.8
+// The last code point of a char literal.
 u64 CV_CHAR_MAX = 255;
 
-/// The hex digits of a `\xHH` escape in cv_to_str, and the shift and mask that
-/// split a byte into two of them.
+// The hex digits of a `\xHH` escape in cv_to_str, and the shift and mask that
+// split a byte into two of them.
 string HEX_DIGITS = "0123456789ABCDEF";
 u64 HEX_SHIFT = 4;
 u64 HEX_MASK = 15;
@@ -104,7 +33,6 @@ u64 ASCII_PRINT_MIN = 32;
 u64 ASCII_PRINT_MAX = 126;
 
 /// What a constant is.
-/// D4.6
 enum cval_kind {
     cv_none, // not a constant expression
     cv_int,  // an integer, exact in [-2^63, 2^64 - 1]
@@ -112,7 +40,7 @@ enum cval_kind {
     cv_char, // a char literal: a code point 0..255
     cv_null, // the literal null
     cv_str,  // a string literal: a view of its decoded bytes
-    cv_float, // D4.4: a float: the binary64 bits of a finite value
+    cv_float, // a float: the binary64 bits of a finite value
 }
 
 /// One constant value. cval{} is the none value, so a struct holding one is
@@ -141,7 +69,7 @@ fn int_make(bool neg, u64 mag) cval {
     return cval{cval_kind.cv_int, neg && mag != 0, mag, "", 0};
 }
 
-/// Stores `-mag` or `mag` when it lies in the constant range, else none.
+// Stores `-mag` or `mag` when it lies in the constant range, else none.
 fn int_check(bool neg, u64 mag, cval mut* out) bool {
     if (neg && mag > NEG_MAX_MAG) {
         *out = cv_none();
@@ -151,10 +79,9 @@ fn int_check(bool neg, u64 mag, cval mut* out) bool {
     return true;
 }
 
-/// The precondition every arithmetic function states: the checker has typed its
-/// operands, so a value of another kind is a broken precondition and panics
-/// where src/bootstrap/consts.c calls fatal_internal.
-/// D13.3
+// Enforces the arithmetic precondition. The checker has typed each operand, so
+// another value kind breaks the precondition. This function panics where the C
+// implementation calls fatal_internal.
 fn require_int(cval v) void {
     if (v.kind != cval_kind.cv_int) {
         panic("consts: constant folding on a non-integer");
@@ -180,13 +107,13 @@ fn cv_from_i64(i64 v) cval {
     return int_make(true, cast(-(v + 1), u64) + 1);
 }
 
-/// Also the constructor for an integer literal: the lexer's magnitude.
+// Also the constructor for an integer literal: the lexer's magnitude.
 fn cv_from_u64(u64 v) cval {
     return int_make(false, v);
 }
 
-/// A char literal from the lexer's code point, at most CV_CHAR_MAX (a broken
-/// precondition otherwise).
+// A char literal from the lexer's code point, at most CV_CHAR_MAX (a broken
+// precondition otherwise).
 fn cv_from_char(u64 code) cval {
     if (code > CV_CHAR_MAX) {
         panic("consts.cv_from_char: char constant outside 0..255");
@@ -207,7 +134,6 @@ fn cv_null() cval {
 
 /// A float constant from the text of a literal, evaluated in binary64; false
 /// when the value is not finite there, which is a compile error.
-/// D2.6, D4.4
 fn cv_from_float_text(string text, cval mut* out) bool {
     u64 mut bits = 0;
     if (!flt.flt_parse(text, &bits)) {
@@ -218,8 +144,8 @@ fn cv_from_float_text(string text, cval mut* out) bool {
     return true;
 }
 
-/// A float constant from the binary64 pattern of a finite value; the pattern
-/// of an f32 constant is the binary64 its binary32 value equals exactly.
+// A float constant from the binary64 pattern of a finite value; the pattern
+// of an f32 constant is the binary64 its binary32 value equals exactly.
 fn cv_from_float(u64 bits) cval {
     return cval{cval_kind.cv_float, false, 0, "", bits};
 }
@@ -247,23 +173,19 @@ fn cv_float_bits(cval v) u64 {
     return v.fbits;
 }
 
-/// The format a float constant is folded in: binary32 for f32 and binary64 for
-/// every other float context, which is also what an untyped float is evaluated
-/// in.
-/// D4.4
+// Whether a float constant uses binary32. f32 uses binary32. All other float
+// contexts use binary64, including an untyped float.
 fn is_f32(prim.prim_kind t) bool {
     return t == prim.prim_kind.prim_f32;
 }
 
 /// An integer or a char: a char in an integer context is its code point.
-/// D4.3
 fn cv_is_int_like(cval v) bool {
     return v.kind == cval_kind.cv_int || v.kind == cval_kind.cv_char;
 }
 
-/// The exact integer of an integer or char value; every arithmetic function
-/// below requires an integer operand, so the checker calls this on a char
-/// first.
+/// Returns the exact integer for an integer or char value.
+/// Arithmetic functions require this conversion before they receive a char.
 fn cv_as_int(cval v) cval {
     if (v.kind == cval_kind.cv_char) {
         return int_make(false, v.mag);
@@ -272,11 +194,8 @@ fn cv_as_int(cval v) cval {
     return v;
 }
 
-/// Whether the value is zero, which is what the division check asks of a divisor.
-/// A float has two zeros and both answer true; a char is its code point, since a
-/// divisor may be one (`4 / '\0'`), and every other kind is a broken
-/// precondition as it is for the arithmetic.
-/// D4.4, D6.12
+/// Returns true for integer zero, char zero, and either floating-point zero.
+/// Other constant kinds break the precondition.
 fn cv_is_zero(cval v) bool {
     if (v.kind == cval_kind.cv_float) {
         return flt.flt_is_zero(v.fbits);
@@ -288,9 +207,8 @@ fn cv_is_zero(cval v) bool {
     return v.mag == 0;
 }
 
-/// Whether the integer is negative: a negative constant in an index, bound or
-/// count position is a compile error.
-/// D4.1
+// Whether the integer is negative: a negative constant in an index, bound or
+// count position is a compile error.
 fn cv_is_neg(cval v) bool {
     require_int(v);
     return v.neg;
@@ -303,7 +221,7 @@ fn cv_to_i64(cval v, i64 mut* out) bool {
         if (v.mag > NEG_MAX_MAG) {
             return false;
         }
-        // D11.1: mag - 1 is at most the i64 maximum, so neither step wraps
+        // mag - 1 is at most the i64 maximum, so neither step wraps
         *out = -cast(v.mag - 1, i64) - 1;
         return true;
     }
@@ -327,7 +245,6 @@ fn cv_to_u64(cval v, u64 mut* out) bool {
 /// The low 64 bits of the two's-complement pattern: the value modulo 2^64, as a
 /// u64 register would hold it. The negation is the wrapping one, since the pattern
 /// of a negative value is exactly 2^64 - mag.
-/// D11.2
 fn cv_bits(cval v) u64 {
     require_int(v);
     if (v.neg) {
@@ -336,10 +253,10 @@ fn cv_bits(cval v) u64 {
     return v.mag;
 }
 
-/// The value whose low 64 bits are `bits` and whose bits above are all `high`
-/// (the infinite two's-complement extension; `high` is `neg` for an integer):
-/// non-negative when `high` is clear, else bits - 2^64, which lies in the
-/// constant range exactly when bits >= 2^63.
+// Builds the value with low bits `bits` and all higher bits `high`. `high`
+// equals `neg` for an integer. A clear `high` gives a nonnegative value.
+// Otherwise, the value is bits - 2^64. It fits the constant range when
+// bits >= 2^63.
 fn int_from_bits(bool high, u64 bits, cval mut* out) bool {
     if (!high) {
         *out = int_make(false, bits);
@@ -349,7 +266,7 @@ fn int_from_bits(bool high, u64 bits, cval mut* out) bool {
         *out = cv_none();
         return false;
     }
-    // D11.2: the wrapping subtract; the exact difference is the pattern
+    // the wrapping subtract; the exact difference is the pattern
     return int_check(true, 0 -% bits, out);
 }
 
@@ -359,7 +276,7 @@ fn cv_cmp(cval a, cval b) i32 {
         if (a.kind != b.kind) {
             panic("consts.cv_cmp: a float constant compared with another kind");
         }
-        // D6.12: every float constant is finite; the two zeros are equal
+        // every float constant is finite; the two zeros are equal
         return flt.flt_cmp(a.fbits, b.fbits);
     }
     if (a.kind != cval_kind.cv_char || b.kind != cval_kind.cv_char) {
@@ -383,9 +300,8 @@ fn cv_cmp(cval a, cval b) i32 {
     return 1;
 }
 
-/// Equality of two values of the same kind: integers and chars by value, bools,
-/// null (equal to null), strings by bytes; none never equals. Values of
-/// different kinds are not equal.
+// Equality compares integers, chars, and bools by value. Null equals null.
+// Strings compare by bytes. None never equals. Different kinds are not equal.
 fn cv_eq(cval a, cval b) bool {
     if (a.kind != b.kind) {
         return false;
@@ -402,23 +318,20 @@ fn cv_eq(cval a, cval b) bool {
     case cval_kind.cv_str:
         return a.str == b.str;
     case cval_kind.cv_float:
-        // D6.12, D4.4
         return flt.flt_cmp(a.fbits, b.fbits) == 0;
     }
     return false;
 }
 
 // ---- untyped arithmetic --------------------------------------------------------
-// D4.4
 
-/// The sum of two signed magnitudes, exact; the raw pair is validated by the
-/// caller through int_check.
+// The sum of two signed magnitudes, exact; the raw pair is validated by the
+// caller through int_check.
 fn add_raw(bool an, u64 am, bool bn, u64 bm, bool mut* rn, u64 mut* rm) bool {
     if (an == bn) {
         *rn = an;
         // The C asks __builtin_add_overflow; the sum is tested before it is computed
         // instead, since performing it is what would trap.
-        // D11.1
         if (am > U64_MAX - bm) {
             return false;
         }
@@ -466,7 +379,6 @@ fn cv_mul(cval a, cval b, cval mut* out) bool {
     // The C asks __builtin_mul_overflow; the product is tested before it is computed
     // instead. A zero left magnitude has no quotient to compare against and cannot
     // overflow.
-    // D11.1
     if (a.mag != 0 && b.mag > U64_MAX / a.mag) {
         *out = cv_none();
         return false;
@@ -481,7 +393,7 @@ fn cv_div(cval a, cval b, cval mut* out) bool {
         *out = cv_none();
         return false;
     }
-    // D6.13: truncation toward zero
+    // truncation toward zero
     return int_check(a.neg != b.neg, a.mag / b.mag, out);
 }
 
@@ -492,7 +404,7 @@ fn cv_rem(cval a, cval b, cval mut* out) bool {
         *out = cv_none();
         return false;
     }
-    // D6.13: the remainder takes the dividend's sign, so always in range
+    // the remainder takes the dividend's sign, so always in range
     return int_check(a.neg, a.mag % b.mag, out);
 }
 
@@ -509,7 +421,6 @@ fn cv_not(cval a, cval mut* out) bool {
     }
     // The C asks __builtin_add_overflow on mag + 1; the one magnitude that overflows
     // is the largest u64, tested before the sum is computed.
-    // D11.1
     if (a.mag == U64_MAX) {
         *out = cv_none();
         return false;
@@ -535,7 +446,7 @@ fn cv_xor(cval a, cval b, cval mut* out) bool {
     return int_from_bits(a.neg != b.neg, cv_bits(a) ^ cv_bits(b), out);
 }
 
-/// A shift count for untyped folding: 0..CV_SHIFT_MAX, else false.
+// A shift count for untyped folding: 0..CV_SHIFT_MAX, else false.
 fn shift_count(cval count, u64 mut* n) bool {
     require_int(count);
     if (count.neg || count.mag > CV_SHIFT_MAX) {
@@ -625,7 +536,6 @@ fn cv_lor(cval a, cval b) cval {
 }
 
 // ---- types ---------------------------------------------------------------------
-// D4.2, D4.3, D4.5, D3.14
 
 fn int_width(prim.prim_kind t) u64 {
     if (!prim.prim_is_integer(t)) {
@@ -651,11 +561,9 @@ fn int_fits(cval v, prim.prim_kind t) bool {
     return width == WORD_BITS || v.mag < (one << width);
 }
 
-/// Whether `v` may take the type `t` by contextual conversion: an integer fits
-/// any integer type whose range holds it and either float type; a char fits
-/// `char` and any integer type that holds its code point; an integer never fits
-/// `char`; a bool fits `bool`.
-/// D4.2, D4.3
+/// Returns true when contextual conversion can give `v` the primitive type `t`.
+/// Integers require a target range that holds them, except that either float type accepts them.
+/// A char fits `char` or an integer type that holds its code point. A bool fits only `bool`.
 fn cv_fits(cval v, prim.prim_kind t) bool {
     switch (v.kind) {
     case cval_kind.cv_int:
@@ -666,7 +574,7 @@ fn cv_fits(cval v, prim.prim_kind t) bool {
     case cval_kind.cv_bool:
         return t == prim.prim_kind.prim_bool;
     case cval_kind.cv_float:
-        // D4.2, D4.4: a float type and no other, and it must be finite there
+        // a float type and no other, and it must be finite there
         if (!prim.prim_is_float(t)) {
             return false;
         }
@@ -678,9 +586,8 @@ fn cv_fits(cval v, prim.prim_kind t) bool {
     return false;
 }
 
-/// The value of an integer, char or float constant in the float type `t`, rounded
-/// to nearest; false when it is not finite there, which is a compile error.
-/// D3.14, D4.2, D4.4
+// Converts an integer, char, or float constant to float type `t`. It rounds to
+// nearest. It returns false for a non-finite result, which is a compile error.
 fn cv_to_float_bits(cval v, prim.prim_kind t, u64 mut* out) bool {
     if (!prim.prim_is_float(t)) {
         panic("consts.cv_to_float_bits: the target is not a float type");
@@ -698,8 +605,9 @@ fn cv_to_float_bits(cval v, prim.prim_kind t, u64 mut* out) bool {
     return flt.flt_from_int(i.neg, i.mag, is_f32(t), out);
 }
 
-/// The same conversion as a constant.
-/// D4.2
+/// Converts an integer-like or float constant to the float type `t`.
+/// Returns false when the rounded result is not finite in `t`.
+/// On failure, the function stores none in `*out`.
 fn cv_to_float(cval v, prim.prim_kind t, cval mut* out) bool {
     u64 mut bits = 0;
     if (!cv_to_float_bits(v, t, &bits)) {
@@ -710,10 +618,11 @@ fn cv_to_float(cval v, prim.prim_kind t, cval mut* out) bool {
     return true;
 }
 
-/// The default type of a constant with no context: i32 if the integer fits, else
-/// i64; `char` for a char; `bool` for a bool. False, and `*out` untouched, for an
-/// integer outside i64 and for null, strings and none.
-/// D4.5
+/// Returns the default primitive type for a constant without context.
+/// Integers use i32 when possible, then i64. Floats use f64.
+/// Chars and bools keep their primitive kinds.
+/// Returns false for integers outside i64, null, strings, and none.
+/// On failure, the function leaves `*out` unchanged.
 fn cv_default_kind(cval v, prim.prim_kind mut* out) bool {
     switch (v.kind) {
     case cval_kind.cv_int:
@@ -733,7 +642,6 @@ fn cv_default_kind(cval v, prim.prim_kind mut* out) bool {
         *out = prim.prim_kind.prim_bool;
         return true;
     case cval_kind.cv_float:
-        // D4.5
         *out = prim.prim_kind.prim_f64;
         return true;
     case cval_kind.cv_none, cval_kind.cv_null, cval_kind.cv_str:
@@ -742,8 +650,8 @@ fn cv_default_kind(cval v, prim.prim_kind mut* out) bool {
     return false;
 }
 
-/// The integer of type `t` whose two's-complement pattern has the low bits of
-/// `bits`: truncated to the width, then sign- or zero-extended.
+// The integer of type `t` whose two's-complement pattern has the low bits of
+// `bits`: truncated to the width, then sign- or zero-extended.
 fn int_from_truncated(u64 bits, prim.prim_kind t) cval {
     u64 width = int_width(t);
     u64 one = 1;
@@ -753,32 +661,30 @@ fn int_from_truncated(u64 bits, prim.prim_kind t) cval {
     }
     u64 low = bits & mask;
     if (prim.prim_is_signed(t) && (low & (one << (width - 1))) != 0) {
-        // D11.1: (~low & mask) + 1 is at most 2^(width - 1), so no wrap
+        // (~low & mask) + 1 is at most 2^(width - 1), so no wrap
         return int_make(true, ((~low) & mask) + 1);
     }
     return int_make(false, low);
 }
 
-/// `cast(v, t)` with run-time semantics: an integer, char or bool to an integer
-/// type keeps the low bits of its two's-complement pattern and sign- or
-/// zero-extends by the target (`cast(300, u8)` is 44, `cast(-1, u32)` is
-/// 4294967295, `cast(0x80000000, i32)` is -2147483648); to `char` it keeps the low
-/// byte; a bool becomes 0 or 1; an integer to a float rounds to nearest and a
-/// float to an integer truncates toward zero and saturates. False for a cast to
-/// `bool`, which is forbidden, to `void`, from a `char` or a `bool` to a float,
-/// from a float to anything but a number, for a float result that is not finite,
-/// and for null, strings and none.
-/// D3.14, D4.4
+/// Applies the run-time scalar cast from `v` to `t`.
+/// Integer targets keep the low bits and extend them according to the target sign.
+/// Char targets keep the low byte. Integer-to-float casts round to nearest.
+/// Float-to-integer casts truncate toward zero and saturate.
+/// Returns false for bool or void targets, and for null, string, or none values.
+/// It rejects bool-to-char, char-to-float, bool-to-float, and float-to-char.
+/// It also rejects non-finite float results.
+/// On failure, the function stores none in `*out`.
 fn cv_cast(cval v, prim.prim_kind t, cval mut* out) bool {
     if (v.kind == cval_kind.cv_float) {
         if (prim.prim_is_integer(t)) {
             return float_to_int(v, t, out);
         }
         if (prim.prim_is_float(t)) {
-            // D3.14, D4.4: rounds to nearest; a result that is not finite fails
+            // rounds to nearest; a result that is not finite fails
             return cv_to_float(v, t, out);
         }
-        // D3.14: a float reaches `char`, `bool` and an enum through no row
+        // a float reaches `char`, `bool` and an enum through no row
         *out = cv_none();
         return false;
     }
@@ -788,11 +694,10 @@ fn cv_cast(cval v, prim.prim_kind t, cval mut* out) bool {
     }
     if (prim.prim_is_float(t)) {
         if (v.kind != cval_kind.cv_int) {
-            // D3.14: no row takes a `char` or a `bool` to a float
+            // no row takes a `char` or a `bool` to a float
             *out = cv_none();
             return false;
         }
-        // D3.14
         return cv_to_float(v, t, out);
     }
     u64 mut bits = v.mag;
@@ -807,16 +712,14 @@ fn cv_cast(cval v, prim.prim_kind t, cval mut* out) bool {
         *out = cv_from_char(bits & CV_CHAR_MAX);
         return true;
     }
-    // D3.14: not to bool, not bool to char, not bool to float
+    // not to bool, not bool to char, not bool to float
     *out = cv_none();
     return false;
 }
 
-/// `cast(v, t)` from a float to an integer type: the value truncated toward zero
-/// and saturated at the range of `t`, which is what the saturating intrinsic
-/// computes at run time. No constant is a NaN, so the NaN row of that rule has no
-/// case here.
-/// D3.14, D4.4, D19.2
+// Casts a float `v` to integer type `t`. It truncates toward zero and saturates
+// to the range of `t`, as the run-time intrinsic does. No constant is a NaN.
+// Thus, the NaN row of that rule has no case here.
 fn float_to_int(cval v, prim.prim_kind t, cval mut* out) bool {
     bool mut neg = false;
     u64 mut mag = 0;
@@ -845,14 +748,12 @@ fn float_to_int(cval v, prim.prim_kind t, cval mut* out) bool {
 }
 
 // ---- float folding -------------------------------------------------------------
-// D4.4, D6.12
 
-/// The four operations on two constants in the float type `t`, each rounding the
-/// exact result once. An integer or char operand takes `t` first, which is the
-/// contextual conversion and the rule that an integer with a float folds as a
-/// float. False, and cv_none, where an operand or the result is not finite in `t`,
-/// or where a division has a zero divisor: no such constant exists.
-/// D4.2, D4.4, D6.12
+// The four operations on two constants in the float type `t`, each rounding the
+// exact result once. An integer or char operand first converts to `t`. Thus, an
+// integer with a float folds as a float. Returns false and cv_none for a
+// non-finite operand or result. Division by zero also returns false and cv_none.
+// No constant exists for these cases.
 fn cv_float_add(cval a, cval b, prim.prim_kind t, cval mut* out) bool {
     u64 mut x = 0;
     u64 mut y = 0;
@@ -913,23 +814,19 @@ fn cv_float_div(cval a, cval b, prim.prim_kind t, cval mut* out) bool {
     return true;
 }
 
-/// Unary minus on a float constant flips the sign bit, which is exact in both
-/// formats and is not a subtraction from zero: the two differ on a zero and on a
-/// NaN.
-/// D6.12
+// Unary minus flips the sign bit of a float constant. This is exact in both
+// formats. It is not subtraction from zero because they differ for zero and NaN.
 fn cv_float_neg(cval v) cval {
     return cv_from_float(flt.flt_neg(cv_float_bits(v)));
 }
 
 // ---- typed folding -------------------------------------------------------------
-// D4.6, D6.2, D6.13, D11.2
 
-/// Every cv_typed_* and cv_wrap_* function documents that its value operands
-/// already have the integer type `t`, so a value outside that type is a bug in the
-/// checker, not a program error: it fails loudly rather than folding
-/// cv_typed_and(-1, 5, u8) to 5. A shift count is not a value operand, any integer
-/// type being admitted there, so the shifts guard their left operand only.
-/// D6.2
+// Each cv_typed_* and cv_wrap_* function requires value operands of integer type
+// `t`. Another value indicates a checker defect, not a program error. This
+// function fails instead of folding cv_typed_and(-1, 5, u8) to 5. A shift count
+// is not a value operand. Any integer type is accepted there, so shifts guard
+// only their left operand.
 fn require_typed(cval v, prim.prim_kind t) void {
     require_int(v);
     if (!int_fits(v, t)) {
@@ -937,7 +834,7 @@ fn require_typed(cval v, prim.prim_kind t) void {
     }
 }
 
-/// The typed result of an exact operation: `ok` and in the range of `t`.
+// The typed result of an exact operation: `ok` and in the range of `t`.
 fn typed_check(bool ok, cval r, prim.prim_kind t, cval mut* out) bool {
     if (!ok || !int_fits(r, t)) {
         *out = cv_none();
@@ -971,13 +868,13 @@ fn cv_typed_mul(cval a, cval b, prim.prim_kind t, cval mut* out) bool {
 fn cv_typed_div(cval a, cval b, prim.prim_kind t, cval mut* out) bool {
     require_typed(a, t);
     require_typed(b, t);
-    // D6.13: MIN / -1 is 2^(w-1), which the range check rejects
+    // MIN / -1 is 2^(w-1), which the range check rejects
     cval mut r = cv_none();
     return typed_check(cv_div(a, b, &r), r, t, out);
 }
 
 fn cv_typed_rem(cval a, cval b, prim.prim_kind t, cval mut* out) bool {
-    // D6.13: MIN % -1 is 0 exactly but a run-time error
+    // MIN % -1 is 0 exactly but a run-time error
     cval mut q = cv_none();
     cval mut r = cv_none();
     return typed_check(cv_typed_div(a, b, t, &q) && cv_rem(a, b, &r), r, t, out);
@@ -986,14 +883,14 @@ fn cv_typed_rem(cval a, cval b, prim.prim_kind t, cval mut* out) bool {
 fn cv_typed_neg(cval a, prim.prim_kind t, cval mut* out) bool {
     require_typed(a, t);
     if (!prim.prim_is_signed(t)) {
-        // D6.2: the checker never asks to negate an unsigned constant
+        // the checker never asks to negate an unsigned constant
         panic("consts.cv_typed_neg: unary minus on an unsigned type");
     }
     cval mut r = cv_none();
     return typed_check(cv_neg(a, &r), r, t, out);
 }
 
-/// `~` complements the bits of the width, so `~0` is 4294967295 in u32.
+// `~` complements the bits of the width, so `~0` is 4294967295 in u32.
 fn cv_typed_not(cval a, prim.prim_kind t, cval mut* out) bool {
     // The complement within the width: -a - 1 modulo 2^width.
     require_typed(a, t);
@@ -1022,8 +919,7 @@ fn cv_typed_xor(cval a, cval b, prim.prim_kind t, cval mut* out) bool {
     return typed_check(cv_xor(a, b, &r), r, t, out);
 }
 
-/// A shift count for the width of `t`: 0..width-1, else false.
-/// D6.2
+// A shift count for the width of `t`: 0..width-1, else false.
 fn typed_shift_count(cval count, prim.prim_kind t, u64 mut* n) bool {
     require_int(count);
     if (count.neg || count.mag >= int_width(t)) {
@@ -1040,7 +936,7 @@ fn cv_typed_shl(cval a, cval count, prim.prim_kind t, cval mut* out) bool {
         *out = cv_none();
         return false;
     }
-    // D6.2: the bits shifted out are discarded, so this wraps by design
+    // the bits shifted out are discarded, so this wraps by design
     *out = int_from_truncated(cv_bits(a) << n, t);
     return true;
 }
@@ -1058,11 +954,10 @@ fn cv_typed_shr(cval a, cval count, prim.prim_kind t, cval mut* out) bool {
     return typed_check(cv_shr(a, count, &r), r, t, out);
 }
 
-/// `+% -% *%` on constants of the integer type `t` (both operands fit `t`):
-/// two's-complement wrapping at the width of `t`; never false. The three sums are
-/// written with the wrapping operators because wrapping is what they compute; a
-/// checked `+` here would trap on the input the rule defines.
-/// D11.2
+// `+% -% *%` on constants of the integer type `t` (both operands fit `t`):
+// two's-complement wrapping at the width of `t`; never false. The three sums use
+// wrapping operators because they compute wrapping. A checked `+` would trap on
+// an input that this rule defines.
 fn cv_wrap_add(cval a, cval b, prim.prim_kind t) cval {
     require_typed(a, t);
     require_typed(b, t);
@@ -1083,10 +978,8 @@ fn cv_wrap_mul(cval a, cval b, prim.prim_kind t) cval {
 
 // ---- diagnostics ---------------------------------------------------------------
 
-/// One byte inside a literal delimited by `quote`, with the escapes of the source
-/// form: `\n \t \r \0 \\`, the delimiter itself, and `\xHH` for every other
-/// byte outside printable ASCII.
-/// D2.8
+// Escapes one byte in a literal delimited by `quote`. It uses source escapes for
+// `\n \t \r \0 \\` and the delimiter. Other nonprintable bytes use `\xHH`.
 fn escape_char(u64 code, char quote, strbuf.str_buf mut* out) void {
     if (code == cast(quote, u64)) {
         strbuf.push(out, '\\');
@@ -1127,9 +1020,8 @@ fn char_to_str(u64 code, strbuf.str_buf mut* out) void {
     strbuf.push(out, '\'');
 }
 
-/// The bytes of a string literal between double quotes, escaped as they would be
-/// written in source, so a diagnostic stays on one line.
-/// D2.8, D2.9
+// The bytes of a string literal between double quotes, escaped as they would be
+// written in source, so a diagnostic stays on one line.
 fn str_to_str(string s, strbuf.str_buf mut* out) void {
     strbuf.push(out, '"');
     u64 mut k = 0;
@@ -1140,17 +1032,9 @@ fn str_to_str(string s, strbuf.str_buf mut* out) void {
     strbuf.push(out, '"');
 }
 
-/// Appends the value as it reads in a diagnostic: an integer in decimal with a
-/// `-` prefix, a char as a char literal (`'a'`, `'\n'`, `'\xFF'`), `true`,
-/// `false`, `null`, a string as a string literal between double quotes with the
-/// escapes of the source form (so a quote, a newline or a NUL byte cannot break
-/// the diagnostic line), and `<none>`. A float constant has no text form here: the
-/// shortest decimal that reads back is the runtime's work and no message of the
-/// checker prints a float value, since the two that print a constant at all -- the
-/// one that does not fit its type and the enum value that does not fit i32 -- name
-/// the float rather than print it. Asking for one is therefore a broken
-/// precondition.
-/// D2.8, D13.3, D18.2
+/// Appends the source-like diagnostic spelling of `v`.
+/// It escapes char and string values so that each diagnostic stays on one line.
+/// A float value breaks the precondition because this function has no float spelling.
 fn cv_to_str(cval v, strbuf.str_buf mut* out) void {
     switch (v.kind) {
     case cval_kind.cv_float:
