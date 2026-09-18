@@ -2,10 +2,12 @@
 """Run compiler mutation tables and report the first failing test stage.
 
 Each round restores the sources, applies one substitution, and rebuilds the compiler.
-It then runs stages from narrowest to widest. The input table supplies sources, commands, and mutations.
+It then runs stages from narrowest to widest. The input table supplies sources,
+commands, and mutations.
 
 Commands run from the worktree root through `tools/vm run`.
-`--runner` selects another command runner. A timeout ends the run because the guest command can continue.
+`--runner` selects another command runner. A timeout ends the run because the
+guest command can continue.
 
 The built binary must differ from the baseline, or the round reports STALE.
 After all rounds, the tool restores sources and rebuilds the baseline.
@@ -121,14 +123,14 @@ def apply_mutation(root, mutation):
 def mutated_rows(table, root):
     """The rows whose mutation the sources hold right now.
 
-    A round rewrites a source, so a reader of the table during a round sees that
-    round's own mutation: the row that is applied holds its `new` text and its
-    `old` text is gone. A test that asserts the anchors must skip on such a tree,
-    or it fails inside the round and reports the compiler as caught.
+    A round rewrites a source. During the round, a table reader sees that
+    mutation. The applied row holds its `new` text, and its `old` text is gone.
+    A test that asserts anchors must skip on such a tree. Otherwise, it fails
+    inside the round and reports a compiler catch.
 
-    The test is "`old` is absent and `new` is present", and **not** "`new` occurs
-    once": a replacement often repeats text the file already had, so `new` occurs
-    twice or three times after the substitution. Some table rows have this shape.
+    The test is "`old` is absent and `new` is present". It does not require one
+    `new` occurrence. A replacement often repeats existing file text, so `new`
+    can occur two or three times after substitution. Some rows have this shape.
     """
     applied = []
     for mutation in table["mutations"]:
@@ -144,25 +146,23 @@ def mutated_rows(table, root):
 def undo_applied(table, root, applied):
     """The text of each source with the applied rows put back, by file name.
 
-    A round rewrites one source, and a second row that shares those lines then
-    has no anchor. That is the round talking and not the table, so `--check`
-    reads the reconstructed text: it puts every applied row's `new` back to its
-    `old` and counts anchors there. A row whose anchor is missing from the
-    reconstructed text has really rotted.
+    A round rewrites one source. A second row that shares those lines then has
+    no anchor. The round causes this state, not the table. Thus, `--check` reads
+    reconstructed text. It puts each applied row's `new` back to its `old` and
+    counts anchors there. A missing anchor in reconstructed text is stale.
 
     It puts back the **first** occurrence, which is the mutation site only when
     the replacement text is unique in the file. Three rows of the emitter table
     repeat text the file already held, so the first occurrence is not always the
     site. Two things make that safe, and a table that breaks them is loud rather
     than quiet.
-    - Measured, not argued: `test_every_row_of_the_table_leaves_no_row_stale_and
-      _names_itself` applies all 88 rows one at a time, and every other anchor
-      survives the reconstruction in every one of the 88.
-    - A wrong site can only **destroy** an anchor, never invent one, because the
-      text it writes is one row's `old` and a second row with that same anchor in
-      the same file would already fail `--check` on a clean tree with `2
-      matches`. So the failure mode is a stale row and exit 1, and never a silent
-      pass.
+    - `test_every_row_of_the_table_leaves_no_row_stale_and_names_itself`
+      measures this condition. It applies all 88 rows separately. Each other
+      anchor survives each reconstruction.
+    - A wrong site can only **destroy** an anchor, never invent one. Its text is
+      one row's `old`. A second row with that anchor would make `--check` report
+      `2 matches` on a clean tree. Thus, the failure is a stale row and exit 1,
+      not a silent pass.
     """
     text = {}
     for name in {m["file"] for m in table["mutations"]}:
@@ -314,10 +314,10 @@ def restore_and_check(table, guest, root, saved, rows, baseline):
 def exit_status(rows, unknown, restored, baseline):
     """0 when every row of the run answered the audit's question, else 1.
 
-    Only `caught` and `survived` are answers. A build that failed, a binary
-    equal to the baseline, a stage that hung and a rotted anchor each say that
-    the round did not run, and a run of no rows says the `--only` named nothing.
-    A table that stops compiling must not report success.
+    Only `caught` and `survived` are answers. A failed build, unchanged binary,
+    hung stage, or stale anchor means the round did not run. A run with no rows
+    means `--only` matched nothing. A table that stops compiling cannot report
+    success.
     """
     if restored != baseline:
         return 1

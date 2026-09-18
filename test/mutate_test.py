@@ -13,9 +13,8 @@ The rounds themselves are not run here: one round rebuilds the compiler and
 costs seconds to minutes. A fake guest answers the build and the stages instead,
 which is what lets a test state the verdict of a round in a millisecond.
 
-The last class reads the real table, `tools/mutations/emitter_bootstrap.json`,
-and runs `--check` over the sources in the repository, so the table answers for
-its own anchors in the gate.
+The last class reads `tools/mutations/emitter_bootstrap.json`. It runs `--check`
+over the repository sources. Thus, the gate checks the table's own anchors.
 
 Run with `python3 -m unittest mutate_test` from this directory.
 Standard library only; Python 3.12.
@@ -280,10 +279,10 @@ class TestRunRound(unittest.TestCase):
 class TestMutatedRows(unittest.TestCase):
     """The guard that keeps a test from judging its own round.
 
-    A round rewrites a source. A test that reads the table against the live
-    sources then fails inside the round, and the round records the compiler as
-    caught when no test of the compiler saw the mutation. `mutated_rows` is what
-    the test and `--check` ask before they report.
+    A round rewrites a source. A test that reads the table against live sources
+    then fails inside that round. The round can record a catch although no
+    compiler test saw the mutation. The test and `--check` use `mutated_rows`
+    before they report.
     """
 
     def test_a_clean_tree_carries_no_round(self):
@@ -354,7 +353,7 @@ class TestMutatedRows(unittest.TestCase):
 
 
 class TestRunTable(unittest.TestCase):
-    """Which rows a run reaches, and where it stops."""
+    """Test which rows a run reaches and where it stops."""
 
     def table_of_two(self, root):
         table = small_table(root)
@@ -545,11 +544,10 @@ class TestGuest(unittest.TestCase):
 class TestTheRealTable(unittest.TestCase):
     """The table in the repository answers for its own shape and anchors.
 
-    These tests read the **live** sources, so they must not run during a round:
-    a round rewrites one of them, and a red test here would be recorded as the
-    compiler's catch. The class skips on such a tree, and the table's second
-    stage excludes this suite by name as well. A
-    skip is visible: `unittest` prints `OK (skipped=...)`.
+    These tests read the **live** sources, so they must not run during a round.
+    A round rewrites one source. A red test here would appear as a compiler
+    catch. The class skips on such a tree. The table's second stage also
+    excludes this suite by name. `unittest` shows a skip as `OK (skipped=...)`.
     """
 
     @classmethod

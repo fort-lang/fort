@@ -47,14 +47,12 @@ CORPUS_DIRS = (
     TTY_DIR,
     DARWIN_TEST_DIR,
 )
-# The number of files those directories hold. It is an equality and not a floor
-# because a floor cannot see a directory that stopped being walked: a ticket
-# that adds or removes a `.ft` under CORPUS_DIRS reads the new number off the
-# failure and writes it here, as it does for CORPUS_FILES in
-# test/parser_recovery_test.c.
+# The number of files those directories hold. A floor cannot detect a directory
+# that the scan stopped using. When a `.ft` file changes this count, use the
+# number from the failure. test/parser_recovery_test.c uses the same method.
 CORPUS_FILES = 705
 # The least number of `.ft` each of those directories holds. A directory grows,
-# so its own test asserts a floor and CORPUS_FILES asserts the exact total. A
+# so its own test asserts a floor and CORPUS_FILES asserts the exact total.
 # A floor of 1 only proves that the directory exists.
 # Each floor stays near its measured count. The
 # table has one entry for each directory of CORPUS_DIRS, and
@@ -225,27 +223,24 @@ def refuse_renumbering(pattern):
 class Scanner:
     """One search over a line for a whole rule list.
 
-    The engine searched for each rule of the list separately at each position,
-    and each search scans to the end of the line, so one line cost
-    `positions x rules x length`. One alternation of the same rules, each
-    inside a group of its own, answers the same question in one scan: the
-    regex engine finds the leftmost position at which an alternative matches,
-    and at that position it takes the first alternative in the order they are
-    written. That is the rule this engine already had -- the end pattern
-    first, then rule order. Thus, the end pattern is the first alternative.
+    The engine searched for each rule separately at each position. Each search
+    scans to the line end, so one line cost `positions x rules x length`.
+    One alternation answers the same question in one scan. Each rule has its
+    own group. The regex engine finds the leftmost matching position. At that
+    position, it takes the first alternative in written order. This engine
+    already used that order: the end pattern first, then rule order. Thus, the
+    end pattern is the first alternative.
 
-    `lastindex` names the group that closed last. The groups of a rule close
-    inside the group that wraps the rule, so that group is the wrapper, and
-    `by_group` turns it into the entry that won.
+    `lastindex` names the group that closed last. A rule's groups close inside
+    its wrapper group. Thus, the last group is the wrapper. `by_group` turns
+    it into the winning entry.
 
-    The winner is then applied on its own at the position the alternation
-    found, because `emit` reads the captures of a rule by the group numbers of
-    that rule. The precondition of the whole class is that a rule pattern
-    means the same thing inside the alternation as it does alone. A
-    backreference, a named backreference and a conditional group all count
-    from the start of the pattern they stand in, so `refuse_renumbering`
-    refuses them rather than let the alternation select the wrong rule. The
-    grammar spells none of the three today, over 57 patterns.
+    The scanner applies the winner alone at the position the alternation found.
+    `emit` reads captures by the winning rule's group numbers. Each rule pattern
+    must have the same meaning inside the alternation and alone. A backreference,
+    named backreference, or conditional group counts from its pattern start.
+    `refuse_renumbering` rejects them because the alternation could select the
+    wrong rule. The grammar uses none of them across 57 patterns.
     """
 
     def __init__(self, engine, rules, end):
@@ -331,10 +326,10 @@ class Engine:
     def scanner(self, patterns, end):
         """The scanner of one rule list and one end pattern, built once.
 
-        The key is the identity of the pattern list, because the grammar holds
-        every list for as long as this engine holds the grammar: no list is
-        freed and no id is reused. A list is built once for each context and
-        not once for each position, which is what makes the alternation cheap.
+        The key is the pattern-list identity. The grammar keeps each list for
+        as long as this engine keeps the grammar. No list is freed, so no id is
+        reused. Each context builds its list once, not once for each position.
+        This makes the alternation inexpensive.
         """
         key = (id(patterns), end)
         if key not in self.scanners:
@@ -610,9 +605,9 @@ class MarkerTableTest(unittest.TestCase):
 class ScannerTest(unittest.TestCase):
     """Compare Scanner with one search for each rule.
 
-    SlowScanner is that oracle. The cases below name each rule of the search
-    on a grammar of two or three patterns, because a case that names the rule
-    is the witness and a corpus that agrees is only the class.
+    SlowScanner is that oracle. Each case names a search rule on a grammar of
+    two or three patterns. The named rule is the witness. A matching corpus
+    identifies only the class.
     """
 
     def setUp(self):
@@ -651,8 +646,11 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual((kind, match.start(), rule["name"]), ("begin", 1, "string"))
 
     def test_the_captures_keep_the_numbers_of_their_own_rule(self):
-        """emit reads a capture by the group number of the rule, so the
-        alternation may not shift it: group 1 of the winner is group 1."""
+        """The alternation does not shift a rule's capture groups.
+
+        emit reads each capture by its group number. Group 1 of the winner
+        remains group 1.
+        """
         rules = [{"match": "z"}, {"match": r"(a)(b)"}, {"match": r"(c)"}]
         _, match, _ = self.scan(rules, None, "qab")
         self.assertEqual((match.group(1), match.group(2), match.re.groups), ("a", "b", 2))
@@ -668,16 +666,20 @@ class ScannerTest(unittest.TestCase):
         self.assertIsNone(self.scan([], None, "abc"))
 
     def test_a_rule_with_groups_does_not_shift_the_rule_after_it(self):
-        """The wrapper of an entry stands after the groups of the entry before
-        it, so a rule with groups may not move the rule that follows it."""
+        """A rule with groups does not move the next rule.
+
+        An entry's wrapper stands after the groups of the previous entry.
+        """
         rules = [{"match": "(a)(b)"}, {"match": "z", "name": "z"}, {"match": "(c)"}]
         _, _, rule = self.scan(rules, None, "z")
         self.assertEqual(rule["name"], "z")
 
     def test_the_group_that_closed_last_is_the_one_that_wraps_the_rule(self):
-        """search reads the winner off lastindex, which names the group that
-        closed last: the groups of a rule close inside the group that wraps
-        it, so the wrapper is the one that closes last."""
+        """search reads the winner from lastindex.
+
+        lastindex names the group that closed last. A rule's groups close
+        inside its wrapper, so the wrapper closes last.
+        """
         scanner = Scanner(self.engine, [{"match": "z"}, {"match": r"(a)(b)"}], None)
         self.assertEqual(sorted(scanner.by_group), [1, 2])
         self.assertEqual(scanner.combined.search("ab").lastindex, 2)
@@ -813,12 +815,11 @@ class CorpusTest(unittest.TestCase):
         """A directory of CORPUS_DIRS that no test checks is caught here.
 
         This test records directory checks and tokenizes nothing.
-        It runs each test of this class with
-        check_directory recording its directory rather than checking it, so it
-        reads what the run does and not what the source says: a method renamed
-        out of the suite, a method the class skips and a call commented out
-        each leave a directory unrecorded. A sibling that fails for its own
-        reason fails here as well, which is the price of running them.
+        It runs each test of this class with check_directory recording its
+        directory instead of checking it. Thus, it reads what the run does,
+        not what the source says. A renamed method, a skipped method, or a
+        commented call leaves a directory unrecorded. A sibling that fails for
+        its own reason also fails here. This is the cost of running them.
         """
         checked = []
 
@@ -841,9 +842,8 @@ class CorpusTest(unittest.TestCase):
     def test_every_fort_source_in_the_repository_is_walked_or_excluded(self):
         """No directory of fort can be missed in silence.
 
-        A new `.ft` outside CORPUS_DIRS and EXCLUDED_DIRS fails here, so a
-        corpus this test does not know about is a red test rather than a hole
-        nobody sees -- which is what test/fort was for two tickets.
+        A new `.ft` outside CORPUS_DIRS and EXCLUDED_DIRS fails here. Thus, an
+        unknown corpus causes a red test instead of an unseen gap.
         """
         stray = []
         for path in sorted(ROOT.rglob("*.ft")):

@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Which diagnostics of a ported pass does no test/fort suite assert?
+"""Report diagnostics of a ported pass that no test/fort suite asserts.
 
 The report compares diagnostics in one bootstrap C pass with a fort module.
-It then shows diagnostics that no test/fort suite asserts.
 Use the report before a change claims complete diagnostic coverage.
 
-A diagnostic is one `check_error(ck, loc, "...")` or one run of `msg_str`
-pieces between `check_msg_begin` and `check_msg_end`/`check_note_end`; two
-sites that build the same message are one diagnostic. It counts as asserted
-when a file under test/fort holds a piece of it, or a 22-character prefix of
-one, that belongs to that message alone -- a hint such as ": write move(" is
-shared by two messages and is evidence for neither.
+A diagnostic is one `check_error(ck, loc, "...")`. It can also be one run of
+`msg_str` pieces between its begin and end calls. Two sites that build the same
+message count as one diagnostic. A test asserts it when a file under test/fort
+contains its unique piece or 22-character prefix. A shared hint, such as
+": write move(", is evidence for neither message.
 
-The result is a list of candidates and not a verdict: a message composed from
-pieces the suites assert only in combination ("<what> expects <T>, not <U>")
-is a false positive, because the finished text exists nowhere in the source.
+The result is a candidate list, not a verdict. A message can combine pieces
+that suites assert only together, such as "<what> expects <T>, not <U>".
+Such a message is a false positive because its full text is not in the source.
 Verify each reported candidate by hand. The tool is not a ctest because its
 output needs this review.
 

@@ -729,9 +729,9 @@ def judge_run(test, compile_proc, link_proc, run_proc):
 
     A harness link or launch failure is an ERROR. A program timeout is a FAIL.
 
-    The `stderr:` substrings are looked for after dropping the notice qemu-user
-    appends when a signal kills the program, so an `abort` or `signal:` test
-    sees the same stderr under qemu as natively.
+    The harness drops the notice that qemu-user appends after a signal kills
+    the program. It then looks for the `stderr:` substrings. Thus, an `abort`
+    or `signal:` test sees the same stderr under qemu and natively.
     """
     verdict, reason = judge_compile(compile_proc, True)
     if verdict:
@@ -842,9 +842,8 @@ def render_index(symbols):
 def golden_index_problems(root, path):
     """Return lint problems for a golden index file.
 
-    A record is also held against `render_index`, so a golden file that was
-    hand-edited into another spelling of the same records fails here rather
-    than in the run it is compared byte for byte in.
+    The lint also compares each record with `render_index`. Thus, a manually
+    respelled golden file fails here, not during the byte comparison.
     """
     where = path.relative_to(root).as_posix()
     try:
@@ -995,9 +994,9 @@ def document_reports(doc, root):
 def sequence_problems(from_text, from_json):
     """Return sequence differences between text and document records.
 
-    The document lists its diagnostics in the order they were reported, which
-    is the order of the text form, so a reordered or a duplicated record is a
-    difference and not just a missing one.
+    The document lists diagnostics in report order. The text form uses the
+    same order. Thus, a reordered or duplicate record is a difference, not
+    only a missing record.
     """
     problems = []
     for i, (text, document) in enumerate(zip(from_text, from_json)):
@@ -1035,11 +1034,10 @@ def _answer_problem(proc, label):
 def files_problems(test, files):
     """Return missing required entries from `"files"`.
 
-    It lists every file the compiler read, so the entry file is always among
-    them; every other file a diagnostic is about is checked with that
-    diagnostic. A module of the test that the walk never reached is
-    legitimately absent: an import rejected before its file is opened, as in
-    `fail/modules/003_late_import`, leaves the sibling unread.
+    The list contains each file that the compiler read. It always contains the
+    entry file. Each diagnostic also checks its named file. An unreached test
+    module is correctly absent. For example, `fail/modules/003_late_import`
+    rejects an import before it opens the sibling.
     """
     if test.entry in files:
         return []
@@ -1053,9 +1051,9 @@ def index_of_the_test(test, symbols):
     closure holds `std.rt` and its imports. Thus, a run over any test
     answers with the whole standard library's records too. Those cannot stand
     in a golden: their file names are the `--std-dir` the run was given, which
-    is a build directory and differs between machines. The golden therefore
-    holds the records of the files under the test's own directory, which is
-    what the test is about, and the library's records are dropped here.
+    is a build directory and differs between machines. Therefore, the golden
+    holds records for files under the test directory. The test examines those
+    files. This function drops the library records.
     """
     prefix = test.path + "/"
     return [record for record in symbols if str(record.get("file", "")).startswith(prefix)]
@@ -1064,9 +1062,8 @@ def index_of_the_test(test, symbols):
 def golden_index_diff(test, symbols, root):
     """Return the first difference from the test's golden index.
 
-    The golden is the `"symbols"` of the run over the test's own files, one
-    record per line, so a mismatch names the line and shows both spellings of
-    it.
+    The golden contains the run's `"symbols"` for the test files, one record
+    per line. Thus, a mismatch names the line and shows both spellings.
     """
     path = root / test.path / INDEX_NAME
     try:

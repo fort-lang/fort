@@ -480,9 +480,8 @@ TEST(a_local_enum_against_an_imported_one_conflicts, {
 
 TEST(a_nominal_against_a_plain_type_offers_the_type_too, {
     begin();
-    // One side names the enum and the other writes the `i32` it crosses as: the note fires although
-    // only one module named a type. This is because the fix is the same one -- import the enum and
-    // write it -- and no rewording of `i32` reaches it.
+    // One side names the enum and the other writes the `i32` it crosses as. The note fires although
+    // only one module named a type. Both errors have one remedy: import the enum and write it.
     add("main.ft",
         "import shade;\n"
         "extern fn paint(i32 c) void;\n"

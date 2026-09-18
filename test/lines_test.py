@@ -1,9 +1,8 @@
 """Unit tests for tools/lines.py.
 
-The glob matcher is the part worth pinning: the guest runs Python 3.12, where
-pathlib.Path.full_match does not exist, so lines.py compiles the globs itself
-and a mistake there would silently count the wrong files. Standard library
-only, Python 3.12.
+The tests hold the glob matcher. The guest runs Python 3.12, which has no
+pathlib.Path.full_match. Thus, lines.py compiles the globs. A mistake can count
+the wrong files without an error. Standard library only; Python 3.12.
 """
 
 import subprocess

@@ -105,7 +105,7 @@ class ReadFielded(unittest.TestCase):
 
 
 class ReadBullets(unittest.TestCase):
-    """Test the legacy bullet form."""
+    """Test the bullet form."""
 
     def test_every_entry_is_found(self):
         entries = check_decisions.read_bullets(BULLETS)
@@ -259,7 +259,7 @@ class Compare(unittest.TestCase):
         self.assertEqual(self.changed(BULLETS, broken, allowed=["D1.1"]), [])
 
     def test_the_rationale_marker_is_not_a_difference(self):
-        """The old form writes `Rationale: ` in the sentence, the new form as
+        """The bullet form writes `Rationale: ` in the sentence. The heading form uses
         the field label, and the comparison must not read that as a change.
         The field keeping the marker compares equal as well."""
         kept = GOOD.replace("- rationale: the user", "- rationale: Rationale: the user")
@@ -418,10 +418,10 @@ class RealLog(unittest.TestCase):
 
         The list is empty. A dated note written into a rule fails this test.
 
-        The pattern is case-insensitive and takes any whitespace between the
-        word and the date, because a rule wraps at 100 columns and such a note
-        is often lowercase; a stricter pattern misses both and passes for the
-        wrong reason.
+        The pattern is case-insensitive. It accepts any whitespace between the
+        word and the date because a rule wraps at 100 columns. Such a note is
+        often lowercase. A stricter pattern misses both cases and passes for
+        the wrong reason.
         """
         dated = re.compile(r"(?:amended|note|decided)\s+20\d\d-\d\d-\d\d", re.IGNORECASE)
         loose = sorted(name for name, fields in self.entries.items()

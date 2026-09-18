@@ -3,10 +3,10 @@
 
 Pure tests cover index records. A fake compiler covers missing output, crashes, and diagnostics.
 
-The second half runs the real compiler when the environment names one in
-FORT_BINARY, as the ctest does: it lints test/fort_lint/bad_names.ft, which
-holds one violation of every rule, and holds the whole verdict against the
-list below. A rule that stopped firing fails there rather than going quiet.
+The second half runs the real compiler when FORT_BINARY names it. The ctest
+uses this path. It lints test/fort_lint/bad_names.ft, which holds one violation
+of each rule. It compares the complete verdict with the list below. A rule
+that stops firing fails there instead of going quiet.
 
 Run with `python3 -m unittest fort_lint_test` from this directory. Standard
 library only; Python 3.12.
@@ -329,7 +329,7 @@ class DocumentProblems(unittest.TestCase):
         self.assertNotIn("no identifier", problems[0][2])
 
     def test_a_file_that_declares_nothing_is_not_a_problem(self):
-        """An empty module or a stub of comments, plausible in Phase B."""
+        """An empty module or a stub of comments is valid."""
         document = {"diagnostics": [], "symbols": []}
         self.assertEqual(
             fort_lint.document_problems(document, str(self.root), "a.ft", has_source_text=False),
@@ -704,7 +704,7 @@ class DefaultFileSet(unittest.TestCase):
         self.assertIn("no file matched", problems[0])
 
     def test_a_directory_that_does_not_exist_yet_is_not_a_problem(self):
-        """src/fort/ before Phase B fills it is absent, not empty."""
+        """An absent src/fort/ directory is not an empty directory."""
         (self.root / "std").mkdir()
         (self.root / "std" / "io.ft").write_text("")
         self.assertEqual(self.problems(), [])

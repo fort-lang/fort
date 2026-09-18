@@ -72,9 +72,8 @@ TEST(a_comparison_reports_the_constant_of_either_operand, {
 })
 
 TEST(a_comparison_reports_a_bad_constant_on_each_side, {
-    // Both sides are retyped, so both are reported. A fix that retyped the left side alone leaves
-    // this at one diagnostic, and the corpus cannot see the difference. This is because both stand
-    // on one line.
+    // Both sides are retyped, so both are reported. Retyping only the left side gives one
+    // diagnostic. The corpus cannot see the difference because both operands stand on one line.
     TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n"
                                  "    println((9223372036854775808 << n) > "
                                  "(18446744073709551615 << n));"));
@@ -138,8 +137,8 @@ TEST(a_unary_operand_leaves_the_pair_before_the_rule_sees_it, {
 
 TEST(an_untyped_pair_that_is_no_comparison_still_reaches_its_context, {
     // The other half of the same branch, which is unchanged: an operator that is no comparison
-    // leaves the pair untyped. The context walks both operands and reports there. The count is what
-    // this asserts, because the fix must not add a second report on the way.
+    // leaves the pair untyped. The context walks both operands and reports there.
+    // The count prevents a second report during that walk.
     TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    println(9223372036854775808 + (1 << n));"));
     TEST_ASSERT_TRUE(said("constant 9223372036854775808 does not fit i64"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);

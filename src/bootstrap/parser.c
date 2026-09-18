@@ -2161,7 +2161,7 @@ static bool parse_import_items(parser_t* p, ast_node_t* n) {
 
 // Reports two invalid path separators at the separator position.
 // Longest-match lexing makes `..` one token in `import a..b;`.
-// Old source can also contain `::`, which preceded the current `.` separator.
+// The parser also accepts `::` as a compatibility separator.
 // Without this test, either form causes an incorrect missing-`;` diagnostic.
 static bool check_path_separator(parser_t* p) {
     if (at(p, TOK_DOT_DOT)) {

@@ -539,7 +539,7 @@ void gen_use_extern(gen_t* g, const sym_t* s) {
     ptrvec_push(&g->externs, (void*)s);
 }
 
-// Linux keeps its old variadic form. Darwin fixes an extern without `...`.
+// Linux uses the variadic form. Darwin fixes an extern without `...`.
 // Darwin also marks each declaration `nobuiltin`.
 static void emit_extern(gen_t* g, sb_t* out, const sym_t* s) {
     const type_t* sig = s->type;
@@ -674,7 +674,7 @@ void gen_finish(gen_t* g) {
     }
     sb_t intrinsics;
     sb_init(&intrinsics);
-    // Then the intrinsics in the fixed table order.
+    // The emitter writes intrinsics in the fixed table order.
     for (uint64_t i = 0; i < (uint64_t)IN_COUNT; i++) {
         if (g->intrinsics[i]) {
             emit_intrinsic(&intrinsics, i);

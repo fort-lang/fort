@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """Check the shape of spec/decisions.md, and hold two revisions of it together.
 
-The decision log is the normative source, so the risk of an edit to it is a
-changed meaning that no build and no test can see. This tool answers two
-questions.
+The decision log is the normative source. An edit can change meaning without
+causing a build or test failure. This tool answers two questions.
 
 With one file, it checks the field order for each `### Dn.m Title` entry.
 It prints one line for each problem and exits 1.
 
-With `--against OLD` it reads the older revision too. It accepts the current
-form and the legacy `- **Dn.m**` bullet form. It compares the text of each
+With `--against BASE` it also reads the base revision. It accepts the heading
+form and the `- **Dn.m**` bullet form. It compares the text of each
 entry. Rule sentences can move between fields only when their words stay unchanged.
 An entry whose words changed is a failure.
-An entry whose words only moved is a failure too, unless the caller names it
-with `--allow-move Dn.m`: a permutation keeps the words of an entry and can
-still invert its rule, so "widening extends, narrowing truncates" and
-"narrowing extends, widening truncates" are one multiset and two rules.
+An entry whose words only moved is also a failure. The caller can permit this
+with `--allow-move Dn.m`. A permutation keeps the words but can invert the
+rule. For example, "widening extends, narrowing truncates" and its reverse use
+one word multiset but state two rules.
 Each permitted move needs one flag. `--allow Dn.m` excuses one entry from both reports.
 The tool prints the difference it excused, so an excused
 entry is still read and never silently dropped. Both flags fail when they name
 an entry that is not in both revisions.
 
-The one text the comparison drops is the bare marker `Rationale: `, which the
-old form wrote in the sentence and the new form writes as the field label.
+The comparison drops only the bare `Rationale: ` marker. The bullet form puts
+it in the sentence. The heading form uses it as the field label.
 """
 
 import argparse
@@ -69,7 +68,7 @@ def read_fielded(text):
 
 
 def read_bullets(text):
-    """Return {id: text} for the legacy `- **Dn.m**` form."""
+    """Return {id: text} for the `- **Dn.m**` bullet form."""
     entries, current = {}, None
     for line in text.split("\n"):
         match = BULLET.match(line)

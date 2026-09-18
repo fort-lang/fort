@@ -201,8 +201,8 @@ static const sym_t* sym_of_binding(const binding_t* b) {
 
 // ---- names -------------------------------------------------------------------------
 
-// Steps 1 and 2 of the lookup: the innermost block outward, then the module
-// namespace. The universe of step 3 is a builtin, which check_builtin reads.
+// The lookup reads the innermost block outward, then the module namespace.
+// check_builtin reads names from the universe.
 static const binding_t* lookup(const check_t* ck, str_t name) {
     if (ck->scope != NULL) {
         const binding_t* b = scope_lookup(ck->scope, name);
@@ -1286,8 +1286,8 @@ static void check_shift(
     // altogether. Every other early return that can see one calls
     // `check_operand`. That function assigns the default type and reports the
     // constant. A shift keeps this shape because it can fold back into range.
-    // For example, `9223372036854775808 >> 1` is a legal 2^62.
-    // the wide half, which this return used to drop
+    // For example, `9223372036854775808 >> 1` is a legal 2^62. This return
+    // keeps that wide half for the context.
     if ((check_poisoned(a->type) && !a->untyped) || check_poisoned(b->type)) {
         return;
     }
@@ -3166,7 +3166,7 @@ static bool check_extern_agreement(check_t* ck, const ast_node_t* decl, const sy
     const sym_t* first = (const sym_t*)ck->externs.items[at];
     if (first->node == decl) {
         // The same declaration can pass twice through one checker. Its symbol
-        // and nominal types are new records for the old tree. Replace the entry
+        // and nominal types are new records for the input tree. Replace the entry
         // instead of comparing it with itself. This path requires the second
         // pass to check successfully. A failed pass leaves the first symbol in
         // the map. Its nominal types belong to a replaced resolution. A later

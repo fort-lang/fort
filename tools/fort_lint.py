@@ -70,10 +70,9 @@ def collect(root, globs):
 def default_file_set(root, sets=SOURCE_SETS):
     """Return the default (path, include roots) pairs, sorted by path.
 
-    A file matched by two globs -- `test/fort/*.ft` and the support glob do not
-    overlap today, but a future pair could -- takes the roots of the first glob
-    that matched it, so the set is a function of the table's order and not of
-    the filesystem's.
+    A file matched by two globs takes the roots of the first matching glob.
+    `test/fort/*.ft` and the support glob do not overlap, but a future pair
+    could overlap. Thus, table order defines the set. Filesystem order does not.
     """
     skipped = {(root / name).resolve() for name in SKIPPED}
     chosen = {}
@@ -178,13 +177,13 @@ def has_source_text(text):
 def real_path(root, recorded, cache):
     """The real path of a file name a record or the file set spells.
 
-    An import resolves to the copy of the library beside the compiler, so the
-    closure of one module holds records of files under build/<preset>/std as
-    well. Real paths make a record that spells the same file differently equal
-    to it. The cache holds one entry per distinct name: one run names 33000
-    records over 40 files, and os.path.realpath is a syscall for each component
-    of each name. The cache is keyed on the recorded name alone, so one cache
-    serves one root; every caller passes the root it built the cache with.
+    An import resolves to the library copy beside the compiler. Thus, one
+    module closure also has records below build/<preset>/std. Real paths make
+    different spellings of one file equal. The cache holds one entry for each
+    distinct name. One run names 33000 records across 40 files, and
+    os.path.realpath calls the system for each name component. The recorded
+    name is the cache key, so one cache serves one root. Each caller passes the
+    root that built the cache.
     """
     resolved = cache.get(recorded)
     if resolved is None:
@@ -205,10 +204,10 @@ def same_file(root, recorded, wanted):
 def diagnostic_problems(document):
     """The checker's own diagnostics, in their own file order.
 
-    The error may sit in an imported module, so each carries its own position
-    and the lint reports it against the head of the file it was asked about.
-    They are sorted by the position they name rather than by the text of the
-    line, so a module with twenty errors lists them in file order.
+    An error can be in an imported module, so each error carries its position.
+    The lint reports it against the requested file's head. It sorts errors by
+    position, not by line text. Thus, a module with twenty errors lists them in
+    file order.
     """
     diagnostics = document.get("diagnostics", [])
     keyed = sorted(
@@ -323,11 +322,11 @@ def text_problems(relative, text):
 def lint_files(fort, root, files, std_dir=None):
     """Return the formatted problems of each file, and the number of runs.
 
-    `std_dir` is the whole run's, never one entry's: it comes from the command
-    line and names the standard library for a compiler the build did not put it
-    beside (the ctest `fort_lint_float` runs stage2 that way). It is therefore
-    the same for every entry and cannot change the rule below, which compares
-    the search roots of two files.
+    `std_dir` applies to the complete run, not one entry. It comes from the
+    command line. It names the standard library when the build does not put it
+    beside the compiler. The ctest `fort_lint_float` runs stage2 this way.
+    Therefore, each entry uses the same value. It cannot change the comparison
+    between two files' search roots.
 
     One `fort --index` run indexes the full import closure and names each record's file.
     Thus, the run judges each file of the
@@ -335,12 +334,11 @@ def lint_files(fort, root, files, std_dir=None):
     as the next entry and judges the closure with it. This avoids checking the
     same closure once for each member.
 
-    A run that fails costs its entry the index, not the checks that read only
-    the text, and leaves every other file of the set for a run of its own. The
-    run's diagnostics go to every file the run judges, so a broken module names
-    itself once in each file of its closure; that reports more than one run per
-    file did, never less. The sort is by position and stable, so two problems at
-    one position keep the order the rules produced them in.
+    A failed run costs its entry the index, but not checks that read only text.
+    Each other file remains for a separate run. The run's diagnostics go to
+    each file that it judges. Thus, a broken module names itself once in each
+    closure file. This reports at least as much as one run per file. The sort
+    is stable and uses position. Two problems at one position keep rule order.
     """
     cache = {}
     entries = []
@@ -389,11 +387,11 @@ def lint_files(fort, root, files, std_dir=None):
 def empty_set_problems(root, paths):
     """The reasons the default file set is not the one this tool means to check.
 
-    A mistyped glob, a renamed directory or a `std/` emptied by a bad merge
-    would otherwise make the whole lint vacuous: it would print "0 file(s), no
-    violation" and exit 0. So the set as a whole must not be empty, and a glob
-    whose directory exists must match something; a glob whose directory does
-    not exist yet (`src/fort/*.ft` before Phase B fills it) is not a mistake.
+    A mistyped glob, renamed directory, or empty `std/` could make the lint
+    inspect nothing. It would print "0 file(s), no violation" and exit 0.
+    Therefore, the complete set must not be empty. A glob with an existing
+    directory must match a file. A glob whose directory does not yet exist is
+    valid.
     """
     problems = []
     if not paths:

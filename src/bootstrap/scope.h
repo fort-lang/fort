@@ -69,8 +69,8 @@ binding_t* scope_declare(
 // The binding of `name` in `s` alone, or NULL.
 const binding_t* scope_find(const scope_t* s, str_t name);
 
-// The binding of `name` in `s`, then in every enclosing scope, or NULL. The
-// universe of step 3 is scope_is_universe.
+// The binding of `name` in `s`, then in every enclosing scope, or NULL.
+// scope_is_universe identifies the universe.
 const binding_t* scope_lookup(const scope_t* s, str_t name);
 
 // Finds `name` in `s` and its enclosing block scopes. The search stops before

@@ -665,7 +665,8 @@ bool type_cast_allowed(const type_t* dst, const type_t* src) {
         return scalar_cast_allowed(dst, src);
     }
     if (is_ptr_like(src)) {
-        // and to `u64`; a function pointer only through `void*`
+        // A pointer converts to another pointer or to `u64`.
+        // A function pointer converts only through `void*`.
         return is_ptr_like(dst) || is_u64(dst) ||
                (src->kind == TYPE_VOIDPTR && dst->kind == TYPE_FN);
     }

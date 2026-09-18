@@ -870,7 +870,7 @@ test('the root stays on the module after its own check answers', () => {
     state.calls[2].args[1],
     COMPILER + " --check --json -I 'project' 'project/util/strings.ft'"
   );
-  // And a file that only that check has painted carries it too.
+  // A file that only this check painted also keeps the root.
   fake.open(state, SUB_CHARS);
   assert.equal(
     state.calls[3].args[1],
@@ -963,7 +963,7 @@ test('the root of a closure does not grow across sibling directories', () => {
   fake.open(state, Y);
   assert.equal(state.calls[2].args[1], ROOT_ONLY + " 'b/y.ft'");
   fake.complete(state.calls[2], { stdout: readFiles('b/y.ft', 'a/x.ft') });
-  // And back again: the list is the one root, however many checks have run.
+  // A later check still uses the one root.
   fake.open(state, X);
   assert.equal(state.calls[3].args[1], ROOT_ONLY + " 'a/x.ft'");
 });
@@ -1004,7 +1004,7 @@ test('a module checked with a root publishes onto the files it names', () => {
   // empty range is expanded to the word at that position.
   assert.deepEqual(items[0].range.start, { line: 2, character: 9 });
   assert.deepEqual(items[0].range.end, { line: 2, character: 13 });
-  // And the module the run was pointed at is cleared, not left painted.
+  // The run also clears its entry module.
   assert.deepEqual(state.diagnostics.get(NOTES_FT), []);
 });
 

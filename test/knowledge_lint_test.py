@@ -418,8 +418,8 @@ class HistoryLimitTest(unittest.TestCase):
                          "D14.4 names")
 
     def test_the_widened_subject_catches_the_motivating_case_it_used_to_miss(self):
-        # The old subject missed a bare-tag report in the motivating case.
-        # The wider subject reports 6 sentences where the old subject reports 4.
+        # The narrow subject misses a bare-tag report in this case.
+        # The wider subject reports 6 sentences. The narrow subject reports 4.
         old = subprocess.run(["git", "show", "8a1eb48:spec/decisions.md"],
                              cwd=Path(__file__).resolve().parent.parent,
                              capture_output=True, check=False)

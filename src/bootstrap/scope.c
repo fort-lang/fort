@@ -64,8 +64,8 @@ const binding_t* scope_find(const scope_t* s, str_t name) {
     return (const binding_t*)s->items.items[at];
 }
 
-// Lookup goes from the innermost block outward, then the module namespace
-// (steps 1 and 2); the universe of step 3 is the caller's.
+// Lookup goes from the innermost block outward, then through the module namespace.
+// The caller handles the universe.
 const binding_t* scope_lookup(const scope_t* s, str_t name) {
     const scope_t* cur = s;
     while (cur != NULL) {

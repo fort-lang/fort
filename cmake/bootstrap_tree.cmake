@@ -38,8 +38,8 @@ execute_process(
 if(NOT std_status EQUAL 0)
     message(FATAL_ERROR "the standard root of ${SHA} failed for ${TARGET}")
 endif()
-# The bridge imports std.rt_float. Later revisions merge that module into
-# std.rt. Keep the old module name available while the bridge builds them.
+# The bridge imports std.rt_float, while HEAD provides the functions in std.rt.
+# Keep the compatibility module available while the bridge builds both modules.
 if(NOT EXISTS "${target_dir}/std/rt_float.ft")
     file(WRITE "${target_dir}/std/rt_float.ft"
          "// Compatibility module for the C-built bootstrap bridge.\n")

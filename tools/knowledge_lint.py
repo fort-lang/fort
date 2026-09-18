@@ -13,14 +13,13 @@ What this lint does not see:
   * The `paths` rule reads a reference to a `.md` file under a directory of the
     repository. A path to a source file, a glob and a bare document name are
     outside it, as is a section number that names no section.
-  * The `history` rule reads a subject that names a rule, and a bare decision
-    tag only at the head of a sentence, because inside one a tag is as often a
-    relative clause. It reads a closed list of verbs, one dated note excuses
-    the whole field, and it says nothing about the `rule` field or the
-    `rationale` field. HISTORY_LIMITS below states each gap with the entry
-    that stands in it, and it is counted by
-    `test_every_limit_names_a_gap_and_says_what_stands_in_it`, so no number
-    for a gap stands in this prose.
+  * The `history` rule reads a subject that names a rule. It reads a bare
+    decision tag only at a sentence head. Elsewhere, a tag often starts a
+    relative clause. The rule uses a closed verb list. One dated note excuses
+    the complete field. It does not read the `rule` or `rationale` field.
+    HISTORY_LIMITS states each gap with its entry. The test
+    `test_every_limit_names_a_gap_and_says_what_stands_in_it` counts the gaps.
+    Thus, this prose gives no gap count.
 """
 
 import argparse
@@ -84,7 +83,7 @@ def rule_decisions(root):
 
 # An amendment date does not date a present-tense claim inside its note.
 # Such a claim becomes stale when the reported rule changes.
-# The reported verb controls the result. Quoted old text does not make a current claim.
+# The reported verb controls the result. Quoted source text does not make a current claim.
 
 # A bare decision tag is a subject at the head of a sentence and nowhere else.
 # A note places a reported entry tag at the sentence head.
@@ -136,7 +135,7 @@ HISTORY_REPORT = re.compile(
 HISTORY_ANCHOR = re.compile(r"\bnow\b|20\d\d-\d\d-\d\d|as it stood"
                             r"|from th(?:is|at) date")
 
-# A dated repair adds a note instead of changing the old words.
+# A dated repair adds a note instead of changing the source words.
 # One dated repair excuses each report in its field.
 HISTORY_DATE = re.compile(r"20\d\d-\d\d-\d\d")
 HISTORY_DATING = re.compile(r"as it stood|from th(?:is|at) date")
@@ -296,9 +295,9 @@ def field_is_dated(body):
 def history_problems(text, path=DECISIONS_FILE):
     """Every history note that reports a rule of the log in the present tense.
 
-    Returns (problems, fields, dated): the count of fields read and the count of
-    them that carry a dated note, so a green report says how much of it is the
-    escape rather than the rule.
+    Returns (problems, fields, dated). fields is the number of fields read.
+    dated is the number with a dated note. Thus, a green report shows how much
+    uses the escape instead of the rule.
     """
     problems, fields, dated = [], 0, 0
     for tag, body, at in history_fields(text):

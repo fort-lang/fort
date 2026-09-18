@@ -31,12 +31,11 @@ def collect(root, globs):
 def scan_text(text):
     """Return the problems in text as (line, message) pairs, in source order.
 
-    The scan is a small state machine over the characters: outside a literal
-    and a comment, `/*` is a block comment; inside a string or a character
-    literal a backslash escapes the next character, and `/*` means nothing;
-    inside a `//` comment nothing but the newline matters. A literal that a
-    newline or the end of the text interrupts is reported too, since the rest
-    of the scan would be nonsense.
+    The scan uses a small state machine. Outside a literal and a comment, `/*`
+    starts a block comment. Inside a string or character literal, a backslash
+    escapes the next character, and `/*` has no effect. Inside a `//` comment,
+    only the newline matters. The scan also reports a literal interrupted by a
+    newline or the text end. Otherwise, the remaining scan would be invalid.
     """
     problems = []
     line = 1
@@ -68,8 +67,9 @@ def scan_text(text):
 def scan_literal(text, start, line):
     """Scan the literal opening at start; return (index after it, line, problem).
 
-    The index is past the closing quote, or at the newline or the end of the
-    text that interrupted the literal, in which case problem says so.
+    The index is past the closing quote. It can also identify the newline or
+    text end that interrupted the literal. In that case, problem gives the
+    cause.
     """
     quote = text[start]
     kind = "string" if quote == '"' else "character"

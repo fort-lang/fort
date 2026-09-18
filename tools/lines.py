@@ -5,10 +5,10 @@ Source includes compiler and standard library files. Tests include C helpers and
 The runtime is std.rt, so it counts with std/*.ft. The editor extension is on neither side.
 `TARGET_RATIO` is display-only. `--min` fails when the ratio is below its argument.
 
---since REF measures a branch instead of the repository: it counts the lines
-a diff against REF adds and removes on each side, so a ticket answers for the
-code it introduces rather than hiding behind the corpus already there. A
-branch that adds no source line has no ratio and passes.
+--since REF measures a branch instead of the repository. It counts the lines
+that a diff against REF adds and removes on each side. Thus, the branch answers
+for the code it introduces. A branch that adds no source line has no ratio and
+passes.
 """
 
 import argparse
@@ -82,9 +82,9 @@ def path_matches(path, patterns):
 def diff_lines(root, ref, globs):
     """Return (added, removed) line counts of a diff against ref for the globs.
 
-    git numstat reports added and removed per file; a file whose path matches
-    none of the globs is skipped, so the two sides use the same rules as a
-    whole-repository count.
+    git numstat reports added and removed lines for each file. The function
+    skips a path that matches no glob. Thus, both sides use the rules of a
+    complete repository count.
     """
     out = subprocess.run(
         ["git", "diff", "--numstat", "--no-renames", ref + "...HEAD"],

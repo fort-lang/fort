@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Unit tests of run_tests.py: directive parsing, lint, judging and an end-to-end run.
 
-The end-to-end tests use a fake `fort` whose behavior is scripted by `//@`
-lines in the test files it is given (they are ordinary comments to the
-harness), a fake `cc` that turns `prog.o` into `prog` and a fake `opt` that
-rejects a module containing the word `invalid`. Run with
-`python3 -m unittest run_tests_test` from this directory.
+The end-to-end tests use a fake `fort`. `//@` lines in each input test script
+its behavior. These lines are ordinary comments to the harness. A fake `cc`
+turns `prog.o` into `prog`. A fake `opt` rejects a module that contains
+`invalid`. Run `python3 -m unittest run_tests_test` from this directory.
 """
 
 import contextlib
@@ -651,9 +650,9 @@ class Discovery(TempRoot):
     def test_a_test_below_the_root_is_reported(self):
         """Report a `*_test.ft` below a directory that discovery does not walk.
 
-        `test/fort/support` holds the code several module tests share and is
-        invisible to `discover`, so a test misfiled there would otherwise run
-        nowhere and say nothing at all.
+        `test/fort/support` holds code that several module tests share.
+        `discover` does not scan it. Thus, a test placed there would not run or
+        report a problem without this check.
         """
         write(self.root, "containers_test.ft", "//! run\n")
         write(self.root, "support/stray_test.ft", "garbage garbage\n")
@@ -1775,8 +1774,8 @@ class CheckJson(EndToEnd):
     def script(self, name, directives, expected="scripted"):
         """One fail test of the corpus whose //@ lines script both runs.
 
-        Its code line is line 3, which every scripted range points into; the
-        corpus is fresh in every test, so every test is the first of its area.
+        Each scripted range points into code line 3. Each test gets a new
+        corpus, so it is the first test in its area.
         """
         path = "fail/mutability/%s" % name
         header = "//! fail\n//! error-any: %s\nfn i32 main() { return 0; }\n" % expected
