@@ -11,19 +11,13 @@ import containers;
 import diag;
 import std.strbuf;
 
-// The diagnostic sink of src/fort/diag.ft, held against what toolchain.md 4
-// and the diagnostic rule say a diagnostic is: a range with a 1-based line and
-// byte column, an error that counts and a note that does not, a budget of
-// twenty per file, and a record whose message and file name are copies of
-// their own.
-// D14.2
+/// Checks diagnostic ranges, counts, file budgets, messages, and file names in
+/// src/fort/diag.ft.
 //
-// The sink is a value this test owns, which is the whole point of the module:
-// two sinks in one program share nothing, so the counts below are never a
-// global's leftovers.
+// This test owns the sink value. Two sinks in one program share no state.
+// Therefore, the counts below cannot contain records from another sink.
 
 // ---- ranges --------------------------------------------------------------------
-// D20.4
 
 // loc_make is the empty range at a position: the end is the start, which is
 // what a diagnostic with no extent carries.
@@ -49,7 +43,6 @@ fn loc_range_carries_both_ends() void {
 }
 
 // The range with no position in the file is the empty range at 1:1.
-// D14.2
 fn the_positionless_range_is_one_one() void {
     diag.loc l = diag.loc_make("", 1, 1);
     assert(l.file == "");
@@ -115,8 +108,7 @@ fn a_fresh_sink_is_empty() void {
     assert(diag.budget_left(&s));
 }
 
-// An error is counted and recorded; a note is recorded and not counted.
-// D14.2
+// An error is counted and recorded. A note is recorded and not counted.
 fn errors_are_counted_and_notes_are_not() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -157,7 +149,6 @@ fn a_record_carries_what_was_reported() void {
 // The message and the file name are copies the sink owns: the buffers they
 // came from may die, which is what lets a record outlive the module set that
 // reported it.
-// D20.2
 fn a_record_outlives_the_buffers_it_was_built_from() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -209,7 +200,6 @@ fn the_records_grow_and_keep_their_order() void {
 // Two sinks in one program share nothing: the counters of one are not the
 // counters of the other, which is what src/bootstrap/diag.c's globals cannot
 // do.
-// D20.5
 fn two_sinks_share_nothing() void {
     diag.sink mut a = diag.create();
     defer diag.free(&a);
@@ -226,7 +216,6 @@ fn two_sinks_share_nothing() void {
 }
 
 // ---- the budget ----------------------------------------------------------------
-// D14.2
 
 // begin_file starts the count of the file about to be read.
 fn begin_file_restarts_the_count() void {
@@ -251,7 +240,6 @@ fn begin_file_restarts_the_count() void {
 // budget is a question the lexer and the parser ask before they report, as
 // src/bootstrap/lexer.c and parser.c do. The sink itself refuses nothing. A
 // pass with no cap, such as the checker or module loader, reports all errors.
-// D14.2
 fn the_twentieth_error_is_the_last_one_the_budget_allows() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -283,7 +271,6 @@ fn the_twentieth_error_is_the_last_one_the_budget_allows() void {
 // lexical and syntax errors, and a note belongs to the error before it and is
 // counted by neither counter, which is what src/bootstrap/diag.c does --
 // diag_note touches neither errors nor file_errors.
-// D14.2
 fn a_note_spends_nothing_of_the_budget() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -298,7 +285,7 @@ fn a_note_spends_nothing_of_the_budget() void {
     assert(diag.count(&s) == 10);
     assert(diag.record_count(&s) == 20);
     assert(diag.budget_left(&s));
-    // Ten more errors spend the rest of it; the ten notes beside them do not.
+    // Ten more errors spend the rest of it. The ten notes beside them do not.
     while (i < 20) {
         diag.error(&s, diag.loc_make("a.ft", cast(i + 1, u32), 1), "e");
         diag.note(&s, diag.loc_make("a.ft", cast(i + 1, u32), 3), "n");
@@ -333,7 +320,6 @@ fn reset_empties_the_sink() void {
 
 // A thousand analyses through one sink allocate no more than one does: reset
 // releases the records and the copies rather than keeping them.
-// D20.5
 fn a_thousand_resets_do_not_grow_the_sink() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -364,9 +350,8 @@ fn freeing_twice_is_a_no_op() void {
 
 // ---- the text form -------------------------------------------------------------
 
-// With text on, each diagnostic writes `<file>:<line>:<col>: error: <msg>`
-// and `... note: ...` to stderr as it arrives, and the records are kept all
-// the same (toolchain.md 4). The two lines are the stderr directives in this
+// With text on, each diagnostic writes its full error or note line to stderr.
+// The sink still keeps the records. The two lines are the stderr directives in this
 // test's header, so the format is held byte for byte.
 fn text_writes_the_line_of_toolchain_4() void {
     diag.sink mut s = diag.create();

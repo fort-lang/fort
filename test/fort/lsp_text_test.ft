@@ -14,18 +14,17 @@
 import lsp.text;
 import lsp_env;
 
-// The positions of src/lsp/text.ft: the two encodings, the line rule, the
-// clamps and the two roundings the module promises. The line under test holds
-// one character of each UTF-8 length, a tab and a combining mark, so a
-// character index and a byte offset part company at every step of it.
+/// Checks line and character positions with tabs, combining marks, and each UTF-8 character
+/// length.
 //
-// SAMPLE is 'a', a tab, U+00E9 (two bytes), U+1D11E (four bytes, a surrogate
-// pair in UTF-16), 'e' and U+0301, the combining acute accent. Its bytes:
+// SAMPLE contains 'a', a tab, U+00E9, U+1D11E, 'e', and U+0301. U+00E9 uses
+// two bytes. U+1D11E uses four bytes and one UTF-16 surrogate pair. U+0301 is
+// the combining acute accent. The rows below show its encodings.
 //
-//   offset  0 1 2 3 4 5 6 7 8 9 10
-//   byte    a \t C3 A9 F0 9D 84 9E e CC 81
-//   utf-16  0 1 2    3          5   6
-//   utf-8   0 1 2    4          8   9
+// Offsets: 0 1 2 3 4 5 6 7 8 9 10.
+// Bytes: a \t C3 A9 F0 9D 84 9E e CC 81.
+// UTF-16 positions: 0 1 2 3 5 6.
+// UTF-8 positions: 0 1 2 4 8 9.
 string SAMPLE = "a\t\xC3\xA9\xF0\x9D\x84\x9Ee\xCC\x81";
 
 // The offsets of SAMPLE that begin a character, and the two indices of each.
@@ -132,17 +131,14 @@ fn an_empty_line_between_two_terminators_ends_where_it_begins() void {
 fn a_lone_carriage_return_is_not_a_line_break() void {
     // An old Mac file is one line, which is how the lexer counts it: a line is
     // numbered at a line feed and a `\r` is whitespace.
-    // D14.2, D2.1
     string s = "ab\rcd";
     lsp_env.check_u64(text.line_start(s, 1), 0, "lone cr line 1");
     lsp_env.check_u64(text.line_end(s, 0), 5, "lone cr end");
 }
 
 fn a_carriage_return_at_the_end_of_the_text_is_ordinary_text() void {
-    // It terminates nothing, so it belongs to the text of its line and the
-    // offset past it is a position. The review found the opposite: line_end
-    // stripped any carriage return before its stopping point, and the last
-    // byte of such a document had no position at all.
+    // It terminates nothing, so it belongs to the line text. The offset after
+    // it is a position. If line_end strips it, the last byte has no position.
     lsp_env.check_u64(text.line_end("abc\r", 0), 4, "the end of a line ending in a lone cr");
     text.position p = text.position_of("abc\r", text.position_encoding.enc_utf16, 4);
     lsp_env.check_u64(p.character, 4, "the position past a trailing cr");
@@ -219,7 +215,6 @@ fn every_ascii_byte_is_one_character_in_both_encodings() void {
 fn a_tab_is_one_character_and_not_a_run_of_columns() void {
     // The protocol counts code units, so a tab is one, whatever a terminal
     // renders. The compiler counts it as one byte column for the same reason.
-    // D14.2
     string s = "\ta";
     lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
                                      text.position{0, 1}), 1, "tab utf16");
@@ -301,7 +296,7 @@ fn a_utf8_character_index_is_a_byte_offset() void {
     while (at <= SAMPLE_LEN) {
         u64 got = text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
                                  text.position{0, at});
-        // Only an offset that begins a character answers itself; the rest
+        // Only an offset that begins a character answers itself. The rest
         // round down, which the case below states one by one.
         assert(got <= at);
         at += 1;
@@ -350,7 +345,7 @@ fn the_two_encodings_answer_the_same_byte_offsets() void {
 
 fn a_byte_that_starts_no_sequence_is_one_character() void {
     // A document an editor sends is valid UTF-8, since the reader refuses a
-    // string that is not; this module still answers for bytes that are not,
+    // string that is not. This module still answers for bytes that are not,
     // one byte at a time, so no walk of it can run away.
     string s = "\xFFa\x80b";
     lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
@@ -451,7 +446,6 @@ fn the_empty_text_answers_every_position() void {
 
 fn a_line_and_column_of_the_compiler_becomes_a_position() void {
     // The compiler numbers both from one and counts the column in bytes.
-    // D14.2
     string s = "ab\n\xC3\xA9cd";
     text.position p = text.of_line_col(s, text.position_encoding.enc_utf16, 1, 1);
     lsp_env.check_u64(p.line, 0, "1:1 line");
@@ -465,7 +459,7 @@ fn a_line_and_column_of_the_compiler_becomes_a_position() void {
 
 fn a_line_or_column_of_zero_reads_as_the_first() void {
     // The compiler numbers from one, so a zero is a caller that has already
-    // converted; reading it as the first line and column is the answer that
+    // converted. Reading it as the first line and column is the answer that
     // stays inside the document.
     string s = "ab\ncd";
     text.position p = text.of_line_col(s, text.position_encoding.enc_utf16, 0, 0);
@@ -491,14 +485,12 @@ fn a_column_past_the_end_of_its_line_stays_on_that_line() void {
 // every position over it go through the two conversions below.
 string DOCUMENT = "fn\ti32\tmain() {\r\n    \xC3\xA9 = \xF0\x9D\x84\x9E;\n\n\te\xCC\x81nd\r\n";
 
-// A document of carriage returns in every place one can stand: a run of two
-// before a line feed, where only the second belongs to the terminator; one
-// alone in the middle of a line; and one as the last byte, which terminates
-// nothing. The review found that line_end stripped that last one, so the last
-// byte of such a document had no position at all. A second document of plain
-// lines beside it, so the sweep covers a text with no carriage return as well,
-// and a third of bytes that begin no sequence, so the rule that such a byte is
-// one unit is crossed with the line rule and with the round trip.
+// A document of carriage returns in every place one can stand. A run of two before a line feed,
+// where only the second belongs to the terminator. One stands alone in the middle of a line.
+// One is the last byte and terminates nothing. Stripping that last byte removes its final
+// position. A second document of plain lines beside it, so the sweep covers a text with no
+// carriage return as well, and a third of bytes that begin no sequence, so the rule that such a
+// byte is one unit is crossed with the line rule and with the round trip.
 string TAIL_CR = "a\r\r\nb\rc\r";
 string LINES_ONLY = "one\ntwo\n\nthree";
 string BAD_UTF8 = "\xFFa\x80\r\n\xC3z\n\xF0\x9D";
@@ -543,15 +535,10 @@ fn oracle_units(u8@ bytes, u64 i, bool utf16, u64 mut* step) u64 {
 // forward split: a terminator is the two bytes `\r\n` or the one byte `\n`,
 // and the text of a line is what stands before the terminator that ends it.
 //
-// This is the half of the oracle that has to be independent and nearly was
-// not. The first version of it walked to the line feed and then stripped the
-// byte before it, which is `line_end` in src/lsp/text.ft expression for
-// expression: an oracle that shares an expression with its subject tests the
-// expression against itself, and it was blind to the bug the review found
-// there. This walk looks forward, matches the terminator where it stands, and
-// never reads the byte before the one it is at, so the two derivations share
-// nothing. An offset inside a terminator belongs to the line that terminator
-// ends, and a carriage return with no line feed after it is ordinary text.
+// The oracle must stay independent from `line_end` in src/lsp/text.ft. This
+// walk looks forward and matches each terminator in place. It never reads the
+// preceding byte. An offset inside a terminator belongs to the line that the
+// terminator ends. A carriage return without a line feed is ordinary text.
 fn oracle_span(string text, u64 offset, u64 mut* line, u64 mut* start, u64 mut* end) void {
     u64 mut index = 0;
     u64 mut from = 0;
@@ -675,7 +662,7 @@ fn sweep_round_trip(string doc, u64 at, text.position_encoding enc) void {
     text.position again = text.position_of(doc, enc, back);
     lsp_env.check_u64(again.line, p.line, "the line after a round trip");
     lsp_env.check_u64(again.character, p.character, "the character after a round trip");
-    // And the offset it answered begins a character or ends the line.
+    // The returned offset begins a character or ends the line.
     u8@ bytes = cast(doc, u8@);
     if (back < doc.len) {
         u64 mut step = 1;

@@ -8,15 +8,13 @@ import prim;
 import types;
 import types_env;
 
-// The two things the port does differently from src/bootstrap/types.c, and
-// which its C suites therefore cannot hold: the node vector, which grows by
-// moving owned pointers rather than by realloc, and the parameter list, which
-// a node owns as a span it copies out of the caller's.
+/// Checks two Fort-specific structures that the C suites cannot observe. The
+/// node vector moves owned pointers when it grows. A node copies its parameter
+/// list from the caller into an owned span.
 //
-// Both are invisible to every other test in this directory, because both are
-// wrong only in the large: a vector that loses a node on growth still answers
-// for the last one interned, and a parameter list that borrowed the caller's
-// array still reads right until the caller writes to it again.
+// Other tests do not expose these errors. A vector can lose an older node but
+// still return the last interned node. A borrowed parameter list can remain
+// correct until the caller changes its array.
 
 // A distinct declaration pointer per nominal type built here.
 i64[4] mut decls = {};
@@ -76,7 +74,7 @@ fn a_nominal_type_is_found_after_a_growth() void {
         n += 1;
     }
     assert(types.type_struct(&tt, "early", decl_at(0)) == s);
-    // And it still lays out, so the layout block travelled with the node.
+    // It still lays out, so the layout block travelled with the node.
     types.node*[1] mut fields = {i32t};
     u64[1] mut offsets = {};
     assert(types.type_layout_begin(s));
@@ -113,7 +111,6 @@ fn a_grown_table_frees_everything_it_made() void {
 // shallow), and nothing else in this directory can see it if they are not: the
 // gate's sanitizers instrument the C compiler and not the x86-64 program the
 // harness runs, so a leak here is invisible to every other test and to ctest.
-// D17.7
 //
 // What can see one is the allocator, in two views, because each is blind to
 // what the other sees (modules_closure_test.ft says which and why). Two
@@ -131,7 +128,6 @@ fn a_grown_table_frees_everything_it_made() void {
 // by a probe: an owning local dropped without it makes the checked build abort
 // at the next write into that slot with `overwriting owned value`, which is
 // what deleting it produces here.
-// D17.11
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_TYPES = 200;
@@ -140,7 +136,6 @@ u64 LEAK_BOUND = 8192;
 // The current program break, which is where the heap ends: sbrk(0) moves
 // nothing and reports it. There is no std binding for it and this is its one
 // caller.
-// D9.8
 extern fn sbrk(i64 increment) void*;
 
 fn heap_end() u64 {
@@ -149,7 +144,6 @@ fn heap_end() u64 {
 
 // How far apart two positions are, whichever way the heap moved: a subtraction
 // the wrong way round would trap before the assertion.
-// D11.1
 fn distance(u64 a, u64 b) u64 {
     if (a > b) {
         return a - b;
@@ -241,7 +235,7 @@ fn the_parameter_list_is_copied_out_of_the_caller_s_array() void {
     assert(f->params.len == 2);
     assert(f->params[0] == i32t);
     assert(f->params[1] == i32t);
-    // And the new list is a different type, which interns on its own.
+    // The new list is a different type and interns on its own.
     types.node* g = types.type_fn(&e.tt, v, params[..], false);
     assert(g != f);
     assert(types_env.str_of(&e, g) == "fn (i64, i64) void");
@@ -297,7 +291,6 @@ fn the_copied_list_holds_the_same_nodes() void {
     assert(types_env.str_of(&e, f) == "fn (node mut* own mut@ own, node*) void");
     // The marks of a parameter are part of the type's identity, which is what
     // the copy has to keep.
-    // D3.10
     types.node*[2] mut lent = {types_env.type_of(&e, "node mut* mut@"), plain};
     assert(types.type_fn(&e.tt, v, lent[..], false) != f);
 }

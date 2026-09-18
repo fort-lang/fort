@@ -10,32 +10,27 @@ import json;
 import std.str;
 import std.strbuf;
 
-// The document src/fort/diag.ft writes: one object per diagnostic, the notes
-// of an error nested under it, the whole range, and the escapes of the JSON
-// writer. It is the port of the document half of test/diag_records_test.c.
-// D20.2, D20.4
+/// Checks the diagnostic JSON from src/fort/diag.ft. Each object includes nested notes, its
+/// full range, and escaped text.
 //
-// The file name of a record is the sink's own copy, which this suite asserts
-// in the document as well as in the record: the module set that reported a
-// diagnostic is freed before the document is written, so a record that kept
-// the borrowed pointer would write "file":"" and the text form would still be
-// right.
-// D20.2
+// The sink owns a copy of each record's file name. The suite checks that name
+// in both the record and the document. It frees the reporting module set
+// before it writes the document. A borrowed pointer would then write
+// `"file":""`, while the text form could remain correct.
 
-// The positions of the toolchain.md section 4 example: the use of 'x' and the
-// declaration it shadows, each one byte wide.
+// The positions of the example use of 'x' and its shadowed declaration.
+// Each token is one byte wide.
 u32 USE_LINE = 7;
 u32 USE_COL = 5;
 u32 DECL_LINE = 3;
 u32 DECL_COL = 9;
 
 // The range of a one-byte token at `line`:`col`.
-// D20.4
 fn one_byte(u32 line, u32 col) diag.loc {
     return diag.loc_range("main.ft", line, col, line, col + 1);
 }
 
-// The document of the records reported so far; a view of `out`.
+// The document of the records reported so far. A view of `out`.
 fn written_json(diag.sink* s, strbuf.str_buf mut* out) string {
     strbuf.clear(out);
     json.writer mut j = json.writer{};
@@ -50,7 +45,6 @@ fn holds(string text, string needle) bool {
 }
 
 // ---- the shape of the array ----------------------------------------------------
-// D20.2
 
 fn no_diagnostic_is_an_empty_array() void {
     diag.sink mut s = diag.create();
@@ -76,7 +70,6 @@ fn an_error_is_one_object_with_an_empty_notes_array() void {
 
 // The whole range is written, a range that spans lines included, and a
 // positionless error is the empty range at 1:1.
-// D14.2, D20.4
 fn the_document_holds_both_ends_of_the_range() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -174,11 +167,9 @@ fn the_document_is_empty_again_after_a_reset() void {
 }
 
 // ---- the notes of an error -----------------------------------------------------
-// D14.2
 
 // The golden document of the worked example: the two notes that follow the
 // error are nested under it.
-// D14.2
 fn the_notes_that_follow_an_error_are_nested_under_it() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -264,11 +255,10 @@ fn an_orphan_note_does_not_capture_the_notes_of_the_error_after_it() void {
 }
 
 // ---- the copies a record keeps -------------------------------------------------
-// D20.2
 
 // The byte the reproduction below fills freed storage with, and the block
 // sizes it takes back. strbuf.reserve's first capacity is 16 bytes, so the
-// name buffer is a 16-byte block and the message buffer a 32-byte one; the
+// name buffer is a 16-byte block and the message buffer a 32-byte one. The
 // sizes around them are filled too, since the allocator answers a request
 // from the bin it finds.
 u8 FILLER = 90; // 'Z', a byte no file name and no message below holds
@@ -293,13 +283,10 @@ fn fill(u8 mut@ block) void {
 // the pool_intern of diag.report deleted, this test reports
 // "file":"ZZZZZZZ" and goes red.
 //
-// src/bootstrap/diag.c paid for the rule once, with a symptom fort cannot
-// have: the C read a NUL-terminated const char* from a freed block that still
-// held a NUL, so the document said "file":"" while the text form was right. A
-// fort `string` carries its length, so an un-interned name of seven bytes
-// reads seven stale bytes and never zero bytes; the assertion is therefore
-// that the filler is absent, which can fail, and not that the name is empty,
-// which cannot.
+// The C implementation can read an empty NUL-terminated string from freed
+// storage. A Fort `string` keeps its length, so this case reads seven stale
+// bytes instead. The assertion checks that the filler is absent. An empty-name
+// assertion cannot detect this Fort failure mode.
 fn the_document_names_the_file_after_its_buffer_is_freed() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
@@ -310,7 +297,6 @@ fn the_document_names_the_file_after_its_buffer_is_freed() void {
     diag.error(&s, diag.loc_range(strbuf.view(&name), 2, 3, 2, 4), strbuf.view(&msg));
     // Both buffers die here, before the document is written, as the module set
     // that reported a diagnostic dies before the check document.
-    // D20.2
     strbuf.free(&name);
     strbuf.free(&msg);
     u8 mut@ own small = new(u8, 16);
@@ -336,7 +322,6 @@ fn the_document_names_the_file_after_its_buffer_is_freed() void {
 // A message can quote any bytes of a source file, which is UTF-8 only by
 // convention, so the writer replaces what is not well-formed and the document
 // stays valid UTF-8.
-// D2.1, D3.7
 fn a_message_of_arbitrary_bytes_gives_a_valid_document() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);

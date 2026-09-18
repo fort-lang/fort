@@ -5,50 +5,43 @@
 import lifetime;
 import std.strbuf;
 
-// The program of this mode makes the checker allocate everything that it
-// owns. The checker gives all of it back.
-// D20.5
+/// The program of this mode makes the checker allocate everything that it
+/// owns. The checker gives all of it back.
 //
 // support/lifetime.ft states the rule of the probe, the two views and the
-// size of a round. This file is one of six, one for each mode of the driver,
-// because the harness kills a program at 60 s (toolchain.md 7.3) and the six
-// modes in one program passed alone and timed out under load.
-// T-094: one probe for each mode of the driver
+// size of a round. Each file tests one driver mode. This keeps every program
+// below the harness limit of 60 s under load.
 //
-// Verified by deletion, one release at a time, each one moving a view past
-// lifetime.BOUND and turning this test red: the `defer session.free(&s)` and
-// the `defer analysis_release(&an, &analysis_live)` of driver.compile_entry;
-// the `defer containers.pool_free(&p)` of driver.load_closure and the `defer
-// strbuf.free(&b)` of driver.std_dir_beside; the loop in check.check_free
-// that frees the symbol records, `del(ck->syms)`,
-// `del(ck->values)`, `del(ck->externs)`, `strmap.free(&ck->extern_first)`,
-// `strmap.free(&ck->bad_imports)`, `strbuf.free(&ck->msg)` and
-// `types.type_table_free`. That list is every release that check.check_free
-// performs. The program is what makes the last five of them reachable.
+// Deletion verified each release separately. Each deletion moved a view past lifetime.BOUND and
+// turned this test red. The checked releases include `session.free` and `analysis_release` in
+// driver.compile_entry. They also include the pools in driver.load_closure and
+// driver.std_dir_beside. check.check_free releases the symbol records with
+// `del(ck->syms)`, `del(ck->values)`, and `del(ck->externs)`. It also calls
+// `strmap.free(&ck->extern_first)`, `strmap.free(&ck->bad_imports)`,
+// `strbuf.free(&ck->msg)`, and `types.type_table_free`. That
+// list is every release that check.check_free performs. The program is what makes the last five
+// of them reachable.
 //
-// The program also carries a function body, so the scopes that
-// check_stmt.check_block, check_function_body, check_for and check_range_for
-// open are released here too: a deletion of any one of those four
-// `scope.free` calls moves a view past lifetime.BOUND. The body carries a
-// `for (T x : coll)` as well as a `for (init; cond; step)` for that reason.
-// The release of check_range_for was invisible until a round opened the scope
-// that it frees.
+// The program also carries a function body. It covers the scopes opened by
+// check_stmt.check_block, check_function_body, check_for, and check_range_for.
+// Removing any of those four `scope.free` calls moves a view past
+// lifetime.BOUND. The body carries a
+// `for (T x: coll)` as well as a `for (init; cond; step)` for that reason.
+// A round opens the scope that makes the check_range_for release visible.
 //
 // This test is the only witness of `strmap.free(&ck->bad_imports)`, of
 // `strbuf.free(&ck->msg)`, and of the two `scope.free(&header)` calls in
 // check_for and check_range_for.
 // Every release of the six modes was measured this way, one deletion at a
-// time, against all six tests. The count of the releases of the six modes,
-// the command that measures them and the one release that no single test
-// witnesses stand in support/lifetime.ft, once for the six tests.
-// T-094: one probe for each mode of the driver
+// time, against all six tests. support/lifetime.ft gives the release count and
+// the measurement command. It also describes the one release with no single
+// witness.
 fn main() i32 {
     lifetime.write_runtime();
     strbuf.str_buf mut program = strbuf.create();
     defer strbuf.free(&program);
     // An import that resolves to nothing leaves the checker the names that it
     // failed to bind. That is the one allocation a clean program never makes.
-    // D14.2
     strbuf.append(&program, "import nosuchmodule;\n");
     strbuf.append(&program, "extern fn puts(char* s) i32;\n");
     strbuf.append(&program, "i32 FOLDED = 41 + 1;\n");
@@ -57,7 +50,6 @@ fn main() i32 {
     // is a scope that owns its bindings, and a parameter scope stands around
     // the body in check_stmt.ft. A scope left unfreed is a leak that this
     // round sees and that a program of module-level declarations cannot.
-    // D7.9
     strbuf.append(&program, "fn sum(i32 n) i32 {\n    i32 mut total = 0;\n");
     strbuf.append(&program, "    for (i32 mut i = 0; i < n; i++) {\n");
     strbuf.append(&program, "        i32 step = i;\n        total += step;\n    }\n");
@@ -70,7 +62,6 @@ fn main() i32 {
     lifetime.write_file("checked.ft", strbuf.view(&program));
     string[4] mut checked = {"fort", "--cfg", "mode=test", "checked.ft"};
     // The checker refuses `checked.ft`, so each round exits 1.
-    // D14.1
     u64 moved = lifetime.measure_status(checked[0..4], lifetime.ROUNDS, true,
         lifetime.EXIT_COMPILE_ERROR);
     assert(moved < lifetime.BOUND);

@@ -10,34 +10,29 @@ import scope;
 import std.strbuf;
 import types;
 
-// The ownership typing and the annotation invariants of check.ft, over the
-// half of the checker src/fort/check.ft carries.
-// D17
+/// The ownership typing and the annotation invariants of check.ft, over the
+/// half of the checker src/fort/check.ft carries.
 //
-// Two of the rules here are invisible to every other test in the repository.
-// `is_mut` and `empty` are two fields of one checked expression and answer two
-// different questions -- "may this be assigned to" and "may `move` and `del`
-// empty it" -- and reading one where the other is meant lets `move` through
-// where it must not go without changing a single diagnostic of a passing
-// program. And the clearing of the annotations before they are written is a
-// property of a second check, which no compilation performs: it is asserted by
-// setting every bit the checker owns on a node it marks with none and watching
-// a re-check wipe them, because asserting that a bit is set after a second
-// pass would pass whether or not the clearing happens.
-// D5.7, D17.6, D20.2
+// Two rules here are invisible to every other test. `is_mut` answers whether
+// an expression permits assignment. `empty` answers whether `move` or `del`
+// can empty it. Using the wrong field can permit an invalid `move` without a
+// changed diagnostic for a valid program.
+//
+// A second check must also clear annotations before it writes them. No normal
+// compilation performs this second check. The test first sets each annotation
+// bit on a node that needs none. It then checks the node again and verifies
+// that all bits are clear.
 //
 // The expressions are checked by hand through check_env.probe_stmt, since the
 // statements of a function body belong to check_stmt.ft and this pass stops
 // before them.
-// T-036: the ticket that ports the statement checker
 
 // The module the ownership probes are written against: a cell, a holder of an
 // owning pointer to one, an owning module-level constant and an owning global,
 // and the two indirections, one mutable and one not. fort does not join
-// adjacent string literals, so a source of this size is built in a buffer; the
+// adjacent string literals, so a source of this size is built in a buffer. The
 // text is written to a file before open_module returns, so the buffer need not
 // outlive the call.
-// D17.6, D2.9
 fn open_probe(check_env.env mut* e, string body) bool {
     return open_probe2(e, body, "");
 }
@@ -61,7 +56,6 @@ fn open_probe2(check_env.env mut* e, string body, string extra) bool {
 }
 
 // ---- `empty` is not `is_mut` -------------------------------------------------------
-// D5.7, D17.6
 
 fn an_owning_global_may_be_emptied_and_a_constant_may_not() void {
     check_env.env mut e = check_env.env{};
@@ -69,7 +63,6 @@ fn an_owning_global_may_be_emptied_and_a_constant_may_not() void {
     defer check_env.close(&e);
     assert(open_probe(&e, "fn probe() void {\n    del(theirs);\n    del(mine);\n}\n"));
     // `theirs` is a `mut` global: its own storage is emptiable.
-    // D17.6
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.errors(&e) == 0);
     // `mine` is a module-level constant: it lives in read-only memory, and
@@ -85,7 +78,7 @@ fn an_owning_constant_is_an_immutable_lvalue_whose_reason_is_read_only_memory() 
     assert(open_probe(&e, "fn probe() void {\n    del(mine);\n}\n"));
     check.expr o = check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.said(&e, "read-only memory"));
-    // The operand is the `del` call, which yields nothing; what the fields
+    // The operand is the `del` call, which yields nothing. What the fields
     // below answer for is the name inside it, read through the same path the
     // checker took.
     check.expr name = check_env.probe_expr(&e,
@@ -93,7 +86,6 @@ fn an_owning_constant_is_an_immutable_lvalue_whose_reason_is_read_only_memory() 
     assert(name.lvalue);
     // Immutable and read-only are two answers, and the second is the one
     // `move` and `del` ask for.
-    // D5.7, D17.6
     assert(!name.is_mut);
     assert(name.empty == check.empty_kind.empty_readonly);
     assert(o.ty != null);
@@ -115,9 +107,8 @@ fn an_immutable_indirection_may_not_be_emptied() void {
     check_env.open(&e);
     defer check_env.close(&e);
     assert(open_probe(&e, "fn probe() void {\n    del(ph->inner);\n    del(qh->inner);\n}\n"));
-    // Level 1 of `ph` is mutable, so what it designates is emptiable; the
+    // Level 1 of `ph` is mutable, so what it designates is emptiable. The
     // read-only memory of the constant `ph` stops at the indirection.
-    // D17.6
     check_env.probe_stmt(&e, "probe", 0);
     assert(check_env.errors(&e) == 0);
     // Level 1 of `qh` is not, so nothing may be taken out of what was only
@@ -127,7 +118,6 @@ fn an_immutable_indirection_may_not_be_emptied() void {
 }
 
 // ---- what owns an allocation -------------------------------------------------------
-// D17.1, D17.7
 
 fn an_own_reference_and_an_owning_aggregate_own_and_a_view_does_not() void {
     check_env.env mut e = check_env.env{};
@@ -145,7 +135,6 @@ fn an_own_reference_and_an_owning_aggregate_own_and_a_view_does_not() void {
     assert(!check.check_owning(check_env.sym_main(&e, "view")->ty));
     // A struct that holds an `own` reference by value is an owning aggregate,
     // and that is the one answer the layout is asked for.
-    // D17.7
     assert(check.check_owning(check_env.sym_main(&e, "hh")->ty));
 }
 
@@ -158,7 +147,6 @@ fn move_needs_an_owning_lvalue() void {
     // `hh` is an owning aggregate, so `move` takes it and yields the one
     // universe function with a value: an `own` rvalue of its operand's type,
     // which is not an lvalue and which nothing else could free.
-    // D17.7, D17.6
     ast.node mut* call = check_env.body_expr(&e, "probe", 0);
     check.expr o = check_env.probe_expr(&e, ast.ast_child_mut(call, 0));
     assert(check_env.type_text(&e, o.ty) == "holder");
@@ -186,12 +174,10 @@ fn del_takes_an_owning_reference_and_nothing_else() void {
     check_env.probe_stmt(&e, "probe", 1);
     // An owning aggregate is not a reference: `del` frees an allocation and a
     // struct is not one.
-    // D12.2, D17.9
     assert(check_env.said(&e, "'del' takes a reference, not holder"));
 }
 
 // ---- owning temporaries ------------------------------------------------------------
-// D17.8
 
 fn a_field_of_an_owning_rvalue_would_leak() void {
     check_env.env mut e = check_env.env{};
@@ -224,7 +210,6 @@ fn copying_an_owning_lvalue_into_an_own_place_requires_move() void {
     check_env.probe_stmt(&e, "probe", 0);
     // Transfer is written, and the hint spells the expression because the
     // operand is a name.
-    // D17.5
     assert(check_env.said(&e, "copying an owning value requires 'move': write move(theirs)"));
 }
 
@@ -241,7 +226,6 @@ fn casting_an_owning_lvalue_to_an_owning_type_requires_move() void {
     // A cast is `own` exactly when its target says so, so an owning lvalue
     // reaches an owning target only through `move`. The hint spells the whole
     // expression because the operand is a name.
-    // D3.14, D17.5, D17.12
     assert(!check_env.check_decls(&e, strbuf.view(&b)));
     assert(check_env.said(&e,
         "casting an owning value to an owning type requires 'move': write move(hh)"));
@@ -255,7 +239,6 @@ fn casting_an_owning_rvalue_to_a_type_that_does_not_own_would_leak() void {
                       "fn borrow(cell mut* p) void {\n    return;\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     // Nothing could free the temporary once the cast has dropped its `own`.
-    // D17.8
     assert(check_env.said(&e, "owning temporary would leak: the cast target does not own it"));
 }
 
@@ -267,7 +250,6 @@ fn an_owning_lvalue_lends_to_a_borrowing_parameter() void {
         "fn borrow(cell mut* p) void {\n    return;\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
     // A target that does not own takes the lend of an owning lvalue.
-    // D17.4
     assert(check_env.errors(&e) == 0);
 }
 
@@ -281,17 +263,14 @@ fn equality_lends_both_operands() void {
         check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_binary, ""));
     // `own` never blocks a comparison: both operands are lent, so two pointers
     // of one element type compare whatever their ownership.
-    // D6.2, D17.4
     assert(check_env.errors(&e) == 0);
     assert(check_env.type_text(&e, o.ty) == "bool");
 }
 
 // ---- the arms of the conditional ---------------------------------------------------
-// D6.6, D17.4
 
 // The arms of `?:` lend, so two owning lvalue arms yield a view and the
 // conditional owns nothing.
-// D17.4
 fn the_arms_of_a_conditional_lend() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -310,7 +289,6 @@ fn the_arms_of_a_conditional_lend() void {
 // It yields `own` when both arms are `own` rvalues or `null`, which is the one
 // case where the value the conditional produces still has an owner. It is an
 // rvalue, so it must land in an `own` place.
-// D17.4, D17.8
 fn two_owning_rvalue_arms_yield_an_owning_rvalue() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -328,7 +306,6 @@ fn two_owning_rvalue_arms_yield_an_owning_rvalue() void {
 
 // An `own` rvalue beside an arm that does not own would be lent, and nothing
 // would be left to free it, which is the error.
-// D17.8
 fn an_owning_rvalue_arm_beside_a_lending_one_would_leak() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -348,7 +325,6 @@ fn an_owning_rvalue_arm_beside_a_lending_one_would_leak() void {
 // the conditional makes is a transfer. Without this the conditional would
 // yield an owning rvalue that no arm was emptied for, and `del` of each would
 // free one allocation twice.
-// D17.4, D17.7, T-044: the review that found the double free
 fn an_owning_aggregate_arm_is_a_transfer_and_needs_move() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -365,7 +341,6 @@ fn an_owning_aggregate_arm_is_a_transfer_and_needs_move() void {
 // `move` in each arm is what the rule asks for, and two `move`s are two owning
 // rvalues, so the conditional yields an owning value that must land in an
 // owning place.
-// D17.5, D17.6
 fn two_moved_aggregate_arms_yield_an_owning_rvalue() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -382,7 +357,6 @@ fn two_moved_aggregate_arms_yield_an_owning_rvalue() void {
 }
 
 // ---- the return of an owning value -------------------------------------------------
-// D17.5, D17.7
 
 fn returning_an_own_parameter_outright_is_an_implicit_move() void {
     check_env.env mut e = check_env.env{};
@@ -398,7 +372,6 @@ fn returning_an_own_parameter_outright_is_an_implicit_move() void {
     // `move`, and only when it names a local or a parameter outright: the
     // emitter empties the operand after reading it, which is what lets a
     // `defer del(p)` written above see the zero value.
-    // D17.5, D17.7, D7.8
     scope.scope mut params = scope.scope{};
     check_env.open_params(&e, &params, "take");
     ast.node mut* ret = check_env.return_in(&e, "take");
@@ -426,7 +399,6 @@ fn returning_an_owning_value_that_names_no_local_needs_move() void {
     check.check_return_value(&e.ck, ret, check_env.result_type(&e, "give"), &out);
     // A global is not a local or a parameter, so the transfer is written and
     // the emitter is told nothing.
-    // D17.5
     assert(check_env.said(&e, "copying an owning value requires 'move': write move(kept)"));
     assert(!check_env.has_ann(ret, check.ANN_MOVE));
 }
@@ -454,7 +426,6 @@ fn a_second_check_clears_every_annotation_it_will_write() void {
     // The clearing is what is asserted, not the writing: a pass that cleared
     // nothing would leave these set, and a pass that wrote them would be
     // caught by the other suites.
-    // D20.2
     assert(body->ann == 0);
     assert(body->aux == 0);
     assert(body->ty == null);
@@ -465,7 +436,6 @@ fn a_second_check_clears_every_annotation_it_will_write() void {
 // what an editor re-checking a file after an edit does. Whether the second
 // check is clean is not what is asserted: the bits it found are, so the call's
 // own answer is discarded and the assertions above it stand.
-// D20.2
 fn modules_recheck(check_env.env mut* e) void {
     check_stmt.check_module(&e->ck, check_env.module_at(e, "main"));
 }
@@ -500,7 +470,6 @@ fn a_call_of_a_noreturn_function_is_marked() void {
     check_env.probe_expr(&e, call);
     // A call to a `noreturn` function terminates its statement, which the
     // emitter and the statement checker read off this bit.
-    // D8.4
     assert(check_env.has_ann(call, check.ANN_NORETURN));
 }
 

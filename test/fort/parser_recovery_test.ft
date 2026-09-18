@@ -5,15 +5,13 @@
 import parse_env;
 import std.strbuf;
 
-// The recovery toolchain.md 4 describes, in shapes the repository sources do
-// not use: where a skip stops, what it drops, what the tree keeps, and the
-// nesting limit.
-// D14.2, D2.11
+/// Checks parser recovery shapes that repository sources do not use. Cases
+/// cover skip boundaries, discarded text, retained nodes, and nesting limits.
 //
 // Every assertion is a whole module's S-expression, so it says both what
 // survived the error and where the region the parser skipped stands.
 
-// ---- where a skip stops (toolchain.md 4) ---------------------------------------
+// ---- where a skip stops ---------------------------------------
 
 fn a_skip_stops_before_the_next_statement_keyword() void {
     parse_env.env mut e = parse_env.create();
@@ -33,7 +31,6 @@ fn a_skip_stops_before_the_next_case_keyword() void {
     // Neither `case` nor `default` appears in a statement or an expression,
     // so a skip inside a switch stops before one rather than swallowing the
     // clause that follows the broken one.
-    // D7.6
     string src = parse_env.join2(&e, "fn f() void {\n    switch (c) {\n    case 1:\n",
                                  "        x = ;\n    default:\n        g();\n    }\n}\n");
     string dumped = parse_env.parse_dump(&e, src);
@@ -50,7 +47,6 @@ fn a_skip_stops_before_a_top_level_declaration() void {
     // A body ends where a top-level declaration starts, so a file whose
     // braces are unbalanced costs one diagnostic and the declarations after
     // it are read.
-    // D14.2
     string src = parse_env.join2(&e, "fn f() void {\n    x = ;\n",
                                  "struct s {\n    i32 x;\n}\n");
     string dumped = parse_env.parse_dump(&e, src);
@@ -62,10 +58,9 @@ fn a_skip_stops_before_a_top_level_declaration() void {
 fn a_skip_runs_over_a_semicolon_inside_a_bracket() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // The `;` of a `for` header and the `,` of an argument list stand inside
-    // the brackets the failed construct left open, so they are not statement
-    // boundaries (toolchain.md 4): the whole header goes with the skipped
-    // region and the statement after it is read.
+    // The `;` of a `for` header and the `,` of an argument list stand inside the brackets the
+    // failed construct left open. They are not statement boundaries: the whole header goes with
+    // the skipped region and the statement after it is read.
     string src = "fn f() void {\n    for (i32 mut i = ; i < 2; i++) { }\n    g();\n}\n";
     string dumped = parse_env.parse_dump(&e, src);
     string expected = parse_env.join2(&e, "(module (fn (type (void)) f (params) (block (error)",
@@ -79,15 +74,12 @@ fn a_run_of_semicolons_is_one_boundary() void {
     defer parse_env.free(&e);
     // The empty statement that follows a skipped region is part of it and not
     // an error of its own, so this file reports once.
-    // D7.3, D14.2
     //
-    // What this cannot separate: the run is consumed by skip_to_boundary and
-    // again by drop_leftovers directly afterwards, so deleting either loop
-    // leaves the tree and the diagnostics unchanged and only the error node's
-    // range -- which no dump prints -- moves. The assertion below is
+    // The run is consumed by skip_to_boundary and then by drop_leftovers.
+    // Removing either loop leaves the tree and diagnostics unchanged. Only the
+    // error node range moves, and no dump prints that range. The assertion below is
     // therefore about the pair and not about the loop inside
     // skip_to_boundary. The direct range tests cover that mutation.
-    // T-033: the review that found the blind spot
     string src = "fn f() void {\n    x = ;;;\n    g();\n}\n";
     string dumped = parse_env.parse_dump(&e, src);
     string expected = parse_env.join2(&e, "(module (fn (type (void)) f (params) (block (error)",
@@ -104,7 +96,6 @@ fn a_leftover_bracket_is_dropped_rather_than_reported_again() void {
     // cost a second diagnostic for one mistake. Here the two `)` and the
     // statement behind them are all part of the region the skip took, which
     // costs the file the call that followed and saves it a second diagnostic.
-    // D14.2
     string src = "fn f() void {\n    g(h(;))\n    k();\n}\n";
     assert(parse_env.parse_dump(&e, src)
            == "(module (fn (type (void)) f (params) (block (error))))");
@@ -116,9 +107,8 @@ fn a_leftover_bracket_is_dropped_rather_than_reported_again() void {
 fn every_recovery_point_keeps_an_error_node() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // The four recovery points of toolchain.md 4, one file each: the
-    // declarations of a module, the statements of a block, the clauses of a
-    // switch and the fields of a struct.
+    // The four recovery points use one file each. The declarations of a module, the statements
+    // of a block, the clauses of a switch and the fields of a struct.
     assert(parse_env.parse_dump(&e, "i32 a = ;\ni32 b = 1;\n")
            == "(module (error) (var b (type (prim i32)) (int 1)))");
     string in_block = parse_env.parse_dump(&e, "fn f() void {\n    x = ;\n    g();\n}\n");
@@ -143,7 +133,6 @@ fn a_construct_that_stands_at_the_boundary_keeps_its_node() void {
     // it. The body ends at the `fn` that follows it, since a declaration
     // keyword is a boundary and a global's type is not: `i32 N = 1;` there
     // would be a local of the unterminated body.
-    // D14.2
     string src = "fn f() void {\n    g();\nfn h() void {\n}\n";
     string dumped = parse_env.parse_dump(&e, src);
     assert(dumped == parse_env.join3(&e, "(module (fn (type (void)) f (params)",
@@ -157,7 +146,6 @@ fn a_file_that_is_nothing_but_errors_still_yields_a_module() void {
     defer parse_env.free(&e);
     // The result is never null and the tree always covers the whole file,
     // which is what lets a later pass walk a broken file at all.
-    // D14.2
     assert(parse_env.parse_dump(&e, ")\n") == "(module (error))");
     assert(parse_env.parse_dump(&e, "}\n") == "(module (error))");
     assert(parse_env.parse_dump(&e, "; ; ;\n") == "(module (error))");
@@ -173,14 +161,12 @@ fn a_recovery_always_consumes_a_token() void {
     // The first token is consumed when the construct consumed none, so the
     // parse of a file made of tokens no construct accepts terminates.
     // Reaching this assertion at all is the test.
-    // D14.2
     assert(parse_env.parse_dump(&e, ") ) ) )\n") == "(module (error))");
     assert(parse_env.parse_dump(&e, "] } ] }\n") == "(module (error))");
     assert(parse_env.parse_dump(&e, ", , ,\n") == "(module (error))");
 }
 
 // ---- the nesting limit ---------------------------------------------------------
-// D2.11
 
 // One source with `depth` nested parentheses around an integer literal,
 // built here because a limit of 256 cannot be written out by hand.
@@ -210,7 +196,6 @@ fn nesting_deeper_than_the_limit_is_an_error() void {
     // Blocks, brace initializers, bracketed groups, unary operands,
     // conditional branches and types count towards one limit of 256, so the
     // parser's recursion is bounded.
-    // D2.11
     parse_env.parse(&e, nested(&src, 200));
     assert(parse_env.errors(&e) == 0);
     parse_env.parse(&e, nested(&src, 256));
@@ -250,7 +235,6 @@ fn configuration_parentheses_count_towards_the_limit() void {
     defer strbuf.free(&src);
     // The configuration form adds one pair to the 255 outer pairs. One more
     // outer pair makes its identifier the first token past the limit.
-    // D2.11, D21.1
     parse_env.parse(&e, nested_cfg(&src, 255));
     assert(parse_env.errors(&e) == 0);
     parse_env.parse(&e, nested_cfg(&src, 256));
@@ -282,7 +266,6 @@ fn the_suffixes_of_one_type_have_their_own_arm_of_the_limit() void {
     // never rises here, since a suffix opens no nested construct. The two
     // hundred and fifty-seventh suffix is the one that reports, at its own
     // token.
-    // D2.11
     parse_env.parse(&e, suffixed(&src, 255));
     assert(parse_env.errors(&e) == 0);
     parse_env.parse(&e, suffixed(&src, 256));

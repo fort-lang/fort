@@ -15,24 +15,18 @@ import gen_stmt;
 import std.str;
 import std.strbuf;
 
-// The function definitions of src/fort/gen_stmt.ft against toolchain.md 6
-// items 1, 2, 7, 10 and 22: the signature of every parameter and result
-// shape, the entry-block allocas, the tail a body that falls off its end
-// gets, `fort_entry`, the named type of a struct and the assembly of the
-// sections into one module.
-// D19.4
+/// Checks function definitions from src/fort/gen_stmt.ft. Cases cover
+/// signatures, entry allocas, implicit tails, `fort_entry`, named structs, and
+/// complete module assembly.
 //
 // This is the half of test/gen_test.c and test/gen_module_test.c that answers
-// for a whole definition. The expected text came from the original port
-// evidence. Direct emitter tests now pin the shape that toolchain.md 6
-// describes.
+// for a whole definition. Direct emitter tests pin the expected shape.
 //
-// Every case that emits a definition also runs the structural check of item
-// 10 over it (gen_env.expect_blocks): `opt -passes=verify` does not reject an
-// instruction after a terminator, so the rule that every block ends in
-// exactly one is asserted over the text (notes/compiler.md 6).
+// Every case that emits a definition also runs gen_env.expect_blocks. The `opt -passes=verify`
+// command does not reject an instruction after a terminator. The rule that every block ends in
+// exactly one is asserted over the text.
 
-// ---- signatures (item 7) ----------------------------------------------------------
+// ---- signatures ----------------------------------------------------------
 
 fn a_void_function_is_a_define_with_an_empty_entry_block() void {
     gen_env.env mut e = gen_env.env{};
@@ -75,10 +69,10 @@ fn a_scalar_parameter_is_an_ordinary_one_and_lands_in_its_slot() void {
     gen_env.expect_blocks(&e, got);
 }
 
-// A narrow result carries the same extension attribute as a narrow parameter,
-// so that LLVM normalizes on both sides of a call (item 7). No language test
-// can see that: caller and callee are compiled together and a convention both
-// sides get wrong agrees with itself (notes/compiler.md 6), so the text is the witness.
+// A narrow result carries the same extension attribute as a narrow parameter, so that LLVM
+// normalizes on both sides of a call. No language test can see that. Caller and callee are
+// compiled together and a convention both sides get wrong agrees with itself, so the text is
+// the witness.
 fn a_narrow_parameter_and_result_carry_their_extension_attribute() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -104,10 +98,9 @@ fn a_narrow_parameter_and_result_carry_their_extension_attribute() void {
     gen_env.expect_blocks(&e, got);
 }
 
-// An aggregate argument is a plain `ptr` parameter, `byval` is never used,
-// and an aggregate result is a leading `ptr sret(%T) %ret.sret` on a `void`
-// function (item 7). The parameter's place is the caller-made copy the
-// incoming pointer designates, so it has no alloca of its own (item 10).
+// An aggregate argument is a plain `ptr` parameter, `byval` is never used. An aggregate result
+// is a leading `ptr sret(%T) %ret.sret` on a `void` function. The parameter's place is the
+// caller-made copy the incoming pointer designates, so it has no alloca of its own.
 fn an_aggregate_parameter_and_result_pass_by_pointer() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -131,8 +124,7 @@ fn an_aggregate_parameter_and_result_pass_by_pointer() void {
 }
 
 // A `noreturn` definition takes attribute group #1 and the block that would
-// fall off the end of its body ends in a trap (items 7, 20).
-// D8.5, D19.7
+// fall off the end of its body ends in a trap.
 fn a_noreturn_definition_takes_the_noreturn_group_and_traps() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -164,14 +156,11 @@ fn a_noreturn_definition_takes_the_noreturn_group_and_traps() void {
     assert(gen.gen_uses_attr(&e.g, gen.ATTR_TRAP));
 }
 
-// ---- slots (item 10) --------------------------------------------------------------
-// D19.4
+// ---- slots --------------------------------------------------------------
 
-// The parameters first, then the locals in declaration order, which is the
-// order their allocas are emitted in; a range `for` declares its loop
-// variable on the loop node itself and that variable is a local like any
-// other, and the compiler's own temporaries follow them all.
-// D7.5
+// The parameters first, then the locals in declaration order, which is the order their allocas
+// are emitted in. A range `for` declares its loop variable on the loop node itself and that
+// variable is a local like any other. The compiler's own temporaries follow them all.
 fn the_allocas_are_the_parameters_then_the_locals_in_declaration_order() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -200,7 +189,6 @@ fn the_allocas_are_the_parameters_then_the_locals_in_declaration_order() void {
 // The slot of an owning local is zeroed once in the entry block, so that the
 // overwrite check its declaration carries reads the zero value the first time
 // and whatever the slot still holds on a second execution.
-// D17.11, D19.4
 fn an_owning_local_is_zeroed_in_the_entry_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -221,11 +209,10 @@ fn an_owning_local_is_zeroed_in_the_entry_block() void {
     gen_env.expect_blocks(&e, got);
 }
 
-// ---- the tail of a body (items 7, 10) ----------------------------------------------
+// ---- the tail of a body ----------------------------------------------
 
 // A `void` body that falls off its end returns, and a non-void one is
 // unreachable, the checker having proved it ends in a terminating statement.
-// D8.4
 fn the_tail_of_a_body_that_falls_off_its_end() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -238,7 +225,6 @@ fn the_tail_of_a_body_that_falls_off_its_end() void {
     // After a terminating statement the emitter opens a fresh block for the
     // unreachable statements the parser allows, and that block gets the same
     // tail.
-    // D14.2
     string[8] mut want = {
         "define dso_local void @\"main.quiet\"() #0 {\n",
         "entry:\n",
@@ -254,8 +240,7 @@ fn the_tail_of_a_body_that_falls_off_its_end() void {
     gen_env.expect_blocks(&e, got);
 }
 
-// ---- fort_entry (item 22) ---------------------------------------------------------
-// D11.6
+// ---- fort_entry ---------------------------------------------------------
 
 fn fort_entry_calls_main_and_returns_its_status() void {
     gen_env.env mut e = gen_env.env{};
@@ -274,12 +259,12 @@ fn fort_entry_calls_main_and_returns_its_status() void {
     gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
     gen_env.expect_blocks(&e, got);
     // The module defines the name from here on, so an `extern fn fort_entry`
-    // is not declared beside it (item 8).
+    // is not declared beside it.
     assert(e.g.entry_defined);
 }
 
 // `fort_entry` copies the argument span into its own frame when `main`
-// declares the parameter, because its caller is the `main` of item 22.
+// declares the parameter, because `main` calls it.
 fn fort_entry_copies_the_argument_span_when_main_takes_one() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -300,12 +285,10 @@ fn fort_entry_copies_the_argument_span_when_main_takes_one() void {
     gen_env.expect_blocks(&e, got);
 }
 
-// ---- the module (items 1, 2) -------------------------------------------------------
+// ---- the module -------------------------------------------------------
 
-// The named type of a struct is its fields in declaration order and never
-// `packed` (item 2), and the two types every module carries stand before it,
-// used or not.
-// D3.8
+// The named type of a struct is its fields in declaration order and never `packed`. The two
+// types every module carries stand before it, used or not.
 fn the_named_types_are_the_two_fixed_ones_then_every_struct() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -325,7 +308,7 @@ fn the_named_types_are_the_two_fixed_ones_then_every_struct() void {
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
 }
 
-// One blank line stands between two definitions (item 1).
+// One blank line stands between two definitions.
 fn two_definitions_are_separated_by_one_blank_line() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -351,7 +334,7 @@ fn two_definitions_are_separated_by_one_blank_line() void {
     gen_env.expect_blocks(&e, got);
 }
 
-// The sections of item 1 in order, separated by a blank line, with the ones
+// The module sections stay in order, with one blank line between them. Sections
 // the module does not need left out entirely.
 fn the_module_is_the_sections_of_item_one_in_order() void {
     gen_env.env mut e = gen_env.env{};
@@ -386,7 +369,6 @@ fn the_module_is_the_sections_of_item_one_in_order() void {
 
 // A whole program, module by module, in the dependency order: the emitter
 // walks the closure and `fort_entry` is emitted in the entry module alone.
-// D9.10, D11.6
 fn a_program_emits_every_module_of_the_closure() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -401,7 +383,6 @@ fn a_program_emits_every_module_of_the_closure() void {
     string got = gen_env.module_text(&e);
     // The imported module comes first, every module after the ones it
     // imports.
-    // D9.10, D19.5
     i64 helper_at = str.find(got, "define dso_local i64 @\"helper.one\"() #0 {\n");
     i64 main_at = str.find(got, "define dso_local i32 @\"main.main\"() #0 {\n");
     i64 entry_at = str.find(got, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n");
@@ -412,15 +393,13 @@ fn a_program_emits_every_module_of_the_closure() void {
 // ---- the structural check itself ---------------------------------------------------
 
 // The structural check runs over every definition and every module these
-// cases emit. Fourteen of the fifteen cases here emit one and call it; the
+// cases emit. Fourteen of the fifteen cases here emit one and call it. The
 // fifteenth is the block check below, which emits no IR at all. So
 // `grep -c '^ *gen_env.expect_blocks('` is 14 and not 15, and the count is
 // written here rather than claimed as "every case".
 //
-// The check of item 10 is only worth running if it can fail, so it is held
-// against three texts it must refuse: a block with two terminators, a block
-// with an instruction after its terminator and a module with no definition in
-// it at all.
+// The block check uses three texts it must reject. They contain two terminators, an instruction
+// after a terminator, or no definition.
 fn the_block_check_refuses_what_it_is_there_to_refuse() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -448,7 +427,7 @@ fn the_block_check_refuses_what_it_is_there_to_refuse() void {
     assert(gen_env.block_terminators(&e, "target triple = \"x86_64\"\n") ==
            "the module holds no closed definition");
     // A `switch` is the one terminator LLVM prints over several lines, so the
-    // lines that continue it are not instructions of their own (item 10).
+    // lines that continue it are not instructions of their own.
     string[7] mut sw = {
         "define dso_local void @\"main.f\"() #0 {\n",
         "entry:\n",

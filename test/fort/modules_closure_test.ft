@@ -15,27 +15,19 @@ import modules_env;
 import scope;
 import std.str;
 
-// The import closure of src/fort/modules.ft (module-system.md 6, 10, 13):
-// cycles, the identity of a module by the real path of its file, the module
-// namespaces the bindings land in, and the dependency order. The roots and
-// the import readings are the other half, in modules_test.ft; two
-// declarations of one C symbol are compared where types exist, so they belong
-// to the checker.
-// D9.5, D9.6, D7.9, D9.8
+/// Checks the import closure of src/fort/modules.ft. Cycles, the identity of a module by the
+/// real path of its file, the module namespaces the bindings land in, and the dependency order.
+/// The roots and the import readings are the other half, in modules_test.ft. Two declarations
+/// of one C symbol are compared where types exist, so they belong to the checker.
 //
-// This is the port of test/modules_closure_test.c, case for case, with the
-// file list and the release of what a set owns added at the end: neither is
-// in the C suite, the first because the C driver asks the set for it and the
-// second because the sanitizers watch the C compiler and not this program.
-// D20.2
+// The final tests check the file list and allocated storage. The C driver
+// checks the file list. C sanitizers do not inspect this Fort program.
 
-// The link a module's identity is tested through; there is no std binding for
+// The link a module's identity is tested through. There is no std binding for
 // it and this is its one caller.
-// D9.8
 extern fn symlink(char* target, char* link_path) i32;
 
 // ---- cycles ---------------------------------------------------------------------
-// D9.5
 
 fn a_cycle_is_reported_at_the_import_that_closes_it() void {
     modules_env.env mut e = modules_env.open();
@@ -86,7 +78,6 @@ fn a_diamond_is_not_a_cycle() void {
 }
 
 // ---- identity by the real path --------------------------------------------------
-// D9.2
 
 fn one_file_reached_through_two_paths_is_an_error() void {
     modules_env.env mut e = modules_env.open();
@@ -142,7 +133,6 @@ fn a_module_and_one_of_its_declarations_may_be_imported_together() void {
 }
 
 // ---- the module namespace -------------------------------------------------------
-// D7.9
 
 fn every_kind_of_declaration_enters_the_namespace() void {
     modules_env.env mut e = modules_env.open();
@@ -167,7 +157,6 @@ fn enum_members_are_not_in_the_namespace() void {
     modules_env.add(&e, "main.ft", "enum color { red, green }\nfn main() i32 { return 0; }\n");
     assert(modules_env.load(&e, "main.ft"));
     // `color.red` is the only spelling, so a scope never holds a member.
-    // D3.9
     assert(modules_env.bound(&e, "main", "red") == null);
 }
 
@@ -180,7 +169,6 @@ fn two_declarations_of_one_name_collide() void {
     assert(modules_env.said(&e, "redeclaration of 'add'"));
     assert(modules_env.said(&e, "previous declaration of 'add' here"));
     // The note belongs to the error before it and is not counted.
-    // D14.2
     assert(modules_env.errors(&e) == 1);
     assert(modules_env.reports(&e) == 2);
     assert(modules_env.report_at(&e, 1).severity == diag.severity.note);
@@ -195,7 +183,6 @@ fn a_declaration_colliding_with_an_import_is_reported_at_the_declaration() void 
     assert(!modules_env.load(&e, "main.ft"));
     // The later of the two positions carries the error and the earlier the
     // note, whichever was bound first.
-    // D7.9, D14.2
     assert(modules_env.said(&e, "redeclaration of 'util'"));
     assert(modules_env.report_at(&e, 0).loc.line == 2);
     assert(modules_env.report_at(&e, 1).loc.line == 1);
@@ -225,7 +212,7 @@ fn a_namespace_holds_the_files_imports_and_its_declarations() void {
     assert(scope.count(&m->names) == 3);
 }
 
-// ---- the closure (module-system.md 10) ------------------------------------------
+// ---- the closure ------------------------------------------
 
 fn a_module_with_nothing_in_it_loads_with_an_empty_namespace() void {
     modules_env.env mut e = modules_env.open();
@@ -268,13 +255,12 @@ fn the_file_of_a_module_is_its_root_joined_path() void {
     assert(modules_env.load(&e, "src/main.ft"));
     modules.module* vec = modules.find(&e.set, "geom.vec");
     assert(vec != null);
-    // The file is the root as given followed by the path (toolchain.md 4).
+    // The file is the root as given followed by the path.
     assert(str.find(vec->file, "/src/geom/vec.ft") >= 0);
 }
 
 // <sandbox>/sub/../sub/x.ft and <sandbox>/sub/x.ft are one file, since a
 // module's identity is the real path of its file, `..` resolved.
-// D9.2
 fn a_root_spelled_with_dot_dot_reaches_the_same_module() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -291,9 +277,7 @@ fn the_notes_of_a_missing_module_name_every_root_and_reading() void {
     modules_env.add(&e, "main.ft", "import util.strings;\nfn main() i32 { return 0; }\n");
     modules_env.root(&e, "lib");
     assert(!modules_env.load(&e, "main.ft"));
-    // One note per root and reading: two roots, two readings
-    // (module-system.md 13).
-    // D9.2
+    // One note appears for each root and reading: two roots and two readings.
     u64 mut notes = 0;
     u64 mut i = 0;
     while (i < modules_env.reports(&e)) {
@@ -306,7 +290,6 @@ fn the_notes_of_a_missing_module_name_every_root_and_reading() void {
 }
 
 // ---- the pass order -------------------------------------------------------------
-// D9.10, D14.2
 
 fn a_chain_is_ordered_from_the_deepest_module_up() void {
     modules_env.env mut e = modules_env.open();
@@ -330,7 +313,6 @@ fn the_pass_order_is_the_dependency_order_when_every_module_loaded() void {
     assert(modules_env.load(&e, "main.ft"));
     // A closure that resolved is ordered end to end, so the pass order is the
     // dependency order and nothing more.
-    // D9.10
     assert(modules.pass_count(&e.set) == modules.count(&e.set));
     assert(modules_env.passed(&e, 0) == "a");
     assert(modules_env.passed(&e, 1) == "main");
@@ -344,9 +326,8 @@ fn the_pass_order_ends_with_the_modules_the_loader_never_ordered() void {
     modules_env.add(&e, "a.ft", "import nothere;\nfn f() i32 { return 0; }\n");
     assert(!modules_env.load(&e, "main.ft"));
     // `a` never resolved and `main` was never reached, so neither is in the
-    // dependency order; both parsed, so a pass still visits them, the
+    // dependency order. Both parsed, so a pass still visits them, the
     // imported module first.
-    // D14.2, D20.1
     assert(modules.count(&e.set) == 0);
     assert(modules.pass_count(&e.set) == 2);
     assert(modules_env.passed(&e, 0) == "a");
@@ -360,15 +341,13 @@ fn a_module_that_did_not_parse_is_not_in_the_pass_order() void {
     modules_env.add(&e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
     modules_env.add(&e, "a.ft", "fn f() i32 { return 0\n");
     assert(!modules_env.load(&e, "main.ft"));
-    // A file with a syntax error is not checked, so no pass visits it; the
+    // A file with a syntax error is not checked, so no pass visits it. The
     // importer that parsed is visited.
-    // D14.2
     assert(modules.pass_count(&e.set) == 1);
     assert(modules_env.passed(&e, 0) == "main");
 }
 
 // ---- the files the loader read --------------------------------------------------
-// D20.2
 
 // Every file read, whether or not its module parsed and whether or not the
 // closure is complete: the "files" array of the check mode's document tells a
@@ -401,7 +380,6 @@ fn a_file_that_could_not_be_read_is_not_listed() void {
 
 // free empties the set and leaves it usable, which is what a second analysis
 // through one value needs.
-// D20.5
 fn free_empties_the_set_and_leaves_it_usable() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -434,10 +412,10 @@ fn free_empties_the_set_and_leaves_it_usable() void {
 //
 // The first view is the program break: a round that gives its blocks back
 // leaves it where it was, while a round that keeps something pushes it up.
-// That view sees a large leak and misses a small one, since the allocator
-// serves a sixty-four-byte vector out of its free chunks without ever asking
-// the kernel for more: with `del(set->modules.items)` deleted the break does
-// not move at all.
+// This view sees a large leak but can miss a small one. The allocator can
+// serve a sixty-four-byte vector from its free chunks without more memory from
+// the kernel. Removing `del(set->modules.items)` therefore does not move the
+// break.
 //
 // The second view is the address of a block a round is handed: a round that
 // frees what it took is handed the same address again. That view sees a small
@@ -455,7 +433,6 @@ fn free_empties_the_set_and_leaves_it_usable() void {
 // `scope.free(&m->names)` move both views. Dropping the `del(m)` of a module
 // makes the checked build abort with `overwriting owned value` in the first
 // test of this file instead.
-// D17.11
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_BOUND = 1024;
@@ -463,7 +440,6 @@ u64 LEAK_BOUND = 1024;
 // The current program break, which is where the heap ends: sbrk(0) moves
 // nothing and reports it. There is no std binding for it and this is its one
 // caller.
-// D9.8
 extern fn sbrk(i64 increment) void*;
 
 fn heap_end() u64 {
@@ -472,7 +448,6 @@ fn heap_end() u64 {
 
 // How far apart two positions are, whichever way the heap moved: a
 // subtraction the wrong way round would trap before the assertion.
-// D11.1
 fn distance(u64 a, u64 b) u64 {
     if (a > b) {
         return a - b;

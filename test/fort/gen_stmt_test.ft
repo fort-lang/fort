@@ -11,25 +11,18 @@ import gen_env;
 import std.str;
 import std.strbuf;
 
-// The statements of src/fort/gen_stmt.ft against toolchain.md 6 item 10: the
-// blocks each control-flow form opens, the order their labels are allocated
-// in, the two exit targets of a loop, the assignment forms and the overwrite
-// check.
-// D19.4, D19.5, D7.6, D7.2, D17.11
+/// Checks statements from src/fort/gen_stmt.ft. Cases cover control-flow
+/// blocks, label order, loop exits, assignment forms, and overwrite checks.
 //
-// This is the half of test/gen_control_test.c and test/gen_stmt_test.c that
-// answers for a whole definition. The expected text came from the original
-// port evidence. Each `do`-`while` and conditional block has a named expected
-// shape in its test comment.
-// T-044: the ticket that added `do`-`while` and `?:`
+// test/gen_control_test.c checks the bootstrap implementation. Each
+// `do`-`while` and conditional block here has
+// a named expected shape in its test comment.
 //
-// Every one of the fifteen cases emits a definition through the `emit` helper
-// below, which runs the structural check of item 10 over it, since `opt
-// -passes=verify` does not reject an instruction after a terminator
-// (notes/compiler.md 6). The check therefore has one call site here and covers
-// all fifteen; `grep -c '^ *gen_env.expect_blocks('` is 1, in `emit`, and
-// `grep -c '= emit(&e,'` is 16, one per case and two in the last, which emits
-// the same function under two build modes.
+// Every one of the fifteen cases emits a definition through the `emit` helper below. The helper
+// checks that each block has one terminator because `opt -passes=verify` accepts an instruction
+// after a terminator. It covers all fifteen. `grep -c '^ *gen_env.expect_blocks('` is 1, in
+// `emit`, and `grep -c '= emit(&e,'` is 16, one per case and two in the last. It emits the same
+// function under two build modes.
 
 // One function of `src` emitted, with the structural check run over it.
 fn emit(gen_env.env mut* e, string src, string name) string {
@@ -42,7 +35,6 @@ fn emit(gen_env.env mut* e, string src, string name) string {
 // The body of `name` written around a `fn i32 main`, which every module needs:
 // the declarations come first so that a function under test is not the entry
 // module's `main`.
-// D8.6
 fn wrap(strbuf.str_buf mut* b, string decls) string {
     strbuf.clear(b);
     strbuf.append(b, decls);
@@ -51,13 +43,11 @@ fn wrap(strbuf.str_buf mut* b, string decls) string {
 }
 
 // ---- if ----------------------------------------------------------------------------
-// D7.4
 
 // The condition branches to the then block and to the else block, or to the
 // continuation when there is no `else`, and each branch that has not
 // terminated branches to the continuation. The labels are allocated then,
 // else, done, so an `else if` chain numbers its blocks in that order.
-// D19.5
 fn an_if_else_chain_opens_its_blocks_in_allocation_order() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -95,10 +85,9 @@ fn an_if_else_chain_opens_its_blocks_in_allocation_order() void {
 }
 
 // ---- while, for and the range for ---------------------------------------------------
-// D7.5
 
 // `while (cond) { }`: a head block that re-evaluates the condition, a body
-// that branches back to it, and a continuation; `continue` targets the head
+// that branches back to it, and a continuation. `continue` targets the head
 // and `break` the continuation.
 fn a_while_loop_is_a_head_a_body_and_a_continuation() void {
     gen_env.env mut e = gen_env.env{};
@@ -119,7 +108,7 @@ fn a_while_loop_is_a_head_a_body_and_a_continuation() void {
         "  br i1 %t2, label %L1, label %L2\n",
         "\nL1:\n",
         // The `break` leaves the body for the continuation, so the back edge
-        // to the head is not written: the block already ended (item 10).
+        // to the head is not written: the block already ended.
         "  br label %L2\n",
         "\nL2:\n",
         "  ret void\n",
@@ -130,10 +119,9 @@ fn a_while_loop_is_a_head_a_body_and_a_continuation() void {
                         gen_env.join_lines(&e, want[0..10]));
 }
 
-// `for (init; cond; step) { }`: `init` runs in the block the loop stands in,
-// the head tests the condition, the body branches to the step block and the
-// step branches back to the head, so `continue` runs `step`.
-// D7.5
+// `for (init; cond; step) { }`: `init` runs in the block the loop stands in. The head tests the
+// condition. The body branches to the step block and the step branches back to the head, so
+// `continue` runs `step`.
 fn a_for_loop_branches_through_its_step_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -170,9 +158,8 @@ fn a_for_loop_branches_through_its_step_block() void {
 }
 
 // `do { } while (cond);`: the body runs once before the first test, so the
-// entry edge goes to the body; `continue` branches to the test block and the
+// entry edge goes to the body. `continue` branches to the test block and the
 // test branches back to the body. The labels are allocated body, test, done.
-// D7.5, D7.6, D19.5
 fn a_do_while_tests_after_its_body() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -207,7 +194,6 @@ fn a_do_while_tests_after_its_body() void {
 // `break` in a `do` leaves the loop without running the test, which is the
 // other exit: the body branches to the continuation and the test block keeps
 // its own back edge.
-// D7.6
 fn a_break_in_a_do_while_skips_the_test() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -223,7 +209,7 @@ fn a_break_in_a_do_while_skips_the_test() void {
         "  br label %L0\n",
         "\nL0:\n",
         // The `break` wrote the body's one terminator, so the back edge to
-        // the test is not written after it (item 10).
+        // the test is not written after it.
         "  br label %L2\n",
         "\nL1:\n",
         "  %t1 = load i8, ptr %go.0, align 1\n",
@@ -237,10 +223,10 @@ fn a_break_in_a_do_while_skips_the_test() void {
                         gen_env.join_lines(&e, want[0..10]));
 }
 
-// `for (T x : coll) { }`: an `i64` counter the compiler invents walks the
-// collection and the loop variable is a fresh copy of each element taken at
-// the start of its iteration. The counter is bounded by the length, so the
-// compare is unsigned and its increment is a plain `add` (item 15, 16).
+// `for (T x: coll) { }`: an invented `i64` counter walks the collection. The
+// loop variable is a fresh copy of each element at the start of its iteration.
+// The counter is bounded by the length, so the
+// compare is unsigned and its increment is a plain `add`.
 fn a_range_for_walks_an_invented_counter() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -255,7 +241,6 @@ fn a_range_for_walks_an_invented_counter() void {
     string[17] mut want = {
         // The collection owns nothing, so it is evaluated once into a
         // temporary and the loop iterates over the copy.
-        // D7.5, D17.10
         "  %tmp0 = alloca [3 x i64], align 8\n",
         "  %tmp1 = alloca i64, align 8\n",
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %xs.in, i64 24,",
@@ -281,7 +266,6 @@ fn a_range_for_walks_an_invented_counter() void {
 // innermost enclosing loop, which a `switch` between them does not interrupt:
 // the `break` here leaves the switch and the `continue` still runs the loop's
 // step.
-// D7.5, D7.6
 fn a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -314,14 +298,11 @@ fn a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() void {
 }
 
 // ---- the conditional in a definition ------------------------------------------------
-// D6.6
 
-// A conditional in a `return` opens three blocks inside one definition, and
-// every one of them ends in exactly one terminator: the two arms branch to the
-// continuation and the continuation returns the slot the arms wrote (item 10).
-// `emit` runs the structural check over the whole definition, which is what
-// sees an instruction written after a terminator.
-// D6.6
+// A conditional in a `return` opens three blocks inside one definition, and every one of them
+// ends in exactly one terminator. The two arms branch to the continuation and the continuation
+// returns the slot the arms wrote. `emit` runs the structural check over the whole definition,
+// which is what sees an instruction written after a terminator.
 fn a_conditional_in_a_return_ends_every_block_it_opens() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -354,9 +335,8 @@ fn a_conditional_in_a_return_ends_every_block_it_opens() void {
 // An aggregate conditional writes through gen_expr_into, which is the other
 // half of the lowering: each arm writes the whole value into the one
 // destination and the two blocks meet at the continuation. The structural
-// check of item 10 runs over this definition as over every other here, since
+// block check runs over this definition because
 // the aggregate path duplicates a memcpy per arm.
-// D19.3
 fn an_aggregate_conditional_writes_each_arm_into_the_destination() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -374,8 +354,7 @@ fn an_aggregate_conditional_writes_each_arm_into_the_destination() void {
         "\nL0:\n",
         "  %t3 = load ptr, ptr %a.1, align 8\n",
         // The move reads the operand into an intermediate, empties it and only
-        // then copies it into the destination (item 18).
-        // D17.6
+        // then copies it into the destination.
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t3, i64 24,",
         " i1 false)\n",
         "  call void @llvm.memset.p0.i64(ptr align 8 %t3, i8 0, i64 24, i1 false)\n",
@@ -392,12 +371,10 @@ fn an_aggregate_conditional_writes_each_arm_into_the_destination() void {
 }
 
 // ---- switch --------------------------------------------------------------------------
-// D7.6, D7.7
 
-// One LLVM `switch` with one case per label, a block per clause and a default
-// block, which is the `default` clause wherever it stands and the
-// continuation when the switch has none; each case body ends in an implicit
-// `break` (item 10).
+// One LLVM `switch` with one case per label, a block per clause and a default block. It is the
+// `default` clause wherever it stands and the continuation when the switch has none. Each case
+// body ends in an implicit `break`.
 fn a_switch_lists_every_label_and_falls_into_no_clause() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -434,7 +411,6 @@ fn a_switch_lists_every_label_and_falls_into_no_clause() void {
 // that reports the enum and the value. The value is widened in the block the
 // switch stands in, which dominates the failure block, and the failure block
 // stands after every normal block of the definition.
-// D3.9, D7.7, D19.6
 fn an_enum_switch_with_no_default_gets_a_failure_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -467,16 +443,14 @@ fn an_enum_switch_with_no_default_gets_a_failure_block() void {
     };
     assert(str.find(got, gen_env.join_lines(&e, want[0..14])) >= 0);
     // The table the failure names is the enum's own name, a string constant
-    // of the module (item 5).
+    // of the module.
     assert(gen_env.record_text(&e, 0) == "colour");
 }
 
 // ---- assignment and the overwrite check -----------------------------------------------
-// D7.2, D17.11
 
 // A compound assignment has the operand rules and the overflow behavior of the
-// operator it applies (item 15), and `++` uses the same intrinsic as `+`.
-// D7.2
+// operator it applies, and `++` uses the same intrinsic as `+`.
 fn a_compound_assignment_and_an_increment_use_the_operator_s_intrinsic() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -504,15 +478,13 @@ fn a_compound_assignment_and_an_increment_use_the_operator_s_intrinsic() void {
     assert(str.find(got, gen_env.join_lines(&e, inc[0..1])) >= 0);
     // Each check's failure block is emitted after every normal block, in
     // ascending label order.
-    // D19.6
     assert(str.find(got, "\nL1:\n  call void @\"std.rt.fail_overflow\"(") <
            str.find(got, "\nL3:\n  call void @\"std.rt.fail_overflow\"("));
 }
 
-// Storing over a live `own` value is a runtime error in a checked build, the
-// previous allocation being lost: the right-hand side is fully evaluated, the
-// check runs, and only then does the store happen (item 18).
-// D11.1, D17.11
+// Storing over a live `own` value is a runtime error in a checked build, the previous
+// allocation being lost. The right-hand side is fully evaluated, the check runs, and only then
+// does the store happen.
 fn an_assignment_to_an_own_reference_checks_what_it_overwrites() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -544,11 +516,9 @@ fn an_assignment_to_an_own_reference_checks_what_it_overwrites() void {
 }
 
 
-// A span or a `string` is produced into a place, so the value lands in a
-// temporary first and the header is copied over after the check; the pointer
-// word the check reads is field 0 of the header and not the value itself (item
-// 18, item 17).
-// D19.3
+// A span or a `string` is produced into a place. The value lands in a temporary first and the
+// header is copied over after the check. The pointer word the check reads is field 0 of the
+// header and not the value itself.
 fn an_own_span_is_checked_through_its_header_and_copied_after() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -572,7 +542,6 @@ fn an_own_span_is_checked_through_its_header_and_copied_after() void {
     // The slot of an owning local is zeroed once in the entry block, and `del`
     // zeroes it again, which is not an assignment and carries no check (item
     // 18).
-    // D17.9
     string[2] mut zeroed = {
         "  call void @llvm.memset.p0.i64(ptr align 8 %xs.0, i8 0, i64 16, i1 false)\n",
         "  %t0 = sext i32 2 to i64\n",
@@ -582,8 +551,7 @@ fn an_own_span_is_checked_through_its_header_and_copied_after() void {
 
 // `--release` drops the overwrite check with the rest of the checked
 // arithmetic, and `--no-bounds-check` does not: it removes the index and span
-// branches alone (item 18).
-// D10.6, D11.1
+// branches alone.
 fn the_overwrite_check_follows_release_and_not_no_bounds_check() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.gen_options_open(&e, true, false);

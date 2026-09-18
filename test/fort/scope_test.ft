@@ -14,13 +14,10 @@ import diag;
 import scope;
 import std.strbuf;
 
-// The namespaces of src/fort/scope.ft, held against what module-system.md 5
-// says a namespace does: one entry per name whatever the kinds, a lookup that
-// walks outward, a lookup for a local that stops before the module namespace,
-// and the universe scope in its order.
-// D7.9, D12.2
+/// Checks namespaces, outward lookup, local lookup, and the ordered universe
+/// scope in src/fort/scope.ft.
 
-// A position to hang a binding on; only its line is ever compared here.
+// A position to hang a binding on. Only its line is ever compared here.
 fn at(u32 line) diag.loc {
     return diag.loc_make("a.ft", line, 1);
 }
@@ -72,7 +69,6 @@ fn the_import_fields_are_written_through_the_binding() void {
     // The module a b_module binding denotes is the same field seen as the
     // opaque pointer the loader stores there, since a module holds a scope by
     // value and a typed field would close an import cycle.
-    // D9.3, D9.5
     scope.binding mut* module_binding =
         scope.declare(&s, "util", scope.bind_kind.b_module, at(3), null);
     module_binding->module = cast(&s, void*);
@@ -93,7 +89,6 @@ fn a_fresh_scope_is_empty() void {
 // The bindings are handed back in declaration order, and a binding declared
 // before a growth of the vector is still itself afterwards: the scope owns
 // each binding separately, so nothing moves.
-// D17.3
 fn the_bindings_keep_their_order_across_a_growth() void {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
@@ -113,7 +108,6 @@ fn the_bindings_keep_their_order_across_a_growth() void {
     assert(scope.count(&s) == 200);
     // A binding declared before the growths is still itself: the scope owns
     // each one separately, so nothing moves.
-    // D17.3
     assert(scope.at(&s, 0) == first);
     assert(scope.find(&s, containers.str_at(&names, 0)) == first);
     // Every name declared is found, and the position of each is its order.
@@ -127,7 +121,6 @@ fn the_bindings_keep_their_order_across_a_growth() void {
 
 // `n<i>` interned in `p`, which the caller keeps alive for as long as the
 // scope that borrows the name.
-// D13.5
 fn make_name(containers.pool mut* p, u64 i) string {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -146,7 +139,6 @@ fn fill_names(containers.pool mut* p, containers.str_vec mut* v, u64 n) void {
 }
 
 // ---- collisions -----------------------------------------------------------------
-// D7.9
 
 // Any two entries of one namespace collide whatever their kinds: a struct
 // `node` and a function `node` cannot coexist, and the first one stays.
@@ -167,7 +159,6 @@ fn any_two_entries_of_one_namespace_collide() void {
 
 // A collision in one scope is none in another: a block may declare the name
 // its module declares, which is the shadowing the rule allows.
-// D7.9
 fn two_scopes_do_not_collide() void {
     scope.scope mut m = module_scope();
     defer scope.free(&m);
@@ -180,9 +171,8 @@ fn two_scopes_do_not_collide() void {
 }
 
 // ---- lookup ---------------------------------------------------------------------
-// D7.9
 
-// find answers for one scope alone; lookup walks outward and the innermost
+// find answers for one scope alone. Lookup walks outward and the innermost
 // binding wins.
 fn lookup_walks_outward_and_the_innermost_wins() void {
     scope.scope mut m = module_scope();
@@ -207,7 +197,6 @@ fn lookup_walks_outward_and_the_innermost_wins() void {
 
 // find_in_blocks stops before the module namespace: a local may shadow a
 // module-level name but never an enclosing local or parameter.
-// D7.9
 fn find_in_blocks_stops_at_the_module_namespace() void {
     scope.scope mut m = module_scope();
     defer scope.free(&m);
@@ -229,10 +218,8 @@ fn find_in_blocks_stops_at_the_module_namespace() void {
 
 // ---- the kinds ------------------------------------------------------------------
 
-// The five importable declarations of module-system.md 3 are declarations;
-// the two import bindings, the two local kinds and the absent kind are not,
-// since there is no re-export.
-// D9.3
+// Five declaration kinds are importable. Import bindings, local kinds, and
+// the absent kind are not importable because Fort does not re-export them.
 fn only_the_declarations_are_importable() void {
     scope.scope mut s = module_scope();
     defer scope.free(&s);
@@ -254,10 +241,9 @@ fn is_declaration_of(scope.scope mut* s, string name, scope.bind_kind kind) bool
 }
 
 // ---- the universe ---------------------------------------------------------------
-// D12.2
 
-// The ten builtins, in the order module-system.md 5 lists them, byte for
-// byte: the order is what a caller indexing the universe reads.
+// The ten builtins in their fixed order. A caller that indexes the universe
+// reads this order.
 fn the_universe_is_the_ten_builtins_of_d12_2() void {
     assert(scope.UNIVERSE_COUNT == 10);
     assert(scope.universe_at(0) == "del");
@@ -272,9 +258,8 @@ fn the_universe_is_the_ten_builtins_of_d12_2() void {
     assert(scope.universe_at(9) == "fprintln");
 }
 
-// Every universe name is one, and a name that is not is not; a scope binding
+// Every universe name is one, and a name that is not is not. A scope binding
 // the name changes neither answer, since shadowing is the caller's question.
-// D7.9
 fn every_universe_name_is_one_and_nothing_else_is() void {
     u64 mut i = 0;
     while (i < scope.UNIVERSE_COUNT) {
@@ -293,8 +278,7 @@ fn every_universe_name_is_one_and_nothing_else_is() void {
 
 // ---- lifetime -------------------------------------------------------------------
 
-// free empties the scope and leaves it usable; a second free is a no-op.
-// D17.9
+// free empties the scope and leaves it usable. A second free is a no-op.
 fn free_empties_the_scope_and_leaves_it_usable() void {
     scope.scope mut s = module_scope();
     defer scope.free(&s);
@@ -305,7 +289,6 @@ fn free_empties_the_scope_and_leaves_it_usable() void {
     assert(scope.count(&s) == 0);
     assert(scope.find(&s, "a") == null);
     // The name is free again, which is what a re-analysis of one file needs.
-    // D20.5
     assert(scope.declare(&s, "a", scope.bind_kind.b_struct, at(3), null) != null);
     assert(scope.count(&s) == 1);
 }
@@ -326,15 +309,13 @@ fn free_empties_the_scope_and_leaves_it_usable() void {
 // with `strmap.free(&s->index)` gone the stale index outlives the bindings
 // and `free_empties_the_scope_and_leaves_it_usable` aborts on `index 0 out of
 // range for length 0`.
-// D17.11
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_NAMES = 200;
 u64 LEAK_BOUND = 1024;
 
-// The current program break, which is where the heap ends; there is no std
+// The current program break, which is where the heap ends. There is no std
 // binding for sbrk and this is its one caller.
-// D9.8
 extern fn sbrk(i64 increment) void*;
 
 fn heap_end() u64 {

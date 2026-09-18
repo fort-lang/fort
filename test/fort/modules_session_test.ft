@@ -12,17 +12,12 @@ import session;
 import std.io;
 import std.str;
 
-// The one thing src/fort/modules.ft does that src/bootstrap/modules.c does
-// not: every file it reads goes through the session (session.ft), so a
-// language server that hands the compiler its editor buffers analyses what is
-// on the screen rather than what is on disk, and a file two modules name is
-// read once.
-// D20.5
+/// Checks that the module loader reads all files through one session. Editor buffers override
+/// disk files, and repeated paths use one cached read.
 //
-// The limit of that is written down here as well: the loader asks the file
-// system whether a candidate file exists before it reads anything
-// (module-system.md 3), so a buffer that stands for no file resolves as an
-// entry file, which is named on the command line, and not as an import.
+// The limit of that is written down here as well: the loader asks the file system whether a
+// candidate file exists before it reads anything. A buffer that stands for no file resolves as
+// an entry file, which is named on the command line, and not as an import.
 
 // ---- the session is where the bytes come from -----------------------------------
 
@@ -45,7 +40,6 @@ fn a_load_leaves_every_source_in_the_session() void {
 // A module's `source` is the session's copy, and a second set loading the
 // same closure through one session reads the same bytes at the same address:
 // the session remembers a file it has read.
-// D20.5
 fn a_file_is_read_once_for_the_life_of_the_session() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -62,9 +56,8 @@ fn a_file_is_read_once_for_the_life_of_the_session() void {
     assert(session.source_count(&e.s) == 1);
 }
 
-// The probe of the symbol reading reads through the session too, so a file it
-// looked at is remembered and the module reading that follows costs no second
-// read (module-system.md 3).
+// The probe of the symbol reading reads through the session too. A file it looked at is
+// remembered and the module reading that follows costs no second read.
 fn the_prefix_probe_reads_through_the_session() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -80,7 +73,6 @@ fn the_prefix_probe_reads_through_the_session() void {
 
 // An inactive import performs no source read. The file can exist, but only the
 // entry source reaches the session table and the module closure.
-// D21.3
 fn an_inactive_import_does_not_read_its_source() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -97,7 +89,6 @@ fn an_inactive_import_does_not_read_its_source() void {
 }
 
 // ---- editor buffers -------------------------------------------------------------
-// D20.5
 
 // An entry file installed with set_source is what the analysis reads, and the
 // file on disk is not opened: the text the loader lexes is the buffer's.
@@ -107,7 +98,7 @@ fn an_entry_buffer_is_what_the_analysis_reads() void {
     modules_env.add(&e, "main.ft", "fn main() i32 {\n    return 0\n}\n");
     string own entry = modules_env.in_sandbox(&e, "main.ft");
     defer del(entry);
-    // The file on disk has a syntax error; the buffer does not.
+    // The file on disk has a syntax error. The buffer does not.
     session.set_source(&e.s, entry, "fn main() i32 {\n    return 0;\n}\n");
     assert(modules.load(&e.s, &e.set, entry));
     assert(modules_env.errors(&e) == 0);
@@ -128,10 +119,8 @@ fn a_buffer_with_an_error_is_the_one_reported() void {
     assert(str.ends_with(modules_env.report_at(&e, 0).loc.file, "main.ft"));
 }
 
-// An imported module's buffer is read as well, as long as a file of that name
-// exists: the loader looks the candidate up on disk and then reads through
-// the session (module-system.md 3).
-// D20.5
+// An imported module's buffer is read as well, as long as a file of that name exists. The
+// loader looks the candidate up on disk and then reads through the session.
 fn an_imported_buffer_is_read_when_the_file_exists() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -144,11 +133,9 @@ fn an_imported_buffer_is_read_when_the_file_exists() void {
     assert(modules_env.errors(&e) == 0);
 }
 
-// A buffer that stands for no file does not resolve as an import: existence
-// is asked of the file system, so an unsaved new module is not importable
-// until it is written (module-system.md 3). The limit is stated here so that
-// a server knows it, and so that a later ticket that lifts it fails this
-// test rather than changing behaviour unnoticed.
+// A buffer that stands for no file does not resolve as an import. Existence is asked of the
+// file system, so an unsaved new module is not importable until it is written. This test keeps
+// that limit explicit for server users.
 fn a_buffer_that_is_no_file_does_not_resolve_as_an_import() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -190,7 +177,6 @@ fn two_sets_over_one_session_share_only_the_sources() void {
 // A set freed before its session leaves the session whole: the sources are
 // the session's and the modules that pointed into them are gone, which is the
 // order a driver releases them in.
-// D20.5
 fn a_set_freed_before_its_session_leaves_the_sources() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -207,7 +193,6 @@ fn a_set_freed_before_its_session_leaves_the_sources() void {
 }
 
 // ---- re-entrancy ----------------------------------------------------------------
-// D20.5
 
 // Two sessions share nothing: the second reads the file itself and reports
 // its own diagnostics, whatever the first did with the same path.
@@ -234,7 +219,6 @@ fn two_sessions_share_nothing() void {
 // A hundred loads through one session neither grow the source table nor
 // change the answer, which is what a document analysed at every keystroke
 // needs.
-// D20.5
 u64 RELOADS = 100;
 
 fn a_hundred_loads_through_one_session_answer_alike() void {

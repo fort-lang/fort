@@ -8,18 +8,10 @@ import prim;
 import types;
 import types_env;
 
-// Re-entrancy: a language server analyses a document again at every keystroke,
-// and analyses several documents at once, so nothing a module of the compiler
-// holds may be shared between two analyses. types.ft keeps no module-level
-// state at all -- every node belongs to the table it was interned in -- and
-// this file is the witness: tables that live at the same time answer for
-// themselves alone, and a table that is filled and freed a thousand times
-// leaves nothing behind.
-// D20.5
+/// Checks that concurrent type tables stay independent. It also checks that 1,000 created and
+/// freed tables leave no shared state.
 //
-// The C module has the same shape, so this is the rule the port had to keep
-// rather than one it introduced; what it could not keep is the arena that is
-// never freed, which is why the repeated half below is here.
+// The repeated test also checks that each table releases its arena.
 
 // A distinct declaration pointer per nominal type built by hand.
 i64[8] mut decls = {};
@@ -52,14 +44,12 @@ fn three_tables_intern_three_nodes() void {
     // The nodes are structurally equal all the same: identity is structural
     // for a pointer type, so the two answer `type_equal` across the tables
     // even though they are two nodes.
-    // D3.12
     assert(types.type_equal(pa, pb));
     assert(types.type_same_shape(pa, pc));
 }
 
 // A struct laid out in one table says nothing about the struct of the same
 // name in another: its identity is its declaration.
-// D3.12
 fn a_layout_in_one_table_leaves_the_other_alone() void {
     types.table mut a = types.table{};
     defer types.type_table_free(&a);
@@ -69,7 +59,6 @@ fn a_layout_in_one_table_leaves_the_other_alone() void {
     types.node* sb = types.type_struct(&b, "point", decl_at(0));
     // Two nodes, and equal all the same: identity is the declaration, which is
     // the same one here, and not the node.
-    // D3.12
     assert(sa != sb);
     assert(types.type_equal(sa, sb));
     types.node*[2] mut fields = {types.type_prim(&a, prim.prim_kind.prim_i32),
@@ -81,7 +70,7 @@ fn a_layout_in_one_table_leaves_the_other_alone() void {
     // The other table's node is untouched: its layout is where it started.
     assert(types.type_layout_state(sb) == types.layout_state.l_unresolved);
     assert(types.type_sizeof(sa) == 8);
-    // And laying it out there works, from its own unresolved state.
+    // Its own unresolved state permits an independent layout.
     types.node*[1] mut other_fields = {types.type_prim(&b, prim.prim_kind.prim_i64)};
     u64[1] mut other_offsets = {};
     assert(types.type_layout_begin(sb));
@@ -121,7 +110,6 @@ fn two_environments_share_nothing() void {
 // program it builds, so what this witnesses is that a thousand rounds answer
 // as the first one does and that the allocator survives them -- a double free
 // of a node aborts in libc here rather than being reported.
-// D20.5
 fn a_thousand_tables_do_not_grow_the_heap() void {
     u64 mut n = 0;
     while (n < 1000) {
@@ -182,7 +170,6 @@ fn a_thousand_environments_do_not_grow_the_heap() void {
 
 // Freeing a table twice frees once: the second call walks an empty vector, as
 // `del` on an emptied span does.
-// D17.9
 fn freeing_twice_is_a_no_op() void {
     types.table mut tt = types.table{};
     types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
@@ -190,7 +177,7 @@ fn freeing_twice_is_a_no_op() void {
     types.type_table_free(&tt);
     types.type_table_free(&tt);
     types.type_table_free(&tt);
-    // And it is still usable afterwards.
+    // The table remains usable after these calls.
     assert(types.type_sizeof(types.type_prim(&tt, prim.prim_kind.prim_i64)) == 8);
     types.type_table_free(&tt);
 }

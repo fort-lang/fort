@@ -8,16 +8,12 @@ import check_env;
 import std.strbuf;
 import types;
 
-// The expression forms of core-language.md 5 as src/fort/check.ft types them:
-// casts, `sizeof`, `new`, indexing and spans, the pseudo-fields, the
-// literals, the calls, the universe functions and the qualified names.
-// D3.14, D3.15, D10.2, D6.8, D6.9, D3.4, D3.5, D3.7, D6.5, D6.11, D12.2, D9.4
+/// Checks casts, allocation, indexing, spans, literals, calls, pseudo-fields,
+/// universe functions, and qualified names in src/fort/check.ft.
 //
 // A constant expression is checked where one belongs, in a module-level
-// initializer; every other form is checked by hand through
-// check_env.probe_stmt, since the statements of a function body belong to
-// check_stmt.ft and this pass stops before them.
-// D7.10, T-036: the ticket that ports the statement checker
+// initializer. Every other form uses check_env.probe_stmt. Function body
+// statements belong to check_stmt.ft, so this pass stops before them.
 
 // The module the probes are written against: a point and a box to index and
 // span, a global of each, and the `probe` function whose statements are
@@ -29,7 +25,6 @@ fn open_probe(check_env.env mut* e, string body) bool {
 // A `probe` whose body is the four statements given, the empty ones left out,
 // and a declaration after it: the form a probe of several statements takes,
 // since fort does not join adjacent string literals.
-// D2.9
 fn open_lines(check_env.env mut* e, string one, string two, string three, string four,
                    string extra) bool {
     strbuf.str_buf mut b = strbuf.create();
@@ -54,7 +49,6 @@ fn open_probe2(check_env.env mut* e, string body, string extra) bool {
     strbuf.append(&b, "i32 mut* q = null;\n");
     // The sinks the probes pass their expression to: a statement is a call,
     // so an expression is checked inside one.
-    // D7.3
     strbuf.append(&b, "fn s_i32(i32 v) void {\n    return;\n}\n");
     strbuf.append(&b, "fn s_u64(u64 v) void {\n    return;\n}\n");
     strbuf.append(&b, "fn s_span(i32@ v) void {\n    return;\n}\n");
@@ -74,7 +68,6 @@ fn probe_type(check_env.env mut* e, u64 i) string {
 }
 
 // ---- casts -------------------------------------------------------------------------
-// D3.14
 
 fn a_cast_among_numeric_types_folds_to_what_the_run_time_would_produce() void {
     check_env.env mut e = check_env.env{};
@@ -84,7 +77,6 @@ fn a_cast_among_numeric_types_folds_to_what_the_run_time_would_produce() void {
     i64 mut v = 0;
     assert(check_env.init_int(&e, "probe", &v));
     // 300 truncated to eight bits.
-    // D3.14
     assert(v == 44);
     assert(check_env.probe_type(&e) == "u8");
 }
@@ -116,7 +108,6 @@ fn a_cast_never_adds_mut() void {
     // One diagnostic for the one cast, at the cast and not at the binding: the
     // count is the rule as much as the text, because a second report on the
     // line would leave the corpus green.
-    // D3.14, D14.2
     assert(!check_env.check_body(&e,
         "    void* q = null;\n    println(cast(q, i32 mut*));"));
     assert(check_env.said(&e, "cannot cast void* to i32 mut*: a cast never adds 'mut'"));
@@ -128,8 +119,7 @@ fn the_diagnostic_names_the_rule_that_refused() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // A cast refused for another reason carries no tail, so the tail says which
-    // rule refused; a pair that both rows refuse reports the mark.
-    // D3.14, D14.2
+    // rule refused. A pair that both rows refuse reports the mark.
     assert(!check_env.check_body(&e, "    i32@ s = {};\n    println(cast(s, u32@).len);"));
     assert(check_env.said(&e, "cannot cast i32@ to u32@"));
     assert(!check_env.said(&e, "a cast never adds 'mut'"));
@@ -144,7 +134,6 @@ fn the_tail_stands_only_where_the_mark_is_the_reason() void {
     // a reader who dropped the mark would meet a second error and the tail says
     // nothing. It stands only where dropping the marks of the target makes the
     // cast legal, which the second half is.
-    // D3.14
     assert(!check_env.check_body(&e, "    i32@ s = {};\n    println(cast(s, u32 mut@).len);"));
     assert(check_env.said(&e, "cannot cast i32@ to u32 mut@"));
     assert(!check_env.said(&e, "a cast never adds 'mut'"));
@@ -162,7 +151,6 @@ fn a_cast_that_drops_mut_is_allowed_at_every_level() void {
     defer check_env.close(&e);
     // The drop behind a mutable level is the one the implicit conversion
     // refuses and the cast makes, and it is how a caller reaches std.sort_ptr.
-    // D3.14, D5.4
     assert(check_env.check_body(&e,
         "    i32 mut* mut@ s = {};\n    println(cast(s, i32* mut@).len);"));
     assert(check_env.errors(&e) == 0);
@@ -174,7 +162,6 @@ fn null_is_not_a_cast_operand() void {
     defer check_env.close(&e);
     assert(!check_env.check_init_of(&e, "i32*", "cast(null, i32*)"));
     // `null` has no type of its own, so there is nothing to convert.
-    // D3.14, D10.5
     assert(check_env.said(&e, "'null' is not a cast operand"));
 }
 
@@ -187,7 +174,6 @@ fn a_cast_target_carries_no_outermost_mut() void {
 }
 
 // ---- sizeof ------------------------------------------------------------------------
-// D3.15
 
 fn sizeof_yields_an_untyped_constant_of_the_type_s_size() void {
     check_env.env mut e = check_env.env{};
@@ -198,11 +184,9 @@ fn sizeof_yields_an_untyped_constant_of_the_type_s_size() void {
     i64 mut v = 0;
     assert(check_env.init_int(&e, "k", &v));
     // One byte, three of padding and four: the layout.
-    // D3.8
     assert(v == 8);
     // The constant took the type of its context, which is what an untyped
     // constant does.
-    // D4.1
     assert(check_env.init_type(&e, "k") == "i64");
 }
 
@@ -215,7 +199,6 @@ fn sizeof_needs_a_sized_type() void {
 }
 
 // ---- new ---------------------------------------------------------------------------
-// D10.2, D17.3
 
 fn new_yields_an_owning_pointer_and_a_counted_new_an_owning_span() void {
     check_env.env mut e = check_env.env{};
@@ -223,7 +206,6 @@ fn new_yields_an_owning_pointer_and_a_counted_new_an_owning_span() void {
     defer check_env.close(&e);
     assert(open_probe(&e, "fn probe() void {\n    del(new(point));\n    del(new(i32, 4));\n}\n"));
     // `new(T)` is `T mut* own` and `new(T, n)` is `T mut@ own`.
-    // D10.2
     assert(probe_type(&e, 0) == "void");
     check.expr one = check_env.probe_expr(&e,
         check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_new, ""));
@@ -245,7 +227,6 @@ fn new_needs_a_sized_type_and_a_non_negative_count() void {
 }
 
 // ---- indexing and spans ------------------------------------------------------------
-// D6.8, D6.9
 
 fn an_index_of_an_array_is_an_lvalue_of_its_element_type() void {
     check_env.env mut e = check_env.env{};
@@ -256,7 +237,6 @@ fn an_index_of_an_array_is_an_lvalue_of_its_element_type() void {
         check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_index, ""));
     assert(check_env.type_text(&e, o.ty) == "i32");
     // The element of a `mut` global array is an assignable lvalue.
-    // D5.7
     assert(o.lvalue && o.is_mut);
 }
 
@@ -277,7 +257,6 @@ fn a_pointer_cannot_be_indexed() void {
     check_env.probe_stmt(&e, "probe", 0);
     // There is no pointer arithmetic, and the hint names the spelling that
     // works for a pointer to an array.
-    // D6.8, D10.4
     assert(check_env.said(&e, "i32 mut* cannot be indexed: write '(*p)[i]'"));
 }
 
@@ -290,12 +269,10 @@ fn a_span_of_an_array_is_a_view_of_its_elements() void {
     check.expr view = check_env.probe_expr(&e,
         check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_span, ""));
     // The element mutability is the operand's and the view is never `own`.
-    // D6.9, D17.3
     assert(check_env.type_text(&e, view.ty) == "i32 mut@");
     check.expr sub = check_env.probe_expr(&e,
         check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_span, ""));
     // A span of a string is a string.
-    // D3.7
     assert(check_env.type_text(&e, sub.ty) == "string");
 }
 
@@ -309,7 +286,6 @@ fn a_pointer_has_only_the_two_bound_span_form() void {
 }
 
 // ---- the pseudo-fields -------------------------------------------------------------
-// D3.4, D3.5, D3.7
 
 fn len_of_a_fixed_array_is_an_untyped_constant() void {
     check_env.env mut e = check_env.env{};
@@ -329,14 +305,12 @@ fn len_of_a_string_is_a_u64_and_ptr_is_a_char_pointer() void {
     check.expr len = check_env.probe_expr(&e,
         check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_field, "len"));
     assert(check_env.type_text(&e, len.ty) == "u64");
-    // `.ptr` carries the element level's mutability and is never `own`; a
+    // `.ptr` carries the element level's mutability and is never `own`. A
     // string's bytes are immutable.
-    // D3.7, D17.3
     check.expr ptr = check_env.probe_expr(&e,
         check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_field, "ptr"));
     assert(check_env.type_text(&e, ptr.ty) == "char*");
     // Neither is an lvalue.
-    // D6.7
     assert(!len.lvalue && !ptr.lvalue);
 }
 
@@ -350,7 +324,6 @@ fn a_fixed_array_has_no_ptr() void {
 }
 
 // ---- fields ------------------------------------------------------------------------
-// D6.10
 
 fn a_field_is_reached_with_a_dot_and_a_pointer_field_with_an_arrow() void {
     check_env.env mut e = check_env.env{};
@@ -380,7 +353,6 @@ fn an_unknown_field_names_the_struct() void {
 }
 
 // ---- literals ----------------------------------------------------------------------
-// D6.5
 
 fn a_positional_literal_has_every_field_in_order() void {
     check_env.env mut e = check_env.env{};
@@ -427,7 +399,6 @@ fn an_array_literal_has_exactly_its_elements_or_is_empty() void {
     check_env.open(&f);
     defer check_env.close(&f);
     // `{}` zero-initializes any aggregate, span, string or enum.
-    // D6.5
     assert(check_env.check_decls(&f, "i32[3] nums = {};\nstring s = {};\n"));
     assert(check_env.errors(&f) == 0);
     check_env.env mut g = check_env.env{};
@@ -446,7 +417,6 @@ fn a_span_literal_does_not_exist() void {
 }
 
 // ---- calls -------------------------------------------------------------------------
-// D6.11
 
 fn a_call_takes_its_parameters_by_position() void {
     check_env.env mut e = check_env.env{};
@@ -474,7 +444,6 @@ fn a_value_that_is_not_a_function_cannot_be_called() void {
 }
 
 // ---- the universe functions --------------------------------------------------------
-// D12.2
 
 fn the_print_family_takes_printable_arguments() void {
     check_env.env mut e = check_env.env{};
@@ -486,7 +455,6 @@ fn the_print_family_takes_printable_arguments() void {
     assert(check_env.errors(&e) == 0);
     check_env.probe_stmt(&e, "probe", 1);
     // A struct is not printable (8.3).
-    // D12.2
     assert(check_env.said(&e, "cannot print a value of type point"));
     check_env.probe_stmt(&e, "probe", 2);
     check_env.probe_stmt(&e, "probe", 3);
@@ -502,12 +470,10 @@ fn assert_and_panic_take_one_argument_each() void {
     assert(probe_type(&e, 0) == "void");
     check_env.probe_stmt(&e, "probe", 1);
     // There is no truthiness.
-    // D3.3
     assert(check_env.said(&e, "'assert' must be bool, not i32"));
     ast.node mut* panics = check_env.body_expr(&e, "probe", 2);
     check_env.probe_expr(&e, panics);
     // `panic` never returns, so a `panic(...)` statement terminates.
-    // D8.4
     assert(check_env.has_ann(panics, check.ANN_NORETURN));
     check_env.probe_stmt(&e, "probe", 3);
     assert(check_env.said(&e, "'panic' takes 1 argument, 0 given"));
@@ -523,7 +489,6 @@ fn a_universe_function_is_callable_and_nothing_else() void {
 }
 
 // ---- qualified names ---------------------------------------------------------------
-// D9.4, D3.9
 
 fn a_declaration_of_an_imported_module_is_reached_through_its_name() void {
     check_env.env mut e = check_env.env{};
@@ -543,7 +508,6 @@ fn a_declaration_of_an_imported_module_is_reached_through_its_name() void {
     assert(v == 1);
     // A qualified type name denotes the declaration of the other module,
     // which is one type however it is spelled.
-    // D9.4
     assert(check_env.decl_type(&e, "t") == "thing");
 }
 
@@ -563,11 +527,9 @@ fn a_name_a_module_does_not_declare_is_reported_with_the_module() void {
 }
 
 // ---- the conditional operator ------------------------------------------------------
-// D6.6, D17.4
 
 // The condition is `bool` and the two arms have one type. The type is the
 // arms' type, and the conditional is an rvalue, so it is not assignable.
-// D6.6
 fn a_conditional_takes_a_bool_condition_and_two_arms_of_one_type() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -582,7 +544,6 @@ fn a_conditional_takes_a_bool_condition_and_two_arms_of_one_type() void {
 // There is no promotion, so two arms of different types are an error and the
 // message names both. Mutability is part of the type, which is what
 // fail/operators/008_mixed_mutability_ternary.ft asserts as a program.
-// D6.2, D6.6
 fn two_arms_of_different_types_are_an_error() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -593,7 +554,6 @@ fn two_arms_of_different_types_are_an_error() void {
     check_env.reopen(&e);
     // An untyped arm adopts the other arm's type first, so a constant that
     // cannot take it is reported as the arm and not as a pair.
-    // D4.1, D6.6
     assert(!check_env.check_body(&e,
         "    bool t = true;\n    string s = \"x\";\n    i32 c = t ? 1 : s;"));
     assert(check_env.said(&e, "the arm of '?:' expects string, not a constant"));
@@ -606,7 +566,6 @@ fn two_arms_of_different_types_are_an_error() void {
 
 // An untyped arm adopts the other arm's type, and two untyped arms leave the
 // conditional untyped, so the context types it.
-// D4.1, D6.6
 fn an_untyped_arm_adopts_the_other_arm_s_type() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -619,7 +578,6 @@ fn an_untyped_arm_adopts_the_other_arm_s_type() void {
     check_env.reopen(&e);
     // The context is what the arms must fit, so an arm that does not fit it
     // is reported there.
-    // D4.2
     assert(!check_env.check_body(&e, "    bool t = true;\n    u8 c = t ? 1 : 300;"));
     assert(check_env.said(&e, "300"));
 }
@@ -627,7 +585,6 @@ fn an_untyped_arm_adopts_the_other_arm_s_type() void {
 // An arm must have a value, which a call of a `noreturn` function and a call
 // of a void function do not. That is also what keeps every block the emitter
 // opens for a conditional open until its own branch: no arm can end a block.
-// D8.5, D12.2
 fn an_arm_with_no_value_is_refused() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -643,7 +600,6 @@ fn an_arm_with_no_value_is_refused() void {
 // `null` has no type of its own, so two `null` arms leave the conditional
 // untyped and the context types both. An arm of pointer type gives the other
 // one that type.
-// D4.1, D10.5
 fn the_arms_may_be_null_when_the_context_is_a_pointer() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -661,7 +617,6 @@ fn the_arms_may_be_null_when_the_context_is_a_pointer() void {
 
 // `?:` is right-associative, so a conditional in the else arm is one
 // expression and the checker types it like any other arm.
-// D6.1
 fn a_conditional_nests_in_either_arm() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -675,7 +630,6 @@ fn a_conditional_nests_in_either_arm() void {
     check_env.reopen(&e);
     // The inner conditional decides the type of the arm it stands in, so a
     // mismatch inside it is reported there.
-    // D6.6
     assert(!check_env.check_body(&e,
         "    string s = \"a\";\n    i32 n = 1;\n    i32 c = true ? n : true ? n : s;"));
     assert(check_env.said(&e, "'?:' takes two operands of the same type, not i32 and string"));
@@ -683,7 +637,6 @@ fn a_conditional_nests_in_either_arm() void {
 
 // `?:` is a constant expression, so a conditional whose three parts are
 // constants folds to the arm the condition selects.
-// D4.6
 fn a_conditional_of_constants_folds_to_the_selected_arm() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -699,12 +652,10 @@ fn a_conditional_of_constants_folds_to_the_selected_arm() void {
     check_env.reopen(&e);
     // A conditional whose condition is not constant does not fold, so it is
     // not a module-level initializer.
-    // D4.6, D7.10
     assert(!check_env.check_decls(&e, "i32 mut g = 1;\ni32 probe = g > 0 ? 4 : 5;\n"));
 }
 
 // ---- the entry module --------------------------------------------------------------
-// D8.6
 
 fn the_entry_module_defines_main() void {
     check_env.env mut e = check_env.env{};
@@ -721,14 +672,12 @@ fn a_module_under_inspection_is_not_held_to_the_entry_rule() void {
     defer check_env.close(&e);
     // `--check` inspects a file rather than building a program, so the rule
     // does not apply to it at all.
-    // D20.1
     e.want_main = false;
     assert(check_env.check_src(&e, "i32 k = 1;\n"));
     assert(check_env.errors(&e) == 0);
 }
 
 // ---- the muted mode ----------------------------------------------------------------
-// D20.2
 
 fn a_muted_checker_annotates_without_reporting() void {
     check_env.env mut e = check_env.env{};
@@ -738,7 +687,6 @@ fn a_muted_checker_annotates_without_reporting() void {
     // The errors are counted, so the run still answers "this module did not
     // check", and nothing is written or recorded: an editor mode indexes a
     // file it is not compiling.
-    // D20.2
     assert(!check_env.check_decls(&e, "i32 k = nosuch;\n"));
     assert(check_env.errors(&e) == 0);
     assert(check_env.reports(&e) == 0);

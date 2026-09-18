@@ -12,48 +12,44 @@ import lsp.json;
 import lsp_json_env;
 import std.strbuf;
 
-// The arena of src/lsp/json.ft: what a document costs, what bounds it, and
-// that json.free gives all of it back.
+/// The arena of src/lsp/json.ft: what a document costs, what bounds it, and
+/// that json.free gives all of it back.
 //
-// The bound this file asserts is 20 times the size of the source, and the
-// number is derived and then measured. Every value of a document costs at
-// least two bytes of source, since the shortest element of an array is a
-// digit and a comma; a node is 36 bytes and a chunk of 256 of them costs 16
-// bytes more; the chunks hold at most 255 nodes more than the document needs;
-// the chunk vector holds one pointer per 256 nodes; and the byte buffer is
-// the length of the source. So the arena is below 36/2 + 1 = 19 times the
-// source for any document large enough to fill a chunk, and 20 is that with a
-// margin. The densest document JSON admits is an array of one-digit numbers,
-// which is what the measurement below parses: it reads 19.07 for a source of
-// one mebibyte (19997711 bytes for 1048575, 524289 nodes). That reading was
-// taken on 39348ed, the commit that added this file. The two lengths are
-// asserted below and the 19997711 is not: the assertion holds the bound 20
-// alone, so a change to NODE_BYTES, to the chunk record, to the chunk vector
-// or to how std.strbuf grows moves the reading and turns nothing red.
+// The bound this file asserts is 20 times the size of the source, and the number is derived and
+// then measured. Every value of a document costs at least two bytes of source, since the
+// shortest element of an array is a digit and a comma. A node is 36 bytes and a chunk of 256 of
+// them costs 16 bytes more. The chunks hold at most 255 nodes more than the document needs. The
+// chunk vector holds one pointer per 256 nodes. The byte buffer equals the source length.
+// A document that fills a chunk stays below 36/2 + 1 = 19 times its source size.
+// The bound of 20 adds a margin. The densest valid document is an array of
+// one-digit numbers. The measurement parses this form. One mebibyte of source
+// uses 19997711 bytes for 524289 nodes, which is a ratio of 19.07. The two
+// lengths are asserted below.
+// The assertion does not use 19997711 because it holds bound 20 alone. A change to NODE_BYTES,
+// to the chunk record, to the chunk vector or to how std.strbuf grows moves the reading and
+// turns nothing red.
 //
-// **The bound is over the largest source the doc has parsed, not over the one
-// it holds.** A doc keeps its chunks and its buffer through json.clear, so a
-// doc that parsed a mebibyte and then parses ten bytes holds a mebibyte's
-// arena for a ten-byte document. Two tests below hold the invariant in that
-// form. The byte buffer keeps the bound true through reuse only because parse
-// releases a buffer that is too small instead of growing it: std.strbuf
-// doubles, so a buffer that grew from 1000000 bytes to 1000001 would hold
-// 2000000 and the total would read 20.02 times the source.
+// **The bound uses the largest source parsed by the document.** A document
+// keeps its chunks and buffer through json.clear. Thus, parsing one mebibyte
+// and then ten bytes keeps an arena sized for one mebibyte. Two tests check
+// this form of the invariant.
+//
+// Reuse stays within the bound because parse replaces a buffer that is too
+// small. std.strbuf would otherwise double a 1000000-byte buffer to 2000000
+// for a 1000001-byte source. The total ratio would then be 20.02.
 //
 // The floor is 9280 bytes, and it is three terms.
 // a_document_of_one_value_takes_one_chunk asserts their sum. One chunk is
 // 9232: 256 nodes of 36 bytes and the 16-byte record that owns them. The first
 // chunk vector is four pointers, 32 bytes. The byte buffer is 16, the smallest
-// capacity std.strbuf reserves. A document of one value costs all of that
-// whatever its size, which is why a server that parses a keystroke reuses one
-// doc through json.clear rather than creating one per message.
+// capacity std.strbuf reserves. Every one-value document pays this fixed cost.
+// Therefore, a server reuses one document through json.clear instead of
+// creating one document for each keystroke.
 //
-// notes/testing.md 4 says test/fort is not a leak oracle, so the release of
-// the arena is witnessed here by two views of the heap over many rounds, and
-// by json.arena_bytes, which the module keeps in band.
+// The normal test corpus is not a leak oracle. This test checks arena release
+// through two heap views over many rounds and through json.arena_bytes.
 
 // One mebibyte, the document size the server is sized for.
-// T-063: the ticket that fixed the document size
 u64 ONE_MEBIBYTE = 1048576;
 
 // The bound the arena must stay under, as a multiple of the source. The module
@@ -70,8 +66,8 @@ u64 CHUNK_NODES = 256;
 u64 CHUNK_RECORD = 16;
 u64 CHUNK_BYTES = 256 * 36 + 16;
 
-// The smallest capacity std.strbuf reserves, whatever it is asked for
-// (stdlib.md 2.6), which is the byte buffer of a document below sixteen bytes.
+// The smallest capacity that std.strbuf reserves. It is the byte buffer size
+// of a document below sixteen bytes.
 u64 STRBUF_MIN_CAP = 16;
 
 // The rounds of the release probe and the distance in bytes that fails it.
@@ -83,16 +79,14 @@ u64 STRBUF_MIN_CAP = 16;
 u64 ROUNDS = 400;
 u64 BOUND = 4096;
 
-// How many of the last rounds the probe holds against the early round. The
-// allocator does not hand a round the same small block every time, so the
-// probe takes the smallest distance over a window that covers the cycle
-// (notes/testing.md 4).
+// How many of the last rounds the probe holds against the early round. The allocator does not
+// hand a round the same small block every time. The probe takes the smallest distance over a
+// window that covers the cycle.
 u64 LATE_SAMPLES = 16;
 
 // The current program break, which is the end of the heap. sbrk(0) moves
 // nothing and reports the break. std has no binding for it and these tests are
 // its only callers.
-// D9.8
 extern fn sbrk(i64 increment) void*;
 
 fn probe_address() u64 {
@@ -112,7 +106,6 @@ fn probe_block() u64 {
 }
 
 // How far apart two addresses are, whichever way the allocator moved.
-// D11.1
 fn distance(u64 a, u64 b) u64 {
     if (a > b) {
         return a - b;
@@ -173,7 +166,7 @@ fn a_document_of_one_value_takes_one_chunk() void {
 }
 
 fn a_node_costs_the_bytes_the_derivation_names() void {
-    // 254 values and the absent node stay inside one chunk; the 256th value
+    // 254 values and the absent node stay inside one chunk. The 256th value
     // starts a second. The step is what NODE_BYTES and CHUNK_NODES say it is.
     strbuf.str_buf mut source = strbuf.create();
     defer strbuf.free(&source);
@@ -377,8 +370,8 @@ fn the_cap_bounds_what_a_document_asks_for() void {
 
 fn the_default_cap_bounds_a_document_at_the_memory_the_module_names() void {
     // Sixteen mebibytes of source and twenty times that of arena is the 320
-    // MB the header of src/lsp/json.ft names. A ticket that moves either
-    // number moves this line and reads the product again.
+    // MB the header of src/lsp/json.ft names. A change to either number must
+    // also change this product.
     assert(json.JSON_MAX_BYTES == 16 * 1024 * 1024);
     assert(json.JSON_MAX_BYTES * json.JSON_ARENA_BOUND == 335544320);
     // The ceiling is the largest offset a u32 field holds, which is what
@@ -406,7 +399,7 @@ fn the_cap_of_a_document_outlives_its_storage() void {
 
 fn a_document_value_carries_the_default_cap() void {
     // doc{} is a valid empty document, so a struct holding one is initialized
-    // with {}; a zero in the field therefore has to mean the default rather
+    // with {}. A zero in the field therefore has to mean the default rather
     // than a cap of nothing.
     json.doc mut d = json.doc{};
     defer json.free(&d);
@@ -419,7 +412,6 @@ fn a_document_value_carries_the_default_cap() void {
 fn a_thousand_parses_through_one_document_do_not_grow_the_arena() void {
     // What a server owes: one document analysed again and again must not grow
     // the heap.
-    // D20.5
     strbuf.str_buf mut source = strbuf.create();
     defer strbuf.free(&source);
     message_into(&source, 4096);
@@ -527,11 +519,10 @@ fn free_gives_every_block_back() void {
 }
 
 fn many_rounds_of_parse_and_free_leave_the_heap_where_it_was() void {
-    // The heap view, which is the one that would see a chunk the free forgot.
-    // Two views, because each is blind to what the other sees
-    // (notes/testing.md 4): the program break moves for a leak the allocator
-    // cannot serve out of a free chunk, and the address of a fresh block moves
-    // for a leak it can.
+    // The heap view, which is the one that would see a chunk the free forgot. Two views,
+    // because each is blind to what the other sees. The program break moves for a leak the
+    // allocator cannot serve out of a free chunk. The address of a fresh block moves for a leak
+    // it can.
     strbuf.str_buf mut source = strbuf.create();
     defer strbuf.free(&source);
     dense_into(&source, 4000);
@@ -590,14 +581,12 @@ fn many_rounds_of_clear_leave_the_heap_where_it_was() void {
     // The other lifetime a server has: one document, cleared between
     // messages, freed once at the end.
     //
-    // The break is the only view here, and the measurement says why. The
-    // probe above gives a hundred kilobytes back over its rounds, so it
-    // leaves free chunks of every size and the 32-byte block view lands
-    // wherever one starts: two probe_block calls in a row differ by 54000
-    // bytes with nothing allocated between them (notes/testing.md 4). The
-    // break answers the question this round asks, since a clear that
-    // allocated anew would ask the allocator for another chunk of the same
-    // shape for each of four hundred rounds.
+    // The break is the only view here, and the measurement says why. The probe above gives a
+    // hundred kilobytes back over its rounds. It leaves free chunks of every size and the
+    // 32-byte block view lands wherever one starts. Two probe_block calls in a row differ by
+    // 54000 bytes with nothing allocated between them. The break answers the question this
+    // round asks, since a clear that allocated anew would ask the allocator for another chunk
+    // of the same shape for each of four hundred rounds.
     strbuf.str_buf mut source = strbuf.create();
     defer strbuf.free(&source);
     dense_into(&source, 4000);

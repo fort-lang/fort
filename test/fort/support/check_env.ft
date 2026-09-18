@@ -1,23 +1,16 @@
-// The environment the checker suites share: the module sandbox of
-// modules_env.ft, a checker over the closure it loads, and small queries over
-// the symbols, the types and the annotations the checker wrote.
-//
-// This is the port of the part of test/check_helpers.h the ported half of the
-// checker needs. A `test/fort` test is a program rather than a translation
-// unit, so the shared part is a module the tests import with `-I support`.
+/// Provides the shared checker-test environment. It combines a module sandbox, a checked
+/// closure, and queries for symbols, types, and annotations.
 //
 // The checker writes `ty`, `sym`, `ann`, and `aux` annotations on the tree.
 // Neither `--tokens` nor `--ast` prints them. These tests assert the expression
-// type, the symbol for a name, the folded value, the field offset, the `ann`
-// bits, and the clearing action of a second check.
+// Tests assert expression types, symbols, folded values, field offsets, and
+// `ann` bits. They also assert that a second check clears these annotations.
 //
-// Two probes of the checker are reachable only from here. src/fort/check.ft
-// resolves the declarations of a module and stops before the function bodies,
-// which belong to check_stmt.ft, so an expression inside a body is reached by
-// calling check_expr on its node directly, after check_module_decls has left
-// the module in place; and `empty` and `is_mut` are two fields of one checked
-// expression, which no diagnostic prints apart.
-// T-036: the ticket that ports the statement checker
+// Two probes of the checker are reachable only from here. src/fort/check.ft resolves the
+// declarations of a module and stops before the function bodies, which belong to check_stmt.ft.
+// An expression inside a body is reached by calling check_expr on its node directly, after
+// check_module_decls has left the module in place. The `empty` and `is_mut` fields belong to
+// one checked expression, and no diagnostic prints them separately.
 import ast;
 import check;
 import check_stmt;
@@ -32,59 +25,55 @@ import std.strmap;
 import std.strbuf;
 import types;
 
-/// The sandbox, the checker over it, and the buffer the text queries build
-/// their answer in.
+// The sandbox, the checker over it, and the buffer the text queries build
+// their answer in.
 struct env {
     modules_env.env m;
     check.checker ck;
     strbuf.str_buf buf;
-    /// The options of the next check, which check_entry applies and resets, so
-    /// that a test states the ones it needs and leaves the next one the
-    /// defaults. The C suite's `want_main` and `want_mute`.
+    // The options of the next check, which check_entry applies and resets, so
+    // that a test states the ones it needs and leaves the next one the
+    // defaults. The C suite's `want_main` and `want_mute`.
     bool want_main;
     bool want_mute;
 }
 
-/// Prepares a fresh sandbox with an empty session, an empty set and a checker
-/// over them. The entry rule is on by default, as the driver has it for a
-/// build.
-/// D8.6
-///
-/// It fills a caller's value rather than returning one, which modules_env.open
-/// may do because nothing in a module set points into the session beside it: a
-/// checker holds the session it reports through (check.ft), so it must be
-/// initialised at the address it will be used at. An `open` that returned by
-/// value left every diagnostic going to the session of the dead local, and the
-/// suite saw a check that reported nothing at all.
+// Prepares a fresh sandbox with an empty session, an empty set and a checker
+// over them. The entry rule is on by default, as the driver has it for a
+// build.
+//
+// It fills a caller's value instead of returning one. modules_env.open can
+// return because a module set does not point into its adjacent session. A
+// checker does hold its reporting session. Therefore, it must initialize at
+// its final address.
 fn open(env mut* e) void {
     e->m = modules_env.open();
     check.check_init(&e->ck, &e->m.s);
     e->want_main = true;
 }
 
-/// Releases the checker, then the modules, then the session: every annotation
-/// points into the checker, every name of a tree into the session, and the
-/// trees belong to the modules.
-/// D20.5
+// Releases the checker, then the modules, then the session: every annotation
+// points into the checker, every name of a tree into the session, and the
+// trees belong to the modules.
 fn close(env mut* e) void {
     check.check_free(&e->ck);
     strbuf.free(&e->buf);
     modules_env.close(&e->m);
 }
 
-/// Closes the environment and opens a fresh one at the same address, which is
-/// what test/check_helpers.h's begin() does before every check. A module set
-/// answers a path it has already loaded from the tree that load left, so a
-/// second check_src over one environment would check the first source again;
-/// and the diagnostics of the first check would still be in the sink. A test
-/// that checks two sources calls this between them, after the assertions about
-/// the first.
+// Closes the environment and opens a fresh one at the same address, which is
+// what test/check_helpers.h's begin() does before every check. A module set
+// answers a path it has already loaded from the tree that load left, so a
+// second check_src over one environment would check the first source again;
+// and the diagnostics of the first check would still be in the sink. A test
+// that checks two sources calls this between them, after the assertions about
+// the first.
 fn reopen(env mut* e) void {
     close(e);
     open(e);
 }
 
-/// Writes a module at `rel` under the sandbox.
+// Writes a module at `rel` under the sandbox.
 fn add(env mut* e, string rel, string text) void {
     modules_env.add(&e->m, rel, text);
 }
@@ -97,11 +86,10 @@ fn add3(env mut* e, string rel, string first, string second, string third) void 
     modules_env.add3(&e->m, rel, first, second, third);
 }
 
-/// Loads the closure of the sandbox module `rel` and checks it; false when the
-/// load or the check reported a diagnostic. Checking runs even when the load
-/// failed, as the front end does, so that a module whose import did not parse
-/// is still checked.
-/// D14.2, D20.1
+// Loads the closure of the sandbox module `rel` and checks it. False when the
+// load or the check reported a diagnostic. Checking runs even when the load
+// failed, as the front end does, so that a module whose import did not parse
+// is still checked.
 fn check_entry(env mut* e, string rel) bool {
     bool loaded = modules_env.load(&e->m, rel);
     e->ck.require_main = e->want_main;
@@ -112,17 +100,16 @@ fn check_entry(env mut* e, string rel) bool {
     return checked && loaded;
 }
 
-/// Writes `text` as the entry module `main.ft` and checks it.
+// Writes `text` as the entry module `main.ft` and checks it.
 fn check_src(env mut* e, string text) bool {
     add(e, "main.ft", text);
     return check_entry(e, "main.ft");
 }
 
-/// The same for a source that is a list of module-level declarations, with the
-/// `main` an entry module needs appended: a declaration on line n of `decls` is
-/// on line n of the module, so a position assertion reads off the text the test
-/// wrote.
-/// D8.6
+// The same for a source that is a list of module-level declarations, with the
+// `main` an entry module needs appended: a declaration on line n of `decls` is
+// on line n of the module, so a position assertion reads off the text the test
+// wrote.
 fn check_decls(env mut* e, string decls) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -131,11 +118,10 @@ fn check_decls(env mut* e, string decls) bool {
     return check_src(e, strbuf.view(&b));
 }
 
-/// `body` as the whole of the body of `fn main() i32`, with the `return 0;` a
-/// value function needs appended: the shape most statement assertions are
-/// written against, as test/check_helpers.h's check_body is. A statement on
-/// line n of `body` is on line n + 1 of the module.
-/// D8.4
+// `body` as the whole of the body of `fn main() i32`, with the `return 0;` a
+// value function needs appended: the shape most statement assertions are
+// written against, as test/check_helpers.h's check_body is. A statement on
+// line n of `body` is on line n + 1 of the module.
 fn check_body(env mut* e, string body) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -145,18 +131,16 @@ fn check_body(env mut* e, string body) bool {
     return check_src(e, strbuf.view(&b));
 }
 
-/// Checks the entry module even though it did not parse, which the driver never
-/// does but an editor mode will: the error nodes stand where statements, fields
-/// and declarations were expected, and every pass skips them. The entry rule
-/// does not apply to a file under inspection, so it is off.
-/// D14.2, D20.1, D8.6
-///
-/// It differs from test/check_helpers.h's check_broken in one way: the C's
-/// begins a fresh sandbox and a fresh checker, and this one uses the
-/// environment it is given, so a caller that checks a second source calls
-/// reopen first, exactly as after check_src. The options are applied and reset
-/// as check_entry does them, so a want_mute set for this call does not leak
-/// into the next one.
+// Checks the entry module even though it did not parse, which the driver never
+// does but an editor mode will: the error nodes stand where statements, fields
+// and declarations were expected, and every pass skips them. The entry rule
+// does not apply to a file under inspection, so it is off.
+//
+// test/check_helpers.h's check_broken starts a fresh sandbox and checker. This
+// helper uses its given environment. A caller checks a second source only
+// after reopen, as it does after check_src. The options are applied and reset
+// as check_entry does them, so a want_mute set for this call does not leak
+// into the next one.
 fn check_broken(env mut* e, string text) bool {
     add(e, "main.ft", text);
     modules_env.load(&e->m, "main.ft");
@@ -168,10 +152,9 @@ fn check_broken(env mut* e, string text) bool {
     return m != null && check_stmt.check_module(&e->ck, m);
 }
 
-/// `T N = <expr>;` as the whole of a module: the one context in which an
-/// expression is checked by the ported half of the checker, since a
-/// module-level initializer is. Returns whether the module checked clean.
-/// D7.10
+// `T N = <expr>;` as the whole of a module. A module initializer is the one
+// expression context handled during declaration checking. Returns whether the
+// module checked clean.
 fn check_init_of(env mut* e, string type_text, string expr_text) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -184,17 +167,16 @@ fn check_init_of(env mut* e, string type_text, string expr_text) bool {
 
 // ---- the tree and the symbols ------------------------------------------------------
 
-/// The module of the closure at `path`, or null.
+// The module of the closure at `path`, or null.
 fn module_at(env* e, string path) modules.module* {
     return modules.find(&e->m.set, path);
 }
 
-/// The same module as the set owns it. `modules.find` hands out an immutable
-/// view on purpose, and no cast turns one back into a mutable reference, so a
-/// test that writes through a module reads the owning slot instead. It reads
-/// the index `modules.find` reads rather than scanning, so the two answer the
-/// same module for the same path by the same route.
-/// D3.14
+// The same module as the set owns it. `modules.find` hands out an immutable
+// view on purpose, and no cast turns one back into a mutable reference, so a
+// test that writes through a module reads the owning slot instead. It reads
+// the index `modules.find` reads rather than scanning, so the two answer the
+// same module for the same path by the same route.
 fn module_mut(env mut* e, string path) modules.module mut* {
     i64 mut at = 0;
     if (!strmap.get(&e->m.set.by_path, path, &at)) {
@@ -203,7 +185,7 @@ fn module_mut(env mut* e, string path) modules.module mut* {
     return e->m.set.modules.items[cast(at, u64)];
 }
 
-/// The syntax tree of the module at `path`, or null.
+// The syntax tree of the module at `path`, or null.
 fn module_ast(env* e, string path) ast.node mut* {
     modules.module* m = module_at(e, path);
     if (m == null) {
@@ -212,7 +194,7 @@ fn module_ast(env* e, string path) ast.node mut* {
     return m->ast;
 }
 
-/// The symbol of a top-level declaration of the module at `path`.
+// The symbol of a top-level declaration of the module at `path`.
 fn sym_of(env* e, string path, string name) ast.sym mut* {
     scope.binding* b = modules_env.bound(&e->m, path, name);
     if (b == null || b->node == null) {
@@ -221,13 +203,13 @@ fn sym_of(env* e, string path, string name) ast.sym mut* {
     return b->node->sym;
 }
 
-/// The symbol of a top-level declaration of the entry module `main`.
+// The symbol of a top-level declaration of the entry module `main`.
 fn sym_main(env* e, string name) ast.sym mut* {
     return sym_of(e, "main", name);
 }
 
-/// The first node of `kind` in the tree below `n`, in source order; `name`
-/// selects by the node's own name when it is not the empty string.
+// The first node of `kind` in the tree below `n`, in source order. `name`
+// selects by the node's own name when it is not the empty string.
 fn node_find(ast.node mut* n, ast.ast_kind kind, string name) ast.node mut* {
     if (n == null) {
         return null;
@@ -262,14 +244,14 @@ fn node_find(ast.node mut* n, ast.ast_kind kind, string name) ast.node mut* {
     return null;
 }
 
-/// The first node of `kind` named `name` in the entry module.
+// The first node of `kind` named `name` in the entry module.
 fn node_in_main(env* e, ast.ast_kind kind, string name) ast.node mut* {
     return node_find(module_ast(e, "main"), kind, name);
 }
 
 // ---- the annotations ---------------------------------------------------------------
 
-/// The canonical spelling of a type, valid until the next text query.
+// The canonical spelling of a type, valid until the next text query.
 fn type_text(env mut* e, types.node* t) string {
     strbuf.clear(&e->buf);
     if (t == null) {
@@ -280,8 +262,7 @@ fn type_text(env mut* e, types.node* t) string {
     return strbuf.view(&e->buf);
 }
 
-/// The spelling of a declaration's type, level 0 included.
-/// D5.3
+// The spelling of a declaration's type, level 0 included.
 fn sym_type_text(env mut* e, ast.sym* s) string {
     strbuf.clear(&e->buf);
     if (s == null || s->ty == null) {
@@ -292,7 +273,7 @@ fn sym_type_text(env mut* e, ast.sym* s) string {
     return strbuf.view(&e->buf);
 }
 
-/// The declared type of the module declaration `name`, level 0 included.
+// The declared type of the module declaration `name`, level 0 included.
 fn decl_type(env mut* e, string name) string {
     ast.node mut* d = node_in_main(e, ast.ast_kind.k_var_decl, name);
     if (d == null) {
@@ -301,7 +282,7 @@ fn decl_type(env mut* e, string name) string {
     return sym_type_text(e, d->sym);
 }
 
-/// The type the checker gave the initializer of the declaration `name`.
+// The type the checker gave the initializer of the declaration `name`.
 fn init_type(env mut* e, string name) string {
     ast.node mut* d = node_in_main(e, ast.ast_kind.k_var_decl, name);
     if (d == null || d->b == null) {
@@ -310,14 +291,14 @@ fn init_type(env mut* e, string name) string {
     return type_text(e, d->b->ty);
 }
 
-/// The type the checker gave the initializer of `probe`, which is what
-/// check_init_of writes.
+// The type the checker gave the initializer of `probe`, which is what
+// check_init_of writes.
 fn probe_type(env mut* e) string {
     return init_type(e, "probe");
 }
 
-/// The folded value of the initializer of the declaration `name`, as an i64;
-/// false when it is not an integer constant.
+// The folded value of the initializer of the declaration `name`, as an i64;
+// false when it is not an integer constant.
 fn init_int(env mut* e, string name, i64 mut* out) bool {
     ast.node mut* d = node_in_main(e, ast.ast_kind.k_var_decl, name);
     if (d == null || d->b == null) {
@@ -326,10 +307,10 @@ fn init_int(env mut* e, string name, i64 mut* out) bool {
     return consts.cv_to_i64(check.check_node_value(&e->ck, d->b), out);
 }
 
-/// The folded value of the initializer of the declaration `name` as the
-/// binary64 pattern of a float constant; false when it is not one. It is
-/// init_int's float twin: a float constant is held as its bits, since the
-/// compiler's own source has no float type (consts.ft, flt.ft).
+// The folded value of the initializer of the declaration `name` as the
+// binary64 pattern of a float constant. False when it is not one. It is
+// init_int's float twin: a float constant is held as its bits, since the
+// compiler's own source has no float type (consts.ft, flt.ft).
 fn init_float(env mut* e, string name, u64 mut* out) bool {
     ast.node mut* d = node_in_main(e, ast.ast_kind.k_var_decl, name);
     if (d == null || d->b == null) {
@@ -343,13 +324,12 @@ fn init_float(env mut* e, string name, u64 mut* out) bool {
     return true;
 }
 
-/// The byte offset the checker recorded on the field `field` of the struct
-/// `name`. `aux` carries a constant's value index on one node kind and a
-/// field's byte offset on another, so it is never read without the bit that
-/// says which: on a field declaration that is ANN_RESOLVED, which check_sym_new
-/// sets when it makes the field's symbol, and a field that did not resolve
-/// carries no offset to read.
-/// D3.8
+// The byte offset the checker recorded on the field `field` of the struct
+// `name`. `aux` carries a constant's value index on one node kind and a
+// field's byte offset on another, so it is never read without the bit that
+// says which: on a field declaration that is ANN_RESOLVED, which check_sym_new
+// sets when it makes the field's symbol, and a field that did not resolve
+// carries no offset to read.
 fn field_offset(env* e, string name, string field) u64 {
     ast.node mut* decl = node_in_main(e, ast.ast_kind.k_struct_decl, name);
     ast.node mut* f = node_find(decl, ast.ast_kind.k_field_decl, field);
@@ -362,42 +342,39 @@ fn field_offset(env* e, string name, string field) u64 {
     return f->aux;
 }
 
-/// Whether every bit of `mask` is set on the node.
+// Whether every bit of `mask` is set on the node.
 fn has_ann(ast.node* n, u32 mask) bool {
     return n != null && (n->ann & mask) == mask;
 }
 
 // ---- diagnostics -------------------------------------------------------------------
 
-/// Whether any diagnostic reported so far holds `text`.
+// Whether any diagnostic reported so far holds `text`.
 fn said(env mut* e, string text) bool {
     return modules_env.said(&e->m, text);
 }
 
-/// The errors reported so far, notes excluded.
-/// D14.2
+// The errors reported so far, notes excluded.
 fn errors(env* e) u64 {
     return modules_env.errors(&e->m);
 }
 
-/// The number of diagnostics reported, notes included.
+// The number of diagnostics reported, notes included.
 fn reports(env mut* e) u64 {
     return modules_env.reports(&e->m);
 }
 
-/// The `i`-th diagnostic as `<line>:<col>: <message>`, valid until the next
-/// text query: the position is what a test about a diagnostic asserts.
-/// D14.2
+// The `i`-th diagnostic as `<line>:<col>: <message>`, valid until the next
+// text query: the position is what a test about a diagnostic asserts.
 fn report_text(env mut* e, u64 i) string {
     diag_record_text(e, i);
     return strbuf.view(&e->buf);
 }
 
-/// The file the `i`-th diagnostic stands in, or the empty string when there is
-/// no such diagnostic, so that a failing assertion is about the file rather
-/// than a panic. Which of two files a report stands in is a rule of its own,
-/// and `report_text` prints the line and the column alone.
-/// D14.2
+// The file the `i`-th diagnostic stands in, or the empty string when there is
+// no such diagnostic, so that a failing assertion is about the file rather
+// than a panic. This result distinguishes reports from two files.
+// `report_text` prints only the line and the column.
 fn report_file(env mut* e, u64 i) string {
     if (i >= modules_env.reports(&e->m)) {
         return "";
@@ -405,13 +382,12 @@ fn report_file(env mut* e, u64 i) string {
     return modules_env.report_at(&e->m, i).loc.file;
 }
 
-/// The severity of the `i`-th diagnostic as the text form spells it, `"error"`
-/// or `"note"`, and `"<none>"` when there is no such diagnostic. A note carries
-/// no severity of its own in the document, its place saying what it is, so a
-/// test that asserts a place asserts this beside it. It answers a text and not
-/// a bool so that an index past the end fails every assertion: `!is_note(e, 0)`
-/// would also pass over a check that reported nothing at all.
-/// D14.2, D20.2
+// The severity of the `i`-th diagnostic as the text form spells it, `"error"`
+// or `"note"`, and `"<none>"` when there is no such diagnostic. A note carries
+// no severity of its own in the document, its place saying what it is, so a
+// test that asserts a place asserts this beside it. It answers a text and not
+// a bool so that an index past the end fails every assertion: `!is_note(e, 0)`
+// would also pass over a check that reported nothing at all.
 fn report_severity(env mut* e, u64 i) string {
     if (i >= modules_env.reports(&e->m)) {
         return "<none>";
@@ -437,15 +413,15 @@ fn diag_record_text(env mut* e, u64 i) void {
 
 // ---- checking one expression by hand -----------------------------------------------
 
-/// Loads the entry module `main.ft` written from `text` and resolves its
-/// declarations, leaving the module in place so that probe_expr may check an
-/// expression against it. It deliberately stops where check_module_decls does,
-/// short of the function bodies check_stmt.check_module_bodies now checks: a
-/// probe checks one expression of a body by hand and asserts the fields of the
-/// result, and a body already checked would report each of its diagnostics a
-/// second time and hand the probe an expression whose annotations are not the
-/// ones this call produced. A test that wants the whole module checked, bodies
-/// included, calls check_src or check_body.
+// Loads the entry module `main.ft` written from `text` and resolves its
+// declarations, leaving the module in place so that probe_expr may check an
+// expression against it. It deliberately stops where check_module_decls does,
+// before the function bodies that check_stmt.check_module_bodies checks. A
+// probe checks one body expression by hand and asserts the result fields.
+// Checking the body first would report each diagnostic twice. It would also
+// give the probe annotations from the earlier check. A test that wants the
+// whole module checked, bodies
+// included, calls check_src or check_body.
 fn open_module(env mut* e, string text) bool {
     add(e, "main.ft", text);
     bool loaded = modules_env.load(&e->m, "main.ft");
@@ -457,20 +433,18 @@ fn open_module(env mut* e, string text) bool {
     return loaded;
 }
 
-/// Checks the expression node `n` as the checker would, with the module
-/// open_module left in place and no block scope, and returns what it found.
-/// This is how an expression form that cannot stand in a module-level
-/// initializer -- a call, `new`, `move`, `del`, `&` -- is reached before the
-/// statements are ported.
-/// T-036: the ticket that ports the statement checker
+// Checks the expression node `n` as the checker would, with the module
+// open_module left in place and no block scope, and returns what it found.
+// This is how an expression form that cannot stand in a module-level
+// initializer -- a call, `new`, `move`, `del`, `&` -- is reached directly.
 fn probe_expr(env mut* e, ast.node mut* n) check.expr {
     check.expr mut out = check.expr{};
     check.check_expr(&e->ck, n, &out);
     return out;
 }
 
-/// The first expression of `kind` in the body of the function `name` of the
-/// entry module, checked; the test asserts on the fields of the result.
+// The first expression of `kind` in the body of the function `name` of the
+// entry module, checked. The test asserts on the fields of the result.
 fn probe_in(env mut* e, string fn_name, ast.ast_kind kind) check.expr {
     ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
     if (f == null) {
@@ -483,15 +457,14 @@ fn probe_in(env mut* e, string fn_name, ast.ast_kind kind) check.expr {
     return probe_expr(e, n);
 }
 
-/// The sources the suites reuse.
+// The sources the suites reuse.
 fn src_main() string {
     return "fn main() i32 {\n    return 0;\n}\n";
 }
 
-/// The `i`-th statement of the body of the function `name`, with the call
-/// statement unwrapped to the call it holds: the shape probe_stmt checks, since
-/// a statement is not an expression.
-/// D7.3
+// The `i`-th statement of the body of the function `name`, with the call
+// statement unwrapped to the call it holds: the shape probe_stmt checks, since
+// a statement is not an expression.
 fn body_expr(env* e, string fn_name, u64 i) ast.node mut* {
     ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
     if (f == null || f->b == null || i >= ast.ast_len(f->b)) {
@@ -504,19 +477,18 @@ fn body_expr(env* e, string fn_name, u64 i) ast.node mut* {
     return s;
 }
 
-/// Checks the expression of the `i`-th statement of the body of `fn_name`.
+// Checks the expression of the `i`-th statement of the body of `fn_name`.
 fn probe_stmt(env mut* e, string fn_name, u64 i) check.expr {
     return probe_expr(e, body_expr(e, fn_name, i));
 }
 
 // ---- the parameter scope of a body -------------------------------------------------
 
-/// Opens the scope check_function_body puts around a body: one block scope with
-/// no parent holding the function's parameters, so that a name in the body
-/// resolves to one. This half of the checker resolves the signature and leaves
-/// the scope to the statement checker, so a probe of a statement expression
-/// builds it here. close_params closes it.
-/// D7.9, T-036: the ticket that ports the statement checker
+// Opens the scope check_function_body puts around a body: one block scope with
+// no parent holding the function's parameters, so that a name in the body
+// resolves to one. This half of the checker resolves the signature and leaves
+// the scope to the statement checker, so a probe of a statement expression
+// builds it here. close_params closes it.
 fn open_params(env mut* e, scope.scope mut* params, string fn_name) void {
     ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
     if (f == null) {
@@ -539,7 +511,7 @@ fn close_params(env mut* e, scope.scope mut* params) void {
     scope.free(params);
 }
 
-/// The first `return` of the body of the function `name`.
+// The first `return` of the body of the function `name`.
 fn return_in(env* e, string fn_name) ast.node mut* {
     ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
     if (f == null) {
@@ -552,8 +524,8 @@ fn return_in(env* e, string fn_name) ast.node mut* {
     return r;
 }
 
-/// The result type of the function `name`, which is what a `return` of it is
-/// checked against.
+// The result type of the function `name`, which is what a `return` of it is
+// checked against.
 fn result_type(env* e, string fn_name) types.node* {
     ast.sym* s = sym_main(e, fn_name);
     if (s == null || s->ty == null || s->ty->kind != types.type_kind.k_fn) {

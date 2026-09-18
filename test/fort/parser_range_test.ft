@@ -5,18 +5,16 @@
 import ast;
 import parse_env;
 
-// The ranges src/fort/parser.ft records and the invariants they must satisfy.
-// D20.4
+/// The ranges src/fort/parser.ft records and the invariants they must satisfy.
 //
 // An S-expression prints no position. The direct assertions pin each range.
 // The C parser has independent range tests in test/parser_loc_test.c.
 //
-// The second half is the walk of parse_env: over a corpus covering every node
-// kind the parser builds, every node must end at or after it starts, a name
-// range must lie inside the node that carries it, and a child's range must
-// lie inside its parent's -- the left operand of an infix node excepted,
-// since such a node starts at its operator (toolchain.md 4). A missed
-// `finish` shows up there as a child that leaves its parent.
+// The second half is the walk of parse_env. Over a corpus covering every node kind the parser
+// builds, every node must end at or after it starts. A name range must lie inside the node that
+// carries it. A child's range must lie inside its parent's -- the left operand of an infix node
+// excepted, since such a node starts at its operator. A missed `finish` shows up there as a
+// child that leaves its parent.
 
 // ---- positions: where a node starts --------------------------------------------
 
@@ -42,8 +40,7 @@ fn an_operator_node_is_at_its_operator() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // An operator node carries its operator, which is where a diagnostic
-    // about the operation points (toolchain.md 4).
-    // D17.11
+    // about the operation points.
     ast.node mut* mod = parse_env.parse(&e, "i32 x = a + b * c;\n");
     ast.node mut* sum = parse_env.decl(mod, 0)->b;
     assert(parse_env.loc_of(&e, sum) == "1:11");
@@ -82,7 +79,7 @@ fn a_statement_starts_at_its_keyword_or_target() void {
     assert(parse_env.loc_of(&e, parse_env.child(parse_env.body_stmt(mod, 0, 3), 0)) == "5:18");
     assert(parse_env.loc_of(&e, parse_env.body_stmt(mod, 0, 4)) == "6:5");
     // An assignment and an increment start at their operator, not at their
-    // target (toolchain.md 4).
+    // target.
     assert(parse_env.loc_of(&e, parse_env.body_stmt(mod, 0, 5)) == "7:7");
     assert(parse_env.loc_of(&e, parse_env.body_stmt(mod, 0, 6)) == "8:6");
     assert(parse_env.loc_of(&e, parse_env.body_stmt(mod, 0, 7)) == "9:5");
@@ -93,7 +90,6 @@ fn a_type_and_its_suffixes_carry_their_own_positions() void {
     defer parse_env.free(&e);
     // A type starts at its base type and every suffix at its own token, so a
     // placement diagnostic points at the marker it is about.
-    // D5.3
     ast.node mut* mod = parse_env.parse(&e, "node* mut@ own x = 0;\ni32[4] mut y = 0;\n");
     ast.node mut* first = parse_env.decl(mod, 0)->a;
     assert(parse_env.loc_of(&e, first) == "1:1");
@@ -112,7 +108,6 @@ fn a_declaration_covers_its_terminator() void {
     defer parse_env.free(&e);
     // A node's range runs to one past the last byte of the construct's last
     // token, which shows as the source text it covers.
-    // D20.4
     string src = parse_env.join2(&e, "i32 n = 4 + 1;\n", "fn f(i32 a) i32 {\n    return a;\n}\n");
     ast.node mut* mod = parse_env.parse(&e, src);
     assert(parse_env.node_text(&e, parse_env.decl(mod, 0)) == "i32 n = 4 + 1;");
@@ -169,7 +164,6 @@ fn a_parenthesized_expression_does_not_cover_its_parentheses() void {
     // parse_paren_expr returns the expression itself and calls no finish, so
     // the `)` it consumed is not part of it and its start cannot move over
     // the `(`.
-    // D20.4
     ast.node mut* mod = parse_env.parse(&e, "i32 x = (a + b);\n");
     assert(parse_env.node_text(&e, parse_env.decl(mod, 0)->b) == "+ b");
     assert(parse_env.node_text(&e, parse_env.decl(mod, 0)) == "i32 x = (a + b);");
@@ -199,7 +193,6 @@ fn a_type_covers_its_suffixes_and_markers() void {
     // A type covers its base and every marker and suffix written after it,
     // and each suffix covers its own marker. A marker-only suffix tail is
     // exactly what a missed finish would drop.
-    // D5.3, D17.2
     string src = parse_env.join3(&e, "node* mut@ own x = 0;\n", "i32[4] mut y = 0;\n",
                                  "string own s = \"\";\n");
     ast.node mut* mod = parse_env.parse(&e, src);
@@ -258,7 +251,6 @@ fn an_empty_case_body_is_an_empty_range_after_the_colon() void {
     defer parse_env.free(&e);
     // An empty case body has no token of its own, so it is the empty range
     // just after the ':' and stays inside its clause.
-    // D20.4
     ast.node mut* mod = parse_env.parse(&e, "fn f() void {\n    switch (c) { case 1: }\n}\n");
     ast.node mut* clause = parse_env.child(parse_env.body_stmt(mod, 0, 0), 0);
     assert(parse_env.range_of(&e, clause) == "2:18-2:25");
@@ -277,7 +269,7 @@ fn an_import_covers_its_semicolon_and_its_items() void {
     assert(parse_env.node_text(&e, parse_env.decl(mod, 1)) == "import util.strings as s;");
     assert(parse_env.node_text(&e, parse_env.decl(mod, 1)->b) == "as s");
     assert(parse_env.node_text(&e, parse_env.decl(mod, 2)) == "import a.b.{c, d as e};");
-    // The path ends at its last segment; the item list is not part of it.
+    // The path ends at its last segment. The item list is not part of it.
     assert(parse_env.node_text(&e, parse_env.decl(mod, 2)->a) == "a.b");
     assert(parse_env.node_text(&e, parse_env.child(parse_env.decl(mod, 2), 0)) == "c");
     assert(parse_env.node_text(&e, parse_env.child(parse_env.decl(mod, 2), 1)) == "d as e");
@@ -312,7 +304,6 @@ fn break_and_continue_cover_their_semicolon() void {
 }
 
 // ---- name ranges ---------------------------------------------------------------
-// D20.4
 
 fn declarations_carry_the_range_of_their_name() void {
     parse_env.env mut e = parse_env.create();
@@ -364,7 +355,6 @@ fn nodes_without_a_name_carry_an_empty_name_range() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // A node no name declares or mentions carries the empty range.
-    // D20.4
     ast.node mut* mod = parse_env.parse(&e, "i32 a = 1 + 2;\nstring b = \"hi\";\n");
     ast.node mut* sum = parse_env.decl(mod, 0)->b;
     assert(sum->name_loc.line == 0);
@@ -380,7 +370,6 @@ fn nodes_without_a_name_carry_an_empty_name_range() void {
 // One source of each shape the parser builds a node for, walked for the three
 // invariants. The last four are modules the parser recovers in, so the
 // invariants are checked on a recovered tree too.
-// D20.4, D14.2
 fn every_node_of_a_corpus_keeps_its_children_inside_itself() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
@@ -472,7 +461,7 @@ fn every_node_of_a_corpus_keeps_its_children_inside_itself() void {
 }
 
 // A `finish` that is dropped shows up as a child leaving its parent, which is
-// what the walk reports; this holds the walk itself against a tree that
+// what the walk reports. This holds the walk itself against a tree that
 // violates the invariant, so a green walk means something.
 fn the_walk_reports_a_child_that_leaves_its_parent() void {
     parse_env.env mut e = parse_env.create();
@@ -480,7 +469,7 @@ fn the_walk_reports_a_child_that_leaves_its_parent() void {
     parse_env.walk_begin();
     ast.node mut* mod = parse_env.parse(&e, "i32 a = 1 + 2;\n");
     // The declaration's range is shortened to its first token, which is what
-    // a missed finish leaves behind; its initializer then leaves it.
+    // a missed finish leaves behind. Its initializer then leaves it.
     ast.node mut* d0 = parse_env.decl(mod, 0);
     d0->loc.end_line = d0->loc.line;
     d0->loc.end_col = d0->loc.col + 3;

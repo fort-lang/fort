@@ -13,19 +13,12 @@ import types;
 import types_env;
 import std.strbuf;
 
-// The type builder and the canonical spelling: the reading rules, the
-// placement rules, and every row of the tables those rules carry. Each row is
-// one assertion: the reader of support/types_env turns the spelling into
-// type_build arguments, and the type is checked by the levels it marks mutable
-// (`muts`, level 0 first), by the `own` mark of each of its references
-// (`owns`, outermost first) and by the spelling type_to_str gives it back. The
-// port of test/types_build_test.c.
-// D3.6, D5.3, D17.2
+/// Checks type construction from written spellings. Each case verifies mutable levels,
+/// ownership marks, and the spelling produced by type_to_str.
 //
-// Every marker follows the type element whose storage it marks and the last
-// position is the binding, so a declaration's own `mut` is just the last one
-// written.
-// D5.3
+// Each marker follows the type element whose storage it marks. The last
+// position belongs to the binding. Thus, a declaration's own `mut` is the
+// last marker.
 
 // One suffix with no marks, the shape the descriptor tests start from.
 fn plain(types.suffix_kind kind, u64 len) types.suffix {
@@ -33,9 +26,8 @@ fn plain(types.suffix_kind kind, u64 len) types.suffix {
 }
 
 // ---- reading suffixes ----------------------------------------------------------
-// D3.6
 
-// Reference suffixes read inside-out; the fixed-array group reads outside-in
+// Reference suffixes read inside-out. The fixed-array group reads outside-in
 // and sits between the two reference groups.
 fn the_d3_6_shapes_round_trip() void {
     types_env.env mut e = types_env.env{};
@@ -83,7 +75,6 @@ fn the_d3_6_shapes_are_the_ones_it_names() void {
     assert(m->len == 3);
     assert(m->elem->len == 4);
     // `void*` is its own kind, with no pointee type.
-    // D3.11
     assert(types_env.type_of(&e, "void*")->kind == types.type_kind.k_voidptr);
     assert(types_env.type_of(&e, "void mut*")->kind == types.type_kind.k_voidptr);
     assert(types_env.type_of(&e, "void mut*")->is_mut);
@@ -92,8 +83,7 @@ fn the_d3_6_shapes_are_the_ones_it_names() void {
     assert(types_env.type_of(&e, "void**")->elem->kind == types.type_kind.k_voidptr);
 }
 
-// `i32[4]*[2]` does not parse; wrap the pointer in a struct.
-// D3.6
+// `i32[4]*[2]` does not parse. Wrap the pointer in a struct.
 fn an_array_suffix_never_follows_a_reference_suffix() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -106,7 +96,6 @@ fn an_array_suffix_never_follows_a_reference_suffix() void {
 
 // The elements of a fixed array share its storage, so the marker goes after
 // the length: `i32 mut[4]` is an error.
-// D5.3
 fn a_marker_that_belongs_to_an_array_is_refused() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -127,9 +116,8 @@ fn a_marker_that_belongs_to_an_array_is_refused() void {
     assert(types_env.spell(&e, "node* mut@") == "node* mut@");
 }
 
-// `own` follows a `*` or an `@`, or `string`, the reference with no suffix; it
+// `own` follows a `*` or an `@`, or `string`, the reference with no suffix. It
 // never follows another base type or a fixed-array suffix.
-// D17.2
 fn an_own_marks_a_reference_and_nothing_else() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -142,7 +130,7 @@ fn an_own_marks_a_reference_and_nothing_else() void {
     assert(types_env.spell(&e, "color own") == msg);
     assert(types_env.spell(&e, "node*[4] own") == arr);
     assert(types_env.spell(&e, "i32[4] own") == arr);
-    // Where it is legal, it marks exactly the reference it follows.
+    // A legal marker applies only to the reference before it.
     assert(types_env.spell(&e, "node* own") == "node* own");
     assert(types_env.spell(&e, "u8@ own") == "u8@ own");
     assert(types_env.spell(&e, "string own") == "string own");
@@ -162,8 +150,7 @@ fn builder_errors_of_lengths_and_void() void {
     assert(types_env.spell(&e, "void*@") == "void*@");
     assert(types_env.spell_decl(&e, "void* mut") == "void* mut");
     // The storage a `void*` reaches has no type, and `void mut*` marks it
-    // writable; the two `mut` positions are distinct and both spell back.
-    // D3.11, D5.3
+    // writable. The two `mut` positions are distinct and both spell back.
     assert(types_env.spell(&e, "void mut*") == "void mut*");
     assert(types_env.spell_decl(&e, "void mut* mut") == "void mut* mut");
     assert(types_env.spell(&e, "void mut* own") == "void mut* own");
@@ -174,7 +161,6 @@ fn builder_errors_of_lengths_and_void() void {
     assert(types_env.spell(&e, "void mut* mut@ own") == "void mut* mut@ own");
     // `void` still names no storage of its own, so every other marker on it is
     // an error, and a span or an array of `void` does not exist.
-    // D3.11, D5.3
     string msg = "error: 'void' is only a return type or the base of 'void*'";
     assert(types_env.spell(&e, "void mut@") == msg);
     assert(types_env.spell(&e, "void mut[4]") == msg);
@@ -193,20 +179,17 @@ fn an_own_mark_on_a_function_type_is_refused() void {
     types.node* f = types_env.fn1(&e, i32t, i32t);
     types.suffix[1] mut none = {};
     // A function pointer is not a reference that owns anything.
-    // D17.1
     types.build_result mut r = types.type_build(&e.tt, true, false, f, none[..0]);
     assert(r.built == null);
     assert(r.error == "'own' marks a reference: write it after a '*' or an '@'");
     // A `mut` after a function type marks the storage holding the function
     // pointer, which in the last position is the binding.
-    // D5.3
     r = types.type_build(&e.tt, false, true, f, none[..0]);
     assert(r.built == f);
     assert(r.mut0);
 }
 
 // ---- the placement rule --------------------------------------------------------
-// D5.3
 
 fn the_d5_3_table_marks_the_levels_it_names() void {
     types_env.env mut e = types_env.env{};
@@ -261,7 +244,6 @@ fn the_placement_rule_on_further_shapes() void {
     types_env.init(&e);
     defer types_env.free(&e);
     // Chains of three, where each position marks one level.
-    // D5.3
     assert(types_env.muts(&e, "node**") == "nnn");
     assert(types_env.muts(&e, "node** mut") == "ynn");
     assert(types_env.muts(&e, "node mut* mut* mut") == "yyy");
@@ -270,7 +252,6 @@ fn the_placement_rule_on_further_shapes() void {
     assert(types_env.muts(&e, "i32 mut@ mut@ mut") == "yyy");
     // A fixed array adds no level, so its elements and the array are one
     // storage.
-    // D5.2
     assert(types_env.muts(&e, "i32[4]@") == "nn");
     assert(types_env.muts(&e, "i32[4] mut@") == "ny");
     assert(types_env.muts(&e, "i32[4]@ mut") == "yn");
@@ -286,7 +267,6 @@ fn the_placement_rule_on_further_shapes() void {
     assert(types_env.muts(&e, "string mut@") == "ny");
     // A `void*` reaches a level whose storage has no type, so it has two
     // positions: the binding and the storage behind the pointer.
-    // D3.11, D5.2
     assert(types_env.muts(&e, "void*") == "nn");
     assert(types_env.muts(&e, "void* mut") == "yn");
     assert(types_env.muts(&e, "void mut*") == "ny");
@@ -294,7 +274,6 @@ fn the_placement_rule_on_further_shapes() void {
     assert(types_env.muts(&e, "void mut* mut*") == "nyy");
     assert(types_env.muts(&e, "void mut* mut@ mut") == "yyy");
     // Out-parameters, the shape the rule names.
-    // D3.6
     assert(types_env.muts(&e, "u8@*") == "nnn");
     assert(types_env.muts(&e, "u8@* mut") == "ynn");
     assert(types_env.muts(&e, "u8 mut@ mut* mut") == "yyy");
@@ -354,7 +333,6 @@ fn the_last_position_is_the_binding() void {
 }
 
 // ---- ownership placement -------------------------------------------------------
-// D17.2
 
 fn the_d17_2_table_marks_the_references_it_names() void {
     types_env.env mut e = types_env.env{};
@@ -371,7 +349,6 @@ fn the_d17_2_table_marks_the_references_it_names() void {
 }
 
 // `own` never changes which levels are mutable.
-// D17.2
 fn the_d17_2_table_marks_the_levels_it_names() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -402,7 +379,6 @@ fn the_d17_2_table_spells_its_declarations_back() void {
 
 // `kids[i]` of a `node mut* own mut@ own` is a `node mut* own`, and `*out` of
 // a `u8 mut@ own mut*` a `u8 mut@ own`.
-// D17.2
 fn the_marks_inside_a_derived_type_survive() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -420,7 +396,6 @@ fn the_marks_inside_a_derived_type_survive() void {
 }
 
 // A reference is owning only where its own position says so.
-// D17.2
 fn each_own_marks_one_reference_only() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -472,7 +447,6 @@ fn suffixes_after_a_function_type_apply_to_it() void {
     types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
     types.node* f = types_env.fn1(&e, i32t, i32t);
     // `fn i32(i32)[4]`: an array of four function pointers.
-    // D3.6
     assert(types_env.str_of(&e, types.type_array(&e.tt, f, 4)) == "fn (i32) i32[4]");
     // `fn i32[4](i32)`: a function returning an `i32[4]`.
     assert(types_env.str_of(&e, types_env.fn1(&e, types.type_array(&e.tt, i32t, 4), i32t)) ==
@@ -486,7 +460,6 @@ fn suffixes_after_a_function_type_apply_to_it() void {
 // A mutable level behind an immutable one, which `&f` on an immutable struct
 // with a `node mut*` field yields, is written by marking each position on its
 // own.
-// D5.3
 fn every_combination_of_markers_has_a_spelling() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -497,7 +470,6 @@ fn every_combination_of_markers_has_a_spelling() void {
     types.node* mut_span = types_env.type_of(&e, "i32 mut@");
     assert(types_env.str_of(&e, types.type_span(&e.tt, mut_span, false, false)) == "i32 mut@@");
     // An owned string inside a type has its own position too.
-    // D3.7, D17.2
     types.node* own_string = types_env.type_of(&e, "string own");
     assert(types_env.str_of(&e, types.type_ptr(&e.tt, own_string, false, false)) ==
            "string own*");
@@ -515,9 +487,8 @@ fn every_combination_of_markers_has_a_spelling() void {
 }
 
 // No array suffix may follow a trailing reference suffix, so a pointer to an
-// array inside an array has no spelling; diagnostics print the inner type in
+// array inside an array has no spelling. Diagnostics print the inner type in
 // parentheses.
-// D3.6
 fn only_an_array_behind_a_reference_needs_parentheses() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -532,7 +503,7 @@ fn only_an_array_behind_a_reference_needs_parentheses() void {
     assert(types_env.str_of(&e, types.type_array(&e.tt, mut_ptr, 2)) == "(i32[4] mut)*[2]");
 }
 
-// The speller walks 64 nodes in one group; a deeper chain, which no source can
+// The speller walks 64 nodes in one group. A deeper chain, which no source can
 // write, is cut and continued in parentheses rather than truncated.
 fn a_chain_deeper_than_one_group_continues_in_parentheses() void {
     types_env.env mut e = types_env.env{};
@@ -592,8 +563,7 @@ fn spelling_a_type_appends_to_the_buffer() void {
 }
 
 // `type_to_str` leaves the binding's position empty and `type_to_str_decl`
-// writes it; nothing else moves.
-// D5.3
+// writes it. Nothing else moves.
 fn the_declaration_spelling_writes_the_last_marker_only() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -627,7 +597,6 @@ fn the_declaration_spelling_writes_the_last_marker_only() void {
 
 // `node*@*` is a pointer to a span of pointers: reference suffixes read
 // inside-out, and each position carries its own markers.
-// D3.6, D5.3
 fn the_builder_reads_the_three_suffix_groups() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -661,7 +630,6 @@ fn the_builder_reads_the_three_suffix_groups() void {
 
 // `string` is the one base type that takes `own`, being a reference with no
 // suffix.
-// D3.7, D17.2
 fn a_base_position_own_marks_a_string() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -760,7 +728,6 @@ fn deep_chains_mark_the_levels_the_suffixes_name() void {
 }
 
 // Whatever the type ends with, the marker before the name is the binding's.
-// D5.3
 fn the_binding_takes_the_last_position_of_every_shape() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -772,7 +739,6 @@ fn the_binding_takes_the_last_position_of_every_shape() void {
     assert(types_env.spell_decl(&e, "u8@ mut* mut") == "u8@ mut* mut");
     // A fixed array holds its elements, so the array's own position is the
     // last one and it is the binding's.
-    // D5.2, D5.3
     assert(types_env.muts(&e, "node*[4] mut") == "yn");
     assert(types_env.muts(&e, "node*[4][2] mut") == "yn");
     assert(types_env.spell_decl(&e, "node*[4][2] mut") == "node*[4][2] mut");

@@ -10,16 +10,13 @@ import gen_env;
 import runtime_sig;
 import std.strbuf;
 
-// The builtins and the calls of src/fort/gen_expr.ft: the print family, the
-// `assert` and `panic` of item 19, and the call shapes of item 7 -- a direct
-// call, a call through a function pointer, an `extern` call with the variadic
-// tail of item 8, an aggregate argument and an aggregate result.
-// D12.2
+/// Checks builtins and calls from src/fort/gen_expr.ft. Cases cover printing,
+/// `assert`, `panic`, direct calls, function pointers, variadic calls, and
+/// aggregate arguments and results.
 //
-// Every expected block was read off `fort -S` run by stage1 over a program
-// whose body is the one the test writes, with the temporaries renumbered from
-// zero, which is what the emitter produces when the expression is a
-// function's first.
+// Each expected block comes from stage1 `fort -S` output for the same program
+// body. The test renumbers temporaries from zero. The emitter uses that
+// numbering when the expression is first in a function.
 
 // One local per print family type, and the call statements that print them.
 fn open_prints(gen_env.env mut* e) bool {
@@ -46,7 +43,7 @@ fn open_prints(gen_env.env mut* e) bool {
     return gen_env.open_src(e, strbuf.view(&b));
 }
 
-// ---- item 19: the print family --------------------------------------------------------
+// ---- the print family --------------------------------------------------------
 
 fn a_bool_is_widened_to_a_byte_before_it_is_printed() void {
     gen_env.env mut e = gen_env.env{};
@@ -54,10 +51,9 @@ fn a_bool_is_widened_to_a_byte_before_it_is_printed() void {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 6);
-    // Item 2: a `bool` place holds `i8` and a `bool` value is `i1`, so the
-    // load is a `trunc` and the entry point, whose parameter is a fort `bool`,
-    // takes that `i1` as it stands; `print` writes to stdout.
-    // D11.5
+    // A `bool` place holds `i8`, but a `bool` value is `i1`. The load uses
+    // `trunc`, and the fort `bool` parameter takes that `i1` unchanged.
+    // `print` writes to stdout.
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join4(&e, "  %t0 = load i8, ptr %b.0, align 1\n",
                                       "  %t1 = trunc i8 %t0 to i1\n",
@@ -73,7 +69,6 @@ fn a_char_goes_to_its_own_entry_point_unwidened() void {
     gen_env.discard_at(&e, 7);
     // `char` is an unsigned byte, so it is `i8 zeroext` and is never widened
     // to an integer.
-    // D3.2
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  %t0 = load i8, ptr %c.1, align 1\n",
                                       "  call void @\"std.rt.print_char\"(i32 1, ",
@@ -86,7 +81,7 @@ fn an_enum_prints_through_its_table_and_its_member_count() void {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 8);
-    // Item 21: the table is emitted for an enum some `print` of that type
+    // the table is emitted for an enum some `print` of that type
     // reaches, and the count stands beside it.
     gen_env.expect_text(
         gen_env.body(&e),
@@ -113,13 +108,12 @@ fn an_integer_is_extended_to_64_bits_by_its_own_signedness() void {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 10);
-    // Item 19: `u8 u16 u32 u64` go to `_u64` zero-extended, and the width
-    // already agrees here, so nothing widens it (item 9).
+    // `u8 u16 u32 u64` go to `_u64` zero-extended, and the width
+    // already agrees here, so nothing widens it.
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
                                       "  call void @\"std.rt.print_u64\"(i32 1, i64 %t0)\n"));
     // `eprint` is the same call to descriptor 2.
-    // D11.5
     gen_env.discard_at(&e, 11);
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
@@ -132,7 +126,7 @@ fn println_ends_with_a_newline_byte_of_its_own() void {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 12);
-    // Item 19: one call per argument, then the newline; a signed integer is
+    // one call per argument, then the newline. A signed integer is
     // sign-extended and goes to `_i64`.
     gen_env.expect_text(
         gen_env.body(&e),
@@ -148,9 +142,8 @@ fn a_string_literal_prints_as_its_constant_and_its_length() void {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.discard_at(&e, 13);
-    // Item 19: a literal is `@.str.N` and its length, with no header built for
+    // a literal is `@.str.N` and its length, with no header built for
     // it at all.
-    // D3.7
     gen_env.expect_text(gen_env.body(&e),
                         "  call void @\"std.rt.print_str\"(i32 1, ptr @.str.0, i64 2)\n");
 }
@@ -163,14 +156,12 @@ fn fprint_evaluates_its_descriptor_once_and_before_the_arguments() void {
     gen_env.discard_at(&e, 14);
     // `fd` is an expression like any other and is evaluated before the
     // arguments, left to right.
-    // D6.3, D12.2
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join2(&e, "  %t0 = load i64, ptr %u.4, align 8\n",
                                       "  call void @\"std.rt.print_u64\"(i32 2, i64 %t0)\n"));
 }
 
 // ---- assert and panic --------------------------------------------------------------
-// D12.2
 
 fn assert_quotes_its_argument_as_the_user_wrote_it() void {
     gen_env.env mut e = gen_env.env{};
@@ -181,7 +172,6 @@ fn assert_quotes_its_argument_as_the_user_wrote_it() void {
     gen_env.discard_at(&e, 1);
     // The message is the source text between the call's parentheses, and the
     // position is the builtin's own name.
-    // D11.4
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join4(&e, "  %t0 = load i8, ptr %b.0, align 1\n",
@@ -206,7 +196,6 @@ fn panic_writes_its_message_and_ends_the_block() void {
     gen_env.discard_at(&e, 1);
     // The callee aborts, so the call is followed by `unreachable` and the
     // block is terminated.
-    // D11.4
     gen_env.expect_text(
         gen_env.body(&e),
         gen_env.join2(&e,
@@ -215,10 +204,10 @@ fn panic_writes_its_message_and_ends_the_block() void {
     assert(e.g.terminated);
 }
 
-// ---- item 7 and item 8: the calls ----------------------------------------------------
+// ---- calls -------------------------------------------------------------------------
 
 // Two functions to call, one of them through a pointer, and one `extern`
-// with the variadic tail of item 8.
+// with a variadic tail.
 fn open_calls(gen_env.env mut* e) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -248,9 +237,8 @@ fn a_direct_call_names_the_symbol_and_carries_no_function_type() void {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.emit_value(&e, "q");
-    // Item 7: a direct call site needs no function type, an opaque pointer
+    // a direct call site needs no function type, an opaque pointer
     // carrying none only where the callee is a value.
-    // D3.10, D19.2
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  %t0 = load i32, ptr %n.0, align 4\n",
                                       "  %t1 = load i32, ptr %n.0, align 4\n",
@@ -263,9 +251,8 @@ fn a_call_through_a_pointer_carries_the_function_type() void {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.emit_value(&e, "r");
-    // An opaque pointer carries no signature, so the call site states it; the
+    // An opaque pointer carries no signature, so the call site states it. The
     // callee is evaluated before the arguments.
-    // D3.10, D19.2, D6.3
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join4(&e, "  %t0 = load ptr, ptr %f.1, align 8\n",
                                       "  %t1 = load i32, ptr %n.0, align 4\n",
@@ -280,13 +267,12 @@ fn an_extern_call_goes_through_the_variadic_call_type() void {
     assert(open_calls(&e));
     gen_env.emit_value(&e, "c");
     // A declared variable tail gives the call the variadic function type, so the caller passes
-    // the vector-register count, and `#3` is `nobuiltin` on every extern call site (item 8).
-    // D9.8
+    // the vector-register count. Every extern call site uses the `nobuiltin` group `#3`.
     string text = gen_env.body(&e);
     gen_env.expect_text(text[text.len - 57..],
                         "  %t5 = call i32 (ptr, ...) @printf(ptr %t3, i32 %t4) #3\n");
     assert(gen.gen_uses_attr(&e.g, gen.ATTR_NOBUILTIN));
-    // It is declared in the extern group, with its own C name (item 8).
+    // It is declared in the extern group, with its own C name.
     assert(e.g.externs.len == 1);
 }
 
@@ -296,7 +282,7 @@ fn an_aggregate_result_arrives_through_the_sret_pointer() void {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.into_text(&e, "z");
-    // Item 7: the result place leads the argument list and the call itself is
+    // the result place leads the argument list and the call itself is
     // `void`.
     gen_env.expect_text(gen_env.body(&e),
                         "  call void @\"main.make\"(ptr sret(%struct.main.point) %z.4)\n");
@@ -308,9 +294,8 @@ fn an_aggregate_argument_is_a_pointer_to_a_copy_the_caller_made() void {
     defer gen_env.close(&e);
     assert(open_calls(&e));
     gen_env.emit_value(&e, "k");
-    // Item 7: a struct, fixed array, span or `string` argument is a plain
-    // `ptr` to a copy the caller allocates in its entry block, and `byval` is
-    // never used.
+    // An aggregate argument is a plain `ptr` to a copy in the caller's entry
+    // block. The emitter never uses `byval`.
     gen_env.expect_text(gen_env.allocas(&e), "  %tmp0 = alloca %struct.main.point, align 4\n");
     gen_env.expect_text(
         gen_env.body(&e),
@@ -329,7 +314,6 @@ fn a_call_of_a_noreturn_function_ends_in_a_trap() void {
     // The trap is what catches a `noreturn` function that returns anyway,
     // which is why the declaration is unadorned and the optimizer cannot
     // delete it.
-    // D8.5, D19.7
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  call void @\"main.stop\"()\n",
                                       "  call void @llvm.trap()\n", "  unreachable\n"));
@@ -343,7 +327,7 @@ fn an_aggregate_result_with_nowhere_to_go_is_a_diagnostic() void {
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open_calls(&e));
-    // Item 7: an aggregate result arrives through the `sret` pointer, so
+    // an aggregate result arrives through the `sret` pointer, so
     // reading one as a value would drop that argument. The emitter reports
     // rather than emitting a call it cannot justify, which is the rule for
     // every path it does not lower.
@@ -358,16 +342,15 @@ fn an_expression_that_designates_no_storage_is_a_diagnostic() void {
     defer gen_env.close(&e);
     string[1] mut lines = {"    i32 mut a = 3;"};
     assert(gen_env.open_lines(&e, lines[..]));
-    // A literal is a value and has no place; the emitter says so rather than
+    // A literal is a value and has no place. The emitter says so rather than
     // inventing one.
-    // D6.7
     gen_env.emit_place(&e, "a");
     assert(e.g.failed);
     assert(gen_env.said(&e, "cannot generate code yet for this expression as a place"));
 }
 
 // A fort function and an `extern` one whose parameters and results are narrow,
-// which is the only shape that can see the attribute rule of item 7.
+// which is the only shape that can see the extension attributes.
 fn open_narrow(gen_env.env mut* e) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -389,12 +372,11 @@ fn a_narrow_argument_and_a_narrow_result_carry_their_attributes() void {
     defer gen_env.close(&e);
     assert(open_narrow(&e));
     gen_env.emit_value(&e, "r");
-    // Item 7: `zeroext` for `u8` and `bool`, `signext` for `i8`, on the
-    // arguments and on the result, so that LLVM normalizes on both sides of
-    // the call. Nothing else in the repository can see this: a fort program
-    // is one module whose caller and callee agree with each other about a
-    // convention both get wrong, and the whole language corpus stays green
-    // when an extension is dropped (notes/compiler.md 6).
+    // `zeroext` for `u8` and `bool`, `signext` for `i8`, on the
+    // arguments and on the result. LLVM normalizes both sides of the call.
+    // Other tests cannot see this error. A fort caller and callee can agree on
+    // the same wrong convention. The language corpus stays green if an
+    // extension attribute is missing.
     gen_env.join5(&e, "  %t0 = load i8, ptr %x.0, align 1\n",
                   "  %t1 = load i8, ptr %y.1, align 1\n",
                   "  %t2 = load i8, ptr %z.2, align 1\n", "  %t3 = trunc i8 %t2 to i1\n",
@@ -410,9 +392,8 @@ fn an_extern_call_carries_them_too_a_literal_argument_included() void {
     assert(open_narrow(&e));
     gen_env.emit_value(&e, "s");
     // The attribute comes from the parameter's fort type and not from the
-    // operand, so a literal argument carries it as a loaded one does; the call
-    // type of item 8 states the types alone.
-    // D9.8
+    // operand, so a literal argument carries it as a loaded one does. The call
+    // function type states the types alone.
     gen_env.join2(&e, "  %t0 = load i8, ptr %x.0, align 1\n",
                   "  %t1 = call zeroext i8 @cnarrow(i8 zeroext %t0, ");
     gen_env.expect_text(gen_env.body(&e), gen_env.join_more(&e, "i16 signext 3) #3\n"));
@@ -423,7 +404,7 @@ fn a_discarded_aggregate_result_still_gets_a_place() void {
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open_calls(&e));
-    // Item 7: the `sret` pointer is part of the call, so a statement that
+    // the `sret` pointer is part of the call, so a statement that
     // throws the result away still allocates the place nothing reads.
     gen_env.discard_at(&e, 7);
     gen_env.expect_text(gen_env.allocas(&e), "  %tmp0 = alloca %struct.main.point, align 4\n");

@@ -7,21 +7,16 @@ import lexer;
 import session;
 import std.strbuf;
 
-// The lexer of src/fort/lexer.ft: the bytes that start no token, and the
-// recovery -- a lexical error costs its line, the tokens already lexed on it
-// included, lexing resumes at the start of the next one, and the file's
-// budget of twenty diagnostics is spent by the lexer and not by the sink.
-// D14.2
+/// Checks invalid token bytes, line-based recovery, and the 20-diagnostic lexer budget.
+/// Recovery resumes at the next line.
 //
-// These are the assertions of test/lexer_test.c's recovery section, which
-// holds the C lexer this module was transliterated from.
+// These assertions match the recovery section of test/lexer_test.c.
 
 // ---- the fixture --------------------------------------------------------------
 
 // One session and one token vector, reused by every lex of one test: the
 // session owns the sink the diagnostics go to and the pool the string
 // literals are decoded into, and freeing it frees both.
-// D20.5
 struct fixture {
     session.session sess;
     lexer.tok_vec toks;
@@ -37,7 +32,7 @@ fn close_fixture(fixture mut* f) void {
 }
 
 // Lexes `src` as t.ft, dropping the tokens and the diagnostics of the lex
-// before it; the pool keeps the strings of both, which no test reads across
+// before it. The pool keeps the strings of both, which no test reads across
 // a call. Returns whether the file was clean.
 fn lex(fixture mut* f, string src) bool {
     lexer.tokvec_free(&f->toks);
@@ -66,26 +61,22 @@ fn text(fixture* f, u64 i) string {
 }
 
 // Whether token `i` starts at line `line`, column `col`.
-// D14.2
 fn at(fixture* f, u64 i, u32 line, u32 col) bool {
     return tok(f, i).line == line && tok(f, i).col == col;
 }
 
 // Whether token `i` covers `len` bytes from offset `off`.
-// D20.4
 fn covers(fixture* f, u64 i, u64 off, u64 len) bool {
     return tok(f, i).off == off && tok(f, i).len == len;
 }
 
 // The errors the last lex reported, notes excluded.
-// D14.2
 fn errors(fixture mut* f) u64 {
     return session.error_count(&f->sess);
 }
 
 // Whether the diagnostic `i` is an error at `line`:`col` of t.ft saying
-// `msg`, which is everything its text line carries (toolchain.md 4).
-// D14.2
+// `msg`, which is everything its text line carries.
 fn error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) bool {
     diag.record r = diag.record_at(session.diags(&f->sess), i);
     return r.severity == diag.severity.error && r.loc.file == "t.ft" && r.loc.line == line
@@ -102,7 +93,6 @@ fn clean(fixture mut* f, string src, u64 n) bool {
 
 // The last lex failed with exactly the one diagnostic given, and still lexed
 // the file whole, so the tokens end in the end-of-file token.
-// D14.2
 fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
     bool ok = lex(f, src);
     if (ok || errors(f) != 1 || count(f) == 0) {
@@ -116,7 +106,6 @@ fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
 
 // The last lex failed with exactly `n` diagnostics and still lexed the file
 // whole, so the tokens end in the end-of-file token.
-// D14.2
 fn failed(fixture mut* f, string src, u64 n) bool {
     bool ok = lex(f, src);
     if (ok || errors(f) != n || count(f) == 0) {
@@ -127,7 +116,6 @@ fn failed(fixture mut* f, string src, u64 n) bool {
 
 // The tokens of the last lex, the end-of-file token excluded: what a resync
 // kept.
-// D14.2
 fn kept(fixture* f) u64 {
     return count(f) - 1;
 }
@@ -140,7 +128,6 @@ fn resumed_line(fixture* f, u32 line) bool {
 }
 
 // ---- bytes that start no token -------------------------------------------------
-// D2.1, D2.10
 
 fn non_ascii_outside_strings_and_comments_is_an_error() void {
     fixture mut f = open_fixture();
@@ -149,7 +136,6 @@ fn non_ascii_outside_strings_and_comments_is_an_error() void {
                      "non-ASCII byte outside a string literal or comment"));
     assert(kept(&f) == 0);
     // Two of the three bytes of the mark are not the mark.
-    // D2.1
     assert(one_error(&f, "\xEF\xBBx", 1, 1,
                      "non-ASCII byte outside a string literal or comment"));
 }
@@ -164,7 +150,7 @@ fn unexpected_printable_character_is_an_error() void {
     assert(one_error(&f, "\\", 1, 1, "unexpected character '\\'"));
 }
 
-// A byte that cannot be shown is named by its value (toolchain.md 4).
+// A byte that cannot be shown is named by its value.
 fn unexpected_control_byte_is_an_error() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -182,7 +168,6 @@ fn error_position_counts_lines_columns_and_tabs() void {
     assert(one_error(&f, "a\n\n\t\tb #", 3, 5, "unexpected character '#'"));
     // The lines before the error keep their tokens, the line of the error
     // loses them.
-    // D14.2
     assert(kept(&f) == 1);
     assert(text(&f, 0) == "a");
 }
@@ -190,7 +175,6 @@ fn error_position_counts_lines_columns_and_tabs() void {
 // An error drops the whole line it stands on, the tokens lexed before it
 // included, and the second error of that line is never reached, so one line
 // costs one diagnostic.
-// D14.2
 fn an_error_drops_its_line_and_reports_once() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -199,11 +183,9 @@ fn an_error_drops_its_line_and_reports_once() void {
 }
 
 // ---- resynchronisation after a lexical error ------------------------------------
-// D14.2
 
 // Every kind of lexical error costs its line alone: the line after it is
 // lexed as though nothing had happened.
-// D14.2
 fn every_error_kind_resumes_at_the_next_line() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -223,7 +205,6 @@ fn every_error_kind_resumes_at_the_next_line() void {
 
 // The same for the literal forms: a bad number, a bad escape and a literal
 // left open at the end of its line.
-// D2.5, D2.8, D2.9
 fn a_broken_literal_resumes_at_the_next_line() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -242,7 +223,6 @@ fn a_broken_literal_resumes_at_the_next_line() void {
 
 // The lines before and after a broken line keep their tokens, so the vector
 // covers the file with one line missing.
-// D14.2
 fn an_error_line_stands_between_two_good_lines() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -256,7 +236,6 @@ fn an_error_line_stands_between_two_good_lines() void {
 
 // Two errors on two lines are both reported, and the lines between and after
 // them are lexed.
-// D14.2
 fn two_errors_on_two_lines_are_both_reported() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -272,7 +251,6 @@ fn two_errors_on_two_lines_are_both_reported() void {
 
 // An error on the last line, with no newline to resume after, still ends the
 // vector in an end-of-file token at the end of the file.
-// D14.2
 fn an_error_on_the_last_line_still_ends_in_eof() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -285,7 +263,6 @@ fn an_error_on_the_last_line_still_ends_in_eof() void {
 
 // A file that is one broken line is the end-of-file token alone, which is
 // what lets the parser run on it.
-// D14.2
 fn a_file_of_one_broken_line_is_only_eof() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -296,7 +273,6 @@ fn a_file_of_one_broken_line_is_only_eof() void {
 
 // A string literal lexed after a resync is decoded like any other, so the
 // pool is unaffected by the dropped line.
-// D2.9
 fn a_literal_after_a_resync_is_decoded() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -312,7 +288,6 @@ fn a_literal_after_a_resync_is_decoded() void {
 // the lexer's to check, not the sink's: diag.report records every diagnostic
 // it is handed, and the lexer asks diag.budget_left before it reports,
 // exactly as src/bootstrap/lexer.c does.
-// D14.2
 fn a_file_reports_at_most_twenty_diagnostics() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -328,7 +303,7 @@ fn a_file_reports_at_most_twenty_diagnostics() void {
     assert(errors(&f) == 20);
     assert(diag.record_count(session.diags(&f.sess)) == 20);
     assert(!diag.budget_left(session.diags(&f.sess)));
-    // The twentieth error is the one on line 20; the five after it are
+    // The twentieth error is the one on line 20. The five after it are
     // silent, and the line after them is lexed.
     assert(error_is(&f, 19, 20, 1, "unexpected character '#'"));
     assert(resumed_line(&f, 26));
@@ -336,7 +311,6 @@ fn a_file_reports_at_most_twenty_diagnostics() void {
 
 // A second file through one session starts a budget of its own, since the
 // lexer opens it with diag.begin_file.
-// D14.2
 fn a_second_file_starts_a_new_budget() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -349,7 +323,7 @@ fn a_second_file_starts_a_new_budget() void {
     }
     assert(!lex(&f, strbuf.view(&b)));
     assert(errors(&f) == 20);
-    // lex resets the sink, so this is the count of the second file alone; the
+    // lex resets the sink, so this is the count of the second file alone. The
     // budget was reopened either way, which the twenty-first error of one
     // file could not be.
     assert(one_error(&f, "#\n", 1, 1, "unexpected character '#'"));
@@ -358,7 +332,6 @@ fn a_second_file_starts_a_new_budget() void {
 
 // A lone carriage return is whitespace, so it ends a line for a resync too: a
 // file written with `\r` alone keeps the tokens after the bad line.
-// D2.1
 fn a_carriage_return_ends_a_resync() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);

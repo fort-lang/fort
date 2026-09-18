@@ -13,22 +13,19 @@ import gen_stmt;
 import std.str;
 import std.strbuf;
 
-// The data half of the emitter, src/fort/gen_data.ft, against toolchain.md 6
-// items 1, 5, 8 and 21: the module-level declarations, the constant
-// initializers, the private data the module refers to, the declarations of
-// the `extern` functions and the intrinsics, and the attribute groups.
-// D7.10, D6.5, D4.6
+/// Checks module data from src/fort/gen_data.ft. Cases cover declarations,
+/// constant initializers, private data, external functions, intrinsics, and
+/// attribute groups.
 //
 // Nine of the twelve cases here emit a module, and each one runs the
-// structural check of item 10 over it (gen_env.expect_blocks): four through
-// `globals_of` below and five in the case itself. The other three call
-// `attr_text`, `emit_intrinsic` and `section` and emit no definition at all,
-// so `grep -c '^ *gen_env.expect_blocks('` is 6 call sites covering 9 cases,
-// and not 12.
+// gen_env.expect_blocks check. Four use `globals_of`, and five call the check
+// directly. The other three call
+// `attr_text`, `emit_intrinsic` and `section` and emit no definition.
+// `grep -c '^ *gen_env.expect_blocks('` reports 6 call sites. Those sites
+// cover 9 cases, not all 12.
 //
-// This is the fort half of test/gen_data_test.c and test/gen_global_test.c.
-// The expected text came from the original port evidence. Direct emitter
-// tests now pin the text.
+// test/gen_global_test.c checks the bootstrap implementation. Direct emitter
+// tests pin the expected text here.
 
 // The globals section of a module whose declarations are `decls`.
 fn globals_of(gen_env.env mut* e, strbuf.str_buf mut* b, string decls) string {
@@ -38,20 +35,18 @@ fn globals_of(gen_env.env mut* e, strbuf.str_buf mut* b, string decls) string {
     assert(gen_env.open_module(e, strbuf.view(b)));
     assert(gen_stmt.gen_program(&e->g, &e->c.ck, &e->c.m.set));
     // Every module a case here emits goes through the structural check of
-    // item 10 as well, which is what this helper is for (notes/compiler.md 6).
+    // the block structure as well, which is what this helper checks.
     gen_env.expect_blocks(e, gen_env.module_text(e));
     return gen_env.globals(e);
 }
 
-// ---- module-level data (item 5) ----------------------------------------------------
-// D7.10
+// ---- module-level data ----------------------------------------------------
 
-// An immutable declaration lives in read-only memory and a `mut` one in
-// writable memory, and every global carries an explicit `align N` from the
-// compiler's own layout (item 5). A named fort constant is not
+// An immutable declaration uses read-only memory. A `mut` declaration uses
+// writable memory. Each global has an explicit `align N` from its layout. A
+// named fort constant is not
 // `unnamed_addr`: its address is significant, because `&CONST` is
 // expressible.
-// D7.10, D3.1, D6.7
 fn a_constant_and_a_mut_global_take_their_own_linkage() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -68,14 +63,12 @@ fn a_constant_and_a_mut_global_take_their_own_linkage() void {
     gen_env.expect_text(got, gen_env.join_lines(&e, want[0..3]));
 }
 
-// ---- constant initializers (item 5) ------------------------------------------------
-// D6.5, D4.6
+// ---- constant initializers ------------------------------------------------
 
-// A constant struct is its fields in declaration order, the order the named
-// type writes them in, with an omitted field of the designated form zeroed;
-// an array is exactly its N elements; a `string` is its two header fields,
+// A constant struct lists fields in declaration order, as its named type does.
+// An omitted designated field is zero. An array lists its N elements. A
+// `string` is its two header fields,
 // the bytes and the length the trailing NUL excludes.
-// D6.5, D3.7
 fn a_constant_aggregate_is_written_member_by_member() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -99,9 +92,8 @@ fn a_constant_aggregate_is_written_member_by_member() void {
 }
 
 // An all-zero aggregate is `zeroinitializer` whatever its shape, and `{}`
-// zeroes any aggregate, span or string (item 5). A pointer's zero is `null`
+// zeroes any aggregate, span or string. A pointer's zero is `null`
 // and every other scalar's is `0`.
-// D6.5
 fn an_all_zero_value_is_zeroinitializer() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -131,7 +123,6 @@ fn an_all_zero_value_is_zeroinitializer() void {
 // expressions: the address of a module-level declaration, a function's
 // address, and the value of another module-level constant, whose chain the
 // checker resolved.
-// D7.10, D4.6
 fn the_three_module_level_initializer_forms() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -154,14 +145,12 @@ fn the_three_module_level_initializer_forms() void {
     gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
 }
 
-// ---- private data (item 5, item 21) ------------------------------------------------
-// D19.5
+// ---- private data ------------------------------------------------
 
 // `@.str.N` before `@.enum.*`, each numbered on first use and a string
-// constant never deduplicated by content; every byte outside the printable
+// constant never deduplicated by content. Every byte outside the printable
 // range is a `\XX` hex pair and the trailing NUL that `len` excludes is
-// written (item 5).
-// D3.7
+// written.
 fn the_private_data_is_the_three_lists_in_order() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -178,13 +167,11 @@ fn the_private_data_is_the_three_lists_in_order() void {
     string[7] mut want = {
         // The same text twice is two constants: private data is assigned on
         // first use and never deduplicated by content.
-        // D19.5
         "@.str.0 = private unnamed_addr constant [4 x i8] c\"a\\09b\\00\", align 1\n",
         "@.str.1 = private unnamed_addr constant [4 x i8] c\"a\\09b\\00\", align 1\n",
         "@.str.2 = private unnamed_addr constant [4 x i8] c\"red\\00\", align 1\n",
         "@.str.3 = private unnamed_addr constant [6 x i8] c\"green\\00\", align 1\n",
-        // One entry per member in declaration order, at C's 16-byte layout
-        // (item 21).
+        // One entry per member in declaration order, with C's 16-byte layout.
         "@.enum.main.colour = private unnamed_addr constant [2 x %fort.enum_member] ",
         "[%fort.enum_member { i32 0, ptr @.str.2 }, %fort.enum_member { i32 1, ptr @.str.3 }],",
         " align 8\n",
@@ -192,16 +179,13 @@ fn the_private_data_is_the_three_lists_in_order() void {
     assert(str.find(got, gen_env.join_lines(&e, want[0..7])) >= 0);
     // A module that needs no failure position holds no file constant at all,
     // since every record is made on first use.
-    // D19.5
     assert(e.g.files.len == 0);
 }
 
 // The file constant holds the path exactly as the compiler opened it, and one
-// record stands per file however many failures name it. An enum member's
-// value is the constant the checker folded, printed as the signed `i32` every
-// enum has, so an explicit value stands in the table where the ordinal would
-// (item 21).
-// D19.5, D3.9
+// record stands per file however many failures name it. An enum member uses
+// the constant that the checker folded. It prints as the enum's signed `i32`.
+// An explicit value replaces the ordinal.
 fn an_enum_table_holds_the_value_of_every_member() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -238,19 +222,15 @@ fn one_file_constant_stands_per_file() void {
     assert(e.g.files.len == 1);
     // The path exactly as the compiler opened it, which in the sandbox is the
     // module's path under the temporary directory.
-    // D19.5
     assert(str.ends_with(gen.records_at(&e.g.files, 0).text, "main.ft"));
 }
 
-// ---- declarations and attribute groups (item 8) ------------------------------------
+// ---- declarations and attribute groups ------------------------------------
 
-// An `extern` function is declared with its C types, unmangled, and with a
-// variadic tail, which is what makes a fixed-prototype declaration of a
-// variadic C function safe (item 8); its call site takes the `nobuiltin`
-// group. The runtime entry points follow in the order of toolchain.md 5.1,
-// then the intrinsics in their fixed table order, then the attribute groups
-// the module used, gaps in the numbering and all.
-// D9.8, D19.5
+// An `extern` function uses its unmangled C types and a variadic tail. The tail
+// makes a fixed C prototype safe for a variadic function. Its call site uses
+// the `nobuiltin` group. Runtime entry points, intrinsics, and attribute groups
+// follow their fixed orders. Attribute group numbers can contain gaps.
 fn the_declaration_groups_stand_in_their_fixed_order() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -265,8 +245,7 @@ fn the_declaration_groups_stand_in_their_fixed_order() void {
     string got = gen_env.module_text(&e);
     gen_env.expect_blocks(&e, got);
     // Two groups and no third: the runtime is defined in the module rather
-    // than declared (item 8).
-    // D13.1
+    // than declared.
     string[5] mut want = {
         "declare void @swap(i8 zeroext, i16 signext) nobuiltin\n",
         "declare i32 @puts(ptr) nobuiltin\n",
@@ -284,8 +263,7 @@ fn the_declaration_groups_stand_in_their_fixed_order() void {
     };
     assert(str.find(got, gen_env.join_lines(&e, groups[0..4])) >= 0);
     // The groups a module does not use leave no trace, so #1, #2 and #5 to #8
-    // are absent here; `#2` is never emitted at all (item 14).
-    // D19.5
+    // are absent here. `#2` is never emitted at all.
     assert(str.find(got, "attributes #1 =") < 0);
     assert(str.find(got, "attributes #2 =") < 0);
     assert(str.find(got, "attributes #5 =") < 0);
@@ -295,7 +273,6 @@ fn the_declaration_groups_stand_in_their_fixed_order() void {
 // Mac marks each extern declaration `nobuiltin`. This test checks two
 // declarations. The call-site group remains in the output. Linux keeps the
 // declaration bytes tested above.
-// D10.2, D19.1
 fn mac_extern_declarations_protect_allocator_effects() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open_with(&e, gen.gen_options{false, false, "arm64-apple-macosx15.0.0"});
@@ -318,17 +295,14 @@ fn mac_extern_declarations_protect_allocator_effects() void {
 // table is written down, and the one thing a `declare` line points at.
 // `mustprogress` is deliberately absent everywhere, since it would license
 // the optimizer to delete a `while (true) { }`, which fort keeps running.
-// D8.4
 fn every_attribute_group_has_its_text() void {
     assert(gen_data.attr_text(gen.ATTR_FN) ==
            "nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
     assert(gen_data.attr_text(gen.ATTR_FN_NORET) ==
            "noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
-    // `#2` is never emitted: it held the C runtime's declarations, and its
-    // index stays so that `#3` to `#7` keep the numbers item 14 fixes for
-    // them. `#8` is `#1` plus `cold`, on the definitions of the `noreturn`
-    // entry points of 5.1.
-    // D19.5
+    // The emitter leaves `#2` unused. Its index keeps `#3` through `#7` at
+    // their fixed numbers. `#8` is `#1`
+    // plus `cold` on `noreturn` entry points.
     assert(gen_data.attr_text(gen.ATTR_UNUSED_2) == "cold noreturn nounwind");
     assert(gen_data.attr_text(gen.ATTR_RT_NORET) ==
            "cold noreturn nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\"");
@@ -345,10 +319,9 @@ fn every_attribute_group_has_its_text() void {
            gen_data.attr_text(gen.ATTR_UNUSED_2));
 }
 
-// The overflow intrinsics of item 15, in the order `sadd ssub smul uadd usub
-// umul` and, within each, the widths `i8 i16 i32 i64`: the slot a family and
-// a width name is what the declaration is rendered from, so the two orders
-// are asserted together.
+// Overflow intrinsics use the order `sadd ssub smul uadd usub umul`. Each
+// family uses widths `i8 i16 i32 i64`. A declaration uses both table
+// positions, so the test checks both orders together.
 fn the_intrinsic_table_is_in_the_order_item_eight_gives() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -373,7 +346,7 @@ fn the_intrinsic_table_is_in_the_order_item_eight_gives() void {
 }
 
 // A section a module does not need leaves no trace, and the ones it has are
-// separated by exactly one blank line (item 1).
+// separated by exactly one blank line.
 fn an_empty_section_is_left_out_entirely() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);

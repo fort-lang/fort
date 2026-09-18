@@ -10,29 +10,22 @@
 import consts;
 import prim;
 
-// A second oracle for the exact folder, beside the table of cases
-// test/consts_fold_test.c wrote down. Two kinds of check, neither of them a
-// number typed by an author:
+/// A second oracle for the exact folder, beside the table of cases
+/// test/consts_fold_test.c wrote down. Two kinds of check, neither of them a
+/// number typed by an author.
 //
-// - over a grid of small values, every untyped operation is held against the
-//   same operation in plain `i64` arithmetic, which the compiler performs and
-//   this file does not implement. A sign the folder loses, a magnitude it
-//   rounds the wrong way and a remainder that takes the divisor's sign are all
-//   visible there, and none of them is visible in a case list that happens not
-//   to name the pair;
-// - over the whole constant range, the operations are held against the
-//   algebraic identities the folding rule states them by: `~c` is `-c - 1`,
-//   `a << n` is `a * 2^n`, De Morgan ties `&` to `|`, division and remainder
-//   reconstruct the dividend, and a comparison is antisymmetric.
-// D4.4
+// The suite uses two checks.
+// - It compares small untyped operations with plain `i64` arithmetic. This
+// catches lost signs, wrong magnitude rounding, and incorrect remainder signs.
+// - It compares the full range with algebraic identities. These identities
+// cover complement, shifts, De Morgan's laws, division, and comparison.
 //
-// The typed half does the same for typed folding and the wrapping operators:
-// an operation at a type is the untyped one plus a range check, and a wrapping
-// one is the exact value reduced modulo 2^width, which this file computes from
-// the width rather than from the module's own truncation.
-// D4.6, D11.2
+// The typed half applies the same checks to typed folding and wrapping
+// operators. A typed operation adds a range check to the untyped operation.
+// A wrapping operation reduces the exact value modulo 2^width. This file
+// computes that result from the width instead of using the module's truncation.
 //
-// Nothing here replaces the case tables; it is the net under them, and it is
+// Nothing here replaces the case tables. It is the net under them, and it is
 // what stands in for the C suites that a self-hosted compiler cannot run.
 
 u64 U64_MAX = 18446744073709551615;
@@ -66,7 +59,6 @@ fn grid_at(u64 k) consts.cval {
     if (mag > TWO63) {
         // -mag is outside [-2^63, 2^64 - 1], so the non-negative value stands
         // for it.
-        // D4.4
         return u(mag);
     }
     consts.cval mut r = consts.cv_none();
@@ -93,7 +85,6 @@ fn add_and_sub_agree_with_i64() void {
             assert(consts.cv_sub(i(a), i(b), &r));
             assert(consts.cv_eq(r, i(a - b)));
             // A zero result is never negative.
-            // D4.4
             if (a + b == 0) {
                 assert(!r.neg || a - b != 0);
             }
@@ -121,7 +112,6 @@ fn mul_agrees_with_i64() void {
 
 // `/` truncates toward zero and `%` takes the dividend's sign, which is what
 // fort's own `/` and `%` do on i64.
-// D6.13
 fn div_and_rem_agree_with_i64() void {
     u64 mut x = 0;
     while (x < SMALL.len) {
@@ -203,14 +193,13 @@ fn cmp_agrees_with_i64() void {
 
 // `a + b` is `b + a`, and `(a + b) - b` is `a` whenever both steps stay in
 // range.
-// D4.4
 fn addition_is_commutative_and_undone_by_subtraction() void {
     u64 mut x = 0;
     while (x < grid_len()) {
-        // Every value of the grid adds and subtracts zero, and adding one to
-        // a value one short of the top succeeds: without a pair the folder
-        // must fold, the identities below all hold of a folder that refuses
-        // everything (the review's finding, 2026-09-11).
+        // Every grid value adds and subtracts zero. A value one below the top
+        // also accepts one. These pairs require the folder to fold. The
+        // identities below also hold if a folder refuses every
+        // operation, so this pair prevents that false result.
         consts.cval mut unit = consts.cv_none();
         assert(consts.cv_add(grid_at(x), i(0), &unit));
         assert(consts.cv_eq(unit, grid_at(x)));
@@ -300,7 +289,6 @@ fn multiplication_is_commutative_with_its_units() void {
 }
 
 // `(a / b) * b + (a % b)` is `a`, the identity that fixes both operators.
-// D6.13
 fn division_and_remainder_reconstruct_the_dividend() void {
     u64 mut x = 0;
     while (x < grid_len()) {
@@ -319,7 +307,6 @@ fn division_and_remainder_reconstruct_the_dividend() void {
                 }
                 // The remainder is smaller than the divisor in magnitude and
                 // carries the dividend's sign.
-                // D6.13
                 assert(rem.mag < b.mag);
                 assert(!rem.neg || a.neg);
             }
@@ -331,7 +318,6 @@ fn division_and_remainder_reconstruct_the_dividend() void {
 
 // `~c` is `-c - 1`, computed here from the two operations it is defined by
 // rather than from the complement itself.
-// D4.4
 fn complement_is_minus_c_minus_one() void {
     u64 mut x = 0;
     while (x < grid_len()) {
@@ -350,7 +336,6 @@ fn complement_is_minus_c_minus_one() void {
 
 // De Morgan over the infinite two's-complement patterns: `~(a & b)` is `~a |
 // ~b` wherever both sides stay in range.
-// D4.4
 fn the_bitwise_operators_agree_with_de_morgan() void {
     u64 mut x = 0;
     while (x < grid_len()) {
@@ -405,7 +390,6 @@ fn the_bitwise_operators_keep_their_units() void {
 }
 
 // A comparison is antisymmetric and agrees with equality.
-// D4.4
 fn comparison_is_antisymmetric() void {
     u64 mut x = 0;
     while (x < grid_len()) {
@@ -427,7 +411,6 @@ fn comparison_is_antisymmetric() void {
 // `a << n` is the exact multiplication by 2^n and `a >> n` the floor division
 // by it, which the identity holds against `*` and `/` rather than against a
 // shifted magnitude.
-// D4.4
 fn shifts_are_multiplication_and_floor_division() void {
     u64 mut x = 0;
     while (x < grid_len()) {
@@ -469,7 +452,6 @@ fn shifts_are_multiplication_and_floor_division() void {
 }
 
 // A count outside 0..63 is refused, whatever the value.
-// D4.4
 fn a_shift_count_outside_the_range_is_refused() void {
     u64 mut x = 0;
     while (x < grid_len()) {
@@ -490,10 +472,8 @@ fn a_shift_count_outside_the_range_is_refused() void {
 }
 
 // ---- the typed operations -------------------------------------------------------
-// D4.6
 
 // The eight integer types, with the width and signedness.
-// D3.1
 fn int_kind(u64 k) prim.prim_kind {
     return cast(k, prim.prim_kind);
 }
@@ -574,7 +554,6 @@ fn in_range(consts.cval v, prim.prim_kind t) bool {
 
 // A typed operation is the untyped one plus the range check: the model folds
 // exactly and then asks whether the result fits.
-// D4.6
 fn typed_arithmetic_is_the_exact_result_plus_a_range_check() void {
     u64 mut k = 0;
     while (k <= 7) {
@@ -610,7 +589,6 @@ fn typed_arithmetic_is_the_exact_result_plus_a_range_check() void {
                 }
                 // `MIN % -1` is 0 exactly but a run-time error, so the
                 // remainder is folded only where the quotient is too.
-                // D6.13
                 consts.cval mut quotient = consts.cv_none();
                 bool rem_model = consts.cv_div(a, b, &quotient) && in_range(quotient, t) &&
                                  consts.cv_rem(a, b, &exact) && in_range(exact, t);
@@ -672,7 +650,6 @@ fn typed_bitwise_stays_inside_the_type() void {
 }
 
 // ---- the wrapping operators -----------------------------------------------------
-// D11.2
 
 // The exact value reduced modulo 2^width, computed here from the width: the
 // low bits of the pattern, sign-extended for a signed type.
@@ -710,7 +687,6 @@ fn the_wrapping_operators_reduce_modulo_the_width() void {
                 assert(consts.cv_eq(consts.cv_wrap_mul(a, b, t), wrapped(pa *% pb, t)));
                 // A wrapping result always lies in the type, and equals the
                 // checked one wherever that one succeeds.
-                // D11.2
                 assert(in_range(consts.cv_wrap_add(a, b, t), t));
                 consts.cval mut exact = consts.cv_none();
                 if (consts.cv_typed_add(a, b, t, &exact)) {
@@ -732,7 +708,6 @@ fn the_wrapping_operators_reduce_modulo_the_width() void {
 
 // A cast keeps the low bits of the pattern and extends by the target, which is
 // the same reduction the wrapping operators make.
-// D3.14
 fn a_cast_is_the_same_reduction() void {
     u64 mut k = 0;
     while (k <= 7) {

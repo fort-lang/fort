@@ -5,19 +5,16 @@
 import ast;
 import parse_env;
 
-// The statements of grammar.md 5 and the declarations of grammar.md 2 and 3
-// as src/fort/parser.ft reads them, asserted through the S-expression of
-// ast.ft. The companion suite parser_test.ft covers expressions and types.
+/// Checks statement and declaration parsing through ast.ft S-expressions.
+/// parser_test.ft covers expressions and types.
 
 // ---- the simple statements -----------------------------------------------------
-// D7.1, D7.2, D7.3
 
 fn a_declaration_carries_its_type_name_and_initializer() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // var_decl = type identifier "=" initializer ";": one declarator and a
     // mandatory initializer.
-    // D7.1
     assert(parse_env.stmt_dump(&e, "i32 n = 1;")
            == "(var n (type (prim i32)) (int 1))");
     assert(parse_env.stmt_dump(&e, "i32 mut n = 1;")
@@ -29,9 +26,8 @@ fn a_declaration_carries_its_type_name_and_initializer() void {
 fn every_assignment_operator_is_a_statement() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // assign_stmt = target assign_op expr ";"; the node carries the operator
+    // assign_stmt = target assign_op expr ";". The node carries the operator
     // token.
-    // D7.2
     assert(parse_env.stmt_dump(&e, "n = 1;") == "(assign = (ident n) (int 1))");
     assert(parse_env.stmt_dump(&e, "n += 1;") == "(assign += (ident n) (int 1))");
     assert(parse_env.stmt_dump(&e, "n -= 1;") == "(assign -= (ident n) (int 1))");
@@ -65,7 +61,6 @@ fn increments_and_calls_are_statements() void {
     assert(parse_env.stmt_dump(&e, "n++;") == "(incdec ++ (ident n))");
     assert(parse_env.stmt_dump(&e, "n--;") == "(incdec -- (ident n))");
     // An expression statement is a call and nothing else.
-    // D7.3
     assert(parse_env.stmt_dump(&e, "f();") == "(call-stmt (call (ident f)))");
     assert(parse_env.stmt_dump(&e, "p->f(1);")
            == "(call-stmt (call (arrow (ident p) f) (int 1)))");
@@ -78,7 +73,6 @@ fn an_expression_that_is_not_a_call_is_not_a_statement() void {
     // neither an assignment, an increment nor a call is reported at the token
     // that ended it, and the region is skipped. No repository source writes
     // one, so this local fixture holds the diagnostic.
-    // D7.3
     assert(parse_env.stmt_dump(&e, "x;") == "(error)");
     assert(parse_env.diag_at(&e, 0)
            == "2:2: error: expected an assignment, an increment or a call, found ';'");
@@ -91,7 +85,7 @@ fn an_expression_that_is_not_a_call_is_not_a_statement() void {
     assert(parse_env.stmt_dump(&e, "p->f;") == "(error)");
     assert(parse_env.diag_at(&e, 0)
            == "2:5: error: expected an assignment, an increment or a call, found ';'");
-    // A dereference is a statement head too (grammar.md 5), and the same rule
+    // A dereference is a statement head too, and the same rule
     // applies to it.
     assert(parse_env.stmt_dump(&e, "*p;") == "(error)");
     assert(parse_env.diag_at(&e, 0)
@@ -99,7 +93,6 @@ fn an_expression_that_is_not_a_call_is_not_a_statement() void {
 }
 
 // ---- the braced forms ----------------------------------------------------------
-// D7.4, D7.5, D7.6, D7.8, D7.11
 
 fn blocks_nest_and_hold_their_statements_in_order() void {
     parse_env.env mut e = parse_env.create();
@@ -114,9 +107,9 @@ fn blocks_nest_and_hold_their_statements_in_order() void {
 fn if_carries_its_condition_and_both_branches() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // if_stmt = "if" "(" expr ")" block [ "else" ... ]; the else branch is
+    // if_stmt = "if" "(" expr ")" block [ "else"... ]. The else branch is
     // the third child, absent as `nil`.
-    // D7.4: braces on every branch
+    // braces on every branch
     assert(parse_env.stmt_dump(&e, "if (c) { f(); }")
            == "(if (ident c) (block (call-stmt (call (ident f)))) nil)");
     string dumped = parse_env.stmt_dump(&e, "if (c) { f(); } else { g(); }");
@@ -156,7 +149,6 @@ fn compile_time_conditions_keep_declaration_and_statement_branches() void {
 // A module chain is an import selector when one recursive leaf is an import.
 // Empty leaves do not change its kind. A statement or a declaration beside an
 // import makes the form invalid, but the parser keeps the complete tree.
-// D21.3
 fn module_conditions_classify_imports_after_the_complete_parse() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
@@ -210,9 +202,8 @@ fn while_and_do_while_carry_body_and_condition() void {
            == "(while (ident c) (block (continue)))");
     // `do { } while (cond);`: the body is a block and the condition follows
     // it, which is the order the tree keeps. stage1 parses the same form and
-    // then refuses it, because it is outside the C bootstrap's subset; the
-    // self-hosted compiler accepts it (toolchain.md 7.3).
-    // D7.5, T-044: the ticket that gave stage2 `do`-`while`
+    // then refuses it, because it is outside the C bootstrap's subset. The
+    // self-hosted compiler accepts it.
     parse_env.env mut e2 = parse_env.create();
     defer parse_env.free(&e2);
     assert(parse_env.stmt_dump(&e2, "do { f(); } while (c);")
@@ -226,9 +217,8 @@ fn while_and_do_while_carry_body_and_condition() void {
 fn the_three_for_forms() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // for_stmt = "for" "(" [init] ";" [cond] ";" [step] ")" block; every part
+    // for_stmt = "for" "(" [init] ";" [cond] ";" [step] ")" block. Every part
     // may be empty and prints as `nil`.
-    // D7.5
     assert(parse_env.stmt_dump(&e, "for (;;) { f(); }")
            == "(for nil nil nil (block (call-stmt (call (ident f)))))");
     string counted = parse_env.stmt_dump(&e, "for (i32 mut i = 0; i < 4; i++) { f(); }");
@@ -242,7 +232,6 @@ fn the_three_for_forms() void {
                                     " (binary < (ident n) (int 4))",
                                     " (incdec ++ (ident n)) (block))"));
     // range_for_stmt = "for" "(" type identifier ":" expr ")" block.
-    // D7.5
     string ranged = parse_env.stmt_dump(&e, "for (i32 v : xs) { f(); }");
     assert(ranged == parse_env.join2(&e, "(range-for (type (prim i32)) v (ident xs)",
                                      " (block (call-stmt (call (ident f)))))"));
@@ -251,9 +240,8 @@ fn the_three_for_forms() void {
 fn switch_clauses_carry_their_labels_and_an_implicit_block() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // switch_stmt = "switch" "(" expr ")" "{" { case_clause } "}"; each body
+    // switch_stmt = "switch" "(" expr ")" "{" { case_clause } "}". Each body
     // is an implicit block and `default` carries no label.
-    // D7.6
     string src = parse_env.join2(&e, "switch (c) { case 1: f(); case 2, 3: g(); ",
                                  "default: h(); }");
     string dumped = parse_env.stmt_dump(&e, src);
@@ -263,7 +251,6 @@ fn switch_clauses_carry_their_labels_and_an_implicit_block() void {
     string expected = parse_env.join4(&e, "(switch (ident c)", one, two, rest);
     assert(dumped == expected);
     // A clause with no statement still has its block.
-    // D7.6
     assert(parse_env.stmt_dump(&e, "switch (c) { case 1: }")
            == "(switch (ident c) (case (labels (int 1)) (block)))");
     assert(parse_env.stmt_dump(&e, "switch (c) { default: }")
@@ -274,7 +261,6 @@ fn defer_takes_a_simple_statement_or_a_block() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // defer_stmt = "defer" (assign | incdec | call | block).
-    // D7.8
     assert(parse_env.stmt_dump(&e, "defer f();")
            == "(defer (call-stmt (call (ident f))))");
     assert(parse_env.stmt_dump(&e, "defer { f(); }")
@@ -287,18 +273,17 @@ fn return_with_and_without_a_value() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // return_stmt = "return" [ expr ] ";".
-    // D7.11
     assert(parse_env.stmt_dump(&e, "return;") == "(return nil)");
     assert(parse_env.stmt_dump(&e, "return 1 + 2;")
            == "(return (binary + (int 1) (int 2)))");
 }
 
-// ---- the declaration-versus-statement choice (grammar.md 7.1) ------------------
+// ---- the declaration-versus-statement choice ------------------
 
 fn a_statement_that_begins_with_a_name_is_decided_by_speculation() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // A type followed by an identifier is a declaration; the same first token
+    // A type followed by an identifier is a declaration. The same first token
     // followed by anything else is an expression statement.
     assert(parse_env.stmt_dump(&e, "node p = null;")
            == "(var p (type (name node)) (null))");
@@ -307,7 +292,6 @@ fn a_statement_that_begins_with_a_name_is_decided_by_speculation() void {
     assert(parse_env.stmt_dump(&e, "node.f = 1;")
            == "(assign = (field (ident node) f) (int 1))");
     // A qualified type name is a declaration too.
-    // D9.4
     assert(parse_env.stmt_dump(&e, "io.writer w = null;")
            == "(var w (type (name io writer)) (null))");
 }
@@ -315,15 +299,14 @@ fn a_statement_that_begins_with_a_name_is_decided_by_speculation() void {
 fn a_misplaced_marker_makes_the_statement_a_declaration() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // A marker at the statement's own bracket level leaves no expression
-    // reading, so the declaration branch wins and reports the marker
-    // (grammar.md 7.1).
+    // A marker at the statement's bracket level leaves no expression reading.
+    // The declaration branch then wins and reports the marker.
     assert(parse_env.stmt_dump(&e, "node mut p;") == "(error)");
     assert(parse_env.errors(&e) == 1);
     assert(parse_env.diag_at(&e, 0) == "2:11: error: expected '=', found ';'");
 }
 
-// ---- declarations (grammar.md 2, 3) --------------------------------------------
+// ---- declarations --------------------------------------------
 
 fn a_function_carries_its_return_type_parameters_and_body() void {
     parse_env.env mut e = parse_env.create();
@@ -343,7 +326,6 @@ fn an_extern_declaration_has_no_body() void {
     defer parse_env.free(&e);
     // extern_decl = "extern" "fn" return_type identifier "(" params ")" ";";
     // the dump names it `extern-fn` and its body is `nil`.
-    // D9.8
     string dumped = parse_env.parse_dump(&e, "extern fn malloc(u64 size) void*;\n");
     assert(dumped == parse_env.join2(&e, "(module (extern-fn (type (void) (ptr)) malloc",
                                      " (params (param (type (prim u64)) size)) nil))"));
@@ -356,7 +338,6 @@ fn a_global_is_a_declaration_at_the_top_level() void {
            == "(module (var N (type (prim i32)) (int 4)))");
     // A global of a function type, whose `fn` is a base type and not a
     // definition.
-    // D3.10, D7.10
     string dumped = parse_env.parse_dump(&e, "fn (i32) i32 chosen = pick;\n");
     assert(dumped == parse_env.join2(&e,
                                      "(module (var chosen (type (fn-type (type (prim i32))",
@@ -367,13 +348,11 @@ fn structs_and_enums_carry_their_members() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // struct_decl = "struct" identifier "{" field { field } "}".
-    // D3.8
     string dumped = parse_env.parse_dump(&e, "struct point {\n    i32 x;\n    i32 y;\n}\n");
     assert(dumped == parse_env.join2(&e, "(module (struct point (field-decl (type (prim i32)) x)",
                                      " (field-decl (type (prim i32)) y)))"));
-    // enum_decl = "enum" identifier "{" member { "," member } [ "," ] "}"; an
+    // enum_decl = "enum" identifier "{" member { "," member } [ "," ] "}". An
     // explicit value is the member's child.
-    // D3.9
     assert(parse_env.parse_dump(&e, "enum color { red, green = 5, blue }\n")
            == "(module (enum color (member red nil) (member green (int 5)) (member blue nil)))");
     // A trailing comma is allowed in an enum body and in nothing else here.
@@ -400,7 +379,6 @@ fn imports_come_before_every_declaration() void {
     defer parse_env.free(&e);
     // The module rule is { import_decl } { top_decl }, so an import after a
     // declaration is reported where it stands.
-    // D9.3
     parse_env.parse(&e, "i32 N = 1;\nimport std.io;\n");
     assert(parse_env.errors(&e) == 1);
     assert(parse_env.diag_at(&e, 0) == "2:1: error: an import comes before every declaration");

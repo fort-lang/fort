@@ -7,21 +7,18 @@ import lexer;
 import session;
 import std.strbuf;
 
-// The lexer of src/fort/lexer.ft: the literal forms (integer, float, char and
-// string literals), their separator rules, the escapes and their errors with
-// the wording of core-language.md 2.
-// D2.5 to D2.9
+/// The lexer of src/fort/lexer.ft. The literal forms (integer, float, char and string
+/// literals), their separator rules, the escapes and their errors with the wording of the
+/// language rules.
 //
-// These are the assertions of test/lexer_literals_test.c, which holds the C
-// lexer this module was transliterated from, so the two suites ask the same
-// questions of the two implementations.
+// These assertions match test/lexer_literals_test.c. The two suites ask the
+// same questions of the C and Fort implementations.
 
 // ---- the fixture --------------------------------------------------------------
 
 // One session and one token vector, reused by every lex of one test: the
 // session owns the sink the diagnostics go to and the pool the string
 // literals are decoded into, and freeing it frees both.
-// D20.5
 struct fixture {
     session.session sess;
     lexer.tok_vec toks;
@@ -37,7 +34,7 @@ fn close_fixture(fixture mut* f) void {
 }
 
 // Lexes `src` as t.ft, dropping the tokens and the diagnostics of the lex
-// before it; the pool keeps the strings of both, which no test reads across
+// before it. The pool keeps the strings of both, which no test reads across
 // a call. Returns whether the file was clean.
 fn lex(fixture mut* f, string src) bool {
     lexer.tokvec_free(&f->toks);
@@ -66,26 +63,22 @@ fn text(fixture* f, u64 i) string {
 }
 
 // Whether token `i` starts at line `line`, column `col`.
-// D14.2
 fn at(fixture* f, u64 i, u32 line, u32 col) bool {
     return tok(f, i).line == line && tok(f, i).col == col;
 }
 
 // Whether token `i` covers `len` bytes from offset `off`.
-// D20.4
 fn covers(fixture* f, u64 i, u64 off, u64 len) bool {
     return tok(f, i).off == off && tok(f, i).len == len;
 }
 
 // The errors the last lex reported, notes excluded.
-// D14.2
 fn errors(fixture mut* f) u64 {
     return session.error_count(&f->sess);
 }
 
 // Whether the diagnostic `i` is an error at `line`:`col` of t.ft saying
-// `msg`, which is everything its text line carries (toolchain.md 4).
-// D14.2
+// `msg`, which is everything its text line carries.
 fn error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) bool {
     diag.record r = diag.record_at(session.diags(&f->sess), i);
     return r.severity == diag.severity.error && r.loc.file == "t.ft" && r.loc.line == line
@@ -102,7 +95,6 @@ fn clean(fixture mut* f, string src, u64 n) bool {
 
 // The last lex failed with exactly the one diagnostic given, and still lexed
 // the file whole, so the tokens end in the end-of-file token.
-// D14.2
 fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
     bool ok = lex(f, src);
     if (ok || errors(f) != 1 || count(f) == 0) {
@@ -116,7 +108,6 @@ fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
 
 // The last lex failed with exactly `n` diagnostics and still lexed the file
 // whole, so the tokens end in the end-of-file token.
-// D14.2
 fn failed(fixture mut* f, string src, u64 n) bool {
     bool ok = lex(f, src);
     if (ok || errors(f) != n || count(f) == 0) {
@@ -128,13 +119,11 @@ fn failed(fixture mut* f, string src, u64 n) bool {
 
 // The value of token `i`, which an integer or a char literal carries and
 // every other kind leaves at 0.
-// D2.5, D2.7
 fn value(fixture* f, u64 i) u64 {
     return tok(f, i).ival;
 }
 
 // ---- integer literals ----------------------------------------------------------
-// D2.5
 
 fn decimal_literals() void {
     fixture mut f = open_fixture();
@@ -181,7 +170,6 @@ fn binary_literals() void {
 }
 
 // `_` groups digits and is not part of the value.
-// D2.5
 fn underscores_between_digits() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -196,7 +184,6 @@ fn underscores_between_digits() void {
 }
 
 // The magnitude of an integer literal goes up to 2^64 - 1.
-// D2.5
 fn largest_integer_literals() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -225,7 +212,6 @@ fn just_too_large_integer_literals() void {
 
 // The integer part of a float literal has no magnitude limit, so the float
 // lookahead comes before the overflow is reported.
-// D2.6
 fn a_float_literal_has_no_magnitude_limit() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -249,7 +235,6 @@ fn decimal_literal_may_not_start_with_zero() void {
     assert(one_error(&f, "0_1", 1, 1, "decimal literal may not start with '0'"));
     assert(one_error(&f, "09.5", 1, 1, "decimal literal may not start with '0'"));
     // `0` alone, and a float whose integer part is `0`, are fine.
-    // D2.6
     assert(clean(&f, "0.5 0e1 0.0e0", 3));
     assert(kind(&f, 0) == "float literal");
     assert(kind(&f, 1) == "float literal");
@@ -281,7 +266,6 @@ fn integer_literals_have_no_suffix() void {
     assert(one_error(&f, "1e+", 1, 2, "integer literals have no suffix"));
     assert(one_error(&f, "1ex", 1, 2, "integer literals have no suffix"));
     // The radix prefixes are lower-case alone.
-    // D2.5
     assert(one_error(&f, "0X7F", 1, 2, "integer literals have no suffix"));
     assert(one_error(&f, "0B1", 1, 2, "integer literals have no suffix"));
     assert(one_error(&f, "0O7", 1, 2, "integer literals have no suffix"));
@@ -308,7 +292,6 @@ fn a_prefix_needs_at_least_one_digit() void {
 }
 
 // `1..5` is two literals and a `..`, not a float and a `.`.
-// D2.5, D2.10
 fn integer_followed_by_a_range_is_two_tokens() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -334,7 +317,6 @@ fn integer_directly_followed_by_punctuation() void {
 }
 
 // ---- float literals -------------------------------------------------------------
-// D2.6
 
 fn float_literal_with_a_fraction() void {
     fixture mut f = open_fixture();
@@ -387,7 +369,6 @@ fn a_huge_exponent_or_fraction_is_still_a_float() void {
 }
 
 // A `.` with no digit after it is neither a float nor two tokens.
-// D2.6
 fn digits_dot_alone_is_not_a_float_literal() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -434,7 +415,6 @@ fn hex_literal_is_never_a_float() void {
 }
 
 // ---- char literals --------------------------------------------------------------
-// D2.7, D2.8
 
 fn plain_char_literals() void {
     fixture mut f = open_fixture();
@@ -451,7 +431,6 @@ fn plain_char_literals() void {
 }
 
 // The seven escapes, each in a char literal.
-// D2.8
 fn every_escape_in_a_char_literal() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -502,7 +481,6 @@ fn unknown_escape_is_an_error() void {
     assert(one_error(&f, "'\\a'", 1, 2, "unknown escape '\\a'"));
     assert(one_error(&f, "'\\1'", 1, 2, "unknown escape '\\1'"));
     // The hex escape is lower-case alone.
-    // D2.8
     assert(one_error(&f, "'\\X41'", 1, 2, "unknown escape '\\X'"));
     assert(one_error(&f, "'\\ '", 1, 2, "unknown escape '\\ '"));
 }
@@ -538,7 +516,6 @@ fn control_character_in_a_char_literal() void {
     assert(one_error(&f, "'\t'", 1, 2, "control character in char literal; use an escape"));
     // A lone `\r` is whitespace, so a resync ends the line there and the `'`
     // left after it opens a literal of its own.
-    // D2.1
     assert(failed(&f, "'\r'", 2));
     assert(error_is(&f, 0, 1, 2, "control character in char literal; use an escape"));
     assert(error_is(&f, 1, 1, 3, "unterminated char literal"));
@@ -551,7 +528,6 @@ fn unterminated_char_literal() void {
     assert(one_error(&f, "'a", 1, 1, "unterminated char literal"));
     // The `'` left on the next line is a second unterminated literal, on its
     // own line, so it is reported as well.
-    // D14.2
     assert(failed(&f, "x = 'a\n'", 2));
     assert(error_is(&f, 0, 1, 5, "unterminated char literal"));
     assert(error_is(&f, 1, 2, 1, "unterminated char literal"));
@@ -565,11 +541,9 @@ fn unterminated_char_literal() void {
 }
 
 // ---- string literals ------------------------------------------------------------
-// D2.8, D2.9
 
 // A string literal's text is its decoded bytes, which the session's pool owns
 // rather than the source.
-// D2.9
 fn string_literal_is_decoded_into_the_pool() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -602,7 +576,6 @@ fn every_escape_in_a_string_literal() void {
 }
 
 // A fort string may hold an embedded NUL, which `len` counts.
-// D3.7
 fn string_literal_keeps_an_escaped_nul() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -646,7 +619,6 @@ fn raw_newline_in_a_string_is_an_error() void {
     defer close_fixture(&f);
     // The rest of the literal stands on the next line, where its closing
     // quote opens an unterminated literal of its own.
-    // D14.2
     assert(failed(&f, "s = \"ab\ncd\"", 2));
     assert(error_is(&f, 0, 1, 5, "unterminated string literal"));
     assert(error_is(&f, 1, 2, 3, "unterminated string literal"));
@@ -677,7 +649,6 @@ fn escape_errors_inside_a_string() void {
 }
 
 // Adjacent literals do not concatenate.
-// D2.9
 fn adjacent_string_literals_are_two_tokens() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -693,7 +664,6 @@ fn adjacent_string_literals_are_two_tokens() void {
 
 // Every decoded string of one file stays valid: they are interned in the
 // session's pool, which outlives the lex.
-// D20.5
 fn many_strings_stay_valid_in_the_pool() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);

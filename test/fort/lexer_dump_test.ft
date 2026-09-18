@@ -7,18 +7,15 @@ import lexer;
 import session;
 import std.strbuf;
 
-// The token dump of `fort --tokens`, whose form spec/toolchain.md 1
-// documents:
-// D14.1
+/// Checks the token dump from `fort --tokens`.
 //
-//     <line>:<col>-<end_line>:<end_col> <value> "<spelling>" <kind>
+// Each output line has this form:
+// <line>:<col>-<end_line>:<end_col> <value> "<spelling>" <kind>
 //
-// one token per line, the range 1-based with its end exclusive, the value of
-// an integer or char literal and 0 elsewhere, the spelling escaped so that a
-// token holding a newline, a tab, a quote or a byte outside printable ASCII
-// still occupies one line, and the kind last because it is the only field
-// that may hold a space.
-// D20.4, D2.5, D2.7
+// Each line describes one token. The range starts at 1 and has an exclusive
+// end. The value is an integer or character literal, or 0 for other tokens.
+// Escaping keeps newlines, tabs, quotes, and non-printable bytes on one line.
+// The kind is last because only that field can contain a space.
 //
 // The assertions pin the dump format.
 
@@ -27,7 +24,6 @@ import std.strbuf;
 // One session and one token vector, reused by every lex of one test: the
 // session owns the sink the diagnostics go to and the pool the string
 // literals are decoded into, and freeing it frees both.
-// D20.5
 struct fixture {
     session.session sess;
     lexer.tok_vec toks;
@@ -43,7 +39,7 @@ fn close_fixture(fixture mut* f) void {
 }
 
 // Lexes `src` as t.ft, dropping the tokens and the diagnostics of the lex
-// before it; the pool keeps the strings of both, which no test reads across
+// before it. The pool keeps the strings of both, which no test reads across
 // a call. Returns whether the file was clean.
 fn lex(fixture mut* f, string src) bool {
     lexer.tokvec_free(&f->toks);
@@ -72,26 +68,22 @@ fn text(fixture* f, u64 i) string {
 }
 
 // Whether token `i` starts at line `line`, column `col`.
-// D14.2
 fn at(fixture* f, u64 i, u32 line, u32 col) bool {
     return tok(f, i).line == line && tok(f, i).col == col;
 }
 
 // Whether token `i` covers `len` bytes from offset `off`.
-// D20.4
 fn covers(fixture* f, u64 i, u64 off, u64 len) bool {
     return tok(f, i).off == off && tok(f, i).len == len;
 }
 
 // The errors the last lex reported, notes excluded.
-// D14.2
 fn errors(fixture mut* f) u64 {
     return session.error_count(&f->sess);
 }
 
 // Whether the diagnostic `i` is an error at `line`:`col` of t.ft saying
-// `msg`, which is everything its text line carries (toolchain.md 4).
-// D14.2
+// `msg`, which is everything its text line carries.
 fn error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) bool {
     diag.record r = diag.record_at(session.diags(&f->sess), i);
     return r.severity == diag.severity.error && r.loc.file == "t.ft" && r.loc.line == line
@@ -108,7 +100,6 @@ fn clean(fixture mut* f, string src, u64 n) bool {
 
 // The last lex failed with exactly the one diagnostic given, and still lexed
 // the file whole, so the tokens end in the end-of-file token.
-// D14.2
 fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
     bool ok = lex(f, src);
     if (ok || errors(f) != 1 || count(f) == 0) {
@@ -135,7 +126,7 @@ fn dumps_as(fixture mut* f, string src, string@ lines) bool {
     }
     if (strbuf.view(&got) != strbuf.view(&want)) {
         // The assertion that follows says only that a dump differed, so the
-        // two texts are printed here; stdout is compared, so this can only
+        // two texts are printed here. Stdout is compared, so this can only
         // run on a test that is failing anyway.
         println("--- the dump is");
         print(strbuf.view(&got));
@@ -148,7 +139,7 @@ fn dumps_as(fixture mut* f, string src, string@ lines) bool {
 
 // ---- the form of a line ---------------------------------------------------------
 
-// The worked example of toolchain.md 1, byte for byte.
+// The complete worked example, byte for byte.
 fn the_worked_example_of_toolchain_md_1() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -185,7 +176,6 @@ fn the_range_is_the_tokens_own() void {
 }
 
 // A tab is one column, so the range of the token after it moves by one.
-// D14.2
 fn a_tab_moves_the_range_by_one_column() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -197,7 +187,6 @@ fn a_tab_moves_the_range_by_one_column() void {
 }
 
 // ---- the value field ------------------------------------------------------------
-// D2.5, D2.7
 
 // An integer literal carries its magnitude, whatever its radix, and the
 // spelling stays the source's.
@@ -230,7 +219,6 @@ fn a_char_literal_dumps_its_byte_and_its_spelling() void {
 
 // Every other kind leaves the value at 0, a float literal included: the lexer
 // computes no float value.
-// D2.6
 fn every_other_kind_dumps_a_zero_value() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -247,7 +235,6 @@ fn every_other_kind_dumps_a_zero_value() void {
 
 // A string literal's spelling is its decoded bytes, so what the dump escapes
 // is what the literal means and not what was typed.
-// D2.9
 fn a_decoded_newline_tab_and_return_are_escaped() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -284,7 +271,6 @@ fn a_byte_outside_printable_ascii_is_written_in_hex() void {
 
 // A raw tab inside a string literal is a byte of it and is escaped like a
 // decoded one, so one token is still one line.
-// D2.9
 fn a_raw_tab_inside_a_literal_is_escaped() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -311,7 +297,6 @@ fn printable_bytes_stand_for_themselves() void {
 
 // The dump covers the file whatever was reported: the broken line is dropped
 // and the lines around it are there.
-// D14.2
 fn a_broken_line_is_missing_from_the_dump() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);

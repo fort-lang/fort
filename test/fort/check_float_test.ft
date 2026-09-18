@@ -10,18 +10,17 @@ import ast;
 import check_env;
 import std.strbuf;
 
-// The float rules of src/fort/check.ft: the type, the untyped constant, the
-// folding, the operand rules and the diagnostics each one reports.
-// D3.1, D4.1 to D4.5, D4.6, D6.12
+/// The float rules of src/fort/check.ft: the type, the untyped constant, the
+/// folding, the operand rules and the diagnostics each one reports.
 //
-// The language corpus runs these rules end to end under stage2; this suite
-// holds the checker's own answers -- the type it gave a declaration, the
-// value it folded and the words it reported -- which no run test can see.
+// The language corpus runs these rules end to end under stage2. This suite
+// checks types, folded values, and diagnostics from the checker. Run tests
+// cannot see these results.
 //
-// The expected patterns are the binary64 of each value: 1.0 is
-// 0x3FF0000000000000 and 0.1 is 0x3FB999999999999A, and the f32 of 0.1 is
-// 0x3FB99999A0000000, whose last 29 bits are zero because a binary32 value
-// is a binary64 with 24 mantissa bits.
+// The expected patterns are binary64 encodings. The value 1.0 is
+// 0x3FF0000000000000, and 0.1 is 0x3FB999999999999A. The f32 value 0.1 is
+// 0x3FB99999A0000000. Its last 29 bits are zero because binary32 has 24
+// mantissa bits.
 
 u64 ONE = 0x3FF0000000000000;
 u64 HALF = 0x3FE0000000000000;
@@ -83,11 +82,9 @@ fn want_error(string type_text, string expr_text, string text) void {
 }
 
 // ---- the types -------------------------------------------------------------------
-// D3.1
 
 // A float type resolves like any other primitive, and an untyped float takes
 // its type from the declaration.
-// D4.1
 fn a_float_declaration_takes_its_written_type() void {
     want_type("f64", "1.5", "f64");
     want_type("f32", "1.5", "f32");
@@ -107,7 +104,6 @@ fn types() void {
 }
 
 // ---- the constants ---------------------------------------------------------------
-// D4.4, D4.6
 
 // A literal reads to the binary64 nearest its value, and the four operations
 // fold in the type the context gave them.
@@ -124,7 +120,6 @@ fn a_literal_and_a_fold_carry_their_value() void {
 
 // An integer constant in a float context takes that float type, rounded to
 // nearest, and an integer with a float folds as a float.
-// D4.2, D4.4
 fn an_integer_constant_becomes_the_float_of_its_context() void {
     want_value("f64", "7", SEVEN);
     want_value("f64", "1 + 6", SEVEN);
@@ -134,7 +129,6 @@ fn an_integer_constant_becomes_the_float_of_its_context() void {
 
 // An f32 context rounds the value to binary32, which is the pattern an f32
 // constant is held as.
-// D4.2
 fn an_f32_context_rounds_to_binary32() void {
     want_value("f32", "0.1", TENTH_F32);
     want_value("f32", "1.0 / 3.0", THIRD_F32);
@@ -150,14 +144,12 @@ fn constants() void {
 }
 
 // ---- the default type with no context --------------------------------------------
-// D4.5
 
 // The program `fn probe(i32 n) void { println(<arg>); }`, checked. A shift
 // with a variable count and a conditional with a run-time condition both fold
 // to no value, so the argument carries the type the rule chose and nothing
 // else in the program says it. The text is built here because fort does not
 // join adjacent string literals.
-// D2.9, D4.5
 fn probe_program(strbuf.str_buf mut* b, string arg) string {
     strbuf.append(b, "fn probe(i32 n) void {\n    println(");
     strbuf.append(b, arg);
@@ -202,10 +194,8 @@ fn want_default_error(string arg, string text) void {
 }
 
 // The second clause of the rule: with no context an untyped float becomes f64.
-// It applies where every constant of the expression is a float, which is the
-// conservative reading of the three clauses: the decisions permit an untyped
-// integer to take a float type and require it nowhere.
-// D4.2, D4.5, D6.2
+// These rules apply when every constant in the expression is a float. They
+// let an untyped integer take a float type but never require that type.
 fn a_float_with_no_context_becomes_f64() void {
     want_default_type("n > 0 ? 1.5 : 2.5", "f64");
     want_default_type("(n > 0 ? 1.5 : 2.5) * 2.0", "f64");
@@ -217,10 +207,9 @@ fn a_float_with_no_context_becomes_f64() void {
 }
 
 // An integer constant or a char literal beside a float constant keeps its own
-// clause, so the expression is an integer or a char one and the float constant
-// then reaches no type of it. Each of these printed a value or drew no
-// diagnostic at all on one branch of 2026-09-14 and on no other day.
-// D4.2, D4.3, D4.5, D6.2
+// clause. The expression is then an integer or char expression. The float
+// constant reaches no compatible type. Each case must report that conversion
+// error and must not produce a value.
 fn a_constant_that_is_no_float_keeps_its_clause() void {
     want_default_error("n > 0 ? 1 : 2.5", "a float constant does not become i32");
     want_default_error("n > 0 ? 1.5 : 2", "a float constant does not become i32");
@@ -238,7 +227,6 @@ fn a_constant_that_is_no_float_keeps_its_clause() void {
 // each operand is an expression with no value, so no operand carries a kind for
 // check_operands to read: without this rule the f64 reached the emitter, which
 // says in its own comment that these are checker errors.
-// D6.2, D6.12
 fn a_default_f64_meets_the_operand_rules() void {
     want_default_error("(n > 0 ? 1.5 : 2.5) << 1",
         "'<<' takes an integer left operand, not f64");
@@ -262,26 +250,22 @@ fn a_default_f64_meets_the_operand_rules() void {
     // with no value its default type at once, so the f64 is typed before the
     // operand rule reads it. The case stands here because the rule of the
     // default type is what makes the operand an f64.
-    // D6.2
     want_default_error("~(n > 0 ? 1.5 : 2.5)", "'~' takes an integer operand, not f64");
     // `+ - * /` and the comparisons take floats, so the same shape is legal.
-    // D6.12
     want_default_type("(n > 0 ? 1.5 : 2.5) / (n > 1 ? 2.5 : 3.5)", "f64");
     want_default_type("-(n > 0 ? 1.5 : 2.5) - (n > 1 ? 2.5 : 3.5)", "f64");
     // The other half of that path, and the one shape where an integer constant
     // beside a float constant is legal: the unary gives its operand the default
     // type alone, so what stands beside it meets a **typed** f64 and takes that
     // type from a typed operand, which is an ordinary context. The expression
-    // `(n > 0 ? 1.5 : 2.5) + 1` two lines below is the same constants with no
+    // `(n > 0 ? 1.5: 2.5) + 1` two lines below is the same constants with no
     // unary, and it is an error. `main` refused both, because it had no float
     // clause at all.
-    // D4.1, D4.5
     want_default_type("-(n > 0 ? 1.5 : 2.5) + 1", "f64");
     want_default_type("1 + -(n > 0 ? 1.5 : 2.5)", "f64");
     want_default_error("(n > 0 ? 1.5 : 2.5) + 1", "a float constant does not become i32");
     // `!` is no such path: it gives its operand a bool context and the float
     // constant meets that instead of a default type.
-    // D3.3, D4.2
     want_default_error("!(n > 0 ? 1.5 : 2.5)", "a float constant does not become bool");
 }
 
@@ -296,7 +280,6 @@ fn defaults() void {
 
 // A float constant becomes a float type and no other, and it must be finite
 // in the one it is given.
-// D4.2, D4.4
 fn a_float_constant_reaches_no_integer_type() void {
     want_error("i32", "2.0", "a float constant does not become i32");
     want_error("u8", "1.5", "a float constant does not become u8");
@@ -316,7 +299,6 @@ fn a_constant_outside_its_format_is_an_error() void {
 
 // Every operator but `+ - * /` and the comparisons is an error on floats, and
 // the two float types do not mix.
-// D6.12, D6.2
 fn an_integer_only_operator_names_the_float() void {
     want_error("f64", "7.5 % 2.0", "'%' takes integer operands, not f64");
     want_error("f64", "6.0 & 3.0", "'&' takes integer operands, not f64");
@@ -326,14 +308,13 @@ fn an_integer_only_operator_names_the_float() void {
     want_error("f64", "1.5 << 2", "'<<' takes an integer left operand, not f64");
     want_error("f64", "1.5 >> 2", "'>>' takes an integer left operand, not f64");
     want_error("f64", "1.0 +% 2.0", "'+%' takes integer operands, not f64");
-    // The typed operand decides whether the operator applies at all, so
-    // `1.0 && true` reports the constant that may not become bool and not the
-    // operand rule; fail/operators/014 holds the rule itself, on two floats.
+    // The typed operand decides whether the operator applies. Thus,
+    // `1.0 && true` reports an invalid bool conversion, not the operand rule.
+    // Fail/operators/014 checks the rule with two floats.
     want_error("bool", "1.0 && true", "a float constant does not become bool");
 }
 
 // A float is no index, no count and no array length.
-// D6.8, D10.2, D3.4
 fn a_float_is_no_length_and_no_index() void {
     want_error("i32", "sizeof(f64[1.5])", "an array length must be an integer, not f64");
     want_error("f64", "cast('a', f64)", "cannot cast char to f64");

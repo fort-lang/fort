@@ -9,24 +9,20 @@ import gen_env;
 import std.str;
 import std.strbuf;
 
-// The deferred statements of src/fort/gen_stmt.ft: which scopes an exit
-// leaves, in which order the statements of each run, and what a `return` of an
-// aggregate does with the block its caller passed.
-// D7.8
+/// Checks deferred statements in src/fort/gen_stmt.ft. The cases cover exited scopes, execution
+/// order, and aggregate returns.
 //
-// The set of deferred statements an exit runs is static, so the emitter reads
-// it off the scope stack and copies the code into every exit rather than
-// keeping a runtime list. That makes the number of copies observable, which
-// is what these cases assert: a `defer` inside a loop body is expanded three
-// times -- at `continue`, at `break` and at the end of the iteration -- and
-// each copy is the statement emitted where the exit stands.
+// Each exit has a static set of deferred statements. The emitter reads them
+// from the scope stack and copies their code into each exit. The cases can
+// therefore count the copies. A `defer` in a loop body expands at `continue`,
+// at `break`, and at the iteration end. Each copy uses the statement emitted
+// at that exit.
 //
-// The expected text of each case was read off stage1's own `fort -S` over the
-// same program and pasted here, never transcribed from the fort under test.
+// Each expected text comes from stage1 `fort -S` output for the same program.
+// It does not come from the Fort emitter under test.
 //
-// All six cases emit a definition through the `emit` helper below, which runs
-// the structural check of item 10 over it, so the check has one call site here
-// and covers all six.
+// All seven cases emit a definition through the `emit` helper below. The
+// helper has one block-check call site that covers all seven cases.
 
 fn emit(gen_env.env mut* e, string src, string name) string {
     assert(gen_env.open_module(e, src));
@@ -49,7 +45,6 @@ fn wrap(strbuf.str_buf mut* b, string decls) string {
 // block ends and not at the function's exit. The three `eprintln`s are
 // therefore c, b, a: the inner block's `c`, then its `defer`, then the
 // function's.
-// D7.8
 fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -79,7 +74,6 @@ fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
     // Nothing was captured at `defer` time: each copy is the statement emitted
     // where the exit stands, so the three literals are three string constants
     // in the order the copies were written.
-    // D19.5
     assert(gen_env.record_text(&e, 0) == "c");
     assert(gen_env.record_text(&e, 1) == "b");
     assert(gen_env.record_text(&e, 2) == "a");
@@ -90,7 +84,6 @@ fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
 // A loop body is a scope that `break` and `continue` both leave, so its
 // deferred statements run at either exit and at the end of every iteration. In
 // a `for`, `continue` runs them before `step`.
-// D7.8, D7.6
 fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -131,7 +124,6 @@ fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
 // the `break` runs its own copy and branches to the continuation. stage1
 // refuses `do`-`while`, so the expected text of this one case was read off
 // stage2 and its blocks are named here.
-// D7.5, D7.6, D7.8, T-044: the ticket that gave stage2 `do`-`while`
 fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -171,7 +163,6 @@ fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
 // the exit of the loop inside the deferred code: the inner `break` branches to
 // L5, `out` still runs, and the enclosing loop is left once, at the end of the
 // expansion. A branch to L2 there would put `out` after a terminator.
-// D7.5, D7.8
 fn a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -205,7 +196,6 @@ fn a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() void {
 
 // `return e` evaluates `e` before the deferred code runs, which cannot then
 // change the value returned: the value is in a register first.
-// D7.8, D8.2
 fn a_return_reads_its_value_before_the_deferred_code_runs() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -228,11 +218,9 @@ fn a_return_reads_its_value_before_the_deferred_code_runs() void {
 
 // ---- results -----------------------------------------------------------------------
 
-// The `sret` block belongs to the caller, which may have passed a pointer to
-// it as an argument as well, so deferred code can reach it: the result lands
-// in a temporary of the callee's own and is copied out after the deferred code
-// has run (item 7).
-// D7.8, D8.2
+// The `sret` block belongs to the caller. The caller can also pass its pointer as an argument,
+// so deferred code can reach it. The result lands in a temporary of the callee's own and
+// is copied out after the deferred code has run.
 fn an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -261,7 +249,6 @@ fn an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() void {
 
 // A function with nothing deferred writes the caller's block directly and pays
 // for no temporary.
-// D7.8
 fn an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);

@@ -19,25 +19,21 @@
 import flt;
 import std.strbuf;
 
-// The float values of src/fort/flt.ft: the decimal reader, the rounding, the
-// four operations a constant folder needs, the conversions and the constant
-// text the IR carries.
-// D2.6, D6.12, D3.14
+/// Checks decimal float parsing, rounding, arithmetic, conversions, and the constant text used
+/// in IR.
 //
-// Where the expected numbers come from. Each one is the IEEE 754 binary64
-// pattern of the value, computed off this tree with exact rational
-// arithmetic -- rounded to the format once, to nearest with ties to even --
-// and the oracle that produced them was checked against CPython's own double
-// arithmetic on 4000 random pairs, so it is not this module's algorithm
-// written a second time. A binary32 result is the binary64 of the binary32
-// value, which is how an f32 constant is held and what the IR needs.
+// Each expected number is the IEEE 754 binary64 pattern of the value. An
+// external oracle computed it with exact rational arithmetic and one
+// round-to-nearest operation with ties to even. CPython double arithmetic
+// agreed with the oracle for 4000 random pairs. A binary32 result is its value
+// encoded as binary64. This is how the compiler holds an f32 constant.
 //
-// The values stand where a wrong implementation still looks right: the two
-// subnormal boundary values that broke PHP and Java, the least subnormal and
-// the thresholds of a zero either side of it, 2^53 and its neighbours, the
-// largest finite value and the first decimal above it, a literal of 902
-// digits whose last digit decides the rounding, and a division in binary32
-// whose result differs when it is rounded in binary64 first.
+// The values cover cases where a wrong implementation can look correct. They
+// include two known subnormal boundaries, the least subnormal, and both zero
+// thresholds. They also include 2^53 and its neighbours, the largest finite
+// value, and the first decimal above it. One 902-digit literal tests a final
+// digit that changes rounding. A binary32 division differs if binary64 rounds
+// it first.
 
 fn want_parse(string text, u64 bits) void {
     u64 mut got = 0;
@@ -51,7 +47,6 @@ fn want_parse(string text, u64 bits) void {
 
 // A literal the format cannot hold is a compile error, so the reader answers
 // false and the checker reports it.
-// D4.4
 fn want_parse_refused(string text) void {
     u64 mut got = 0;
     bool ok = flt.flt_parse(text, &got);
@@ -76,8 +71,7 @@ fn want_int(string what, i64 got, i64 value) void {
 }
 
 // Every literal reads to the binary64 nearest its exact decimal value, ties
-// to even; an untyped float constant is evaluated in binary64.
-// D2.6, D4.4
+// to even. An untyped float constant is evaluated in binary64.
 fn the_reader_gives_a_literal_the_binary64_nearest_its_value() void {
     want_parse("1.0", 0x3FF0000000000000);
     want_parse("0.1", 0x3FB999999999999A);
@@ -149,7 +143,6 @@ fn a_digit_below_the_eight_hundred_kept_still_decides_a_tie() void {
 // refuses it rather than producing an infinity. The last one is the first
 // decimal above the rounding threshold of the largest finite value, which is
 // where a reader starts producing an infinity.
-// D4.4
 fn a_literal_past_binary64_is_refused() void {
     want_parse_refused("1e309");
     want_parse_refused("1.7976931348623159e308");
@@ -205,7 +198,6 @@ fn want_refused(string what, bool ok) void {
 
 // flt_to_f32 rounds to binary32 and answers with the binary64 of that value,
 // which is exact: 24 mantissa bits out of 53.
-// D3.14
 fn a_value_rounds_to_binary32_once_and_keeps_its_binary64_form() void {
     // 0.1
     want_bits("f32 0.1", to_f32(0x3FB999999999999A), 0x3FB99999A0000000);
@@ -237,9 +229,8 @@ fn a_value_rounds_to_binary32_once_and_keeps_its_binary64_form() void {
     want_bits("f32 1e-300", to_f32(0x01A56E1FC2F8F359), 0x0000000000000000);
 }
 
-// The rounding threshold of binary32 is (2 - 2^-24) * 2^127; from it upward
+// The rounding threshold of binary32 is (2 - 2^-24) * 2^127. From it upward
 // the value is not finite in binary32, which is a compile error.
-// D4.4
 fn a_value_past_binary32_is_refused() void {
     want_f32_refused("3.4028235677973366e38", 0x47EFFFFFF0000000);
     want_f32_refused("3.5e38", 0x47F074F8C4D3CD7B);
@@ -248,7 +239,7 @@ fn a_value_past_binary32_is_refused() void {
 }
 
 // A zero rounds to a zero of the same sign.
-// D6.12: the sign bit is what tells the two zeros apart
+// the sign bit is what tells the two zeros apart
 fn a_zero_keeps_its_sign_through_binary32() void {
     want_bits("f32 -0.0", to_f32(0x8000000000000000), 0x8000000000000000);
     want_bits("f32 0.0", to_f32(0), 0);
@@ -282,7 +273,6 @@ fn binary32() void {
 // binary64 once, to nearest with ties to even. The zeros carry the signs IEEE
 // 754 gives them: a sum of two zeros is negative only when both are, x - x is
 // +0.0, and a product takes the two signs combined.
-// D6.12
 fn the_four_operations_round_their_exact_result_once() void {
     u64 mut got = 0;
     want_op("0.1 + 0.2", flt.flt_add(0x3FB999999999999A, 0x3FC999999999999A, false, &got), got,
@@ -350,7 +340,6 @@ fn the_four_operations_round_their_exact_result_once() void {
 // A division by zero yields an infinity or a NaN and an overflow yields an
 // infinity. Neither is a constant, so the fold answers false and the checker
 // reports the error.
-// D4.4, D6.12
 fn an_operation_that_leaves_the_range_is_refused() void {
     u64 mut got = 0;
     want_refused("1.0 / 0.0", flt.flt_div(0x3FF0000000000000, 0x0000000000000000, false, &got));
@@ -402,7 +391,6 @@ fn a_binary32_operation_rounds_to_binary32_directly() void {
 // the four operations, half of them drawn from subnormal exponents, found no
 // pair where the two differ. The reading is the one class where two roundings
 // are observable, and run/constants/011_float_two_roundings.ft holds it.
-// D4.4
 fn a_binary32_division_rounds_to_binary32_directly() void {
     u64 mut got = 0;
     want_op("the quotient of two binary32 values",
@@ -428,7 +416,6 @@ fn binary32_arithmetic() void {
 // Every value here is finite, so the comparison is the ordering of the
 // numbers, with a negative value below a positive one whatever the patterns
 // say and the two zeros equal.
-// D6.12
 fn the_ordering_is_the_ordering_of_the_values() void {
     u64 mut zero = 0;
     want_int("cmp 0.1 0.2", cast(flt.flt_cmp(0x3FB999999999999A, 0x3FC999999999999A), i64), -1);
@@ -465,7 +452,6 @@ fn the_ordering_is_the_ordering_of_the_values() void {
 // -0.0 == 0.0, and unary minus flips the sign bit rather than subtracting
 // from zero: the two differ on a zero, since 0.0 - 0.0 is +0.0 and -(0.0) is
 // -0.0.
-// D6.12
 fn the_two_zeros_are_equal_and_a_negation_is_the_sign_bit() void {
     want_int("cmp 0.0 -0.0", cast(flt.flt_cmp(0, 0x8000000000000000), i64), 0);
     want_int("cmp -0.0 0.0", cast(flt.flt_cmp(0x8000000000000000, 0), i64), 0);
@@ -487,7 +473,6 @@ fn comparison() void {
 // An integer constant in a float context takes that float type, rounded to
 // nearest: 2^53 + 1 and 2^24 + 1 are the first values their formats cannot
 // hold, and each one goes to the even mantissa.
-// D4.2, D3.14
 fn an_integer_constant_rounds_to_the_nearest_value() void {
     u64 mut got = 0;
     want_from_int(false, 0, false, 0x0000000000000000);
@@ -539,9 +524,8 @@ fn an_integer_constant_rounds_to_binary32_the_same_way() void {
 }
 
 // A float to integer cast truncates toward zero, so 2.5 gives 2 and -2.5
-// gives -2; the sign of the zero comes through, since the caller needs it to
+// gives -2. The sign of the zero comes through, since the caller needs it to
 // saturate at the right end.
-// D3.14
 fn a_value_truncates_toward_zero() void {
     bool mut neg = false;
     u64 mut mag = 0;
@@ -562,7 +546,6 @@ fn a_value_truncates_toward_zero() void {
 
 // flt_to_int answers false when the magnitude is past 2^64 - 1, and the
 // caller saturates at the range of the target type.
-// D3.14
 fn a_value_past_the_widest_integer_is_left_to_the_caller() void {
     bool mut neg = false;
     u64 mut mag = 0;
@@ -583,7 +566,6 @@ fn integers() void {
 // digits of the binary64 pattern, upper case. The last line is the binary32
 // value of 0.1, whose pattern ends in 29 zero bits because an f32 constant
 // must be a binary64 the type holds exactly.
-// D19.1
 fn a_constant_prints_as_the_sixteen_hex_digits_of_its_pattern() void {
     want_hex(0x3FB999999999999A, "0x3FB999999999999A");
     want_hex(0x3FF0000000000000, "0x3FF0000000000000");
@@ -652,10 +634,8 @@ fn want_hex(u64 bits, string text) void {
 
 // ---- the vectors -----------------------------------------------------------------
 
-// What follows is a corpus of values held against an oracle of exact rational
-// arithmetic computed off this tree, the same one the cases above use. It is
-// here rather than in a note about a run someone once made, because a number
-// in a file is evidence anyone can re-run.
+// The following values use the same exact-rational oracle as the cases above.
+// The stored values make the evidence reproducible.
 //
 // The values are drawn at random from five classes -- a normal of any
 // exponent, a small integer times a power of two (what a program writes), an
@@ -745,7 +725,6 @@ fn c(u64 a, u64 b, i64 want) void {
 // 350 literals, one per value, drawn from the five classes: each is the
 // shortest decimal of the value, which is what a program writes and what the
 // runtime prints.
-// D11.7, D18.2
 fn parsed_values_1() void {
     p("2.1238426269156665e-82", 0x2EF9C97A0FE8F576);
     p("8.525603822614502e-44", 0x36FE6B9D6E6D7582);

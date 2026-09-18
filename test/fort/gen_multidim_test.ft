@@ -11,21 +11,15 @@ import gen_env;
 import types;
 import std.strbuf;
 
-// The IR of a nested array and span level in src/fort/gen_expr.ft: the types
-// `[2 x [3 x i32]]` and `%fort.span` over `[3 x i32]`, the GEP of each
-// dimension, the bounds check each one carries and the copy.
-// D11.1, D19.7, D3.4
+/// Checks IR for nested arrays and spans. The cases cover types, dimension GEPs, bounds checks,
+/// and copies.
 //
-// Where the expected text comes from, which is not where the other emitter
-// suites take it from. stage1 refuses a second array or span level
-// (toolchain.md 7.3), so it cannot be run over these bodies and there is no C
-// output to copy. Each block below is written from the contract instead --
-// toolchain.md 6 items 3, 13, 16 and 17, with the LLVM rule that a GEP into an
-// `[N x T]` takes the array index after the object index -- and the emitter is
-// held against that reading. Two other tests answer for the same rules from
-// another side: run/errors/028 to 030 run the checks, and
-// run/ffi/012_multidim_layout.ft holds every stride against C's own sizeof
-// and offsetof, which is the only shape that sees a stride error at all.
+// The expected text has a different source from the text in other emitter suites.
+// stage1 refuses a second array or span level, so it produces no reference output. The expected
+// blocks follow the emitter and LLVM contracts. A GEP into `[N x T]` takes the array index
+// after the object index. Two other tests check the same rules from another side:
+// run/errors/028 to 030 run the checks. run/ffi/012_multidim_layout.ft holds every stride
+// against C's own sizeof and offsetof, which is the only shape that sees a stride error at all.
 
 string GRID = "    i32[2][3] mut m = {};";
 string I = "    i32 mut i = 1;";
@@ -40,7 +34,7 @@ fn each_dimension_is_indexed_and_checked_on_its_own() void {
     string[4] mut lines = {GRID, I, J, "    i32 mut a = m[i][j];"};
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.emit_value(&e, "a");
-    // The outer index is checked against 2 and strides over a whole row; the
+    // The outer index is checked against 2 and strides over a whole row. The
     // inner one is checked against 3 inside the block the first check fell
     // into, and strides over an i32. The row's address is the base of the
     // second GEP, whose type is the row's own.
@@ -66,7 +60,6 @@ fn the_second_check_fails_to_its_own_block() void {
     // Each dimension has a failure block of its own, and each one names the
     // length it was checked against and the column of its own `[`, which is 18
     // for the outer index and 21 for the inner one.
-    // D11.4
     gen_env.expect_text(
         gen_env.fail(&e),
         gen_env.join8(&e, "\nL1:\n",
@@ -83,8 +76,8 @@ fn a_literal_index_is_checked_at_each_rank_too() void {
     string[2] mut lines = {GRID, "    i32 mut a = m[1][2];"};
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.emit_value(&e, "a");
-    // Item 16 emits the compare for every index, a literal one included: the
-    // emitter folds nothing and LLVM removes the two compares below. What
+    // The emitter writes a comparison for every index, including a literal.
+    // It folds nothing, and LLVM removes the two comparisons below. What
     // changes with the rank is the type of the GEP and the length compared.
     gen_env.join8(&e, "  %t0 = sext i32 1 to i64\n", "  %t1 = icmp uge i64 %t0, 2\n",
                   "  br i1 %t1, label %L1, label %L0\n\nL0:\n",
@@ -97,7 +90,6 @@ fn a_literal_index_is_checked_at_each_rank_too() void {
 }
 
 // ---- the copy ------------------------------------------------------------------------
-// D3.4
 
 fn a_whole_nested_array_copies_every_byte() void {
     gen_env.env mut e = gen_env.env{};
@@ -106,7 +98,7 @@ fn a_whole_nested_array_copies_every_byte() void {
     string[2] mut lines = {GRID, "    i32[2][3] mut b = m;"};
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.into_text(&e, "b");
-    // Item 13: an aggregate lands in its destination through one memcpy of
+    // an aggregate lands in its destination through one memcpy of
     // the whole type, which is 24 bytes here, six elements of four.
     gen_env.expect_text(
         gen_env.body(&e),
@@ -124,7 +116,6 @@ fn one_row_copies_the_row_alone() void {
     gen_env.into_text(&e, "r");
     // The row is 12 bytes and the copy is of the row, not of the array it came
     // out of.
-    // D3.4
     gen_env.join5(&e, "  %t0 = sext i32 1 to i64\n", "  %t1 = icmp uge i64 %t0, 2\n",
                   "  br i1 %t1, label %L1, label %L0\n\nL0:\n",
                   "  %t2 = getelementptr inbounds [2 x [3 x i32]], ptr %m.0, i64 0, i64 %t0\n",
@@ -143,9 +134,8 @@ fn a_span_of_arrays_strides_by_the_row() void {
                            "    i32 mut a = g[i][0];"};
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.emit_value(&e, "a");
-    // Item 17: the length comes out of the header and the pointer after it,
-    // and the second rank is the array GEP of item 3 over the row the first
-    // one reached.
+    // The length comes from the header, followed by the pointer. The second
+    // rank uses an array GEP over the row that the first rank reached.
     gen_env.join8(&e, "  %t0 = load i32, ptr %i.1, align 4\n",
                   "  %t1 = sext i32 %t0 to i64\n",
                   "  %t2 = getelementptr inbounds %fort.span, ptr %g.0, i32 0, i32 1\n",
@@ -154,7 +144,7 @@ fn a_span_of_arrays_strides_by_the_row() void {
                   "  %t5 = getelementptr inbounds %fort.span, ptr %g.0, i32 0, i32 0\n",
                   "  %t6 = load ptr, ptr %t5, align 8\n");
     // The element GEP names the element type and takes one index, so it
-    // strides by the 12 bytes of one row (item 3).
+    // strides by the 12 bytes of one row.
     gen_env.join_more(&e, "  %t7 = getelementptr inbounds [3 x i32], ptr %t6, i64 %t1\n");
     gen_env.join_more(&e, "  %t8 = sext i32 0 to i64\n");
     gen_env.join_more(&e, "  %t9 = icmp uge i64 %t8, 3\n");
@@ -172,7 +162,6 @@ fn the_element_type_of_that_span_is_the_row() void {
     assert(gen_env.open_lines(&e, lines[..]));
     // A span is two words whatever it spans, and its element carries the row's
     // size, which is what the GEP above strides by.
-    // D3.5
     types.node* span = gen_env.type_of(&e, "g");
     assert(types.type_sizeof(span) == 16);
     assert(types.type_sizeof(span->elem) == 12);
@@ -193,9 +182,8 @@ fn an_array_of_spans_strides_by_the_header() void {
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.emit_value(&e, "b");
     // The outer index walks an `[2 x %fort.span]`, so it strides by the 16
-    // bytes of one header (item 3); the inner one reads the length and the
+    // bytes of one header. The inner one reads the length and the
     // pointer out of the header it reached.
-    // D19.2
     gen_env.join8(&e, "  %t0 = sext i32 1 to i64\n", "  %t1 = icmp uge i64 %t0, 2\n",
                   "  br i1 %t1, label %L1, label %L0\n\nL0:\n",
                   "  %t2 = getelementptr inbounds [2 x %fort.span], ptr %rows.1, i64 0, i64 %t0\n",
@@ -220,8 +208,8 @@ fn a_span_of_spans_strides_by_the_header_too() void {
                            "    i32 mut c = view[1][0];"};
     assert(gen_env.open_lines(&e, lines[..]));
     gen_env.emit_value(&e, "c");
-    // The element of the outer span is itself a `%fort.span`, so the element
-    // GEP names that type and strides by 16 bytes (item 3, item 17).
+    // The element of the outer span is itself a `%fort.span`. The element GEP
+    // names that type and strides by 16 bytes.
     gen_env.join8(&e, "  %t0 = sext i32 1 to i64\n",
                   "  %t1 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 1\n",
                   "  %t2 = load i64, ptr %t1, align 8\n", "  %t3 = icmp uge i64 %t0, %t2\n",
@@ -241,7 +229,7 @@ fn a_span_of_spans_strides_by_the_header_too() void {
                         gen_env.join_more(&e, "  %t14 = load i32, ptr %t13, align 4\n"));
 }
 
-// ---- the result of item 7 --------------------------------------------------------------
+// ---- aggregate results --------------------------------------------------------------
 
 fn a_nested_array_result_arrives_through_the_sret_pointer() void {
     gen_env.env mut e = gen_env.env{};
@@ -252,11 +240,10 @@ fn a_nested_array_result_arrives_through_the_sret_pointer() void {
     strbuf.append(&src, "fn same(i32[2][3] m) i32[2][3] {\n    return m;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&src)));
-    // Item 7: an aggregate result of any size leaves through the `sret`
+    // an aggregate result of any size leaves through the `sret`
     // pointer and the function returns `void`. Every other sret assertion in
-    // the repository names a 16-byte struct; this one is 24 bytes, and the
+    // the repository names a 16-byte struct. This one is 24 bytes, and the
     // size is in the memcpy that fills it.
-    // D3.4
     string[5] mut want = {
         "define dso_local void @\"main.same\"(ptr sret([2 x [3 x i32]]) %ret.sret, ptr %m.in)",
         " #0 {\nentry:\n",

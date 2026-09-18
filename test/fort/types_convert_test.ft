@@ -10,15 +10,12 @@ import prim;
 import types;
 import types_env;
 
-// The conversions of a type: the implicit drops of mutability and of
-// ownership, and the cast matrix. Every example those rules give is one
-// assertion, with the further rows the rules imply, and the last four tests
-// re-derive the matrix and the invariants that tie the two together. The port
-// of test/types_convert_test.c.
-// D5.4, D17.4, D3.14
+/// The conversions of a type: the implicit drops of mutability and of
+/// ownership, and the cast matrix. Every example those rules give is one
+/// assertion. The final four tests derive the matrix and its invariants by a
+/// second method.
 
 // The class of a scalar type in the cast matrix.
-// D3.14
 enum scalar_class {
     class_int,
     class_float,
@@ -32,24 +29,20 @@ u64 SCALARS_MAX = 14;
 u64 SAMPLES_MAX = 35;
 
 // The ordered pairs of that table whose cast would add a mark, read off the
-// failure of no_conversion_and_no_cast_adds_mut below. A ticket that adds a
-// spelling to the table reads the new number there and writes it here, as
-// test/types_convert_test.c's MUT_ADDING_PAIRS does.
+// failure of no_conversion_and_no_cast_adds_mut below. Add a new spelling to
+// the table only after that test gives the new count.
 //
 // `u8 mut@`, `node mut*@` and `node mut*[2]` are in the table for the two arms
 // of the rule that the other 32 spellings never reached: a `string` source,
 // whose bytes carry no level behind them, and a `mut` inside a fixed array. The
-// review that asked for them measured both arms at 0 of the pairs the table
-// held before them, so a mutation in either left the count and the gate
-// untouched. The array arm holds 34 of the 336 today and the `string` arm 2.
+// These two cases exercise distinct rule branches. The array branch holds 34
+// of the 336 pairs. The `string` branch holds 2 pairs.
 // `node mut*@` is the one that reaches the `string` arm, because a target whose
 // own level is mutable is answered by the level before it.
-// D3.14
 u64 MUT_ADDING_PAIRS = 336;
 
 // Whether a value of the type spelled `src` may be used where the type spelled
 // `dst` is expected.
-// D5.4, D17.4
 fn assignable(types_env.env mut* e, string dst, string src) bool {
     types.node* d = types_env.type_of(e, dst);
     types.node* s = types_env.type_of(e, src);
@@ -57,7 +50,6 @@ fn assignable(types_env.env mut* e, string dst, string src) bool {
 }
 
 // Whether `cast(expr, dst)` is allowed on an expression of type `src`.
-// D3.14
 fn castable(types_env.env mut* e, string dst, string src) bool {
     types.node* d = types_env.type_of(e, dst);
     types.node* s = types_env.type_of(e, src);
@@ -65,8 +57,8 @@ fn castable(types_env.env mut* e, string dst, string src) bool {
 }
 
 // The matrix rows for scalars, re-derived from the table rather than from the
-// implementation: identity always; integers and floats convert both ways; an
-// integer also becomes a `char` or an enum; `bool`, `char` and an enum become
+// implementation: identity always. Integers and floats convert both ways. An
+// integer also becomes a `char` or an enum. `bool`, `char` and an enum become
 // an integer and nothing else.
 fn matrix_allows(scalar_class dst, scalar_class src, bool identical) bool {
     if (identical) {
@@ -115,7 +107,6 @@ fn scalar_types(types_env.env mut* e, types.node* mut@ list, scalar_class mut@ c
 // references to them included: the marks inside a function type are part of
 // its identity, so a property that never sees one cannot tell whether a
 // conversion respects them.
-// D3.10
 fn sample_types(types_env.env mut* e, types.node* mut@ list) u64 {
     string[29] spellings = {"i32", "u8", "bool", "char", "f64", "node*", "node mut*",
                             "node mut* own", "node**", "node* mut*", "node*@", "node mut* mut@",
@@ -157,7 +148,6 @@ fn fail_pair(types_env.env mut* e, types.node* a, string between, types.node* b)
 }
 
 // ---- dropping mutability -------------------------------------------------------
-// D5.4
 
 fn the_d5_4_conversions_and_their_shape() void {
     types_env.env mut e = types_env.env{};
@@ -177,14 +167,12 @@ fn the_d5_4_conversions_and_their_shape() void {
     assert(!assignable(&e, "i32 mut@", "i32@"));
     // The storage a `void*` reaches is a level like any other: dropping its
     // `mut` is the one implicit conversion, and adding it needs a cast.
-    // D3.11, D5.4
     assert(assignable(&e, "void*", "void mut*"));
     assert(!assignable(&e, "void mut*", "void*"));
     assert(assignable(&e, "void* mut", "void mut*"));
     assert(assignable(&e, "void mut* mut", "void mut*"));
     // The C `T** -> const T**` hole is closed here too: level 1 of the target
     // must be immutable before level 2 may be dropped.
-    // D5.4
     assert(assignable(&e, "void**", "void mut* mut*"));
     assert(!assignable(&e, "void* mut*", "void mut* mut*"));
     assert(assignable(&e, "void*@", "void mut* mut@"));
@@ -217,7 +205,6 @@ fn mutability_drops_through_further_shapes() void {
 }
 
 // ---- lending -------------------------------------------------------------------
-// D17.4
 
 fn the_d17_4_conversions_and_their_shape() void {
     types_env.env mut e = types_env.env{};
@@ -249,7 +236,7 @@ fn ownership_is_never_added_implicitly() void {
     assert(!assignable(&e, "node* own@", "node*@"));
     // Dropping `own` and mutability together is one conversion.
     assert(assignable(&e, "void*", "void* own"));
-    // An owned writable allocation lends as a plain view; the reverse adds a
+    // An owned writable allocation lends as a plain view. The reverse adds a
     // mark in each direction.
     assert(assignable(&e, "void*", "void mut* own"));
     assert(!assignable(&e, "void mut*", "void* own"));
@@ -265,13 +252,11 @@ fn assignability_of_null_void_and_the_error_type() void {
     types.node* err = types.type_error(&e.tt);
     types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
     // `null` adopts a pointer, `void*` or function type.
-    // D10.5
     assert(types.type_assignable(types_env.type_of(&e, "node*"), null_t));
     assert(types.type_assignable(types_env.type_of(&e, "node mut* own"), null_t));
     assert(types.type_assignable(types_env.type_of(&e, "void*"), null_t));
     assert(types.type_assignable(types_env.fn1(&e, i32t, i32t), null_t));
     // Not a span, a string or a value type: the zero value is `{}`.
-    // D3.5
     assert(!types.type_assignable(types_env.type_of(&e, "i32@"), null_t));
     assert(!types.type_assignable(types_env.type_of(&e, "string"), null_t));
     assert(!types.type_assignable(types_env.type_of(&e, "i32"), null_t));
@@ -293,7 +278,6 @@ fn function_types_convert_only_to_themselves() void {
     assert(types.type_assignable(types_env.fn1(&e, i32t, i32t), types_env.fn1(&e, i32t, i32t)));
     assert(!types.type_assignable(types_env.fn1(&e, i32t, i32t), types_env.fn1(&e, v, i32t)));
     // No variance on a parameter's pointee mutability or `own`.
-    // D3.10
     types.node* takes_node = types_env.fn1(&e, v, types_env.type_of(&e, "node*"));
     types.node* takes_mut = types_env.fn1(&e, v, types_env.type_of(&e, "node mut*"));
     types.node* takes_own = types_env.fn1(&e, v, types_env.type_of(&e, "node* own"));
@@ -304,7 +288,6 @@ fn function_types_convert_only_to_themselves() void {
 }
 
 // ---- casts ---------------------------------------------------------------------
-// D3.14
 
 fn casts_among_numbers_bool_char_and_enums() void {
     types_env.env mut e = types_env.env{};
@@ -350,7 +333,7 @@ fn casts_among_pointers_and_u64() void {
     types_env.init(&e);
     defer types_env.free(&e);
     assert(castable(&e, "point*", "node*")); // any pointer to any pointer
-    // D17.3: the source already carries the `mut` the target keeps
+    // the source already carries the `mut` the target keeps
     assert(castable(&e, "node mut* own", "node mut*")); // adopts
     assert(castable(&e, "node*", "node mut* own"));     // lends
     assert(castable(&e, "void*", "node*"));
@@ -358,7 +341,6 @@ fn casts_among_pointers_and_u64() void {
     assert(castable(&e, "void* own", "void*"));
     // A `mut` the source carries reaches the level a `void*` names, in both
     // directions, and a cast that only drops it is allowed as well.
-    // D3.14
     assert(castable(&e, "void mut*", "node mut*"));
     assert(castable(&e, "node mut*", "void mut*"));
     assert(castable(&e, "void*", "void mut*"));
@@ -378,7 +360,6 @@ fn casts_among_pointers_and_u64() void {
     assert(!castable(&e, "i64", "i32@"));
     // No pointer cast adds the `mut`, from a typed pointer, from a `void*` or
     // from the address in a `u64`.
-    // D3.14
     assert(!castable(&e, "node mut*", "node*"));
     assert(!castable(&e, "node mut* own", "node*"));
     assert(!castable(&e, "void mut*", "void*"));
@@ -421,7 +402,6 @@ fn casts_within_the_string_family() void {
     assert(castable(&e, "u8@", "u8 mut@"));
     assert(castable(&e, "char mut@", "u8 mut@"));
     // Adoption and lending are both casts.
-    // D17.3, D17.12
     assert(castable(&e, "string own", "u8 mut@ own"));
     assert(castable(&e, "string", "u8 mut@ own"));
     assert(castable(&e, "string own", "string"));
@@ -433,7 +413,6 @@ fn casts_within_the_string_family() void {
     // The bytes of a `string` are immutable, and no member of the family adds
     // the `mut` back, so the two casts of `cast(cast(b, string), u8 mut@)`
     // launder nothing.
-    // D3.7, D3.14
     assert(!castable(&e, "char mut@", "string"));
     assert(!castable(&e, "u8 mut@", "string"));
     assert(!castable(&e, "u8 mut@", "u8@"));
@@ -453,7 +432,6 @@ fn a_span_cast_never_launders_a_signature_or_an_owner() void {
     // The marks of a parameter are part of the function type's identity, so
     // those spans have different element types and the row for marks does not
     // reach them, exactly as the cast on one element does not.
-    // D3.10, D3.14
     assert(!types.type_cast_allowed(of_node, of_mut));
     assert(!types.type_cast_allowed(of_mut, of_node));
     assert(!types.type_cast_allowed(takes_node, takes_mut));
@@ -461,19 +439,16 @@ fn a_span_cast_never_launders_a_signature_or_an_owner() void {
     assert(types.type_cast_allowed(of_node, of_node));
     // A span of function pointers still casts where its own marks differ, so
     // long as the marks are not added: `own` may be, `mut` may not.
-    // D3.14
     assert(types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, false), of_node));
     assert(!types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, true), of_node));
     assert(types.type_cast_allowed(of_node, types.type_span(&e.tt, takes_node, false, true)));
     // Dropping an `own` under a reference the target still owns would leave
     // its objects owned by nobody, which no cast licenses.
-    // D17.4
     assert(!castable(&e, "node mut* mut@ own", "node mut* own mut@ own"));
     assert(!castable(&e, "node* mut@ own", "node* own@ own"));
     assert(!castable(&e, "u8@ mut@ own", "u8@ own@ own"));
     // Dropping it with no owner outside is lending, which a cast may do even
     // where the implicit rule refuses.
-    // D3.14
     assert(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
     assert(castable(&e, "node*@", "node mut* own mut@ own"));
     assert(castable(&e, "node mut* own mut@", "node mut* own mut@ own"));
@@ -483,9 +458,8 @@ fn casts_of_spans_change_only_the_marks() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    // The element type never changes; mutability is dropped at any level, and
+    // The element type never changes. Mutability is dropped at any level, and
     // `own` is added or dropped at any reference.
-    // D3.14
     assert(castable(&e, "node*@", "node* mut@"));
     assert(castable(&e, "i32@@ mut", "i32 mut@ mut@"));
     assert(castable(&e, "u8@", "u8@ own"));
@@ -493,13 +467,11 @@ fn casts_of_spans_change_only_the_marks() void {
     assert(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
     // The route a caller of `std.sort_ptr` takes: the drop at level 2 behind a
     // mutable level 1, which the implicit conversion refuses and the cast makes.
-    // D5.4, D3.14
     assert(castable(&e, "node* mut@", "node mut* mut@"));
     assert(!assignable(&e, "node* mut@", "node mut* mut@"));
     assert(!castable(&e, "node*@", "point*@"));
     assert(!castable(&e, "i32@@", "i32@"));
     // A span adds no `mut`, at the slots or at any level below them.
-    // D3.14
     assert(!castable(&e, "node* mut@", "node*@"));
     assert(!castable(&e, "node mut* mut@", "node* mut@"));
     assert(!castable(&e, "i32 mut@ mut@", "i32@ mut@"));
@@ -514,7 +486,6 @@ fn a_cast_never_adds_mut() void {
     defer types_env.free(&e);
     // One rule over every row of the matrix: the target marks a level `mut`
     // only where the source marks the level at the same depth `mut` too.
-    // D3.14
     assert(types.type_cast_adds_mut(types_env.type_of(&e, "node mut*"),
                                     types_env.type_of(&e, "node*")));
     assert(!types.type_cast_adds_mut(types_env.type_of(&e, "node*"),
@@ -530,7 +501,6 @@ fn a_cast_never_adds_mut() void {
     // `void*` is a source like any other, so the two casts of
     // `cast(cast(p, void*), u8 mut*)` refuse the second one. A `void mut*`
     // carries the mark and the same cast compiles.
-    // D3.11, D3.14
     assert(!castable(&e, "u8 mut*", "void*"));
     assert(castable(&e, "u8 mut*", "void mut*"));
     assert(castable(&e, "u8*", "void*"));
@@ -543,13 +513,12 @@ fn a_cast_never_adds_mut() void {
     assert(types.type_cast_adds_mut(types_env.type_of(&e, "void mut*"),
                                     types_env.fn1(&e, types.type_void(&e.tt),
                                                   types_env.type_of(&e, "node*"))));
-    // Where the pointee type diverges, the source says nothing about the levels
+    // If the pointee type diverges, the source says nothing about the levels
     // below the divergence, so the target marks none of them.
     assert(!castable(&e, "node mut* mut*", "u8 mut*"));
     assert(castable(&e, "node* mut*", "u8 mut*"));
     assert(castable(&e, "u8 mut*", "node mut* mut*"));
     // A fixed array adds no level of its own: the elements are compared.
-    // D5.2
     assert(!castable(&e, "node mut*[2]", "node*[2]"));
     assert(castable(&e, "node*[2]", "node mut*[2]"));
 }
@@ -571,7 +540,6 @@ fn casts_refused_for_structs_and_fixed_arrays() void {
 
 // A span is `{ptr, len}` and a pointer is an address: neither reaches the
 // other, and a span expression or `.ptr` is the way across.
-// D3.5, D3.14
 fn casts_between_a_reference_and_a_fat_pointer_are_refused() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -603,7 +571,6 @@ fn casts_of_null_void_and_the_error_type() void {
     types.node* v = types.type_void(&e.tt);
     types.node* p = types_env.type_of(&e, "node*");
     // `null` has no type of its own, so it is not a cast operand.
-    // D10.5
     assert(!types.type_cast_allowed(p, null_t));
     assert(!types.type_cast_allowed(null_t, p));
     // `void` is not a value type.
@@ -643,9 +610,8 @@ fn mutability_drops_along_a_three_level_chain() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    // `node mut* mut* mut*` has every level mutable; a target may drop a
+    // `node mut* mut* mut*` has every level mutable. A target may drop a
     // suffix of them, starting at the outermost.
-    // D5.4
     assert(assignable(&e, "node***", "node mut* mut* mut*"));
     assert(!assignable(&e, "node* mut**", "node mut* mut* mut*"));
     assert(!assignable(&e, "node** mut*", "node mut* mut* mut*"));
@@ -660,7 +626,6 @@ fn mutability_drops_along_a_three_level_chain() void {
 
 // A fixed array adds no level, so its elements convert under the rule that
 // applies to the array itself.
-// D5.2, D5.4
 fn conversions_through_a_fixed_array_follow_the_element() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -682,7 +647,6 @@ fn lending_combines_with_dropping_mutability() void {
     types_env.init(&e);
     defer types_env.free(&e);
     // The two drops are one conversion, in every order of marks.
-    // D17.4
     assert(assignable(&e, "u8@", "u8 mut@ own"));
     assert(assignable(&e, "u8 mut@", "u8 mut@ own"));
     assert(assignable(&e, "u8@ own", "u8 mut@ own"));
@@ -699,7 +663,6 @@ fn lending_combines_with_dropping_mutability() void {
 }
 
 // Adoption is a cast, at any level, where the implicit drop refuses.
-// D3.14, D17.3
 fn casts_may_add_own_at_any_reference() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -707,7 +670,6 @@ fn casts_may_add_own_at_any_reference() void {
     // Adoption adds the `own` alone: every `mut` of the target stands in the
     // source. `cast(libc.malloc(n), u8 mut* own)` compiles because `malloc`
     // answers `void mut* own`.
-    // D3.14, D17.3, D17.13
     assert(castable(&e, "u8 mut@ own", "u8 mut@"));
     assert(castable(&e, "u8 mut@ own mut*", "u8 mut@ mut*"));
     assert(castable(&e, "node mut* own mut@ own", "node mut* mut@"));
@@ -747,7 +709,6 @@ fn every_scalar_pair_follows_the_d3_14_matrix() void {
 
 // A cast that only drops mutability or ownership is a no-op the implicit
 // conversions already cover, so `cast` is never the stricter of the two.
-// D3.14
 fn every_implicit_conversion_is_also_a_cast() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -778,7 +739,6 @@ fn stripped(types_env.env mut* e, string text) string {
 // marks, which is how the checker tells a cast refused for the mark from one
 // refused for the element type as well. It is a query of the type table, so the
 // test spells the answer rather than asking the rule again.
-// D3.10, D3.14
 fn clearing_every_mark_of_a_type() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -790,11 +750,9 @@ fn clearing_every_mark_of_a_type() void {
     assert(stripped(&e, "void mut*") == "void*");
     assert(stripped(&e, "u8 mut@") == "u8@");
     // `own` is another mark and this clears none of it, at any level.
-    // D17.2
     assert(stripped(&e, "node mut* own mut@ own") == "node* own@ own");
     assert(stripped(&e, "void mut* own") == "void* own");
     // A fixed array holds no mark of its own and passes the clearing down.
-    // D5.2
     assert(stripped(&e, "node mut*[2]") == "node*[2]");
     // A `string`, a scalar and a struct carry no level, so each is itself.
     assert(stripped(&e, "string") == "string");
@@ -802,7 +760,6 @@ fn clearing_every_mark_of_a_type() void {
     assert(stripped(&e, "point") == "point");
     // A function type is its own identity, marks of parameters included, so
     // clearing them would answer another type and it answers itself.
-    // D3.10
     types.node* takes_mut = types_env.fn1(&e, types.type_void(&e.tt),
                                           types_env.type_of(&e, "node mut*"));
     assert(types.type_without_mut(&e.tt, takes_mut) == takes_mut);
@@ -828,7 +785,6 @@ fn clearing_every_mark_of_a_type() void {
 // that converts stops casting, and the pairs that cast without converting are
 // named one by one in a_cast_never_adds_mut and in
 // casts_of_spans_change_only_the_marks.
-// D3.14, D5.4
 fn no_conversion_and_no_cast_adds_mut() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -857,7 +813,7 @@ fn no_conversion_and_no_cast_adds_mut() void {
     assert(adding == MUT_ADDING_PAIRS);
 }
 
-// Identity converts and casts; two types that convert both ways are identical,
+// Identity converts and casts. Two types that convert both ways are identical,
 // since every drop is strict.
 fn conversion_and_identity_agree_with_themselves() void {
     types_env.env mut e = types_env.env{};
@@ -900,7 +856,6 @@ fn dropping_marks_never_changes_the_shape_or_the_size() void {
         while (s < n) {
             if (d != s && types.type_assignable(list[d], list[s])) {
                 // An implicit conversion is a no-op at run time.
-                // D5.4, D17.1
                 assert(types.type_same_shape(list[d], list[s]));
                 assert(types.type_sizeof(list[d]) == types.type_sizeof(list[s]));
                 assert(types.type_alignof(list[d]) == types.type_alignof(list[s]));

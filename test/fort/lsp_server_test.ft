@@ -19,16 +19,12 @@ import lsp_env;
 import std.io;
 import std.strbuf;
 
-// The state machine of src/lsp/server.ft, case by case: which message is
-// answered in which lifecycle state, with which id and which code, and what a
-// document notification does to the store. The exact bytes of an answer stand
-// in lsp_protocol_test.ft; this file reads the answers as a digest, so a case
-// is one line and the matrix is readable.
+/// Checks server state transitions, response ids, error codes, and document notifications.
 //
-// The digest of a session is one item per frame the server wrote, joined by
-// spaces: `1:ok` for a result, `1:-32601` for an error of that code, and
-// `null:-32700` for an error that names no request. A session that answered
-// nothing is the empty digest.
+// A session digest contains one item for each frame that the server wrote.
+// Spaces join the items. `1:ok` is a result. `1:-32601` is an error with that
+// code. `null:-32700` is an error with no request id. A session with no answer
+// has an empty digest.
 
 // The bytes of `script` as one session, with the digest in the answer and the
 // exit status in *status.
@@ -56,7 +52,7 @@ fn digest_into(strbuf.str_buf mut* out, string answers) void {
     u64 mut at = 0;
     u64 mut seen = 0;
     while (at < answers.len) {
-        // Each frame is `Content-Length: N\r\n\r\nbody`; the answers are this
+        // Each frame is `Content-Length: N\r\n\r\nbody`. The answers are this
         // server's own, so the header is the one it writes.
         u64 mut end = at;
         while (end + 4 <= answers.len && answers[end..end + 4] != "\r\n\r\n") {
@@ -93,7 +89,7 @@ fn digest_into(strbuf.str_buf mut* out, string answers) void {
     }
 }
 
-// The decimal number `s` spells. std.str.parse_u64 does the same; this file
+// The decimal number `s` spells. std.str.parse_u64 does the same. This file
 // keeps its import list to the modules under test.
 fn str_parse(string s, u64 mut* out) bool {
     if (s.len == 0) {
@@ -565,9 +561,8 @@ fn didsave_changes_nothing() void {
 
 
 fn the_server_is_ready_only_after_the_initialized_notification() void {
-    // A server may send nothing to the client before `initialized` arrives, so
-    // the flag is part of the lifecycle this ticket owns even though the first
-    // caller of is_ready is the ticket that publishes a diagnostic.
+    // A server sends nothing before `initialized` arrives. The ready flag is
+    // part of this lifecycle even though diagnostics are its first user.
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     strbuf.str_buf mut script = strbuf.create();
@@ -586,7 +581,7 @@ fn the_server_is_ready_only_after_the_initialized_notification() void {
     rpc.classify(&d, &m);
     server.dispatch(&srv, &d, &m);
     assert(server.is_ready(&srv));
-    // And free takes it back, with the rest of the lifecycle.
+    // Free clears the flag with the rest of the session state.
     server.free(&srv);
     assert(!server.is_ready(&srv));
     assert(io.close(in_ends.read_fd));
@@ -706,8 +701,8 @@ fn a_frame_whose_header_field_holds_a_bare_line_feed_ends_the_loop() void {
 }
 
 fn a_frame_whose_field_name_holds_a_space_ends_the_loop() void {
-    // The script the review measured, behind an initialize. The framing
-    // refuses the field, so the loop ends with status 1 and only the answer
+    // The framing refuses this field after initialization. The loop ends with
+    // status 1 and only the answer
     // before it stands. What makes this worth a case of its own: the 48 bytes
     // a reader that trims the name would take hold a whole second request, so
     // the two readers disagree about a message and not only about a frame.

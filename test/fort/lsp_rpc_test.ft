@@ -16,10 +16,8 @@ import lsp_env;
 import std.io;
 import std.strbuf;
 
-// The base protocol of src/lsp/rpc.ft: what read_frame reads out of a stream,
-// what it refuses, what write_frame writes, and how classify reads a document
-// as a JSON-RPC message. Every read here goes through a real pipe, so the
-// framing meets the read boundaries of a stream and not of a string.
+/// Checks frame reading, rejected input, frame writing, and JSON-RPC message classification in
+/// src/lsp/rpc.ft.
 
 // The frames of `script`, read with a conn whose read size is `chunk`, joined
 // by `|`. A frame that is refused ends the text with `!<message>`, and a clean
@@ -92,7 +90,7 @@ fn two_frames_are_read_in_order() void {
 }
 
 fn a_body_of_no_bytes_is_a_frame() void {
-    // The framing accepts it; the JSON reader is what refuses an empty
+    // The framing accepts it. The JSON reader is what refuses an empty
     // document, and the server answers that with a parse error.
     reads_as("Content-Length: 0\r\n\r\n", ".");
     reads_as("Content-Length: 0\r\n\r\nContent-Length: 2\r\n\r\n{}", "|{}.");
@@ -159,7 +157,7 @@ fn a_field_the_server_does_not_read_is_ignored() void {
 }
 
 fn the_field_name_is_read_without_case() void {
-    // The base protocol writes `Content-Length`; the HTTP rule this header
+    // The base protocol writes `Content-Length`. The HTTP rule this header
     // follows compares a field name without case.
     reads_as("content-length: 2\r\n\r\n{}", "{}.");
     reads_as("CONTENT-LENGTH: 2\r\n\r\n{}", "{}.");
@@ -334,13 +332,12 @@ fn every_byte_at_or_below_a_space_is_refused_in_a_name() void {
     // A byte above the ASCII range is an ordinary name byte. It is the case
     // that fails if `char` ever stops comparing by unsigned byte value, since
     // 0xC3 read as a signed byte is below a space.
-    // D3.2
     reads_as("Content-Length: 2\r\nX\xC3\xA9Y: a\r\n\r\n{}", "{}.");
 }
 
 fn the_script_a_trimming_reader_frames_differently() void {
-    // What the review measured. Before the rule above, this module read the
-    // block as one field it does not know and one Content-Length of 2, so it
+    // A reader that accepts the space reads this block as one unknown field
+    // and one Content-Length of 2. It
     // answered a two-byte body and then a whole second frame. A reader that
     // trims the name reads one 48-byte body instead and never delivers the
     // second message. The stream now ends at the field.
@@ -351,10 +348,9 @@ fn the_script_a_trimming_reader_frames_differently() void {
     strbuf.append(&smuggled, "Content-Length: 24\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":9}");
     string refused = "!a header field name holds a space or a control byte";
     reads_as(strbuf.view(&smuggled), refused);
-    // The same smuggle one byte over, which the review measured after the
-    // first rule refused the space: a vertical tab is not whitespace to the
-    // RFC and is whitespace to `String.prototype.trim`, so the byte class and
-    // not the two literals is what closes it.
+    // The same case uses a vertical tab instead of a space. A vertical tab is not whitespace to
+    // the RFC and is whitespace to `String.prototype.trim`. The byte class and not the two
+    // literals is what closes it.
     strbuf.str_buf mut tabbed = strbuf.create();
     defer strbuf.free(&tabbed);
     strbuf.append(&tabbed, "Content-Length\x0B: 48\r\n");
@@ -577,12 +573,11 @@ fn a_frame_this_module_writes_is_one_it_reads() void {
 }
 
 fn a_write_that_fails_is_an_error_record() void {
-    // Both ends of the pipe are closed, so the write meets EBADF. A write to a
-    // pipe whose reader alone is gone raises SIGPIPE instead, which ends the
-    // program before write_all answers, so no test here provokes one: a server
-    // whose client died after a whole frame reached the read buffer does meet
-    // it, and the header of src/lsp/rpc.ft says what a later ticket installs
-    // if that signal is to become an error record.
+    // Both ends of the pipe are closed, so the write meets EBADF. A write to a pipe whose
+    // reader alone is gone raises SIGPIPE instead, which ends the program before write_all
+    // answers. No test here provokes one: a server whose client died after a whole frame
+    // reached the read buffer does meet it. A SIGPIPE handler is necessary before that case can
+    // return an error.
     lsp_env.pipe_ends ends = lsp_env.open_pipe();
     assert(io.close(ends.read_fd));
     assert(io.close(ends.write_fd));
@@ -656,7 +651,7 @@ fn a_field_of_every_shape_is_passed_over() void {
 }
 
 fn a_header_that_names_only_the_length_twice_over_is_read() void {
-    // The rule is that two lengths that differ are refused; two that agree are
+    // The rule is that two lengths that differ are refused. Two that agree are
     // one length, whatever the case of their names.
     reads_as("Content-Length: 2\r\ncontent-length: 2\r\nCONTENT-LENGTH: 2\r\n\r\n{}", "{}.");
 }

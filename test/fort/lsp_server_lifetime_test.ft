@@ -12,27 +12,20 @@ import lsp_env;
 import std.io;
 import std.strbuf;
 
-// What re-entrancy promises the server, measured: a session gives back
-// everything it took, and a session that handles two thousand messages leaves
-// the heap where it found it. A server that grew by one message would grow
-// without bound over a day of editing, which is the failure this file exists
-// to catch.
-// D20.5
+/// Checks server resource release. A session that handles 2,000 messages must return the heap
+/// to its starting range.
 //
-// The scripts go through files rather than through a pipe. A pipe holds 64 KiB
-// and nothing drains it while the server reads, so a script of two thousand
-// messages would fill it and the server would wait for a writer that has
-// already returned. The harness runs a test in a directory of its own, so a
-// file the test writes is the test's alone (notes/testing.md 3).
+// The scripts use files instead of a pipe. A pipe holds 64 KiB, and nothing
+// drains it while the server reads. Two thousand messages would fill it. The
+// server would then wait for a writer that already returned. The harness runs
+// a test in a directory of its own, so a
+// file the test writes is the test's alone.
 //
-// The program break is the one view here, and the small-block view is off on
-// purpose. A round of this file allocates tens of kilobytes and gives all of
-// it back, which leaves free chunks of every size, so a 32-byte probe lands
-// wherever one starts: it measured 22800 bytes of movement with nothing
-// leaking (notes/testing.md 4). A round that switches the block view off has
-// to earn it, and this one does: a deletion sweep over the six releases of
-// server.free turns the break probe red for every one of them.
-// T-064: it ran the sweep one deletion at a time
+// The program break is the one view here, and the small-block view is off on purpose. A round
+// of this file allocates tens of kilobytes and gives all of it back, which leaves free chunks
+// of every size. A 32-byte probe lands wherever one starts. It moved 22800
+// bytes with no leak. This noise makes the small-block view unsuitable.
+// Removing any of the six server.free releases turns the break probe red.
 
 // The rounds of the session probe and the distance in bytes that fails it.
 // Each round runs a whole session -- a server, its buffers, its parsed
@@ -48,15 +41,13 @@ u64 BOUND = 8192;
 // late sample is round 185 (`i == 184`) and the span the bound covers is 181
 // rounds. 8192 over 181 is about 45 bytes a round, so a leak below 45 bytes
 // per session sits under this probe and a leak above it does not. Every
-// release of server.free is far above that -- the deletion sweep moved the
-// break by 212992 bytes at the least -- and a later ticket that adds a release
-// of a few bytes to a session needs more rounds rather than a smaller bound,
+// release of server.free is far above that. The smallest deletion moved the
+// break by 212992 bytes. A new release of a few bytes needs more rounds,
 // since the bound is the allocator's own noise.
-// T-064: its deletion sweep measured the six releases
 
 // The messages of the long session, and how many of them the probe holds
 // against the early sample. Two thousand didChange notifications of a
-// kibibyte each are 2 MB of text through one server; a server that kept one
+// kibibyte each are 2 MB of text through one server. A server that kept one
 // text of each moves the break by that much.
 u64 MESSAGES = 2000;
 u64 EARLY_MESSAGE = 200;
@@ -78,7 +69,6 @@ string ANSWER_FILE = "answers.bin";
 // The current program break, which is the end of the heap. sbrk(0) moves
 // nothing and reports it. std has no binding for it and these tests are its
 // only callers.
-// D9.8
 extern fn sbrk(i64 increment) void*;
 
 fn probe_address() u64 {
@@ -86,7 +76,6 @@ fn probe_address() u64 {
 }
 
 // How far apart two addresses are, whichever way the heap moved.
-// D11.1
 fn distance(u64 a, u64 b) u64 {
     if (a > b) {
         return a - b;
@@ -255,8 +244,8 @@ fn a_session_gives_back_everything_it_took() void {
 fn a_session_of_two_thousand_messages_does_not_grow() void {
     // One server, one document, two thousand changes of a kibibyte each. The
     // document the reader parses is cleared and not freed between messages, so
-    // the arena settles at the largest message; the read buffer drops the frame
-    // it answered; and the store holds one text at a time. The break must
+    // the arena settles at the largest message. The read buffer drops the frame
+    // it answered, and the store holds one text at a time. The break must
     // therefore stand still from the two-hundredth message to the last.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
@@ -283,7 +272,7 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
     // The two messages before the changes, and the changes themselves.
     u64 steps = MESSAGES + 2;
     // step answers false at the end of the stream, which is where the script
-    // ends; every message before that is one step.
+    // ends. Every message before that is one step.
     while (server.step(&srv)) {
         seen += 1;
         if (seen == EARLY_MESSAGE) {

@@ -9,16 +9,11 @@ import prim;
 import types;
 import std.strbuf;
 
-// The syntax tree and its S-expression printer (src/fort/ast.ft): the arena,
-// the children of a node, the kind names and the printed form of a
-// hand-built tree. The parser suites cover the trees the parser builds; this
-// one covers the shapes only a hand-built tree reaches and the ownership the
-// arena promises.
+/// Checks the AST arena, child lists, kind names, and S-expression output for hand-built trees.
 
 // The arena and the buffer every assertion below works in. They are locals of
 // main's callees rather than module state, since a module of the compiler may
 // not keep any and a test has no reason to differ.
-// D20.5
 struct env {
     ast.arena arena;
     strbuf.str_buf buf;
@@ -137,7 +132,6 @@ fn arena_free_empties_and_is_reusable() void {
     assert(ast.ast_arena_count(&e.arena) == 0);
     // The arena is usable afterwards, which is what makes a second analysis
     // in one process independent of the first.
-    // D20.5
     ast.node mut* n = int_lit(&e, 5);
     assert(ast.ast_arena_count(&e.arena) == 1);
     assert(n->ival == 5);
@@ -173,7 +167,6 @@ fn arena_init_zeroes_a_fresh_arena() void {
 // by a probe: an owning local dropped without it makes the checked build
 // abort at the next write into that slot with `overwriting owned value`,
 // which is what deleting it produces here.
-// D17.11
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_CHILDREN = 1024;
@@ -182,7 +175,6 @@ u64 LEAK_BOUND = 8192;
 // The current program break, which is where the heap ends: sbrk(0) moves
 // nothing and reports it. There is no std binding for it and this is its one
 // caller.
-// D9.8
 extern fn sbrk(i64 increment) void*;
 
 fn heap_end() u64 {
@@ -191,7 +183,6 @@ fn heap_end() u64 {
 
 // How far apart two positions are, whichever way the heap moved: a
 // subtraction the wrong way round would trap before the assertion.
-// D11.1
 fn distance(u64 a, u64 b) u64 {
     if (a > b) {
         return a - b;
@@ -247,8 +238,7 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
     }
     assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
     // A node owns its list and `del` is shallow, so the list goes before the
-    // node does; if it did not, this is where it would show.
-    // D17.7
+    // node does. If it did not, this is where it would show.
     assert(moved(list_at[0], list_at[1], list_at[2]) < LEAK_BOUND);
     // The vector of owned node pointers is the arena's own block and is
     // released last.
@@ -276,7 +266,7 @@ fn children_are_pushed_and_read_back() void {
         i += 1;
     }
     assert(ast.ast_len(parent) == 100);
-    // The first two were pushed with their own values; every later child
+    // The first two were pushed with their own values. Every later child
     // carries its index.
     assert(ast.ast_child(parent, 0)->ival == 1);
     assert(ast.ast_child(parent, 1)->ival == 2);
@@ -306,7 +296,7 @@ fn marks_are_read_from_the_flags() void {
 
 fn every_kind_has_a_name() void {
     // ast_kind_name answers for every member of the enum, and no two members
-    // of one family share a name; the dump and the diagnostics spell a kind
+    // of one family share a name. The dump and the diagnostics spell a kind
     // with it.
     assert(ast.ast_kind_name(ast.ast_kind.k_none) == "none");
     assert(ast.ast_kind_name(ast.ast_kind.k_module) == "module");
@@ -320,7 +310,7 @@ fn every_kind_has_a_name() void {
     assert(ast.ast_kind_name(ast.ast_kind.k_struct_lit) == "struct-lit");
     assert(ast.ast_kind_name(ast.ast_kind.k_array_lit) == "array-lit");
     assert(ast.ast_kind_name(ast.ast_kind.k_error) == "error");
-    // Every kind from the first to the last has a name of its own; `?` is the
+    // Every kind from the first to the last has a name of its own. `?` is the
     // answer for no member at all.
     i32 mut k = cast(ast.ast_kind.k_none, i32);
     i32 last = cast(ast.ast_kind.k_error, i32);
@@ -344,7 +334,6 @@ fn dump_of_an_error_node_has_no_children() void {
     ast.node mut* err = node(&e, ast.ast_kind.k_error);
     // A skipped region never has children, and the dump prints none even if a
     // pass put one there.
-    // D14.2
     ast.ast_push(err, int_lit(&e, 1));
     assert(dump(&e, err) == "(error)");
 }
@@ -424,7 +413,6 @@ fn dump_of_named_string_void_and_function_types() void {
     named->name = "node";
     assert(dump(&e, named) == "(name node)");
     // A qualified name prints both identifiers.
-    // D9.4
     named->a = ident(&e, "writer");
     assert(dump(&e, named) == "(name node writer)");
     assert(dump(&e, node(&e, ast.ast_kind.k_type_string)) == "(string)");
@@ -464,7 +452,6 @@ fn dump_of_a_declaration_and_of_a_module() void {
     ast.ast_push(mod, var);
     assert(dump(&e, mod) == "(module (var n (type (prim i32) mut) (int 1)))");
     // An `extern fn` is named by its flag rather than by its kind.
-    // D9.8
     ast.node mut* fn_decl = node(&e, ast.ast_kind.k_fn_decl);
     fn_decl->name = "abort";
     fn_decl->flags = ast.FLAG_EXTERN;
@@ -491,7 +478,6 @@ fn dump_of_a_case_clause_and_a_designator() void {
     clause->a = node(&e, ast.ast_kind.k_block);
     assert(dump(&e, clause) == "(case (labels (int 1)) (block))");
     // The default clause carries the word rather than a label list.
-    // D7.6
     ast.node mut* other = node(&e, ast.ast_kind.k_case);
     other->flags = ast.FLAG_DEFAULT;
     other->a = node(&e, ast.ast_kind.k_block);

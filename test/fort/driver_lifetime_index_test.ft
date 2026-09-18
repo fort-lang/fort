@@ -5,42 +5,37 @@
 import lifetime;
 import std.strbuf;
 
-// The check document mode. `--index` runs the front end, the index walk and
-// the document writer in each round, and the document goes to the captured
-// stdout. `--index` implies `--check --json`, so the three of them are one
-// option here. The driver gives all of it back.
-// D14.1, D20.2, D20.3, D20.5
+/// The check document mode. `--index` runs the front end, the index walk and
+/// the document writer in each round, and the document goes to the captured
+/// stdout. `--index` implies `--check --json`, so the three of them are one
+/// option here. The driver gives all of it back.
 //
 // support/lifetime.ft states the rule of the probe, the two views and the
-// size of a round. This file is one of six, one for each mode of the driver,
-// because the harness kills a program at 60 s (toolchain.md 7.3) and the six
-// modes in one program passed alone and timed out under load.
-// T-094: one probe for each mode of the driver
+// size of a round. Each file tests one driver mode. This keeps every program
+// below the harness limit of 60 s under load.
 //
-// The six releases that this mode adds are the three of index.free -- the
-// record span, the pool of type spellings and the buffer that a spelling is
-// built in -- the two of driver.check_document, the file list and the index
-// itself, and the `strbuf.free(&doc)` of driver.write_document. The width is
-// what makes the small ones visible: a spelling buffer and a vector of one
-// file name are 256 bytes in each round, and every record carries a long type
-// spelling, so that the pool and the buffer are the size of a round and not
-// the size of a block.
+// This mode adds six releases. index.free releases the record span, the type
+// spelling pool, and the spelling buffer. driver.check_document releases the
+// file list and the index. driver.write_document releases `doc`.
+//
+// The width makes the small releases visible. Each round allocates 256 bytes
+// for a spelling buffer and a one-name vector. Each record also carries a long
+// type spelling. These allocations then affect a complete round.
 //
 // The width also has a ceiling, and the ceiling is why it is 27 and not 40.
-// The buffer of driver.write_document holds the whole document, and a strbuf
-// doubles its capacity, so a document above 65536 bytes gives that buffer a
-// capacity of 131072. glibc serves a block of that size by mmap, the program
-// break does not move, and the release becomes invisible: at a width of 40
-// the document is 92003 bytes and the deletion of `strbuf.free(&doc)` left
-// this test green. At 27 the document is 62541 bytes, the buffer is a heap
+// The driver.write_document buffer holds the complete document. A strbuf
+// doubles its capacity. A document above 65536 bytes therefore gives the
+// buffer a capacity of 131072. glibc serves that block through mmap, so the
+// program break does not move. At width 40, the document is 92003 bytes and
+// removing `strbuf.free(&doc)` is invisible to this test. At 27, the document
+// is 62541 bytes and the buffer is a heap
 // block of 65536, and the deletion turns this test red. A width that makes
-// the document pass 65536 bytes takes that release out of the probe, so the
-// document size is measured when the width or the document format changes.
-// notes/testing.md 4 states the rule.
+// the document exceed 65536 bytes hides that release from the probe. Measure
+// the document size when the width or document format changes.
+// The shared lifetime probe states the measurement rule.
 //
-// The count of rounds is a quarter of the count of a front-end mode, and that
-// is a measurement and not a guess: all six releases turn this test red at
-// 1000 rounds, where the two small ones leak 256 KB each.
+// The round count is one quarter of a front-end mode's count. At 1000 rounds,
+// all six releases turn this test red. Each small release then leaks 256 KB.
 u64 INDEX_ROUNDS = 1000;
 u64 INDEX_WIDTH = 27;
 
@@ -69,7 +64,6 @@ fn main() i32 {
 // time, against all six tests. The count of the releases of the six modes,
 // the command that measures them and the one release that no single test
 // witnesses stand in support/lifetime.ft, once for the six tests.
-// T-094: one probe for each mode of the driver
 //
 // The width is what makes the two small ones visible. A file list of one name
 // and a buffer that holds one spelling are a few hundred bytes in each round,
@@ -136,7 +130,6 @@ fn write_indexed() void {
     strbuf.append(&b, "    return total;\n}\n");
     // The function the pointer above denotes, declared after it: a module's
     // declarations are order-independent.
-    // D7.10
     strbuf.append(&b, "fn wide(");
     i = 0;
     while (i < INDEX_WIDTH) {

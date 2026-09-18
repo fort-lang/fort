@@ -1,28 +1,23 @@
-// The environment the emitter suites share: the checked sandbox of
-// check_env.ft and an emitter over the same session, with the small queries
-// an assertion about emitted text needs.
+/// Provides the shared emitter-test environment. It combines a checked sandbox, an emitter, and
+/// queries for emitted text.
 //
-// What this stands in for, and why. src/bootstrap/gen.c emits a whole
-// function -- the signature, the allocas of the parameters and locals, the
-// body and the failure blocks -- and test/gen*_test.c therefore compiles a
-// whole program and reads the module back. An expression suite here drives
-// one node at a time instead, so it needs the slots the emitter would have
-// made and none of the text around them: gen_stmt.gen_slots is that half of
-// gen_function, called here and by gen_function itself, so a suite can never
-// assert a slot name the emitter no longer produces. The other job this
+// src/bootstrap/gen.c emits a complete function. This includes the signature,
+// parameter and local allocas, body, and failure blocks. Therefore,
+// test/gen*_test.c compiles a complete program and reads the module back. An
+// expression suite here drives one node at a time, so it needs only the
+// emitter's slots. gen_stmt.gen_slots
+// creates those slots here and in gen_function. A suite therefore
+// cannot assert a slot name that the emitter does not produce. The other job this
 // module does is the per-function reset of the counters and buffers, which
 // `begin` spells the way function_begin does.
 //
-// What it cannot do, and what covers that instead. Nothing here runs
-// `opt -passes=verify`: the compiler's own modules are run through clang by
-// every test of the stage2 corpus, and `opt` would not answer the question
-// that matters here in any case -- it accepts an instruction after a
-// terminator, splitting the block and inventing a successor (notes/compiler.md 6). The
-// structural half of item 10 is therefore `block_terminators` below, over the
-// text of a whole definition, which is the fort analogue of
-// test/gen_helpers.h's gen_block_terminators. An assertion about the emitted
-// text is how a convention rule is pinned in any case, since no language run
-// test can see one (notes/compiler.md 6).
+// What it cannot do, and what covers that instead. Nothing here runs `opt -passes=verify`: the
+// compiler's own modules are run through clang by every test of the stage2 corpus. `opt` would
+// not answer the question that matters here in any case. It accepts an instruction after a
+// terminator, splitting the block and inventing a successor. The `block_terminators` checks the
+// structure of a whole definition. It is the Fort equivalent of test/gen_helpers.h's
+// gen_block_terminators. An assertion about the emitted text is how a convention rule is pinned
+// in any case, since no language run test can see one.
 import ast;
 import check;
 import std.str;
@@ -34,32 +29,30 @@ import modules;
 import std.strbuf;
 import types;
 
-/// The sandbox with its checker, the emitter over its session, and a buffer
-/// the source builders below use. The emitter is initialised at the address it
-/// is used at, since it stores the session it reports through (gen.ft).
+// The sandbox with its checker, the emitter over its session, and a buffer
+// the source builders below use. The emitter is initialised at the address it
+// is used at, since it stores the session it reports through (gen.ft).
 struct env {
     check_env.env c;
     gen.emitter g;
     strbuf.str_buf buf;
 }
 
-/// Prepares a fresh sandbox and an emitter over it, in the default build mode:
-/// checked arithmetic and bounds checks on.
-/// D11.1, D10.6
+// Prepares a fresh sandbox and an emitter over it, in the default build mode:
+// checked arithmetic and bounds checks on.
 fn open(env mut* e) void {
     check_env.open(&e->c);
     gen.gen_init(&e->g, &e->c.m.s, gen.gen_options{});
 }
 
-/// The same with the options a `--release` or `--no-bounds-check` build has.
+// The same with the options a `--release` or `--no-bounds-check` build has.
 fn open_with(env mut* e, gen.gen_options opts) void {
     check_env.open(&e->c);
     gen.gen_init(&e->g, &e->c.m.s, opts);
 }
 
-/// Releases the emitter, then the checker and the sandbox: every text the
-/// emitter interned is its own, and every annotation it read is the checker's.
-/// D20.5
+// Releases the emitter, then the checker and the sandbox: every text the
+// emitter interned is its own, and every annotation it read is the checker's.
 fn close(env mut* e) void {
     gen.gen_free(&e->g);
     strbuf.free(&e->buf);
@@ -68,10 +61,10 @@ fn close(env mut* e) void {
 
 // ---- driving one function ----------------------------------------------------------
 
-/// Checks `body` as the whole of the body of `fn main() i32` and prepares the
-/// emitter over it: the annotations the emitter reads, the module `assert`
-/// quotes its argument out of, and one slot per parameter and local. False
-/// when the source did not check clean, which is what an assertion asks first.
+// Checks `body` as the whole of the body of `fn main() i32` and prepares the
+// emitter over it: the annotations the emitter reads, the module `assert`
+// quotes its argument out of, and one slot per parameter and local. False
+// when the source did not check clean, which is what an assertion asks first.
 fn open_body(env mut* e, string body) bool {
     if (!check_env.check_body(&e->c, body)) {
         return false;
@@ -79,8 +72,8 @@ fn open_body(env mut* e, string body) bool {
     return open_main(e);
 }
 
-/// The same for a whole module source, which is how a test that needs a
-/// declaration beside `main` writes one.
+// The same for a whole module source, which is how a test that needs a
+// declaration beside `main` writes one.
 fn open_src(env mut* e, string src) bool {
     if (!check_env.check_src(&e->c, src)) {
         return false;
@@ -88,8 +81,8 @@ fn open_src(env mut* e, string src) bool {
     return open_main(e);
 }
 
-/// Points the emitter at the checked entry module and binds the slots of
-/// `main`.
+// Points the emitter at the checked entry module and binds the slots of
+// `main`.
 fn open_main(env mut* e) bool {
     e->g.ck = &e->c.ck;
     e->g.module = check_env.module_at(&e->c, "main");
@@ -97,32 +90,26 @@ fn open_main(env mut* e) bool {
     if (e->g.module == null || fn_node == null) {
         return false;
     }
-    // The very slots gen_function makes, from gen_function's own code; the
-    // allocas it wrote beside them belong to the entry block, which an
-    // expression assertion does not look at, and `begin` clears them before
-    // the first emission.
-    // D19.4, D19.5
+    // The very slots gen_function makes, from gen_function's own code. The allocas it wrote
+    // beside them belong to the entry block. An expression assertion does not
+    // inspect them, and `begin` clears them before the first emission.
     gen.node_ref_vec mut locals = gen.node_ref_vec{};
     defer gen.refs_free(&locals);
     gen_stmt.gen_slots(&e->g, fn_node, &locals);
     return true;
 }
 
-/// The per-function reset of gen_stmt.function_begin, minus the slots, so that
-/// two assertions of one test each start from `%t0` and `L0`.
-/// D19.5
-///
-/// It stays a second copy and is not joined to function_begin, which a review
-/// asked about. The two answer different questions. function_begin resets
-/// fourteen fields, the slot vector and the scope stack among them, because it
-/// starts a definition; this resets the seven an expression assertion reads --
-/// the three counters, the three buffers and `terminated` -- and keeps the
-/// slots, because the expression it is about to emit names the locals of the
-/// function `open_main` already bound. A `begin` that called function_begin
-/// would drop those slots and every expression suite would panic in
-/// gen_slot_place. It also clears `failed`, which function_begin does not, so
-/// that one case's gen_todo does not silence the next.
-/// T-037: the review that asked about the second copy
+// The per-function reset of gen_stmt.function_begin, minus the slots, so that
+// two assertions of one test each start from `%t0` and `L0`.
+//
+// It stays separate from function_begin because the two reset different state. function_begin
+// resets fourteen fields, the slot vector and the scope stack among them, because it starts a
+// definition. This resets the seven an expression assertion reads -- the three counters, the
+// three buffers and `terminated`. It keeps the slots because the next expression can name
+// locals that `open_main` already bound. A `begin` that called
+// function_begin would drop those slots and every expression suite would panic in
+// gen_slot_place. It also clears `failed`, which function_begin does not, so that one case's
+// gen_todo does not silence the next.
 fn begin(env mut* e) void {
     e->g.temps = 0;
     e->g.labels = 0;
@@ -136,12 +123,12 @@ fn begin(env mut* e) void {
 
 // ---- the nodes of the checked body -------------------------------------------------
 
-/// The declaration of the local named `name` in `main`.
+// The declaration of the local named `name` in `main`.
 fn decl_of(env* e, string name) ast.node* {
     return check_env.node_in_main(&e->c, ast.ast_kind.k_var_decl, name);
 }
 
-/// Its initializer, which is the expression a test emits.
+// Its initializer, which is the expression a test emits.
 fn init_of(env* e, string name) ast.node* {
     ast.node* d = decl_of(e, name);
     if (d == null) {
@@ -150,71 +137,66 @@ fn init_of(env* e, string name) ast.node* {
     return d->b;
 }
 
-/// The place of that local, which is what an initializer is written into.
+// The place of that local, which is what an initializer is written into.
 fn place_of(env mut* e, string name) gen.gen_place {
     return gen.gen_slot_place(&e->g, decl_of(e, name)->sym);
 }
 
 // ---- emitting -----------------------------------------------------------------------
 
-/// Emits the initializer of the local `name` as a scalar value and answers the
-/// operand it lands in; the text it produced is body(e).
+// Emits the initializer of the local `name` as a scalar value and answers the
+// operand it lands in. The text it produced is body(e).
 fn emit_value(env mut* e, string name) gen.gen_val {
     begin(e);
     return gen_expr.gen_expr_value(&e->g, init_of(e, name));
 }
 
-/// The same, answering the text of the blocks it produced.
+// The same, answering the text of the blocks it produced.
 fn value_text(env mut* e, string name) string {
     emit_value(e, name);
     return body(e);
 }
 
-/// The expression of the `i`-th statement of `main`, with the call statement
-/// unwrapped to the call it holds.
-/// D7.3
+// The expression of the `i`-th statement of `main`, with the call statement
+// unwrapped to the call it holds.
 fn stmt_expr(env* e, u64 i) ast.node* {
     return check_env.body_expr(&e->c, "main", i);
 }
 
-/// Emits that statement's expression for its effects alone, which is what a
-/// call statement is.
-/// D7.3
+// Emits that statement's expression for its effects alone, which is what a
+// call statement is.
 fn discard_at(env mut* e, u64 i) string {
     begin(e);
     gen_expr.gen_expr_discard(&e->g, stmt_expr(e, i));
     return body(e);
 }
 
-/// Emits it into that local's own place, which is how every aggregate is
-/// produced.
-/// D19.3
+// Emits it into that local's own place, which is how every aggregate is
+// produced.
 fn into_text(env mut* e, string name) string {
     begin(e);
     gen_expr.gen_expr_into(&e->g, init_of(e, name), place_of(e, name));
     return body(e);
 }
 
-/// The normal blocks emitted so far, a view valid until the next emission.
+// The normal blocks emitted so far, a view valid until the next emission.
 fn body(env* e) string {
     return strbuf.view(&e->g.body);
 }
 
-/// The failure blocks, which are held apart until the definition is assembled.
-/// D19.6
+// The failure blocks, which are held apart until the definition is assembled.
 fn fail(env* e) string {
     return strbuf.view(&e->g.fail);
 }
 
-/// The entry-block allocas a temporary place asked for.
-/// D19.4
+// The entry-block allocas a temporary place asked for.
 fn allocas(env* e) string {
     return strbuf.view(&e->g.allocas);
 }
 
-/// The type of the local `name`, which is how a test over the type lowering
-/// names a fort type: it writes a declaration and reads the type the checker
-/// gave it.
+// The type of the local `name`, which is how a test over the type lowering
+// names a fort type: it writes a declaration and reads the type the checker
+// gave it.
 fn type_of(env* e, string name) types.node* {
     ast.node* d = decl_of(e, name);
     if (d == null || d->sym == null) {
@@ -223,15 +205,14 @@ fn type_of(env* e, string name) types.node* {
     return d->sym->ty;
 }
 
-/// The symbol of a top-level declaration of the entry module.
+// The symbol of a top-level declaration of the entry module.
 fn sym_main(env* e, string name) ast.sym* {
     return check_env.sym_main(&e->c, name);
 }
 
-/// Asserts that emitted text is exactly `expected`, printing both when they
-/// differ: an assertion over a block of IR is unreadable without the two texts
-/// beside each other, and `assert` quotes its argument and not its value.
-/// D11.4
+// Asserts that emitted text is exactly `expected`, printing both when they
+// differ: an assertion over a block of IR is unreadable without the two texts
+// beside each other, and `assert` quotes its argument and not its value.
 fn expect_text(string got, string expected) void {
     if (got != expected) {
         eprint("got:      [");
@@ -244,13 +225,12 @@ fn expect_text(string got, string expected) void {
     assert(got == expected);
 }
 
-/// Two to five lines of expected IR joined into one text: fort joins no two
-/// adjacent string literals and a `.ft` line is 100 columns, so an expected
-/// block of instructions is written a line at a time. The buffer is the
-/// environment's own and serves this one role, so a test holds emitted text (a
-/// view of the emitter's body) against a joined text and never a view of one
-/// buffer against another view of it.
-/// D2.9
+// Two to five lines of expected IR joined into one text: fort joins no two
+// adjacent string literals and a `.ft` line is 100 columns, so an expected
+// block of instructions is written a line at a time. The buffer is the
+// environment's own and serves this one role, so a test holds emitted text (a
+// view of the emitter's body) against a joined text and never a view of one
+// buffer against another view of it.
 fn join2(env mut* e, string a, string b) string {
     strbuf.clear(&e->buf);
     strbuf.append(&e->buf, a);
@@ -292,32 +272,30 @@ fn join8(env mut* e, string a, string b, string c, string d, string f, string h,
 
 // ---- diagnostics --------------------------------------------------------------------
 
-/// Whether any diagnostic reported so far holds `text`: what gen_todo wrote is
-/// read back here, since an unfinished construct is a diagnostic and never
-/// wrong code.
+// Whether any diagnostic reported so far holds `text`: what gen_todo wrote is
+// read back here, since an unfinished construct is a diagnostic and never
+// wrong code.
 fn said(env mut* e, string text) bool {
     return check_env.said(&e->c, text);
 }
 
-/// The errors reported so far, notes excluded.
-/// D14.2
+// The errors reported so far, notes excluded.
 fn errors(env* e) u64 {
     return check_env.errors(&e->c);
 }
 
-/// One more piece appended to the text the last join built, for a block longer
-/// than eight lines.
+// One more piece appended to the text the last join built, for a block longer
+// than eight lines.
 fn join_more(env mut* e, string a) string {
     strbuf.append(&e->buf, a);
     return strbuf.view(&e->buf);
 }
 
-/// The body of `main` written a line at a time, which is how a suite lays a
-/// probe out exactly as the program stage1 was run over: a statement on line
-/// `i` of `lines` is on line `i + 2` of the module check_body builds, so the
-/// position a failure call carries is the position of the operator the test
-/// wrote.
-/// D11.4
+// The body of `main` written a line at a time, which is how a suite lays a
+// probe out exactly as the program stage1 was run over: a statement on line
+// `i` of `lines` is on line `i + 2` of the module check_body builds, so the
+// position a failure call carries is the position of the operator the test
+// wrote.
 fn open_lines(env mut* e, string@ lines) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -332,51 +310,48 @@ fn open_lines(env mut* e, string@ lines) bool {
     return open_body(e, strbuf.view(&b));
 }
 
-/// The bytes of the `i`-th string constant the emitter made, which is how the
-/// text `assert` quoted out of the source is read back (item 5).
-/// D11.4
+// The bytes of the `i`-th string constant the emitter made, which is how the
+// text `assert` quoted out of the source is read back.
 fn record_text(env* e, u64 i) string {
     return gen.records_at(&e->g.strs, i).text;
 }
 
-/// Emits the initializer of the local `name` as a place, which is what an
-/// lvalue has and a value does not.
-/// D6.7
+// Emits the initializer of the local `name` as a place, which is what an
+// lvalue has and a value does not.
 fn emit_place(env mut* e, string name) gen.gen_place {
     begin(e);
     return gen_expr.gen_expr_place(&e->g, init_of(e, name));
 }
 
-// ---- the structural check of item 10 -------------------------------------------------
+// ---- structural block check -------------------------------------------------
 
-/// The answer `block_terminators` gives when every block of every definition
-/// ends in exactly one terminator; anything else names the offending block.
+// The answer `block_terminators` gives when every block of every definition
+// ends in exactly one terminator. Anything else names the offending block.
 string BLOCKS_OK = "one terminator per block";
 
-/// The four terminators the emitter writes: `br`, `ret`, `unreachable` and the
-/// `switch` of a fort switch (item 10).
+// The four terminators the emitter writes: `br`, `ret`, `unreachable` and the
+// `switch` of a fort switch.
 fn is_terminator(string line) bool {
     return str.starts_with(line, "  br ") || str.starts_with(line, "  ret ") ||
            str.starts_with(line, "  unreachable") || str.starts_with(line, "  switch ");
 }
 
-/// Whether the line begins an instruction rather than continuing the one above.
-/// Every instruction is indented by exactly two spaces, so a line indented
-/// further, or one holding the `]` that closes a `switch`, is a continuation of
-/// the `switch` above it, which is the one terminator LLVM prints over several
-/// lines (item 10).
+// Whether the line begins an instruction rather than continuing the one above. Every
+// instruction is indented by exactly two spaces. A line indented further, or one holding the
+// `]` that closes a `switch`, is a continuation of the `switch` above it. It is the one
+// terminator LLVM prints over several lines.
 fn is_instruction(string line) bool {
     return line.len > 2 && str.starts_with(line, "  ") && line[2] != ' ' && line[2] != ']';
 }
 
-/// Whether the line is a block label, which is the only unindented line inside
-/// a definition.
+// Whether the line is a block label, which is the only unindented line inside
+// a definition.
 fn is_label(string line) bool {
     return line.len > 1 && line[0] != ' ' && line[line.len - 1] == ':';
 }
 
-/// The line beginning at `from`, and the offset of the one after it in *next;
-/// the last line of a text with no final newline is returned whole.
+// The line beginning at `from`, and the offset of the one after it in *next;
+// the last line of a text with no final newline is returned whole.
 fn line_at(string text, u64 from, u64 mut* next) string {
     u64 mut i = from;
     while (i < text.len && text[i] != '\n') {
@@ -386,16 +361,15 @@ fn line_at(string text, u64 from, u64 mut* next) string {
     return text[from..i];
 }
 
-/// BLOCKS_OK when every block of every definition in `text` ends in exactly one
-/// terminator and holds no instruction after it, and a report naming the
-/// offending block otherwise: the structural half of what `opt -passes=verify`
-/// is usually trusted for, stated over the text because `opt` does not reject
-/// an instruction after a terminator at all -- it splits the block and invents
-/// a successor (notes/compiler.md 6, item 10). It is the transliteration of
-/// test/gen_helpers.h's gen_block_terminators_of.
-///
-/// A block begins at a label line and ends at the next label or at the closing
-/// brace of the definition.
+// BLOCKS_OK when every block of every definition in `text` ends in exactly one terminator and
+// holds no instruction after it. A report naming the offending block otherwise. The structural
+// half of what `opt -passes=verify` is usually trusted for. Stated over the text because `opt`
+// does not reject an instruction after a terminator at all. It splits the block and invents a
+// successor. This function implements test/gen_helpers.h's
+// gen_block_terminators_of.
+//
+// A block begins at a label line and ends at the next label or at the closing
+// brace of the definition.
 fn block_terminators(env mut* e, string text) string {
     bool mut in_function = false;
     bool mut open = false;
@@ -439,8 +413,8 @@ fn block_terminators(env mut* e, string text) string {
     return BLOCKS_OK;
 }
 
-/// `<label> has N terminators`, the report of a block that ends in none or in
-/// more than one.
+// `<label> has N terminators`, the report of a block that ends in none or in
+// more than one.
 fn terminator_report(env mut* e, string label, u64 count) string {
     strbuf.clear(&e->buf);
     strbuf.append(&e->buf, label);
@@ -450,9 +424,8 @@ fn terminator_report(env mut* e, string label, u64 count) string {
     return strbuf.view(&e->buf);
 }
 
-/// Asserts the structural rule over `text`, printing the report and the module
-/// when it fails: `assert` quotes its argument and not its value.
-/// D11.4
+// Asserts the structural rule over `text`, printing the report and the module
+// when it fails: `assert` quotes its argument and not its value.
 fn expect_blocks(env mut* e, string text) void {
     string report = block_terminators(e, text);
     if (report != BLOCKS_OK) {
@@ -467,13 +440,13 @@ fn expect_blocks(env mut* e, string text) void {
 
 // ---- whole definitions ---------------------------------------------------------------
 
-/// The function definitions emitted so far, which is what an assertion about a
-/// whole definition reads (item 1).
+// The function definitions emitted so far, which is what an assertion about a
+// whole definition reads.
 fn funcs(env* e) string {
     return strbuf.view(&e->g.funcs);
 }
 
-/// The named types, the module-level data and the assembled module.
+// The named types, the module-level data and the assembled module.
 fn named(env* e) string {
     return strbuf.view(&e->g.named);
 }
@@ -486,9 +459,9 @@ fn module_text(env* e) string {
     return gen.gen_text(&e->g);
 }
 
-/// Emits the definition of the top-level function `name` of the entry module
-/// and answers its text, which is the whole of the funcs section when it is the
-/// first definition emitted.
+// Emits the definition of the top-level function `name` of the entry module
+// and answers its text, which is the whole of the funcs section when it is the
+// first definition emitted.
 fn emit_function(env mut* e, string name) string {
     ast.node* fn_node = check_env.node_in_main(&e->c, ast.ast_kind.k_fn_decl, name);
     if (fn_node == null) {
@@ -498,8 +471,8 @@ fn emit_function(env mut* e, string name) string {
     return funcs(e);
 }
 
-/// Checks `src` as a whole module and points the emitter at it without binding
-/// any slot: a definition suite lets gen_function do that itself.
+// Checks `src` as a whole module and points the emitter at it without binding
+// any slot: a definition suite lets gen_function do that itself.
 fn open_module(env mut* e, string src) bool {
     if (!check_env.check_src(&e->c, src)) {
         return false;
@@ -509,12 +482,11 @@ fn open_module(env mut* e, string src) bool {
     return e->g.module != null;
 }
 
-/// The lines of an expected block of IR joined verbatim, each already ending in
-/// its newline: fort joins no two adjacent string literals and a `.ft` line is
-/// 100 columns, so an expected definition is written a line at a time and
-/// passed here as a fixed array. It is the general form of join2 to join8
-/// above, which the expression suites use for a two- or three-line block.
-/// D2.9
+// The lines of an expected block of IR joined verbatim, each already ending in
+// its newline: fort joins no two adjacent string literals and a `.ft` line is
+// 100 columns, so an expected definition is written a line at a time and
+// passed here as a fixed array. It is the general form of join2 to join8
+// above, which the expression suites use for a two- or three-line block.
 fn join_lines(env mut* e, string@ lines) string {
     strbuf.clear(&e->buf);
     u64 mut i = 0;
@@ -525,10 +497,9 @@ fn join_lines(env mut* e, string@ lines) string {
     return strbuf.view(&e->buf);
 }
 
-/// The same as `open_with` from the two build-mode flags, which is how a suite
-/// asks for a `--release` or a `--no-bounds-check` emitter without naming the
-/// option struct.
-/// D11.1, D10.6
+// The same as `open_with` from the two build-mode flags, which is how a suite
+// asks for a `--release` or a `--no-bounds-check` emitter without naming the
+// option struct.
 fn gen_options_open(env mut* e, bool release, bool no_bounds_check) void {
     gen.gen_options mut opts = gen.gen_options{};
     opts.release = release;
