@@ -1,77 +1,28 @@
-// lsp.uri: the file URIs of the protocol, in both directions.
-//
-// A client names a document by a URI and the compiler opens a path, so every
-// message that carries a file name goes through this module. The open
-// documents of lsp.docs are keyed by the URI the client spelled and never by
-// the path, so a document with no path -- `untitled:1`, a file the user has
-// not saved -- is synchronised like any other and only the passes that must
-// open a file ask for one.
-//
-// No module of src/lsp imports this one today (`grep -rl '^import lsp.uri;'
-// src/lsp` names nothing; test/fort/lsp_uri_test.ft is the one importer), so
-// the rule above binds the pass a later ticket adds rather than describing a
-// path any message takes now.
-//
-// ---- what a file URI is ----
-//
-// `file://<authority>/<path>` and `file:/<path>` (RFC 8089). The scheme is
-// compared without case, as RFC 3986 3.1 requires. The authority must be empty
-// or `localhost`, also without case: any other authority names a host this
-// server cannot read a file from, and answering a path for it would open the
-// wrong file. A query or a fragment is refused for the same reason, since
-// neither has a meaning this module could carry into a path.
-//
-// Percent-encoding: `path_of` decodes `%XX` in either case; `of_path` encodes
-// every byte outside the unreserved set of RFC 3986 2.3 with the uppercase
-// hex RFC 3986 2.1 prefers, and leaves `/` alone, since it separates the
-// segments. So a path this module writes comes back from this module
-// unchanged, which is the property the tests hold it to.
-//
-// `%00` is refused. A NUL byte ends a path at the C boundary, and a path that
-// holds one names its prefix (stdlib.md 2.4, io.open_read), so a URI carrying
-// one would name a shorter file than it spells.
-//
-// The decoded path must be absolute. A file URI has no other form, and a
-// relative path from a server that has no working directory of its own names
-// nothing.
-//
-// A Windows drive letter is no special case here: `file:///c%3A/x` decodes to
-// `/c:/x`, which this module answers as it stands. The server targets Linux
-// and no pass of it reads a drive letter.
-//
-// Re-entrancy: no module-level state; both directions write into a buffer the
-// caller owns and lends.
-// D20.5
-//
-// Dispatch: none. Both directions are a loop over bytes and no table of
-// function pointers.
-// D3.10
+/// Converts absolute paths and local file URIs.
 import lsp.text;
 import std.str;
 import std.strbuf;
 
-/// The hex digits of a percent-escape, uppercase because RFC 3986 2.1 prefers
-/// them, with the shift and the mask that pick the two digits of one byte out.
+// Use uppercase digits in percent escapes.
 string HEX_DIGITS = "0123456789ABCDEF";
 u64 HEX_SHIFT = 4;
 u64 HEX_MASK = 15;
 
-/// The two hex digits an escape carries, and the base they are read in.
+// The two hex digits an escape carries, and the base they are read in.
 u64 ESCAPE_DIGITS = 2;
 i64 HEX_BASE = 16;
 
-/// The scheme this module reads and writes, and the one authority it accepts
-/// beside the empty one.
+// The scheme this module reads and writes, and the one authority it accepts
+// beside the empty one.
 string FILE_SCHEME = "file";
 string LOCAL_HOST = "localhost";
 
-/// Whether the byte needs no escape: the unreserved set of RFC 3986 2.3.
+// Whether the byte needs no escape: the unreserved set of RFC 3986 2.3.
 fn is_unreserved(char c) bool {
     return str.is_alnum(c) || c == '-' || c == '.' || c == '_' || c == '~';
 }
 
-/// The value of the escape at `at`, which is the `%`, or -1 when the two bytes
-/// after it are not hex digits, or when they are the two of a NUL.
+// Returns the escape at `%`, or -1 for invalid hex, missing digits, or NUL.
 fn escape_value(string s, u64 at) i64 {
     if (s.len - at <= ESCAPE_DIGITS) {
         return -1;
@@ -88,9 +39,8 @@ fn escape_value(string s, u64 at) i64 {
     return value;
 }
 
-/// The path a file URI names, written into `out`, which is emptied first.
-/// False when `uri` is no file URI this server can open a file for, and `out`
-/// is then empty. Ownership: `out` is borrowed for the call.
+// Writes a local file URI path into an emptied `out`.
+// Returns false and leaves `out` empty when the URI cannot name a local file.
 fn path_of(string uri, strbuf.str_buf mut* out) bool {
     strbuf.clear(out);
     i64 colon = str.index_of(uri, ':');
@@ -122,9 +72,7 @@ fn path_of(string uri, strbuf.str_buf mut* out) bool {
     while (i < uri.len) {
         char c = uri[i];
         if (c == '?' || c == '#') {
-            // A query and a fragment have no reading this module could carry
-            // into a path, so the whole URI is refused rather than the tail
-            // being dropped.
+            // Refuse the whole URI instead of dropping a query or fragment.
             strbuf.clear(out);
             return false;
         }
@@ -144,10 +92,8 @@ fn path_of(string uri, strbuf.str_buf mut* out) bool {
     return true;
 }
 
-/// The file URI of an absolute path, written into `out`, which is emptied
-/// first. False when `path` is not absolute, and `out` is then empty: a
-/// relative path names no file to a server that has no working directory of
-/// its own. Ownership: `out` is borrowed for the call.
+// Writes an absolute path as a file URI into an emptied `out`.
+// Returns false and leaves `out` empty for a relative path.
 fn of_path(string path, strbuf.str_buf mut* out) bool {
     strbuf.clear(out);
     if (path.len == 0 || path[0] != '/') {

@@ -1,167 +1,37 @@
-// lsp.rpc: the base protocol of the language server -- the framing over a pair
-// of descriptors, and the JSON-RPC 2.0 records a frame carries.
-//
-// A frame is a header block, a `\r\n\r\n`, and exactly `Content-Length` bytes
-// of UTF-8 JSON (LSP 3.17, Base Protocol). A conn reads frames from one
-// descriptor and writes them to another, so the server is driven by a pipe in
-// a test exactly as it is by an editor.
-//
-// A header field carries no bare carriage return and no bare line feed, and
-// its name carries no byte at or below a space -- the C0 controls, NUL and the
-// tab among them, and the space itself. A field that breaks either rule is
-// refused, and the frame with it. LSP states no rule for either, and this is
-// the strict reading of the two the module could take: what matters is that no
-// other reader of the same block can cut it into different fields.
-//
-// Both rules answer one shape. A reader that ends a header line at a line feed
-// alone sees two `Content-Length` fields in
-// `Content-Length: 5\r\nX: a\nContent-Length: 2`, where this module sees one
-// field whose value holds a line feed. A reader that trims a field name reads
-// `Content-Length : 48` above a `Content-Length: 2` as one 48-byte body, where
-// this module reads two bytes and then a whole second frame; RFC 7230 3.2.4
-// makes an HTTP server refuse such a field rather than trim it, and this module
-// does the same. Two readers that frame one stream differently is how a message
-// smuggled inside another reaches a server.
-//
-// The name rule is a byte class and not the two bytes the RFC names, because
-// the second reader that matters is written in JavaScript.
-// `String.prototype.trim` strips the Unicode White_Space set, U+000B and U+000C
-// among it, so a vertical tab before the colon is that same smuggle one byte
-// over for `vscode-jsonrpc` and for anything else on that runtime. A class
-// closed against the RFC's whitespace and open against the reference
-// implementation is the wrong way round. No name of the base protocol and no
-// HTTP token character lives at or below a space, so the wider class refuses
-// nothing a client writes.
-//
-// ---- what bounds this module ----
-//
-// An allocation that fails is a runtime error and ends the program, so every
-// buffer a client can grow needs a bound. There are two. A header block above
-// RPC_MAX_HEADER is refused before it is buffered, which stops a client that
-// never sends the empty line from growing the read buffer without limit. A
-// `Content-Length` above the conn's cap is refused before a byte of the body
-// is read.
-// D10.2
-//
-// The body cap is the reader's cap as well: the server calls
-// json.set_max_bytes with the number max_content answers, so no body that
-// passed the framing is refused for its size by the reader (lsp.json). One
-// number, in one place, for one bound.
-//
-// A frame above the cap ends the loop rather than being skipped. The server
-// cannot both bound its memory and stay in step with the stream: the bytes it
-// would have to skip are the ones it refuses to read. The cap is sixteen
-// mebibytes, above any message an editor sends, so a frame above it is a
-// client this server cannot follow.
-//
-// ---- what an error is ----
-//
-// Everything a client can get wrong is an error record on the conn -- a flag
-// and a message -- and never a panic, as lsp.json answers a malformed document
-// with a record. A violated precondition of this module's own API is a panic,
-// and this module states two: a cap above RPC_CONTENT_CEILING handed to
-// set_max_content, and a read size above RPC_CHUNK_CEILING handed to set_chunk.
-// Both bound what one call asks the allocator for, and
-// test/fort/lsp_rpc_cap_panic_test.ft and test/fort/lsp_rpc_chunk_panic_test.ft
-// break one each. `grep -c '^ *panic("' src/lsp/rpc.ft` reads 2.
-// D13.3
-//
-// The end of the stream is not an error. `eof` says the client closed the
-// pipe, which the server reads as `exit` reads it.
-//
-// A write that fails is an error record as well, and one failing write is
-// outside that rule: a write to a pipe whose reader alone has closed raises
-// SIGPIPE, which ends the program before write_all can answer. A shell reads
-// that as status 141 and not as the 1 an orderly end answers with.
-//
-// The server can meet it. A client that dies after the server has read a whole
-// frame into its buffer leaves read_frame able to answer that frame, and the
-// response to it hits the closed pipe. The common order is the other one --
-// the client closes both ends, read_frame answers the end of the stream, and
-// the loop ends before any write -- but it is not the only one.
-//
-// Nothing here installs a handler, and the language does not stand in the way
-// of one: a cast between a pointer and a u64 and between a function pointer
-// and a void* is allowed, so `signal(SIGPIPE, SIG_IGN)` is expressible, and
-// an extern may declare it. A ticket that wants a failed write to be an error
-// record rather than a signal installs it in the entry file, where a
-// process-wide disposition belongs.
-// D3.14, D9.8
-//
-// ---- what a view lives for ----
-//
-// read_frame answers a view into the conn's own read buffer, and the next call
-// to read_frame drops the frame it answered. Every id and every method of the
-// record classify builds is a view into the document the caller parsed, which
-// json.clear ends at the next parse. A caller that keeps either past the next
-// message copies it.
-//
-// Re-entrancy: a conn is a value the caller owns and frees; no module-level
-// state.
-// D20.5
-//
-// Dispatch: none. The header block is a loop over lines and the message a
-// chain of comparisons, not a table of function pointers.
-// D3.10
+/// Reads and writes LSP frames and classifies JSON-RPC messages.
 import lsp.json;
 import lsp.text;
 import std.io;
 import std.str;
 import std.strbuf;
 
-/// The bytes one read(2) asks for. A conn takes more in one call only by
-/// asking again, so a test that sets `chunk` to 1 proves that a frame is a
-/// function of the bytes and not of the read boundaries.
+// The default size of one read.
 u64 RPC_CHUNK = 4096;
 
-/// The longest header block a frame may carry. A client that never sends the
-/// empty line would otherwise grow the read buffer without limit; eight
-/// kibibytes is about a hundred times the two fields LSP defines.
+// The header limit prevents an unterminated header from growing without limit.
 u64 RPC_MAX_HEADER = 8192;
 
-/// The longest body a frame may carry, which is lsp.json's own default: a
-/// message carries one source file at its largest.
+// The longest body a frame may carry, which is lsp.json's own default: a
+// message carries one source file at its largest.
 u64 RPC_MAX_CONTENT = 16777216;
 
-/// The largest read size set_chunk takes. A read asks std.strbuf to reserve
-/// that many bytes of spare room whatever the stream holds, and an allocation
-/// that fails ends the program, so the read size needs a bound as the body
-/// does. Sixteen mebibytes is the largest body a frame carries by default,
-/// and a read larger than the largest frame buys nothing. It bounds the
-/// setter and not the field: `chunk` is public and a caller could write it
-/// directly, outside this bound. No module of this program does, and
-/// set_chunk is the only door this module opens, which is what read_frame
-/// says of max_content where the two are summed.
-/// D10.2
+// The largest read size accepted by `set_chunk`.
 u64 RPC_CHUNK_CEILING = 16777216;
 
-/// The largest cap set_max_content takes, which is the reader's own ceiling:
-/// the server hands the reader the number this conn answers, and a document
-/// holds the offset of its text in a u32 (lsp.json). It is also what keeps the
-/// sum of a header and a body inside a u64 in read_frame, since a cap of the
-/// largest u64 would make that sum overflow and trap. It bounds the setter and
-/// not the field, as RPC_CHUNK_CEILING does: `max_content` is public, and
-/// read_frame says the same where it sums.
-/// D11.1
+// The largest body limit accepted by `set_max_content`.
 u64 RPC_CONTENT_CEILING = 4294967295;
 
-/// The header field that gives the length of the body, and the one separator
-/// of the base protocol.
+// The header field that gives the length of the body, and the one separator
+// of the base protocol.
 string CONTENT_LENGTH = "Content-Length";
 string HEADER_END = "\r\n\r\n";
 u64 HEADER_END_LEN = 4;
 u64 LINE_END_LEN = 2;
 
-/// The base of the decimal number a header field carries.
+// The base of the decimal number a header field carries.
 u64 DECIMAL = 10;
 
-/// The error codes of JSON-RPC 2.0 6 and of LSP 3.17, ErrorCodes. The server
-/// answers with four of them today -- ERROR_PARSE, ERROR_INVALID_REQUEST,
-/// ERROR_METHOD_NOT_FOUND and ERROR_SERVER_NOT_INITIALIZED, which
-/// `grep -n 'rpc.ERROR_' src/lsp/server.ft` finds -- and with no code that is
-/// not named here. The other three are the ones the handlers of the later
-/// tickets need: a request whose parameters are wrong, a handler that failed,
-/// and a request the client cancelled.
+// JSON-RPC and LSP error codes used by server handlers.
 i64 ERROR_PARSE = -32700;
 i64 ERROR_INVALID_REQUEST = -32600;
 i64 ERROR_METHOD_NOT_FOUND = -32601;
@@ -170,28 +40,22 @@ i64 ERROR_INTERNAL = -32603;
 i64 ERROR_SERVER_NOT_INITIALIZED = -32002;
 i64 ERROR_REQUEST_CANCELLED = -32800;
 
-/// How a message names a request. JSON-RPC 2.0 allows a number or a string,
-/// and LSP 3.17 allows those two; id_absent is a message that names none,
-/// which is a notification, and it is also what the server answers with when
-/// it could not read an id at all.
+// A request ID is absent, an integer, or a string.
 enum id_kind {
     id_absent,
     id_int,
     id_str,
 }
 
-/// The id of a request. `num` holds an id_int and `text` an id_str; `text` is
-/// a view into the document the id was read from.
+// The id of a request. `num` holds an id_int and `text` an id_str; `text` is
+// a view into the document the id was read from.
 struct msg_id {
     id_kind kind;
     i64 num;
     string text;
 }
 
-/// What a frame carried. m_invalid is a document this module could not read as
-/// a JSON-RPC message, and `error_msg` says which rule it broke; the id is
-/// still filled in when one could be read, so the answer names the request the
-/// client asked about.
+// `m_invalid` keeps any readable ID so the error response can name the request.
 enum msg_kind {
     m_invalid,
     m_request,
@@ -199,9 +63,7 @@ enum msg_kind {
     m_response,
 }
 
-/// One message. `method` and `params` are empty on a response; `params` is the
-/// handle of the params value in the caller's document, and 0 when the message
-/// carries none. Every string here is a view into that document.
+// One classified message. Responses have no method or parameters.
 struct message {
     msg_kind kind;
     msg_id id;
@@ -210,18 +72,15 @@ struct message {
     string error_msg;
 }
 
-/// A pair of descriptors and the buffers of the frames that cross them. conn{}
-/// is not usable: create names the descriptors. The conn does not own the
-/// descriptors and never closes them, since the server's are stdin and stdout.
+// A framed connection. Call `create` before reading or writing.
 struct conn {
     i32 in_fd;
     i32 out_fd;
     strbuf.str_buf in_buf;
     strbuf.str_buf out_buf;
-    /// The bytes of in_buf the last frame took, dropped at the next read.
+    // Bytes used by the last frame. The next read drops them.
     u64 consumed;
-    /// 0 for the defaults, RPC_CHUNK and RPC_MAX_CONTENT, so that conn{} and
-    /// create both carry them.
+    // Zero selects the default read size or body limit.
     u64 chunk;
     u64 max_content;
     bool eof;
@@ -229,7 +88,7 @@ struct conn {
     string error_msg;
 }
 
-/// A conn over the two descriptors, with the default chunk and cap.
+// A conn over the two descriptors, with the default chunk and cap.
 fn create(i32 in_fd, i32 out_fd) conn {
     conn mut c = conn{};
     c.in_fd = in_fd;
@@ -237,10 +96,7 @@ fn create(i32 in_fd, i32 out_fd) conn {
     return c;
 }
 
-/// Releases both buffers and clears the error record; the conn is empty and
-/// usable afterwards. The descriptors, the read size and the cap are the
-/// caller's and stay as they were, as json.free leaves a document's cap.
-/// free of conn{} is a no-op.
+// Clears buffers and error state. The read size and body limit stay unchanged.
 fn free(conn mut* c) void {
     strbuf.free(&c->in_buf);
     strbuf.free(&c->out_buf);
@@ -250,7 +106,7 @@ fn free(conn mut* c) void {
     c->error_msg = "";
 }
 
-/// The bytes one read asks for.
+// The bytes one read asks for.
 fn chunk_of(conn* c) u64 {
     if (c->chunk == 0) {
         return RPC_CHUNK;
@@ -258,7 +114,7 @@ fn chunk_of(conn* c) u64 {
     return c->chunk;
 }
 
-/// The longest body this conn accepts.
+// The longest body this conn accepts.
 fn max_content(conn* c) u64 {
     if (c->max_content == 0) {
         return RPC_MAX_CONTENT;
@@ -266,12 +122,7 @@ fn max_content(conn* c) u64 {
     return c->max_content;
 }
 
-/// Moves the read size, 0 restoring RPC_CHUNK. A test sets it to 1 to split
-/// every frame across as many reads as it has bytes. A size above
-/// RPC_CHUNK_CEILING is a violated precondition and panics, as a cap above
-/// its own ceiling does: both numbers bound what one call asks the allocator
-/// for.
-/// D13.3
+// Sets the read size. Zero restores the default. A value above the ceiling causes a panic.
 fn set_chunk(conn mut* c, u64 size) void {
     if (size > RPC_CHUNK_CEILING) {
         panic("rpc.set_chunk: above the ceiling");
@@ -279,12 +130,7 @@ fn set_chunk(conn mut* c, u64 size) void {
     c->chunk = size;
 }
 
-/// Moves the cap on a body, 0 restoring RPC_MAX_CONTENT. The server hands the
-/// reader the same number, so that the two layers cannot disagree about what
-/// is too large. A cap above RPC_CONTENT_CEILING is a violated precondition
-/// and panics: the reader refuses it for the same reason, and the sum of a
-/// header and a body must stay inside a u64.
-/// D13.3
+// Sets the body limit. Zero restores the default. A value above the ceiling causes a panic.
 fn set_max_content(conn mut* c, u64 limit) void {
     if (limit > RPC_CONTENT_CEILING) {
         panic("rpc.set_max_content: above the ceiling");
@@ -292,13 +138,13 @@ fn set_max_content(conn mut* c, u64 limit) void {
     c->max_content = limit;
 }
 
-/// Whether the last read ended because the client closed the stream.
+// Whether the last read ended because the client closed the stream.
 fn at_eof(conn* c) bool {
     return c->eof;
 }
 
-/// Whether the conn met an error, and which rule it broke; the message is
-/// empty when it met none.
+// Whether the conn met an error, and which rule it broke; the message is
+// empty when it met none.
 fn has_failed(conn* c) bool {
     return c->failed;
 }
@@ -307,8 +153,8 @@ fn error_message(conn* c) string {
     return c->error_msg;
 }
 
-/// Records the first rule a conn broke. A conn that failed reads no further
-/// frame, since it no longer knows where one begins.
+// Records the first rule a conn broke. A conn that failed reads no further
+// frame, since it no longer knows where one begins.
 fn fail(conn mut* c, string message) void {
     if (!c->failed) {
         c->failed = true;
@@ -316,15 +162,12 @@ fn fail(conn mut* c, string message) void {
     }
 }
 
-/// The bytes read and not yet consumed.
+// The bytes read and not yet consumed.
 fn buffered(conn* c) u64 {
     return c->in_buf.len;
 }
 
-/// Drops the frame the last read answered, which is what keeps the buffer at
-/// the size of the frames in flight rather than of the session. The tail moves
-/// down one byte at a time: it is the bytes of the next frame that a read
-/// brought in early, and never a whole message.
+// Drops the last frame and keeps bytes already read for the next frame.
 fn drop_consumed(conn mut* c) void {
     if (c->consumed == 0) {
         return;
@@ -339,14 +182,12 @@ fn drop_consumed(conn mut* c) void {
     c->consumed = 0;
 }
 
-/// One read into the spare room of the read buffer. False at the end of the
-/// stream and on a read error, which has_failed tells apart.
+// One read into the spare room of the read buffer. False at the end of the
+// stream and on a read error, which has_failed tells apart.
 fn fill(conn mut* c) bool {
     u64 size = chunk_of(c);
     strbuf.reserve(&c->in_buf, size);
-    // The read lands in the buffer's own storage, so nothing is copied
-    // afterwards; the room is `size` bytes and not the whole spare capacity,
-    // which is what makes the read size the one set_chunk fixed.
+    // Limit the read to `size`, even when the buffer has more spare capacity.
     u8 mut@ room = c->in_buf.data[c->in_buf.len..c->in_buf.len + size];
     i64 n = io.read(c->in_fd, room);
     if (n < 0) {
@@ -361,16 +202,13 @@ fn fill(conn mut* c) bool {
     return true;
 }
 
-/// The offset just past the `\r\n\r\n` that ends the header block, or 0 when
-/// the buffer does not hold one yet. `from` is where to start looking, which
-/// the caller moves forward so that a header is scanned once.
+// The offset just past the `\r\n\r\n` that ends the header block, or 0 when
+// the buffer does not hold one yet. `from` is where to start looking, which
+// the caller moves forward so that a header is scanned once.
 fn header_end(conn* c, u64 mut* from) u64 {
     string buffered_text = strbuf.view(&c->in_buf);
     if (buffered_text.len >= LINE_END_LEN && buffered_text[0..LINE_END_LEN] == "\r\n") {
-        // The block ends at its first empty line, so a block with no field at
-        // all is two bytes. It declares no length and content_length refuses
-        // it; without this case the scan below would run on into the frame
-        // after it and read two blocks as one.
+        // Stop at the first empty line, including an empty two-byte block.
         return LINE_END_LEN;
     }
     if (buffered_text.len < HEADER_END_LEN) {
@@ -389,9 +227,9 @@ fn header_end(conn* c, u64 mut* from) u64 {
     return 0;
 }
 
-/// The value of a header field, without the spaces around it. The protocol
-/// writes one space after the colon; a client that writes none, or several, is
-/// read the same way.
+// The value of a header field, without the spaces around it. The protocol
+// writes one space after the colon; a client that writes none, or several, is
+// read the same way.
 fn trimmed(string s) string {
     u64 mut from = 0;
     while (from < s.len && (s[from] == ' ' || s[from] == '\t')) {
@@ -404,9 +242,9 @@ fn trimmed(string s) string {
     return s[from..to];
 }
 
-/// Whether `s` holds a byte at or below a space: the C0 controls, NUL and the
-/// tab among them, and the space itself. A field name may hold none of them.
-/// D3.2: char is ordered by unsigned byte value
+// Whether `s` holds a byte at or below a space: the C0 controls, NUL and the
+// tab among them, and the space itself. A field name may hold none of them.
+// char is ordered by unsigned byte value
 fn holds_space_or_control(string s) bool {
     u64 mut i = 0;
     while (i < s.len) {
@@ -418,11 +256,8 @@ fn holds_space_or_control(string s) bool {
     return false;
 }
 
-/// Reads the header block, which ends at `end`, and answers the body length it
-/// declares. False with an error record when a field is malformed, when a
-/// field holds a bare carriage return or a bare line feed, when a field name
-/// holds a byte at or below a space, when the block declares no length, or
-/// when it declares two that differ.
+// Reads the body length from a complete header block.
+// Returns false and records an error for malformed or conflicting fields.
 fn content_length(conn mut* c, u64 end, u64 mut* out) bool {
     string block = strbuf.view(&c->in_buf)[0..end];
     bool mut found = false;
@@ -434,19 +269,12 @@ fn content_length(conn mut* c, u64 end, u64 mut* out) bool {
             stop += 1;
         }
         if (stop == at) {
-            // The empty line that ends the block.
+            // The empty line ends the block.
             break;
         }
         string line = block[at..stop];
         if (str.index_of(line, '\r') >= 0 || str.index_of(line, '\n') >= 0) {
-            // A field whose bytes hold a bare carriage return or a bare line
-            // feed is refused, and the frame with it. A reader that ends a
-            // line at either byte reads fields this one does not:
-            // `Content-Length: 5\r\nX: a\nContent-Length: 2\r\n\r\n` is one
-            // five-byte body here and two declared lengths there, which is
-            // where a message smuggled inside another gets in. A field of the
-            // base protocol ends at `\r\n` and the block at `\r\n\r\n`, so
-            // neither byte stands inside a well-formed field.
+            // Refuse bare line breaks. Another reader could split the same bytes differently.
             fail(c, "a header field holds a bare carriage return or line feed");
             return false;
         }
@@ -457,20 +285,7 @@ fn content_length(conn mut* c, u64 end, u64 mut* out) bool {
         }
         string name = line[0..cast(colon, u64)];
         if (holds_space_or_control(name)) {
-            // A field name that holds a byte at or below a space is refused,
-            // and the frame with it, for the reason the two bytes above are.
-            // This module compares the name as it stands, so
-            // `Content-Length : 48` names no field it reads, while a reader
-            // that trims the name cuts the same block into other fields. The
-            // review measured what that costs on a block of
-            // `Content-Length : 48` above a `Content-Length: 2`: this module
-            // read a two-byte body and then a whole second frame, and a
-            // trimming reader reads one 48-byte body that swallows the second
-            // message. It measured the same smuggle again with a vertical tab
-            // in place of the space, which is why the class is every byte at
-            // or below a space and not the two the RFC names; the header says
-            // why. The name needs no trimming after this, which is why it gets
-            // none.
+            // Do not trim field names. Trimming could change the frame boundary.
             fail(c, "a header field name holds a space or a control byte");
             return false;
         }
@@ -482,8 +297,7 @@ fn content_length(conn mut* c, u64 end, u64 mut* out) bool {
                 return false;
             }
             if (found && declared != *out) {
-                // Two lengths that differ leave no reading of where the body
-                // ends, so the stream cannot be followed past this frame.
+                // Conflicting lengths make the next frame boundary unknown.
                 fail(c, "the frame declares two lengths");
                 return false;
             }
@@ -499,9 +313,7 @@ fn content_length(conn mut* c, u64 end, u64 mut* out) bool {
     return true;
 }
 
-/// The body of the next frame, as a view into the conn's read buffer that
-/// lives until the next call. False at the end of the stream (at_eof) and on a
-/// malformed frame (has_failed); a conn that failed answers false ever after.
+// Reads the next frame body. Returns false at EOF or after a framing error.
 fn read_frame(conn mut* c, string mut* out) bool {
     *out = "";
     drop_consumed(c);
@@ -530,10 +342,7 @@ fn read_frame(conn mut* c, string mut* out) bool {
         end = header_end(c, &from);
     }
     if (end > RPC_MAX_HEADER) {
-        // The block ended, and it is longer than the bound: the test above
-        // holds the buffer of a client that sends no terminator, and this one
-        // holds the block itself, so the bound reads the same whatever the
-        // read size was.
+        // Check the complete block because its terminator can cross the limit.
         fail(c, "the header is too long");
         return false;
     }
@@ -545,12 +354,7 @@ fn read_frame(conn mut* c, string mut* out) bool {
         fail(c, "the frame is too large");
         return false;
     }
-    // The sum fits. `end` is at most RPC_MAX_HEADER, which the test above has
-    // just enforced, and `len` is at most the cap, which every call of
-    // set_max_content holds to RPC_CONTENT_CEILING. The cap is a field and a
-    // caller could write it directly, outside that bound; no module of this
-    // program does, and set_max_content is the only door this module opens.
-    // D11.1
+    // The header and body limits keep this sum inside `u64`.
     u64 total = end + len;
     while (buffered(c) < total) {
         if (!fill(c)) {
@@ -565,9 +369,8 @@ fn read_frame(conn mut* c, string mut* out) bool {
     return true;
 }
 
-/// Writes one frame: the header, the empty line and the body, in one write, so
-/// that a client never reads a header without its body. False when the write
-/// failed, with the reason in the error record.
+// Builds one frame and passes all bytes to `io.write_all`.
+// Returns false and records an error when `io.write_all` fails.
 fn write_frame(conn mut* c, string body) bool {
     strbuf.clear(&c->out_buf);
     strbuf.append(&c->out_buf, CONTENT_LENGTH);
@@ -584,8 +387,8 @@ fn write_frame(conn mut* c, string body) bool {
 
 // ---- the message -----------------------------------------------------------------
 
-/// Whether the two ids name one request. Two absent ids name none, so they are
-/// never the same: a cancel that carries no id cancels nothing.
+// Whether the two ids name one request. Two absent ids name none, so they are
+// never the same: a cancel that carries no id cancels nothing.
 fn same_id(msg_id a, msg_id b) bool {
     if (a.kind != b.kind) {
         return false;
@@ -599,9 +402,9 @@ fn same_id(msg_id a, msg_id b) bool {
     return false;
 }
 
-/// The id a message member carries, absent when the member is missing, null,
-/// or a value JSON-RPC does not allow there. `ok` is false in that last case,
-/// which is a message this module refuses.
+// The id a message member carries, absent when the member is missing, null,
+// or a value JSON-RPC does not allow there. `ok` is false in that last case,
+// which is a message this module refuses.
 fn id_of(json.doc* d, u32 v, bool mut* ok) msg_id {
     msg_id mut id = msg_id{};
     *ok = true;
@@ -629,9 +432,9 @@ fn id_of(json.doc* d, u32 v, bool mut* ok) msg_id {
     return id;
 }
 
-/// Reads the parsed document as a JSON-RPC message. The document must be one
-/// the caller parsed; a document that failed to parse has no root and is
-/// m_invalid. Every string of the record is a view into that document.
+// Reads the parsed document as a JSON-RPC message. The document must be one
+// the caller parsed; a document that failed to parse has no root and is
+// m_invalid. Every string of the record is a view into that document.
 fn classify(json.doc* d, message mut* out) void {
     *out = message{};
     u32 root = json.root(d);
@@ -680,9 +483,7 @@ fn classify(json.doc* d, message mut* out) void {
 
 // ---- the answers -----------------------------------------------------------------
 
-/// Writes the id as the value of the `id` member: the number, the string, or
-/// null for an absent one, which is what JSON-RPC 2.0 5 answers a request it
-/// could not read with.
+// Writes an integer ID, a string ID, or null for an absent ID.
 fn write_id(json.writer mut* w, msg_id id) void {
     if (id.kind == id_kind.id_int) {
         json.write_int(w, id.num);
@@ -695,8 +496,8 @@ fn write_id(json.writer mut* w, msg_id id) void {
     json.write_null(w);
 }
 
-/// Opens a successful response and leaves the writer where the result value
-/// goes. The caller writes exactly one value and then calls response_end.
+// Opens a successful response and leaves the writer where the result value
+// goes. The caller writes exactly one value and then calls response_end.
 fn response_begin(json.writer mut* w, msg_id id) void {
     json.write_object_begin(w);
     json.write_key(w, "jsonrpc");
@@ -706,14 +507,12 @@ fn response_begin(json.writer mut* w, msg_id id) void {
     json.write_key(w, "result");
 }
 
-/// Closes the object response_begin opened.
+// Closes the object response_begin opened.
 fn response_end(json.writer mut* w) void {
     json.write_object_end(w);
 }
 
-/// The whole of an error response. `message` is the sentence a client shows a
-/// user, so it names what the server could not do and not where in the code it
-/// gave up.
+// Writes a complete error response. `message` is suitable for the client to display.
 fn write_error(json.writer mut* w, msg_id id, i64 code, string message) void {
     json.write_object_begin(w);
     json.write_key(w, "jsonrpc");

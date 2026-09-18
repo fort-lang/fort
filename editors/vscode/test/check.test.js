@@ -1,13 +1,6 @@
 'use strict';
 
-// The check document of D20.2 turned into diagnostic records: what is accepted
-// as a document, the conversion of its 1-based byte columns to 0-based UTF-16
-// offsets, and the grouping by file that publishes and clears squiggles.
-//
-// The documents under `fixtures/` are real compiler output, regenerated with
-// `fort --check --json` over the `.ft` file of the same name; the documents
-// built here by hand are the shapes a compiler must not be trusted to produce
-// (a truncated read, a wrong version, a foreign JSON document).
+/** Tests check document validation, position conversion, and file grouping. */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -41,9 +34,7 @@ function noLines() {
 
 test('a real check document parses to its files and diagnostics', () => {
   const document = check.parseDocument(DOCUMENT);
-  // Every closure holds std.rt, which the compiler reads before the entry file,
-  // and load_module resolves a module's imports before it returns, so std.libc
-  // follows the runtime and the entry file comes third.
+  // The compiler reads the runtime and its imports before the entry file.
   assert.equal(document.files[0], '/vagrant/build/release/std/rt.ft');
   assert.equal(document.files[1], '/vagrant/build/release/std/libc.ft');
   assert.equal(document.files[2], 'main.ft');
@@ -59,7 +50,7 @@ test('a document of a clean check parses with no diagnostic', () => {
   assert.deepEqual(check.parseDocument(clean).diagnostics, []);
 });
 
-// The compiler writes one complete document or nothing (D20.1), so everything
+// The compiler writes one complete document or nothing, so everything
 // else is "no answer" and never "no errors".
 test('stdout that is not a document is no answer', () => {
   assert.equal(check.parseDocument(''), null);
@@ -103,8 +94,7 @@ test('a half-shaped document is refused member by member', () => {
 
 // ---- the conversion ---------------------------------------------------------
 
-// Line 6 of main.ft is `\tprintln("héllo ☃",\ttotal, nope);`: `é` is two bytes
-// and one UTF-16 unit, `☃` is three and one, and the tabs are one each (D20.4).
+// The target line contains tabs and multibyte characters before the diagnostic.
 test('a byte column converts against the multi-byte line it names', () => {
   const document = check.parseDocument(DOCUMENT);
   const byFile = check.diagnosticsByFile(document, PROJECT, linesOnDisk);
@@ -127,7 +117,7 @@ test('without the text a byte column is taken for a character offset', () => {
   });
 });
 
-// A lexical error is reported at a position and not over a range (D14.2), which
+// A lexical error is reported at a position and not over a range, which
 // would be a squiggle of no width at all.
 test('an empty range is expanded to the word at its position', () => {
   const document = check.parseDocument(LEXICAL);
@@ -175,8 +165,7 @@ test('a position is converted against its own file, not the checked one', () => 
   assert.equal(linesOnDisk(MATHX)[4].slice(3, 6), 'add');
 });
 
-// A document from an editor session names lines a file rewritten since may not
-// have, and a range that cannot be shown is worse than one that is off.
+// A stale document can name lines that the current file no longer has.
 test('a range past the end of the file clamps to it', () => {
   const document = {
     version: 1,
@@ -228,9 +217,7 @@ test('a file the document names with an absolute path inside the folder is kept'
   assert.equal(byFile.get(MAIN)[0].message, 'absolute');
 });
 
-// The closure holds the standard library, which the compiler read from its own
-// directory in the guest: those paths name nothing the editor can open, and a
-// squiggle it cannot show is worse than none.
+// Guest standard-library paths are outside the workspace and cannot open in the editor.
 test('a file outside the folder is dropped, diagnostic and all', () => {
   const document = check.parseDocument(DOCUMENT);
   assert.ok(document.files.some((file) => file.startsWith('/vagrant/')));
@@ -287,13 +274,8 @@ test('a note about a file outside the folder is dropped and its error kept', () 
   assert.deepEqual(byFile.get(MAIN)[0].notes, []);
 });
 
-// The other direction of the same document, and the asymmetry this pins. An
-// error the editor cannot show takes its notes with it. That holds for a note
-// that points at a file the reader has open. 9.2 licenses dropping the
-// diagnostics of a file the client cannot open, and nothing else. The severity
-// `note` belongs to a note that follows no error (D20.2), which this one does
-// not. Publishing it alone would show `previous declaration here` with its
-// error nowhere on the screen.
+// An omitted error also omits its notes, including notes inside the workspace.
+// Publishing a nested note alone would invent a standalone diagnostic.
 test('a note in the folder is dropped with the outside error it followed', () => {
   const document = {
     version: 1,
@@ -321,8 +303,7 @@ test('a note in the folder is dropped with the outside error it followed', () =>
     ],
   };
   const byFile = check.diagnosticsByFile(document, PROJECT, linesOnDisk);
-  // main.ft keeps the empty entry its place in `files` gives it, and nothing
-  // else: an empty entry clears, and clearing is what 9.2 licenses.
+  // Keep the empty entry from `files` so publishing clears main.ft.
   assert.deepEqual([...byFile.keys()], [MAIN]);
   assert.deepEqual(byFile.get(MAIN), []);
 });
@@ -413,8 +394,7 @@ test('a file of the closure outside the folder is left out', () => {
   assert.deepEqual(check.filesUnder(document, PROJECT), [MAIN, MATHX]);
 });
 
-// The order is the compiler's, which is an imported module before its importers
-// (D9.10), and a relative path resolves against the folder like any other.
+// Keep compiler read order. Resolve relative paths against the workspace folder.
 test('the closure keeps the order the compiler read the files in', () => {
   const document = {
     version: 1,
@@ -426,8 +406,7 @@ test('the closure keeps the order the compiler read the files in', () => {
 
 // ---- the grouping -----------------------------------------------------------
 
-// Every file of the closure gets an entry, so publishing the map clears the
-// file that was fixed as well as painting the one that is broken (D20.2).
+// Empty entries clear fixed files while non-empty entries paint broken files.
 test('a file of the closure with no diagnostic gets an empty entry', () => {
   const document = check.parseDocument(DOCUMENT);
   const byFile = check.diagnosticsByFile(document, PROJECT, linesOnDisk);
@@ -453,10 +432,7 @@ test('several diagnostics of one file keep the compiler order', () => {
   assert.deepEqual(items.map((item) => item.notes), [[], []]);
 });
 
-// A note stays with its error, carrying the second place it names. The real
-// document is why: this note has the *same* range as its error, so publishing it
-// separately would put two squiggles over one span and two rows in Problems with
-// nothing saying they are one diagnostic.
+// Keep a note as related information, even when it has the same range as its error.
 test('a note is carried by the error it follows, with its own place', () => {
   const document = check.parseDocument(NOTES);
   const file = path.join(FIXTURES, 'notes.ft');
@@ -537,8 +513,7 @@ test('a diagnostic about a file outside the list still gets an entry', () => {
   assert.deepEqual(byFile.get(MAIN), []);
 });
 
-// A standalone note is a diagnostic of severity `note` in the document itself
-// (D20.2), and it must not be painted as an error.
+// A standalone note uses information severity, not error severity.
 test('a standalone note keeps its severity', () => {
   const document = {
     version: 1,

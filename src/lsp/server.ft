@@ -1,123 +1,30 @@
-// lsp.server: the dispatch loop of the language server -- the lifecycle, the
-// document synchronisation and the capabilities the server advertises.
-//
-// One loop reads a frame, parses it, classifies it and answers it, in that
-// order, and then reads the next. Everything the server knows is a field of
-// one `server` value the caller owns, so a test drives the same loop over a
-// pipe that an editor drives over stdin and stdout.
-// D20.5
-//
-// ---- what the server advertises ----
-//
-// The capability object names what this server implements and nothing else: a
-// capability a server names and does not implement is a bug no client can see
-// until a user meets it. Today that is document synchronisation, full text at
-// a time, and the position encoding. No feature request is implemented yet, so
-// none is advertised. test/fort/lsp_protocol_test.ft asserts the object member
-// by member and counts the members, so a capability added without an
-// implementation fails that test.
-//
-// serverInfo carries the name and no version. The version is `VERSION` in
-// src/fort/driver.ft, and this closure holds no module that carries it: it
-// does hold one module of the compiler, `flt`, which lsp.json imports for its
-// numbers, and importing the driver for one string would pull the whole
-// compiler into fort-lsp behind it. A literal here would be a second copy that
-// drifts, and a version this server cannot derive is a version it must not
-// claim, so the member is absent until the ticket that gives the server an
-// analysis reaches driver.VERSION anyway.
-//
-// ---- the lifecycle ----
-//
-// A request before `initialize` is ServerNotInitialized and a notification
-// before it is dropped, `exit` excepted. A second `initialize` is
-// InvalidRequest. A request after `shutdown` is InvalidRequest and a
-// notification after it is dropped, `exit` excepted. An unknown method is
-// MethodNotFound for a request and a drop for a notification, because a
-// notification is never answered (JSON-RPC 2.0 4.1).
-//
-// `exit` ends the loop with status 0 when a `shutdown` came before it and with
-// status 1 when none did (LSP 3.17, exit). The end of the input stream takes
-// the same two statuses: the client is gone either way, and a status of 0 for
-// a stream that ended in the middle of a conversation would tell a supervisor
-// that the server finished its work. A frame the server could not read ends
-// the loop the same way, since the framing no longer knows where the next
-// message begins.
-//
-// ---- cancellation ----
-//
-// The loop reads one frame, handles it and writes the response before it reads
-// the next byte. "In flight" therefore means one thing here: a request whose
-// handler has not returned. `$/cancelRequest` has three cases and the server
-// writes nothing in any of them, a notification being unanswerable:
-//
-//   * The id names the request being handled. The handler is the one that can
-//     observe it, so the server records it and answers is_cancelled. Nothing
-//     in this ticket sets it through the loop, because no handler reads input
-//     while it works; the analysis of a later ticket is what will.
-//   * The id names a request the server has already answered. Dropped: the
-//     response has gone and the client takes it.
-//   * The id names a request the server has never seen, which includes a
-//     cancel that arrives before its request. Dropped as well, and the request
-//     that follows is answered normally: a cancel names a request in flight,
-//     and that one was not.
-//
-// The id of the request being handled is copied into the server's own buffer.
-// An id is a view into the document that carried it and the next parse reuses
-// that storage, so a server that kept the view would compare against bytes
-// that have been overwritten.
-//
-// ---- the documents ----
-//
-// TextDocumentSyncKind.Full: every didChange carries the whole text. The
-// server takes the text of the last change of the notification and holds it as
-// the document. A change that carries a `range` is a client using a sync kind
-// this server did not advertise, so the notification is dropped and the
-// document keeps the text it had: applying a range's text as the whole
-// document would replace the file with a fragment of it.
-//
-// A malformed notification is dropped whatever it names. The protocol gives a
-// server no way to answer one, and this server has no logging channel yet.
-//
-// Re-entrancy: no module-level state. Every buffer belongs to the server value
-// and dies with it.
-// D20.5
-//
-// Dispatch: none. The method is a chain of comparisons over a string and not
-// a table of function pointers. The server answers nine methods today
-// (`grep -cE '^ +if \(m->method == ' src/lsp/server.ft` reads 9, a count the
-// comment itself cannot join). The whole protocol is tens of methods, so a
-// table would cost a level of indirection and buy nothing.
-// D3.10
+/// Runs the LSP lifecycle and synchronizes open documents.
 import lsp.docs;
 import lsp.json;
 import lsp.rpc;
 import lsp.text;
 import std.strbuf;
 
-/// The name the server reports in `serverInfo`.
+// The name the server reports in `serverInfo`.
 string SERVER_NAME = "fort";
 
-/// TextDocumentSyncKind.Full (LSP 3.17): every change carries the whole text.
+// TextDocumentSyncKind.Full (LSP 3.17): every change carries the whole text.
 u64 SYNC_FULL = 1;
 
-/// The exit status of an orderly shutdown and of every other end of the loop
-/// (LSP 3.17, exit).
+// The exit status of an orderly shutdown and of every other end of the loop
+// (LSP 3.17, exit).
 i32 STATUS_SHUTDOWN = 0;
 i32 STATUS_NO_SHUTDOWN = 1;
 
-/// Everything the server knows. create fills it; a server{} is not usable,
-/// since it names no descriptors.
+// Session state. Call `create` before use.
 struct server {
     rpc.conn conn;
     json.doc doc;
     docs.store open_docs;
-    /// The response being built, and the buffer a diagnostic message is built
-    /// in. They are two, because a message is a view while the response that
-    /// carries it is being written.
+    // Keep message text separate while the response uses it.
     strbuf.str_buf body;
     strbuf.str_buf msg;
-    /// The copy of the id of the request being handled. `current` points into
-    /// this buffer for a string id.
+    // `current` points here when the request ID is a string.
     strbuf.str_buf id_text;
     rpc.msg_id current;
     bool handling;
@@ -129,9 +36,7 @@ struct server {
     text.position_encoding enc;
 }
 
-/// A server over the two descriptors, which it does not own and never closes.
-/// The reader's cap is the framing's cap, so a body that passed the framing is
-/// never refused for its size by the reader.
+// Creates a server and gives the JSON reader the framing limit.
 fn create(i32 in_fd, i32 out_fd) server {
     server mut s = server{};
     s.conn = rpc.create(in_fd, out_fd);
@@ -140,10 +45,7 @@ fn create(i32 in_fd, i32 out_fd) server {
     return s;
 }
 
-/// Releases every buffer, the parsed document and every open document, and
-/// takes the lifecycle back to where create left it: a server that was freed
-/// is a server no client has spoken to, over the same two descriptors. A
-/// second call is a no-op.
+// Clears the session and its buffers. A second call has no effect.
 fn free(server mut* s) void {
     rpc.free(&s->conn);
     json.free(&s->doc);
@@ -161,17 +63,12 @@ fn free(server mut* s) void {
     s->enc = text.position_encoding.enc_utf16;
 }
 
-/// Whether the client has sent `initialized`. LSP 3.17 binds the server until
-/// it answers `initialize` with an InitializeResult (LSP 3.17, initialize),
-/// and says of `initialized` only that the client sends it after it has that
-/// answer and before its next message. Waiting for it is therefore stricter
-/// than the specification asks and is the conservative gate: the ticket that
-/// publishes a diagnostic asks this before it writes one.
+// Returns true after the client sends `initialized`.
 fn is_ready(server* s) bool {
     return s->ready;
 }
 
-/// The exit status the loop answers with.
+// The exit status the loop answers with.
 fn exit_status(server* s) i32 {
     if (s->shutdown_seen) {
         return STATUS_SHUTDOWN;
@@ -179,28 +76,26 @@ fn exit_status(server* s) i32 {
     return STATUS_NO_SHUTDOWN;
 }
 
-/// The position encoding in force, which `initialize` negotiated.
+// The position encoding in force, which `initialize` negotiated.
 fn encoding(server* s) text.position_encoding {
     return s->enc;
 }
 
-/// The connection, so that a caller may move the read size or the cap on a
-/// body before the loop runs. The reader's cap follows the conn's at every
-/// message, so the two cannot disagree about what is too large.
+// The connection, so that a caller may move the read size or the cap on a
+// body before the loop runs. The reader's cap follows the conn's at every
+// message, so the two cannot disagree about what is too large.
 fn connection(server mut* s) rpc.conn mut* {
     return &s->conn;
 }
 
-/// The open documents, which the feature requests of the later tickets read.
+// The open documents that feature requests read.
 fn documents(server* s) docs.store* {
     return &s->open_docs;
 }
 
 // ---- the request being handled ---------------------------------------------------
 
-/// Takes `id` as the id of the request being handled, copying the text of a
-/// string id: an id is a view into the document that carried it, and the next
-/// parse reuses that storage.
+// Starts request tracking and copies a string ID before the next parse.
 fn begin_request(server mut* s, rpc.msg_id id) void {
     strbuf.clear(&s->id_text);
     s->current = id;
@@ -212,40 +107,40 @@ fn begin_request(server mut* s, rpc.msg_id id) void {
     s->cancelled = false;
 }
 
-/// Ends the request being handled. No request is in flight afterwards, so a
-/// cancel that names it is dropped.
+// Ends the request being handled. No request is in flight afterwards, so a
+// cancel that names it is dropped.
 fn end_request(server mut* s) void {
     s->handling = false;
     s->cancelled = false;
     s->current = rpc.msg_id{};
 }
 
-/// Whether the client cancelled the request being handled. A handler that runs
-/// long asks this at a checkpoint and answers ERROR_REQUEST_CANCELLED.
+// Whether the client cancelled the request being handled. A handler that runs
+// long asks this at a checkpoint and answers ERROR_REQUEST_CANCELLED.
 fn is_cancelled(server* s) bool {
     return s->handling && s->cancelled;
 }
 
-/// The id of the request being handled; the absent id when none is.
+// The id of the request being handled; the absent id when none is.
 fn current_id(server* s) rpc.msg_id {
     return s->current;
 }
 
 // ---- the answers -----------------------------------------------------------------
 
-/// Starts a response in the body buffer.
+// Starts a response in the body buffer.
 fn begin_body(server mut* s, json.writer mut* w) void {
     strbuf.clear(&s->body);
     json.write_init(w, &s->body);
 }
 
-/// Sends the body that was built. False when the write failed, which the loop
-/// reads off the conn.
+// Sends the body that was built. False when the write failed, which the loop
+// reads off the conn.
 fn send_body(server mut* s) bool {
     return rpc.write_frame(&s->conn, strbuf.view(&s->body));
 }
 
-/// Answers a request with `null`, which is the result of `shutdown`.
+// Answers a request with `null`, which is the result of `shutdown`.
 fn send_null(server mut* s, rpc.msg_id id) bool {
     json.writer mut w = json.writer{};
     begin_body(s, &w);
@@ -255,7 +150,7 @@ fn send_null(server mut* s, rpc.msg_id id) bool {
     return send_body(s);
 }
 
-/// Answers a request with an error.
+// Answers a request with an error.
 fn send_error(server mut* s, rpc.msg_id id, i64 code, string message) bool {
     json.writer mut w = json.writer{};
     begin_body(s, &w);
@@ -263,7 +158,7 @@ fn send_error(server mut* s, rpc.msg_id id, i64 code, string message) bool {
     return send_body(s);
 }
 
-/// Answers `initialize` with the capabilities of this server.
+// Answers `initialize` with the capabilities of this server.
 fn send_capabilities(server mut* s, rpc.msg_id id) bool {
     json.writer mut w = json.writer{};
     begin_body(s, &w);
@@ -298,17 +193,9 @@ fn send_capabilities(server mut* s, rpc.msg_id id) bool {
 
 // ---- reading the parameters ------------------------------------------------------
 
-// Every function below takes the document the message was parsed from beside
-// the message, because a handle belongs to one document: json.member_of
-// panics on a handle another document handed out. The loop passes its own
-// document, and nothing under dispatch parses again, so every view the
-// message carries is alive for the whole of it.
-// D13.3
+// The following helpers receive the document that created each JSON handle.
 
-/// The member `name` of `v`, and 0 when `v` is the absent handle, when it is
-/// no object, or when it has no such member. json.member_of takes a handle the
-/// document handed out, so the absent one is answered here.
-/// D13.3
+// Returns member `name`, or 0 for an absent value, another kind, or no match.
 fn member(json.doc* d, u32 v, string name) u32 {
     if (v == 0) {
         return 0;
@@ -316,13 +203,13 @@ fn member(json.doc* d, u32 v, string name) u32 {
     return json.member_of(d, v, name);
 }
 
-/// Whether `v` is a string of that document.
+// Whether `v` is a string of that document.
 fn is_string(json.doc* d, u32 v) bool {
     return v != 0 && json.kind_of(d, v) == json.value_kind.k_string;
 }
 
-/// The value of `v` when it is an integer, and `fallback` otherwise. A version
-/// the client left out, or wrote as a float, keeps the one the store holds.
+// The value of `v` when it is an integer, and `fallback` otherwise. A version
+// the client left out, or wrote as a float, keeps the one the store holds.
 fn int_or(json.doc* d, u32 v, i64 fallback) i64 {
     if (v == 0 || json.kind_of(d, v) != json.value_kind.k_int) {
         return fallback;
@@ -332,10 +219,7 @@ fn int_or(json.doc* d, u32 v, i64 fallback) i64 {
 
 // ---- initialize ------------------------------------------------------------------
 
-/// The encoding to negotiate from the client's capabilities: the first name of
-/// `general.positionEncodings` this server implements, since the client lists
-/// them in the order it prefers (LSP 3.17, general.positionEncodings). UTF-16
-/// when the client offers none of them, which every client supports.
+// Selects the first supported client encoding. Returns UTF-16 when none match.
 fn negotiate(json.doc* d, u32 params) text.position_encoding {
     u32 general = member(d, member(d, params, "capabilities"), "general");
     u32 list = member(d, general, "positionEncodings");
@@ -379,16 +263,13 @@ fn did_change(server mut* s, json.doc* d, rpc.message* m) void {
     }
     u64 count = json.count_of(d, changes);
     if (count == 0) {
-        // A notification that changes nothing leaves the document alone,
-        // version and all: the client sent no text to hold.
+        // No content change means no version or text change.
         return;
     }
-    // Full sync: each change carries the whole text, so the last one is the
-    // document. An earlier one is the same document at an earlier keystroke.
+    // Full sync uses the last complete text in the notification.
     u32 last = json.at_of(d, changes, count - 1);
     if (member(d, last, "range") != 0) {
-        // Incremental sync, which this server did not advertise. Its text is a
-        // fragment, and holding a fragment as the document would lose the file.
+        // Reject incremental changes because their text is only a fragment.
         return;
     }
     u32 body = member(d, last, "text");
@@ -410,8 +291,8 @@ fn did_close(server mut* s, json.doc* d, rpc.message* m) void {
 
 // ---- cancellation ----------------------------------------------------------------
 
-/// Reads `$/cancelRequest`. The three cases stand in the header of this file;
-/// every one of them writes nothing.
+// Reads `$/cancelRequest` without writing a response. A matching active request
+// becomes cancelled. An absent, invalid, past, future, or different ID has no effect.
 fn note_cancel(server mut* s, json.doc* d, rpc.message* m) void {
     u32 named = member(d, m->params, "id");
     bool mut ok = true;
@@ -426,8 +307,8 @@ fn note_cancel(server mut* s, json.doc* d, rpc.message* m) void {
 
 // ---- the dispatch ----------------------------------------------------------------
 
-/// The message a request names, built in the server's own buffer so that it
-/// names the method the client sent.
+// The message a request names, built in the server's own buffer so that it
+// names the method the client sent.
 fn about(server mut* s, string before, string method) string {
     strbuf.clear(&s->msg);
     strbuf.append(&s->msg, before);
@@ -504,10 +385,7 @@ fn handle_notification(server mut* s, json.doc* d, rpc.message* m) void {
     // a server that does not implement one.
 }
 
-/// Answers one message, which must have been parsed from `d`. A response is
-/// dropped, since JSON-RPC forbids answering one and this server sends no
-/// request of its own; a message that is no JSON-RPC message at all is
-/// InvalidRequest, named by the id it carried when it carried one.
+// Handles one parsed message. Drops responses and answers invalid messages with an error.
 fn dispatch(server mut* s, json.doc* d, rpc.message* m) void {
     if (m->kind == rpc.msg_kind.m_response) {
         return;
@@ -525,21 +403,17 @@ fn dispatch(server mut* s, json.doc* d, rpc.message* m) void {
     end_request(s);
 }
 
-/// Reads one frame and answers it. False when the loop must end: the stream
-/// ended, the framing broke, or `exit` arrived.
+// Reads one frame and answers it. False when the loop must end: the stream
+// ended, the framing broke, or `exit` arrived.
 fn step(server mut* s) bool {
     string mut body = "";
     if (!rpc.read_frame(&s->conn, &body)) {
         return false;
     }
-    // The reader's cap follows the framing's at every message, so a caller
-    // that moved the conn's cap cannot leave the two disagreeing about what is
-    // too large. The body in hand passed the framing's cap already.
+    // Keep the parser limit equal to the framing limit.
     json.set_max_bytes(&s->doc, rpc.max_content(&s->conn));
     if (!json.parse(&s->doc, body)) {
-        // The framing said where the next frame begins, so the stream is still
-        // in step and the loop goes on. JSON-RPC 2.0 answers a document it
-        // could not read with a null id.
+        // Framing remains valid, so answer the parse error and continue.
         send_error(s, rpc.msg_id{}, rpc.ERROR_PARSE, json.error_message(&s->doc));
         return !rpc.has_failed(&s->conn);
     }
@@ -552,17 +426,17 @@ fn step(server mut* s) bool {
     return true;
 }
 
-/// Reads and answers messages until the client exits, closes the stream, or
-/// sends a frame the server cannot read. The status is 0 after an orderly
-/// shutdown and 1 otherwise.
+// Reads and answers messages until the client exits, closes the stream, or
+// sends a frame the server cannot read. The status is 0 after an orderly
+// shutdown and 1 otherwise.
 fn run(server mut* s) i32 {
     while (step(s)) {
     }
     return exit_status(s);
 }
 
-/// The whole of a session over a pair of descriptors: the server, the loop and
-/// the release of everything it took.
+// The whole of a session over a pair of descriptors: the server, the loop and
+// the release of everything it took.
 fn serve(i32 in_fd, i32 out_fd) i32 {
     server mut s = create(in_fd, out_fd);
     defer free(&s);

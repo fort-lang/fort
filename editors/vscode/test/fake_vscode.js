@@ -1,13 +1,6 @@
 'use strict';
 
-// A stand-in for the editor, so the glue in `extension.js` can be driven.
-//
-// `extension.js` is the only file that requires `vscode`, and no editor exists
-// while the tests run, so this module answers that require with the small part
-// of the API the extension uses and answers `child_process` with a spawn that
-// hands the test the callback. What it cannot check is that VS Code calls these
-// functions the way it is documented to; that is what the manual smoke test in
-// `editors/README.md` is for.
+/** Provides the VS Code and child-process fakes for extension tests. */
 
 const Module = require('node:module');
 const path = require('node:path');
@@ -86,11 +79,7 @@ function createApi(state) {
     },
     workspace: {
       textDocuments: state.openDocuments,
-      // What the extension asks is which folder a file belongs to, and a file
-      // outside every folder belongs to none. A workspace may hold several
-      // folders and one of them may lie inside another, in which case VS Code
-      // answers with the nearest, so the longest match wins. `state.folders` is
-      // an array a test may add to, the way a user adds a folder to a window.
+      // Match the nearest workspace folder when folders are nested.
       getWorkspaceFolder(uri) {
         let best = null;
         for (const folder of state.folders) {
@@ -115,12 +104,7 @@ function createApi(state) {
   };
 }
 
-// Load a fresh copy of the extension with the editor and the spawn faked.
-// `options.documents` are the ones the editor already holds open when it
-// activates, which is how VS Code starts an extension that `onLanguage:fort`
-// woke, and `options.workspaceFolder` is the folder it opened -- one path, an
-// array of them for a window holding several, and nothing at all for a file
-// opened outside every folder.
+/** Loads a fresh extension with fake editor and child-process APIs. */
 function install(options) {
   const settings = options === undefined ? {} : options;
   const state = {
@@ -159,10 +143,7 @@ function install(options) {
   return { extension, state };
 }
 
-// A document as the editor would hand it over: its path, its language and its
-// scheme, which is all the extension reads of one. `scheme` is `file` unless a
-// test says otherwise, since a diff view hands over the same path under another
-// one.
+/** Creates the document fields that the extension reads. */
 function document(filePath, options) {
   const settings = options || {};
   const scheme = settings.scheme === undefined ? 'file' : settings.scheme;
@@ -176,7 +157,7 @@ function languageOf(filePath) {
   return filePath.endsWith('.ft') ? 'fort' : 'plaintext';
 }
 
-// Open a file in the fake editor, replacing the document of that path.
+/** Opens or replaces a document and sends its open event. */
 function open(state, filePath, options) {
   const doc = document(filePath, options);
   const at = state.openDocuments.findIndex((each) => each.uri.fsPath === filePath);
@@ -186,13 +167,14 @@ function open(state, filePath, options) {
   return doc;
 }
 
-// Save a file, which in an editor means the buffer is open and now clean.
+/** Sends a save event for a document. */
 function save(state, filePath, options) {
   const doc = document(filePath, options);
   for (const handler of state.saveHandlers) handler(doc);
   return doc;
 }
 
+/** Closes a document and sends its close event. */
 function close(state, filePath, options) {
   const doc = document(filePath, options);
   const at = state.openDocuments.findIndex((each) => each.uri.fsPath === filePath);
@@ -201,11 +183,7 @@ function close(state, filePath, options) {
   return doc;
 }
 
-// Answer a pending run. `code` is the exit status of a process that ran;
-// `spawnFailure` is a spawn that never happened, which Node reports with a
-// *string* `code` such as `'ENOENT'` -- the very case the extension separates
-// from an exit status; and `timeout` is the run execFile killed, which carries
-// no code at all.
+/** Completes one fake compiler run with output, an exit status, or a spawn failure. */
 function complete(call, result) {
   const answer = result === undefined ? {} : result;
   const stdout = answer.stdout === undefined ? '' : answer.stdout;

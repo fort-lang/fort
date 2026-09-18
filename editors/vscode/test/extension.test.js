@@ -1,11 +1,6 @@
 'use strict';
 
-// The glue: an open and a save each run the compiler through `tools/vm run` in a
-// child process, its document is published into the one collection, a close
-// clears the file, and a run that answers with no document leaves the last
-// diagnostics standing (D20.1, D20.2). The editor and the spawn are faked
-// (test/fake_vscode.js), so what is exercised here is the extension's own case
-// analysis, with no editor, no VM and no compiler.
+/** Tests the extension with a fake editor and a fake child process. */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -29,7 +24,7 @@ const VM = path.join(PROJECT, 'tools', 'vm');
 // with the path relative to the workspace folder and quoted for it.
 const GUEST = COMPILER + " --check --json 'main.ft'";
 // The guest command of a re-check: the directory of the file whose check
-// painted the departed file goes on it as a search root (D9.2).
+// painted the departed file goes on it as a search root.
 const RECHECK_MATHX = COMPILER + " --check --json -I '.' 'mathx.ft'";
 // Severities as VS Code numbers them, which the fake copies.
 const ERROR = 0;
@@ -40,9 +35,7 @@ const CLEAN = JSON.stringify({
   diagnostics: [],
   symbols: [],
 });
-// Two answers about one closure, in the shape check-document.json has: a check
-// of main.ft reporting an error in the module it imports, and a check of that
-// module alone finding it clean.
+// One entry-file check finds a module error. A later module check finds it clean.
 const MAIN_WITH_STALE_MATHX = JSON.stringify({
   version: 1,
   files: ['main.ft', 'mathx.ft'],
@@ -95,9 +88,7 @@ const MATHX_BROKEN = JSON.stringify({
   ],
   symbols: [],
 });
-// A closure of three files, clean, and the same closure with an error in the
-// third. A close of main.ft asks about two files, so the queue is busy while
-// the second waits, which is what an event arriving during the drain needs.
+// A three-file closure keeps one recheck queued while another event arrives.
 const THREE = JSON.stringify({
   version: 1,
   files: ['main.ft', 'mathx.ft', 'other.ft'],
@@ -146,9 +137,7 @@ function checked() {
 
 // ---- what is run ------------------------------------------------------------
 
-// The whole crossing: `tools/vm run` of the workspace folder, spawned there,
-// with the file named relative to it, since the compiler echoes the path it was
-// given and the answer then resolves against that same folder on the host.
+// Run `tools/vm` in the workspace folder and give the compiler a relative path.
 test('a save runs the compiler through tools/vm run and nothing else', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -172,8 +161,7 @@ test('a file in a sub-directory is named relative to the folder', () => {
   ]);
 });
 
-// `tools/vm run` hands its argument to a shell in the guest, so a quote in a
-// file name must not end the word the compiler is given.
+// Quote file names because the guest shell reads the command.
 test('a file name holding a quote is quoted for the guest shell', () => {
   const { state } = open();
   fake.save(state, path.join(PROJECT, "it's.ft"));
@@ -203,8 +191,7 @@ test('a document that is not fort is not checked', () => {
   assert.equal(state.calls.length, 0);
 });
 
-// A diff view hands over a document of the same path under another scheme, and
-// the compiler can only be pointed at a file on disk.
+// The compiler checks files on disk, not documents under another URI scheme.
 test('a fort document that is not a file on disk is not checked', () => {
   const { state } = open();
   fake.save(state, MAIN, { scheme: 'git' });
@@ -233,7 +220,7 @@ test('a save the compiler rejects publishes its diagnostics', () => {
   assert.equal(items[0].severity, ERROR);
   assert.equal(items[0].source, 'fort');
   // The range is the converted one: line 6 of main.ft holds two multi-byte
-  // characters before the name (D20.2, D20.4).
+  // characters before the name.
   assert.deepEqual(items[0].range.start, { line: 5, character: 27 });
   assert.deepEqual(items[0].range.end, { line: 5, character: 31 });
 });
@@ -272,7 +259,7 @@ test('a note becomes related information of its error', () => {
 });
 
 // A note that follows no error is a diagnostic of its own and is shown as
-// information rather than as another error (D20.2).
+// information rather than as another error.
 test('a standalone note is published as information', () => {
   const standalone = JSON.stringify({
     version: 1,
@@ -299,11 +286,7 @@ test('a standalone note is published as information', () => {
   assert.deepEqual(items[0].relatedInformation, []);
 });
 
-// An error whose file is the standard library in the guest is dropped. Its note
-// is dropped with it, even when it points into the workspace folder. 9.2
-// licenses dropping the diagnostics of a file the editor cannot open, and
-// nothing else. A note that follows an error is not the standalone note of
-// D20.2. Nothing is painted, and nothing is invented.
+// Drop an error outside the workspace and all its notes. Do not publish a nested note alone.
 test('a note of a dropped error is dropped with it', () => {
   const outside = JSON.stringify({
     version: 1,
@@ -354,9 +337,7 @@ test('closing a file that is not fort clears nothing', () => {
 
 // ---- when there is no answer ------------------------------------------------
 
-// No document is no answer and never "no errors" (D20.1): the squiggles on
-// screen are the last thing the compiler said and they stay until it says
-// something else.
+// Missing output keeps the last diagnostics. It does not mean that the file is clean.
 test('a run that produces no document leaves the diagnostics standing', () => {
   const state = checked();
   const before = state.published.length;
@@ -430,8 +411,7 @@ test('the newer check publishes when the older one answers first', () => {
   assert.deepEqual(state.diagnostics.get(MAIN), []);
 });
 
-// The dropped answer is dropped whole: it must not reach the output channel
-// either, or a stale failure would be reported over a run that succeeded.
+// A superseded run cannot publish diagnostics or report a failure.
 test('a superseded run that failed is not reported', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -441,10 +421,7 @@ test('a superseded run that failed is not reported', () => {
   assert.deepEqual(state.output, []);
 });
 
-// The bug this closes: the guard used to be keyed on the checked file while a
-// check publishes its whole closure, so a check of main.ft answering late could
-// repaint an error in mathx.ft that a newer check of mathx.ft had just cleared,
-// and it stayed painted until the user saved again.
+// An older entry-file answer cannot repaint a module that a newer run cleared.
 test('an older run does not repaint a file a newer run has answered about', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -480,8 +457,7 @@ test('checks of two files do not supersede each other', () => {
   assert.equal(state.diagnostics.get(NOTES_FT)[0].relatedInformation.length, 1);
 });
 
-// A file checked again after it was closed is the ordinary case of reopening
-// it, so nothing may be left behind that silences the new run.
+// Reopening a file starts and publishes a new check.
 test('a file checked, closed and opened again is published again', () => {
   const state = checked();
   fake.close(state, MAIN);
@@ -576,7 +552,7 @@ test('a departed file that is broken keeps a squiggle of its own', () => {
   assert.equal(items[0].message, 'the error mathx.ft has of its own');
 });
 
-// A run that answers with no document is no answer here either (D20.1). The
+// A run that answers with no document is no answer here either. The
 // squiggles stand and the output channel says why, which is what a deleted
 // module looks like: the compiler cannot read it.
 test('a departed file whose run fails keeps its last answer', () => {
@@ -773,7 +749,7 @@ test('a superseded re-check releases the queue', () => {
 });
 
 // A module is not a file that checks the same way on its own. The first search
-// root is always the directory of the file the compiler was given (D9.2). A
+// root is always the directory of the file the compiler was given. A
 // module in `util/` that imports its sibling as `util.chars` resolves that
 // import only from the directory its entry file sits in. The re-check therefore
 // carries that directory as `-I`, or it paints `module not found` on a file the
@@ -809,10 +785,7 @@ test('a re-check carries the directory of the entry that painted the file', () =
   assert.deepEqual(state.diagnostics.get(NOTES), []);
 });
 
-// A re-check that asks about a file of its own closure hands on the root it was
-// given, and not its own directory. Its own directory is the first root of that
-// one run by D9.2 and of no other run, so handing it on would check the next
-// file with a root no closure ever searched (T-111 finding 3).
+// A recheck passes the root it received. It does not add its own directory.
 test('a re-check hands on the root it was given and not its own', () => {
   const { state } = fake.install({ workspaceFolder: FIXTURES });
   const closure = (...files) =>
@@ -834,22 +807,13 @@ test('a re-check hands on the root it was given and not its own', () => {
   assert.equal(state.calls[4].args[1], COMPILER + " --check --json -I 'project' 'lexical.ft'");
 });
 
-// ---- the root an open and a save carry (T-111) ------------------------------
+// ---- the root an open and a save carry ------------------------------
 //
-// A module is not a file that checks the same way on its own. The first search
-// root is always the directory of the file the compiler was given (D9.2), so an
-// open or a save of `util/strings.ft` resolves `import util.chars;` from
-// `util/` and paints `module 'util.chars' not found` on correct code. Measured
-// with the release compiler on `test/lang/run/modules/nested`: without a root,
-// exit 1 and that message; with `-I` the directory of `main.ft`, exit 0 and a
-// closure of both files. The window knows that directory whenever a check has
-// painted the file, which is what these tests are about.
+// A module can need the entry-file directory to resolve a sibling import.
+// These tests keep that root after an entry-file check paints the module.
 
-// The fixture project of these tests: an entry file with a module in a
-// sub-directory of its own, which is the shape the root matters for. Only
-// `main.ft` is a file on disk. The others are names on a command line, as
-// `other.ft` is above: the compiler is faked, and a name is read from disk only
-// when a diagnostic must be converted against its text.
+// The fixture has an entry file and a module in a subdirectory.
+// Only `main.ft` exists because the tests fake compiler output.
 const SUB_MAIN = path.join(PROJECT, 'main.ft');
 const SUB_STRINGS = path.join(PROJECT, 'util', 'strings.ft');
 const SUB_CHARS = path.join(PROJECT, 'util', 'chars.ft');
@@ -857,8 +821,7 @@ const SUB_CHARS = path.join(PROJECT, 'util', 'chars.ft');
 const readFiles = (...files) =>
   JSON.stringify({ version: 1, files, diagnostics: [], symbols: [] });
 
-// A check of the entry file that painted the module, with the workspace folder
-// one directory above the entry so that the root is a path and not `.`.
+// Paints the module from an entry file below the workspace folder.
 function painted() {
   const { state } = fake.install({ workspaceFolder: FIXTURES });
   fake.save(state, SUB_MAIN);
@@ -887,10 +850,7 @@ test('a save of a module another check painted carries the root of that check', 
   );
 });
 
-// A module nothing has painted is checked as it always was. No closure that
-// holds it has been walked, so nothing here knows which directory is the root
-// of its project, and the extension does not invent one: a project model is
-// what that takes, and no decision states one (T-111).
+// A module without a prior closure has no inferred project root.
 test('a module nothing has painted is checked with no root', () => {
   const { state } = fake.install({ workspaceFolder: FIXTURES });
   fake.open(state, SUB_STRINGS);
@@ -898,9 +858,7 @@ test('a module nothing has painted is checked with no root', () => {
   assert.equal(state.calls[0].args[1], COMPILER + " --check --json 'project/util/strings.ft'");
 });
 
-// The root survives the module's own check: that check records what it was
-// given, plus its own directory, so the next save of the same file carries the
-// root again rather than losing it after one answer.
+// A module check keeps its inherited root for the next save.
 test('the root stays on the module after its own check answers', () => {
   const state = painted();
   fake.open(state, SUB_STRINGS);
@@ -920,10 +878,7 @@ test('the root stays on the module after its own check answers', () => {
   );
 });
 
-// The directory of the file being checked is the first root in every case and
-// no option adds it or removes it (D9.2), so it is not repeated on the command
-// line. An entry file therefore looks exactly as it did before this root
-// existed.
+// Do not repeat the checked file's directory as an include root.
 test('the directory of the file itself is not repeated as a root', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -932,9 +887,7 @@ test('the directory of the file itself is not repeated as a root', () => {
   assert.equal(state.calls[1].args[1], GUEST);
 });
 
-// A close clears the paint and keeps the root. The closure that searched that
-// directory searched it whether the file is open or not, and re-opening the
-// module must not paint the message the closure never saw.
+// Closing a module clears diagnostics but keeps its prior closure root.
 test('a close keeps the root the closure searched', () => {
   const state = painted();
   fake.open(state, SUB_STRINGS);
@@ -994,16 +947,8 @@ test('saving a module again does not lengthen its roots', () => {
   );
 });
 
-// The root of a closure is one directory and it does not grow. A check of a
-// module records the root it was given, not its own directory: its own
-// directory is the first root of that one run by D9.2 and of no other. Two
-// modules in sibling directories therefore each get the root of the entry file
-// that read them, and never each other's.
-//
-// Without this, an open of `a/x.ft` and then of `b/y.ft` would put `-I 'a'` on
-// the second, and `b.z` in `y.ft` would read `a/b/z.ft`: an answer from a root
-// the closure never searched, which is the defect the record exists to stop
-// (T-111 finding 3).
+// A closure root does not grow with each checked module.
+// Sibling modules receive the entry-file root, not each other's directories.
 test('the root of a closure does not grow across sibling directories', () => {
   const { state } = fake.install({ workspaceFolder: PROJECT });
   const X = path.join(PROJECT, 'a', 'x.ft');
@@ -1011,8 +956,7 @@ test('the root of a closure does not grow across sibling directories', () => {
   const ROOT_ONLY = COMPILER + ' --check --json -I ' + "'.'";
   fake.save(state, MAIN);
   fake.complete(state.calls[0], { stdout: readFiles('main.ft', 'a/x.ft', 'b/y.ft') });
-  // Each module is checked with the directory of main.ft, the entry file that
-  // read it, and its answer names the other module of the same closure.
+  // Each module uses the entry-file root and can answer about its sibling.
   fake.open(state, X);
   assert.equal(state.calls[1].args[1], ROOT_ONLY + " 'a/x.ft'");
   fake.complete(state.calls[1], { stdout: readFiles('a/x.ft', 'b/y.ft') });
@@ -1024,19 +968,14 @@ test('the root of a closure does not grow across sibling directories', () => {
   assert.equal(state.calls[3].args[1], ROOT_ONLY + " 'a/x.ft'");
 });
 
-// The root and the publishing are one path, not two. A module checked with the
-// root of its closure answers about the whole closure, and each diagnostic must
-// land on the file it names, with the columns converted against that file's text
-// on disk (D20.2, D20.4). This is the boundary the command-line assertions above
-// stop at.
+// Publish each diagnostic on its named file and convert against that file's text.
 test('a module checked with a root publishes onto the files it names', () => {
   const { state } = fake.install({ workspaceFolder: FIXTURES });
   fake.save(state, MAIN);
   fake.complete(state.calls[0], { stdout: readFiles('project/main.ft', 'notes.ft') });
   fake.open(state, NOTES_FT);
   assert.equal(state.calls[1].args[1], COMPILER + " --check --json -I 'project' 'notes.ft'");
-  // That run reads lexical.ft and reports the error of the fixture document in
-  // it: line 3 of a file whose third line is a tab and then `i32 x = 0755;`.
+  // Convert the reported range against `lexical.ft`, not the checked file.
   fake.complete(state.calls[1], {
     code: 1,
     stdout: JSON.stringify({
@@ -1069,10 +1008,7 @@ test('a module checked with a root publishes onto the files it names', () => {
   assert.deepEqual(state.diagnostics.get(NOTES_FT), []);
 });
 
-// A root is a path relative to the workspace folder the run worked in. A folder
-// added under that one takes the files below it, and `project` names nothing
-// from inside `project`, so the root is dropped rather than carried into a run
-// of another folder.
+// A root is relative to its workspace folder. Drop it when a nested folder takes the file.
 test('a root relative to another workspace folder is dropped', () => {
   const { state } = fake.install({ workspaceFolder: [FIXTURES] });
   fake.save(state, SUB_MAIN);
@@ -1087,7 +1023,7 @@ test('a root relative to another workspace folder is dropped', () => {
 });
 
 // The closure is what the compiler read, which is `"files"`, and not what was
-// published. A diagnostic may name a file that is in no `"files"` array (9.2).
+// published. A diagnostic can name a file that is in no `"files"` array.
 // Such a file never entered a closure, so it never leaves one, and no run is
 // spent on it.
 test('a diagnostic about a file the compiler never read enters no closure', () => {
@@ -1119,7 +1055,7 @@ test('a diagnostic about a file the compiler never read enters no closure', () =
   assert.equal(state.diagnostics.get(MATHX).length, 1);
 });
 
-// A cyclic import is an error and not an impossibility (D9.5), and the compiler
+// A cyclic import is an error and not an impossibility, and the compiler
 // still lists both files, so a cyclic closure reaches this code. It terminates
 // because a hop destroys its own precondition: the answer rewrites the closure
 // of the file that was checked and moves `by` to it.
@@ -1216,10 +1152,7 @@ test('a departure does not let an older answer beat a newer one', () => {
 
 // ---- a close, which is a closure that names nothing ---------------------------
 
-// The squiggle on mathx.ft came from a walk of main.ft's closure. Closing
-// main.ft ends that walk as surely as deleting the `import` does, so mathx.ft is
-// checked in its own right and nothing is guessed about it in the meantime
-// (T-106).
+// Closing an entry file rechecks each module that its closure painted.
 test('closing a file asks about the files its closure painted', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -1235,7 +1168,7 @@ test('closing a file asks about the files its closure painted', () => {
 });
 
 // That run publishes its answer like any other, which is the whole of what the
-// client decides about such a file (`spec/toolchain.md` 9.2).
+// client decides about such a file.
 test('the answer a close asked for is published like any other', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -1245,8 +1178,7 @@ test('the answer a close asked for is published like any other', () => {
   assert.deepEqual(state.diagnostics.get(MATHX), []);
 });
 
-// A file broken in its own right keeps a squiggle of its own, which is the
-// other direction of the same rule: the file shows its own truth.
+// A departed module keeps any diagnostic from its own recheck.
 test('a file a close departed keeps a squiggle of its own', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -1258,9 +1190,7 @@ test('a file a close departed keeps a squiggle of its own', () => {
   assert.equal(items[0].message, 'the error mathx.ft has of its own');
 });
 
-// The closed file is not asked about: its paint is gone and the reader has shut
-// it. `by` alone would not say so here, because the file is opened again while
-// its own re-check would still be in the queue, which would put `by` back on it.
+// Do not recheck the closed entry file, even when a later open updates its record.
 test('closing a file asks nothing about the file itself', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -1287,10 +1217,7 @@ test('a close asks nothing about a file another check painted', () => {
   assert.equal(state.diagnostics.get(MATHX).length, 1);
 });
 
-// Two closes in a row ask once. The first empties the closure of the file it
-// closes, and the second finds nothing left in it. The closure is three files
-// wide, so the queue is still busy at the second close: a queue of one drains
-// before any later event can reach it, and the duplicate would be invisible.
+// The first close empties the closure. A second close must not queue duplicates.
 test('two closes in a row ask once', () => {
   const harness = open();
   const state = harness.state;
@@ -1308,13 +1235,8 @@ test('two closes in a row ask once', () => {
   assert.equal(state.calls[2].args[1], COMPILER + " --check --json -I '.' 'other.ft'");
 });
 
-// The fifth situation: a re-open while the queue still holds a run the close
-// asked for. A queued run takes its number when the queue starts it, which is
-// after the re-open, so `mayReplace` calls it the newer event and lets it paint.
-// The check the re-open started has meanwhile reported an error in other.ft, and
-// that error would be gone until main.ft is saved again. The queued run is
-// therefore dropped: its paint is not the paint that was on the file when it was
-// queued (T-106).
+// A re-open can update a file before its queued departure check starts.
+// Drop that queued check because it no longer describes the current paint.
 test('a re-open drops the runs a close left in the queue', () => {
   const harness = open();
   const state = harness.state;
@@ -1348,9 +1270,7 @@ test('closing a file of another closure asks nothing', () => {
   assert.equal(state.diagnostics.has(MATHX), false);
 });
 
-// A close while a check of the same closure is in flight. The close drops that
-// run whole, and the re-checks it asks for come from the closure that answered
-// and is on the screen, which is the paint that has lost its support.
+// A close cancels an in-flight entry check and rechecks the closure on screen.
 test('a close during a check of its closure asks about the paint on screen', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -1366,9 +1286,7 @@ test('a close during a check of its closure asks about the paint on screen', () 
   assert.deepEqual(state.diagnostics.get(MATHX), []);
 });
 
-// A run a close asked for takes its number when it starts, like every other
-// run, so a save of that file made after it is the live one and the older
-// answer is dropped whole.
+// A later save supersedes the departure check that a close started.
 test('a save supersedes the run a close asked for', () => {
   const { state } = open();
   fake.save(state, MAIN);
@@ -1437,8 +1355,7 @@ test('a close of a wide closure asks one run at a time', () => {
   assert.deepEqual(state.diagnostics.get(OTHER), []);
 });
 
-// A file outside every workspace folder is never checked and never painted, so
-// its close asks nothing, there being no folder to run a check from.
+// A file outside all workspace folders has no checks to close.
 test('closing a file no workspace folder holds asks nothing', () => {
   const { state } = open();
   fake.open(state, LEXICAL_FT);
@@ -1454,7 +1371,7 @@ test('closing a file no workspace folder holds asks nothing', () => {
 // closure has. `deactivate` drops all three with the window.
 //
 // Each cycle costs two runs, not one: the close asks again about the mathx.ft
-// its closure painted (T-106). That is one run per departed file per close, the
+// its closure painted. That is one run per departed file per close, the
 // cost a departure has, and it adds no key to any map.
 test('opening and closing a file fifty times leaves five entries', () => {
   const harness = open();
@@ -1466,9 +1383,7 @@ test('opening and closing a file fifty times leaves five entries', () => {
     fake.complete(last(), { stdout: MATHX_CLEAN });
   }
   assert.equal(harness.state.calls.length, 100);
-  // main.ft and mathx.ft are published about and each has walked a closure;
-  // the run of main.ft is forgotten by the close, and the run of mathx.ft is
-  // the one the last close asked for.
+  // The close forgets the main run. The last module recheck remains current.
   assert.deepEqual(harness.extension.bookkeeping(), {
     runOf: 1,
     publishedAt: 2,

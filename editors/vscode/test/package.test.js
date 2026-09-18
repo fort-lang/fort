@@ -1,7 +1,6 @@
 'use strict';
 
-// The manifest: the activation script, the language and grammar contributions,
-// and the settings there are none of.
+/** Tests the extension manifest and source boundary. */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -29,8 +28,7 @@ test('the language and the grammar are still contributed', () => {
   assert.equal(MANIFEST.contributes.languages[0].configuration, './language-configuration.json');
 });
 
-// The compiler is a constant of extension.js, so there is nothing to set: a
-// manifest that offered a setting would be offering one nothing reads.
+// The compiler path is a constant in extension.js. A manifest setting would have no reader.
 test('the extension contributes no configuration at all', () => {
   assert.equal(MANIFEST.contributes.configuration, undefined);
   assert.deepEqual(Object.keys(MANIFEST.contributes), ['languages', 'grammars']);
@@ -43,23 +41,19 @@ test('the version says this is the stripped extension', () => {
   assert.match(MANIFEST.description, /diagnostics/);
 });
 
-// Everything else under editors/ wraps at 100 columns, and a JSON string
-// cannot be wrapped, so the descriptions are kept short instead and the long
-// form lives in editors/README.md.
+// JSON descriptions stay short because a JSON string cannot wrap.
 test('no line of the manifest is wider than the rest of editors/', () => {
   const text = fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8');
   for (const line of text.split('\n')) assert.ok(line.length <= 100, line);
 });
 
-// One job means one require of the editor API and one pure module beside it
-// (CLAUDE.md, the VS Code extension bullets).
+// Only the activation script imports the editor API.
 test('only the activation script knows about the editor', () => {
   const sources = [path.join(ROOT, 'extension.js')];
   for (const name of fs.readdirSync(path.join(ROOT, 'lib'))) {
     sources.push(path.join(ROOT, 'lib', name));
   }
-  // Written as a pattern rather than as the text itself, so that a search for
-  // the editor API over the sources does not find this test.
+  // Use a pattern so source searches do not count this test as an import.
   const editorApi = /require\(['"]vscode['"]\)/;
   const requiring = sources.filter((file) => editorApi.test(fs.readFileSync(file, 'utf8')));
   assert.deepEqual(requiring, [path.join(ROOT, 'extension.js')]);
