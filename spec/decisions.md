@@ -1685,7 +1685,13 @@ Sections:
   the runtime is `std.rt` now (D13.1 as amended) and counts with `std/*.ft`; `runtime/*.c` and `*.h`
   stayed on the source side while those files existed. Amended 2026-09-12 (T-091): they are deleted
   and `tools/lines.py` globs them no longer, so the source side is the compiler and the standard
-  library and nothing else.
+  library and nothing else. Amended 2026-09-14 (T-123, the user): until then the target was
+  "about three lines of test for each line of source", and the corpus had never met it. Measured
+  on 865a15c: 2.19, from 52963 source lines against 115824 test lines, so 3.0 needed about 43000
+  further test lines. The user refused that backfill and set the target above 2.0, which the
+  corpus meets today. The number changed and the rule that a ticket's own diff carries its
+  tests did not: `tools/lines.py --since main --min 3.0` stays an acceptance criterion, because a
+  per-branch minimum above the corpus target is what holds the corpus above its floor.
 
 ### D14.7 The C-started target bootstrap chain
 - owner: `toolchain.md` (8).
@@ -1805,13 +1811,6 @@ Findings from the design reviews that look like bugs but are deliberate.
 
 Added after the v1 design review at the user's request; wherever an earlier decision or document
 says ownership is "by convention", this section supersedes it.
-  Amended 2026-09-14 (T-123, the user): until then the target was "about three lines of test for
-  each line of source", and the corpus had never met it. Measured on 865a15c: 2.19, from 52963
-  source lines against 115824 test lines, so 3.0 needed about 43000 further test lines. The user
-  refused that backfill and set the target above 2.0, which the corpus meets today. The number
-  changed and the rule that a ticket's own diff carries its tests did not:
-  `tools/lines.py --since main --min 3.0` stays an acceptance criterion, because a per-branch
-  minimum above the corpus target is what holds the corpus above its floor.
 
 ### D17.1 The own qualifier
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

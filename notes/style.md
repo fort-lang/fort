@@ -446,7 +446,19 @@ every one matches.
   a table cell as `\|`, and check by re-parsing: each row must split into the number of cells the
   header names. The deliverable of an audit ticket **is** its table -- T-077, T-078, T-115 and
   T-116 are all tables -- so a malformed table is a deliverable nobody can read (T-077, T-078,
-  T-111).
+  T-111). *A number a tool can re-derive belongs to the tool and not to prose.* Six tickets found
+  the three counts of the `lang_check_json-stage2` comment in `CMakeLists.txt` stale (T-042,
+  T-043, T-124, T-126, T-128, T-157). T-133 deleted those counts. It named
+  `run_tests.py --list` and `run_tests.py --check-json --list` as the way to read them. Five more
+  places still set the corpus target at three lines for each source line, after the user dropped
+  it to above 2.0 on 2026-09-14. Each now points at `TARGET_RATIO`, or states the words of D14.6
+  (`spec/toolchain.md` 7.6), or names the command that measures one branch
+  (`.claude/agents/rev-quick.md`). Three further places gave the number where they mean the
+  ratio, and now name the ratio. One file keeps its stale numbers: `PROMPT.md` is the user's
+  opening request and a record of one day. It holds three statements that are stale today: the
+  3x coverage ratio, the x86-64 Linux target, and the assembly output. The user ruled on
+  2026-09-17 that the file stays unchanged. A record is corrected by the documents that
+  superseded it, and not by an edit (T-133).
 
 ## 5. Shell scripts
 

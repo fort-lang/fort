@@ -426,12 +426,14 @@ without a rewrite.
   `fort-lint` (`tools/fort_lint.py`: the identifier conventions of D1.4 over `std/*.ft` and
   `src/fort/*.ft`, read off `fort --index`; the ctests are `fort_lint` and `fort_lint_selftest`),
   `lines` (`tools/lines.py`: test lines per source line, source being the compiler, `std/*.ft`
-  and the runtime (D14.6, amended by T-076), target 3:1, `--min RATIO` fails
-  below it; `--since REF` measures a branch's own diff instead of the whole repository, which
-  is how a ticket answers for the code it introduces rather than hiding behind the corpus
-  already there; **`--since` reads the commits, not the working tree**, so a file that is only
-  written or only staged counts as 0 lines and the ratio answers about the last commit: commit
-  first, then measure (T-093); its own tests are the ctest `lines_selftest`).
+  and the runtime (D14.6, amended by T-076); `TARGET_RATIO` in that file holds the corpus
+  target, which is above 2:1 since T-123, and is printed and never compared, so `--min RATIO`
+  from the caller is the only value that fails a run; `--since REF` measures a branch's own diff
+  instead of the whole repository, which is how a ticket answers for the code it introduces
+  rather than hiding behind the corpus already there; **`--since` reads the commits, not the
+  working tree**, so a file that is only written or only staged counts as 0 lines and the ratio
+  answers about the last commit: commit first, then measure (T-093); its own tests are the
+  ctest `lines_selftest`).
   `tools/vm <target> [preset]` runs one. CMake detects Linux or Darwin from the host system.
   The `linux` and `darwin` presets set no `FORT_TARGET` cache value.
 - **The `darwin` build copies target library modules** (T-145, T-152).

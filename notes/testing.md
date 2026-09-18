@@ -200,7 +200,7 @@ bullet at a time and without a rewrite.
   read `664 tests: 663 passed, 1 failed` and named only those two substrings; with them removed
   it read `664 tests: 664 passed`, the C suite exited 0 and `test/fort` read
   `173 tests: 173 passed`. `fail/constants/014_a_comparison_of_two_untyped_operands.ft` was the
-  first of the 246 `fail` tests to use the directive.
+  first `fail` test to use the directive.
 - **A `fail` test may not mix a lexical or a syntax diagnostic with a semantic one.** `lex_file`
   reports, and the driver then stops before the checker runs (D14.2), so a file whose lexical
   error is annotated alongside an expected type error never produces the second one and the run
@@ -1027,8 +1027,8 @@ bullet at a time and without a rewrite.
   to lint `std/darwin/*.ft` with stage2 (T-144). The linux root conflicts with darwin declarations.
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
-  has. `tools/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source
-  for the 3:1 ratio (T-144).
+  has. `tools/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the
+  test-to-code ratio (T-144).
   It counts `test/darwin/*.c` as test. The compiler and runtime are source too (D14.6).
   What still does not: **there is no formatter** -- indentation,
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no

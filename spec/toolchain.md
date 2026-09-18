@@ -1785,7 +1785,7 @@ the token stream, the parser's speculative rewinds, constant folding at the edge
 
 ### 7.6 Coverage target (D14.6)
 
-The corpus aims at about three lines of test for each line of source: `wc -l` over `test/*.c`,
+The corpus aims at more than two lines of test for each line of source: `wc -l` over `test/*.c`,
 `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` against `wc -l` over `src/bootstrap/*.c`,
 `src/bootstrap/*.h`, `src/fort/*.ft` and `std/*.ft`, the runtime among them (D13.1). The
 standard library is source and not test (D14.6): it is code the project ships, and the tests that

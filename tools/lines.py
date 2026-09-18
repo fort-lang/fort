@@ -9,8 +9,12 @@ ships and must test, and crediting it to the tests would raise the ratio for
 writing library code (D14.6, amended by T-076). The runtime counts with it:
 the runtime is std.rt, an ordinary module of std/*.ft, since T-091 deleted
 runtime/fort_rt.c and the glob that named it (D13.1, D14.6 as T-088 amends
-it). The editor extension is still on neither side. The target ratio is 3:1;
---min fails the run when the ratio is below the given value.
+it). The editor extension is still on neither side. `TARGET_RATIO` below
+holds the corpus target of D14.6: more than two lines of test for each source
+line, which the user set on 2026-09-14 (T-123). Read the target there and not
+from this text (T-133). No run compares a ratio against `TARGET_RATIO`: the
+constant is printed and never tested, so it fails nothing. --min fails the run
+when the ratio is below the given value, and the value comes from the caller.
 
 --since REF measures a branch instead of the repository: it counts the lines
 a diff against REF adds and removes on each side, so a ticket answers for the
@@ -34,6 +38,7 @@ SOURCE_GLOBS = (
     "std/linux/*.ft",
 )
 TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c", "test/darwin/*.c")
+# Printed beside every ratio and compared with nothing: only --min fails a run.
 TARGET_RATIO = 2.0
 
 

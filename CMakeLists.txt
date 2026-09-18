@@ -723,50 +723,23 @@ set_tests_properties(lang-stage2 PROPERTIES LABELS lang)
 # with a golden index.json beside it, held against that file byte for byte
 # (D20.2, D20.3). It is the oracle of the json and index ports (T-093).
 #
-# --check-json selects 248 of 688 tests. It selects 246 fail tests with
-# diagnostics and two tests with a golden index. The golden tests check the
-# clean compile document. The fail tests check diagnostic documents.
-# `run_tests.py --list` reports 688 tests. `--check-json --list` reports 248.
-# The second list ends with one summary line. That line makes `wc -l` report 249.
-# The pair
-# before T-043 (194 of 538, 192 fail tests) counted the fail tests wrong as
-# well, T-042 re-measured all three after the corpus had grown past 200 of 559,
-# T-045 moved the total by nine `run` tests, which carry no diagnostic, and by
-# one `fail` test, which does: 628 to 638, 219 to 220 and 221 to 222, T-107
-# moved the total alone with two `run` tests, and T-077 moved all three with
-# three tests of which two are `fail` tests: 638 to 643, 220 to 222 and 222 to
-# 224, measured on the branch that rebased over it, and T-117 moved all three
-# with three tests of which one is a `fail` test: 643 to 646, 222 to 223 and
-# 224 to 225. T-097 then moved all three with seven tests of which one is a
-# `fail` test, 646 to 653, 223 to 224 and 225 to 226, and left this comment
-# unchanged; no tool reads these three numbers, so nothing went red. T-124
-# measured them again after it rebased over that commit and moved them with two
-# tests of which one is a `fail` test: 653 to 655, 224 to 225 and 226 to 227.
-# T-125 moved all three with two `fail` tests: 655 to 657, 225 to 227 and 227
-# to 229. T-128 measured all three again and found the comment five tests
-# stale: the corpus on its base was 662, 230 and 232, so tickets after T-125
-# moved it by five and left this comment alone, which nothing reports. Its own
-# two tests, of which one is a `fail` test, take it to 664, 231 and 233. T-126
-# measured all three on its base and found the comment one test stale again:
-# 665, 232 and 234. Its own test is a `run` test, so it moves the total alone,
-# to 666. T-135 measured all three again and moved all three with three tests
-# of which two are `fail` tests: 666 to 669, 232 to 234 and 234 to 236, read
-# off `run_tests.py --list` and `run_tests.py --check-json --list`. T-075
-# measured all three on its base, found the comment where T-135 left it, and
-# moved the total alone with one `run` test: 669 to 670, 234 and 236 unchanged.
-# T-085 rebased over that and moved all three with five tests, of which four are
-# `fail` tests, one for each shape a mut-adding cast has: 670 to 675, 234 to 238
-# and 236 to 240. T-136 measured all three again and moved all three with one
-# `fail` test, which pins the refusal of the old signature form: 675 to 676,
-# 238 to 239 and 240 to 241.
-# T-157 remeasured the three totals and added one run test and one fail test:
-# 684 to 686, 246 to 247, and 247 output lines to 248.
-# T-158 adds one run test and one fail test: 688, 248, and 249 output lines.
-# Against a
-# golden the comparison is stricter than a diff of two compilers for the value
-# and the order of every record, since it holds both compilers against a file
-# in the repository; it is weaker for whitespace, because run_tests.py
-# re-serialises the records with separators of its own before it compares.
+# --check-json selects two groups of tests and no other. It selects every
+# `fail` test, which checks a diagnostic document, and every test with a golden
+# index.json beside it, which checks the clean compile document. The diagnostic
+# half grows with each new `fail` test. The clean half stays small, because a
+# short list of golden files covers it. Read the counts off the harness:
+# `run_tests.py --list` prints the corpus and `run_tests.py --check-json --list`
+# prints the selection. Each list ends with one summary line, so `wc -l` reports
+# one more than the count. This comment held those three counts until T-133
+# deleted them. Six tickets had found them stale, because no tool reads a
+# comment and nothing goes red. `git show 7b5c625:CMakeLists.txt` holds the
+# history those six tickets wrote here (T-133).
+#
+# Against a golden the comparison is stricter than a diff of two compilers for
+# the value and the order of every record, since it holds both compilers
+# against a file in the repository; it is weaker for whitespace, because
+# run_tests.py re-serialises the records with separators of its own before it
+# compares.
 # --check-json ignores the expectation list, so the --xfail of the stage2
 # command above does not apply here. It is a command of check-lang as well as
 # a ctest, which is what makes the gate run it.

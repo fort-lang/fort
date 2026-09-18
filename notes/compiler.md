@@ -933,7 +933,7 @@ gone.
   as a test -- so a fixture common to several suites is either repeated in each or put in
   `test/fort/support/`; what that directory is and what it costs is under **Build and test**
   above, in one place rather than two. `tools/lines.py` counts
-  `src/fort`, so the ported lines carry the 3:1 ratio like any others.
+  `src/fort`, so the ported lines carry the test-to-code ratio like any others.
   Eight more facts the first ports paid for: five from T-032 (`prim.ft`, `consts.ft`,
   `types.ft`) -- keywords, `new(T, n)`, `==`, enum ordering, the forked tests -- and three from
   T-033 (`ast.ft`, `parser.ft`, `test/fort/support/parse_env.ft`) -- joining strings, the

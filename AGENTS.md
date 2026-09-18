@@ -216,7 +216,7 @@ An agent MUST write down a learning or a course correction at once. Two cases st
 **One home for each kind of knowledge.** `AGENTS.md` is not the default home: before T-098 it
 measured 1491 lines and 128 KB, and the cause was a rule that sent every learning here. The table
 says where a fact goes. **The first row that fits wins**, so a fact that two rows accept goes to
-the higher row: the `pkill` rule is the VM's, `tools/lines.py` and the 3:1 ratio are the tests',
+the higher row: the `pkill` rule is the VM's, `tools/lines.py` and the test ratio are the tests',
 and "What checks `.ft` source" is the tests' as well.
 
 | what you learned | where it goes |
