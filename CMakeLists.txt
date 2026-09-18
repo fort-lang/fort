@@ -44,12 +44,30 @@ set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
 set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
 set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
 set(FORT_FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/fort")
-set(FORT_BOOTSTRAP_DIR "${CMAKE_BINARY_DIR}/bootstrap")
 option(FORT_ENABLE_BOOTSTRAP "Build fort through the C-started source chain" ON)
 set(FORT_STAGE1_COMPILER "" CACHE FILEPATH
     "External fort compiler that builds working-tree HEAD")
-set(FORT_BOOTSTRAP_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref" CACHE FILEPATH
-    "Ordered source revisions for the C-started bootstrap")
+
+if(FORT_ENABLE_BOOTSTRAP AND FORT_STAGE1_COMPILER)
+    message(FATAL_ERROR
+        "FORT_ENABLE_BOOTSTRAP=ON does not accept FORT_STAGE1_COMPILER")
+elseif(NOT FORT_ENABLE_BOOTSTRAP AND NOT FORT_STAGE1_COMPILER)
+    message(FATAL_ERROR
+        "FORT_ENABLE_BOOTSTRAP=OFF requires FORT_STAGE1_COMPILER")
+endif()
+
+if(FORT_ENABLE_BOOTSTRAP)
+    set(FORT_BOOTSTRAP_DIR "${CMAKE_BINARY_DIR}/bootstrap")
+    set(FORT_BOOTSTRAP_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref" CACHE FILEPATH
+        "Ordered source revisions for the C-started bootstrap")
+else()
+    get_filename_component(FORT_STAGE1_COMPILER
+        "${FORT_STAGE1_COMPILER}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    if(NOT EXISTS "${FORT_STAGE1_COMPILER}")
+        message(FATAL_ERROR
+            "FORT_STAGE1_COMPILER does not exist: ${FORT_STAGE1_COMPILER}")
+    endif()
+endif()
 
 if(CMAKE_CROSSCOMPILING)
     message(FATAL_ERROR "fort bootstrap requires a native build")
@@ -73,14 +91,10 @@ endif()
 
 # Host tools use the target that CMake selected. This file is build data, not
 # an input to the chain.
-file(MAKE_DIRECTORY "${FORT_BOOTSTRAP_DIR}")
-file(GENERATE OUTPUT "${FORT_BOOTSTRAP_DIR}/target"
+set(FORT_TARGET_FILE "${CMAKE_BINARY_DIR}/bootstrap/target")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/bootstrap")
+file(GENERATE OUTPUT "${FORT_TARGET_FILE}"
     CONTENT "${FORT_TARGET_TRIPLE}\n")
-
-if(NOT FORT_ENABLE_BOOTSTRAP AND NOT FORT_STAGE1_COMPILER)
-    message(FATAL_ERROR
-        "FORT_ENABLE_BOOTSTRAP=OFF requires FORT_STAGE1_COMPILER")
-endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(FORT_STAGE_MODE_ARGS "")
@@ -102,29 +116,29 @@ if(NOT FORT_OPT_PATH)
 endif()
 
 # ---- the bootstrap compiler ---------------------------------------------------
-file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
-list(REMOVE_ITEM FORT_CORE_SOURCES "${FORT_SRC_DIR}/main.c")
+if(FORT_ENABLE_BOOTSTRAP)
+    file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
+    list(REMOVE_ITEM FORT_CORE_SOURCES "${FORT_SRC_DIR}/main.c")
 
-add_library(fort_core STATIC ${FORT_CORE_SOURCES})
-target_include_directories(fort_core PUBLIC "${FORT_SRC_DIR}")
-target_compile_definitions(fort_core PUBLIC
-    FORT_DEFAULT_CC="${FORT_DEFAULT_TARGET_CC}"
-    FORT_DEFAULT_TARGET="${FORT_TARGET_TRIPLE}"
-)
-if(APPLE)
-    # Darwin hides mkdtemp under its source feature macro in C11 mode.
-    target_compile_definitions(fort_core PUBLIC _DARWIN_C_SOURCE)
+    add_library(fort_core STATIC ${FORT_CORE_SOURCES})
+    target_include_directories(fort_core PUBLIC "${FORT_SRC_DIR}")
+    target_compile_definitions(fort_core PUBLIC
+        FORT_DEFAULT_CC="${FORT_DEFAULT_TARGET_CC}"
+        FORT_DEFAULT_TARGET="${FORT_TARGET_TRIPLE}"
+    )
+    if(APPLE)
+        # Darwin hides mkdtemp under its source feature macro in C11 mode.
+        target_compile_definitions(fort_core PUBLIC _DARWIN_C_SOURCE)
+    endif()
+
+    # The compiler binary sits below the bootstrap directory. Product tests
+    # pass their standard root explicitly.
+    add_executable(fort_stage1 "${FORT_SRC_DIR}/main.c")
+    target_link_libraries(fort_stage1 PRIVATE fort_core)
+    set_target_properties(fort_stage1 PROPERTIES
+        OUTPUT_NAME fort
+        RUNTIME_OUTPUT_DIRECTORY "${FORT_BOOTSTRAP_DIR}/stage1")
 endif()
-
-# The compiler binary sits at the root of the build directory and the
-# standard library directory is <build>/std. The fallback --std-dir of
-# toolchain.md 1 (../std relative to the binary) does not resolve to it; the
-# test harness passes --std-dir explicitly.
-add_executable(fort_stage1 "${FORT_SRC_DIR}/main.c")
-target_link_libraries(fort_stage1 PRIVATE fort_core)
-set_target_properties(fort_stage1 PROPERTIES
-    OUTPUT_NAME fort
-    RUNTIME_OUTPUT_DIRECTORY "${FORT_BOOTSTRAP_DIR}/stage1")
 
 # ---- the standard library ------------------------------------------------------
 # The target root is flat: the modules of std/ and those of std/<target>/.
@@ -149,10 +163,10 @@ add_custom_target(fort_std ALL DEPENDS ${FORT_STD_OUTPUTS})
 # ---- the chain of source compilers ---------------------------------------------
 # CMake reads, validates, and orders this list. A shell script does not select
 # a predecessor. An external stage1 skips the complete list.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_BOOTSTRAP_REF}")
-set(FORT_PIN_NUMBERS "")
-set(FORT_PIN_SHAS "")
-if(NOT FORT_STAGE1_COMPILER)
+if(FORT_ENABLE_BOOTSTRAP)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_BOOTSTRAP_REF}")
+    set(FORT_PIN_NUMBERS "")
+    set(FORT_PIN_SHAS "")
     if(NOT EXISTS "${FORT_BOOTSTRAP_REF}")
         message(FATAL_ERROR "bootstrap reference is missing: ${FORT_BOOTSTRAP_REF}")
     endif()
@@ -250,52 +264,52 @@ if(NOT FORT_STAGE1_COMPILER)
     endif()
 endif()
 
-# The C differential compiler uses this frozen root.
-set(FORT_ORACLE_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap-oracle.ref")
-file(STRINGS "${FORT_ORACLE_REF}" FORT_ORACLE_LINES REGEX "^bootstrap-0 ")
-list(LENGTH FORT_ORACLE_LINES FORT_ORACLE_LINE_COUNT)
-if(NOT FORT_ORACLE_LINE_COUNT EQUAL 1 OR
-   NOT FORT_ORACLE_LINES MATCHES "^bootstrap-0[ \t]+([0-9a-f]+)$")
-    message(FATAL_ERROR "tools/bootstrap-oracle.ref must name one bootstrap-0 SHA")
-endif()
-set(FORT_ORACLE_SHA "${CMAKE_MATCH_1}")
-set(FORT_ORACLE_DIR "${CMAKE_BINARY_DIR}/oracle")
-set(FORT_ORACLE_STAMP "${FORT_ORACLE_DIR}/.tree-${FORT_ORACLE_SHA}")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_ORACLE_REF}")
-execute_process(
-    COMMAND git cat-file -t "${FORT_ORACLE_SHA}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    RESULT_VARIABLE FORT_ORACLE_VERIFY_STATUS
-    OUTPUT_VARIABLE FORT_ORACLE_OBJECT_TYPE
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-if(NOT FORT_ORACLE_VERIFY_STATUS EQUAL 0 OR
-   NOT FORT_ORACLE_OBJECT_TYPE STREQUAL "commit")
-    message(FATAL_ERROR "tools/bootstrap-oracle.ref names no usable commit object")
-endif()
-add_custom_command(
-    OUTPUT "${FORT_ORACLE_STAMP}"
-    COMMAND "${CMAKE_COMMAND}"
-            -DROOT=${CMAKE_SOURCE_DIR}
-            -DSHA=${FORT_ORACLE_SHA}
-            -DOUTPUT=${FORT_ORACLE_DIR}
+if(FORT_ENABLE_BOOTSTRAP)
+    # The C differential compiler uses this frozen root.
+    set(FORT_ORACLE_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap-oracle.ref")
+    file(STRINGS "${FORT_ORACLE_REF}" FORT_ORACLE_LINES REGEX "^bootstrap-0 ")
+    list(LENGTH FORT_ORACLE_LINES FORT_ORACLE_LINE_COUNT)
+    if(NOT FORT_ORACLE_LINE_COUNT EQUAL 1 OR
+       NOT FORT_ORACLE_LINES MATCHES "^bootstrap-0[ \t]+([0-9a-f]+)$")
+        message(FATAL_ERROR "tools/bootstrap-oracle.ref must name one bootstrap-0 SHA")
+    endif()
+    set(FORT_ORACLE_SHA "${CMAKE_MATCH_1}")
+    set(FORT_ORACLE_DIR "${CMAKE_BINARY_DIR}/oracle")
+    set(FORT_ORACLE_STAMP "${FORT_ORACLE_DIR}/.tree-${FORT_ORACLE_SHA}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_ORACLE_REF}")
+    execute_process(
+        COMMAND git cat-file -t "${FORT_ORACLE_SHA}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        RESULT_VARIABLE FORT_ORACLE_VERIFY_STATUS
+        OUTPUT_VARIABLE FORT_ORACLE_OBJECT_TYPE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT FORT_ORACLE_VERIFY_STATUS EQUAL 0 OR
+       NOT FORT_ORACLE_OBJECT_TYPE STREQUAL "commit")
+        message(FATAL_ERROR "tools/bootstrap-oracle.ref names no usable commit object")
+    endif()
+    add_custom_command(
+        OUTPUT "${FORT_ORACLE_STAMP}"
+        COMMAND "${CMAKE_COMMAND}"
+                -DROOT=${CMAKE_SOURCE_DIR}
+                -DSHA=${FORT_ORACLE_SHA}
+                -DOUTPUT=${FORT_ORACLE_DIR}
             -DTARGET=${FORT_TARGET}
-            -P "${CMAKE_SOURCE_DIR}/cmake/extract_tree.cmake"
-    DEPENDS "${FORT_ORACLE_REF}" "${CMAKE_SOURCE_DIR}/cmake/extract_tree.cmake"
-    COMMENT "Extracting the C differential-oracle standard root"
-    VERBATIM
-)
-add_custom_target(fort_oracle_tree ALL DEPENDS "${FORT_ORACLE_STAMP}")
-set(FORT_ORACLE_STD_DIR "${FORT_ORACLE_DIR}/std")
+                -P "${CMAKE_SOURCE_DIR}/cmake/extract_tree.cmake"
+        DEPENDS "${FORT_ORACLE_REF}" "${CMAKE_SOURCE_DIR}/cmake/extract_tree.cmake"
+        COMMENT "Extracting the C differential-oracle standard root"
+        VERBATIM
+    )
+    add_custom_target(fort_oracle_tree ALL DEPENDS "${FORT_ORACLE_STAMP}")
+    set(FORT_ORACLE_STD_DIR "${FORT_ORACLE_DIR}/std")
 
-add_test(NAME c-bootstrap
-    COMMAND bash "${FORT_TEST_DIR}/c_bootstrap_test.sh" "${FORT_TARGET}"
-            "$<TARGET_FILE:fort_stage1>" "${CMAKE_BINARY_DIR}/c-bootstrap"
-            "${FORT_ORACLE_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_OPT_PATH}")
-set_tests_properties(c-bootstrap PROPERTIES LABELS lang)
+    add_test(NAME c-bootstrap
+        COMMAND bash "${FORT_TEST_DIR}/c_bootstrap_test.sh" "${FORT_TARGET}"
+                "$<TARGET_FILE:fort_stage1>" "${CMAKE_BINARY_DIR}/c-bootstrap"
+                "${FORT_ORACLE_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_OPT_PATH}")
+    set_tests_properties(c-bootstrap PROPERTIES LABELS lang)
 
-if(NOT FORT_STAGE1_COMPILER)
     add_test(NAME c-bootstrap-bridge
         COMMAND bash "${FORT_TEST_DIR}/c_bootstrap_bridge_test.sh" "${FORT_TARGET}"
                 "$<TARGET_FILE:fort_stage1>"
@@ -309,16 +323,9 @@ endif()
 file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
 set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/cmake/bootstrap_tree.cmake")
 
-if(FORT_STAGE1_COMPILER)
-    get_filename_component(FORT_STAGE1_COMPILER
-        "${FORT_STAGE1_COMPILER}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
-    if(NOT EXISTS "${FORT_STAGE1_COMPILER}")
-        message(FATAL_ERROR
-            "FORT_STAGE1_COMPILER does not exist: ${FORT_STAGE1_COMPILER}")
-    endif()
+if(NOT FORT_ENABLE_BOOTSTRAP)
     set(FORT_PREVIOUS_COMPILER "${FORT_STAGE1_COMPILER}")
     set(FORT_PREVIOUS_DEPENDENCY "${FORT_STAGE1_COMPILER}")
-    set(FORT_BOOTSTRAP_BINARY "${FORT_STAGE1_COMPILER}")
 else()
     set(FORT_PREVIOUS_COMPILER "$<TARGET_FILE:fort_stage1>")
     set(FORT_PREVIOUS_DEPENDENCY fort_stage1)
@@ -356,34 +363,41 @@ else()
         add_custom_target(fort_bootstrap_${pin_number} DEPENDS "${pin_binary}")
         set(FORT_PREVIOUS_COMPILER "${pin_binary}")
         set(FORT_PREVIOUS_DEPENDENCY "${pin_binary}")
-        set(FORT_BOOTSTRAP_BINARY "${pin_binary}")
     endforeach()
 endif()
 
 set(FORT_HEAD_ENTRY "${FORT_FORT_SRC_DIR}/main.ft")
-set(FORT_HEAD_BINARY "${FORT_BOOTSTRAP_DIR}/head/fort")
-set(FORT_HEAD_STD "${FORT_BOOTSTRAP_DIR}/head/std")
-set(FORT_HEAD_STD_STAMP "${FORT_HEAD_STD}/.assembled")
-add_custom_command(
-    OUTPUT "${FORT_HEAD_STD_STAMP}"
-    COMMAND "${CMAKE_COMMAND}"
-        -DSOURCE=${FORT_STD_DIR}
-        -DOUTPUT=${FORT_HEAD_STD}
-        -P "${CMAKE_SOURCE_DIR}/cmake/bootstrap_head.cmake"
-    DEPENDS fort_std ${FORT_STD_OUTPUTS}
-            "${CMAKE_SOURCE_DIR}/cmake/bootstrap_head.cmake"
-    COMMENT "Assembling the bootstrap standard root for HEAD"
-    VERBATIM
-)
+if(FORT_ENABLE_BOOTSTRAP)
+    set(FORT_HEAD_DIR "${FORT_BOOTSTRAP_DIR}/head")
+    set(FORT_HEAD_STD "${FORT_HEAD_DIR}/std")
+    set(FORT_HEAD_STD_STAMP "${FORT_HEAD_STD}/.assembled")
+    add_custom_command(
+        OUTPUT "${FORT_HEAD_STD_STAMP}"
+        COMMAND "${CMAKE_COMMAND}"
+            -DSOURCE=${FORT_STD_DIR}
+            -DOUTPUT=${FORT_HEAD_STD}
+            -P "${CMAKE_SOURCE_DIR}/cmake/bootstrap_head.cmake"
+        DEPENDS fort_std ${FORT_STD_OUTPUTS}
+                "${CMAKE_SOURCE_DIR}/cmake/bootstrap_head.cmake"
+        COMMENT "Assembling the bootstrap standard root for HEAD"
+        VERBATIM
+    )
+    set(FORT_HEAD_STD_DEPENDENCY "${FORT_HEAD_STD_STAMP}")
+else()
+    set(FORT_HEAD_DIR "${CMAKE_BINARY_DIR}/head")
+    set(FORT_HEAD_STD "${FORT_STD_DIR}")
+    set(FORT_HEAD_STD_DEPENDENCY fort_std)
+endif()
+set(FORT_HEAD_BINARY "${FORT_HEAD_DIR}/fort")
 add_custom_command(
     OUTPUT "${FORT_HEAD_BINARY}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_BOOTSTRAP_DIR}/head"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_HEAD_DIR}"
     COMMAND "${FORT_PREVIOUS_COMPILER}" ${FORT_STAGE_MODE_ARGS}
         --std-dir "${FORT_HEAD_STD}"
         -I "${FORT_FORT_SRC_DIR}"
         --cc "${FORT_TARGET_CC_PATH}"
         -o "${FORT_HEAD_BINARY}" "${FORT_HEAD_ENTRY}"
-    DEPENDS "${FORT_HEAD_STD_STAMP}" ${FORT_FORT_SOURCES}
+    DEPENDS ${FORT_HEAD_STD_DEPENDENCY} ${FORT_FORT_SOURCES}
             ${FORT_PREVIOUS_DEPENDENCY}
     COMMENT "Building working-tree HEAD with the last bootstrap compiler"
     VERBATIM
@@ -420,19 +434,20 @@ add_test(NAME darwin-probe-target
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(darwin-probe-target PROPERTIES LABELS unit)
 
-add_test(NAME cmake-bootstrap
-    COMMAND bash "${FORT_TEST_DIR}/cmake_bootstrap_test.sh" "${FORT_GRAPH_BINARY}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(cmake-bootstrap PROPERTIES LABELS unit)
+if(FORT_ENABLE_BOOTSTRAP)
+    add_test(NAME cmake-bootstrap
+        COMMAND bash "${FORT_TEST_DIR}/cmake_bootstrap_test.sh" "${FORT_GRAPH_BINARY}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(cmake-bootstrap PROPERTIES LABELS unit)
+endif()
 
 set(FORT_GRAPH_FIXPOINT_COMMAND
     bash "${CMAKE_SOURCE_DIR}/tools/fixpoint.sh" "${CMAKE_BINARY_DIR}/cmake-fixpoint"
-    --bootstrap "${FORT_BOOTSTRAP_BINARY}"
     --compiler "${FORT_COMPILER_BINARY}"
     --cc "${FORT_TARGET_CC_PATH}"
     --target "${FORT_TARGET_TRIPLE}"
     --entry "${FORT_HEAD_ENTRY}"
-    --std "${FORT_HEAD_STD}"
+    --std "${FORT_STD_DIR}"
     --source-root "${FORT_FORT_SRC_DIR}"
     --opt "${FORT_OPT_PATH}")
 add_test(NAME bootstrap
@@ -488,6 +503,7 @@ if(FORT_TARGET STREQUAL "darwin")
 endif()
 
 # ---- unit tests ----------------------------------------------------------------
+if(FORT_ENABLE_BOOTSTRAP)
 # The test-only helpers that are compiled rather than included: every
 # test/*.c that is not a suite. They are linked into every suite so that
 # -Werror and clang-tidy cover them once. The list is empty today -- the
@@ -520,7 +536,7 @@ foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
     add_test(NAME "unit-${test_component}" COMMAND "${test_target}")
     set_tests_properties("unit-${test_component}" PROPERTIES
-        LABELS unit
+        LABELS "unit;bootstrap"
         ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
     list(APPEND FORT_UNIT_TEST_TARGETS "${test_target}")
 endforeach()
@@ -560,9 +576,13 @@ endforeach()
 foreach(std_reader runtime_sig_test check_conv_test)
     if(TARGET "${std_reader}")
         target_compile_definitions("${std_reader}"
-            PRIVATE FORT_STD_SOURCE_DIR="${FORT_ORACLE_STD_DIR}")
+            PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP_DIR}/bootstrap-0/target/std")
+        string(REGEX REPLACE "_test$" "" std_reader_component "${std_reader}")
+        set_tests_properties("unit-${std_reader_component}" PROPERTIES
+            LABELS "unit;bootstrap;bootstrap-contract")
     endif()
 endforeach()
+endif()
 
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
 # are in the form of toolchain.md 6 (D19.1), are verified with opt, compiled
@@ -599,9 +619,12 @@ add_custom_target(check
     COMMENT "Running the unit tests"
     USES_TERMINAL
 )
-add_dependencies(check fort fort_std fort_oracle_tree)
-if(FORT_UNIT_TEST_TARGETS)
-    add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
+add_dependencies(check fort fort_std)
+if(FORT_ENABLE_BOOTSTRAP)
+    add_dependencies(check fort_oracle_tree)
+    if(FORT_UNIT_TEST_TARGETS)
+        add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
+    endif()
 endif()
 
 # The language tests (toolchain.md 7, D14.4, D14.5): test/lang/run_tests.py
@@ -628,26 +651,28 @@ endif()
 #
 # --std-dir is the C oracle library and not HEAD's. This keeps the frozen C
 # language subset independent from the production source pins.
-set(FORT_LANG_COMMAND
-    "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
-    --fort "$<TARGET_FILE:fort_stage1>"
-    --std-dir "${FORT_ORACLE_STD_DIR}"
-    --cc "${FORT_TARGET_CC_PATH}"
-    --opt "${FORT_OPT_PATH}"
-    --verify-ir
-    -j "${FORT_LANG_JOBS}"
-)
-add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
-set_tests_properties(lang PROPERTIES
-    LABELS lang
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+if(FORT_ENABLE_BOOTSTRAP)
+    set(FORT_LANG_COMMAND
+        "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
+        --fort "$<TARGET_FILE:fort_stage1>"
+        --std-dir "${FORT_ORACLE_STD_DIR}"
+        --cc "${FORT_TARGET_CC_PATH}"
+        --opt "${FORT_OPT_PATH}"
+        --verify-ir
+        -j "${FORT_LANG_JOBS}"
+    )
+    add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
+    set_tests_properties(lang PROPERTIES
+        LABELS lang
+        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
-# The check mode over the same corpus: `fort --check --json` on every fail
-# test, held against the text form of D14.2 (D20.1, D20.2).
-add_test(NAME lang_check_json COMMAND ${FORT_LANG_COMMAND} --check-json)
-set_tests_properties(lang_check_json PROPERTIES
-    LABELS lang
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+    # The check mode over the same corpus: `fort --check --json` on every fail
+    # test, held against the text form of D14.2 (D20.1, D20.2).
+    add_test(NAME lang_check_json COMMAND ${FORT_LANG_COMMAND} --check-json)
+    set_tests_properties(lang_check_json PROPERTIES
+        LABELS lang
+        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+endif()
 
 # The compiler's own modules: test/fort/<x>_test.ft is a run test in the
 # directives of D14.5 that imports a module of src/fort with `-I` and asserts
@@ -750,9 +775,11 @@ set_tests_properties(lang_check_json-stage2 PROPERTIES LABELS lang)
 # string of src/bootstrap/driver.h as a second copy of what driver.c prints.
 # Both binaries exist here, so the two copies are held against each other by
 # running them: --help, --version and the usage line, byte for byte.
-add_test(NAME stage-usage
-    COMMAND bash "${FORT_TEST_DIR}/stage_usage_test.sh" "${CMAKE_BINARY_DIR}")
-set_tests_properties(stage-usage PROPERTIES LABELS unit)
+if(FORT_ENABLE_BOOTSTRAP)
+    add_test(NAME stage-usage
+        COMMAND bash "${FORT_TEST_DIR}/stage_usage_test.sh" "${CMAKE_BINARY_DIR}")
+    set_tests_properties(stage-usage PROPERTIES LABELS unit)
+endif()
 
 add_test(NAME stage2-ast-variadic
     COMMAND bash "${FORT_TEST_DIR}/stage2_ast_variadic_test.sh" "${FORT_COMPILER_BINARY}"
@@ -777,6 +804,7 @@ add_test(NAME stage2-import-if
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(stage2-import-if PROPERTIES LABELS unit)
 
+if(FORT_ENABLE_BOOTSTRAP)
 # The two lexers over the whole repository: `fort --tokens` writes one line per
 # token (D14.1, toolchain.md 1). tools/diff_tokens.sh compares dumps,
 # diagnostics and exit statuses for 964 of 971 files. It separately measures
@@ -824,6 +852,7 @@ add_test(NAME diff-ir
             --opt "${FORT_OPT_PATH}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(diff-ir PROPERTIES LABELS lang)
+endif()
 
 # The interactive half of D11.5 (toolchain.md 5.3): a program whose stdout is
 # a terminal flushes each line as it writes it. No language test can see that,
@@ -833,8 +862,8 @@ set_tests_properties(diff-ir PROPERTIES LABELS lang)
 # it needs the compiler and the runtime object this build made.
 add_test(NAME tty
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/tty_test.py"
-            --fort "$<TARGET_FILE:fort_stage1>"
-            --std-dir "${FORT_ORACLE_STD_DIR}"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
             --cc "${FORT_TARGET_CC_PATH}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(tty PROPERTIES
@@ -876,12 +905,14 @@ set_tests_properties(lines_selftest PROPERTIES
 # round -- and the anchors of tools/mutations/emitter_bootstrap.json against the
 # sources they name, which is the one way a table of textual anchors rots
 # (T-078). It runs no round: a round rebuilds the compiler.
-add_test(NAME mutate_selftest
-    COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
-    WORKING_DIRECTORY "${FORT_TEST_DIR}")
-set_tests_properties(mutate_selftest PROPERTIES
-    LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+if(FORT_ENABLE_BOOTSTRAP)
+    add_test(NAME mutate_selftest
+        COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
+        WORKING_DIRECTORY "${FORT_TEST_DIR}")
+    set_tests_properties(mutate_selftest PROPERTIES
+        LABELS unit
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+endif()
 
 # The shape of the decision log (label unit): every entry is `### Dn.m Title`
 # with an owner field and a rule field, and no line is over 100 columns
@@ -968,7 +999,7 @@ add_test(NAME fort_lint_selftest
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
 set_tests_properties(fort_lint_selftest PROPERTIES
     LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=$<TARGET_FILE:fort_stage1>;FORT_ORACLE_DIR=${FORT_ORACLE_DIR}")
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=${FORT_COMPILER_BINARY};FORT_STD_DIR=${FORT_STD_DIR}")
 
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
 # compare its keyword and operator lists with D2.4 and D2.10 and assert the
@@ -992,28 +1023,46 @@ add_test(NAME extension_selftest
     WORKING_DIRECTORY "${FORT_EDITORS_DIR}/vscode")
 set_tests_properties(extension_selftest PROPERTIES LABELS unit)
 
-add_custom_target(check-lang
-    COMMAND ${FORT_LANG_COMMAND}
-    COMMAND ${FORT_LANG_COMMAND} --check-json
-    COMMAND ${FORT_MODULE_TEST_COMMAND}
-    COMMAND ${FORT_LANG_STAGE2_COMMAND}
-    COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
-            --opt "${FORT_OPT_PATH}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
-    COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Running the language tests"
-    USES_TERMINAL
-    VERBATIM
-)
-add_dependencies(check-lang fort fort_std fort_lsp fort_oracle_tree)
+if(FORT_ENABLE_BOOTSTRAP)
+    add_custom_target(check-lang
+        COMMAND ${FORT_LANG_COMMAND}
+        COMMAND ${FORT_LANG_COMMAND} --check-json
+        COMMAND ${FORT_MODULE_TEST_COMMAND}
+        COMMAND ${FORT_LANG_STAGE2_COMMAND}
+        COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
+        COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+                --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
+        COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_tokens.sh" "${CMAKE_BINARY_DIR}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ast.sh" "${CMAKE_BINARY_DIR}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_check.sh" "${CMAKE_BINARY_DIR}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/diff_ir.sh" "${CMAKE_BINARY_DIR}"
+                --opt "${FORT_OPT_PATH}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
+        COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Running the language tests"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_dependencies(check-lang fort fort_std fort_lsp fort_oracle_tree)
+else()
+    add_custom_target(check-lang
+        COMMAND ${FORT_MODULE_TEST_COMMAND}
+        COMMAND ${FORT_LANG_STAGE2_COMMAND}
+        COMMAND ${FORT_LANG_STAGE2_COMMAND} --check-json
+        COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
+                --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
+        COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
+        COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Running the language tests"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_dependencies(check-lang fort fort_std fort_lsp)
+endif()
 
 add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)

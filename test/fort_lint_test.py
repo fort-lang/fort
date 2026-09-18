@@ -829,15 +829,13 @@ class IncludeRoots(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("FORT_BINARY") and os.environ.get("FORT_ORACLE_DIR"),
-    "FORT_BINARY or FORT_ORACLE_DIR is not set",
+    os.environ.get("FORT_BINARY") and os.environ.get("FORT_STD_DIR"),
+    "FORT_BINARY or FORT_STD_DIR is not set",
 )
 class RealCompiler(unittest.TestCase):
     """The whole tool over the fixtures, with the compiler the build made.
 
-    That compiler is the C differential oracle. Each run names its historical
-    standard root. The production pins can use forms the frozen C compiler
-    does not accept.
+    Each run uses the product compiler and its current standard root.
     """
 
     def run_lint(self, *args):
@@ -848,7 +846,7 @@ class RealCompiler(unittest.TestCase):
                 "--fort",
                 os.environ["FORT_BINARY"],
                 "--std-dir",
-                str(Path(os.environ["FORT_ORACLE_DIR"]) / "std"),
+                os.environ["FORT_STD_DIR"],
                 *args,
             ],
             capture_output=True,
@@ -866,29 +864,16 @@ class RealCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 1)
         self.assertEqual(got.stdout.strip().split("\n"), BAD_NAMES_PROBLEMS)
 
-    def test_the_c_oracle_standard_library_conforms(self):
+    def test_the_product_standard_library_conforms(self):
         """Every module of the library the compiler this test runs compiles.
 
-        This tree is the separate C oracle input. The ctest fort_lint holds
-        HEAD's library against D1.4 with stage2.
-
-        Two modules of the oracle library stand outside: std/math.ft and
-        std/rt_float.ft hold floats and the C bootstrap rejects a float type
-        and a float literal (D18.1, toolchain.md 7.3). That is a property of
-        the C compiler and not of the pin, so it is named here and not in
-        fort_lint.SKIPPED, which is empty. HEAD's library has no rt_float.ft:
-        T-132 folded it into std/rt.ft, which is a float-holding module of
-        HEAD's tree and holds no float in this one.
+        The ctest fort_lint holds the same library against D1.4.
         """
-        oracle = Path(os.environ["FORT_ORACLE_DIR"])
-        floatless = ("math.ft", "rt_float.ft")
-        every = sorted((oracle / "std").glob("*.ft"))
-        files = [p for p in every if p.name not in floatless]
-        self.assertEqual(len(files) + len(floatless), len(every))
-        self.assertGreaterEqual(len(files), 10)
+        files = sorted(Path(os.environ["FORT_STD_DIR"]).glob("*.ft"))
+        self.assertGreaterEqual(len(files), 12)
         # The paths are absolute, because the tool resolves a path it is given
         # against its own working directory and reports it relative to --root.
-        got = self.run_lint("--root", str(oracle), *[str(p) for p in files])
+        got = self.run_lint("--root", os.environ["FORT_STD_DIR"], *[str(p) for p in files])
         self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
 
     def test_a_rejected_file_is_reported_and_still_judged(self):

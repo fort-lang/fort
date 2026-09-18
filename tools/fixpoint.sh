@@ -2,8 +2,7 @@
 # tools/fixpoint.sh <build-dir>: the compiler must reproduce itself, in both
 # build modes (D19.5).
 #
-# CMake supplies the last bootstrap compiler and build/fort. The graph builds
-# build/fort with that compiler. Stage3 uses build/fort, and stage4 uses stage3.
+# CMake supplies build/fort. Stage3 uses build/fort, and stage4 uses stage3.
 #
 # Which pair D19.5 compares, and why it is not the pair it used to be. The last
 # pin and HEAD are different programs, so their `-S` texts differ on any commit
@@ -58,7 +57,7 @@
 set -eu
 
 usage() {
-    echo "usage: fixpoint.sh <build-dir> --bootstrap <fort> --compiler <fort>" >&2
+    echo "usage: fixpoint.sh <build-dir> --compiler <fort>" >&2
     echo "                   [--cc <clang>]" >&2
     echo "                   [--target <triple>] [--opt <opt>] [--entry <file>]" >&2
     echo "                   [--std <dir>] [--source-root <dir>]" >&2
@@ -72,8 +71,7 @@ usage() {
 cc=${FORT_TARGET_CC:-clang}
 opt=${FORT_OPT:-opt-18}
 target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
-# The compiler that builds HEAD. CMake passes it from the graph.
-bootstrap=
+# The current compiler. CMake passes it from the graph.
 compiler=
 entry=
 std=
@@ -92,7 +90,6 @@ while [ "$#" -gt 0 ]; do
         exit 2
     fi
     case "$1" in
-        --bootstrap) bootstrap=$2 ;;
         --compiler) compiler=$2 ;;
         --cc) cc=$2 ;;
         --target) target=$2 ;;
@@ -112,10 +109,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 entry=${entry:-$root/src/fort/main.ft}
 std=${std:-$build/std}
 source_root=${source_root:-$(dirname "$entry")}
-if [ -z "$bootstrap" ]; then
-    echo "fixpoint.sh: --bootstrap is required" >&2
-    exit 2
-fi
 if [ -z "$compiler" ]; then
     echo "fixpoint.sh: --compiler is required" >&2
     exit 2
@@ -141,18 +134,14 @@ arm64-apple-macosx[0-9]*.[0-9]*.[0-9]*)
     ;;
 esac
 
-if [ ! -x "$bootstrap" ] || [ ! -x "$compiler" ]; then
-    echo "fixpoint.sh: the bootstrap compiler or build/fort is not built" >&2
+if [ ! -x "$compiler" ]; then
+    echo "fixpoint.sh: build/fort is not built" >&2
     exit 2
 fi
 if [ ! -f "$entry" ] || [ ! -d "$std" ] || [ ! -d "$source_root" ]; then
     echo "fixpoint.sh: target entry, source root, or standard root is missing" >&2
     exit 2
 fi
-
-echo "== checking HEAD with the last CMake bootstrap compiler"
-"$bootstrap" --check --std-dir "$std" -I "$source_root" \
-    --target "$target" "$entry"
 
 # A missing tool is a broken environment and not a compiler that failed to
 # reproduce itself, so it exits 2 as test/pipeline_test.sh does.
