@@ -2,21 +2,21 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
+/// Checks lazy resolution, value containment, resolution edges, cycles, and ordinary recursion.
 import ast;
 import check;
 import check_env;
 import std.strbuf;
 import types;
 
-/// Checks lazy resolution, value containment, resolution edges, cycles, and ordinary recursion.
 //
 // Resolution edges are value-containment edges. A type name resolves when the
 // written type stores its value. Function results and parameters do not add
 // these edges.
 //
 // The suite checks bases behind arrays and references in both declaration
-// orders. `behind_arrays` in types.ft and `struct_of` in check.ft use the same
-// rule.
+// orders. `behind_arrays` in types.ft and `struct_of` in check.ft both follow
+// value-containment edges.
 
 fn decls(check_env.env mut* e, string one, string two, string three) bool {
     strbuf.str_buf mut b = strbuf.create();
@@ -33,7 +33,7 @@ fn a_struct_stored_by_value_is_resolved_before_its_holder() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `inner` is declared after `outer` and `outer` stores one by value, so the
+    // `inner` is declared after `outer` and `outer` stores one by value. So the
     // resolution reaches it and the layout is exact whichever order the two are
     // written in.
     assert(decls(&e, "struct outer {\n    i32 tag;\n    inner part;\n}\n",
@@ -88,7 +88,7 @@ fn a_pair_that_reaches_through_a_span_checks_in_either_order() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // `vec` holds a span of pointers to `node` and `node` holds a `vec` by
-    // value: neither layout depends on the other, so the pair checks whichever
+    // value. Neither layout depends on the other, so the pair checks whichever
     // order the file declares them in. Resolving `node` from `vec`'s pointer
     // field puts `vec` on its own resolution path through the value field.
     // The cycle makes the layout read an infinite size.
@@ -113,7 +113,7 @@ fn a_reference_behind_two_array_levels_is_identity_only() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // `node*[2][3]` is six pointers: the array levels carry the base through
-    // and the `*` ends the containment, so `vec` stores no `node` by value and
+    // and the `*` ends the containment. So `vec` stores no `node` by value and
     // the pair checks in this order. This is the rank-two half of the rule,
     // which stage1 cannot write at all.
     assert(decls(&e, "struct vec {\n    node mut*[2][3] rows;\n}\n",
@@ -136,7 +136,7 @@ fn a_span_of_arrays_of_a_struct_is_identity_only_as_well() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // `node[3] mut@ own` is two words whatever it views, the array level inside
-    // it included, so it opens no resolution edge and the pair checks in both
+    // it included. So it opens no resolution edge and the pair checks in both
     // orders.
     assert(decls(&e, "struct vec {\n    node[3] mut@ own rows;\n}\n",
                  "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
@@ -156,7 +156,7 @@ fn an_array_of_arrays_of_a_struct_contains_it_by_value() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A fixed array of any rank over `node` contains `node` by value, so this
+    // A fixed array of any rank over `node` contains `node` by value. So this
     // pair is a cycle and the error is the same in both orders. The two tests
     // above and this one are the two answers the demand graph must tell apart
     // at rank two.
@@ -175,7 +175,7 @@ fn a_function_type_stores_neither_its_result_nor_its_parameters() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A function pointer is one word and its signature is stored nowhere, so a
+    // A function pointer is one word and its signature is stored nowhere. So a
     // struct holding one that mentions the struct itself is not a cycle.
     assert(decls(&e, "struct node {\n    fn (node mut*) void visit;\n    i32 v;\n}\n",
                  "node n = {null, 1};\n", ""));
@@ -220,8 +220,8 @@ fn a_declaration_may_hold_its_own_address() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // `&N` inside N's own initializer asks for an address and not for a value,
-    // and a module-level initializer admits `&` of a module-level declaration
+    // `&N` inside N's own initializer asks for an address and not for a value.
+    // And a module-level initializer admits `&` of a module-level declaration
     // from any module, this one included: a self-pointing sentinel is legal.
     assert(decls(&e, "struct node {\n    node* self;\n}\n", "node n = node{&n};\n", ""));
     assert(check_env.errors(&e) == 0);

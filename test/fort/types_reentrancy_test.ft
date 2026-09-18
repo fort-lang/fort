@@ -4,12 +4,12 @@
 //| interleaved ok
 //| repeated ok
 //| ok
+/// Checks that concurrent type tables stay independent. It also checks that 1,000 created and
+/// freed tables leave no shared state.
 import prim;
 import types;
 import types_env;
 
-/// Checks that concurrent type tables stay independent. It also checks that 1,000 created and
-/// freed tables leave no shared state.
 //
 // The repeated test also checks that each table releases its arena.
 
@@ -23,7 +23,7 @@ fn decl_at(u64 i) void mut* {
 // ---- tables that live at the same time -----------------------------------------
 
 // Three tables intern the same spelling at one time, and each hands out a node
-// of its own: pointer equality is identity inside a table and says nothing
+// of its own. Pointer equality is identity inside a table and says nothing
 // across two.
 fn three_tables_intern_three_nodes() void {
     types.table mut a = types.table{};
@@ -42,7 +42,7 @@ fn three_tables_intern_three_nodes() void {
     assert(pa == types.type_ptr(&a, types.type_prim(&a, prim.prim_kind.prim_i32), false, true));
     assert(pb == types.type_ptr(&b, types.type_prim(&b, prim.prim_kind.prim_i32), false, true));
     // The nodes are structurally equal all the same: identity is structural
-    // for a pointer type, so the two answer `type_equal` across the tables
+    // for a pointer type. So the two answer `type_equal` across the tables
     // even though they are two nodes.
     assert(types.type_equal(pa, pb));
     assert(types.type_same_shape(pa, pc));
@@ -105,11 +105,11 @@ fn two_environments_share_nothing() void {
 // ---- a table filled and freed again and again -----------------------------------
 
 // A thousand tables, each filled and freed, leave the heap where they found
-// it: every node, parameter list and layout block belongs to the table and
+// it. Every node, parameter list and layout block belongs to the table and
 // dies with it. The sanitizers of the gate instrument the compiler and not the
-// program it builds, so what this witnesses is that a thousand rounds answer
-// as the first one does and that the allocator survives them -- a double free
-// of a node aborts in libc here rather than being reported.
+// program it builds. A thousand rounds must match the
+// first round without allocator failure. A double-free
+// aborts in libc instead of producing a fort diagnostic.
 fn a_thousand_tables_do_not_grow_the_heap() void {
     u64 mut n = 0;
     while (n < 1000) {
@@ -131,7 +131,7 @@ fn a_thousand_tables_do_not_grow_the_heap() void {
 }
 
 // The same table, filled and freed a thousand times, is a table that starts
-// again each time: freeing it leaves an empty table that is usable.
+// again each time. Freeing it leaves an empty table that is usable.
 fn one_table_reused_a_thousand_times_starts_again() void {
     types.table mut tt = types.table{};
     defer types.type_table_free(&tt);

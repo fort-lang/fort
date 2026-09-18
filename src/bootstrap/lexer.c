@@ -410,8 +410,8 @@ static loc_t here(const lexer_t* lx) {
 
 // Reports the message built in lx->msg at `at`; always false so that a lexing
 // function can `return fail(lx, at)`. A file reports at most DIAG_MAX_PER_FILE
-// diagnostics, the parser's share of the budget included, and lexing goes on
-// silently past the cap so that the tokens still cover the file.
+// diagnostics, including the parser's share. Lexing continues silently past
+// the cap so that the tokens still cover the file.
 static bool fail(lexer_t* lx, loc_t at) {
     const char* text = msg_end(&lx->msg);
     if (diag_file_count() < DIAG_MAX_PER_FILE) {
@@ -454,7 +454,7 @@ static token_t make_token(const lexer_t* lx, tok_kind_t kind, uint64_t start, lo
 
 // ---- whitespace and comments -----------------------------------------------
 
-// Skips whitespace and line comments, the only comment form; false on the
+// Skips whitespace and line comments, the only comment form. False on the
 // adjacent pair `/*`, which is a lexical error rather than a division by a
 // dereference. `a / *p`, with the operators separated, is that division and
 // reaches lex_operator.

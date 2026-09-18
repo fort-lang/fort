@@ -166,7 +166,7 @@ static void append_hex(sb_t* out, unsigned char byte) {
 }
 
 // Returns whether `byte` is valid in an unquoted IR name. LLVM accepts
-// `[-a-zA-Z$._][-a-zA-Z$._0-9]*`. Every dotted module path satisfies this rule.
+// `[-a-zA-Z$._][-a-zA-Z$._0-9]*`. Every dotted module path matches the pattern.
 static bool name_byte_is_plain(unsigned char byte, bool first) {
     if (byte == '-' || byte == '$' || byte == '.' || byte == '_') {
         return true;

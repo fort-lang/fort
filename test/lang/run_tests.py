@@ -120,9 +120,9 @@ REPORT_RE = re.compile(r"^(.+):(\d+):(\d+): (error|note): (.*)$")
 
 # The lexer reports a position because rejected bytes are not a token.
 # Thus, lexer diagnostic ranges can be empty. These are the messages of `fail` and `fail_text`
-# in src/bootstrap/lexer.c, by the part of each that never varies; a lexer
-# message that is not here fails the range check of a fail test, which is the
-# reminder to add it or to give the diagnostic a range.
+# in src/bootstrap/lexer.c, by the part of each that never
+# varies. An unknown lexer message fails a fail test's range
+# check. Add the message here or give the diagnostic a range.
 LEXICAL_MESSAGES = (
     "block comments are not supported",
     "'_' must stand between two digits",
@@ -524,7 +524,7 @@ def _discover_module_tests(root, tests, problems):
     for entry in sorted(root.glob("*.ft")):
         rel = entry.relative_to(root).as_posix()
         # A `.ft` at the root that is not a test is a typo nothing would ever
-        # run, as `containers_tets.ft` would be, so it is a problem rather
+        # run, as `containers_tets.ft` would be. So it is a problem rather
         # than a file to skip.
         if not NAME_RE.match(entry.stem) or not entry.stem.endswith("_test"):
             problems.append("%s: bad test name" % rel)
@@ -1524,7 +1524,7 @@ def main(argv=None):
             result = future.result()
             if not args.check_json:
                 # The cross-check is about the two forms of one run, not about
-                # whether the compiler can pass the test yet, so xfail.txt does
+                # whether the compiler can pass the test yet. So xfail.txt does
                 # not apply to it.
                 result.verdict, result.reason = apply_expectations(
                     result.verdict, result.reason, listed(test, xfail), xfail_label

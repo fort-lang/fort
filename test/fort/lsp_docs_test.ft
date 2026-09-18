@@ -10,17 +10,17 @@
 //| sweep ok
 //| release ok
 //| ok
+/// Checks the open-document store in src/lsp/docs.ft. The cases cover results, refusals, order,
+/// and resource release.
+
 import lsp.docs;
 import lsp_env;
 import std.strbuf;
 
-/// Checks the open-document store in src/lsp/docs.ft. The cases cover results, refusals, order,
-/// and resource release.
-
 // The rounds of the release probe and the distance in bytes that fails it.
-// Each round opens twenty documents of about a kibibyte and closes them all,
-// so a round that kept one text pushes the break out by twenty kibibytes and
-// four hundred rounds push it far past the heap a process starts with.
+// Each round opens twenty documents of about a kibibyte and closes them all.
+// One retained text moves the break by twenty kibibytes. Four
+// hundred retained texts exceed the process's initial heap.
 u64 ROUNDS = 400;
 u64 BOUND = 4096;
 
@@ -312,9 +312,9 @@ fn a_store_holds_every_document_across_its_growth() void {
 // ---- the boundaries --------------------------------------------------------------
 
 fn a_document_may_hold_the_empty_text() void {
-    // The empty text is what didOpen carries for a new file, and text_of
-    // answers the same for it as for a document that is not open, which is why
-    // a caller that must tell the two apart asks is_open.
+    // didOpen can carry empty text. text_of also
+    // returns empty text for a closed document,
+    // so callers use is_open to distinguish them.
     docs.store mut s = docs.create();
     defer docs.free(&s);
     docs.open(&s, "file:///new.ft", "", 1);
@@ -357,7 +357,7 @@ fn the_ends_of_the_version_range_are_versions() void {
     assert(docs.update(&s, "file:///a.ft", "a", 9223372036854775807));
     lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), 9223372036854775807,
                       "the largest version");
-    // -1 is the answer for a document that is not open, and it is also a
+    // -1 is the answer for a document that is not open. And it is also a
     // version a client may send, so is_open is what tells them apart.
     assert(docs.update(&s, "file:///a.ft", "a", -1));
     lsp_env.check_i64(docs.version_of(&s, "file:///a.ft"), -1, "a version of -1");
@@ -399,9 +399,9 @@ fn text_of(strbuf.str_buf mut* b, u64 i) string {
 
 fn a_store_of_four_documents_survives_every_order_of_closing() void {
     // The removal moves the records after the one it takes, so the order the
-    // documents are closed in is what that loop is held to. Four documents
-    // have 24 orders and every one of them must leave the store empty and
-    // leave every document that is still open holding its own text.
+    // documents are closed in is what that loop is held to.
+    // Four documents have 24 orders. Each order must empty
+    // the store and preserve the text of each open document.
     strbuf.str_buf mut uri = strbuf.create();
     defer strbuf.free(&uri);
     strbuf.str_buf mut body = strbuf.create();
@@ -475,7 +475,7 @@ fn is_after(u64[4] order, u64 from, u64 what) bool {
 }
 
 fn a_store_of_two_hundred_documents_answers_every_one() void {
-    // The linear scan is the store's whole index, so this is what says it
+    // The linear scan is the store's whole index. So this is what says it
     // still answers when a session holds far more documents than an editor
     // ever opens.
     docs.store mut s = docs.create();

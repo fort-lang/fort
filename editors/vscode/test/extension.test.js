@@ -20,8 +20,8 @@ const NOTES = fs.readFileSync(path.join(FIXTURES, 'notes-document.json'), 'utf8'
 const LEXICAL = fs.readFileSync(path.join(FIXTURES, 'lexical-document.json'), 'utf8');
 const COMPILER = '/vagrant/build/release/fort';
 const VM = path.join(PROJECT, 'tools', 'vm');
-// The guest command as `tools/vm run` receives it: one argument for a shell,
-// with the path relative to the workspace folder and quoted for it.
+// `tools/vm run` receives one shell argument. Its quoted path is relative to
+// the workspace folder.
 const GUEST = COMPILER + " --check --json 'main.ft'";
 // The guest command of a re-check: the directory of the file whose check
 // painted the departed file goes on it as a search root.
@@ -900,8 +900,8 @@ test('a close keeps the root the closure searched', () => {
   );
 });
 
-// The root follows the last check that painted the file, which is the same rule
-// `by` follows. A module read by two entry files in two directories is checked
+// The root and `by` follow the last check that painted the file. A module read
+// by two entry files in two directories is checked
 // the way the closure that painted it last was checked.
 test('the newest check decides the root of a module', () => {
   const state = painted();
@@ -1133,9 +1133,9 @@ test('a re-check that finds its own departure asks once more and stops', () => {
   assert.deepEqual(state.diagnostics.get(OTHER), []);
 });
 
-// A newer answer about the departed file stands. That is the same rule as when
-// the file is still in the closure, and it holds for the answer the departure
-// itself asked for.
+// A newer answer about the departed file stands. A newer answer also stands
+// while the file remains in the closure. This includes the answer that the
+// departure itself requested.
 test('a departure does not let an older answer beat a newer one', () => {
   const { state } = open();
   fake.save(state, MAIN);

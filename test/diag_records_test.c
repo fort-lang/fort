@@ -323,8 +323,7 @@ TEST(a_record_past_the_end_is_an_internal_error, {
 
 // ---- the text switch ---------------------------------------------------------------
 
-// Text output is on until it is turned off: every existing caller writes its
-// line as it always did.
+// Text output stays on until disabled. Each caller writes its line while it is on.
 TEST(the_text_line_is_written_by_default, {
     begin();
     diag_error(one_byte(USE_LINE, USE_COL), "to the sink");

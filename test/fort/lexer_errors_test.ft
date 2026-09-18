@@ -2,21 +2,21 @@
 //! flags: -I ../../src/fort
 //! stdout:
 //| ok
+/// Checks invalid token bytes, line-based recovery, and the 20-diagnostic lexer budget.
+/// Recovery resumes at the next line.
 import diag;
 import lexer;
 import session;
 import std.strbuf;
 
-/// Checks invalid token bytes, line-based recovery, and the 20-diagnostic lexer budget.
-/// Recovery resumes at the next line.
 //
 // These assertions match the recovery section of test/lexer_test.c.
 
 // ---- the fixture --------------------------------------------------------------
 
-// One session and one token vector, reused by every lex of one test: the
-// session owns the sink the diagnostics go to and the pool the string
-// literals are decoded into, and freeing it frees both.
+// Each test reuses one session and token
+// vector. The session owns the diagnostic sink
+// and literal pool, and its release frees both.
 struct fixture {
     session.session sess;
     lexer.tok_vec toks;
@@ -49,8 +49,8 @@ fn tok(fixture* f, u64 i) lexer.token {
     return lexer.tokvec_at(&f->toks, i);
 }
 
-// The name of the kind of token `i`, which is what an assertion compares:
-// two kinds are equal when their names are (tok_kind_name is injective, as
+// The name of the kind of token `i`, which is what an assertion compares.
+// Two kinds are equal when their names are (tok_kind_name is injective, as
 // kind_names_are_distinct asserts).
 fn kind(fixture* f, u64 i) string {
     return lexer.tok_kind_name(tok(f, i).kind);
@@ -173,7 +173,7 @@ fn error_position_counts_lines_columns_and_tabs() void {
 }
 
 // An error drops the whole line it stands on, the tokens lexed before it
-// included, and the second error of that line is never reached, so one line
+// included. And the second error of that line is never reached, so one line
 // costs one diagnostic.
 fn an_error_drops_its_line_and_reports_once() void {
     fixture mut f = open_fixture();
@@ -249,8 +249,8 @@ fn two_errors_on_two_lines_are_both_reported() void {
     assert(at(&f, 2, 4, 1));
 }
 
-// An error on the last line, with no newline to resume after, still ends the
-// vector in an end-of-file token at the end of the file.
+// An error on a final line without a newline
+// still appends an end-of-file token at the file end.
 fn an_error_on_the_last_line_still_ends_in_eof() void {
     fixture mut f = open_fixture();
     defer close_fixture(&f);
@@ -284,9 +284,9 @@ fn a_literal_after_a_resync_is_decoded() void {
 }
 
 // A file reports at most twenty diagnostics, and lexing goes on silently past
-// the cap, so the tokens of the lines after it are still there. The cap is
+// the cap. So the tokens of the lines after it are still there. The cap is
 // the lexer's to check, not the sink's: diag.report records every diagnostic
-// it is handed, and the lexer asks diag.budget_left before it reports,
+// it is handed. And the lexer asks diag.budget_left before it reports,
 // exactly as src/bootstrap/lexer.c does.
 fn a_file_reports_at_most_twenty_diagnostics() void {
     fixture mut f = open_fixture();
@@ -330,7 +330,7 @@ fn a_second_file_starts_a_new_budget() void {
     assert(diag.budget_left(session.diags(&f.sess)));
 }
 
-// A lone carriage return is whitespace, so it ends a line for a resync too: a
+// A lone carriage return is whitespace, so it ends a line for a resync too. A
 // file written with `\r` alone keeps the tokens after the bad line.
 fn a_carriage_return_ends_a_resync() void {
     fixture mut f = open_fixture();

@@ -51,9 +51,8 @@ BAD_NAMES_PROBLEMS = [
 ]
 
 
-# The whole verdict over test/fort_lint/broken.ft: the checker's own error and
-# the two names it resolved anyway, which a lint that stopped at the first
-# diagnostic would never have judged.
+# The complete verdict for test/fort_lint/broken.ft includes the checker error
+# and two resolved names. A lint that stops at the first diagnostic misses them.
 BROKEN_PROBLEMS = [
     "test/fort_lint/broken.ft:1:1: fort could not check this closure: "
     "test/fort_lint/broken.ft:8:22: unknown name 'nowhere'",

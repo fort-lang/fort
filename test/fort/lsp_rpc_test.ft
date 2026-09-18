@@ -10,14 +10,14 @@
 //| messages ok
 //| answers ok
 //| ok
+/// Checks frame reading, rejected input, frame writing, and JSON-RPC message classification in
+/// src/lsp/rpc.ft.
+
 import lsp.json;
 import lsp.rpc;
 import lsp_env;
 import std.io;
 import std.strbuf;
-
-/// Checks frame reading, rejected input, frame writing, and JSON-RPC message classification in
-/// src/lsp/rpc.ft.
 
 // The frames of `script`, read with a conn whose read size is `chunk`, joined
 // by `|`. A frame that is refused ends the text with `!<message>`, and a clean
@@ -123,8 +123,8 @@ fn a_body_of_raw_bytes_is_measured_in_bytes() void {
 }
 
 fn the_frames_of_a_long_stream_are_all_read() void {
-    // Twenty frames, so the read buffer holds several of them at once under
-    // the default read size and one of them at a time under a size of 1.
+    // Twenty frames make the default buffer hold several
+    // frames. A read size of 1 makes it hold one frame at a time.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     strbuf.str_buf mut want = strbuf.create();
@@ -202,12 +202,12 @@ fn a_length_that_is_no_number_is_refused() void {
 fn a_header_block_that_ends_its_lines_with_a_line_feed_alone_is_refused() void {
     // The base protocol ends a header line with `\r\n` and the block with an
     // empty line. A client that writes a line feed alone writes a block this
-    // module never finds the end of: the reader keeps reading, and the stream
+    // module never finds the end of. The reader keeps reading, and the stream
     // ends inside a header.
     reads_as("Content-Length: 2\n\n{}", "!the stream ended inside a header");
     reads_as("Content-Length: 2\n\r\n{}", "!the stream ended inside a header");
     // A frame in the proper form after it does not rescue it. The scan finds
-    // the terminator of that frame, so the block runs across both and its one
+    // the terminator of that frame. So the block runs across both and its one
     // field holds the line feeds the first block ended its lines with.
     reads_as("Content-Length: 2\n\n{}Content-Length: 2\r\n\r\n{}",
              "!a header field holds a bare carriage return or line feed");
@@ -217,12 +217,12 @@ fn a_header_block_that_ends_its_lines_with_a_line_feed_alone_is_refused() void {
 
 fn a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused() void {
     // The smuggling shape: a second Content-Length written after a lone line
-    // feed. The block ends at the `\r\n\r\n`, so a reader that ends a header
-    // line at a line feed sees two lengths, 5 and 2, where a reader of the
-    // base protocol sees one field whose value holds a line feed. The two
+    // feed. The block ends at the `\r\n\r\n`. A line-feed
+    // parser sees lengths 5 and 2. The base protocol sees
+    // one field whose value contains a line feed. The two
     // would then frame the stream differently. This module refuses the field,
     // and the frame with it, which is also what keeps the two-lengths guard
-    // from being walked around: the second length below never reaches it.
+    // from being walked around. The second length below never reaches it.
     string smuggled = "Content-Length: 5\r\nX: a\nContent-Length: 2\r\n\r\n{}abc";
     reads_as(smuggled, "!a header field holds a bare carriage return or line feed");
     // A bare carriage return in a value is refused for the same reason, since
@@ -234,7 +234,7 @@ fn a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused() vo
              "!a header field holds a bare carriage return or line feed");
     reads_as("Content-Length:\n2\r\n\r\n{}",
              "!a header field holds a bare carriage return or line feed");
-    // The field is refused before its colon is looked for, so a line with
+    // The field is refused before its colon is looked for. So a line with
     // neither a colon nor a terminator answers for the byte it holds.
     reads_as("Content-Length 2\nX\r\n\r\n{}",
              "!a header field holds a bare carriage return or line feed");
@@ -243,7 +243,7 @@ fn a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused() vo
     reads_as("Content-Length: 2\r\n\r\n{}Content-Length: 2\r\nX: a\nY: b\r\n\r\n{}",
              "{}!a header field holds a bare carriage return or line feed");
     // Two bytes and no others: a tab, a vertical tab and a form feed are
-    // ordinary bytes of a value, since no reader of a header block ends a
+    // ordinary bytes of a value. This is because no reader of a header block ends a
     // line at one.
     reads_as("Content-Length: 2\r\nX: a\tb\r\n\r\n{}", "{}.");
     reads_as("Content-Length: 2\r\nX: a\x0Bb\r\n\r\n{}", "{}.");
@@ -256,8 +256,8 @@ fn a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused() vo
 }
 
 fn a_header_field_name_that_holds_a_space_or_a_control_byte_is_refused() void {
-    // The name is compared as it stands, so a name that holds a byte a second
-    // reader may trim is a name no two readers agree about: this module reads
+    // The name is compared as it stands. So a name that holds a byte a second
+    // reader may trim is a name no two readers agree about. This module reads
     // the field as one it does not know, and the other reads a Content-Length.
     string refused = "!a header field name holds a space or a control byte";
     reads_as("Content-Length : 2\r\n\r\n{}", refused);
@@ -268,9 +268,9 @@ fn a_header_field_name_that_holds_a_space_or_a_control_byte_is_refused() void {
     // protocol. Here it is a name that holds one, and it is refused as one.
     reads_as("Content-Length: 2\r\n X: a\r\n\r\n{}", refused);
     // The class is every byte at or below a space and not the two the RFC
-    // names, because `String.prototype.trim` in JavaScript strips the Unicode
-    // White_Space set, U+000B and U+000C among it, and JavaScript is what
-    // vscode-jsonrpc is written in. A class that is closed against the RFC and
+    // names. JavaScript `String.prototype.trim` removes Unicode
+    // White_Space, including U+000B and U+000C. vscode-jsonrpc
+    // uses JavaScript. A class that is closed against the RFC and
     // open against the reference implementation is the wrong way round.
     reads_as("Content-Length: 2\r\nX\x0BY: a\r\n\r\n{}", refused);
     reads_as("Content-Length: 2\r\nX\x0CY: a\r\n\r\n{}", refused);
@@ -279,11 +279,11 @@ fn a_header_field_name_that_holds_a_space_or_a_control_byte_is_refused() void {
     reads_as("Content-Length: 2\r\nX\x00Y: a\r\n\r\n{}", refused);
     reads_as("Content-Length: 2\r\nX!Y: a\r\n\r\n{}", "{}.");
     // The rule is the name's alone: the value is still trimmed, as
-    // the_spaces_around_a_value_are_dropped holds, and a vertical tab or a
+    // the_spaces_around_a_value_are_dropped holds. And a vertical tab or a
     // form feed inside a value stays where it is (see the case above, in
     // a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused).
     reads_as("Content-Length:  2  \r\n\r\n{}", "{}.");
-    // A value needs no class of its own, and this is why: a trimming reader
+    // A value needs no class of its own, and this is why. A trimming reader
     // reads 2 here and this one reads `2\x0B`, which is no number, so the
     // frame is refused rather than framed differently. The two readers
     // disagree about nothing the client receives.
@@ -299,7 +299,7 @@ fn a_header_field_name_that_holds_a_space_or_a_control_byte_is_refused() void {
 }
 
 fn every_byte_at_or_below_a_space_is_refused_in_a_name() void {
-    // The rule is a byte class, so the test is a sweep and not a sample: every
+    // The rule is a byte class, so the test is a sweep and not a sample. Every
     // byte from 0 to 32 is refused inside a name and 33, the byte above the
     // space, is not. A guard written `<` where it needs `<=` passes every
     // example above and fails here at 32.
@@ -330,8 +330,8 @@ fn every_byte_at_or_below_a_space_is_refused_in_a_name() void {
     // to the rule that the block declares no length.
     reads_as(": 2\r\n\r\n{}", "!the frame has no Content-Length");
     // A byte above the ASCII range is an ordinary name byte. It is the case
-    // that fails if `char` ever stops comparing by unsigned byte value, since
-    // 0xC3 read as a signed byte is below a space.
+    // that fails if `char` ever stops comparing by unsigned byte value. A
+    // signed read makes 0xC3 less than a space.
     reads_as("Content-Length: 2\r\nX\xC3\xA9Y: a\r\n\r\n{}", "{}.");
 }
 
@@ -358,7 +358,7 @@ fn the_script_a_trimming_reader_frames_differently() void {
     strbuf.append(&tabbed, "Content-Length: 24\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":9}");
     reads_as(strbuf.view(&tabbed), refused);
     // The other reading, spelled out, so the cost is in the test and not only
-    // in a comment: one field of 48 bytes takes the second message, its header
+    // in a comment. One field of 48 bytes takes the second message, its header
     // block and all, as the body of the first frame.
     strbuf.str_buf mut whole = strbuf.create();
     defer strbuf.free(&whole);
@@ -592,7 +592,7 @@ fn a_write_that_fails_is_an_error_record() void {
 // ---- the sweep -------------------------------------------------------------------
 
 fn a_frame_of_every_length_up_to_sixty_four_is_read() void {
-    // The length is the one number the framing reads, so every length from an
+    // The length is the one number the framing reads. So every length from an
     // empty body to sixty-four bytes goes through it, written by this module
     // and read back by it.
     strbuf.str_buf mut body = strbuf.create();

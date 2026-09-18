@@ -59,7 +59,7 @@ class GlobMatching(unittest.TestCase):
         self.assertTrue(lines.path_matches("std/rt.ft", source))
         self.assertFalse(lines.path_matches("std/rt.ft", tests))
         # No glob names the removed C runtime.
-        # a file put back there would count on neither side.
+        # A restored file there would count on neither side.
         for path in ("runtime/fort_rt.c", "runtime/fort_rt.h"):
             self.assertFalse(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)

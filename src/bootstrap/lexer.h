@@ -133,9 +133,8 @@ enum {
     TOK_OP_LAST = TOK_AT
 };
 
-// The spelling of a keyword or operator kind, or a description of the other
-// kinds ("identifier", "integer literal", "float literal", "char literal",
-// "string literal", "end of file").
+// Returns the spelling of a keyword or operator kind. Other kinds use a
+// description such as "identifier", "integer literal", or "end of file".
 const char* tok_kind_name(tok_kind_t kind);
 
 typedef struct {
@@ -182,7 +181,7 @@ bool lex_file(const char* file, str_t source, str_pool_t* pool, tokvec_t* out);
 
 // Appends the `--tokens` output to `out`. Each token uses one line:
 //
-// <line>:<col>-<end_line>:<end_col> <ival> "<spelling>" <kind>
+// <line>:<col>-<end_line>:<end_col> <ival> "<spelling>" <kind>.
 //
 // Escapes the spelling so newline, tab, quote, and nonprintable bytes stay on one line.
 // The range ends after the token's last byte.

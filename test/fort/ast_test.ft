@@ -2,6 +2,8 @@
 //! flags: -I ../../src/fort
 //! stdout:
 //| ok
+/// Checks the AST arena, child lists, kind names, and S-expression output for hand-built trees.
+
 import ast;
 import diag;
 import lexer;
@@ -9,10 +11,8 @@ import prim;
 import types;
 import std.strbuf;
 
-/// Checks the AST arena, child lists, kind names, and S-expression output for hand-built trees.
-
 // The arena and the buffer every assertion below works in. They are locals of
-// main's callees rather than module state, since a module of the compiler may
+// main's callees rather than module state. This is because a module of the compiler may
 // not keep any and a test has no reason to differ.
 struct env {
     ast.arena arena;
@@ -105,7 +105,7 @@ fn arena_nodes_are_stable_while_it_grows() void {
     env mut e = open();
     defer close(&e);
     // The arena owns a pointer per node, so a node never moves however many
-    // are handed out after it: the first one still reads back its own value
+    // are handed out after it. The first one still reads back its own value
     // after the vector has grown several times.
     ast.node mut* first = int_lit(&e, 11);
     u64 mut i = 0;
@@ -146,27 +146,26 @@ fn arena_init_zeroes_a_fresh_arena() void {
 }
 
 // The arena owns every node, every node's list and the vector of nodes
-// itself, and nothing else in this directory can see a release that is
-// missing: the gate's sanitizers instrument the C compiler and not the
-// x86-64 program the harness runs, so a leak here is invisible to every
+// itself. And nothing else in this directory can see a release that is
+// missing. The gate's sanitizers instrument the C compiler and not the
+// x86-64 program the harness runs. So a leak here is invisible to every
 // other test and to ctest.
 //
 // What can see one is the allocator, in two views, because each is blind to
 // what the other sees (modules_closure_test.ft says which and why). Two
 // hundred identical rounds build the same tree and free it: the program break
-// sees a leak the allocator had to ask the kernel for, and the address a
+// sees a leak the allocator had to ask the kernel for. And the address a
 // round is handed sees one it served out of its own free chunks. The early
-// round is held against the last two and the smaller distance taken, since
-// the allocator alternates between two positions from one round to the next
+// round is held against the last two and the smaller distance taken. The
+// allocator alternates between two positions from one round to the next
 // once the program's path is long enough to change a bin.
 //
 // ast_arena_free makes three releases. `list_free(&n->list)` and
-// `del(ar->nodes)` are each watched here by an address and by the break, and
+// `del(ar->nodes)` are each watched here by an address and by the break. And
 // each was verified by deleting that one release and watching this test fail.
 // The third, `del(n)` on the node itself, is held by the language rather than
-// by a probe: an owning local dropped without it makes the checked build
-// abort at the next write into that slot with `overwriting owned value`,
-// which is what deleting it produces here.
+// by a probe. Without it, the checked build aborts at the next write into the
+// owning local. Deleting it here produces `overwriting owned value`.
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_CHILDREN = 1024;

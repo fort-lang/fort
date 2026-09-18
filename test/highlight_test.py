@@ -70,12 +70,12 @@ CORPUS_MINIMUMS = {
     DARWIN_TEST_DIR: 2,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
-# because it is meant to hold a lexical error: test/lang/fail is the corpus of
-# programs the compiler must reject, test/highlight/scopes.ft carries the
-# errors the fixture test enumerates, and editors/vscode/test/fixtures holds
-# lexical.ft, whose bad literal is the diagnostic the extension displays.
+# because it is meant to hold a lexical error.
+# test/lang/fail holds rejected programs.
+# test/highlight/scopes.ft holds fixture errors.
+# editors/vscode/test/fixtures/lexical.ft supplies the extension diagnostic.
 EXCLUDED_DIRS = (LANG_FAIL_DIR, FIXTURE_DIR, EDITOR_FIXTURE_DIR)
-# Directories of the worktree that hold no source of the project: the build
+# Directories of the worktree that hold no source of the project. The build
 # tree copies std/*.ft next to the runtime, and a dot directory is git's or a
 # cache.
 IGNORED_DIRS = ("build",)
@@ -207,7 +207,7 @@ NO_PATTERNS = ()
 
 # A backreference, a named backreference and a conditional group count their
 # group from the start of the pattern they stand in. The alternation of Scanner
-# puts a group in front of each rule, so a rule that spells one of the three
+# puts a group in front of each rule. So a rule that spells one of the three
 # would count a group of another rule. The grammar spells none of them, and
 # test_every_rule_of_the_grammar_can_be_combined holds that over all 57
 # patterns.

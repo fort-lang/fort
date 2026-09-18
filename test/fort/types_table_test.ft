@@ -4,13 +4,13 @@
 //| growth ok
 //| params ok
 //| ok
+/// Checks two fort-specific structures that the C suites cannot observe. The
+/// node vector moves owned pointers when it grows. A node copies its parameter
+/// list from the caller into an owned span.
 import prim;
 import types;
 import types_env;
 
-/// Checks two Fort-specific structures that the C suites cannot observe. The
-/// node vector moves owned pointers when it grows. A node copies its parameter
-/// list from the caller into an owned span.
 //
 // Other tests do not expose these errors. A vector can lose an older node but
 // still return the last interned node. A borrowed parameter list can remain
@@ -26,7 +26,7 @@ fn decl_at(u64 i) void mut* {
 // ---- the node vector ------------------------------------------------------------
 
 // Interning far past the first capacity keeps every node alive and unique: the
-// vector grows by moving its owned pointers, so a node interned before a
+// vector grows by moving its owned pointers. So a node interned before a
 // growth must still be the node its spelling interns to after it.
 fn a_node_survives_every_growth_of_the_table() void {
     types.table mut tt = types.table{};
@@ -83,7 +83,7 @@ fn a_nominal_type_is_found_after_a_growth() void {
 }
 
 // The table frees every node it made, however many growths it took: a node the
-// growth dropped is a leak this loop only makes slow, but a node it moved
+// growth dropped is a leak this loop only makes slow. But a node it moved
 // twice is a double free that aborts in libc, which is what twenty rounds of
 // fifty growths ask about.
 fn a_grown_table_frees_everything_it_made() void {
@@ -106,28 +106,28 @@ fn a_grown_table_frees_everything_it_made() void {
     }
 }
 
-// The three blocks a node owns beside itself -- its parameter list, its layout
-// and the vector the table keeps them in -- are released with it (`del` is
-// shallow), and nothing else in this directory can see it if they are not: the
+// A node owns its parameter list and layout. The table also owns a vector that
+// contains them. All three blocks need explicit release because `del` is
+// shallow. Nothing else in this directory can see a missing release. The
 // gate's sanitizers instrument the C compiler and not the x86-64 program the
-// harness runs, so a leak here is invisible to every other test and to ctest.
+// harness runs. So a leak here is invisible to every other test and to ctest.
 //
 // What can see one is the allocator, in two views, because each is blind to
 // what the other sees (modules_closure_test.ft says which and why). Two
 // hundred identical rounds build the same table and free it: the program
-// break sees a leak the allocator had to ask the kernel for, and the address
+// break sees a leak the allocator had to ask the kernel for. And the address
 // a round is handed sees one it served out of its own free chunks. The early
-// round is held against the last two and the smaller distance taken, since
-// the allocator alternates between two positions from one round to the next
+// round is held against the last two and the smaller distance taken. The
+// allocator alternates between two positions from one round to the next
 // once the program's path is long enough to change a bin.
 //
 // type_table_free makes four releases. `del(t->params)`, `del(t->layout)` and
-// `del(tt->nodes)` are each watched here by an address and by the break, and
+// `del(tt->nodes)` are each watched here by an address and by the break. And
 // each was verified by deleting that one release and watching this test fail.
 // The fourth, `del(t)` on the node itself, is held by the language rather than
-// by a probe: an owning local dropped without it makes the checked build abort
-// at the next write into that slot with `overwriting owned value`, which is
-// what deleting it produces here.
+// by a probe. Without this release, the checked
+// build aborts at the next owning-local write.
+// The diagnostic is `overwriting owned value`.
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_TYPES = 200;
@@ -175,8 +175,8 @@ fn the_blocks_a_node_owns_are_released_with_it() void {
         types.node* f = types.type_fn(&tt, types.type_void(&tt), params[..], false);
         types.node* s = types.type_struct(&tt, "probe", decl_at(2));
         // Past the first capacity of the node vector, so the block
-        // `del(tt->nodes)` gives back is one the allocator had to grow for,
-        // and one parameter list per function type, since a single
+        // `del(tt->nodes)` gives back is one the allocator had to grow for.
+        // It also allocates one parameter list per function type. A single
         // sixty-four-byte list a round keeps moves neither view.
         u64 mut n = 0;
         while (n < LEAK_TYPES) {

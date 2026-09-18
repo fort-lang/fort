@@ -1,4 +1,4 @@
-// Tests `lexer.h` token dumps from `fort --tokens`:
+// Tests `lexer.h` token dumps from `fort --tokens`. Each line uses this format:
 //
 //     <line>:<col>-<end_line>:<end_col> <value> "<spelling>" <kind>
 //

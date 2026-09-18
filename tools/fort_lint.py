@@ -254,7 +254,7 @@ def file_problems(records, diagnostics, has_source_text=True):
         # The guard against a silent pass: a file whose records the filter
         # above never matched would be linted by nothing at all. A file that
         # declares nothing (an empty module, a stub of comments) is not that
-        # case, and a file with a diagnostic has its reason already.
+        # case. And a file with a diagnostic has its reason already.
         problems.append((1, 1, "fort --index reported no identifier in this file"))
     return problems
 
@@ -364,11 +364,11 @@ def lint_files(fort, root, files, std_dir=None):
             records = buckets.get(entries[other][2])
             if other != index and (not records or entries[other][1] != includes):
                 # The whole design rests on one fact: a file's records depend on
-                # that file's own import closure and on nothing wider, so the
+                # that file's own import closure and on nothing wider. So the
                 # records of a file in this document are the records its own run
                 # would give. The search roots are the one thing that can change
                 # that closure. Thus, a run judges a file only when the roots
-                # agree. The default set loses no run to the rule: std/ resolves
+                # agree. The default set loses no run to the rule. Std/ resolves
                 # through the copy beside the compiler, which is another file,
                 # and the test/fort tests carry the roots of test/fort/support.
                 continue

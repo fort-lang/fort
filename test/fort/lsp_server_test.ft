@@ -10,6 +10,7 @@
 //| free ok
 //| encodings ok
 //| ok
+/// Checks server state transitions, response ids, error codes, and document notifications.
 import lsp.docs;
 import lsp.json;
 import lsp.rpc;
@@ -19,7 +20,6 @@ import lsp_env;
 import std.io;
 import std.strbuf;
 
-/// Checks server state transitions, response ids, error codes, and document notifications.
 //
 // A session digest contains one item for each frame that the server wrote.
 // Spaces join the items. `1:ok` is a result. `1:-32601` is an error with that
@@ -264,7 +264,7 @@ fn a_notification_the_server_does_not_implement_is_dropped() void {
 fn exit_as_a_request_is_a_method_that_is_not_found() void {
     // `exit` is a notification in the protocol. A request of that name is a
     // client that is broken, and ending the loop would leave its request
-    // unanswered, so the server answers it and reads on.
+    // unanswered. So the server answers it and reads on.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     initialize_into(&script);
@@ -320,7 +320,7 @@ fn a_message_that_breaks_a_rule_is_an_invalid_request() void {
     defer strbuf.free(&script);
     initialize_into(&script);
     // No version, a version of another kind, no method and no result, a method
-    // of another kind, and an id of a kind JSON-RPC does not allow.
+    // of another kind. It also sends an id of a kind JSON-RPC forbids.
     frame_into(&script, "{\"id\":2,\"method\":\"shutdown\"}");
     frame_into(&script, "{\"jsonrpc\":2,\"id\":3,\"method\":\"shutdown\"}");
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"id\":4}");
@@ -613,7 +613,7 @@ fn a_notification_before_initialize_leaves_the_server_unready() void {
 // ---- what free leaves ------------------------------------------------------------
 
 fn a_server_that_was_freed_is_one_no_client_has_spoken_to() void {
-    // free takes the lifecycle back to where create left it, so a server value
+    // free takes the lifecycle back to where create left it. So a server value
     // that is reused does not answer a second client as though it had already
     // been initialized and shut down.
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
@@ -627,7 +627,7 @@ fn a_server_that_was_freed_is_one_no_client_has_spoken_to() void {
     lsp_env.check_i64(cast(server.run(&srv), i64), 0, "the first session");
     assert(server.encoding(&srv) == text.position_encoding.enc_utf16);
     server.free(&srv);
-    // The store is empty, no request is in flight, and the lifecycle is back
+    // The store is empty, no request is in flight. And the lifecycle is back
     // at the start: the next request is answered as one before initialize.
     lsp_env.check_u64(docs.count(server.documents(&srv)), 0, "the store after free");
     assert(!server.is_cancelled(&srv));
@@ -650,7 +650,7 @@ fn a_server_that_was_freed_is_one_no_client_has_spoken_to() void {
 }
 
 fn a_frame_above_the_cap_of_the_conn_ends_the_loop() void {
-    // The framing refuses it before a byte of the body is read, and the loop
+    // The framing refuses it before a byte of the body is read. And the loop
     // ends because the stream cannot be followed past a frame that was never
     // read. The answers before it stand.
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
@@ -678,12 +678,12 @@ fn a_frame_above_the_cap_of_the_conn_ends_the_loop() void {
 
 fn a_frame_whose_header_field_holds_a_bare_line_feed_ends_the_loop() void {
     // The framing refuses the field, so the server never reads the body and
-    // cannot follow the stream past it: the loop ends with status 1 and the
+    // cannot follow the stream past it. The loop ends with status 1 and the
     // answers before it stand, exactly as for a frame above the cap. The
-    // second length is what the refusal is for. A reader that ended a header
-    // line at the line feed would take a two-byte body here, where this one
-    // sees a five-byte body declared by a field whose value holds a line feed,
-    // and the two would disagree about where the next frame begins.
+    // second length is what the refusal is for. A line-feed
+    // parser takes a two-byte body. This parser takes the
+    // five-byte body declared by a field containing a line feed.
+    // And the two would disagree about where the next frame begins.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     initialize_into(&script);
@@ -703,9 +703,9 @@ fn a_frame_whose_header_field_holds_a_bare_line_feed_ends_the_loop() void {
 fn a_frame_whose_field_name_holds_a_space_ends_the_loop() void {
     // The framing refuses this field after initialization. The loop ends with
     // status 1 and only the answer
-    // before it stands. What makes this worth a case of its own: the 48 bytes
-    // a reader that trims the name would take hold a whole second request, so
-    // the two readers disagree about a message and not only about a frame.
+    // before it stands. What makes this worth a case of its own. A
+    // parser that trims the name takes 48 bytes containing another
+    // request. Thus, the parsers disagree about message boundaries.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     initialize_into(&script);
@@ -715,7 +715,7 @@ fn a_frame_whose_field_name_holds_a_space_ends_the_loop() void {
     answers_are(strbuf.view(&script), "1:ok", 1, "a field name that holds a space");
     // The same script with a vertical tab in place of the space. The RFC calls
     // that byte no whitespace and `String.prototype.trim` in JavaScript strips
-    // it, so a reader on that runtime -- vscode-jsonrpc, for one -- takes the
+    // it. Thus, a JavaScript reader such as vscode-jsonrpc takes the
     // 48 bytes and delivers the request this server must not let through.
     strbuf.str_buf mut tabbed = strbuf.create();
     defer strbuf.free(&tabbed);

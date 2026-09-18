@@ -2,10 +2,10 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
-import parse_env;
-
 /// Checks marker placement in every type position. The positions include declarations,
 /// parameters, fields, returns, casts, sizeof, allocation, and array literals.
+import parse_env;
+
 //
 // The companion parser_test.ft suite checks one type shape per rule. This
 // suite checks each rule in every position. test/parser_type_test.c makes the
@@ -157,9 +157,9 @@ fn an_own_after_the_mut_of_its_position_is_refused_everywhere() void {
 fn an_own_where_no_reference_is_is_refused_everywhere() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    // An `own` marks a reference, so after a base type it is legal on
-    // `string` alone, and it never follows an array suffix, which introduces
-    // no reference.
+    // `own` marks a reference. After a base type,
+    // only `string` accepts it. An array suffix
+    // introduces no reference and never accepts it.
     string on_value = "an own marks a reference: write it after a '*' or an '@', or on a string";
     assert(refused_everywhere(&e, "i32 own", on_value));
     assert(refused_everywhere(&e, "node own", on_value));
@@ -212,8 +212,8 @@ fn a_second_aggregate_level_parses_everywhere() void {
     assert(parses_everywhere(&e, "u8@@"));
     assert(parses_everywhere(&e, "node@[4]"));
     assert(parses_everywhere(&e, "i32[2][3][4]"));
-    // The suffixes stand in the tree in the order they were written, which is
-    // what tells `i32[2][3]` (two arrays of three) from `i32[3][2]`.
+    // The tree preserves suffix order. This distinguishes
+    // `i32[2][3]`, two arrays of three, from `i32[3][2]`.
     string two_of_three = parse_env.join2(&e, "(type (prim i32) (array (int 2))",
                                           " (array (int 3)))");
     assert(parse_env.type_dump(&e, "i32[2][3]") == two_of_three);
@@ -268,7 +268,7 @@ fn an_allocated_type_takes_pointers_and_dimensions_only() void {
     assert(parse_env.expr_dump(&e, "new(node*[2][3])")
            == "(new (type (name node) (ptr) (array (int 2)) (array (int 3))) nil)");
     // A `mut` in the outermost position does not parse, whether a `*` or a
-    // dimension stands before it: that position is the storage `new`
+    // dimension stands before it. That position is the storage `new`
     // allocates and `new` marks it.
     parse_env.parse(&e, "fn f() void {\n    g(new(node* mut));\n}\n");
     assert(parse_env.errors(&e) == 1);
@@ -279,7 +279,7 @@ fn an_allocated_type_takes_pointers_and_dimensions_only() void {
 }
 
 // A `mut` below the outermost position marks storage `new` does not
-// allocate: what the fresh pointer would reach, which is null until the
+// allocate. What the fresh pointer would reach, which is null until the
 // program stores something there. So it parses, and the element type of the
 // result is the element type written.
 fn an_allocated_type_takes_a_mut_below_its_outermost_position() void {
@@ -325,7 +325,7 @@ fn an_array_literal_type_carries_no_marker() void {
            == "(array-lit (type (prim i32) (array (int 2))) (init (int 1) (int 2)))");
     assert(parse_env.expr_dump(&e, "node*[1]{null}")
            == "(array-lit (type (name node) (ptr) (array (int 1))) (init (null)))");
-    // A `mut` after the length is not part of the literal's type, so the
+    // A `mut` after the length is not part of the literal's type. So the
     // speculation fails and the statement is read as an expression, which
     // then reports.
     parse_env.parse(&e, "fn f() void {\n    g(i32[2] mut{1, 2});\n}\n");

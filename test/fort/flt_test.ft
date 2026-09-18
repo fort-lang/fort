@@ -16,11 +16,11 @@
 //| integer conversions ok
 //| orderings ok
 //| ok
+/// Checks decimal float parsing, rounding, arithmetic, conversions, and the constant text used
+/// in IR.
 import flt;
 import std.strbuf;
 
-/// Checks decimal float parsing, rounding, arithmetic, conversions, and the constant text used
-/// in IR.
 //
 // Each expected number is the IEEE 754 binary64 pattern of the value. An
 // external oracle computed it with exact rational arithmetic and one
@@ -123,8 +123,8 @@ fn a_tie_goes_to_the_even_mantissa_and_one_digit_below_it_goes_up() void {
 
 // The reader keeps 800 significant digits and records a nonzero digit below
 // them, which can only turn a tie away from zero. This literal has 902
-// digits: it is above 1.0 and below the value after it, so it rounds to 1.0,
-// and the reader must not read it as the 1.0 its first 800 digits spell and
+// digits: it is above 1.0 and below the value after it, so it rounds to 1.0.
+// And the reader must not read it as the 1.0 its first 800 digits spell and
 // lose the difference.
 fn a_digit_below_the_eight_hundred_kept_still_decides_a_tie() void {
     strbuf.str_buf mut b = strbuf.create();
@@ -150,9 +150,9 @@ fn a_literal_past_binary64_is_refused() void {
     want_parse_refused("1.797693134862315808e308");
 }
 
-// The least subnormal, the values either side of half of it -- which round
-// to zero and to the least subnormal -- the two values at the boundary
-// between the subnormals and the normals, and the largest finite value.
+// The cases cover the least subnormal and
+// both sides of its half. They also cover the
+// normal boundary and largest finite value.
 fn the_edges_of_the_range_read_exactly() void {
     want_parse("4.9406564584124654e-324", 0x0000000000000001);
     want_parse("1e-323", 0x0000000000000002);
@@ -239,7 +239,7 @@ fn a_value_past_binary32_is_refused() void {
 }
 
 // A zero rounds to a zero of the same sign.
-// the sign bit is what tells the two zeros apart
+// The sign bit distinguishes the two zeros.
 fn a_zero_keeps_its_sign_through_binary32() void {
     want_bits("f32 -0.0", to_f32(0x8000000000000000), 0x8000000000000000);
     want_bits("f32 0.0", to_f32(0), 0);
@@ -271,7 +271,7 @@ fn binary32() void {
 
 // Each result is the exact sum, difference, product or quotient rounded to
 // binary64 once, to nearest with ties to even. The zeros carry the signs IEEE
-// 754 gives them: a sum of two zeros is negative only when both are, x - x is
+// 754 gives them. A sum of two zeros is negative only when both are, x - x is
 // +0.0, and a product takes the two signs combined.
 fn the_four_operations_round_their_exact_result_once() void {
     u64 mut got = 0;
@@ -384,10 +384,10 @@ fn a_binary32_operation_rounds_to_binary32_directly() void {
 // result.
 //
 // It pins the result and not a difference between two methods, because there
-// is no difference to pin: binary64 has 53 mantissa bits and 53 >= 2 * 24 +
-// 2, so rounding an exact binary32 sum, difference, product or quotient to
-// binary64 and then to binary32 gives the binary32 the exact result rounds
-// to, always (Figueroa's condition). A search over 231660 operand pairs of
+// is no difference to pin. Binary64 has 53 mantissa bits and 53 >= 2 * 24 +
+// 2. Double rounding gives the same binary32 result
+// for each exact binary32 operation. This is
+// Figueroa's condition. A search over 231660 operand pairs of
 // the four operations, half of them drawn from subnormal exponents, found no
 // pair where the two differ. The reading is the one class where two roundings
 // are observable, and run/constants/011_float_two_roundings.ft holds it.
@@ -413,9 +413,9 @@ fn binary32_arithmetic() void {
     println("binary32 arithmetic ok");
 }
 
-// Every value here is finite, so the comparison is the ordering of the
-// numbers, with a negative value below a positive one whatever the patterns
-// say and the two zeros equal.
+// Each value is finite. Negative
+// values precede positive values,
+// and the two zeros compare equal.
 fn the_ordering_is_the_ordering_of_the_values() void {
     u64 mut zero = 0;
     want_int("cmp 0.1 0.2", cast(flt.flt_cmp(0x3FB999999999999A, 0x3FC999999999999A), i64), -1);
@@ -450,7 +450,7 @@ fn the_ordering_is_the_ordering_of_the_values() void {
 }
 
 // -0.0 == 0.0, and unary minus flips the sign bit rather than subtracting
-// from zero: the two differ on a zero, since 0.0 - 0.0 is +0.0 and -(0.0) is
+// from zero: the two differ on a zero. This is because 0.0 - 0.0 is +0.0 and -(0.0) is
 // -0.0.
 fn the_two_zeros_are_equal_and_a_negation_is_the_sign_bit() void {
     want_int("cmp 0.0 -0.0", cast(flt.flt_cmp(0, 0x8000000000000000), i64), 0);
@@ -471,7 +471,7 @@ fn comparison() void {
 }
 
 // An integer constant in a float context takes that float type, rounded to
-// nearest: 2^53 + 1 and 2^24 + 1 are the first values their formats cannot
+// nearest. 2^53 + 1 and 2^24 + 1 are the first values their formats cannot
 // hold, and each one goes to the even mantissa.
 fn an_integer_constant_rounds_to_the_nearest_value() void {
     u64 mut got = 0;
@@ -508,8 +508,7 @@ fn an_integer_constant_rounds_to_the_nearest_value() void {
     want_from_int(true, 10000000000000000000, false, 0xC3E158E460913D00);
 }
 
-// The same rule in binary32, where 16777217 is the first integer the format
-// cannot hold.
+// Binary32 rounds 16777217 because it is the first integer the format cannot hold.
 fn an_integer_constant_rounds_to_binary32_the_same_way() void {
     u64 mut got = 0;
     want_from_int(false, 0, true, 0x0000000000000000);
@@ -563,9 +562,9 @@ fn integers() void {
 }
 
 // An LLVM float or double constant is written as 0x and the sixteen hex
-// digits of the binary64 pattern, upper case. The last line is the binary32
-// value of 0.1, whose pattern ends in 29 zero bits because an f32 constant
-// must be a binary64 the type holds exactly.
+// digits of the binary64 pattern, upper case. The last
+// line is binary32 0.1. Its pattern ends in 29 zero
+// bits because the type must hold the binary64 exactly.
 fn a_constant_prints_as_the_sixteen_hex_digits_of_its_pattern() void {
     want_hex(0x3FB999999999999A, "0x3FB999999999999A");
     want_hex(0x3FF0000000000000, "0x3FF0000000000000");
@@ -576,7 +575,7 @@ fn a_constant_prints_as_the_sixteen_hex_digits_of_its_pattern() void {
     want_hex(0x8000000000000000, "0x8000000000000000");
     want_hex(0x3FB99999A0000000, "0x3FB99999A0000000");
     // The largest finite value of each format and the least subnormal: every
-    // digit of the pattern moves, so a text built from the wrong end or with
+    // digit of the pattern moves. So a text built from the wrong end or with
     // a short digit count is caught here.
     want_hex(0x7FEFFFFFFFFFFFFF, "0x7FEFFFFFFFFFFFFF");
     want_hex(0x47EFFFFFE0000000, "0x47EFFFFFE0000000");
@@ -637,12 +636,12 @@ fn want_hex(u64 bits, string text) void {
 // The following values use the same exact-rational oracle as the cases above.
 // The stored values make the evidence reproducible.
 //
-// The values are drawn at random from five classes -- a normal of any
-// exponent, a small integer times a power of two (what a program writes), an
-// exponent near the subnormal boundary, a subnormal, and an exponent near the
-// largest finite value -- because the rounding path differs between them: the
-// boundary classes are where the guard bit, the clamp to the least exponent
-// and the carry out of the mantissa meet.
+// The random values use five classes.
+// These include normals, scaled small
+// integers, near-subnormal exponents, and
+// subnormals. The fifth class uses exponents near
+// the largest finite value. Boundary classes
+// exercise guard bits, exponent clamps, and mantissa carry.
 
 // A literal and the pattern it reads to.
 fn p(string text, u64 bits) void {
@@ -722,9 +721,9 @@ fn c(u64 a, u64 b, i64 want) void {
     want_int("cmp", cast(flt.flt_cmp(a, b), i64), want);
 }
 
-// 350 literals, one per value, drawn from the five classes: each is the
-// shortest decimal of the value, which is what a program writes and what the
-// runtime prints.
+// The test writes 350 literals from five
+// classes. Each literal is the shortest
+// decimal used by programs and runtime output.
 fn parsed_values_1() void {
     p("2.1238426269156665e-82", 0x2EF9C97A0FE8F576);
     p("8.525603822614502e-44", 0x36FE6B9D6E6D7582);
@@ -1115,10 +1114,9 @@ fn parsed_values() void {
     println("parsed values ok");
 }
 
-// 150 digit strings of 1 to 850 significant digits with exponents from
-// -330 to 300: the reader keeps 800 digits and a nonzero digit below them
-// only breaks a tie, so the long ones exercise the tail and the bignum
-// scaling that the short ones never reach.
+// The test uses 150 strings with 1
+// to 850 digits and exponents from
+// -330 to 300. Long inputs exercise the 800-digit tail and bignum scaling.
 fn parsed_digits_1() void {
     p("0.506082194293008195508508512375e217", 0x6CED5C792ECEF0F5);
     p("0.9209727564999960e93", 0x533C41D37E3DD1EE);

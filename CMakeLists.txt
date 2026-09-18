@@ -402,8 +402,8 @@ set_tests_properties(fixpoint PROPERTIES LABELS lang)
 # The entry file's directory is the first root. No import names a module there.
 set(FORT_LSP_SRC_DIR "${CMAKE_SOURCE_DIR}/src/lsp")
 file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
-# The binary is `fort-lsp` and the target is `fort_lsp`: ninja refuses a target
-# whose name is also the path of an output in the same directory, and the
+# The binary is `fort-lsp` and the target is `fort_lsp`. Ninja refuses a target
+# whose name is also the path of an output in the same directory. And the
 # hyphen is the name a language server carries in every other toolchain.
 set(FORT_LSP_BINARY "${CMAKE_BINARY_DIR}/fort-lsp")
 add_custom_command(
@@ -484,10 +484,9 @@ foreach(driver_suite driver_test driver_check_test driver_conformance_test drive
 endforeach()
 
 # The emitter suites run the LLVM verifier over each emitted module.
-# Each suite needs the verifier path. Every test/gen*_test.c gets it, so a new
-# suite is covered by adding the file, and `opt` is a default rather than a
-# configure-time requirement of every preset, as it is for the pipeline test
-# and for the language harness.
+# Each suite needs the verifier path. Every test/gen*_test.c gets it.
+# Adding a file covers a new suite. `opt` is a default for these tests.
+# The pipeline test and language harness require it during configuration.
 foreach(gen_suite IN LISTS FORT_UNIT_TEST_TARGETS)
     if(gen_suite MATCHES "^gen")
         target_compile_definitions("${gen_suite}"
@@ -712,18 +711,17 @@ set_tests_properties(check_decisions_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The knowledge rules of notes/style.md and AGENTS.md (label unit): the line
-# budget of AGENTS.md, an owner and a rule in each decision, no history note
-# that reports a rule in the present tense without a date, and valid document
-# paths. The test reads documentation and runs no build.
+# These unit tests enforce the knowledge rules of notes/style.md and AGENTS.md.
+# They check the AGENTS.md line budget and the required decision fields.
+# They also check dated history notes and document paths. They run no build.
 add_test(NAME knowledge_lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/knowledge_lint.py"
             --root "${CMAKE_SOURCE_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(knowledge_lint PROPERTIES LABELS unit)
 
-# Its own unit tests (label unit): seeded history notes, the measured limits of
-# the history rule, and each remaining rule on clean and broken seeded trees.
+# These unit tests cover seeded history notes and the history-rule limits.
+# They also cover each other rule on clean and broken seeded trees.
 add_test(NAME knowledge_lint_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest knowledge_lint_test
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
@@ -755,9 +753,8 @@ add_test(NAME fort_lint_darwin
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fort_lint_darwin PROPERTIES LABELS lang)
 
-# Its own unit tests (label unit): the rules over synthetic index records, the
-# plumbing against a fake compiler, and the fixtures in test/fort_lint through
-# the real one, which FORT_BINARY names.
+# These unit tests check synthetic index records and a fake compiler.
+# They also check test/fort_lint fixtures with the compiler in FORT_BINARY.
 add_test(NAME fort_lint_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest fort_lint_test
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
@@ -810,7 +807,7 @@ file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
 )
 
-# Fort and project C sources do not permit block comments.
+# fort and project C sources do not permit block comments.
 # format-check depends on this target, so a `/* */` fails the gate.
 add_custom_target(check-comments
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_comments.py"

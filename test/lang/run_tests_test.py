@@ -2324,7 +2324,7 @@ class GoldenIndexLint(unittest.TestCase):
         # Each closure contains std.rt and its imports. Thus, an
         # --index run over any test answers with the standard library's
         # records too. Their file names are the --std-dir the run was given,
-        # which is a build directory and differs between machines, so the
+        # which is a build directory and differs between machines. So the
         # golden holds the records of the test's own files alone.
         test = run_tests.Test("run/modules/t", "run/modules/t/main.ft", "run")
         mine = self.record()

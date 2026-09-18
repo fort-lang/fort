@@ -67,11 +67,9 @@ TEST(a_bool_to_integer_cast_is_a_zext_of_i1, {
 })
 
 TEST(a_bool_widens_to_a_byte_because_its_value_is_one_bit, {
-    // A `bool` is one bit as a value, so a cast of it to `u8` is a widening and emits a `zext`.
-    // Both modules run the same and `opt` accepts the `store i1`. The difference is visible in the
-    // text alone -- the mutation that made gen_int_bits answer 8 exposed a missing direct
-    // assertion. Every other target width is blind to it. A `zext i1` to `i32` reads the same for a
-    // one-bit or eight-bit source width.
+    // A `bool` is one bit as a value. A cast to `u8` therefore emits `zext i1`
+    // directly. Wider targets cannot distinguish a one-bit source from an
+    // incorrect 8-bit source, so this test checks the IR text.
     TEST_ASSERT_TRUE(emit(in_main("    bool b = true;\n    u8 n = cast(b, u8);\n"
                                   "    println(n);\n")));
     TEST_ASSERT_EQ_STR(found("  %t2 = trunc i8 %t1 to i1\n"

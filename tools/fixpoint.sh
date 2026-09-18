@@ -186,7 +186,7 @@ check_mode() {
 
     echo "== $mode: the modules stage2 and stage3 emit"
     # Neither module of the other mode may stand here, for the reason the
-    # binaries above are removed: a compiler that exits 0 and writes nothing
+    # binaries above are removed. A compiler that exits 0 and writes nothing
     # would otherwise make cmp read the previous file and report agreement.
     rm -f "$two_ll" "$three_ll"
     if ! emit "$two" "$flags" "$two_ll"; then

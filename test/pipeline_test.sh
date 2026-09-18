@@ -36,7 +36,7 @@ expect_file() {
     fi
 }
 
-# A missing tool is a broken environment, not a failing module: report it as
+# A missing tool is a broken environment, not a failing module. Report it as
 # such (exit 2) instead of letting the verification or the link fail below.
 for tool in "$opt" "$cc" readelf nm; do
     command -v "$tool" >/dev/null || {
@@ -67,7 +67,7 @@ expect_file hello.stdout "$work/hello.out" 'hello, world!
 expect_file hello.stderr "$work/hello.err" ''
 
 # drop_qemu_notice <file>: qemu-user reports a fatal signal on the program's
-# stderr ("qemu: uncaught target signal 6 (Aborted) - core dumped"); native
+# stderr ("qemu: uncaught target signal 6 (Aborted) - core dumped"). Native
 # execution prints nothing, so the line is not part of the expected output.
 drop_qemu_notice() {
     grep -v '^qemu: uncaught target signal' "$1" >"$1.clean" || true

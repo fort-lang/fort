@@ -2,14 +2,14 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
+/// Checks expression typing and resolution annotations from src/fort/check.ft. These include
+/// types, symbols, constants, and field offsets.
 import ast;
 import check;
 import check_env;
 import std.strbuf;
 import types;
 
-/// Checks expression typing and resolution annotations from src/fort/check.ft. These include
-/// types, symbols, constants, and field offsets.
 //
 // The checker leaves annotations on the tree. No diagnostic dump shows them.
 // This suite gives one direct assertion per rule over those annotations.
@@ -133,7 +133,7 @@ fn an_untyped_constant_with_no_context_takes_its_default_type() void {
 // ---- the default type of an expression that folded to no value ----------------------
 
 // The `println` call of `fn probe(i32 n) void { println(<args>); }`, checked.
-// The count of a shift is a parameter, so nothing folds and each argument
+// The count of a shift is a parameter. So nothing folds and each argument
 // carries the type default_type chose, which nothing else in the program says.
 // The text is built here because fort does not join adjacent string literals.
 fn probe_call(check_env.env mut* e, string args, bool ok) ast.node* {
@@ -212,17 +212,17 @@ fn a_poisoned_left_operand_that_is_no_constant_is_still_dropped() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // The other half of the guard above it. An untyped constant with no default
-    // type goes on to the context, and every other poisoned operand stops at the
-    // shift, because whatever reported it has said all there is to say. The count
-    // is the assertion: a shift that let the error type through would add
-    // "'<<' takes an integer left operand, not <error>" on the same line, which a
-    // fail test of the corpus cannot see (the harness judges a line, not a count).
+    // type goes on to the context. And every other poisoned operand stops at the
+    // shift, because whatever reported it has said all
+    // there is to say. The count is the assertion. A
+    // leaked error type adds a second operator message.
+    // The line-based corpus cannot detect that duplicate.
     ast.node* call = probe_call(&e, "nosuch << n", false);
     assert(call != null);
     assert(check_env.errors(&e) == 1);
     assert(check_env.said(&e, "unknown name 'nosuch'"));
     // The count holds the second guard as well: the error type is no integer
-    // type, so the shift guard in retype_untyped would report it here a second
+    // type. So the shift guard in retype_untyped would report it here a second
     // time if it read a poisoned type.
     assert(!check_env.said(&e, "'<<' takes an integer left operand"));
 }
@@ -309,7 +309,7 @@ fn a_constant_that_folds_back_into_range_leaves_the_operator_its_own_rule() void
     defer check_env.close(&e);
     // The second outcome of the same call, and it is not an error path. The
     // shift leaves `2^63 >> 1` poisoned and carrying the i64 2^62, and the
-    // default type accepts that value, so the operand reaches the operator
+    // default type accepts that value. So the operand reaches the operator
     // typed and the operator answers by its own rule. Without the call the
     // four programs below compiled, exited 0 and printed nothing.
     assert(!check_env.check_body(&e, "    println(*(9223372036854775808 >> 1));"));
@@ -334,12 +334,9 @@ fn a_dropped_operand_with_a_type_keeps_the_message_of_its_operator() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The other half: an operand that is no untyped constant reaches the
-    // operator, which answers as it always did. No mutant of the guard turns
-    // this red, and that is the point of writing it down: the guard runs only
-    // for a poisoned operand, so a typed one never enters it. The test pins
-    // the seven messages, so a later change that widens the key is seen. Its
-    // C twin is test/check_operand_test.c.
+    // An operand that is not an untyped constant reaches the operator. The
+    // guard runs only for poisoned operands. Typed operands keep these seven
+    // messages. test/check_operand_test.c checks the C implementation.
     assert(!check_env.check_body(&e, "    i32 v = 1;\n    println(*v);"));
     assert(check_env.said(&e, "cannot dereference i32"));
     check_env.reopen(&e);
@@ -394,15 +391,13 @@ fn a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic() void {
             check_env.reopen(&e);
         }
         strbuf.str_buf mut b = strbuf.create();
-        // The guard reads the operand and not the operator, so an operand that
-        // was reported where it arose stays reported once. The count is the
-        // assertion: a guard that reported for every poisoned operand would
-        // double each of them, and the corpus could not see it, because the
-        // harness judges a line and not a count.
+    // The guard reads the operand, not the operator. An operand reported at
+    // its source stays reported once. The count detects duplicate reports,
+    // which the line-based corpus cannot detect.
         assert(!check_env.check_body(&e, drop_site(&b, i, "nosuch")));
         assert(check_env.said(&e, "unknown name 'nosuch'"));
-        // `move` adds "'move' has no value", which it added before this guard
-        // too: its early return leaves the result `void`.
+        // `move` also reports "'move' has no value" because its early return
+        // leaves the result `void`.
         u64 mut want = 1;
         if (i == 9) {
             want = 2;
@@ -492,11 +487,10 @@ fn every_position_that_drops_its_operand_reports_once() void {
             check_env.reopen(&e);
         }
         strbuf.str_buf mut b = strbuf.create();
-        // The thirteen positions that are no context at all reach the same
-        // rule through `check_operand`, so each of them drew the same second
-        // diagnostic. `move` keeps two, because its early return leaves the
-        // result `void`, and the rule of an expression with no value answers
-        // that.
+        // Each of the thirteen non-context positions reaches default_type
+        // through `check_operand`. Each reports `constant expression out of
+        // range`. `move` reports twice because its early return leaves a
+        // `void` result, which has no value.
         assert(!check_env.check_body(&e, drop_site(&b, i, "9223372036854775808")));
         assert(check_env.said(&e, "constant expression out of range"));
         assert(!check_env.said(&e, "not a constant"));
@@ -515,7 +509,7 @@ fn a_context_with_a_real_type_still_names_itself() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // The other half, and the reason the guard reads the type and not the
-    // message: a context whose type is no error still tells the reader what it
+    // message. A context whose type is no error still tells the reader what it
     // expected. fail/operators/018 annotates these two messages, and
     // fail/arrays/009 annotates a third, which stage1 never reaches because it
     // refuses a second array level.
@@ -599,7 +593,7 @@ fn a_folded_char_stands_for_its_subtree_as_an_integer() void {
     defer check_env.close(&e);
     ast.node* call = probe_call(&e, "('a' + 1) << n", true);
     // The walk stops at a node that folded, so the left operand of the shift is
-    // the integer 98 and not the char below it: the shift is legal and the
+    // the integer 98 and not the char below it. The shift is legal and the
     // expression is i32.
     assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i32");
     check_env.env mut f = check_env.env{};
@@ -629,8 +623,8 @@ fn a_context_that_takes_no_integer_constant_reports_the_constant() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The operand rule of the shift reads the type the whole expression took,
-    // and the left operand there is the integer `1`, which no context of these
+    // The operand rule of the shift reads the type the whole expression took.
+    // And the left operand there is the integer `1`, which no context of these
     // five accepts. The constant is what the reader must change, so the message
     // that names it comes first and the operand rule stays quiet. Each case
     // must report the invalid constant, not an invalid left operand.
@@ -724,8 +718,8 @@ fn a_conditional_arm_that_fits_no_type_of_the_rule_is_the_error() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The tail of the same rule through a conditional: neither type holds the
-    // constant, so the error names i64, the widest the clause offers. The count
+    // Neither conditional-arm type holds the constant. The error names i64,
+    // the widest type available to the untyped pair. The count
     // is the assertion beside the text, because the harness of the language
     // corpus judges a line and not a count.
     assert(probe_call(&e, "n > 0 ? 9223372036854775808 : 1", false) != null);
@@ -738,7 +732,7 @@ fn a_constant_with_no_default_type_may_still_fold_back_into_range() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // The same operand as the test above it, shifted by a constant count. The
-    // fold happens before any type is chosen, so the value that meets the rule
+    // fold happens before any type is chosen. So the value that meets the rule
     // is 2^62 and not 2^63, and the expression is legal.
     ast.node* call = probe_call(&e, "9223372036854775808 >> 1, 18446744073709551615 >> 32", true);
     assert(check_env.type_text(&e, ast.ast_child(call, 0)->ty) == "i64");
@@ -786,7 +780,7 @@ fn a_comparison_yields_bool_and_folds() void {
 }
 
 // ---- a comparison of two untyped operands -------------------------------------------
-// A comparison yields bool, so no context reaches its operands: the rule of the
+// A comparison yields bool, so no context reaches its operands. The rule of the
 // default type answers for them where the comparison is checked, over both
 // sides together. Both sides must retain poison and its constant. The C twin
 // is test/check_untyped_pair_test.c.
@@ -808,8 +802,8 @@ string[4] PAIR_TAIL = string[4]{
     ");",
 };
 
-// The two ends of the range the rule has no type for, `[2^63, 2^64 - 1]`, and
-// the message each draws against i64, the widest type the rule offers.
+// Holds both ends of `[2^63, 2^64 - 1]`. No type accepts this range.
+// Each end produces a message against i64, the widest available type.
 string[2] PAIR_ENDS = string[2]{
     "9223372036854775808",
     "18446744073709551615",
@@ -903,7 +897,7 @@ fn a_pair_whose_sides_ask_for_no_type_at_all_keeps_i32() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // The tail of `untyped_pair_type`. A `null` arm asks for no default type
-    // of its own, so the walk of both sides answers `prim_void` and the pair keeps
+    // of its own. So the walk of both sides answers `prim_void` and the pair keeps
     // the i32 that `default_type` keeps in the same case. The i32 is observable:
     // it is the type each `null` is then reported against. Four diagnostics, one
     // for each `null` leaf, which is both sides retyped.
@@ -924,7 +918,7 @@ fn a_float_constant_across_a_comparison_is_one_error() void {
     defer check_env.close(&e);
     // The pair takes one type over both sides. The integer clause and the char
     // clause each win over the float clause, so the float constant then meets
-    // a type it cannot take. Each program is one error and not two: the side
+    // a type it cannot take. Each program is one error and not two. The side
     // that folded to no value holds no constant the type refuses, so only the
     // float constant is reported. The language corpus cannot see that count,
     // because `judge_fail` groups its diagnostics by file and by line. So the
@@ -935,7 +929,7 @@ fn a_float_constant_across_a_comparison_is_one_error() void {
     assert(check_env.said(&e, "a float constant does not become i32"));
     assert(check_env.errors(&e) == 1);
     check_env.reopen(&e);
-    // The char clause of the same rule. Both arms are char literals, so the
+    // A conditional with two char arms has type char. Therefore, the
     // conditional is a `char` and the float constant meets `char`.
     assert(!check_env.check_body(&e,
         "    i32 n = 1;\n    println((n > 0 ? 'a' : 'b') == 1.5);"));
@@ -965,7 +959,7 @@ fn a_unary_operand_leaves_the_pair_before_the_rule_sees_it() void {
     // a typed operand, as it takes
     // a type from any typed operand. The pair rule never runs: an untyped pair is
     // two untyped sides. So the constant that is legal in `(1 << n) > 2147483648`
-    // is an error one unary minus away from it, and that is the ordinary context
+    // is an error one unary minus away from it. And that is the ordinary context
     // rule and not a hole.
     assert(!check_env.check_body(&e, "    i32 n = 1;\n    println(-(1 << n) > 2147483648);"));
     assert(check_env.said(&e, "constant 2147483648 does not fit i32"));
@@ -1005,7 +999,7 @@ fn an_untyped_pair_that_is_no_comparison_still_reaches_its_context() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The other half of the same branch, which is unchanged: an operator that
+    // The other half of the same branch, which is unchanged. An operator that
     // is no comparison leaves the pair untyped, so the context walks both
     // operands and reports there. The count is what this asserts, because the
     // fix must not add a second report on the way.
@@ -1019,8 +1013,7 @@ fn an_untyped_pair_that_is_no_comparison_still_reaches_its_context() void {
     assert(check_env.said(&e, "constant 9223372036854775808 does not fit i64"));
     assert(check_env.errors(&e) == 1);
     check_env.reopen(&e);
-    // A sibling that needs i64 carries the whole expression to i64, which is
-    // the same rule reached through the context.
+    // An i64 sibling carries the complete expression to i64 through context.
     assert(check_env.check_body(&e, "    i32 n = 1;\n    i64 w = (1 << n) + 4294967296;"));
     assert(check_env.init_type(&e, "w") == "i64");
 }
@@ -1157,9 +1150,8 @@ fn noreturn_is_a_return_type_and_nothing_else() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The parser refuses `noreturn` wherever a type is written and the
-    // checker answers for the one place it does parse, a return type carrying
-    // a suffix.
+    // The parser refuses `noreturn` in written types. The checker handles the
+    // one parsed case: a return type with a suffix.
     assert(!check_env.check_decls(&e, "fn f() noreturn* {\n    return null;\n}\n"));
     assert(check_env.said(&e, "'noreturn' is a return type"));
 }
@@ -1190,9 +1182,8 @@ fn a_struct_of_mixed_alignment_pads_to_the_widest_member() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The shape the C suite uses, whose widest member is eight bytes: an
-    // assertion over a struct of alignment 4 cannot see a field misplaced by
-    // a wider one.
+    // The C suite uses a shape with an eight-byte member. A struct with
+    // alignment 4 cannot detect a field that a wider member misplaces.
     assert(check_env.check_decls(&e,
         "struct wide {\n    u8 a;\n    i64 b;\n    u8 c;\n}\nwide w = {1, 2, 3};\n"));
     assert(check_env.field_offset(&e, "wide", "a") == 0);

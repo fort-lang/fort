@@ -9,19 +9,19 @@
 //| files ok
 //| lifetime ok
 //| ok
+/// Checks the import closure of src/fort/modules.ft. Cycles, the identity of a module by the
+/// real path of its file, the module namespaces the bindings land in, and the dependency order.
+/// The roots and the import readings are the other half, in modules_test.ft. Two declarations
+/// of one C symbol are compared where types exist, so they belong to the checker.
 import diag;
 import modules;
 import modules_env;
 import scope;
 import std.str;
 
-/// Checks the import closure of src/fort/modules.ft. Cycles, the identity of a module by the
-/// real path of its file, the module namespaces the bindings land in, and the dependency order.
-/// The roots and the import readings are the other half, in modules_test.ft. Two declarations
-/// of one C symbol are compared where types exist, so they belong to the checker.
 //
 // The final tests check the file list and allocated storage. The C driver
-// checks the file list. C sanitizers do not inspect this Fort program.
+// checks the file list. C sanitizers do not inspect this fort program.
 
 // The link a module's identity is tested through. There is no std binding for
 // it and this is its one caller.
@@ -350,7 +350,7 @@ fn a_module_that_did_not_parse_is_not_in_the_pass_order() void {
 // ---- the files the loader read --------------------------------------------------
 
 // Every file read, whether or not its module parsed and whether or not the
-// closure is complete: the "files" array of the check mode's document tells a
+// closure is complete. The "files" array of the check mode's document tells a
 // client which files it may clear stale diagnostics for.
 fn the_file_list_is_every_file_read_in_read_order() void {
     modules_env.env mut e = modules_env.open();
@@ -400,9 +400,9 @@ fn free_empties_the_set_and_leaves_it_usable() void {
     assert(modules.count(&e.set) == 2);
 }
 
-// The set owns every module, every namespace, the two vectors of module
-// pointers, the two maps, the arena of every tree and the pool of every path,
-// and no other test here can see a release that is missing: the gate's
+// The set owns modules, namespaces, two module-pointer
+// vectors, two maps, each tree arena, and each path pool.
+// And no other test here can see a release that is missing. The gate's
 // sanitizers instrument the C compiler and not the x86-64 program the harness
 // runs.
 //
@@ -411,28 +411,27 @@ fn free_empties_the_set_and_leaves_it_usable() void {
 // same two modules and ask for the same blocks in the same order.
 //
 // The first view is the program break: a round that gives its blocks back
-// leaves it where it was, while a round that keeps something pushes it up.
+// leaves it where it was. A round that retains an allocation pushes it up.
 // This view sees a large leak but can miss a small one. The allocator can
 // serve a sixty-four-byte vector from its free chunks without more memory from
 // the kernel. Removing `del(set->modules.items)` therefore does not move the
 // break.
 //
-// The second view is the address of a block a round is handed: a round that
-// frees what it took is handed the same address again. That view sees a small
-// leak and misses a large one -- with `defer analysis_free` deleted in the
-// driver it read 0 while the break had climbed by megabytes -- so three of
-// them are watched here, the vector of owned modules, the vector of the
-// dependency order and the pool's first block, because one address alone does
-// not see every release either: a leak of the order vector alone left the
+// The second view is the address of a block a round receives. A round that
+// frees what it took receives the same address again. This view sees a small
+// leak and misses a large one. With `defer analysis_free` deleted, it read 0
+// while the break climbed by megabytes. These checks watch the owned-module
+// vector, the dependency-order vector, and the pool's first block. One address
+// cannot see each release. A leak of the order vector alone left the
 // address of the modules vector where it was.
 //
 // Every release of modules.free was verified by deleting it and watching this
-// test fail: `del(set->modules.items)` and `del(set->order.items)` move an
-// address, `ast.ast_arena_free(&set->arena)`,
-// `containers.pool_free(&set->pool)`, `strmap.free(&set->by_path)` and
-// `scope.free(&m->names)` move both views. Dropping the `del(m)` of a module
-// makes the checked build abort with `overwriting owned value` in the first
-// test of this file instead.
+// test fail. `del(set->modules.items)` and `del(set->order.items)` move an
+// address. `ast.ast_arena_free(&set->arena)`,
+// `containers.pool_free(&set->pool)`, `strmap.free(&set->by_path)`, and
+// `scope.free(&m->names)` move both measured views. Dropping the `del(m)` of a
+// module makes the checked build abort with `overwriting owned value` in the
+// first test of this file instead.
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_BOUND = 1024;
@@ -455,10 +454,10 @@ fn distance(u64 a, u64 b) u64 {
     return b - a;
 }
 
-// How far the break moved between the early round and the end of the rounds:
-// the smaller of its distances to the last two, which costs nothing when the
-// break is steady and absorbs an allocator that grows the heap on one round
-// in two.
+// How far the break moved between the early round and the end of the rounds.
+// Uses the smaller distance to the final
+// two samples. This ignores no steady growth
+// and absorbs alternating allocator growth.
 fn moved(u64 early, u64 late, u64 last) u64 {
     assert(early != 0 && late != 0 && last != 0);
     u64 one = distance(late, early);

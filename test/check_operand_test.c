@@ -67,27 +67,23 @@ TEST(a_constant_that_folds_back_into_range_leaves_the_operator_its_own_rule, {
 })
 
 TEST(a_dropped_operand_that_is_no_constant_keeps_its_one_diagnostic, {
-    // The guard reads the operand and not the operator, so an operand that was reported where it
-    // arose stays reported once. Every message below is the one the site gave before the guard
-    // existed. The count is the assertion: a guard that reported for every poisoned operand would
-    // double each of them. The corpus could not see it, because the harness judges a line and not a
-    // count.
+    // The guard reads the operand, not the operator. An operand reported at its
+    // source stays one diagnostic. The count detects duplicate reports. A guard
+    // that reports each poisoned operand would double the count.
     for (uint64_t i = 0; i < (uint64_t)DROP_SITE_COUNT; i++) {
         const char* body = drop_site(i, "nosuch");
         TEST_ASSERT_TRUE(body != NULL);
         TEST_ASSERT_FALSE(check_body(body));
         TEST_ASSERT_TRUE(said("unknown name 'nosuch'"));
-        // `move` adds "'move' has no value", which it added before this guard
-        // too: its early return leaves the result `void`.
+        // `move` also reports "'move' has no value" because its early return
+        // leaves the result `void`.
         TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)(i == DROP_SITE_MOVE ? 2 : 1));
     }
 })
 
 TEST(a_dropped_operand_with_a_type_keeps_the_message_of_its_operator, {
-    // The other half: an operand that is no untyped constant reaches the operator, which answers as
-    // it always did. No mutant of the guard turns this red. That is the point of writing it down:
-    // the guard runs only for a poisoned operand, so a typed one never enters it. The test pins the
-    // seven messages, so a later change that widens the key is seen.
+    // An operand that is not an untyped constant reaches the operator. The guard
+    // runs only for poisoned operands, so typed operands keep these seven messages.
     TEST_ASSERT_FALSE(check_body("    i32 v = 1;\n    println(*v);"));
     TEST_ASSERT_TRUE(said("cannot dereference i32"));
     TEST_ASSERT_FALSE(check_body("    i32 v = 1;\n    println(v.x);"));

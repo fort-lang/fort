@@ -2,9 +2,9 @@
 # Provision the fort development VM (Ubuntu 24.04 arm64). Runs as root from
 # the Vagrantfile; idempotent, so `tools/vm provision` can re-run it.
 #
-# Expects FORT_HOST_REPO: the absolute host path of the repository root, which
-# is symlinked to /vagrant so worktree .git files (absolute host paths)
-# resolve inside the guest.
+# Expects FORT_HOST_REPO, the absolute host
+# repository path. The /vagrant link lets
+# worktree .git paths resolve in the guest.
 set -eux
 
 export DEBIAN_FRONTEND=noninteractive
@@ -42,7 +42,7 @@ EOF
 
 # ---- core dumps -----------------------------------------------------------------
 # Ubuntu pipes every core dump to apport, and a piped core_pattern ignores
-# `ulimit -c 0`, so each SIGABRT cost about a second; the runtime's tests
+# `ulimit -c 0`, so each SIGABRT cost about a second. The runtime's tests
 # abort dozens of times. Disable apport and dump to a plain file, which the
 # limit then suppresses.
 systemctl disable --now apport.service || true

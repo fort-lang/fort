@@ -2,7 +2,7 @@
 """Unit tests of tools/mutate.py, the mutation runner of a coverage audit.
 
 The runner answers one question for each row of a table: does a test in the
-repository fail when this rule is broken? A wrong answer is silent, so the
+repository fail when the table row is broken? A wrong answer is silent, so the
 parts that can give one are what this file tests. The failure parser must name
 each test that ctest reports. The anchor must
 match its file exactly once, or the round mutates the wrong line or no line.
@@ -321,7 +321,7 @@ class TestMutatedRows(unittest.TestCase):
     def test_a_second_row_on_the_mutated_lines_is_not_stale(self):
         # Two rows of the shipped table anchor the same lines.
         # Applying one leaves the other with no anchor, and that
-        # is the round talking: `--check` reads the text with the applied row
+        # is the round talking. `--check` reads the text with the applied row
         # put back, so it reports 0 stale.
         with tempfile.TemporaryDirectory() as root:
             table = {"sources": ["a.c"], "binary": "b", "build": "", "stages": [],
@@ -395,7 +395,7 @@ class TestRunTable(unittest.TestCase):
         self.assertIn("may still run in the guest", said)
         self.assertIn("the run stops here", said)
         # The pattern is quoted inside the command: `tools/vm` interpolates its
-        # argument into the guest script raw, so an unquoted `|` is a pipe in
+        # argument into the guest script raw. So an unquoted `|` is a pipe in
         # the guest shell and `pgrep -af ninja | ctest` runs ctest.
         self.assertIn("tools/vm run \"pgrep -af 'ninja|ctest'\"", said)
 

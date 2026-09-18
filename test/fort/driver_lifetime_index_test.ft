@@ -2,13 +2,13 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
-import lifetime;
-import std.strbuf;
-
 /// The check document mode. `--index` runs the front end, the index walk and
 /// the document writer in each round, and the document goes to the captured
 /// stdout. `--index` implies `--check --json`, so the three of them are one
 /// option here. The driver gives all of it back.
+import lifetime;
+import std.strbuf;
+
 //
 // support/lifetime.ft states the rule of the probe, the two views and the
 // size of a round. Each file tests one driver mode. This keeps every program
@@ -48,26 +48,23 @@ fn main() i32 {
     return 0;
 }
 
-// Writes a program that makes the identifier index allocate everything that
-// it owns, so that a round makes the allocation of each release that
-// index.free and driver.check_document perform: a record for each identifier
-// occurrence for the record span, a type spelling for each record for the
-// pool, and a spelling long enough to grow the buffer that it is built in.
+// Writes a program that allocates each identifier-index resource. Every
+// identifier creates a record, and every record creates a type spelling. A
+// long spelling also grows the spelling buffer.
 //
-// Verified by deletion, one release at a time, each one moving a view past
-// lifetime.BOUND and turning this test red: `del(ix->entries)`,
-// `containers.pool_free(&ix->pool)` and `strbuf.free(&ix->msg)` in
-// index.free, `containers.str_free(&files)` and the `defer index.free(&ix)`
-// of driver.check_document, and the `defer strbuf.free(&doc)` of
-// driver.write_document. This test is the only witness of all six.
+// This test is the only witness of six releases. index.free runs
+// `del(ix->entries)`, `containers.pool_free(&ix->pool)`, and
+// `strbuf.free(&ix->msg)`. driver.check_document runs
+// `containers.str_free(&files)` and `defer index.free(&ix)`.
+// driver.write_document runs `defer strbuf.free(&doc)`.
 // Every release of the six modes was measured this way, one deletion at a
-// time, against all six tests. The count of the releases of the six modes,
-// the command that measures them and the one release that no single test
-// witnesses stand in support/lifetime.ft, once for the six tests.
+// time, against all six tests. support/lifetime.ft records
+// release counts for all six modes. It also records the
+// measurement command and the release with no single-test witness.
 //
 // The width is what makes the two small ones visible. A file list of one name
-// and a buffer that holds one spelling are a few hundred bytes in each round,
-// so the type of every local is written `a_structure_with_a_long_name mut*
+// and a buffer that holds one spelling are a few hundred bytes in each round.
+// So the type of every local is written `a_structure_with_a_long_name mut*
 // own`, which is 38 bytes interned one time for each record.
 fn write_indexed() void {
     strbuf.str_buf mut b = strbuf.create();
@@ -75,7 +72,7 @@ fn write_indexed() void {
     strbuf.append(&b, "struct a_structure_with_a_long_name {\n    i32 value;\n}\n");
     u64 mut i = 0;
     while (i < INDEX_WIDTH) {
-        // One constant apiece: a declaration and a use are two records, and
+        // One constant apiece: a declaration and a use are two records. And
         // each record interns a spelling of its own, since the pool copies
         // rather than deduplicates (containers.ft).
         strbuf.append(&b, "i32 LIMIT");
@@ -89,7 +86,7 @@ fn write_indexed() void {
     i = 0;
     while (i < INDEX_WIDTH) {
         // One owning local apiece, whose type spelling is the longest this
-        // program writes: the record of its declaration and the record of its
+        // program writes. The record of its declaration and the record of its
         // use in `del` each carry it.
         strbuf.append(&b, "    a_structure_with_a_long_name mut* own p");
         strbuf.append_u64(&b, i);
@@ -103,10 +100,10 @@ fn write_indexed() void {
         strbuf.append(&b, ");\n");
         i += 1;
     }
-    // One function of INDEX_WIDTH parameters and a function pointer to it:
-    // its type is the longest spelling of the program, about two hundred
-    // bytes, which is what grows the buffer a spelling is built in past a
-    // block's worth. With the spelling of the owning local alone, 38 bytes,
+    // The function has INDEX_WIDTH parameters and
+    // a pointer to it. Its type spelling grows the
+    // spelling buffer past one block. With the
+    // spelling of the owning local alone, 38 bytes,
     // deleting `strbuf.free(&ix->msg)` left this test green.
     strbuf.append(&b, "    fn (");
     i = 0;

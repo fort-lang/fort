@@ -5,6 +5,8 @@
 //| messages ok
 //| documents ok
 //| ok
+/// Checks server resource release. A session that handles 2,000 messages must return the heap
+/// to its starting range.
 import lsp.docs;
 import lsp.rpc;
 import lsp.server;
@@ -12,8 +14,6 @@ import lsp_env;
 import std.io;
 import std.strbuf;
 
-/// Checks server resource release. A session that handles 2,000 messages must return the heap
-/// to its starting range.
 //
 // The scripts use files instead of a pipe. A pipe holds 64 KiB, and nothing
 // drains it while the server reads. Two thousand messages would fill it. The
@@ -28,18 +28,18 @@ import std.strbuf;
 // Removing any of the six server.free releases turns the break probe red.
 
 // The rounds of the session probe and the distance in bytes that fails it.
-// Each round runs a whole session -- a server, its buffers, its parsed
-// document and two open documents of about two kibibytes -- and frees it, so a
-// round that kept one document pushes the break out by kilobytes and two
-// hundred rounds push it far past the heap a process starts with.
+// Each round runs and frees a complete session. The session includes a server,
+// its buffers, its parsed document, and two open documents of about two kibibytes.
+// One retained document moves the break by kilobytes.
+// Two hundred retained documents exceed the process's initial heap.
 u64 SESSION_ROUNDS = 200;
 u64 BOUND = 8192;
 
 // What that pair can see, counted off the two sample points and not off
-// SESSION_ROUNDS: the early sample is taken after round 4 (`i == 3` below) and
-// `moved` takes the smallest distance over the last 16 rounds, so the nearest
+// SESSION_ROUNDS. The early sample is taken after round 4 (`i == 3` below) and
+// `moved` takes the smallest distance over the last 16 rounds. So the nearest
 // late sample is round 185 (`i == 184`) and the span the bound covers is 181
-// rounds. 8192 over 181 is about 45 bytes a round, so a leak below 45 bytes
+// rounds. 8192 over 181 is about 45 bytes a round. So a leak below 45 bytes
 // per session sits under this probe and a leak above it does not. Every
 // release of server.free is far above that. The smallest deletion moved the
 // break by 212992 bytes. A new release of a few bytes needs more rounds,
@@ -53,7 +53,7 @@ u64 MESSAGES = 2000;
 u64 EARLY_MESSAGE = 200;
 
 // How many of the last rounds the probe holds against the early round. The
-// allocator does not hand a round the same block every time, so the probe
+// allocator does not hand a round the same block every time. So the probe
 // takes the smallest distance over a window that covers the cycle.
 u64 LATE_SAMPLES = 16;
 
@@ -194,7 +194,7 @@ fn the_session_script(strbuf.str_buf mut* script) void {
     frame_into(script, "{\"jsonrpc\":");
     // A request whose method name and whose string id are each a kibibyte.
     // The server copies the id into a buffer of its own and builds the "not
-    // implemented" message in another, so a round that keeps either of those
+    // implemented" message in another. So a round that keeps either of those
     // two buffers moves the break rather than hiding inside a round's noise.
     strbuf.str_buf mut long_name = strbuf.create();
     defer strbuf.free(&long_name);
@@ -301,9 +301,9 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
 // ---- the documents of a session --------------------------------------------------
 
 fn a_session_of_many_documents_gives_them_all_back() void {
-    // Fifty documents opened and closed in one session, which takes the store
-    // through its growth and its removal path inside the loop rather than in a
-    // test of the store alone.
+    // One session opens and closes fifty
+    // documents. This exercises store
+    // growth and removal inside the server loop.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     strbuf.str_buf mut body = strbuf.create();

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reject block comments in the project's C sources.
 
-Fort and project C use `//` comments. This keeps the bootstrap transliterable into fort.
+fort and project C use `//` comments. This keeps the bootstrap transliterable into fort.
 The tool scans C files under src/ and test/. It tracks strings, characters, escapes, and
 `//` comments. It reports each real `/*` opener as `<file>:<line>: block comment`.
 It exits 1 for a problem and 0 otherwise.

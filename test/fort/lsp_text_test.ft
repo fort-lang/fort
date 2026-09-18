@@ -11,11 +11,11 @@
 //| columns ok
 //| sweep ok
 //| ok
+/// Checks line and character positions with tabs, combining marks, and each UTF-8 character
+/// length.
 import lsp.text;
 import lsp_env;
 
-/// Checks line and character positions with tabs, combining marks, and each UTF-8 character
-/// length.
 //
 // SAMPLE contains 'a', a tab, U+00E9, U+1D11E, 'e', and U+0301. U+00E9 uses
 // two bytes. U+1D11E uses four bytes and one UTF-16 surrogate pair. U+0301 is
@@ -129,7 +129,7 @@ fn an_empty_line_between_two_terminators_ends_where_it_begins() void {
 }
 
 fn a_lone_carriage_return_is_not_a_line_break() void {
-    // An old Mac file is one line, which is how the lexer counts it: a line is
+    // An old Mac file is one line, which is how the lexer counts it. A line is
     // numbered at a line feed and a `\r` is whitespace.
     string s = "ab\rcd";
     lsp_env.check_u64(text.line_start(s, 1), 0, "lone cr line 1");
@@ -156,9 +156,8 @@ fn a_carriage_return_at_the_end_of_the_text_is_ordinary_text() void {
 
 fn only_the_last_carriage_return_of_a_run_belongs_to_the_terminator() void {
     // `a\r\r\n`: the second carriage return is half of the terminator and the
-    // first is ordinary text, so the text of line 0 is `a\r` and ends at 2.
-    // The mutation runner rewrites this expression. TAIL_CR carries the same
-    // run so that both sweeps walk it.
+    // first is ordinary text. So the text of line 0 is `a\r` and ends at 2.
+    // TAIL_CR carries the same run, so both text sweeps cover it.
     string s = "a\r\r\n";
     lsp_env.check_u64(text.line_end(s, 0), 2, "the end of a line before a run of two");
     lsp_env.check_u64(text.line_start(s, 1), 4, "the line after that terminator");
@@ -174,7 +173,7 @@ fn only_the_last_carriage_return_of_a_run_belongs_to_the_terminator() void {
     // A run of three: only the last one is the terminator's.
     lsp_env.check_u64(text.line_end("a\r\r\r\n", 0), 3, "the end of a line before a run of three");
     // The compiler's own 1-based line and byte column read the run the same
-    // way: column 2 is the first carriage return of the two, and a column past
+    // way: column 2 is the first carriage return of the two. And a column past
     // the text of the line clamps to its end and not into the terminator.
     text.position c = text.of_line_col(s, text.position_encoding.enc_utf16, 1, 2);
     lsp_env.check_u64(c.line, 0, "the line of column 2");
@@ -332,7 +331,7 @@ fn a_utf8_position_inside_a_sequence_rounds_down() void {
 
 fn the_two_encodings_answer_the_same_byte_offsets() void {
     // The set of byte offsets a character index can address is the same under
-    // both encodings: the starts of the characters, and the end of the line.
+    // both encodings. The starts of the characters, and the end of the line.
     u64 mut i = 0;
     while (i <= 12) {
         u64 a = text.offset_of(SAMPLE, text.position_encoding.enc_utf16, text.position{0, i});
@@ -386,7 +385,7 @@ fn the_round_trip_holds_across_lines() void {
         text.position p = text.position_of(s, text.position_encoding.enc_utf16, at);
         u64 back = text.offset_of(s, text.position_encoding.enc_utf16, p);
         // An offset inside a character or inside a two-byte terminator lands
-        // on the start of what holds it, so the round trip never moves
+        // on the start of what holds it. So the round trip never moves
         // forwards and never leaves the line it started on.
         assert(back <= at);
         text.position again = text.position_of(s, text.position_encoding.enc_utf16, back);
@@ -408,7 +407,7 @@ fn a_character_past_the_end_of_the_line_clamps_to_the_line() void {
 }
 
 fn a_character_past_the_end_never_crosses_the_terminator() void {
-    // The clamp lands before the terminator and not on the next line, so a
+    // The clamp lands before the terminator and not on the next line. So a
     // range that ends past the line does not swallow the line break.
     string s = "ab\r\ncd";
     lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
@@ -489,15 +488,15 @@ string DOCUMENT = "fn\ti32\tmain() {\r\n    \xC3\xA9 = \xF0\x9D\x84\x9E;\n\n\te\
 // where only the second belongs to the terminator. One stands alone in the middle of a line.
 // One is the last byte and terminates nothing. Stripping that last byte removes its final
 // position. A second document of plain lines beside it, so the sweep covers a text with no
-// carriage return as well, and a third of bytes that begin no sequence, so the rule that such a
+// carriage return as well. A third covers bytes that begin no sequence. So the rule that such a
 // byte is one unit is crossed with the line rule and with the round trip.
 string TAIL_CR = "a\r\r\nb\rc\r";
 string LINES_ONLY = "one\ntwo\n\nthree";
 string BAD_UTF8 = "\xFFa\x80\r\n\xC3z\n\xF0\x9D";
 
-// The units of the sequence at `i`, decoded here rather than by the module
-// under test: a second reading of RFC 3629 that the sweep holds the first
-// against. A lead byte says how many bytes follow it, and a code point above
+// This code decodes the sequence units at `i`. It
+// independently checks the module's reading of RFC 3629. A
+// lead byte says how many bytes follow it, and a code point above
 // U+FFFF is a surrogate pair in UTF-16.
 fn oracle_units(u8@ bytes, u64 i, bool utf16, u64 mut* step) u64 {
     u64 lead = cast(bytes[i], u64);
@@ -532,8 +531,8 @@ fn oracle_units(u8@ bytes, u64 i, bool utf16, u64 mut* step) u64 {
 }
 
 // The line that holds `offset`, and where its text begins and ends, by a
-// forward split: a terminator is the two bytes `\r\n` or the one byte `\n`,
-// and the text of a line is what stands before the terminator that ends it.
+// forward split. A terminator is the two bytes `\r\n` or the one byte `\n`.
+// And the text of a line is what stands before the terminator that ends it.
 //
 // The oracle must stay independent from `line_end` in src/lsp/text.ft. This
 // walk looks forward and matches each terminator in place. It never reads the
@@ -608,7 +607,7 @@ fn oracle_character(string text, u64 offset, bool utf16) u64 {
 
 fn every_offset_of_a_document_answers_the_position_the_oracle_counts() void {
     // The UTF-8 walk of the oracle reads RFC 3629 a second time and its line
-    // split walks the terminators forward, so a module that agreed with itself
+    // split walks the terminators forward. So a module that agreed with itself
     // and with nothing else fails here.
     offsets_agree_with_the_oracle(DOCUMENT);
     offsets_agree_with_the_oracle(TAIL_CR);
@@ -635,7 +634,7 @@ fn offsets_agree_with_the_oracle(string doc) void {
 fn every_offset_comes_back_from_its_position() void {
     // offset_of(position_of(o)) never moves forwards, lands on a boundary, and
     // is the same offset when o begins a character. The four documents are the
-    // ones the oracle sweep walks, the empty one among them: a document with
+    // ones the oracle sweep walks, the empty one among them. A document with
     // no offset but 0 is where a walk that assumes a first byte fails.
     offsets_come_back(DOCUMENT);
     offsets_come_back(TAIL_CR);
@@ -674,7 +673,7 @@ fn sweep_round_trip(string doc, u64 at, text.position_encoding enc) void {
 
 fn every_position_of_a_document_lands_inside_its_line() void {
     // Every line of the document, every character from 0 past the end of the
-    // longest line, and both encodings: the offset must lie between the start
+    // longest line, and both encodings. The offset must lie between the start
     // of that line and its end, and must never cross a terminator.
     u64 mut line = 0;
     while (line < 6) {

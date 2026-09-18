@@ -5,15 +5,15 @@
 //| ascii ok
 //| utf8 ok
 //| ok
+/// Checks that diagnostic JSON stays valid UTF-8 for all message bytes. Invalid bytes each
+/// produce one U+FFFD replacement.
+
 import json;
 import json_env;
 import std.strbuf;
 
-/// Checks that diagnostic JSON stays valid UTF-8 for all message bytes. Invalid bytes each
-/// produce one U+FFFD replacement.
-
-// The JSON form of every byte from 0x00 to 0x1F, written out here so that the
-// table is a golden and not a second copy of the writer's rule: the control
+// This table gives the JSON form of bytes 0x00 through
+// 0x1F. It is a golden, not a copy of writer logic. The control
 // bytes fort spells out are spelled out, every other one is \u00XX with
 // uppercase hex digits.
 string[32] CONTROL_FORMS = {
@@ -24,7 +24,7 @@ string[32] CONTROL_FORMS = {
 };
 
 // The UTF-8 bytes of U+FFFD, which a byte that is part of no well-formed
-// sequence is written as, and that text repeated up to four times, since two
+// sequence is written as. And that text repeated up to four times, since two
 // string literals beside each other do not join.
 string ONE_REPLACEMENT = "\xEF\xBF\xBD";
 string TWO_REPLACEMENTS = "\xEF\xBF\xBD\xEF\xBF\xBD";
@@ -64,9 +64,9 @@ fn every_control_byte_is_escaped() void {
     }
 }
 
-// Every byte of the ASCII range in one pass: a control byte takes the form the
-// golden table gives, the quote and the backslash are escaped, and the 0x20
-// boundary falls between the last escaped byte and the first kept one.
+// One pass covers each ASCII byte. It
+// checks controls, quote, backslash, and the 0x20 boundary between escaped and
+// retained bytes.
 fn every_ascii_byte_takes_its_form() void {
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
@@ -133,7 +133,7 @@ fn a_byte_that_starts_no_sequence_becomes_the_replacement_character() void {
 
 // One case of the corpus, checked twice: the bytes alone, and the same bytes
 // between two ASCII letters. A case that is well-formed alone is well-formed
-// in a sentence too, and one that is not costs exactly its own bytes there as
+// in a sentence too. And one that is not costs exactly its own bytes there as
 // well, so the text around a bad byte is untouched.
 fn utf8_case(string bytes, string want, string what) void {
     strbuf.str_buf mut expected = strbuf.create();
@@ -178,10 +178,10 @@ fn every_well_formed_sequence_is_kept() void {
     utf8_case("\xF4\x8F\xBF\xBF", "\xF4\x8F\xBF\xBF", "U+10FFFF, the highest code point");
 }
 
-// The five ways a sequence is refused -- a stray continuation byte, a lead byte
-// no sequence starts with, an overlong form, a UTF-16 surrogate and a value
-// past U+10FFFF -- and sequences cut short or with a continuation byte one step
-// out of range. The writer keeps nothing it must replace.
+// The test covers invalid leads, overlong forms,
+// UTF-16 surrogates, and values above U+10FFFF. It also
+// covers short sequences and invalid
+// continuations. The writer keeps nothing it must replace.
 fn every_ill_formed_sequence_is_replaced() void {
     utf8_case("\x80", ONE_REPLACEMENT, "a stray continuation byte, the lowest");
     utf8_case("\xBF", ONE_REPLACEMENT, "a stray continuation byte, the highest");
@@ -220,8 +220,8 @@ fn a_continuation_byte_out_of_range_ends_the_sequence() void {
     utf8_case("\xF1\x80\x80\xC0", FOUR_REPLACEMENTS, "a fourth byte one above the range");
 }
 
-// One message with a byte of every kind: two escapes, a control byte, an ASCII
-// run, a well-formed sequence and a byte that is part of none.
+// One message includes two escapes, a control byte,
+// ASCII, valid UTF-8, and a byte outside any valid sequence.
 fn a_message_of_every_kind_of_byte_is_written_once() void {
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);

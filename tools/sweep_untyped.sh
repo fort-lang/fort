@@ -25,11 +25,12 @@
 #
 # A changed class or RAN answer fails the run.
 #
-# Usage, from the top of the worktree, after `tools/vm build <preset>`:
+# Usage from the worktree root after `tools/vm build <preset>`.
 #
 #   COMPILER=build/debug/fort \
 #       COMPILER_ARGS="--std-dir build/debug/std --cc clang" \
 #       bash tools/sweep_untyped.sh tools/sweep_untyped.txt
+# This command runs the sweep.
 #
 # The compiler needs the explicit standard root because the root is beside it.
 # Its executable-relative fallback selects `build/std` instead.
@@ -39,9 +40,9 @@
 #   <class> <body>
 #
 # `<body>` is the statement list that goes into main, and it may hold several
-# statements. A class is REPORTED, FRAME, CC-FAIL, SILENT, RAN:<output> or
-# TRAP:<status>, where <output> is what the program prints with every run of
-# whitespace replaced by `_` and <status> is the exit status.
+# statements. A class is REPORTED, FRAME, CC-FAIL, SILENT, RAN:<output>, or
+# TRAP:<status>. In <output>, `_` replaces each whitespace run. <status> is the
+# exit status.
 #
 # A row without a body is a usage error. A class the list misspells is also a
 # usage error.
@@ -53,9 +54,9 @@
 # A line `!frame <name>` selects the frame every row below it goes into, until
 # the next such line. There are three frames and `base` is the first:
 #
-#   base   fn z(i32 v) i32 { return v; }, and i64, char and u8 twins of it,
-#          with main declaring `i32 n`, `i32 thirtyone`, `bool c` and
-#          `i32[4] mut a`, each through a call so that it is a run-time value.
+#   base   `fn z(i32 v) i32 { return v; }`, with i64, char, and u8 variants.
+#          main declares `i32 n`, `i32 thirtyone`, `bool c`, and
+#          `i32[4] mut a`. Calls give each declaration a run-time value.
 #          The body is the statement list of main.
 #   float  base plus `fn zf(f64 v) f64` and `fn zg(f32 v) f32`, and main
 #          declaring `f64 d = zf(0.5);` as well.
@@ -107,8 +108,8 @@ wrong=0
 # so a list without the directive is a usage error and not a silent pass.
 want_rows=-1
 
-# A class a row may expect. The list is checked so that a typo, or a row cut
-# down to its class, is a usage error rather than a row that tests nothing.
+# A class a row may expect. The list rejects typos and rows
+# that contain only a class. Such rows would test nothing.
 valid_class() {
     case $1 in
         REPORTED|FRAME|CC-FAIL|SILENT) return 0 ;;
@@ -117,8 +118,8 @@ valid_class() {
     esac
 }
 
-# The output of a program, with every run of whitespace replaced by `_`, so
-# that a class and its expected output are one field of the row.
+# The output replaces each whitespace run with `_`. This keeps a class and its
+# expected output in one row field.
 squash() {
     tr '\n\t ' '___' <"$1" | sed 's/__*/_/g; s/^_//; s/_$//'
 }
@@ -224,8 +225,8 @@ while IFS= read -r line; do
 
     # The line the row itself stands on in the generated program. A refusal
     # above it did not reach the row, which is the FRAME class. The body is
-    # written with `echo "    $body"`, so an exact whole-line match finds it,
-    # and the `ret` frame writes it inside `r()` before main calls it, so the
+    # written with `echo "    $body"`, so an exact whole-line match finds it.
+    # And the `ret` frame writes it inside `r()` before main calls it, so the
     # first match is the row.
     body_line=$(grep -n -F -x -m 1 "    $body" "$prog" | cut -d: -f1)
     if [ -z "$body_line" ]; then
@@ -241,7 +242,7 @@ while IFS= read -r line; do
     set -e
     if [ "$check_status" -gt 1 ]; then
         # The compiler uses result statuses 0 and 1. Anything else is a
-        # crash or a usage error and not a diagnostic, and reading it as one
+        # crash or a usage error and not a diagnostic. And reading it as one
         # would let a compiler that dies on every row pass the sweep.
         actual=BAD-STATUS:$check_status
         detail=$(head -n 1 "$work/check.err")

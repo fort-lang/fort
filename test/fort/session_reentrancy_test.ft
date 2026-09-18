@@ -4,14 +4,14 @@
 //| interleaved ok
 //| repeated ok
 //| ok
+/// Checks that concurrent sessions stay independent. It also checks that 1,000 created and
+/// freed sessions leave no shared state.
 import containers;
 import diag;
 import session;
 import std.io;
 import std.strbuf;
 
-/// Checks that concurrent sessions stay independent. It also checks that 1,000 created and
-/// freed sessions leave no shared state.
 //
 // The C bootstrap could not pass this file: its diagnostics live in two
 // file-scope globals, so the second analysis would read the first one's
@@ -92,9 +92,9 @@ fn one_spent_budget_does_not_spend_another() void {
     assert(diag.record_at(session.diags(&b), 0).msg == "reported");
 }
 
-// A session created inside another session's analysis, and freed inside it,
-// disturbs nothing of the outer one: no allocation of the inner session is
-// reachable from the outer, and none of the outer's views moves.
+// An inner session does not disturb its outer
+// session. No inner allocation is reachable
+// from the outer session, and no outer view moves.
 fn an_inner_session_disturbs_nothing() void {
     session.session mut outer = session.create();
     defer session.free(&outer);
@@ -125,9 +125,9 @@ fn an_inner_session_disturbs_nothing() void {
 
 // ---- the same document, again and again ----------------------------------------
 
-// A document re-analysed a thousand times: a fresh session each time, each
-// reading the same overlay text and reporting the same diagnostics, each
-// freeing everything it allocated. What the heap holds afterwards is what it
+// The test analyses one document a thousand times. Each fresh
+// session reads the same overlay, reports the same diagnostics, and
+// frees its allocations. What the heap holds afterwards is what it
 // held before, which is the property the modules are written for.
 fn a_document_analysed_a_thousand_times() void {
     u64 mut round = 0;
@@ -152,7 +152,7 @@ fn a_document_analysed_a_thousand_times() void {
 }
 
 // One session re-used for a thousand documents: it is the storage that must
-// not grow without bound, so a server that keeps a session frees it between
+// not grow without bound. So a server that keeps a session frees it between
 // analyses rather than trusting the counters to fall.
 fn one_session_reused_for_a_thousand_documents() void {
     session.session mut s = session.create();
@@ -186,7 +186,7 @@ fn one_session_reused_for_a_thousand_documents() void {
     assert(session.source_count(&s) == 0);
 }
 
-// The same file on disk read by a thousand sessions: each opens it once and
+// The same file on disk read by a thousand sessions. Each opens it once and
 // each frees its copy, so the reader has no state of its own either.
 fn a_file_read_by_a_thousand_sessions() void {
     assert(io.write_file("shared.ft", cast("fn shared() void {}", u8@)));

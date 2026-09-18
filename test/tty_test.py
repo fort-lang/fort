@@ -25,11 +25,11 @@ SOURCES = (
     ("direct std.rt", "rt_print_then_wait"),
 )
 
-# Seconds to wait for output the program has already written; generous, because it is only
+# Seconds to wait for output the program has already written; generous. This is because it is only
 # reached when the output never comes, which is the failing path.
 TIMEOUT = 20.0
 # Seconds to wait before concluding that nothing more is coming. The program wrote its stdout
-# line before the stderr line this harness has already read, so a line-buffered pipe would have
+# line before the stderr line this harness has already read. So a line-buffered pipe would have
 # delivered it long before this elapses.
 QUIET = 1.0
 # Cross-compiled programs run under qemu-user, which needs the target's libraries.
@@ -82,8 +82,8 @@ def run_on_terminal(program, env):
             os._exit(127)
     running = drain(master, time.monotonic() + TIMEOUT, lambda t: t.count("\n") >= 2)
     release(master)
-    # The program blocks again after this line, so it is read from a live pty:
-    # the master loses whatever is still buffered once the last slave closes.
+    # The program blocks again after this line, so it is read from a live pty.
+    # The master loses whatever is still buffered once the last slave closes.
     rest = drain(master, time.monotonic() + TIMEOUT, lambda t: "bye\n" in normalize(t))
     release(master)
     _, status = os.waitpid(pid, 0)

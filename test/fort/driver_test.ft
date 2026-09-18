@@ -11,6 +11,8 @@
 //| std dir ok
 //| reentrancy ok
 //| ok
+/// Checks command-line options, usage errors, mode statuses, and the standard
+/// library directory in src/fort/driver.ft.
 import capture;
 import containers;
 import driver;
@@ -19,14 +21,12 @@ import std.str;
 import std.strbuf;
 import std.sys;
 
-/// Checks command-line options, usage errors, mode statuses, and the standard
-/// library directory in src/fort/driver.ft.
 //
-// A Fort test can drive part of test/driver_test.c in process. This suite
+// A fort test can drive part of test/driver_test.c in process. This suite
 // covers the command line, dumps, front end, emitter, and exit statuses. It
 // also covers a missing --cc program and one that runs and fails.
 // test/driver_test.c checks the complete clang command line through
-// test/fake_cc.sh. A Fort test cannot ship that script beside itself.
+// test/fake_cc.sh. A fort test cannot ship that script beside itself.
 //
 // Each driver run writes to stdout or stderr. support/capture.ft captures that
 // output in this test's directory and reads it back. Only this file's
@@ -193,7 +193,7 @@ fn the_defaults_are_clang_and_the_linux_triple() void {
 }
 
 // `-o ""` names an output of no characters. It is an output the command line
-// gave, not an option left out, so the driver hands that name to --cc and does
+// gave, not an option left out. So the driver hands that name to --cc and does
 // not fall back to `a.out`. src/bootstrap/driver.c compares the option against
 // NULL and answers the same way. A length test here would make the compilers
 // handle one command line differently. --std-dir and the entry file already
@@ -205,7 +205,7 @@ fn an_empty_output_option_is_an_output_that_was_named() void {
     assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
     assert(opts.have_output);
     assert(opts.output.len == 0);
-    // The whole run answers the same way: --cc is given the empty name and
+    // The whole run answers the same way. --cc is given the empty name and
     // fails, where the default would have made `a.out` and exited 0.
     write_file("named.ft", "fn main() i32 {\n    return 0;\n}\n");
     string[6] mut whole = {"fort", "--cc", "false", "-o", "", "named.ft"};
@@ -358,7 +358,7 @@ fn an_entry_file_that_is_a_directory_is_the_loader_s_error() void {
 }
 
 // A file whose closure loaded and checked is the emitter's turn, which this
-// compiler does not carry: an internal error, exit 2, and no usage line after
+// compiler does not carry. An internal error, exit 2, and no usage line after
 // it, since the command line was fine. `--check` alone stops here and is exit
 // 0 instead, since a check-only run emits nothing.
 fn a_clean_program_is_emitted_and_handed_to_the_cc() void {
@@ -498,7 +498,7 @@ fn a_syntax_error_is_exit_one() void {
     assert(out.len == 0);
 }
 
-// A lexical error is the same, and the file is reported once: the lexer
+// A lexical error is the same, and the file is reported once. The lexer
 // resynchronises at the next line and the parser runs on what it left.
 fn a_lexical_error_is_exit_one() void {
     write_file("lexical.ft", "fn main() i32 {\n    i32 x = 08;\n    return x;\n}\n");
@@ -567,8 +567,8 @@ fn ast_of_a_file_with_a_syntax_error_is_exit_one() void {
     assert(err_has("tree_bad.ft:3:"));
 }
 
-// Neither dump opens an import: the file is lexed or parsed alone, so a module
-// it imports being missing changes neither the dump nor the status.
+// Neither dump opens an import. It lexes or parses the
+// file alone, so a missing imported module changes no result.
 fn neither_dump_opens_an_import() void {
     write_file("lonely.ft", "import nothere;\nfn main() i32 {\n    return 0;\n}\n");
     string[3] mut tokens = {"fort", "--tokens", "lonely.ft"};
@@ -599,7 +599,7 @@ fn the_front_end_walks_the_closure() void {
     assert(err_has("helper.ft:3:"));
 }
 
-// An `-I` root is searched after the entry file's directory: the module is
+// An `-I` root is searched after the entry file's directory. The module is
 // found under it and its own syntax error is what the run reports.
 fn an_include_root_is_searched() void {
     assert(make_directory("root"));
@@ -656,7 +656,7 @@ fn the_std_dir_option_wins_over_the_environment() void {
 
 // Without --std-dir the directory is $FORT_STD_DIR when it names one, and
 // `std` beside the binary otherwise. Both arms are forced
-// here rather than read off the environment the run happens to have: a test
+// here rather than read off the environment the run happens to have. A test
 // that branches on the ambient variable asserts whichever half the
 // environment presents and covers neither on any one run.
 fn the_environment_is_read_when_the_option_is_absent() void {
@@ -682,7 +682,7 @@ fn an_empty_std_dir_variable_counts_as_unset() void {
     assert(str.ends_with(driver.std_dir(&p, &opts, "/usr/bin/fort"), "/std"));
 }
 
-// An empty --std-dir is a directory that was named, not an option left out:
+// An empty --std-dir is a directory that was named, not an option left out.
 // src/bootstrap/driver.c compares the option against NULL, so `--std-dir ""`
 // is the empty root and nothing below it is consulted. Reading its length
 // instead made stage2 fall back to the environment and resolve, under that
@@ -702,7 +702,7 @@ fn an_empty_std_dir_option_counts_as_named() void {
 }
 
 // The same at the level a user sees: with the environment naming a directory
-// that holds the module, `--std-dir ""` still refuses the import, because the
+// that holds the module, `--std-dir ""` still refuses the import. This is because the
 // empty root is the one root a `std` path is looked up in.
 fn an_empty_std_dir_option_resolves_no_std_import() void {
     assert(make_directory("stdlib"));
@@ -747,7 +747,7 @@ fn unset_env(string name) void {
 // ---- re-entrancy ----------------------------------------------------------------
 
 // Two runs in one process are independent: the second answers for its own
-// command line, whatever the first reported, because every allocation and
+// command line, whatever the first reported. This is because every allocation and
 // every counter belongs to the session the run created.
 fn two_runs_in_one_process_share_nothing() void {
     write_file("first.ft", "fn main() i32 {\n    return 0\n}\n");
@@ -765,7 +765,7 @@ fn two_runs_in_one_process_share_nothing() void {
     assert(err_has("first.ft:3:"));
 }
 
-// A hundred runs of one file neither grow nor change: the status of the
+// A hundred runs of one file neither grow nor change. The status of the
 // hundredth is the status of the first, which is what a language server
 // re-analysing a document depends on.
 u64 RERUNS = 100;

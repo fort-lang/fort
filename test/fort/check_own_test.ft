@@ -2,6 +2,8 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
+/// The ownership typing and the annotation invariants of check.ft, over the
+/// half of the checker src/fort/check.ft carries.
 import ast;
 import check;
 import check_env;
@@ -10,8 +12,6 @@ import scope;
 import std.strbuf;
 import types;
 
-/// The ownership typing and the annotation invariants of check.ft, over the
-/// half of the checker src/fort/check.ft carries.
 //
 // Two rules here are invisible to every other test. `is_mut` answers whether
 // an expression permits assignment. `empty` answers whether `move` or `del`
@@ -23,13 +23,13 @@ import types;
 // bit on a node that needs none. It then checks the node again and verifies
 // that all bits are clear.
 //
-// The expressions are checked by hand through check_env.probe_stmt, since the
+// The expressions are checked by hand through check_env.probe_stmt. This is because the
 // statements of a function body belong to check_stmt.ft and this pass stops
 // before them.
 
-// The module the ownership probes are written against: a cell, a holder of an
-// owning pointer to one, an owning module-level constant and an owning global,
-// and the two indirections, one mutable and one not. fort does not join
+// The ownership probes use a cell and a holder with an owning cell pointer.
+// They also use owning module declarations and mutable and immutable indirections.
+// fort does not join
 // adjacent string literals, so a source of this size is built in a buffer. The
 // text is written to a file before open_module returns, so the buffer need not
 // outlive the call.
@@ -145,7 +145,7 @@ fn move_needs_an_owning_lvalue() void {
     assert(open_probe2(&e, "fn probe() void {\n    sink(move(hh));\n}\n",
         "fn sink(i32 x) void {\n    return;\n}\n"));
     // `hh` is an owning aggregate, so `move` takes it and yields the one
-    // universe function with a value: an `own` rvalue of its operand's type,
+    // universe function with a value. An `own` rvalue of its operand's type,
     // which is not an lvalue and which nothing else could free.
     ast.node mut* call = check_env.body_expr(&e, "probe", 0);
     check.expr o = check_env.probe_expr(&e, ast.ast_child_mut(call, 0));
@@ -286,8 +286,8 @@ fn the_arms_of_a_conditional_lend() void {
     assert(check_env.type_text(&e, o.ty) == "cell mut*");
 }
 
-// It yields `own` when both arms are `own` rvalues or `null`, which is the one
-// case where the value the conditional produces still has an owner. It is an
+// It yields `own` when both arms are `own` rvalues or `null`. Only this case
+// gives the conditional result an owner. It is an
 // rvalue, so it must land in an `own` place.
 fn two_owning_rvalue_arms_yield_an_owning_rvalue() void {
     check_env.env mut e = check_env.env{};
@@ -321,7 +321,7 @@ fn an_owning_rvalue_arm_beside_a_lending_one_would_leak() void {
 }
 
 // Lending strips the `own` of a reference and not the `own` a struct holds by
-// value, so an owning aggregate arm still owns after check_lend and the copy
+// value. So an owning aggregate arm still owns after check_lend and the copy
 // the conditional makes is a transfer. Without this the conditional would
 // yield an owning rvalue that no arm was emptied for, and `del` of each would
 // free one allocation twice.
@@ -339,7 +339,7 @@ fn an_owning_aggregate_arm_is_a_transfer_and_needs_move() void {
 }
 
 // `move` in each arm is what the rule asks for, and two `move`s are two owning
-// rvalues, so the conditional yields an owning value that must land in an
+// rvalues. So the conditional yields an owning value that must land in an
 // owning place.
 fn two_moved_aggregate_arms_yield_an_owning_rvalue() void {
     check_env.env mut e = check_env.env{};
@@ -369,7 +369,7 @@ fn returning_an_own_parameter_outright_is_an_implicit_move() void {
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
     assert(check_env.open_module(&e, strbuf.view(&b)));
     // The result type is the one own place an owning lvalue reaches without
-    // `move`, and only when it names a local or a parameter outright: the
+    // `move`, and only when it names a local or a parameter outright. The
     // emitter empties the operand after reading it, which is what lets a
     // `defer del(p)` written above see the zero value.
     scope.scope mut params = scope.scope{};
@@ -416,15 +416,15 @@ fn a_second_check_clears_every_annotation_it_will_write() void {
     // alone.
     ast.node mut* body = check_env.node_in_main(&e, ast.ast_kind.k_fn_decl, "main")->b;
     assert(body->ann == 0 && body->ty == null && body->sym == null && body->aux == 0);
-    // Every bit the checker owns, plus a type and a symbol that belong to
-    // nothing, as an earlier check of the same tree would have left them.
+    // Set each checker bit. Also set an unrelated type and symbol, as an
+    // earlier check of the same tree can leave them.
     body->ann = check.ANN_ALL;
     body->aux = 7;
     body->ty = check_env.sym_main(&e, "k")->ty;
     body->sym = check_env.sym_main(&e, "k");
     modules_recheck(&e);
     // The clearing is what is asserted, not the writing: a pass that cleared
-    // nothing would leave these set, and a pass that wrote them would be
+    // nothing would leave these set. And a pass that wrote them would be
     // caught by the other suites.
     assert(body->ann == 0);
     assert(body->aux == 0);
@@ -434,7 +434,7 @@ fn a_second_check_clears_every_annotation_it_will_write() void {
 
 // Checks the entry module a second time through the same checker, which is
 // what an editor re-checking a file after an edit does. Whether the second
-// check is clean is not what is asserted: the bits it found are, so the call's
+// check is clean is not what is asserted: the bits it found are. So the call's
 // own answer is discarded and the assertions above it stand.
 fn modules_recheck(check_env.env mut* e) void {
     check_stmt.check_module(&e->ck, check_env.module_at(e, "main"));
@@ -442,7 +442,7 @@ fn modules_recheck(check_env.env mut* e) void {
 
 fn the_sentinel_bit_is_one_past_the_highest_one() void {
     // ANN_END doubles with the highest bit, and ANN_ALL is the mask
-    // clear_annotations clears, so a bit declared without raising the
+    // clear_annotations clears. So a bit declared without raising the
     // sentinel would not be cleared (check.ft).
     assert(check.ANN_END == check.ANN_MOVE * 2);
     assert(check.ANN_ALL == check.ANN_END - 1);

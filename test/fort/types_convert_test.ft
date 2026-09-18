@@ -6,14 +6,14 @@
 //| further ok
 //| matrix ok
 //| ok
-import prim;
-import types;
-import types_env;
-
 /// The conversions of a type: the implicit drops of mutability and of
 /// ownership, and the cast matrix. Every example those rules give is one
 /// assertion. The final four tests derive the matrix and its invariants by a
 /// second method.
+
+import prim;
+import types;
+import types_env;
 
 // The class of a scalar type in the cast matrix.
 enum scalar_class {
@@ -32,10 +32,10 @@ u64 SAMPLES_MAX = 35;
 // failure of no_conversion_and_no_cast_adds_mut below. Add a new spelling to
 // the table only after that test gives the new count.
 //
-// `u8 mut@`, `node mut*@` and `node mut*[2]` are in the table for the two arms
-// of the rule that the other 32 spellings never reached: a `string` source,
-// whose bytes carry no level behind them, and a `mut` inside a fixed array. The
-// These two cases exercise distinct rule branches. The array branch holds 34
+// `u8 mut@`, `node mut*@`, and `node mut*[2]` cover two branches the other 32
+// spellings do not reach.
+// They cover a `string` source and a `mut` inside a fixed array. These cases
+// exercise distinct rule branches. The array branch holds 34
 // of the 336 pairs. The `string` branch holds 2 pairs.
 // `node mut*@` is the one that reaches the `string` arm, because a target whose
 // own level is mutable is answered by the level before it.
@@ -103,10 +103,10 @@ fn scalar_types(types_env.env mut* e, types.node* mut@ list, scalar_class mut@ c
     return n;
 }
 
-// The reference and value types the invariant tests walk, function types and
-// references to them included: the marks inside a function type are part of
-// its identity, so a property that never sees one cannot tell whether a
-// conversion respects them.
+// The invariants walk value and
+// reference types, including function
+// types. Function-type marks belong to
+// identity, so the tests must inspect them.
 fn sample_types(types_env.env mut* e, types.node* mut@ list) u64 {
     string[29] spellings = {"i32", "u8", "bool", "char", "f64", "node*", "node mut*",
                             "node mut* own", "node**", "node* mut*", "node*@", "node mut* mut@",
@@ -139,7 +139,7 @@ fn sample_types(types_env.env mut* e, types.node* mut@ list) u64 {
 }
 
 // Reports a failing pair of a property test the way the C's TEST_LOG_ does,
-// then fails: a loop assertion is otherwise opaque about which pair broke it.
+// then fails. A loop assertion is otherwise opaque about which pair broke it.
 fn fail_pair(types_env.env mut* e, types.node* a, string between, types.node* b) void {
     print(types_env.str_of(e, a));
     print(between);
@@ -187,7 +187,7 @@ fn mutability_drops_through_further_shapes() void {
     // Level 0 of the receiving binding is unconstrained in both directions.
     assert(assignable(&e, "node*", "node* mut"));
     assert(assignable(&e, "node* mut", "node*"));
-    // A fixed array adds no level, so its elements follow the same rule.
+    // A fixed array adds no level. Its element marks control assignment.
     assert(assignable(&e, "node*[4]", "node mut*[4]"));
     assert(!assignable(&e, "node mut*[4]", "node*[4]"));
     assert(!assignable(&e, "node*[4]", "node*[8]"));
@@ -410,7 +410,7 @@ fn casts_within_the_string_family() void {
     assert(!castable(&e, "i8@", "u8@"));
     assert(!castable(&e, "string", "i8@"));
     assert(!castable(&e, "i32@", "u32@"));
-    // The bytes of a `string` are immutable, and no member of the family adds
+    // The bytes of a `string` are immutable. And no member of the family adds
     // the `mut` back, so the two casts of `cast(cast(b, string), u8 mut@)`
     // launder nothing.
     assert(!castable(&e, "char mut@", "string"));
@@ -429,7 +429,7 @@ fn a_span_cast_never_launders_a_signature_or_an_owner() void {
     types.node* takes_mut = types_env.fn1(&e, v, types_env.type_of(&e, "node mut*"));
     types.node* of_node = types.type_span(&e.tt, takes_node, false, false);
     types.node* of_mut = types.type_span(&e.tt, takes_mut, false, false);
-    // The marks of a parameter are part of the function type's identity, so
+    // The marks of a parameter are part of the function type's identity. So
     // those spans have different element types and the row for marks does not
     // reach them, exactly as the cast on one element does not.
     assert(!types.type_cast_allowed(of_node, of_mut));
@@ -437,8 +437,8 @@ fn a_span_cast_never_launders_a_signature_or_an_owner() void {
     assert(!types.type_cast_allowed(takes_node, takes_mut));
     assert(!types.type_same_shape(of_node, of_mut));
     assert(types.type_cast_allowed(of_node, of_node));
-    // A span of function pointers still casts where its own marks differ, so
-    // long as the marks are not added: `own` may be, `mut` may not.
+    // A span of function pointers can cast when its outer marks differ. The
+    // cast can remove `own`, but it cannot add `mut`.
     assert(types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, false), of_node));
     assert(!types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, true), of_node));
     assert(types.type_cast_allowed(of_node, types.type_span(&e.tt, takes_node, false, true)));
@@ -465,7 +465,7 @@ fn casts_of_spans_change_only_the_marks() void {
     assert(castable(&e, "u8@", "u8@ own"));
     assert(castable(&e, "i32@", "i32 mut@"));
     assert(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
-    // The route a caller of `std.sort_ptr` takes: the drop at level 2 behind a
+    // The route a caller of `std.sort_ptr` takes. The drop at level 2 behind a
     // mutable level 1, which the implicit conversion refuses and the cast makes.
     assert(castable(&e, "node* mut@", "node mut* mut@"));
     assert(!assignable(&e, "node* mut@", "node mut* mut@"));
@@ -484,8 +484,8 @@ fn a_cast_never_adds_mut() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    // One rule over every row of the matrix: the target marks a level `mut`
-    // only where the source marks the level at the same depth `mut` too.
+    // Checks each matrix row. A target marks a level `mut` only when the source
+    // marks the level at the same depth `mut`.
     assert(types.type_cast_adds_mut(types_env.type_of(&e, "node mut*"),
                                     types_env.type_of(&e, "node*")));
     assert(!types.type_cast_adds_mut(types_env.type_of(&e, "node*"),
@@ -657,7 +657,7 @@ fn lending_combines_with_dropping_mutability() void {
     assert(assignable(&e, "void*", "void* own"));
     assert(assignable(&e, "void mut*", "void mut* own"));
     assert(assignable(&e, "string", "string own"));
-    // A span of owned strings lends its own mark under the same rule.
+    // A span of owned strings lends its outer ownership mark.
     assert(assignable(&e, "string@", "string@ own"));
     assert(!assignable(&e, "string@ own", "string@"));
 }
@@ -735,9 +735,9 @@ fn stripped(types_env.env mut* e, string text) string {
     return types_env.str_of(e, types.type_without_mut(&e->tt, types_env.type_of(e, text)));
 }
 
-// type_without_mut answers the target a refused cast would have had without its
-// marks, which is how the checker tells a cast refused for the mark from one
-// refused for the element type as well. It is a query of the type table, so the
+// type_without_mut gives the unmarked target of a refused
+// cast. The checker then distinguishes mark errors from
+// element-type errors. It is a query of the type table, so the
 // test spells the answer rather than asking the rule again.
 fn clearing_every_mark_of_a_type() void {
     types_env.env mut e = types_env.env{};
@@ -771,9 +771,9 @@ fn clearing_every_mark_of_a_type() void {
 }
 
 // The rule is a universal one, so the test is a loop over the sample table and
-// not a list of cases: 35 spellings, 1225 ordered pairs, every one of them asked
-// whether it adds a mark and then whether the two answers that matter agree with
-// that. MUT_ADDING_PAIRS holds the table to the rule, because two implications
+// not a list of cases. Checks 1,225 ordered pairs of 35 spellings. Each
+// pair tests whether it adds a mark and whether both relevant answers
+// agree. MUT_ADDING_PAIRS holds the table to the rule. This is because two implications
 // over a table that had stopped naming a mutable type would both hold and prove
 // nothing.
 //
@@ -782,7 +782,7 @@ fn clearing_every_mark_of_a_type() void {
 // rule satisfies them and bakes its own number into the count, so neither says
 // the rule refuses no more than it should. The converse over the same table is
 // every_implicit_conversion_is_also_a_cast, which goes red the moment a pair
-// that converts stops casting, and the pairs that cast without converting are
+// that converts stops casting. And the pairs that cast without converting are
 // named one by one in a_cast_never_adds_mut and in
 // casts_of_spans_change_only_the_marks.
 fn no_conversion_and_no_cast_adds_mut() void {

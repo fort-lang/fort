@@ -3,8 +3,8 @@
 # The test covers src/lsp/main.ft, standard input, standard output, and process status.
 #
 # Four sessions: an orderly one, whose answers are compared byte for byte and
-# whose status is 0; `exit` without a shutdown, whose status is 1; an empty
-# stream, whose status is 1 as well; and one whose document text is not ASCII,
+# whose status is 0; `exit` without a shutdown, whose status is 1. An empty
+# stream, whose status is also 1. The final session has non-ASCII document text,
 # which holds the frame length to a count of bytes. Each one must also leave
 # stderr empty, since nothing below the entry file may write anywhere but the
 # frame stream.
@@ -26,7 +26,7 @@ if [ ! -x "$server" ]; then
     exit 2
 fi
 export QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}
-# The locale is pinned, and it is pinned to a UTF-8 one on purpose: the byte
+# The locale is pinned, and it is pinned to a UTF-8 one on purpose. The byte
 # count below is what a UTF-8 locale gets wrong, so a guard that runs under
 # LC_ALL=C guards nothing. The guest reads en_US.UTF-8 today, which made the
 # guard fire by accident of the image rather than by this line.
@@ -42,17 +42,15 @@ fail() {
 }
 
 # frame <body>: the body inside a Content-Length frame, on stdout.
-# The length is the bytes of the body and `wc -c` counts bytes, where `${#1}`
-# counts characters in the UTF-8 locale pinned above and would declare a short
-# body for the fourth session, which is the one that carries a character above
-# ASCII.
+# The body length counts bytes with `wc -c`. `${#1}` counts characters in the
+# pinned UTF-8 locale. It would shorten the fourth session body.
 frame() {
     printf 'Content-Length: %d\r\n\r\n%s' "$(printf '%s' "$1" | wc -c)" "$1"
 }
 
 # run_session <script file> <output file> <stderr file>: the status the server
 # exits with. The stderr of the server is captured rather than inherited: this
-# is the only test that runs src/lsp/main.ft over real descriptors, so it is
+# is the only test that runs src/lsp/main.ft over real descriptors. So it is
 # the only one that can see a server which prints a line for every frame.
 run_session() {
     set +e
@@ -150,10 +148,10 @@ if [ -s "$work/empty.out" ]; then
 fi
 
 # ---- a session whose document text is not ASCII ----------------------------------
-# The text holds a two-byte character and a four-byte one, so its body is four
-# bytes longer than its characters. A length counted in characters would end
-# the body inside the text and the server would read the rest as a header
-# block, which is the desynchronisation this session exists to catch.
+# The text holds a two-byte character and a four-byte one. So its body is four
+# bytes longer than its characters. A character
+# length ends the body inside its text. The server
+# then reads the remaining body as a header block.
 utf8_opened='{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":'
 utf8_opened=$utf8_opened'{"uri":"file:///caf%C3%A9.ft","languageId":"fort",'
 utf8_opened=$utf8_opened'"version":1,"text":"// caf'"$e_acute $clef"'\nfn main() i32"}}}'

@@ -8,12 +8,12 @@
 //| reuse ok
 //| release ok
 //| ok
+/// The arena of src/lsp/json.ft: what a document costs, what bounds it, and
+/// that json.free gives all of it back.
 import lsp.json;
 import lsp_json_env;
 import std.strbuf;
 
-/// The arena of src/lsp/json.ft: what a document costs, what bounds it, and
-/// that json.free gives all of it back.
 //
 // The bound this file asserts is 20 times the size of the source, and the number is derived and
 // then measured. Every value of a document costs at least two bytes of source, since the
@@ -53,12 +53,12 @@ import std.strbuf;
 u64 ONE_MEBIBYTE = 1048576;
 
 // The bound the arena must stay under, as a multiple of the source. The module
-// names the same number, since the cap on a source is chosen against it, and
+// names the same number, since the cap on a source is chosen against it. And
 // the first assertion of the bound section holds the two together.
 u64 ARENA_BOUND = 20;
 
 // What a node costs, how many stand in one chunk, and what the chunk record
-// beside the slots costs: the derivation above rests on these and the
+// beside the slots costs. The derivation above rests on these and the
 // assertions below hold the module to them. A chunk record is a span, which
 // is a pointer and a length.
 u64 NODE_BYTES = 36;
@@ -71,11 +71,11 @@ u64 CHUNK_BYTES = 256 * 36 + 16;
 u64 STRBUF_MIN_CAP = 16;
 
 // The rounds of the release probe and the distance in bytes that fails it.
-// Each round parses a document of 3999 bytes into 2001 nodes, so it allocates
+// Each round parses a document of 3999 bytes into 2001 nodes. So it allocates
 // 8 chunks, a chunk vector and the byte buffer -- 77919 bytes, measured with
-// json.arena_bytes -- and gives all of it back. A round that keeps one chunk
-// pushes the break out by 9232 bytes, and four hundred rounds push it far past
-// the heap a process starts with.
+// json.arena_bytes -- and gives all of it back. One
+// retained chunk moves the break by 9232 bytes. Four
+// hundred retained chunks exceed the process's initial heap.
 u64 ROUNDS = 400;
 u64 BOUND = 4096;
 
@@ -132,8 +132,8 @@ fn dense_into(strbuf.str_buf mut* b, u64 size) void {
     strbuf.push(b, ']');
 }
 
-// A document of the shape a server receives: one object whose members are a
-// few numbers and one long string, which is a source file inside a message.
+// The document has a common server-message shape. Its
+// object holds numbers and one long source-file string.
 fn message_into(strbuf.str_buf mut* b, u64 size) void {
     strbuf.clear(b);
     strbuf.append(b, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"text\":\"");
@@ -188,7 +188,7 @@ fn an_empty_document_costs_nothing_until_it_is_parsed() void {
 
 fn the_byte_buffer_is_reserved_once_at_the_size_of_the_source() void {
     // Every string and every number of a document is copied into the buffer
-    // and decoding never lengthens one, so the buffer the parse reserves is
+    // and decoding never lengthens one. So the buffer the parse reserves is
     // the buffer it ends with, whatever the document holds.
     strbuf.str_buf mut source = strbuf.create();
     defer strbuf.free(&source);
@@ -202,7 +202,7 @@ fn the_byte_buffer_is_reserved_once_at_the_size_of_the_source() void {
 }
 
 fn the_chunks_grow_one_at_a_time() void {
-    // A document of a thousand values takes four chunks and no more: the
+    // A document of a thousand values takes four chunks and no more. The
     // arena never holds a copy of itself, which is what a doubling vector of
     // nodes would do while it copies.
     strbuf.str_buf mut source = strbuf.create();
@@ -449,7 +449,7 @@ fn a_larger_document_grows_the_arena_and_a_smaller_one_does_not_shrink_it() void
 fn the_bound_holds_after_a_document_grows_by_one_byte() void {
     // The case that breaks a buffer which doubles: a source one byte above
     // the one before it. The buffer is released and taken again at the new
-    // length, so the arena stays inside the bound and the buffer is never
+    // length. So the arena stays inside the bound and the buffer is never
     // twice the source.
     strbuf.str_buf mut small = strbuf.create();
     defer strbuf.free(&small);
@@ -471,7 +471,7 @@ fn the_bound_holds_after_a_document_grows_by_one_byte() void {
 }
 
 fn the_bound_is_over_the_largest_source_the_document_parsed() void {
-    // A doc keeps its storage through a parse of a smaller document, so the
+    // A doc keeps its storage through a parse of a smaller document. So the
     // bound answers for the largest source it has seen and not for the one it
     // holds.
     strbuf.str_buf mut large = strbuf.create();
@@ -543,10 +543,10 @@ fn many_rounds_of_parse_and_free_leave_the_heap_where_it_was() void {
         json.doc mut d = json.create();
         assert(json.parse(&d, document));
         assert(json.node_count(&d) > 1000);
-        // The failure path allocates as the success path does -- every node
-        // before the bad byte is in the arena -- so the round frees a document
-        // of each kind and a release the failure path forgot moves the break
-        // as well.
+        // Failure allocates each node before
+        // the bad byte. Each round frees
+        // successful and failed documents, so a
+        // missed failure release moves the break.
         json.doc mut refused = json.create();
         assert(!json.parse(&refused, half));
         assert(json.node_count(&refused) > 1000);
@@ -585,8 +585,8 @@ fn many_rounds_of_clear_leave_the_heap_where_it_was() void {
     // hundred kilobytes back over its rounds. It leaves free chunks of every size and the
     // 32-byte block view lands wherever one starts. Two probe_block calls in a row differ by
     // 54000 bytes with nothing allocated between them. The break answers the question this
-    // round asks, since a clear that allocated anew would ask the allocator for another chunk
-    // of the same shape for each of four hundred rounds.
+    // round asks. A clear that allocated anew would ask the allocator for
+    // another chunk of the same shape for each of four hundred rounds.
     strbuf.str_buf mut source = strbuf.create();
     defer strbuf.free(&source);
     dense_into(&source, 4000);

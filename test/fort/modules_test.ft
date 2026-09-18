@@ -10,6 +10,8 @@
 //| ambiguity ok
 //| prefix ok
 //| ok
+/// Checks search roots, import paths, the standard library root, ambiguity,
+/// and missing modules in src/fort/modules.ft.
 import diag;
 import modules;
 import modules_env;
@@ -17,13 +19,11 @@ import scope;
 import std.str;
 import std.strbuf;
 
-/// Checks search roots, import paths, the standard library root, ambiguity,
-/// and missing modules in src/fort/modules.ft.
 //
 // modules_closure_test.ft checks closure order, namespaces, and pass order.
 //
 // The C suite asks the same questions of the bootstrap loader. Its fixed path
-// buffer has an extra length test. The Fort loader uses a growing std.strbuf.
+// buffer has an extra length test. The fort loader uses a growing std.strbuf.
 
 // ---- the entry file ----------------------------------------
 
@@ -57,7 +57,7 @@ fn the_entry_directory_is_the_first_search_root() void {
 }
 
 // An entry base name must be a module path segment. Test corpus names such as
-// `NNN_name.ft` cannot meet that rule. An import cannot spell such a name.
+// `NNN_name.ft` are not module path segments. An import cannot spell such a name.
 fn an_entry_base_name_that_is_no_identifier_is_taken_as_it_is() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -83,7 +83,7 @@ fn a_dotted_entry_is_reported_at_the_start_of_the_file() void {
     assert(!modules_env.load(&e, "my.app.ft"));
     assert(modules_env.reports(&e) == 1);
     diag.record rec = modules_env.report_at(&e, 0);
-    // An error with no position in the file is reported at 1:1: it is the
+    // An error with no position in the file is reported at 1:1. It is the
     // file's name that is wrong, not anything written inside it.
     assert(rec.loc.line == 1);
     assert(rec.loc.col == 1);
@@ -115,7 +115,7 @@ fn a_dotted_entry_is_rejected_beside_the_module_it_would_collide_with() void {
 }
 
 // Only `.` is barred, since only `.` separates a module path: the mangler
-// copies the path across, so `my:app.ft` emits `my:app.main`, which no module
+// copies the path across. So `my:app.ft` emits `my:app.main`, which no module
 // path can spell because a segment is an identifier.
 fn a_colon_in_the_entry_base_name_is_accepted() void {
     modules_env.env mut e = modules_env.open();
@@ -233,7 +233,7 @@ fn append_broken_declarations(strbuf.str_buf mut* out, u64 n) void {
 
 // A file's budget is twenty errors, counted across its lexical and its syntax
 // errors together: the loader opens the file with begin_file through the
-// lexer, and the parser goes on with what the lexer left of it, so a file
+// lexer. And the parser goes on with what the lexer left of it. So a file
 // mistyped from end to end costs a reader twenty lines and no more.
 fn a_file_reports_at_most_twenty_errors() void {
     modules_env.env mut e = modules_env.open();
@@ -250,9 +250,9 @@ fn a_file_reports_at_most_twenty_errors() void {
 }
 
 // The budget is the file's and not the run's, so a second file begins with
-// its own twenty. The entry file here is clean and the module it imports is
-// the mistyped one, which makes the imported file the one that spends a
-// budget of its own.
+// its own twenty. The entry file is clean, but
+// its imported module has the typo. The imported
+// file therefore spends its own diagnostic budget.
 fn each_file_has_a_budget_of_its_own() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -451,8 +451,8 @@ fn a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module() void {
     assert(modules.entry(&e.set) != null);
     assert(modules.entry(&e.set)->path == "std.rt");
 
-    // The same for a module the runtime imports rather than the runtime
-    // itself: it is read as std.helper and the entry file is that module.
+    // This case checks a module imported by the runtime. The
+    // loader reads std.helper, and that module becomes the entry file.
     modules_env.env mut f = modules_env.open();
     defer modules_env.close(&f);
     modules_env.add2(&f, "lib/rt.ft", "import std.helper;\n",
@@ -507,7 +507,7 @@ fn a_closure_that_holds_a_float_loads_the_runtime_and_nothing_else() void {
 }
 
 // A file called rt_float.ft in the standard library directory is a module like
-// any other: no rule of the loader names it, so a closure that holds a float
+// any other: no rule of the loader names it. So a closure that holds a float
 // leaves it unread and an `import std.rt_float;` reaches it.
 fn a_float_module_in_the_library_directory_is_an_ordinary_module() void {
     modules_env.env mut e = modules_env.open();

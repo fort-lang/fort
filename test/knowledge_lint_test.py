@@ -305,7 +305,7 @@ class HistoryTest(unittest.TestCase):
 
     def test_the_past_tense_of_the_note_is_not_what_silences_the_rule(self):
         # `until then the rule read:` is past, but the clause after the colon is present.
-        # clause after the colon is a sentence of its own and still present. So
+        # The clause after the colon is a sentence of its own and still present. Thus,
         # the quotation is the silencer and the note's own tense is not
         _, by_entry = self.problems_of(HISTORY_LOG)
         self.assertEqual(len(by_entry["D1.8"]), 1)
@@ -520,7 +520,7 @@ class HistoryLimitTest(unittest.TestCase):
 class HistoryRepositoryTest(unittest.TestCase):
     def test_a_tree_with_no_decision_log_reports_nothing_rather_than_raising(self):
         # `rule_history` returns no problem when the decision log is absent.
-        # This behavior lets `--root` inspect a partial tree.
+        # Returning no problem lets `--root` inspect a partial tree.
         with tempfile.TemporaryDirectory() as name:
             problems, count = lint.rule_history(Path(name))
             self.assertEqual(problems, [])

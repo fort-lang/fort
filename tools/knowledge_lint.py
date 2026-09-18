@@ -42,7 +42,7 @@ AGENTS_FILE = "AGENTS.md"
 DECISIONS_FILE = "spec/decisions.md"
 
 # The line budget of AGENTS.md uses the measured `wc -l AGENTS.md` value.
-# The limit has no headroom. A new AGENTS.md line fails this rule.
+# The limit has no headroom. A new AGENTS.md line fails the budget check.
 # BUDGET_TARGET is display-only. Lower the limit when text moves out.
 # Raise the limit only when approved text moves in.
 BUDGET_LIMIT = 252
@@ -115,7 +115,7 @@ HISTORY_BETWEEN = HISTORY_ADVERB + r"(?:,?(?:\s+\S+){0," + str(HISTORY_RUN) + r"
 
 # The verbs of saying, in the present tense. `read` and `said` are absent
 # because they are past-tense forms and a clause built on one reports nothing
-# that can go stale; that is a property of the reported clause and not of the
+# that can go stale. That is a property of the reported clause and not of the
 # note around it, which the paragraph above states. `is`, `has` and `stands` are
 # absent too, because they report a property and not a statement, and every note
 # holds one.
@@ -130,8 +130,8 @@ HISTORY_REPORT = re.compile(
     r"\b(" + HISTORY_SUBJECT + HISTORY_BETWEEN + r"(?:" + HISTORY_VERBS + r"|"
     + HISTORY_NEGATED + r"))\b", re.IGNORECASE)
 
-# A claim the sentence dates itself: `now` says the amendment made it true, and
-# a date or one of the two dating phrases pins it to a day.
+# A claim can date itself. `now`, a date, or
+# either dating phrase pins the claim to a day.
 HISTORY_ANCHOR = re.compile(r"\bnow\b|20\d\d-\d\d-\d\d|as it stood"
                             r"|from th(?:is|at) date")
 

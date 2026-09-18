@@ -3,7 +3,7 @@
 // The form is one line per tree: `(kind field... child...)`.
 // An absent fixed child prints as `nil`, which keeps each child position visible.
 //
-// i32 mut x = 1 + 2; (var x (type (prim i32) mut) (binary + (int 1) (int 2)))
+// Example: i32 mut x = 1 + 2; (var x (type (prim i32) mut) (binary + (int 1) (int 2))).
 //
 // Type positions print their marks as the words `own` and `mut` after what
 // they qualify, as the source writes them.

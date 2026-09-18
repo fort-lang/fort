@@ -8,6 +8,8 @@
 //| cancel ok
 //| exit ok
 //| ok
+/// Checks the server dispatch loop over recorded exchanges. The cases cover lifecycle,
+/// capabilities, documents, errors, cancellation, and exit status.
 import lsp.docs;
 import lsp.json;
 import lsp.rpc;
@@ -17,8 +19,6 @@ import lsp_env;
 import std.io;
 import std.strbuf;
 
-/// Checks the server dispatch loop over recorded exchanges. The cases cover lifecycle,
-/// capabilities, documents, errors, cancellation, and exit status.
 //
 // A session writes the whole script into a pipe and closes it, so the server
 // reads the script and then the end of the stream. Its answers go into a
@@ -497,7 +497,7 @@ fn a_malformed_document_notification_is_dropped() void {
     defer strbuf.free(&script);
     request_into(&script, 1, "initialize", "{}");
     // No uri, no text, a uri of the wrong kind, no textDocument at all, no
-    // params, an empty list of changes, and a change for a document that was
+    // params, an empty list of changes. And a change for a document that was
     // never opened.
     note_into(&script, "textDocument/didOpen", "{\"textDocument\":{\"text\":\"x\"}}");
     note_into(&script, "textDocument/didOpen", "{\"textDocument\":{\"uri\":\"file:///a.ft\"}}");
@@ -623,9 +623,9 @@ fn two_documents_are_synchronised_side_by_side() void {
 }
 
 fn the_text_of_a_change_carries_every_escape() void {
-    // The text of a message is JSON, so the server holds the bytes the escapes
-    // stand for: a quote, a backslash, a line feed, a tab, a NUL and a
-    // character of every UTF-8 length.
+    // The text of a message is JSON. The server stores
+    // the bytes represented by each escape. These cover
+    // quote, backslash, controls, NUL, and each UTF-8 length.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
     strbuf.str_buf mut params = strbuf.create();
@@ -810,7 +810,7 @@ fn a_string_id_is_answered_with_the_same_string() void {
 // ---- cancellation ----------------------------------------------------------------
 
 // Dispatches `initialize` straight into the server. A notification before it
-// is dropped (LSP 3.17), so a test that drives the state machine by hand
+// is dropped (LSP 3.17). So a test that drives the state machine by hand
 // initializes the server first, as a script over the pipe does. The answer
 // goes into the output pipe like any other.
 fn initialize_directly(exchange mut* x, json.doc mut* d) void {
@@ -866,7 +866,7 @@ fn a_cancel_for_a_request_the_server_never_saw_is_dropped() void {
     note_into(&script, "$/cancelRequest", "{\"id\":null}");
     note_into(&script, "$/cancelRequest", "{\"id\":[1]}");
     // The request the first cancel named arrives afterwards and is answered
-    // like any other: a cancel names a request in flight, and that one was not.
+    // like any other. A cancel names a request in flight, and that one was not.
     request_into(&script, 77, "shutdown", "null");
     note_into(&script, "exit", "null");
     i32 mut status = -1;
@@ -884,7 +884,7 @@ fn a_cancel_for_a_request_the_server_never_saw_is_dropped() void {
 fn a_cancel_for_the_request_in_flight_is_recorded() void {
     strbuf.str_buf mut params = strbuf.create();
     defer strbuf.free(&params);
-    // The loop answers a request before it reads the next frame, so a cancel
+    // The loop answers a request before it reads the next frame. So a cancel
     // reaches a request in flight only through a handler that reads input
     // while it works. The state machine is driven here directly, which is what
     // such a handler will do.
@@ -949,7 +949,7 @@ fn the_id_of_the_request_in_flight_is_a_copy() void {
     strbuf.str_buf mut params = strbuf.create();
     defer strbuf.free(&params);
     // An id is a view into the document that carried it, and the next parse
-    // reuses that storage, so the server copies the text of the id it is
+    // reuses that storage. So the server copies the text of the id it is
     // handling. A second parse over the same document is what a second message
     // does, and the id must still compare equal afterwards.
     exchange mut x = exchange{};

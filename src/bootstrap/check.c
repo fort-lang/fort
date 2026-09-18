@@ -749,7 +749,7 @@ static bool retype_untyped(
         // An operator that folded to no value reaches its operand rule here because
         // check_binary could not read a value from its operands. The
         // children go first. A constant that does not fit `t` is reported at
-        // its location, so this rule stays quiet. In `char c = 1 << n;`, the
+        // its location, so `untyped_operand_ok` stays quiet. In `char c = 1 << n;`, the
         // left operand is integer `1`. The useful message names that constant.
         ok = false;
     }
@@ -864,7 +864,7 @@ static void default_type(check_t* ck, ast_node_t* n, expr_t* e) {
         k = untyped_default_kind(ck, n);
         if (k == PRIM_VOID) {
             // No constant in it asks for a type, so the expression keeps the
-            // i32 that `retype_untyped` reported against before this rule.
+            // i32 that `retype_untyped` used for its earlier diagnostic.
             k = PRIM_I32;
         }
         e->type = type_prim(&ck->types, k);
@@ -887,7 +887,7 @@ static void value_of(check_t* ck, ast_node_t* n, expr_t* e) {
     }
 }
 
-// This rule applies to an operator operand that gets no context. The thirteen
+// `check_operand` handles an operator operand that gets no context. The thirteen
 // positions include `*e`, `e.f`, `e->f`, `e.len`, `e[i]`, and `e[a..b]`. They
 // also include `e()`, `&e`, `del(e)`, `move(e)`, an assignment or `++` target,
 // and a range `for` collection. Each position
@@ -901,16 +901,15 @@ static void value_of(check_t* ck, ast_node_t* n, expr_t* e) {
 // Thus, the constant takes its default type here, as it does without an
 // operator.
 //
-// The rule has two outcomes here and the second is not an error path. It
-// usually reports the constant and leaves the error type. The caller sees the
-// poison and returns. A constant that folds back into range leaves a typed
-// operand without a diagnostic. `2^63 >> 1` is the i64 value 2^62. The shift
-// leaves it poisoned, and this call restores it. The caller continues, and the
-// operator reports `cannot dereference i64`. Four
-// programs of that shape were accepted in silence as well.
+// The rule has two outcomes here, and the second is not an error path. It
+// usually reports the constant and leaves the error type. The caller then
+// returns. A constant that folds back into range leaves a typed operand without
+// a diagnostic. `2^63 >> 1` is the i64 value 2^62. The shift leaves it
+// poisoned, and this call restores it. The caller continues, so the operator
+// can report `cannot dereference i64`.
 //
 // `default_type` returns at once for an operand that is no untyped constant, so
-// every diagnostic these operators give today stands unchanged.
+// operators handle each typed operand normally.
 void check_operand(check_t* ck, ast_node_t* n, expr_t* out) {
     check_expr(ck, n, out);
     if (check_poisoned(out->type)) {
@@ -2221,7 +2220,6 @@ static bool is_builtin(const sym_t* s, const char* name) {
 }
 
 // Printable types exclude structs, arrays, and spans.
-// not printable.
 static bool type_is_printable(const type_t* t) {
     switch (t->kind) {
     case TYPE_PRIM:
@@ -2792,7 +2790,7 @@ static void resolve_sym(check_t* ck, sym_t* s) {
             // value stays CV_NONE because an address is not a constant value.
             return;
         }
-        // The same rule applies to an enum member value.
+        // An enum member value cannot depend on itself either.
         check_msg_begin(ck);
         msg_quote(&ck->msg, s->name);
         msg_str(&ck->msg, " is defined in terms of itself");

@@ -111,8 +111,8 @@ static bool at(const parser_t* p, tok_kind_t k) {
     return kind(p) == k;
 }
 
-// The empty range just after the last consumed token, where a node with no
-// token of its own begins: the implicit block of a case body.
+// The empty range follows the last consumed token. It starts a node with no
+// token of its own, such as the implicit block of a case body.
 static loc_t here_implicit(const parser_t* p) {
     if (p->pos == 0) {
         return loc_make(p->file, cur(p)->line, cur(p)->col);
@@ -691,8 +691,8 @@ static ast_node_t* parse_type(parser_t* p, bool allow_noreturn) {
 }
 
 // array_type = base_type { ref_suffix } "[" const_expr "]" { "[" const_expr "]"
-// }: the type of an array literal, which has no base marker, no
-// marker on a dimension and no trailing reference suffix.
+// }: the type of an array literal. It has no base marker, dimension marker,
+// or trailing reference suffix.
 static ast_node_t* parse_array_type(parser_t* p) {
     if (!enter(p)) {
         return NULL;
@@ -1302,7 +1302,7 @@ static bool starts_statement(tok_kind_t k) {
 }
 
 // The keywords that begin a case clause. Neither appears in a statement or an
-// expression, so a skip inside a switch stops before one rather than
+// expression. So a skip inside a switch stops before one rather than
 // swallowing the clause that follows the broken one.
 static bool starts_case(tok_kind_t k) {
     return k == TOK_KW_CASE || k == TOK_KW_DEFAULT;
@@ -1489,7 +1489,7 @@ static ast_node_t* parse_var_decl(parser_t* p, bool want_semi) {
 // assign_head, incdec_head or call_expr: the target is a postfix expression or a
 // unary `*`. An assignment and an increment carry their operator's
 // position, which is where the runtime reports the overwrite check and an
-// overflow; the target's own position is on the target node.
+// overflow. The target's own position is on the target node.
 static ast_node_t* parse_simple_head(parser_t* p) {
     const loc_t loc = here(p);
     ast_node_t* e = at(p, TOK_STAR) ? parse_unary(p) : parse_postfix(p);
@@ -1537,7 +1537,7 @@ static ast_node_t* parse_condition(parser_t* p) {
 }
 
 // Ends the range of every `if` of an else-if chain: the chain nests at its
-// tail, so each one runs to the end of the whole chain.
+// tail. So each one runs to the end of the whole chain.
 static ast_node_t* finish_if_chain(parser_t* p, ast_node_t* first) {
     ast_node_t* n = first;
     while (n != NULL && n->kind == AST_IF) {
@@ -1600,7 +1600,7 @@ static ast_node_t* parse_while(parser_t* p) {
 }
 
 // do_stmt = "do" block "while" "(" expr ")" ";". The whole form is parsed before
-// `do`-`while` is reported as outside the C bootstrap's subset, so this is the
+// `do`-`while` is reported as outside the C bootstrap's subset. So this is the
 // parser the self-hosted compiler keeps, minus the one check.
 static ast_node_t* parse_do(parser_t* p) {
     const loc_t loc = here(p);
@@ -1715,8 +1715,8 @@ static ast_node_t* parse_for(parser_t* p) {
     return n;
 }
 
-// Where the statements of a case body stop: the next clause or the end of the
-// switch, and, since a missing `}` ends every body, a top-level declaration.
+// A case body stops at the next clause or the end of the switch. A missing `}`
+// also stops the body at a top-level declaration.
 static bool at_case_end(parser_t* p) {
     return at(p, TOK_KW_CASE) || at(p, TOK_KW_DEFAULT) || at(p, TOK_RBRACE) || at(p, TOK_EOF) ||
            at_decl_start(p);
@@ -1898,7 +1898,7 @@ static ast_node_t* parse_block_tail(parser_t* p, loc_t loc) {
 }
 
 // block = "{" { statement } "}". A block that stands where a
-// statement is expected needs its `{`: the statement forms are braced, so a
+// statement is expected needs its `{`: the statement forms are braced. So a
 // missing one is a different mistake and the construct fails.
 static ast_node_t* parse_block(parser_t* p) {
     const loc_t loc = here(p);
@@ -2000,8 +2000,8 @@ static ast_node_t* parse_fn_decl(parser_t* p, loc_t loc) {
 }
 
 // At the top level a `fn` opens a function definition. When the
-// `fn` is followed by `(` rather than by a name, it is the base of a function
-// type and the declaration is a global of that type.
+// `fn` is followed by `(` rather than a name, it starts a function type.
+// The declaration is a global of that type.
 static ast_node_t* parse_fn_top_decl(parser_t* p) {
     const loc_t loc = here(p);
     bump(p);
