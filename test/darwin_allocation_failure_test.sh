@@ -77,7 +77,7 @@ for source in "${fixtures[@]}"; do
     if [[ "$name" == allocation_unused* ]]; then
         if [ -s "$work/$name.out" ] || \
             ! printf '%s\n' \
-                'test/darwin/allocation_unused.ft:7:27: runtime error: out of memory' |
+                'test/darwin/allocation_unused.ft:6:27: runtime error: out of memory' |
                 cmp -s - "$work/$name.err"; then
             echo "darwin allocation: unused storage did not report its source position" >&2
             exit 1

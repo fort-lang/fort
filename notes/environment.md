@@ -505,8 +505,12 @@ without a rewrite.
   /opt/homebrew/bin/opt --version
   cmake --version
   node --version
+  rg --version
   ```
 
+  `tools/darwin_host_identity.sh` requires each tool it hashes, `rg` among them; a host without
+  ripgrep exits 2 with `darwin identity: missing tool rg` before the gate runs (T-183, measured
+  2026-09-19; `brew install ripgrep` cured it).
   Set `FORT_DARWIN_OPT` to a different `opt` path only when that tool verifies LLVM IR.
   Each `tools/target darwin workflow` call writes this path to the CMake cache.
   Configure and build the `darwin` compiler and language server on the darwin host:
