@@ -92,7 +92,7 @@ shebang.
   make glibc declare `environ`: `<unistd.h>` guards it with `#ifdef __USE_GNU`, so a file that
   passes an environment to `posix_spawn` declares `extern char** environ;` itself, as POSIX
   allows. `realpath` is the same case (`<stdlib.h>` guards it with `__USE_XOPEN_EXTENDED`, which
-  `_POSIX_C_SOURCE` does not set), and `src/bootstrap/modules.c` declares it the same way;
+  `_POSIX_C_SOURCE` does not set), and `bootstrap/src/modules.c` declares it the same way;
   check for that guard before calling any POSIX function the headers seem to be missing, rather
   than widening the feature macros. Names: functions, variables, parameters, fields and
   struct/union/enum tags lower_case;
@@ -114,23 +114,23 @@ shebang.
   `tools/vm format` reformats,
   and `tools/check_comments.py` rejects a block comment (`tools/vm format-check` runs it; it
   skips a `/*` inside a string literal, a character literal or a `//` comment). This applies to
-  test helpers under `test/` too. Two gaps of clang-tidy 18 are covered by review:
-  `bugprone-unused-return-value` takes function names, not patterns (patterns arrive in
-  clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the project's own
-  functions are unchecked; and **clang-tidy 18's macro-argument blind spot covers
+  test helpers under `bootstrap/test/` and `test/lang/ffi/` too. Two gaps of clang-tidy 18 are
+  covered by review: `bugprone-unused-return-value` takes function names, not patterns (patterns
+  arrive in clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the
+  project's own functions are unchecked; and **clang-tidy 18's macro-argument blind spot covers
   `readability-identifier-naming` as well as `readability-magic-numbers`**, so nothing inside a
   `TEST(name, { ... })` body is checked for either -- a `static const char program[]` there draws
   no `invalid case style for static constant` while the same declaration at ordinary source
   location does. An experiment that renames an identifier *inside* a `TEST` body and sees no
   complaint has measured nothing; move the declaration out, or read the convention off a
-  comparable one in a `main` (`SOURCE` in `test/gen_control_test.c`).
+  comparable one in a `main` (`SOURCE` in `bootstrap/test/gen_control_test.c`).
   **A suite's `main` trips `readability-function-size` at 61 tests**, because `TEST_RUN` expands
   to thirteen statements and the check's default threshold is 800. The number measures the macro
   and the size of the suite, not the function, so the suite that passes it takes a
   `// NOLINTNEXTLINE(readability-function-size)` on its `main` with that reason written above it;
-  `test/check_stmt_test.c` is the first, at 63 tests and 825 statements (T-075). Do not raise the
-  threshold in `.clang-tidy`: that check reads `src/` too, where the count means what it says.
-  The bootstrap must also stay transliterable into fort: no unions, no macro tricks, and no
+  `bootstrap/test/check_stmt_test.c` is the first, at 63 tests and 825 statements (T-075). Do not
+  raise the threshold in `.clang-tidy`: that check reads `src/` too, where the count means what it
+  says. The bootstrap must also stay transliterable into fort: no unions, no macro tricks, and no
   compiler builtin fort lacks (function-pointer tables are fine, the bootstrap subset has
   function pointers). `__builtin_clzll` was removed for that reason: `mag > (UINT64_MAX >> n)`
   says the same thing. The whole list, and what replaces each construct, is **Transliterating the

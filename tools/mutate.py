@@ -40,7 +40,7 @@ class AnchorError(Exception):
 
 
 # The summary block of ctest names every test that failed, whatever its label:
-# `        3 - unit-gen_cast (Failed)`. The per-test lines above it do not, so
+# `        3 - gen_cast_test (Failed)`. The per-test lines above it do not, so
 # read this summary pattern instead of the incomplete per-test lines.
 CTEST_FAILURE = re.compile(r"^\s*\d+ - (\S+) \((Failed|Timeout|Subprocess aborted)\)")
 

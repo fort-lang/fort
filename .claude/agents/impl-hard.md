@@ -11,7 +11,7 @@ worktree and the branch.
 
 fort is a C-like systems language: immutable by default, sized arrays and spans, ownership
 (`own`/`move`), modules, checked arithmetic. It targets x86-64 Linux through GNU assembly and a
-small C runtime. You write C11 in `src/bootstrap/` or fort in `src/fort/`.
+small C runtime. You write C11 in `bootstrap/src/` or fort in `src/fort/`.
 
 Normative order: `spec/decisions.md` (numbered `Dn.m`) and `spec/grammar.md` win over the
 specification documents, which win over comments and code. Read only what your ticket cites:

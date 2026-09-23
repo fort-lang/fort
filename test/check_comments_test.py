@@ -131,9 +131,9 @@ class MainTest(unittest.TestCase):
         self.assertIn("D2.2", err)
 
     def test_the_default_globs_cover_the_c_sources(self):
-        self.write("src/bootstrap/a.c", "/* no */\n")
-        self.write("src/bootstrap/b.h", "/* no */\n")
-        self.write("test/c_test.c", "/* no */\n")
+        self.write("bootstrap/src/a.c", "/* no */\n")
+        self.write("bootstrap/src/b.h", "/* no */\n")
+        self.write("bootstrap/test/c_test.c", "/* no */\n")
         self.write("test/lang/ffi/helpers.c", "/* no */\n")
         self.write("test/lang/run/x.ft", "/* not a C source */\n")
         self.write("notes/x.md", "/* not a C source */\n")
@@ -143,16 +143,16 @@ class MainTest(unittest.TestCase):
         self.assertEqual(
             reported,
             [
-                "src/bootstrap/a.c",
-                "src/bootstrap/b.h",
-                "test/c_test.c",
+                "bootstrap/src/a.c",
+                "bootstrap/src/b.h",
+                "bootstrap/test/c_test.c",
                 "test/lang/ffi/helpers.c",
             ],
         )
         self.assertIn("4 block comment", err)
 
     def test_a_clean_tree_exits_zero(self):
-        self.write("src/bootstrap/a.c", '// fine\nconst char* s = "/*";\n')
+        self.write("bootstrap/src/a.c", '// fine\nconst char* s = "/*";\n')
         status, out, err = self.run_main(["--root", str(self.root)])
         self.assertEqual(status, 0)
         self.assertEqual(out, "")

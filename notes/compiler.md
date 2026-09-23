@@ -41,9 +41,9 @@ came here.
   consumed are not part of it, as `parse_paren_expr` does with the `)` of a parenthesized
   expression, whose start cannot move over the `(` (D20.4). A name is recorded with
   `expect_name(p, n)`, and a node's start never moves: the nodes named after an operator still
-  start at it (`toolchain.md` 4). `test/parser_range_test.c` catches a missed `finish` only when
-  the node has a child that ends after the node's anchor token, since what it checks is that a
-  child's range lies inside its parent's: dropping the `finish` of a childless node (`break`,
+  start at it (`toolchain.md` 4). `bootstrap/test/parser_range_test.c` catches a missed `finish`
+  only when the node has a child that ends after the node's anchor token, since what it checks is
+  that a child's range lies inside its parent's: dropping the `finish` of a childless node (`break`,
   `continue`), of a marker-only type suffix (`* mut`) or of a trailing `;` leaves it green. Those
   need an explicit `parser_loc_test` assertion on the source text the range covers. Add a new node
   kind to the corpus of the first suite and an assertion to the second.
@@ -74,8 +74,9 @@ came here.
   diagnostic counts of the files with two syntax errors are asserted beside it, since a walk that
   only forbids unannotated lines also passes with recovery switched off. It also asserts the
   number of files it walked (`CORPUS_FILES`), so a ticket that adds a test under `test/lang/fail`
-  raises that constant in the same commit, and one that adds a suite of its own to `test/` runs
-  `tools/vm configure` before `build`, since the executables are globbed at configure time.
+  raises that constant in the same commit, and one that adds a suite of its own to
+  `bootstrap/test/` runs `tools/vm configure` before `build`, since the executables are globbed at
+  configure time.
 
 ## 4. The checker
 
@@ -133,10 +134,10 @@ came here.
   there: value containment is a field written
   `B` or a fixed array of any rank over it, and nothing else. The rule to keep: a declaration
   order that changes whether a program compiles is a bug in the demand graph, not a limitation.
-  10 of `test/check_layout_test.c`'s 17 tests check both declaration orders
+  10 of `bootstrap/test/check_layout_test.c`'s 17 tests check both declaration orders
   (`grep -c 'TEST_RUN(.*_in_either_order)'` against `grep -c 'TEST_RUN('`), and
-  `test/gen_aggregate_test.c` holds the two emitted modules against each other line by line,
-  since a layout is only observable through the offsets it moves. `suffixes_store_base` is the
+  `bootstrap/test/gen_aggregate_test.c` holds the two emitted modules against each other line by
+  line, since a layout is only observable through the offsets it moves. `suffixes_store_base` is the
   third spelling of "look behind fixed arrays" beside `behind_arrays` in `types.c` and
   `struct_of` in `check.c`; keep the three in step by reading them together. Its generality was
   untestable in stage1 by construction, since that compiler refuses `b[2][3]` and `b[3] mut@`,
@@ -237,9 +238,9 @@ came here.
   `not supported by the bootstrap compiler: ?:` inside `std/math.ft`, which has one place and is
   not this shape. What holds the rule, and why a `fail` test alone does not, is
   `notes/testing.md` 3. Mutation-measured on 2026-09-14: swapping the two
-  places of the extern conflict takes `unit-check_extern` red and `lang` to 5 failed in stage1,
+  places of the extern conflict takes `check_extern_test` red and `lang` to 5 failed in stage1,
   and `fort-modules` red and `lang` to 5 failed in stage2; swapping them at the
-  redeclaration takes `unit-modules_closure` and `lang` red in stage1 and `fort-modules` and
+  redeclaration takes `modules_closure_test` and `lang` red in stage1 and `fort-modules` and
   `lang` red in stage2.
 
 ## 6. The IR emitter
@@ -251,7 +252,7 @@ came here.
   after, which destroyed the value in three of six build-mode/shape cells and was invisible to
   every language test, because the two aliasing forms it did not cover are not statically
   comparable. Fix the general case rather than banning the syntax that exposes it.
-- **The IR emitter** (`src/bootstrap/gen*.c`, toolchain.md 6): it runs inside that window, before
+- **The IR emitter** (`bootstrap/src/gen*.c`, toolchain.md 6): it runs inside that window, before
   the caller frees the analysis, because every annotation it reads points into the checker
   (`check.h`); an emitter called after the analysis is released walks freed memory. It builds its
   operand and type texts in one shared `g->scratch`, so a function that has begun writing there
@@ -297,18 +298,18 @@ came here.
   message and nothing else.
   **A runtime entry point is described in two places, and one test holds them together**: the
   fort signature in `std/rt.ft`, which is what defines it, and one row per entry point in
-  `src/bootstrap/runtime_sig.c` (`RT_SIG`, indexed by the `rt_entry_t` of `runtime_sig.h`), which
+  `bootstrap/src/runtime_sig.c` (`RT_SIG`, indexed by the `rt_entry_t` of `runtime_sig.h`), which
   carries the mangled name of D9.7, the result form, the `noreturn` mark and the parameter forms;
   `toolchain.md` 5.1 states the same signatures in prose. The emitter writes its call sites from
   the row's name, result form and `noreturn` mark, and declares nothing, since the module holds
   the definition too (item 8). **The argument list of a call is not in the table**: each site
   builds its own operands in `gen_expr.c` and `gen_stmt.c`, so a wrong argument type or a wrong
-  order is held by the per-site text assertions in `test/gen*_test.c` and by nothing else --
-  every entry point a program can reach has one today, by count and not by construction, so a
+  order is held by the per-site text assertions in `bootstrap/test/gen*_test.c` and by nothing else
+  -- every entry point a program can reach has one today, by count and not by construction, so a
   ticket that adds an argument to a call writes the assertion with it. The witness for the row is
-  `test/runtime_sig_test.c`'s `every_row_is_the_fort_signature_of_std_rt`, which loads `std/rt.ft`
-  with the compiler's own front end (CMake passes `FORT_STD_SOURCE_DIR`) and holds each row
-  against the declaration of the same name: the result form, the arity, each parameter form and
+  `bootstrap/test/runtime_sig_test.c`'s `every_row_is_the_fort_signature_of_std_rt`, which loads
+  `std/rt.ft` with the compiler's own front end (CMake passes `FORT_STD_SOURCE_DIR`) and holds each
+  row against the declaration of the same name: the result form, the arity, each parameter form and
   the `noreturn` mark, plus the text the emitter writes for that definition's result, which is
   what a call site must state for the two to agree. Nothing below the compiler holds them
   together, so there is no second oracle: before a witness existed, giving `fort_rt_print_f64` an
@@ -333,14 +334,14 @@ came here.
   Two C declarations of one name are one ELF symbol, so anything the module emits once -- an
   `extern` declaration above all -- deduplicates by the C name and never by `sym_t*`: two modules
   declaring the same function are two symbols, and a second `declare` is a redefinition `opt`
-  rejects. The suites (`test/gen*_test.c` over `test/gen_helpers.h`) emit into a sandbox they
-  `chdir` into, so `@.file.N` holds a bare file name and the text does not depend on the build
-  directory; CMake gives every `test/gen*_test.c` `FORT_OPT` and `FORT_IR_DIR`, and the ctest
-  `lang` passes `--verify-ir`, so every module either suite produces is checked by
-  `opt -passes=verify`. `opt` is a default, not a configure-time requirement, so each suite must
-  report a missing one as a broken environment (`gen_no_verifier`, exit `TEST_RESULT_ERR`) the
-  way `test/pipeline_test.sh` exits 2: a spawn that succeeds and a child that exits 127 otherwise
-  reads as "the verifier rejected this IR", which blames the wrong thing.
+  rejects. The suites (`bootstrap/test/gen*_test.c` over `bootstrap/test/common/gen_helpers.h`) emit
+  into a sandbox they `chdir` into, so `@.file.N` holds a bare file name and the text does not
+  depend on the build directory; CMake gives every `bootstrap/test/gen*_test.c` `FORT_OPT` and
+  `FORT_IR_DIR`, and the ctest `lang` passes `--verify-ir`, so every module either suite produces is
+  checked by `opt -passes=verify`. `opt` is a default, not a configure-time requirement, so each
+  suite must report a missing one as a broken environment (`gen_no_verifier`, exit
+  `TEST_RESULT_ERR`) the way `test/pipeline_test.sh` exits 2: a spawn that succeeds and a child that
+  exits 127 otherwise reads as "the verifier rejected this IR", which blames the wrong thing.
   A duplicate the emitter stops writing is only a fix if something else refuses the program: `opt`
   rejected a `declare` beside a `define` of `fort_entry`, and dropping the declaration to satisfy
   it turned a hard compile error into a call through the declared type -- a SIGSEGV in the test
@@ -360,47 +361,47 @@ came here.
   computes wrongly therefore reaches the module and shows only in its text. T-078 made
   `gen_int_bits` answer 8 bits for a `bool`, which turned `cast(b, u8)` into the identity. No unit
   test and no program of the corpus saw it. The assertion that sees it now is
-  `a_bool_widens_to_a_byte_because_its_value_is_one_bit` in `test/gen_cast_test.c`.
+  `a_bool_widens_to_a_byte_because_its_value_is_one_bit` in `bootstrap/test/gen_cast_test.c`.
   **`opt -passes=verify` does not reject an instruction after a terminator.** It splits the block,
   invents an unnamed successor which it prints as `0: ; No predecessors!`, and exits 0 -- so it
   quietly manufactures the implicit numbering D19.5 forbids rather than reporting the module that
   caused it. An emitter whose block structure is wrong therefore passes the whole gate: `gen_for`
   emitted its back edge after a `noreturn` call in a `for` header for a whole ticket while the unit
   tests, the language corpus, `--verify-ir` and `test/pipeline_test.sh` all stayed green. Block
-  structure is asserted by the suites themselves: `verified()` in `test/gen_helpers.h` runs
-  `gen_block_terminators` before it calls `opt`, so every call site in every emitter suite checks
-  contract item 10 and a new suite inherits it. Treat `opt` as a floor that catches type and
-  dominance errors, never as the proof of a structural contract item -- and when a contract item
-  names a tool as its check, confirm the tool actually rejects a violation before believing it.
-  **No internal-ABI mutation is catchable by a language run test.** Flipping a `zeroext` to
-  `signext`, dropping either extension attribute, passing an aggregate `byval` and dropping the
-  `sret` of a definition each leave the whole of `test/lang` green (measured on all 280 tests,
-  T-017's review): a fort program is one LLVM module, caller and callee are compiled together, the
-  `-O1` of the `--cc` line inlines the mismatch away, and a convention both sides get wrong agrees
-  with itself. The corpus can only see what the *program* can observe -- evaluation order, a callee
-  writing to its parameter, a trap that must fire. Everything else is pinned by the text: the
-  assertions in `test/gen*_test.c` and the goldens in `test/ir/*.ll`. A ticket that touches the
-  calling convention therefore asserts the emitted text and proves the assertion by mutation --
-  change the emitter, watch that one test fail, change it back -- rather than trusting that a run
-  test would have caught it. The same held for the `llvm.trap` of D19.7: the review broke it and
-  all 55 suites and 280 language tests stayed green. **A C mirror is the exception, and only when
-  the mirror is optimised.** T-025 re-measured the `zeroext`/`signext` swap with
-  `test/lang/run/ffi/007` sending `i8`, `u8`, `i16`, `u16`, `char` and `bool` into separately
-  compiled helpers: with the helper at `-O0` the whole corpus stayed green, with the helper at
-  `-O1` it printed `4295032812` for `-20` and failed. An unoptimised callee spills its narrow
-  parameter to a stack slot and re-narrows it from there, which repairs the caller's mistake; at
-  `-O1` the callee keeps the argument under the `AssertSext`/`AssertZext` its parameter attribute
-  states, folds the re-narrowing away, and the wrong extension reaches the arithmetic. That is why
-  `link_command` in `test/lang/run_tests.py` passes `-O1`, matching the `-O1` the driver gives the
-  fort side: a mirror built at `-O0` silently answers a weaker question than the one it was
-  written to ask. So the emitted text in `test/gen*_test.c` is where a convention rule is pinned
-  *first*, and a `run/ffi` mirror is the second, independent witness -- not a blind one.
-  **Under opaque pointers a field's type in a named struct type is observable through the offsets
-  it moves and through one other window, a module-level constant initializer.** A substitution
-  that leaves every later offset unchanged is invisible to every run test and to C interop, when
-  it also keeps the struct's size and alignment. Two shapes do that. One is a same-size swap:
-  `i32` for an enum, `i64` for a `ptr`. The other is a widening that fits in padding the field
-  already had, such as `u16` written as `i32` or as `i64` in `{ u8; i32; u16; i64 }`.
+  structure is asserted by the suites themselves: `verified()` in
+  `bootstrap/test/common/gen_helpers.h` runs `gen_block_terminators` before it calls `opt`, so every
+  call site in every emitter suite checks contract item 10 and a new suite inherits it. Treat `opt`
+  as a floor that catches type and dominance errors, never as the proof of a structural contract
+  item -- and when a contract item names a tool as its check, confirm the tool actually rejects a
+  violation before believing it. **No internal-ABI mutation is catchable by a language run test.**
+  Flipping a `zeroext` to `signext`, dropping either extension attribute, passing an aggregate
+  `byval` and dropping the `sret` of a definition each leave the whole of `test/lang` green
+  (measured on all 280 tests, T-017's review): a fort program is one LLVM module, caller and callee
+  are compiled together, the `-O1` of the `--cc` line inlines the mismatch away, and a convention
+  both sides get wrong agrees with itself. The corpus can only see what the *program* can observe --
+  evaluation order, a callee writing to its parameter, a trap that must fire. Everything else is
+  pinned by the text: the assertions in `bootstrap/test/gen*_test.c` and the goldens in
+  `test/ir/*.ll`. A ticket that touches the calling convention therefore asserts the emitted text
+  and proves the assertion by mutation -- change the emitter, watch that one test fail, change it
+  back -- rather than trusting that a run test would have caught it. The same held for the
+  `llvm.trap` of D19.7: the review broke it and all 55 suites and 280 language tests stayed green.
+  **A C mirror is the exception, and only when the mirror is optimised.** T-025 re-measured the
+  `zeroext`/`signext` swap with `test/lang/run/ffi/007` sending `i8`, `u8`, `i16`, `u16`, `char` and
+  `bool` into separately compiled helpers: with the helper at `-O0` the whole corpus stayed green,
+  with the helper at `-O1` it printed `4295032812` for `-20` and failed. An unoptimised callee
+  spills its narrow parameter to a stack slot and re-narrows it from there, which repairs the
+  caller's mistake; at `-O1` the callee keeps the argument under the `AssertSext`/`AssertZext` its
+  parameter attribute states, folds the re-narrowing away, and the wrong extension reaches the
+  arithmetic. That is why `link_command` in `test/lang/run_tests.py` passes `-O1`, matching the
+  `-O1` the driver gives the fort side: a mirror built at `-O0` silently answers a weaker question
+  than the one it was written to ask. So the emitted text in `bootstrap/test/gen*_test.c` is where a
+  convention rule is pinned *first*, and a `run/ffi` mirror is the second, independent witness --
+  not a blind one. **Under opaque pointers a field's type in a named struct type is observable
+  through the offsets it moves and through one other window, a module-level constant initializer.**
+  A substitution that leaves every later offset unchanged is invisible to every run test and to C
+  interop, when it also keeps the struct's size and alignment. Two shapes do that. One is a
+  same-size swap: `i32` for an enum, `i64` for a `ptr`. The other is a widening that fits in padding
+  the field already had, such as `u16` written as `i32` or as `i64` in `{ u8; i32; u16; i64 }`.
   It is **not** invisible to `opt` when the module
   holds a constant or a global of that struct type. LLVM writes such an initializer with the named
   type. It then checks each element against the type's element. T-078 printed a `ptr` field
@@ -480,14 +481,14 @@ came here.
   program could then no longer copy, so a signature in the specification is part of that bill.
   A set with no
   such directory loads no runtime, which is what every in-process unit suite is, so a suite that
-  drives the whole driver writes an **empty** `std/rt.ft` in its sandbox (`test/driver_helpers.h`,
-  `test/modules_helpers.h`, `test/fort/support/modules_env.ft` and the three `test/fort/driver*`
-  suites) rather than the real one: the driver needs a file that parses and the assertions stay
-  short. And the `"files"` of D20.2 and the `"symbols"` of D20.3 now hold the library's records
-  too, whose file names are the `--std-dir` the run was given, so `run_tests.py`'s golden index
-  compares the records of the test's own directory alone (`index_of_the_test`) -- a byte-for-byte
-  golden of the whole index would name a build directory and could not be checked out on another
-  machine.
+  drives the whole driver writes an **empty** `std/rt.ft` in its sandbox
+  (`bootstrap/test/common/driver_helpers.h`, `bootstrap/test/common/modules_helpers.h`,
+  `test/fort/support/modules_env.ft` and the three `test/fort/driver*` suites) rather than the real
+  one: the driver needs a file that parses and the assertions stay short. And the `"files"` of D20.2
+  and the `"symbols"` of D20.3 now hold the library's records too, whose file names are the
+  `--std-dir` the run was given, so `run_tests.py`'s golden index compares the records of the test's
+  own directory alone (`index_of_the_test`) -- a byte-for-byte golden of the whole index would name
+  a build directory and could not be checked out on another machine.
 - **Writing a library module against C** (`stdlib.md` 1.4, D13.4): a span is not a pointer, so
   `cast(u8 mut@ own, void* own)` is rejected (D3.14 lists pointer-to-pointer, not span-to-pointer).
   The `libc.free(cast(move(p), void* own))` idiom of `stdlib.md` 2.2 therefore applies to a
@@ -579,14 +580,14 @@ library (T-160).
   skeleton (`src/fort/containers.ft`, `diag.ft`, `session.ft`) and followed by every module ported
   after it. No module-level mutable state that outlives one analysis: the diagnostic sink, the
   counters and the caches are fields of `session.session`, which the driver creates, passes down
-  and frees, so two analyses in one process share nothing (`src/bootstrap/diag.c` keeps one
+  and frees, so two analyses in one process share nothing (`bootstrap/src/diag.c` keeps one
   file-scope `sink` holding every counter, which is the habit not to transliterate). Every
   allocation of an analysis comes from that session's pool or from a container the session frees,
   so a document analysed a thousand times leaves the heap where it found it. Nothing in a library
   module ends the process: an impossible input is a
   `panic` at the boundary that broke the precondition (D13.3), never an exit deep in a leaf (the C
   bootstrap ends the process at 73 sites across 17 modules:
-  `grep -rn 'fatal_internal(\|fatal_oom(\|\bexit(' src/bootstrap/*.c | grep -v fail.c | wc -l`;
+  `grep -rn 'fatal_internal(\|fatal_oom(\|\bexit(' bootstrap/src/*.c | grep -v fail.c | wc -l`;
   and its arenas are never freed). A panic buys a documented boundary and a stated precondition,
   not in-process recovery: `std.rt.panic` aborts like every other failure (D11.4), so a server that
   must survive a malformed document runs the analysis where it can observe that abort (D20.5).
@@ -596,7 +597,7 @@ library (T-160).
   whether it uses a function-pointer dispatch table (D3.10) or a switch.
 - **A port uses direct unit tests.** `diag.ft` first enforced the
   twenty-diagnostics-per-file cap of D14.2 inside `report` and charged a note to the budget, which
-  reads like the decision and is not what the compiler does: `src/bootstrap/diag.c` counts a file's
+  reads like the decision and is not what the compiler does: `bootstrap/src/diag.c` counts a file's
   errors only (`diag_note` touches no counter) and the cap is checked by `lexer.c` and `parser.c`
   before they report, so `check.c` and `modules.c` are uncapped. The divergence is stage-visible --
   25 type errors would have printed 20 in the fort compiler and 25 in the C compiler. Direct
@@ -652,13 +653,13 @@ library (T-160).
     constant or a fort `enum`, whose members are qualified (`kind.num`, D3.9).
   - No compiler builtin fort lacks. `__builtin_add_overflow` and `__builtin_mul_overflow` are
     the exception the exact constant folder needs, and the port replaces their three sites in
-    `src/bootstrap/consts.c` by pre-checks: `am > UINT64_MAX - bm` in `add_raw`,
+    `bootstrap/src/consts.c` by pre-checks: `am > UINT64_MAX - bm` in `add_raw`,
     `a.mag != 0 && b.mag > UINT64_MAX / a.mag` in `cv_mul` and `a.mag == UINT64_MAX` in `cv_not`.
     No new builtin may be added without the same note.
   - No `goto`, no `switch` fallthrough, and an `enum` switch must name every member or carry a
     `default` (D7.6). The bootstrap uses none of the three today; keep it that way.
   - **No pointer arithmetic at all** (D10.4): `p + 1`, `p++` and `p[i]` are errors, and
-    `src/bootstrap/str.c` is the file that uses them (`p->cur + p->used`, `b->data + b->len`).
+    `bootstrap/src/str.c` is the file that uses them (`p->cur + p->used`, `b->data + b->len`).
     The fort form is a span and an index; the only way from a raw pointer to a span is the
     two-bound `p[lo..hi]` (D6.9).
   - **No implicit conversion but dropping `mut` and `own`** (D5.4, D17.4) and **no integer
@@ -719,7 +720,7 @@ library (T-160).
     `assert` at the one place that depends on it; `prim.h`'s assertion on the order of
     `prim_kind_t` is the site.
   - `malloc`/`free` become `new`/`del` with ownership (D17), and **there is no `realloc`**: growth
-    is allocate, copy, `del`, as `std/vec.ft` and `src/bootstrap/str.c` already write it.
+    is allocate, copy, `del`, as `std/vec.ft` and `bootstrap/src/str.c` already write it.
   - Checked arithmetic traps where C wrapped (D11.1). Every place that means to wrap -- a hash, a
     checksum, a fingerprint -- must be written `+% -% *%` (D11.2), or the checked build aborts on
     input the C compiler handled.

@@ -30,8 +30,8 @@ class GlobMatching(unittest.TestCase):
         self.assertFalse(self.matches("test/lang/**/*.ft", "test/other/a.ft"))
 
     def test_the_whole_path_must_match(self):
-        self.assertFalse(self.matches("src/bootstrap/*.c", "src/bootstrap/x.c.bak"))
-        self.assertFalse(self.matches("src/bootstrap/*.c", "other/src/bootstrap/x.c"))
+        self.assertFalse(self.matches("bootstrap/src/*.c", "bootstrap/src/x.c.bak"))
+        self.assertFalse(self.matches("bootstrap/src/*.c", "other/bootstrap/src/x.c"))
 
     def test_a_dot_is_not_a_wildcard(self):
         self.assertFalse(self.matches("test/*.c", "test/diagXc"))
@@ -39,11 +39,11 @@ class GlobMatching(unittest.TestCase):
     def test_the_real_globs_sort_the_files_they_are_meant_to(self):
         source = [lines.glob_to_regex(g) for g in lines.SOURCE_GLOBS]
         tests = [lines.glob_to_regex(g) for g in lines.TEST_GLOBS]
-        for path in ("src/bootstrap/diag.c", "src/bootstrap/diag.h", "src/fort/lexer.ft",
+        for path in ("bootstrap/src/diag.c", "bootstrap/src/diag.h", "src/fort/lexer.ft",
                      "std/darwin/libc.ft"):
             self.assertTrue(lines.path_matches(path, source), path)
             self.assertFalse(lines.path_matches(path, tests), path)
-        for path in ("test/diag_test.c", "test/types_helpers.h",
+        for path in ("bootstrap/test/diag_test.c", "bootstrap/test/common/types_helpers.h",
                      "test/lang/run/arrays/001_x.ft", "test/lang/ffi/helpers.c",
                      "test/fort/containers_test.ft", "test/darwin/open_tail_probe.c"):
             self.assertTrue(lines.path_matches(path, tests), path)
@@ -121,13 +121,13 @@ class Since(unittest.TestCase):
         self.git(repo, "init", "-q")
         self.git(repo, "config", "user.email", "t@example.com")
         self.git(repo, "config", "user.name", "t")
-        (repo / "src" / "bootstrap").mkdir(parents=True)
-        (repo / "test").mkdir()
+        (repo / "bootstrap" / "src").mkdir(parents=True)
+        (repo / "bootstrap" / "test").mkdir()
         (repo / "README").write_text("base\n")
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-qm", "base")
-        (repo / "src" / "bootstrap" / "x.c").write_text("x\n" * source_lines)
-        (repo / "test" / "x_test.c").write_text("t\n" * test_lines)
+        (repo / "bootstrap" / "src" / "x.c").write_text("x\n" * source_lines)
+        (repo / "bootstrap" / "test" / "x_test.c").write_text("t\n" * test_lines)
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-qm", "work")
         return repo

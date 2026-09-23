@@ -38,7 +38,6 @@ enable_testing()
 
 find_program(FORT_PYTHON3 NAMES python3 REQUIRED)
 
-set(FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/bootstrap")
 set(FORT_TEST_DIR "${CMAKE_SOURCE_DIR}/test")
 set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
 set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
@@ -116,28 +115,10 @@ if(NOT FORT_OPT_PATH)
 endif()
 
 # ---- the bootstrap compiler ---------------------------------------------------
+# bootstrap/ builds the C compiler fort_bootstrap and its tests. Its binary
+# directory is FORT_BOOTSTRAP_DIR, so the compiler is bootstrap/stage1/fort.
 if(FORT_ENABLE_BOOTSTRAP)
-    file(GLOB FORT_CORE_SOURCES CONFIGURE_DEPENDS "${FORT_SRC_DIR}/*.c")
-    list(REMOVE_ITEM FORT_CORE_SOURCES "${FORT_SRC_DIR}/main.c")
-
-    add_library(fort_core STATIC ${FORT_CORE_SOURCES})
-    target_include_directories(fort_core PUBLIC "${FORT_SRC_DIR}")
-    target_compile_definitions(fort_core PUBLIC
-        FORT_DEFAULT_CC="${FORT_DEFAULT_TARGET_CC}"
-        FORT_DEFAULT_TARGET="${FORT_TARGET_TRIPLE}"
-    )
-    if(APPLE)
-        # Darwin hides mkdtemp under its source feature macro in C11 mode.
-        target_compile_definitions(fort_core PUBLIC _DARWIN_C_SOURCE)
-    endif()
-
-    # The compiler binary sits below the bootstrap directory. Product tests
-    # pass their standard root explicitly.
-    add_executable(fort_stage1 "${FORT_SRC_DIR}/main.c")
-    target_link_libraries(fort_stage1 PRIVATE fort_core)
-    set_target_properties(fort_stage1 PROPERTIES
-        OUTPUT_NAME fort
-        RUNTIME_OUTPUT_DIRECTORY "${FORT_BOOTSTRAP_DIR}/stage1")
+    add_subdirectory(bootstrap "${FORT_BOOTSTRAP_DIR}")
 endif()
 
 # ---- the standard library ------------------------------------------------------
@@ -272,8 +253,8 @@ if(NOT FORT_ENABLE_BOOTSTRAP)
     set(FORT_PREVIOUS_COMPILER "${FORT_STAGE1_COMPILER}")
     set(FORT_PREVIOUS_DEPENDENCY "${FORT_STAGE1_COMPILER}")
 else()
-    set(FORT_PREVIOUS_COMPILER "$<TARGET_FILE:fort_stage1>")
-    set(FORT_PREVIOUS_DEPENDENCY fort_stage1)
+    set(FORT_PREVIOUS_COMPILER "$<TARGET_FILE:fort_bootstrap>")
+    set(FORT_PREVIOUS_DEPENDENCY fort_bootstrap)
     list(LENGTH FORT_PIN_SHAS FORT_PIN_COUNT)
     math(EXPR FORT_LAST_PIN_INDEX "${FORT_PIN_COUNT} - 1")
     foreach(pin_index RANGE 0 ${FORT_LAST_PIN_INDEX})
@@ -431,101 +412,6 @@ add_test(NAME lsp-binary
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(lsp-binary PROPERTIES LABELS lang)
 
-# ---- unit tests ----------------------------------------------------------------
-# The C unit tests run on linux and on darwin.
-if(FORT_ENABLE_BOOTSTRAP)
-# Compile test-only helpers that a suite does not include. Link each helper into
-# each suite so that -Werror and clang-tidy inspect it once. The list is empty.
-# Create the target only when the glob finds a helper. CMake rejects a library
-# with no source. A new helper then needs no CMake edit.
-file(GLOB FORT_TEST_SUPPORT_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*.c")
-list(FILTER FORT_TEST_SUPPORT_SOURCES EXCLUDE REGEX "_test\\.c$")
-set(FORT_TEST_SUPPORT_LIB "")
-if(FORT_TEST_SUPPORT_SOURCES)
-    add_library(fort_test_support OBJECT ${FORT_TEST_SUPPORT_SOURCES})
-    target_include_directories(fort_test_support PUBLIC "${FORT_TEST_DIR}")
-    target_link_libraries(fort_test_support PUBLIC fort_core)
-    set(FORT_TEST_SUPPORT_LIB fort_test_support)
-endif()
-
-# Each test/<component>_test.c gets one executable and one unit test.
-# The test name is unit-<component>.
-file(GLOB FORT_UNIT_TEST_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/*_test.c")
-set(FORT_UNIT_TEST_TARGETS "")
-foreach(test_source IN LISTS FORT_UNIT_TEST_SOURCES)
-    get_filename_component(test_target "${test_source}" NAME_WE)
-    string(REGEX REPLACE "_test$" "" test_component "${test_target}")
-    add_executable("${test_target}" "${test_source}")
-    target_include_directories("${test_target}" PRIVATE "${FORT_TEST_DIR}")
-    target_link_libraries("${test_target}" PRIVATE fort_core ${FORT_TEST_SUPPORT_LIB})
-    set_target_properties("${test_target}" PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
-    add_test(NAME "unit-${test_component}" COMMAND "${test_target}")
-    set_tests_properties("unit-${test_component}" PROPERTIES
-        LABELS "unit;bootstrap"
-        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
-    list(APPEND FORT_UNIT_TEST_TARGETS "${test_target}")
-endforeach()
-
-# The driver tests spawn test/fake_cc.sh as their --cc: it records the command
-# line that the driver built. The check suite asserts that `--check` does not start it.
-# The conformance suite makes the same assertion for runs that stop before it.
-foreach(driver_suite driver_test driver_check_test driver_conformance_test driver_tokens_test
-                     driver_ast_test)
-    if(TARGET "${driver_suite}")
-        target_compile_definitions("${driver_suite}"
-            PRIVATE FORT_FAKE_CC="${FORT_TEST_DIR}/fake_cc.sh")
-    endif()
-endforeach()
-
-# The emitter suites run the LLVM verifier over each emitted module.
-# Each suite needs the verifier path. Every test/gen*_test.c gets it.
-# Adding a file covers a new suite. `opt` is a default for these tests.
-# The pipeline test and language harness require it during configuration.
-foreach(gen_suite IN LISTS FORT_UNIT_TEST_TARGETS)
-    if(gen_suite MATCHES "^gen")
-        target_compile_definitions("${gen_suite}"
-            PRIVATE FORT_OPT="${FORT_OPT_PATH}")
-    endif()
-endforeach()
-
-# runtime_sig_test reads std/rt.ft. It checks each entry-point row against its
-# fort signature. check_conv_test reads std/libc.ft and checks imported calls
-# against the library declarations.
-# Both suites need the sources.
-#
-# Both suites parse the standard root that bootstrap-0 uses. This makes them
-# contracts between the C implementation and its bootstrap library.
-foreach(std_reader runtime_sig_test check_conv_test)
-    if(TARGET "${std_reader}")
-        target_compile_definitions("${std_reader}"
-            PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP_DIR}/bootstrap-0/target/std")
-        string(REGEX REPLACE "_test$" "" std_reader_component "${std_reader}")
-        set_tests_properties("unit-${std_reader_component}" PROPERTIES
-            LABELS "unit;bootstrap;bootstrap-contract")
-    endif()
-endforeach()
-
-# The parser recovery suite walks the fail corpus and asserts that
-# every diagnostic lands on an annotated line, so it needs the corpus's path.
-if(TARGET parser_recovery_test)
-    target_compile_definitions(parser_recovery_test
-        PRIVATE FORT_LANG_DIR="${FORT_TEST_DIR}/lang")
-endif()
-endif()
-
-# The tools/mutate.py unit tests cover parsers, anchors, guards, restore, and timeouts.
-# They also check the shipped table against its source anchors.
-# The unit tests run no mutation round because a round rebuilds the compiler.
-if(FORT_ENABLE_BOOTSTRAP)
-    add_test(NAME mutate_selftest
-        COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
-        WORKING_DIRECTORY "${FORT_TEST_DIR}")
-    set_tests_properties(mutate_selftest PROPERTIES
-        LABELS unit
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-endif()
-
 if(FORT_TARGET STREQUAL "darwin")
     # The remaining targets are the linux tests and the C lint targets. They do
     # not belong to the darwin graph.
@@ -566,10 +452,8 @@ add_custom_target(check
     USES_TERMINAL
 )
 add_dependencies(check fort fort_std)
-if(FORT_ENABLE_BOOTSTRAP)
-    if(FORT_UNIT_TEST_TARGETS)
-        add_dependencies(check ${FORT_UNIT_TEST_TARGETS})
-    endif()
+if(TARGET fort_bootstrap_unit_tests)
+    add_dependencies(check fort_bootstrap_unit_tests)
 endif()
 
 # The language test harness drives the compiler over test/lang.
@@ -804,8 +688,9 @@ add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)
 
 # ---- format, tidy, lines -----------------------------------------------------------
+# The lint targets cover the bootstrap sources also when FORT_ENABLE_BOOTSTRAP is OFF.
 file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
-    "${FORT_SRC_DIR}/*.c" "${FORT_SRC_DIR}/*.h"
+    "${CMAKE_SOURCE_DIR}/bootstrap/*.c" "${CMAKE_SOURCE_DIR}/bootstrap/*.h"
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
 )
 
@@ -842,9 +727,9 @@ find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy run-clang-tidy-18)
 if(FORT_RUN_CLANG_TIDY)
     add_custom_target(tidy
         COMMAND "${FORT_RUN_CLANG_TIDY}" -p "${CMAKE_BINARY_DIR}" -quiet
-                "${FORT_SRC_DIR}" "${FORT_TEST_DIR}"
+                "${CMAKE_SOURCE_DIR}/bootstrap" "${FORT_TEST_DIR}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Running clang-tidy over src and test"
+        COMMENT "Running clang-tidy over bootstrap and test"
         VERBATIM
     )
 else()

@@ -1458,10 +1458,10 @@ Sections:
   while the compiler still lowered every builtin to the C one, so `std.rt` held five `extern fn
   fort_rt_*` declarations for that window; T-091 retargeted the builtins, deleted the C runtime and
   those declarations, and "declares no `fort_rt_` symbol" is true of the module from that commit on
-  (`test/runtime_sig_test.c`, `std_rt_declares_no_runtime_c_symbol`). Amended 2026-09-13 (T-045):
-  `std.sort` joins the list. It is the first module this list gained after v1 was written, and
-  `stdlib.md` 2.10 specifies it. Its element type must own nothing, because the sort permutes the
-  elements inside C, where the ownership rules of D17 see nothing. Amended 2026-09-13 (T-107):
+  (`bootstrap/test/runtime_sig_test.c`, `std_rt_declares_no_runtime_c_symbol`). Amended 2026-09-13
+  (T-045): `std.sort` joins the list. It is the first module this list gained after v1 was written,
+  and `stdlib.md` 2.10 specifies it. Its element type must own nothing, because the sort permutes
+  the elements inside C, where the ownership rules of D17 see nothing. Amended 2026-09-13 (T-107):
   `std.rt_float` held the two printers alone; it also holds the two buffer formatters of D18.1 as
   amended, and it imports `std.strbuf` for them. Amended 2026-09-14 (T-097): `std.net` joins the
   list and `stdlib.md` 2.13 specifies it. It resolves no name: `connect` reads a dotted quad,
@@ -1646,7 +1646,7 @@ Sections:
   exist only under `modules`. Verdicts: PASS, FAIL (the program or compiler misbehaved), ERROR (the
   compiler exited 2, crashed, timed out, or the harness could not link or start the program), XFAIL
   and XPASS for tests listed in `xfail.txt` (an ERROR on a listed test is XFAIL too). Compiler unit
-  tests in C live in `test/` using `test.h`.
+  tests in C live in `bootstrap/test/` using `test.h`.
 
 ### D14.5 Test file directives
 - owner: `toolchain.md`.
@@ -1671,11 +1671,11 @@ Sections:
 ### D14.6 The test-to-source ratio
 - owner: `toolchain.md`.
 - rule: Coverage target: **more than two lines of test for each line of source** the
-  project writes and ships -- the compiler (`src/bootstrap/*.c`, `*.h`, `src/fort/*.ft`) and the
+  project writes and ships -- the compiler (`bootstrap/src/*.c`, `*.h`, `src/fort/*.ft`) and the
   standard library (`std/*.ft`), the runtime included, since it is `std.rt` -- measured against
-  `test/*.c`, `test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` by `tools/lines.py`. The
-  implementation plan will size the corpus; the seed tests written in this phase establish the
-  format and one example per feature area.
+  `bootstrap/test/*.c`, `bootstrap/test/common/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` by
+  `tools/lines.py`. The implementation plan will size the corpus; the seed tests written in this
+  phase establish the format and one example per feature area.
 - history: Amended 2026-09-11 (T-076): until then the target was "three lines of test for each line
   of compiler", with the runtime and the standard library excluded from both sides, which credited
   library and runtime code with tests it did not have -- `test/runtime_test.c` counted 850 lines
@@ -2075,7 +2075,7 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   2026-09-14 (T-096): the rule as it stood gave the C bootstrap's refusal of floats as the reason
   for the split and put no end on it, which left the end of the split a hope; T-096 added the one
   condition that ends it, named the `fort_stage2` input that makes the condition checkable, and
-  added the sentence that keeps the freeze of `src/bootstrap` out of that condition. T-096
+  added the sentence that keeps the freeze of `bootstrap/src` out of that condition. T-096
   measured the fold instead of making it, because the user kept the C bootstrap as the compiler
   that builds the compiler on that date; the measurement and its commands are in
   `notes/compiler.md` 7. The same amendment corrected the membership sentence, which until then
@@ -2086,7 +2086,7 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   review of 2026-09-14 found it, since `tools/check_decisions.py` compares two revisions and
   cannot see a field that contradicts itself. Amended 2026-09-14 (T-131): **the condition named
   above arrived on this date.** The `fort_stage2` target takes the last pin of `tools/bootstrap.ref`
-  as its input and not the binary built from `src/bootstrap`, so a fort compiler builds the fort
+  as its input and not the binary built from `bootstrap/src`, so a fort compiler builds the fort
   compiler and `std/rt.ft` may hold a float. The fold of the two modules is T-132's and did not
   land with the condition. So between T-131 and T-132 the split stands although the condition
   that ends it holds; this note records that window rather than hiding it, and T-131's log

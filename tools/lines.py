@@ -18,15 +18,21 @@ import sys
 from pathlib import Path
 
 SOURCE_GLOBS = (
-    "src/bootstrap/*.c",
-    "src/bootstrap/*.h",
+    "bootstrap/src/*.c",
+    "bootstrap/src/*.h",
     "src/fort/*.ft",
     "src/lsp/*.ft",
     "std/*.ft",
     "std/darwin/*.ft",
     "std/linux/*.ft",
 )
-TEST_GLOBS = ("test/*.c", "test/*.h", "test/**/*.ft", "test/lang/ffi/*.c", "test/darwin/*.c")
+TEST_GLOBS = (
+    "bootstrap/test/*.c",
+    "bootstrap/test/common/*.h",
+    "test/**/*.ft",
+    "test/lang/ffi/*.c",
+    "test/darwin/*.c",
+)
 # Printed beside every ratio and compared with nothing: only --min fails a run.
 TARGET_RATIO = 2.0
 

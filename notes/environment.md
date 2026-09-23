@@ -295,7 +295,7 @@ without a rewrite.
   agreeing while the compiler disagrees is what identifies this and rules out the source, so the
   first suspicion for a `<built-in>` diagnostic is the shared folder and never the file. Four
   measurements, in the order they were taken.
-  T-124 rewrote one line of `src/bootstrap/check.c` with a python heredoc **inside the guest**;
+  T-124 rewrote one line of `bootstrap/src/check.c` with a python heredoc **inside the guest**;
   clang reported `expected identifier or '('` in `<built-in>` and segfaulted, four rebuilds in a
   row, while `clang -fsyntax-only` on a copy in the guest's own `/tmp` exited 0 and
   `tr -d '\0' | wc -c` read the same 124493 bytes on both sides. `touch` in the guest did not
@@ -303,7 +303,7 @@ without a rewrite.
   the host".
   T-125 met the same crash 13 times with the same guest-side heredoc and found the new-inode
   cure, which is cheaper than dropping the caches.
-  T-128 wrote four mutants of `src/bootstrap/check.c` and `src/fort/check.ft` **from the host**,
+  T-128 wrote four mutants of `bootstrap/src/check.c` and `src/fort/check.ft` **from the host**,
   one at a time, and the first two hit the stale mapping and show its two faces: the file grew by
   9 bytes and clang read NUL bytes at line 3693, past the old end, and then the file shrank by 43
   bytes and clang reported `expected identifier or '('` in `<built-in>`. Both times the guest's
@@ -311,8 +311,8 @@ without a rewrite.
   `clang -fsyntax-only` on a copy in the guest's `/tmp` exited 0 -- and both times `touch` in the
   guest and a second `tools/vm build` changed nothing. The guest `cp`, `rm`, `cp` above cleared
   both at once.
-  T-130 measured the case that fixes the axis. It rewrote `test/check_conv_test.c` **from the
-  host** with `open(p, 'w').write(...)`, which truncates in place, and clang crashed three times
+  T-130 measured the case that fixes the axis. It rewrote `bootstrap/test/check_conv_test.c` **from
+  the host** with `open(p, 'w').write(...)`, which truncates in place, and clang crashed three times
   all the same -- twice through ninja, once as a direct `CCACHE_DISABLE=1` command -- while both
   sides read `md5sum 0591673e...`, 42878 bytes and valid UTF-8, and a `cp` of the file into the
   guest's own `/tmp` compiled with exit 0. `cp f /tmp/x && mv /tmp/x f` on the host, identical
@@ -347,7 +347,8 @@ without a rewrite.
   and the suite keeps failing on text the file no longer holds; `md5sum` in the guest reads the
   new bytes and dropping the caches does not help, because it is the timestamp and not the
   content that is stale. Delete that target's object
-  (`build/<preset>/CMakeFiles/<target>.dir/<path>.o`) and build again. A mutation experiment --
+  (`build/<preset>/CMakeFiles/<target>.dir/<path>.o`; a target of `bootstrap/CMakeLists.txt`
+  keeps it in `build/<preset>/bootstrap/CMakeFiles`) and build again. A mutation experiment --
   break a rule in the compiler, watch the test go red, restore it, watch it go green -- runs into
   this more than anything else, because every step rewrites a file the last step just built from,
   and a stale mtime makes the next step report the previous binary's colours. Edit and restore
@@ -411,9 +412,19 @@ without a rewrite.
   runtime object). `tools/vm workflow <preset>` configures, builds and runs ctest; build
   directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
   -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
-- C-started mode builds `fort_core` and `fort_stage1`. The C compiler builds bootstrap-0 (T-160).
-  The last source compiler builds working-tree HEAD as `fort`. External-stage1 mode builds only
-  HEAD with `FORT_STAGE1_COMPILER`. It does not create C compiler or C unit-test targets.
+- C-started mode (`FORT_ENABLE_BOOTSTRAP=ON`) adds `bootstrap/CMakeLists.txt` with the binary
+  directory `build/<preset>/bootstrap`. That file builds `fort_core` and `fort_bootstrap`. It sets
+  its own C11 settings, warnings and definitions. It reads the target and the tool paths from the
+  top-level file, and it does not configure alone. The top-level chain starts at `fort_bootstrap`,
+  which builds bootstrap-0 (T-160). Each source pin builds the next one.
+  The last source compiler builds working-tree HEAD as `fort`.
+- `FORT_BOOTSTRAP_BUILD_TESTS` (default OFF; every preset sets it ON) adds the C unit tests on
+  linux and on darwin. `FORT_BOOTSTRAP_PIN_TEST` (default ON, and OFF when
+  `FORT_BOOTSTRAP_BUILD_TESTS` is OFF) adds the ctest `bootstrap-pin`: stage1 builds bootstrap-0 in
+  `build/<preset>/bootstrap/pin-test`. That tree is not the tree of the chain. The contract
+  suites read its standard root, so it is extracted whenever the tests are on.
+- External-stage1 mode builds only HEAD with `FORT_STAGE1_COMPILER`. It does not create C
+  compiler or C unit-test targets.
   Both modes build `fort_std`, a copy of
   `std/*.ft` and `std/<target>/*.ft` in `build/<preset>/std`, which is
   what the compiler reads as `--std-dir`; `FORT_TARGET_CC`, a clang (default `clang`) with
@@ -463,7 +474,7 @@ without a rewrite.
   `snprintf` result silences it: check it against the capacity and fail the test with a message
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
-  the helper -- as `test/modules_test.c` and `test/gen_test.c` do.
+  the helper -- as `bootstrap/test/modules_test.c` and `bootstrap/test/gen_test.c` do.
 - Binaries: `build/<preset>/bootstrap/stage1/fort` is the C compiler.
   `build/<preset>/bootstrap/bootstrap-N/fort` is source pin N from `tools/bootstrap.ref`.
   `build/<preset>/fort` is HEAD built by the last source pin (T-155).
@@ -581,11 +592,11 @@ without a rewrite.
   (`toolchain.md` 2, D14.2): pass a path relative to the workspace folder and the document names it
   the same way, so it resolves against that folder on the host. That is the premise the whole
   crossing rests on, and `a_relative_entry_is_named_in_the_document_exactly_as_it_was_given` in
-  `test/driver_check_test.c` is what pins it: an absolute path there would put every record outside
-  the workspace and the extension would go **silent** rather than wrong, which is the worst failure
-  shape an editor has. What comes back absolute is what the compiler found for itself -- the
-  standard library under `/vagrant/build/release/std` -- and those files are the guest's, so an
-  editor drops them rather than painting a path the host cannot open. The argument of `run` is
+  `bootstrap/test/driver_check_test.c` is what pins it: an absolute path there would put every
+  record outside the workspace and the extension would go **silent** rather than wrong, which is the
+  worst failure shape an editor has. What comes back absolute is what the compiler found for itself
+  -- the standard library under `/vagrant/build/release/std` -- and those files are the guest's, so
+  an editor drops them rather than painting a path the host cannot open. The argument of `run` is
   handed to a shell in the guest, so a path is quoted before it goes in.
 - **git does not work in the guest of a VM that a worktree owns.** `/vagrant` is then the worktree,
   and the worktree's `.git` file names `<main checkout>/.git/worktrees/<name>`, which that guest

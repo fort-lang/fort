@@ -120,7 +120,7 @@ REPORT_RE = re.compile(r"^(.+):(\d+):(\d+): (error|note): (.*)$")
 
 # The lexer reports a position because rejected bytes are not a token.
 # Thus, lexer diagnostic ranges can be empty. These are the messages of `fail` and `fail_text`
-# in src/bootstrap/lexer.c, by the part of each that never
+# in bootstrap/src/lexer.c, by the part of each that never
 # varies. An unknown lexer message fails a fail test's range
 # check. Add the message here or give the diagnostic a range.
 LEXICAL_MESSAGES = (

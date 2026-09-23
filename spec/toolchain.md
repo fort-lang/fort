@@ -1712,12 +1712,12 @@ under `//! args: one two` and `//! exit: 3`.
 
 ### 7.5 Compiler unit tests in C
 
-Each `test/<component>_test.c` is one suite built against the compiler's sources and `test.h`:
-tests are defined with `TEST(name, body)`, registered with `TEST_RUN`, and the suite exits through
-`TEST_EXIT` with status 0 (ok), 1 (a failed assertion) or 2 (a test error). The first command-line
-argument, when present, is a name prefix selecting tests. `TEST_ASSERT_*` macros log file, line,
-expression, actual and expected values and return `TEST_RESULT_FAIL`. A body is one macro
-argument, so a comma outside parentheses inside it must be parenthesized.
+Each `bootstrap/test/<component>_test.c` is one suite built against the compiler's sources and
+`test.h`: tests are defined with `TEST(name, body)`, registered with `TEST_RUN`, and the suite exits
+through `TEST_EXIT` with status 0 (ok), 1 (a failed assertion) or 2 (a test error). The first
+command-line argument, when present, is a name prefix selecting tests. `TEST_ASSERT_*` macros log
+file, line, expression, actual and expected values and return `TEST_RESULT_FAIL`. A body is one
+macro argument, so a comma outside parentheses inside it must be parenthesized.
 
 ```c
 #include "test.h"
@@ -1745,11 +1745,11 @@ the token stream, the parser's speculative rewinds, constant folding at the edge
 
 ### 7.6 Coverage target (D14.6)
 
-The corpus aims at more than two lines of test for each line of source: `wc -l` over `test/*.c`,
-`test/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` against `wc -l` over `src/bootstrap/*.c`,
-`src/bootstrap/*.h`, `src/fort/*.ft` and `std/*.ft`, the runtime among them (D13.1). The
-standard library is source and not test (D14.6): it is code the project ships, and the tests that
-exercise it are `test/lang/run/stdlib`. The seed tests of the
+The corpus aims at more than two lines of test for each line of source: `wc -l` over
+`bootstrap/test/*.c`, `bootstrap/test/common/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` against
+`wc -l` over `bootstrap/src/*.c`, `bootstrap/src/*.h`, `src/fort/*.ft` and `std/*.ft`, the runtime
+among them (D13.1). The standard library is source and not test (D14.6): it is code the project
+ships, and the tests that exercise it are `test/lang/run/stdlib`. The seed tests of the
 design phase establish the format with one example per area; the full corpus is sized as follows,
 in files:
 

@@ -38,23 +38,23 @@ A safe(r) C-like systems programming language.
 - `notes/`: the engineering knowledge. `notes/environment.md`, `notes/testing.md`,
   `notes/compiler.md` and `notes/style.md` take the facts the routing rule at the end of this
   file sends them.
-- `test/`: `test/test.h` is the C macro framework for the compiler's unit tests
-  (`test/common.h` provides `TEST_UNUSED`); `test/lang/` holds language tests in the directive
-  format defined in `spec/toolchain.md`.
-- `src/bootstrap/`: the C bootstrap compiler (stage1). It builds `bootstrap-0` and stays the
-  second implementation. `tools/bootstrap.ref` pins the remaining chain. `notes/compiler.md` 8
-  holds the five invariants. `src/fort/`: the
-  compiler in fort (stage2 and stage3). `src/lsp/`: the language server in fort, whose modules
-  are reached as `lsp.<name>` and never `<name>` through the search root `src` (T-063,
-  `notes/compiler.md` 8). `std/`: the standard library in fort, the runtime (`std/rt.ft`) among
-  its modules; there is no C runtime and no object linked beside the program (T-091). `tools/`:
-  `vm`, `provision.sh`, and `lines.py`.
+- `test/`: `test/lang/` holds language tests in the directive format of `spec/toolchain.md`.
+- `bootstrap/`: the C bootstrap compiler (stage1) in `bootstrap/src/`, its unit tests in
+  `bootstrap/test/` over the macro framework `bootstrap/test/common/test.h`, and its
+  `CMakeLists.txt`. The build adds it only when `FORT_ENABLE_BOOTSTRAP` is ON. It builds
+  `bootstrap-0` and stays the second implementation. `tools/bootstrap.ref` pins the remaining chain.
+  `notes/compiler.md` 8 holds the five invariants.
+- `src/fort/`: the compiler in fort (stage2 and stage3). `src/lsp/`: the language server in fort,
+  whose modules are reached as `lsp.<name>` and never `<name>` through the search root `src`
+  (T-063, `notes/compiler.md` 8). `std/`: the standard library in fort, the runtime (`std/rt.ft`)
+  among its modules; there is no C runtime and no object linked beside the program (T-091).
+  `tools/`: `vm`, `provision.sh`, and `lines.py`.
 - `editors/`: `editors/vscode/` is the VS Code extension -- `package.json`,
   `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, `extension.js`, and the one pure
   module it is tested through, `lib/check.js` -- and `editors/README.md` is its install guide, its
   manual smoke test and its list of limitations. It highlights fort and shows the compiler's
   diagnostics, and that is all it does (T-089). It is installed on the **host**, where VS Code runs.
-- `CMakeLists.txt`, `CMakePresets.json` and `cmake/sanitizers.cmake` are the build;
+- `CMakeLists.txt`, `bootstrap/CMakeLists.txt`, `CMakePresets.json` and `cmake/` are the build;
   `.clang-format` and `.clang-tidy` (clang 18) are the C11 lint configuration.
 - `.tickets/` (gitignored, main checkout only) is the ticket board; `.codex/agents/` holds seven
   project agent roles. `.codex/config.toml` limits Codex to three child threads (T-139).
@@ -139,9 +139,9 @@ target moved and the rebase is missing. No merge commit enters the history. Unti
   mutation-proved when two of the sites were held only by a compiler warning outside the gate. In
   every case the implementor had checked one instance and generalised, and in every case a reviewer
   found it by counting. So: write the count and the command that produced it into the log
-  (`grep -c 'verified()' test/gen_*_test.c` against the number of tests, and so on), and phrase the
-  criterion as the number rather than as "every". A criterion that overstates is worse than one that
-  admits a gap, because it stops the next reader looking.
+  (`grep -c 'verified()' bootstrap/test/gen_*_test.c` against the number of tests, and so on), and
+  phrase the criterion as the number rather than as "every". A criterion that overstates is worse
+  than one that admits a gap, because it stops the next reader looking.
 - **Say how a claim was established, not only what it claims.** An audit whose verdicts all read
   the same hides which rows a reader may lean on. T-077 marks each row `mutation-measured` (a
   mutant was built and a suite was run), `probed` (programs were compiled and their output is

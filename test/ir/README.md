@@ -13,8 +13,8 @@ declarations, the attribute-group indices) is stated there, not here.
 What these files are not: the module the compiler emits for the program beside each one. That
 module also holds every definition of `std.rt` and of `std.libc`, some three thousand lines of
 it, because every closure holds the runtime (D9.10). The five definitions here stand for it. The
-emitter's own output is held against its expected text by `test/gen_module_test.c`, where the
-runtime is out of the closure and the calls into it stand alone.
+emitter's own output is held against its expected text by `bootstrap/test/gen_module_test.c`, where
+the runtime is out of the closure and the calls into it stand alone.
 
 `hello.ll` is
 

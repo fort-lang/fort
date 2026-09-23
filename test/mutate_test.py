@@ -40,10 +40,10 @@ import mutate  # noqa: E402
 # What ctest prints when three tests fail. The per-test lines above the summary
 # name only the test that was running; the summary block names them all.
 CTEST_OUTPUT = """\
-        Start  3: unit-gen_cast
-  3/78 Test  #3: unit-gen_cast ....................***Failed    0.11 sec
-        Start  4: unit-gen_call
-  4/78 Test  #4: unit-gen_call ....................   Passed    0.09 sec
+        Start  3: gen_cast_test
+  3/78 Test  #3: gen_cast_test ....................***Failed    0.11 sec
+        Start  4: gen_call_test
+  4/78 Test  #4: gen_call_test ....................   Passed    0.09 sec
 
 39% tests passed, 3 tests failed out of 78
 
@@ -51,8 +51,8 @@ Label Time Summary:
 unit    =   6.02 sec*proc (78 tests)
 
 The following tests FAILED:
-          3 - unit-gen_cast (Failed)
-         17 - unit-gen_own (Subprocess aborted)
+          3 - gen_cast_test (Failed)
+         17 - gen_own_test (Subprocess aborted)
          41 - lang (Timeout)
 Errors while running CTest
 """
@@ -120,22 +120,22 @@ class TestFailingTests(unittest.TestCase):
         # A plain failure, an abort and a timeout: all three are red, and the
         # parser that read only `(Failed)` reported a third of this round.
         self.assertEqual(mutate.failing_tests(CTEST_OUTPUT),
-                         ["unit-gen_cast", "unit-gen_own", "lang"])
+                         ["gen_cast_test", "gen_own_test", "lang"])
 
     def test_it_reads_no_name_out_of_a_green_run(self):
         self.assertEqual(mutate.failing_tests(GREEN_OUTPUT), [])
         self.assertEqual(mutate.failing_tests(""), [])
 
     def test_it_keeps_the_order_and_drops_a_repeat(self):
-        doubled = CTEST_OUTPUT + "          3 - unit-gen_cast (Failed)\n"
+        doubled = CTEST_OUTPUT + "          3 - gen_cast_test (Failed)\n"
         self.assertEqual(mutate.failing_tests(doubled),
-                         ["unit-gen_cast", "unit-gen_own", "lang"])
+                         ["gen_cast_test", "gen_own_test", "lang"])
 
     def test_a_passing_line_of_the_progress_report_is_not_a_failure(self):
-        # `  4/78 Test  #4: unit-gen_call ... Passed` starts with digits and a
+        # `  4/78 Test  #4: gen_call_test ... Passed` starts with digits and a
         # slash, which the summary's `  4 - name (Failed)` shape excludes.
         self.assertEqual(mutate.failing_tests(
-            "  3/78 Test  #3: unit-gen_cast ....***Failed    0.11 sec\n"), [])
+            "  3/78 Test  #3: gen_cast_test ....***Failed    0.11 sec\n"), [])
 
 
 class TestApplyAndRestore(unittest.TestCase):
@@ -206,10 +206,10 @@ class TestRunRound(unittest.TestCase):
         self.assertEqual(row["verdict"], "caught")
         self.assertEqual(row["stage"], "narrow")
         self.assertEqual(row["tests"],
-                         ["unit-gen_cast", "unit-gen_own", "lang"])
+                         ["gen_cast_test", "gen_own_test", "lang"])
         # The wide stage costs 320 s to 420 s and the round has its answer.
         self.assertNotIn("ctest -L unit", guest.commands)
-        self.assertIn("unit-gen_own (Subprocess aborted)", kept)
+        self.assertIn("gen_own_test (Subprocess aborted)", kept)
 
     def test_a_mutation_no_stage_catches_survives_after_every_stage(self):
         row, guest, _ = self.round_with({}, ["mutant-md5"])

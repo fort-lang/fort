@@ -11,7 +11,7 @@ worktree and the branch.
 
 fort is a C-like systems language: immutable by default, sized arrays and spans, ownership
 (`own`/`move`), modules, checked arithmetic. It targets x86-64 Linux through GNU assembly and a
-small C runtime. You write C11 in `src/bootstrap/` or fort in `src/fort/`.
+small C runtime. You write C11 in `bootstrap/src/` or fort in `src/fort/`.
 
 Normative order: `spec/decisions.md` (numbered `Dn.m`) and `spec/grammar.md` win over the
 specification documents, which win over comments and code. Read only what your ticket cites:
@@ -36,9 +36,9 @@ the ticket log, the commit format, the merge gate. When the specification is sil
 most conservative reading, record it in the ticket's Notes, and flag it in your report for the
 coordinator to ratify: never invent syntax or semantics.
 
-Write tests with the code. Use `test/test.h` for unit tests in `test/*_test.c`.
-Use the directive format for language tests in `test/lang/`. Aim for three test lines per code line.
-Shrink `test/lang/xfail.txt` in the commit that makes a test pass.
+Write tests with the code. Use `bootstrap/test/common/test.h` for unit tests in
+`bootstrap/test/*_test.c`. Use the directive format for language tests in `test/lang/`. Aim for
+three test lines per code line. Shrink `test/lang/xfail.txt` in the commit that makes a test pass.
 Squash a single-unit ticket before handoff. Give the coordinator a clean final SHA.
 Tick measured criteria; leave the gate criterion pending. Report check evidence.
 The coordinator moves the ticket to `.tickets/inreview/` when review starts.
