@@ -45,7 +45,7 @@ DECISIONS_FILE = "spec/decisions.md"
 # The limit has no headroom. A new AGENTS.md line fails the budget check.
 # BUDGET_TARGET is display-only. Lower the limit when text moves out.
 # Raise the limit only when approved text moves in.
-BUDGET_LIMIT = 254
+BUDGET_LIMIT = 252
 BUDGET_TARGET = 150
 
 # ---- the rules --------------------------------------------------------------

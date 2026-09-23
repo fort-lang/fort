@@ -82,7 +82,7 @@ TEST(inequality_is_the_same_call_negated, {
     TEST_ASSERT_EQ_STR(found("  %t7 = xor i1 %t6, true\n"), "  %t7 = xor i1 %t6, true\n");
     // One call either way: the negation is in the module and not in the
     // runtime.
-    TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (size_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -129,7 +129,7 @@ TEST(the_entry_point_is_never_declared, {
                           "    println(s == \"hi\", s == \"ho\");\n"
                           "    return puts(s.ptr);\n}\n"));
     // The declarations section holds the externs and the intrinsics and no third group.
-    TEST_ASSERT_EQ_SIZE(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (size_t)2);
+    TEST_ASSERT_EQ_UINT64(occurrences("call zeroext i1 @\"std.rt.str_eq\"("), (uint64_t)2);
     TEST_ASSERT_EQ_STR(absent("declare zeroext i1 @\"std.rt.str_eq\""), "absent");
     TEST_ASSERT_EQ_STR(absent("declare void @\"std.rt."), "absent");
     TEST_ASSERT_EQ_STR(found("declare i32 @puts(ptr) nobuiltin"),

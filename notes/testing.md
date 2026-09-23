@@ -82,6 +82,16 @@ bullet at a time and without a rewrite.
   The sanitizer presets run the unit tests with `allocator_may_return_null=1` (ctest sets the
   environment, `cmake/sanitizers.cmake`) because the runtime's out-of-memory path is tested with
   an impossible allocation; run a suite by hand under those presets with the same variable.
+- **The C unit suites run on linux and on darwin.** The first darwin run failed 6 compilations
+  and 20 test cases. Four rules keep a suite portable:
+  - Compare a `uint64_t` with `TEST_ASSERT_EQ_UINT64`, not `TEST_ASSERT_EQ_SIZE`. `size_t` is
+    `unsigned long` on darwin and `uint64_t` is `unsigned long long`, so `%zu` fails `-Wformat`.
+  - Build an expected command line from `FORT_DEFAULT_CC`, `FORT_DEFAULT_TARGET` and
+    `cross_target()` in `test/driver_helpers.h`. Do not write `clang` or `x86_64-linux-gnu` in
+    the text.
+  - Capture driver output with `capture_stream()`, not `tmpfile()`. Darwin's `tmpfile()` reads
+    `TMPDIR`, and 2 driver tests set `TMPDIR` to an empty or a missing directory.
+  - Find the running binary with `_NSGetExecutablePath` on darwin; `/proc/self/exe` is linux only.
 - A test that must observe a program the compiler spawns uses a fake one: `test/fake_cc.sh` is
   the `--cc` of the driver suites, it writes its own path and every argument, one per line, into
   `$FORT_FAKE_CC_LOG` and exits with `$FORT_FAKE_CC_STATUS`, so the whole clang command line is

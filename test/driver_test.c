@@ -11,6 +11,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #include "diag.h"
 #include "driver_helpers.h"
 #include "str.h"
@@ -264,7 +268,7 @@ TEST(options_without_an_entry_file_are_a_usage_error, {
 
 // ---- parsing ------------------------------------------------------
 
-TEST(defaults_are_clang_the_x86_64_triple_and_checked_mode, {
+TEST(defaults_are_the_build_defaults_and_checked_mode, {
     driver_options_t opts;
     driver_options_init(&opts);
     run_t run;
@@ -272,8 +276,8 @@ TEST(defaults_are_clang_the_x86_64_triple_and_checked_mode, {
     TEST_ASSERT_EQ_STR(opts.entry, "main.ft");
     TEST_ASSERT_NULL(opts.output);
     TEST_ASSERT_NULL(opts.std_dir);
-    TEST_ASSERT_EQ_STR(opts.cc, "clang");
-    TEST_ASSERT_EQ_STR(opts.target, "x86_64-linux-gnu");
+    TEST_ASSERT_EQ_STR(opts.cc, FORT_DEFAULT_CC);
+    TEST_ASSERT_EQ_STR(opts.target, FORT_DEFAULT_TARGET);
     TEST_ASSERT_FALSE(opts.emit_ir);
     TEST_ASSERT_FALSE(opts.compile_only);
     TEST_ASSERT_FALSE(opts.release);
@@ -286,9 +290,21 @@ TEST(defaults_are_clang_the_x86_64_triple_and_checked_mode, {
     driver_options_free(&opts);
 })
 
-TEST(the_defaults_are_the_ones_the_header_names, {
-    TEST_ASSERT_EQ_STR(FORT_DEFAULT_CC, "clang");
-    TEST_ASSERT_EQ_STR(FORT_DEFAULT_TARGET, "x86_64-linux-gnu");
+// The build selects the defaults for its host: clang on both hosts, x86_64-linux-gnu on linux
+// and the fixed arm64 triple on darwin.
+static const char HOST_DEFAULT_CC[] = "clang";
+
+static bool default_target_is_the_host_target(void) {
+#if defined(__APPLE__)
+    return strcmp(FORT_DEFAULT_TARGET, "arm64-apple-macosx11.0.0") == 0;
+#else
+    return strcmp(FORT_DEFAULT_TARGET, "x86_64-linux-gnu") == 0;
+#endif
+}
+
+TEST(the_defaults_are_the_ones_the_build_selects_for_the_host, {
+    TEST_ASSERT_EQ_STR(FORT_DEFAULT_CC, HOST_DEFAULT_CC);
+    TEST_ASSERT_TRUE(default_target_is_the_host_target());
     TEST_ASSERT_EQ_STR(FORT_DEFAULT_OUTPUT, "a.out");
 })
 
@@ -431,15 +447,24 @@ TEST(the_default_output_is_a_out_then_base_o_then_base_ll, {
     str_pool_free(&pool);
 })
 
-// `std` beside the running binary, computed from /proc/self/exe the way the
-// driver must: the last component of the path replaced by `std`.
+// `std` beside the running binary, computed the way the driver must: the last
+// component of the path replaced by `std`. linux names the binary with
+// /proc/self/exe. darwin names it with _NSGetExecutablePath and realpath.
 static bool std_beside_this_test(char* dst, size_t size) {
     char exe[PATH_CAP];
+#if defined(__APPLE__)
+    char named[PATH_CAP];
+    uint32_t cap = sizeof named;
+    if (_NSGetExecutablePath(named, &cap) != 0 || realpath(named, exe) == NULL) {
+        return false;
+    }
+#else
     const ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
     if (len <= 0) {
         return false;
     }
     exe[len] = '\0';
+#endif
     char* slash = strrchr(exe, '/');
     if (slash == NULL) {
         return false;
@@ -474,7 +499,7 @@ TEST(the_std_dir_option_beats_the_environment_which_beats_the_binary, {
     opts.std_dir = NULL;
     TEST_ASSERT_EQ_STR(driver_std_dir(&opts, "build/debug/fort", &pool).ptr, "/env/std");
     TEST_UNUSED(unsetenv("FORT_STD_DIR"));
-    // With neither, the directory containing the binary, which /proc/self/exe
+    // With neither, the directory containing the binary, which the system
     // names whatever argv[0] is.
     char expected[PATH_CAP];
     TEST_ASSERT_TRUE(std_beside_this_test(expected, sizeof expected));
@@ -524,15 +549,20 @@ static void build_argv(char** command, char* buf, size_t size) {
 TEST(the_checked_invocation_is_the_line_of_toolchain_2, {
     char line[CAPTURE_MAX];
     BUILD_ARGV(line, "main.ft");
-    TEST_ASSERT_EQ_STR(line,
-                       "clang\n"
-                       "--target=x86_64-linux-gnu\n"
-                       "-O1\n"
-                       "-fPIE\n"
-                       "-Wno-override-module\n"
-                       "-o\n"
-                       "prog\n"
-                       "/tmp/t/main.ll\n");
+    char expected[CAPTURE_MAX];
+    expect2(expected,
+            sizeof expected,
+            "%s\n"
+            "--target=%s\n"
+            "-O1\n"
+            "-fPIE\n"
+            "-Wno-override-module\n"
+            "-o\n"
+            "prog\n"
+            "/tmp/t/main.ll\n",
+            FORT_DEFAULT_CC,
+            FORT_DEFAULT_TARGET);
+    TEST_ASSERT_EQ_STR(line, expected);
 })
 
 TEST(release_compiles_the_module_with_o2, {
@@ -553,35 +583,45 @@ TEST(the_target_option_becomes_the_target_argument, {
 TEST(libraries_then_cc_arguments_close_the_line, {
     char line[CAPTURE_MAX];
     BUILD_ARGV(line, "-lm", "-Xcc", "-fuse-ld=lld", "-lz", "-Xcc", "-static", "main.ft");
-    TEST_ASSERT_EQ_STR(line,
-                       "clang\n"
-                       "--target=x86_64-linux-gnu\n"
-                       "-O1\n"
-                       "-fPIE\n"
-                       "-Wno-override-module\n"
-                       "-o\n"
-                       "prog\n"
-                       "/tmp/t/main.ll\n"
-                       "-lm\n"
-                       "-lz\n"
-                       "-fuse-ld=lld\n"
-                       "-static\n");
+    char expected[CAPTURE_MAX];
+    expect2(expected,
+            sizeof expected,
+            "%s\n"
+            "--target=%s\n"
+            "-O1\n"
+            "-fPIE\n"
+            "-Wno-override-module\n"
+            "-o\n"
+            "prog\n"
+            "/tmp/t/main.ll\n"
+            "-lm\n"
+            "-lz\n"
+            "-fuse-ld=lld\n"
+            "-static\n",
+            FORT_DEFAULT_CC,
+            FORT_DEFAULT_TARGET);
+    TEST_ASSERT_EQ_STR(line, expected);
 })
 
 TEST(compile_only_puts_c_before_o_and_drops_the_link_arguments, {
     char line[CAPTURE_MAX];
     BUILD_ARGV(line, "-c", "-lm", "-Xcc", "-static", "main.ft");
-    TEST_ASSERT_EQ_STR(line,
-                       "clang\n"
-                       "--target=x86_64-linux-gnu\n"
-                       "-O1\n"
-                       "-fPIE\n"
-                       "-Wno-override-module\n"
-                       "-c\n"
-                       "-o\n"
-                       "prog\n"
-                       "/tmp/t/main.ll\n"
-                       "-static\n");
+    char expected[CAPTURE_MAX];
+    expect2(expected,
+            sizeof expected,
+            "%s\n"
+            "--target=%s\n"
+            "-O1\n"
+            "-fPIE\n"
+            "-Wno-override-module\n"
+            "-c\n"
+            "-o\n"
+            "prog\n"
+            "/tmp/t/main.ll\n"
+            "-static\n",
+            FORT_DEFAULT_CC,
+            FORT_DEFAULT_TARGET);
+    TEST_ASSERT_EQ_STR(line, expected);
 })
 
 TEST(the_module_is_never_introduced_by_x_ir, {
@@ -601,10 +641,10 @@ TEST(a_checked_build_spawns_the_invocation_and_removes_the_temporary, {
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
     char expected[CAPTURE_MAX];
-    expect2(expected,
+    expect3(expected,
             sizeof expected,
             "%s\n"
-            "--target=x86_64-linux-gnu\n"
+            "--target=%s\n"
             "-O1\n"
             "-fPIE\n"
             "-Wno-override-module\n"
@@ -612,6 +652,7 @@ TEST(a_checked_build_spawns_the_invocation_and_removes_the_temporary, {
             "%s\n"
             "<tmp>/main.ll\n",
             FORT_FAKE_CC,
+            FORT_DEFAULT_TARGET,
             box.out);
     TEST_ASSERT_EQ_STR(log.joined, expected);
     // The module lived in a directory of its own under $TMPDIR, and both are gone once the driver
@@ -632,7 +673,7 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
                           "--cc",
                           FORT_FAKE_CC,
                           "--target",
-                          "x86_64-linux-gnu",
+                          FORT_DEFAULT_TARGET,
                           "-lm",
                           "-Xcc",
                           "-fuse-ld=lld",
@@ -643,10 +684,10 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
     char expected[CAPTURE_MAX];
-    expect2(expected,
+    expect3(expected,
             sizeof expected,
             "%s\n"
-            "--target=x86_64-linux-gnu\n"
+            "--target=%s\n"
             "-O2\n"
             "-fPIE\n"
             "-Wno-override-module\n"
@@ -656,6 +697,7 @@ TEST(a_release_build_passes_o2_the_target_the_libraries_and_the_cc_arguments, {
             "-lm\n"
             "-fuse-ld=lld\n",
             FORT_FAKE_CC,
+            FORT_DEFAULT_TARGET,
             box.out);
     TEST_ASSERT_EQ_STR(log.joined, expected);
     TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
@@ -670,10 +712,10 @@ TEST(compile_only_stops_at_the_object_and_names_it_after_the_entry, {
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
     char expected[CAPTURE_MAX];
-    expect2(expected,
+    expect3(expected,
             sizeof expected,
             "%s\n"
-            "--target=x86_64-linux-gnu\n"
+            "--target=%s\n"
             "-O1\n"
             "-fPIE\n"
             "-Wno-override-module\n"
@@ -682,6 +724,7 @@ TEST(compile_only_stops_at_the_object_and_names_it_after_the_entry, {
             "%s\n"
             "<tmp>/main.ll\n",
             FORT_FAKE_CC,
+            FORT_DEFAULT_TARGET,
             box.out);
     TEST_ASSERT_EQ_STR(log.joined, expected);
     TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
@@ -748,7 +791,7 @@ TEST(cross_target_ir_requires_an_explicit_standard_root, {
     TEST_ASSERT_TRUE(box.ok);
     char module[PATH_CAP];
     join(module, sizeof module, box.dir, "out.ll");
-    const run_t run = RUN("-S", "--target", "arm64-apple-macosx26.6.2", "-o", module, box.entry);
+    const run_t run = RUN("-S", "--target", cross_target(), "-o", module, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_EQ_STR(run.err,
                        "fort: error: --std-dir is required for cross-target -S\n"
@@ -762,24 +805,22 @@ TEST(cross_target_s_wins_over_c_and_emits_the_selected_target, {
     TEST_ASSERT_TRUE(box.ok);
     char module[PATH_CAP];
     join(module, sizeof module, box.dir, "out.ll");
-    const run_t run = RUN("-S",
-                          "-c",
-                          "--target",
-                          "arm64-apple-macosx26.6.2",
-                          "--std-dir",
-                          box.std,
-                          "-o",
-                          module,
-                          box.entry);
+    const run_t run =
+        RUN("-S", "-c", "--target", cross_target(), "--std-dir", box.std, "-o", module, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_OK);
     FILE* file = fopen(module, "rb");
     TEST_ASSERT_NONNULL(file);
     char text[CAPTURE_MAX];
     slurp(file, text, sizeof text);
     TEST_UNUSED(fclose(file));
-    TEST_ASSERT_TRUE(strncmp(text,
-                             "target triple = \"arm64-apple-macosx26.6.2\"\n",
-                             strlen("target triple = \"arm64-apple-macosx26.6.2\"\n")) == 0);
+    // The linux module names the vendor of the triple, as LLVM spells it.
+    char triple[PATH_CAP];
+    expect1(triple,
+            sizeof triple,
+            "target triple = \"%s\"\n",
+            strcmp(FORT_DEFAULT_TARGET, "x86_64-linux-gnu") != 0 ? "x86_64-unknown-linux-gnu"
+                                                           : cross_target());
+    TEST_ASSERT_TRUE(strncmp(text, triple, strlen(triple)) == 0);
     TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
     sandbox_close(&box);
 })
@@ -787,14 +828,8 @@ TEST(cross_target_s_wins_over_c_and_emits_the_selected_target, {
 TEST(a_cross_target_object_stops_before_output, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
-    const run_t run = RUN("-c",
-                          "--target",
-                          "arm64-apple-macosx26.6.2",
-                          "--std-dir",
-                          box.std,
-                          "-o",
-                          box.out,
-                          box.entry);
+    const run_t run =
+        RUN("-c", "--target", cross_target(), "--std-dir", box.std, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_NONNULL(strstr(run.err, "cannot compile object for target"));
     TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
@@ -806,7 +841,7 @@ TEST(a_cross_target_link_stops_before_output, {
     sandbox_t box = sandbox_open();
     TEST_ASSERT_TRUE(box.ok);
     const run_t run =
-        RUN("--target", "arm64-apple-macosx26.6.2", "--std-dir", box.std, "-o", box.out, box.entry);
+        RUN("--target", cross_target(), "--std-dir", box.std, "-o", box.out, box.entry);
     TEST_ASSERT_EQ_INT32(run.status, FORT_EXIT_USAGE);
     TEST_ASSERT_NONNULL(strstr(run.err, "cannot link target"));
     TEST_ASSERT_EQ_INT32(access(box.out, F_OK), -1);
@@ -892,10 +927,10 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load_named(box.log, &log, "/prog.ll"));
     char expected[CAPTURE_MAX];
-    expect2(expected,
+    expect3(expected,
             sizeof expected,
             "%s\n"
-            "--target=x86_64-linux-gnu\n"
+            "--target=%s\n"
             "-O1\n"
             "-fPIE\n"
             "-Wno-override-module\n"
@@ -903,6 +938,7 @@ TEST(an_entry_without_the_ft_suffix_keeps_its_whole_name, {
             "%s\n"
             "<tmp>/prog.ll\n",
             FORT_FAKE_CC,
+            FORT_DEFAULT_TARGET,
             box.out);
     TEST_ASSERT_EQ_STR(log.joined, expected);
     TEST_ASSERT_EQ_INT32(count_entries(box.tmp), 0);
@@ -985,10 +1021,10 @@ TEST(the_object_of_c_is_named_after_the_entry_in_the_current_directory, {
     cc_log_t log;
     TEST_ASSERT_TRUE(cc_log_load(box.log, &log));
     char expected[CAPTURE_MAX];
-    expect1(expected,
+    expect2(expected,
             sizeof expected,
             "%s\n"
-            "--target=x86_64-linux-gnu\n"
+            "--target=%s\n"
             "-O1\n"
             "-fPIE\n"
             "-Wno-override-module\n"
@@ -996,7 +1032,8 @@ TEST(the_object_of_c_is_named_after_the_entry_in_the_current_directory, {
             "-o\n"
             "main.o\n"
             "<tmp>/main.ll\n",
-            FORT_FAKE_CC);
+            FORT_FAKE_CC,
+            FORT_DEFAULT_TARGET);
     TEST_ASSERT_EQ_STR(log.joined, expected);
     sandbox_close(&box);
 })
@@ -1167,8 +1204,8 @@ int main(int argc, char** argv) {
     TEST_RUN(option_missing_its_argument_is_a_usage_error);
     TEST_RUN(two_entry_files_are_a_usage_error);
     TEST_RUN(options_without_an_entry_file_are_a_usage_error);
-    TEST_RUN(defaults_are_clang_the_x86_64_triple_and_checked_mode);
-    TEST_RUN(the_defaults_are_the_ones_the_header_names);
+    TEST_RUN(defaults_are_the_build_defaults_and_checked_mode);
+    TEST_RUN(the_defaults_are_the_ones_the_build_selects_for_the_host);
     TEST_RUN(every_flag_sets_its_option);
     TEST_RUN(the_last_output_cc_and_target_win);
     TEST_RUN(roots_libraries_and_cc_arguments_keep_their_order);

@@ -114,17 +114,15 @@ target moved and the rebase is missing. No merge commit enters the history. Unti
   It gives the template and number rule. Fields: id, title, size, critical-path, depends-on, impl,
   review, deliverable, spec, branch, worktree, assignee, acceptance criteria, notes, log.
   `Notes` holds four subsections in this order: `Design`, `Open questions`, `Deviations` and
-  `Review findings`; a fifth, `Reconciliation`, follows a history rewrite of `main`. An open
-  question gives the question in one line, an `owner:` line and a `resolution:` block whose first
-  line is the ruling and whose following lines give the reason; a one-line resolution loses the
-  measurement that makes a ruling checkable (T-102, measured on T-099 and T-086). A deviation cites
-  its decision as `(Dn.m)` and names who ratified it. A review finding carries `file:line`, a
-  severity and either `fixed: <evidence>` or `declined: <reason>`. A reconciliation lists, by line,
-  each statement the rewrite made false and what holds now (2026-09-24). `Log` holds one line for
-  each event, in one shape: `- YYYY-MM-DD role: event; evidence`. A ruling, a measurement or a
-  finding goes into the matching Notes subsection and the Log line points at it. **`.tickets/` is
-  gitignored and `.tickets/README.md` is untracked**, so the template reaches no commit and a
-  reader verifies it by reading the file in the main checkout.
+  `Review findings`. An open question gives the question in one line, an `owner:` line and a
+  `resolution:` block whose first line is the ruling and whose following lines give the reason; a
+  one-line resolution loses the measurement that makes a ruling checkable (T-102, measured on
+  T-099 and T-086). A deviation cites its decision as `(Dn.m)` and names who ratified it. A review
+  finding carries `file:line`, a severity and either `fixed: <evidence>` or `declined: <reason>`.
+  `Log` holds one line for each event, in one shape: `- YYYY-MM-DD role: event; evidence`. A
+  ruling, a measurement or a finding goes into the matching Notes subsection and the Log line
+  points at it. **`.tickets/` is gitignored and `.tickets/README.md` is untracked**, so the
+  template reaches no commit and a reader verifies it by reading the file in the main checkout.
 - Assign a ticket only when each dependency is in `done/` after its merge into `main`. Assign
   independent tickets concurrently, one implementor each.
 - Acceptance criteria are verifiable inside the VM or on a named native host. The ticket log names
@@ -242,7 +240,7 @@ that move and 223 after it. The 73 lines above the budget have one candidate and
 `notes/style.md`. Everything else here is the layout, the process or this table, so a move that
 closes the last 46 lines would put process knowledge outside `AGENTS.md`. The user decides which
 of the two the budget means; until then the number stands as a target and not as a rule (T-099).
-The lint holds that number: `BUDGET_LIMIT` in `tools/knowledge_lint.py` is 254, the measured
+The lint holds that number: `BUDGET_LIMIT` in `tools/knowledge_lint.py` is 252, the measured
 value, so any growth trips it; `BUDGET_TARGET` is 150 and no test reads it (T-103).
 
 Five rules for an entry:

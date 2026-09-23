@@ -240,7 +240,7 @@ TEST(a_span_of_a_span_expression_lands_in_a_temporary, {
                        "%tmp0 = alloca %fort.span, align 8");
     TEST_ASSERT_EQ_STR(found("%tmp1 = alloca %fort.span, align 8"),
                        "%tmp1 = alloca %fort.span, align 8");
-    TEST_ASSERT_EQ_SIZE(occurrences("call void @\"std.rt.fail_span\"("), (size_t)2);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"std.rt.fail_span\"("), (uint64_t)2);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 
@@ -386,7 +386,7 @@ TEST(a_range_for_over_a_span_walks_it_by_index_with_no_check, {
     // collection's own slot. The one memcpy of the module is the declaration's checked store.
     TEST_ASSERT_EQ_STR(absent("std.rt.fail_bounds"), "absent");
     TEST_ASSERT_EQ_STR(found("icmp ult i64 "), "icmp ult i64 ");
-    TEST_ASSERT_EQ_SIZE(occurrences("call void @llvm.memcpy"), (size_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @llvm.memcpy"), (uint64_t)1);
     TEST_ASSERT_EQ_STR(found("  %t7 = load i64, ptr %tmp1, align 8\n"
                              "  %t8 = getelementptr inbounds %fort.span, ptr %s.1, "
                              "i32 0, i32 1\n"),
@@ -404,7 +404,7 @@ TEST(a_range_for_over_a_span_expression_copies_it_once, {
     // the first iteration.
     TEST_ASSERT_EQ_STR(found("%tmp0 = alloca %fort.span, align 8"),
                        "%tmp0 = alloca %fort.span, align 8");
-    TEST_ASSERT_EQ_SIZE(occurrences("call void @\"std.rt.fail_span\"("), (size_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("call void @\"std.rt.fail_span\"("), (uint64_t)1);
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
 

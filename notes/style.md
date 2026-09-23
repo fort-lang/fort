@@ -35,7 +35,7 @@ Harness directives are not documentation. Keep their required syntax and positio
 fixed-position fixtures during a documentation sweep. These fixtures include `test/lang/**/*.ft`,
 `test/darwin/*.ft`, `editors/vscode/test/fixtures/**`, `test/fort_lint/*.ft`,
 `test/highlight/scopes.ft`, and generated fixtures. A test pins a position in such a file:
-commit b6576f85 removed one comment line from `test/darwin/allocation_unused.ft` and the Darwin
+commit 332e5fa7 removed one comment line from `test/darwin/allocation_unused.ft` and the Darwin
 gate exited 1 until T-183 repinned `test/darwin_allocation_failure_test.sh`.
 
 ### 1.2 fort

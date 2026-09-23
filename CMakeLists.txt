@@ -431,13 +431,8 @@ add_test(NAME lsp-binary
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(lsp-binary PROPERTIES LABELS lang)
 
-if(FORT_TARGET STREQUAL "darwin")
-    # The remaining targets build and test the C compiler. They do not belong
-    # to the darwin graph.
-    return()
-endif()
-
 # ---- unit tests ----------------------------------------------------------------
+# The C unit tests run on linux and on darwin.
 if(FORT_ENABLE_BOOTSTRAP)
 # Compile test-only helpers that a suite does not include. Link each helper into
 # each suite so that -Werror and clang-tidy inspect it once. The list is empty.
@@ -510,6 +505,31 @@ foreach(std_reader runtime_sig_test check_conv_test)
             LABELS "unit;bootstrap;bootstrap-contract")
     endif()
 endforeach()
+
+# The parser recovery suite walks the fail corpus and asserts that
+# every diagnostic lands on an annotated line, so it needs the corpus's path.
+if(TARGET parser_recovery_test)
+    target_compile_definitions(parser_recovery_test
+        PRIVATE FORT_LANG_DIR="${FORT_TEST_DIR}/lang")
+endif()
+endif()
+
+# The tools/mutate.py unit tests cover parsers, anchors, guards, restore, and timeouts.
+# They also check the shipped table against its source anchors.
+# The unit tests run no mutation round because a round rebuilds the compiler.
+if(FORT_ENABLE_BOOTSTRAP)
+    add_test(NAME mutate_selftest
+        COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
+        WORKING_DIRECTORY "${FORT_TEST_DIR}")
+    set_tests_properties(mutate_selftest PROPERTIES
+        LABELS unit
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+endif()
+
+if(FORT_TARGET STREQUAL "darwin")
+    # The remaining targets are the linux tests and the C lint targets. They do
+    # not belong to the darwin graph.
+    return()
 endif()
 
 # The cross pipeline: the hand-written LLVM IR modules under test/ir, which
@@ -557,12 +577,6 @@ endif()
 # the product compiler. `lang_lint` validates the directives, and
 # `lang_selftest` runs the harness's own unit tests (both label unit).
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
-
-# The parser recovery suite walks the fail corpus and asserts that
-# every diagnostic lands on an annotated line, so it needs the corpus's path.
-if(TARGET parser_recovery_test)
-    target_compile_definitions(parser_recovery_test PRIVATE FORT_LANG_DIR="${FORT_LANG_DIR}")
-endif()
 set(FORT_LANG_HARNESS "${FORT_LANG_DIR}/run_tests.py")
 include(ProcessorCount)
 ProcessorCount(FORT_LANG_JOBS)
@@ -679,18 +693,6 @@ add_test(NAME lines_selftest
 set_tests_properties(lines_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# The tools/mutate.py unit tests cover parsers, anchors, guards, restore, and timeouts.
-# They also check the shipped table against its source anchors.
-# The unit tests run no mutation round because a round rebuilds the compiler.
-if(FORT_ENABLE_BOOTSTRAP)
-    add_test(NAME mutate_selftest
-        COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
-        WORKING_DIRECTORY "${FORT_TEST_DIR}")
-    set_tests_properties(mutate_selftest PROPERTIES
-        LABELS unit
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-endif()
 
 # The shape of the decision log (label unit): every entry is `### Dn.m Title`
 # with an owner field and a rule field. It also limits lines to 100 columns.

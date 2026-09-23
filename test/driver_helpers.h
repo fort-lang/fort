@@ -40,6 +40,23 @@ static inline void slurp(FILE* stream, char* buf, size_t size) {
     buf[got] = '\0';
 }
 
+// Opens an anonymous stream for what the driver writes. The file is under /tmp and not under
+// $TMPDIR, because some tests set TMPDIR to an empty or a missing directory. Darwin's tmpfile()
+// reads TMPDIR and glibc's does not.
+static inline FILE* capture_stream(void) {
+    char path[] = "/tmp/fort-capture-XXXXXX";
+    const int fd = mkstemp(path);
+    if (fd < 0) {
+        return NULL;
+    }
+    TEST_UNUSED(unlink(path));
+    FILE* stream = fdopen(fd, "w+b");
+    if (stream == NULL) {
+        TEST_UNUSED(close(fd));
+    }
+    return stream;
+}
+
 // Runs driver_main on the NULL-terminated argument list, argv[0] included.
 static inline run_t run_driver(char** argv) {
     run_t run;
@@ -50,8 +67,8 @@ static inline run_t run_driver(char** argv) {
     while (argv[argc] != NULL) {
         argc++;
     }
-    FILE* out = tmpfile();
-    FILE* err = tmpfile();
+    FILE* out = capture_stream();
+    FILE* err = capture_stream();
     if (out == NULL || err == NULL) {
         return run;
     }
@@ -205,6 +222,29 @@ static inline void expect2(
 static inline void expect3(
     char* dst, size_t size, const char* format, const char* a, const char* b, const char* c) {
     TEST_UNUSED(snprintf(dst, size, format, a, b, c));
+}
+
+static inline void expect4(char* dst,
+                           size_t size,
+                           const char* format,
+                           const char* a,
+                           const char* b,
+                           const char* c,
+                           const char* d) {
+    TEST_UNUSED(snprintf(dst, size, format, a, b, c, d));
+}
+
+// ---- the default target -----------------------------------------------------------
+
+// The build gives the driver its defaults: FORT_DEFAULT_CC and FORT_DEFAULT_TARGET. The expected
+// command lines use the same values, so each suite holds on linux and on darwin.
+
+// A supported target that is not the default target, so a run with it is cross-target. The
+// result is not const because it goes into an argv.
+static inline char* cross_target(void) {
+    static char linux_target[] = "x86_64-linux-gnu";
+    static char mac_target[] = "arm64-apple-macosx26.6.2";
+    return strcmp(FORT_DEFAULT_TARGET, linux_target) == 0 ? mac_target : linux_target;
 }
 
 // ---- the diagnostics of a run ----------------------------------------------------

@@ -731,7 +731,7 @@ TEST(the_enum_member_of_std_rt_is_the_named_type_every_module_carries, {
                                        "enum color { red, green }\n"
                                        "fn main() i32 { println(color.green); return 0; }\n"));
     TEST_ASSERT_EQ_STR(absent("%struct.std.rt.enum_member"), "absent");
-    TEST_ASSERT_EQ_SIZE(occurrences("%fort.enum_member = type { i32, ptr }"), (size_t)1);
+    TEST_ASSERT_EQ_UINT64(occurrences("%fort.enum_member = type { i32, ptr }"), (uint64_t)1);
     TEST_ASSERT_EQ_STR(found("[2 x %fort.enum_member]"), "[2 x %fort.enum_member]");
     TEST_ASSERT_EQ_STR(verified(), "verified");
 })
