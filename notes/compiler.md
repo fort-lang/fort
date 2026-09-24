@@ -140,7 +140,7 @@ came here.
   line, since a layout is only observable through the offsets it moves. `suffixes_store_base` is the
   third spelling of "look behind fixed arrays" beside `behind_arrays` in `types.c` and
   `struct_of` in `check.c`; keep the three in step by reading them together. Its generality was
-  untestable in stage1 by construction, since that compiler refuses `b[2][3]` and `b[3] mut@`,
+  untestable in bootstrap-0 by construction, since that compiler refuses `b[2][3]` and `b[3] mut@`,
   and T-043 made it testable in stage2 and tested it:
   `test/fort/check_resolve_test.ft` writes `node mut*[2][3]` and `node[3] mut@ own` (identity
   only, both declaration orders) beside `node[2][3]` (value containment, an infinite size in both
@@ -230,7 +230,7 @@ came here.
   `conflicting declarations of extern '<name>'` (`error_extern_conflict` in `check.c` and
   `check.ft`) and `redeclaration of '<name>'` (`error_redeclaration` in `modules.c` and
   `modules.ft`). Measured over the whole corpus on 2026-09-14, both compilers: 666 tests, 994
-  diagnostics under stage1 and 545 under stage2, 9 notes each, of which 5 stand in another file
+  diagnostics under bootstrap-0 and 545 under stage2, 9 notes each, of which 5 stand in another file
   than their error and all 5 put the error in the module being checked. The three other
   note-carrying diagnostics put their note where their error stands: `module '<p>' not found`,
   `module '<a>' is the same file as module '<b>'`, and the struct-or-enum note of the extern
@@ -238,9 +238,9 @@ came here.
   `not supported by the bootstrap compiler: ?:` inside `std/math.ft`, which has one place and is
   not this shape. What holds the rule, and why a `fail` test alone does not, is
   `notes/testing.md` 3. Mutation-measured on 2026-09-14: swapping the two
-  places of the extern conflict takes `check_extern_test` red and `lang` to 5 failed in stage1,
+  places of the extern conflict takes `check_extern_test` red and `lang` to 5 failed in bootstrap-0,
   and `fort-modules` red and `lang` to 5 failed in stage2; swapping them at the
-  redeclaration takes `modules_closure_test` and `lang` red in stage1 and `fort-modules` and
+  redeclaration takes `modules_closure_test` and `lang` red in bootstrap-0 and `fort-modules` and
   `lang` red in stage2.
 
 ## 6. The IR emitter
@@ -570,7 +570,7 @@ the 14 stands on its own `define` line and appears nowhere else in the module, a
 14 in the binary:
 
 **Product library scope.** Product tests use the current compiler and current standard library.
-The C compiler does not run this corpus. Only two C contract suites read the bootstrap-0 standard
+The C compiler does not run this corpus. Only two C contract suites read the bootstrap-1 standard
 library (T-160).
 
 ## 8. The port to fort
@@ -616,7 +616,7 @@ library (T-160).
   rules the bootstrap
   already follows so that it stays portable are the first four.
   **The target bootstrap chain and its invariants** (T-155, D14.7). CMake detects Linux or Darwin
-  from the host operating system. The C compiler builds only `bootstrap-0`. Each source compiler
+  from the host operating system. The C compiler builds only `bootstrap-1`. Each source compiler
   builds the next listed revision. The last listed compiler builds working-tree HEAD. Five
   invariants hold the chain:
   1. **One list serves both hosts.** `tools/bootstrap.ref` contains the same full commit SHAs for
@@ -631,10 +631,10 @@ library (T-160).
      A new pin must build with its predecessor and build its successor. Both builds must pass on both
      supported hosts. Each pin is an ancestor of HEAD. A shallow clone that lacks one pin cannot
      bootstrap.
-  5. **The C compiler has one production job.** It builds `bootstrap-0`.
+  5. **The C compiler has one production job.** It builds `bootstrap-1`.
 
   **The C compiler stays frozen against general language work** (T-046, T-160). Change it only to
-  fix a specified C defect or to keep the native C-to-bootstrap-0 edge working on a supported host.
+  fix a specified C defect or to keep the native C-to-bootstrap-1 edge working on a supported host.
   It does not track the fort compiler's language behavior. The one exception is its IR form: the
   user had it emit the fort compiler's IR on both targets, with fixed externs, `nobuiltin`
   declarations, `sret` call sites, `inline-asm` stack probes and no PIE link flag (D9.8, D9.9,
@@ -750,7 +750,7 @@ library (T-160).
   `types.ft`) -- keywords, `new(T, n)`, `==`, enum ordering, the forked tests -- and three from
   T-033 (`ast.ft`, `parser.ft`, `test/fort/support/parse_env.ft`) -- joining strings, the
   NULL-for-no-message parameter, and the fixture's token vector. A fourth, that two mutually
-  recursive structs had to be declared in one particular order, was a stage1 bug and is gone
+  recursive structs had to be declared in one particular order, was a bootstrap-0 bug and is gone
   (T-082).
   - **Keywords take the names first.** `type`, `const`, `match` and the rest of D2.4's reserved
     list, and every type keyword, are not identifiers, so `type_t` cannot be `type`, a field
@@ -809,9 +809,9 @@ library (T-160).
     in `src/fort` (D13.3), a panic ends the program (D11.4), and a `test/fort` test cannot fork,
     so each broken precondition is a `<module>_<case>_panic_test.ft` that prints one line, calls
     the site and carries the message in a `//! stderr:` directive.
-  - **`fort -S` run by stage1 is the oracle for the emitter port** (T-037). The IR of a program
+  - **`fort -S` run by bootstrap-0 is the oracle for the emitter port** (T-037). The IR of a program
     is a function of the program alone (D19.5), so the expected text of a fort emitter test is
-    read off stage1's own output over a program whose body the test writes, and never
+    read off bootstrap-0's own output over a program whose body the test writes, and never
     transcribed from the fort under test. One mechanical step makes the two comparable: a suite
     that drives one expression at a time renumbers `%tN` and `%LN` from zero, which is what the
     emitter produces when the expression is a function's first, so a probe body puts only

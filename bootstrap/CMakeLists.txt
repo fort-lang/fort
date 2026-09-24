@@ -1,18 +1,18 @@
-# The C bootstrap compiler (stage1) and its tests. The top-level project adds
+# The C bootstrap compiler (bootstrap-0) and its tests. The top-level project adds
 # this directory only when FORT_ENABLE_BOOTSTRAP is ON, and this directory
 # never configures alone. The parent gives these variables:
 # - the target: FORT_TARGET, FORT_TARGET_TRIPLE and FORT_DEFAULT_TARGET_CC.
 # - the tools: FORT_TARGET_CC_PATH, FORT_OPT_PATH and FORT_PYTHON3.
-# - the tests: FORT_TEST_DIR, FORT_BOOTSTRAP_REF and FORT_SANITIZER_TEST_ENV.
+# - the tests: FORT_TEST_DIR and FORT_SANITIZER_TEST_ENV.
 #
 # The binary directory of this file is build/<preset>/bootstrap, so the
-# compiler is bootstrap/stage1/fort. The parent builds its chain of source
-# compilers from fort_bootstrap. The pin test below does not use that chain.
+# compiler is bootstrap/bootstrap-0/fort. The parent builds its chain of source
+# compilers from fort_bootstrap. The e2e test below does not use that chain.
 
 include(CMakeDependentOption)
 option(FORT_BOOTSTRAP_BUILD_TESTS "Build and register the tests of the C compiler" OFF)
-cmake_dependent_option(FORT_BOOTSTRAP_PIN_TEST
-    "Test the C compiler: it builds the bootstrap-0 compiler" ON
+cmake_dependent_option(FORT_BOOTSTRAP_E2E_TEST
+    "Test the C compiler: it builds the bootstrap-1 compiler" ON
     "FORT_BOOTSTRAP_BUILD_TESTS" OFF)
 
 set(FORT_BOOTSTRAP_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -59,7 +59,8 @@ add_executable(fort_bootstrap "${FORT_BOOTSTRAP_SRC_DIR}/main.c")
 target_link_libraries(fort_bootstrap PRIVATE fort_core)
 set_target_properties(fort_bootstrap PROPERTIES
     OUTPUT_NAME fort
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/stage1")
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-0"
+)
 
 if(FORT_BOOTSTRAP_BUILD_TESTS)
     # unit tests
@@ -80,52 +81,36 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
         list(APPEND FORT_UNIT_TEST_TARGETS "${TEST_TARGET}")
     endforeach()
 
-    # ---- the pinned tree -----------------------------------------------------------
-    # The contract suites and the pin test read bootstrap-0 from a tree of their
-    # own. The parent's chain extracts the same revision into a different tree.
-    file(STRINGS "${FORT_BOOTSTRAP_REF}" FORT_PIN_TEST_LINE REGEX "^bootstrap-0[ \t]")
-    if(NOT FORT_PIN_TEST_LINE MATCHES "^bootstrap-0[ \t]+([0-9a-f]+)$")
-        message(FATAL_ERROR "${FORT_BOOTSTRAP_REF}: bootstrap-0 is missing")
-    endif()
-    set(FORT_PIN_TEST_SHA "${CMAKE_MATCH_1}")
-    string(LENGTH "${FORT_PIN_TEST_SHA}" FORT_PIN_TEST_SHA_LENGTH)
-    if(NOT FORT_PIN_TEST_SHA_LENGTH EQUAL 40)
-        message(FATAL_ERROR "${FORT_BOOTSTRAP_REF}: bootstrap-0 needs one lowercase full SHA")
-    endif()
+    # ---- the bootstrap-1 source ----------------------------------------------------
+    # The contract suites and the e2e test read bootstrap-1 from a tree of their
+    # own. The parent's chain extracts its pins from tools/bootstrap.ref.
+    set(FORT_BOOTSTRAP_1_SHA 0fe521c08a4541ec8f1a9563bc177630cb59316e)
 
-    set(FORT_PIN_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/pin-test/bootstrap-0")
-    set(FORT_PIN_TEST_STAMP "${FORT_PIN_TEST_DIR}/.assembled-${FORT_PIN_TEST_SHA}-${FORT_TARGET}")
+    set(FORT_BOOTSTRAP_1_DIR "${CMAKE_CURRENT_BINARY_DIR}/e2e/bootstrap-1")
+    set(FORT_BOOTSTRAP_1_STAMP
+        "${FORT_BOOTSTRAP_1_DIR}/.assembled-${FORT_BOOTSTRAP_1_SHA}-${FORT_TARGET}")
     add_custom_command(
-        OUTPUT "${FORT_PIN_TEST_STAMP}"
-        COMMAND "${CMAKE_COMMAND}"
-            -DROOT=${CMAKE_SOURCE_DIR}
-            -DSHA=${FORT_PIN_TEST_SHA}
-            -DOUTPUT=${FORT_PIN_TEST_DIR}
-            -DTARGET=${FORT_TARGET}
-            -P "${CMAKE_SOURCE_DIR}/cmake/bootstrap_tree.cmake"
-        DEPENDS "${FORT_BOOTSTRAP_REF}" "${CMAKE_SOURCE_DIR}/cmake/bootstrap_tree.cmake"
-        COMMENT "Extracting bootstrap-0 for the tests of the C compiler"
+        OUTPUT "${FORT_BOOTSTRAP_1_STAMP}"
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/extract_pin.sh"
+            "${FORT_BOOTSTRAP_1_SHA}" "${FORT_BOOTSTRAP_1_DIR}" "${FORT_TARGET}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/extract_pin.sh"
+        COMMENT "Extracting bootstrap-1 for the tests of the C compiler"
         VERBATIM
     )
-    add_custom_target(fort_bootstrap_pin_tree ALL DEPENDS "${FORT_PIN_TEST_STAMP}")
+    add_custom_target(fort_bootstrap_1_source ALL DEPENDS "${FORT_BOOTSTRAP_1_STAMP}")
 
-    # ---- the pin test --------------------------------------------------------------
-    # The end-to-end test of the C compiler: stage1 builds the bootstrap-0 compiler
-    # from the pinned tree. The test passes when that build exits 0.
-    if(FORT_BOOTSTRAP_PIN_TEST)
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            set(FORT_PIN_TEST_MODE_ARGS "")
-        else()
-            set(FORT_PIN_TEST_MODE_ARGS --release)
-        endif()
-        add_test(NAME bootstrap-pin
-            COMMAND "$<TARGET_FILE:fort_bootstrap>" ${FORT_PIN_TEST_MODE_ARGS}
-                --std-dir "${FORT_PIN_TEST_DIR}/target/std"
-                -I "${FORT_PIN_TEST_DIR}/src/fort"
+    # ---- the e2e test ---------------------------------------------------------------
+    # The end-to-end test of the C compiler: bootstrap-0 builds the bootstrap-1 compiler
+    # from the bootstrap-1 source. The test passes when that build exits 0.
+    if(FORT_BOOTSTRAP_E2E_TEST)
+        add_test(NAME bootstrap-e2e
+            COMMAND "$<TARGET_FILE:fort_bootstrap>" ${FORT_BOOTSTRAP_1_MODE_ARGS}
+                --std-dir "${FORT_BOOTSTRAP_1_DIR}/target/std"
+                -I "${FORT_BOOTSTRAP_1_DIR}/src/fort"
                 --cc "${FORT_TARGET_CC_PATH}"
-                -o "${FORT_PIN_TEST_DIR}/fort" "${FORT_PIN_TEST_DIR}/target/entry/main.ft"
+                -o "${FORT_BOOTSTRAP_1_DIR}/fort" "${FORT_BOOTSTRAP_1_DIR}/target/entry/main.ft"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
-        set_tests_properties(bootstrap-pin PROPERTIES
+        set_tests_properties(bootstrap-e2e PROPERTIES
             LABELS "unit;bootstrap"
             ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
     endif()
@@ -164,13 +149,13 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
     # against the library declarations.
     # Both suites need the sources.
     #
-    # Both suites parse the standard root of the pinned tree above. This makes them
+    # Both suites parse the standard root of the bootstrap-1 source above. This makes them
     # contracts between the C implementation and its bootstrap library.
     foreach(std_reader runtime_sig_test check_conv_test)
         if(TARGET "${std_reader}")
             target_compile_definitions("${std_reader}"
-                PRIVATE FORT_STD_SOURCE_DIR="${FORT_PIN_TEST_DIR}/target/std")
-            add_dependencies("${std_reader}" fort_bootstrap_pin_tree)
+                PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP_1_DIR}/target/std")
+            add_dependencies("${std_reader}" fort_bootstrap_1_source)
             set_tests_properties("${std_reader}" PROPERTIES
                 LABELS "unit;bootstrap;bootstrap-contract")
         endif()

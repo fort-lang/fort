@@ -18,7 +18,7 @@ written.
 `std/darwin/`. The other modules stand in `std/` and serve both targets.
 
 `std.math` holds f64 and f32 functions. Product tests use this current standard library.
-The C compiler reads only the standard library of bootstrap-0.
+The C compiler reads only the standard library of bootstrap-1.
 
 `std.rt` is the only runtime there is. A `print`, a `new` and a `panic` are calls to its entry
 points, which the compiler emits by their mangled names (D9.7, D12.2), and the module declares no

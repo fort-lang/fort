@@ -41,7 +41,7 @@ You are transliterating an existing, tested C module in `bootstrap/src/` into fo
 - Where fort cannot express the C directly (no unions, mutability and ownership rules, no
   function pointers in the bootstrap subset), use the idiom the ticket names and record the
   deviation in the ticket's Notes.
-- The fort you write must stay inside the bootstrap subset, or stage1 cannot compile it.
+- The fort you write must stay inside the bootstrap subset, or bootstrap-0 cannot compile it.
 
 Follow AGENTS.md. Make small green commits. Give the coordinator a clean final SHA.
 Tick measured criteria; leave the gate criterion pending. Report check evidence.

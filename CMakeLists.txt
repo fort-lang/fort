@@ -116,7 +116,7 @@ endif()
 
 # ---- the bootstrap compiler ---------------------------------------------------
 # bootstrap/ builds the C compiler fort_bootstrap and its tests. Its binary
-# directory is FORT_BOOTSTRAP_DIR, so the compiler is bootstrap/stage1/fort.
+# directory is FORT_BOOTSTRAP_DIR, so the compiler is bootstrap/bootstrap-0/fort.
 if(FORT_ENABLE_BOOTSTRAP)
     add_subdirectory(bootstrap "${FORT_BOOTSTRAP_DIR}")
 endif()
@@ -152,7 +152,7 @@ if(FORT_ENABLE_BOOTSTRAP)
         message(FATAL_ERROR "bootstrap reference is missing: ${FORT_BOOTSTRAP_REF}")
     endif()
     file(STRINGS "${FORT_BOOTSTRAP_REF}" FORT_REF_LINES)
-    set(FORT_EXPECTED_PIN 0)
+    set(FORT_EXPECTED_PIN 1)
     set(FORT_PREVIOUS_PIN "")
     foreach(ref_line IN LISTS FORT_REF_LINES)
         string(STRIP "${ref_line}" ref_line)
@@ -241,13 +241,13 @@ if(FORT_ENABLE_BOOTSTRAP)
         math(EXPR FORT_EXPECTED_PIN "${FORT_EXPECTED_PIN} + 1")
     endforeach()
     if(NOT FORT_PIN_SHAS)
-        message(FATAL_ERROR "${FORT_BOOTSTRAP_REF}: bootstrap-0 is missing")
+        message(FATAL_ERROR "${FORT_BOOTSTRAP_REF}: bootstrap-1 is missing")
     endif()
 endif()
 
 # ---- the self-hosted compiler --------------------------------------------------
 file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
-set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/cmake/bootstrap_tree.cmake")
+set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/bootstrap/extract_pin.sh")
 
 if(NOT FORT_ENABLE_BOOTSTRAP)
     set(FORT_PREVIOUS_COMPILER "${FORT_STAGE1_COMPILER}")
@@ -265,12 +265,7 @@ else()
         set(pin_binary "${pin_dir}/fort")
         add_custom_command(
             OUTPUT "${pin_stamp}"
-            COMMAND "${CMAKE_COMMAND}"
-                -DROOT=${CMAKE_SOURCE_DIR}
-                -DSHA=${pin_sha}
-                -DOUTPUT=${pin_dir}
-                -DTARGET=${FORT_TARGET}
-                -P "${FORT_TREE_SCRIPT}"
+            COMMAND bash "${FORT_TREE_SCRIPT}" "${pin_sha}" "${pin_dir}" "${FORT_TARGET}"
             DEPENDS "${FORT_BOOTSTRAP_REF}" "${FORT_TREE_SCRIPT}"
             COMMENT "Extracting and assembling bootstrap-${pin_number}"
             VERBATIM

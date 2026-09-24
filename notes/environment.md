@@ -416,13 +416,15 @@ without a rewrite.
   directory `build/<preset>/bootstrap`. That file builds `fort_core` and `fort_bootstrap`. It sets
   its own C11 settings, warnings and definitions. It reads the target and the tool paths from the
   top-level file, and it does not configure alone. The top-level chain starts at `fort_bootstrap`,
-  which builds bootstrap-0 (T-160). Each source pin builds the next one.
+  which builds bootstrap-1 (T-160). Each source pin builds the next one.
+  `bootstrap/extract_pin.sh <sha> <dir> <linux|darwin> [darwin-version]` extracts a pin with
+  `git archive` and assembles its `target/std` and `target/entry` for the target.
   The last source compiler builds working-tree HEAD as `fort`.
 - `FORT_BOOTSTRAP_BUILD_TESTS` (default OFF; every preset sets it ON) adds the C unit tests on
-  linux and on darwin. `FORT_BOOTSTRAP_PIN_TEST` (default ON, and OFF when
-  `FORT_BOOTSTRAP_BUILD_TESTS` is OFF) adds the ctest `bootstrap-pin`: stage1 builds bootstrap-0 in
-  `build/<preset>/bootstrap/pin-test`. That tree is not the tree of the chain. The contract
-  suites read its standard root, so it is extracted whenever the tests are on.
+  linux and on darwin. `FORT_BOOTSTRAP_E2E_TEST` (default ON, and OFF when
+  `FORT_BOOTSTRAP_BUILD_TESTS` is OFF) adds the ctest `bootstrap-e2e`: bootstrap-0 builds
+  bootstrap-1 in `build/<preset>/bootstrap/e2e`. That tree is not the tree of the chain. The
+  contract suites read its standard root, so it is extracted whenever the tests are on.
 - External-stage1 mode builds only HEAD with `FORT_STAGE1_COMPILER`. It does not create C
   compiler or C unit-test targets.
   Both modes build `fort_std`, a copy of
@@ -475,9 +477,12 @@ without a rewrite.
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
   the helper -- as `bootstrap/test/modules_test.c` and `bootstrap/test/gen_test.c` do.
-- Binaries: `build/<preset>/bootstrap/stage1/fort` is the C compiler.
-  `build/<preset>/bootstrap/bootstrap-N/fort` is source pin N from `tools/bootstrap.ref`.
-  `build/<preset>/fort` is HEAD built by the last source pin (T-155).
+- Binaries: `build/<preset>/bootstrap/bootstrap-0/fort` is the C compiler.
+  `build/<preset>/bootstrap/bootstrap-N/fort` is source pin N from `tools/bootstrap.ref`, which
+  starts at bootstrap-1. `build/<preset>/fort` is HEAD built by the last source pin (T-155).
+  Stage1 is the compiler that builds HEAD: the last pin, or `FORT_STAGE1_COMPILER`. Stage2 is
+  `build/<preset>/fort`, and `tools/fixpoint.sh` builds stage3 and stage4 from it. Text before
+  2026-09-24 calls the C compiler stage1 and the first pin bootstrap-0.
   CMake validates the list and owns all extraction and build edges. `FORT_STAGE1_COMPILER` names an
   external compiler and skips the list. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external path.
   `FORT_ENABLE_BOOTSTRAP=ON` rejects that external path. External-stage1 mode reads no pin

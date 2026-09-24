@@ -76,7 +76,7 @@ TEST(the_other_end_of_the_range_is_silenced_as_well, {
 TEST(a_context_with_a_real_type_still_names_itself, {
     // A valid context still reports its expected type.
     // `fail/operators/018` annotates these two messages.
-    // `fail/arrays/009` annotates a third, which stage1 never reaches because it
+    // `fail/arrays/009` annotates a third, which bootstrap-0 never reaches because it
     // refuses a second array level.
     TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    i32* p = 1 << n;\n    println(p);"));
     TEST_ASSERT_TRUE(said("the initializer expects i32*, not a constant"));

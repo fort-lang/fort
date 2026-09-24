@@ -63,7 +63,7 @@ bullet at a time and without a rewrite.
   `bootstrap`. These suites test the C implementation. Darwin and external-stage1 builds register
   none of these suites (T-160).
 - New C unit suites use inline source or local sandbox fixtures. Only a bootstrap-library contract
-  can read the bootstrap-0 standard library. `runtime_sig_test` and `check_conv_test` are the two
+  can read the bootstrap-1 standard library. `runtime_sig_test` and `check_conv_test` are the two
   contract suites. They also have the label `bootstrap-contract`.
 - Unit tests: `bootstrap/test/<component>_test.c` with `bootstrap/test/common/test.h`; the suite
   name is the file stem and `bootstrap/test/` already holds one per component, `runtime_test.c`
@@ -417,7 +417,7 @@ bullet at a time and without a rewrite.
   compiler with the fort compiler.
 - The ctest `fixpoint` compiles HEAD twice. It compares the two LLVM modules and the two compiler
   binaries. It also verifies both modules with LLVM.
-- A successful native build proves the bootstrap edge. The C compiler builds bootstrap-0.
+- A successful native build proves the bootstrap edge. The C compiler builds bootstrap-1.
   Bootstrap-0 builds the next compiler in the C-started chain.
 - External-stage1 mode uses an external compiler to build HEAD. It registers no bootstrap tests
   and no C unit suites (T-160).

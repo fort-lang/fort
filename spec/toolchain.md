@@ -159,7 +159,7 @@ file (D14.1). Options and the entry file may appear in any order.
   (module (extern-fn (type (void)) c (params (param (type (prim i32)) x) ...) nil))
   ```
 
-  Stage1 need not parse or print this new C extern form.
+  Bootstrap-0 need not parse or print this new C extern form.
 - The entry file's directory is always a root and the current directory never is (D9.2).
 
 Exit status (D14.1):
@@ -1565,7 +1565,7 @@ list shrinks in the commit that makes tests pass. `--xfail` names another list.
 `--no-xfail` ignores the list.
 
 The C compiler is frozen against general language work. It changes only for a specified C defect
-or to keep the native C-to-bootstrap-0 edge working on a supported host. Product tests do not run
+or to keep the native C-to-bootstrap-1 edge working on a supported host. Product tests do not run
 the C compiler (T-046, T-160).
 
 The harness prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per test with the
@@ -1792,7 +1792,7 @@ implementable; the design is to be planned in the implementation phase.
   the library sources.
 - **The chain that builds the compiler** (D14.7). CMake detects Linux or Darwin from the host
   operating system. It rejects cross compilation and all other systems. The C compiler builds
-  `bootstrap-0` for that host. Each source pin builds the next pin. The last pin builds HEAD.
+  `bootstrap-1` for that host. Each source pin builds the next pin. The last pin builds HEAD.
   `tools/bootstrap.ref`
   holds the ordered, gap-free list of full commit SHAs. CMake validates and owns this graph. A
   graph does not call a shell script to read the list or select a predecessor. A shallow clone that
@@ -1802,7 +1802,7 @@ implementable; the design is to be planned in the implementation phase.
   pin cannot build a required later revision. A new pin must build with its predecessor and build
   its successor. Both builds must pass on both supported host systems before the pin enters the list.
   The C unit suites test the C implementation. Product tests use the current compiler and
-  current standard library. A successful native build proves the C-to-bootstrap-0 edge.
+  current standard library. A successful native build proves the C-to-bootstrap-1 edge.
   External-stage1 mode registers no bootstrap tests. The project does not maintain C-to-fort parity.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the
   passes below, invokes `--cc` over the emitted module (D14.3) and maps failures to exit

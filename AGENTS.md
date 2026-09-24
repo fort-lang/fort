@@ -39,10 +39,10 @@ A safe(r) C-like systems programming language.
   `notes/compiler.md` and `notes/style.md` take the facts the routing rule at the end of this
   file sends them.
 - `test/`: `test/lang/` holds language tests in the directive format of `spec/toolchain.md`.
-- `bootstrap/`: the C bootstrap compiler (stage1) in `bootstrap/src/`, its unit tests in
+- `bootstrap/`: the C bootstrap compiler (bootstrap-0) in `bootstrap/src/`, its unit tests in
   `bootstrap/test/` over the macro framework `bootstrap/test/common/test.h`, and its
   `CMakeLists.txt`. The build adds it only when `FORT_ENABLE_BOOTSTRAP` is ON. It builds
-  `bootstrap-0` and stays the second implementation. `tools/bootstrap.ref` pins the remaining chain.
+  `bootstrap-1` and stays the second implementation. `tools/bootstrap.ref` pins the remaining chain.
   `notes/compiler.md` 8 holds the five invariants.
 - `src/fort/`: the compiler in fort (stage2 and stage3). `src/lsp/`: the language server in fort,
   whose modules are reached as `lsp.<name>` and never `<name>` through the search root `src`

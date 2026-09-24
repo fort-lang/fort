@@ -1699,9 +1699,9 @@ Sections:
   selects `linux` and `x86_64-linux-gnu`. Darwin selects `darwin` and
   `arm64-apple-macosx11.0.0`. The build rejects cross compilation and all other hosts.
   CMake reads `tools/bootstrap.ref` and owns the complete build graph. The file contains an ordered,
-  gap-free list from `bootstrap-0`. Each row names one lowercase, full commit SHA. Each commit is in
+  gap-free list from `bootstrap-1`. Each row names one lowercase, full commit SHA. Each commit is in
   HEAD's history and contains the compiler and standard sources for both supported hosts. A shallow
-  clone that lacks one listed commit cannot bootstrap. The C compiler builds only `bootstrap-0` for
+  clone that lacks one listed commit cannot bootstrap. The C compiler builds only `bootstrap-1` for
   the detected host. Each listed source compiler builds the next listed revision for that host. The
   last listed compiler builds working-tree HEAD. The graph does not call a shell script to read the
   list or select a predecessor. CMake applies the configured checked or release mode to each source
@@ -1716,7 +1716,10 @@ Sections:
   The project does not maintain C-to-fort parity.
 - rationale: One C compiler can start the same source chain on both supported systems. CMake records
   all dependencies and rebuilds only the affected stages.
-- history: Amended 2026-09-17 (T-160). The two exclusive modes replace the C parity role. The
+- history: Amended 2026-09-24: the C compiler became bootstrap-0, and the list starts at
+  `bootstrap-1`. Stage1 became the name of the compiler that builds HEAD. Before this date the C
+  compiler was stage1 and the first listed revision was bootstrap-0.
+  Amended 2026-09-17 (T-160). The two exclusive modes replace the C parity role. The
   native build proves the C-to-bootstrap-0 edge. External-stage1 mode contains no C compiler test.
   Amended 2026-09-17 (T-159). Removed the supplied-seed workflow after CMake took control
   of the complete graph. Amended 2026-09-17 (T-155). The C compiler replaces the user-supplied
@@ -1910,7 +1913,7 @@ says ownership is "by convention", this section supersedes it.
   **rvalue** operand is the error of D17.8 instead, `make() == null` above all, since lending it
   would leave nothing able to free it. `?:` is the exception: it yields `own` when both operands are
   `own` rvalues or `null` (D6.2), so the temporary lands wherever the conditional's value lands.
-  Stage1 does not implement `?:` at all (`toolchain.md` 7.3), so that clause is carried by the
+  Bootstrap-0 does not implement `?:` at all (`toolchain.md` 7.3), so that clause is carried by the
   self-hosted compiler alone: T-044 added it, with the `fail` test for
   `use(flag ? new(node) : new(node))` (`test/lang/fail/ownership/037_ternary_own_arms.ft`).
 - history: Amended 2026-09-11: the comparison clause read "so `own` never blocks a comparison"
@@ -1923,7 +1926,8 @@ says ownership is "by convention", this section supersedes it.
   describes the log as it stood on 2026-09-13. On that date D3.10 still carried the title
   "Function types and function pointers". It still put function pointers inside the C bootstrap's
   subset, and it still listed nothing stage1 lacks. So the note above needed a date and no
-  correction.
+  correction. Amended 2026-09-24: "Stage1" in the rule became "Bootstrap-0", the new name of the
+  C compiler. The notes above use the old name.
 
 ### D17.5 Transfer
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
