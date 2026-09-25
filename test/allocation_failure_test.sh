@@ -1,40 +1,55 @@
 #!/bin/bash
-# Test allocation failures in Darwin code.
+# Test allocation failures at the -O1 of the target clang.
 #
-# Apple clang -O1 must keep a failed allocation even when code reads no storage.
+# clang -O1 must keep a failed allocation even when code reads no storage.
 # The test covers three OOM, three size-overflow, and one successful fixture.
-# It also verifies runtime errors and emitted modules.
+# It also verifies runtime errors and emitted modules: every extern
+# declaration carries `nobuiltin`, so the optimizer cannot fold `calloc` away.
 set -eu
 
-if [ "$#" -ne 3 ] || [ "$(uname -s)" != "Darwin" ]; then
-    echo "usage: darwin_allocation_failure_test.sh <compiler> <std-root> <target>" >&2
+if [ "$#" -ne 4 ]; then
+    echo "usage: allocation_failure_test.sh <fort> <std-dir> <cc> <target-triple>" >&2
     exit 2
 fi
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 compiler=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
 std=$(cd "$2" && pwd -P)
-target=$3
+cc=$3
+triple=$4
 if [ ! -x "$compiler" ] || [ ! -f "$std/rt.ft" ] || [ ! -f "$std/libc.ft" ]; then
-    echo "darwin allocation: compiler or darwin standard root is missing" >&2
+    echo "allocation: compiler or standard root is missing" >&2
     exit 2
 fi
-
-if ! [[ "$target" =~ ^arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "darwin allocation: unsupported darwin target '$target'" >&2
-    exit 2
-fi
-cc=$(xcrun --sdk macosx --find clang)
-sdk=$(xcrun --sdk macosx --show-sdk-path)
+case "$triple" in
+arm64-apple-macosx*)
+    target=darwin
+    sdk=$(xcrun --sdk macosx --show-sdk-path)
+    cc_args=(--target="$triple" -isysroot "$sdk")
+    ;;
+*)
+    target=linux
+    cc_args=(--target="$triple")
+    export QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}
+    ;;
+esac
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/fort-t149.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 ulimit -c 0
 cd "$root"
 
+# drop_qemu_notice <file>: qemu-user adds one line to stderr when a signal
+# kills the program. Native execution prints nothing there.
+drop_qemu_notice() {
+    grep -v '^qemu: uncaught target signal' "$1" >"$1.clean" || true
+    mv "$1.clean" "$1"
+}
+
+unused_fixture=test/core/allocation_unused.ft
 fixtures=(
-    test/darwin/allocation_unused.ft
-    test/darwin/allocation_unused.ft
+    "$unused_fixture"
+    "$unused_fixture"
     test/lang/run/errors/012_out_of_memory.ft
     test/lang/run/modes/027_rt_alloc_out_of_memory_release.ft
     test/lang/run/stdlib/087_rt_alloc_out_of_memory.ft
@@ -49,7 +64,7 @@ foreign_total=0
 for source in "${fixtures[@]}"; do
     name=$(basename "$source" .ft)
     mode=$(sed -n 's@^//! flags: @@p' "$source")
-    if [ "$source" = test/darwin/allocation_unused.ft ]; then
+    if [ "$source" = "$unused_fixture" ]; then
         unused_count=$((unused_count + 1))
         if [ "$unused_count" -eq 2 ]; then
             name=allocation_unused_release
@@ -59,62 +74,61 @@ for source in "${fixtures[@]}"; do
         fi
     fi
     if [ "$mode" = --release ]; then
-        "$compiler" --release -S --target "$target" --std-dir "$std" \
-            -o "$work/$name.ll" "$source"
+        "$compiler" --release -S --std-dir "$std" -o "$work/$name.ll" "$source"
     else
-        "$compiler" -S --target "$target" --std-dir "$std" \
-            -o "$work/$name.ll" "$source"
+        "$compiler" -S --std-dir "$std" -o "$work/$name.ll" "$source"
     fi
-    "$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE \
+    "$cc" "${cc_args[@]}" -O1 -fPIE \
         -Wno-override-module -o "$work/$name" "$work/$name.ll"
     status=0
     bash -c '"$1" > "$2" 2> "$3"' bash "$work/$name" \
         "$work/$name.out" "$work/$name.err" 2>/dev/null || status=$?
     if [ "$status" -ne 134 ]; then
-        echo "darwin allocation: $name exited $status, expected 134" >&2
+        echo "allocation: $name exited $status, expected 134" >&2
         exit 1
     fi
+    drop_qemu_notice "$work/$name.err"
     if [[ "$name" == allocation_unused* ]]; then
         if [ -s "$work/$name.out" ] || \
             ! printf '%s\n' \
-                'test/darwin/allocation_unused.ft:6:27: runtime error: out of memory' |
+                "$unused_fixture:6:27: runtime error: out of memory" |
                 cmp -s - "$work/$name.err"; then
-            echo "darwin allocation: unused storage did not report its source position" >&2
+            echo "allocation: unused storage did not report its source position" >&2
             exit 1
         fi
     else
         sed -n 's@^//| @@p' "$source" > "$work/$name.expected"
         if ! cmp -s "$work/$name.expected" "$work/$name.out"; then
-            echo "darwin allocation: $name stdout differs" >&2
+            echo "allocation: $name stdout differs" >&2
             exit 1
         fi
         expected=$(sed -n 's@^//! stderr: @@p' "$source")
-        if ! rg -F -q -- "$expected" "$work/$name.err" || \
+        if ! grep -F -q -- "$expected" "$work/$name.err" || \
             [ "$(wc -l < "$work/$name.err")" -ne 1 ]; then
-            echo "darwin allocation: $name stderr differs" >&2
+            echo "allocation: $name stderr differs" >&2
             exit 1
         fi
     fi
-    foreign_count=$(rg '^declare ' "$work/$name.ll" | rg -v '@llvm\.' | wc -l | tr -d ' ')
-    protected_count=$(rg -c '^declare .* nobuiltin$' "$work/$name.ll" || true)
+    foreign_count=$(grep '^declare ' "$work/$name.ll" | grep -v '@llvm\.' | wc -l | tr -d ' ')
+    protected_count=$(grep -c '^declare .* nobuiltin$' "$work/$name.ll" || true)
     protected_count=${protected_count:-0}
     if [ "$foreign_count" -ne "$protected_count" ] || \
-        ! rg -q '^declare ptr @calloc\(i64, i64\) nobuiltin$' "$work/$name.ll"; then
-        echo "darwin allocation: $name protects $protected_count of $foreign_count externs" >&2
+        ! grep -Eq '^declare ptr @calloc\(i64, i64\) nobuiltin$' "$work/$name.ll"; then
+        echo "allocation: $name protects $protected_count of $foreign_count externs" >&2
         exit 1
     fi
     foreign_total=$((foreign_total + foreign_count))
     case "$name" in
     *out_of_memory*|allocation_unused*)
-        "$cc" --target="$target" -isysroot "$sdk" -O1 -S -emit-llvm \
+        "$cc" "${cc_args[@]}" -O1 -S -emit-llvm \
             -Wno-override-module -o "$work/$name.optimized.ll" "$work/$name.ll"
         module=$(basename "$source" .ft)
         if ! awk -v target="$module.main" \
             '/^define / && (index($0, "@\"" target "\"(") ||
             index($0, "@" target "(")) { inside=1 }
             inside { print } inside && /^}/ { exit }' "$work/$name.optimized.ll" |
-            rg -q 'call ptr @calloc\('; then
-            echo "darwin allocation: $name optimized fort main removed calloc" >&2
+            grep -Eq 'call ptr @calloc\('; then
+            echo "allocation: $name optimized fort main removed calloc" >&2
             exit 1
         fi
         oom_count=$((oom_count + 1))
@@ -124,30 +138,29 @@ for source in "${fixtures[@]}"; do
 done
 if [ "$unused_count" -ne 2 ] || [ "$oom_count" -ne 5 ] || \
     [ "$overflow_count" -ne 3 ]; then
-    echo "darwin allocation: fixture count differs" >&2
+    echo "allocation: fixture count differs" >&2
     exit 1
 fi
 source=test/lang/run/stdlib/070_rt_alloc_free.ft
 name=070_rt_alloc_free
-"$compiler" -S --target "$target" --std-dir "$std" \
-    -o "$work/$name.ll" "$source"
-foreign_count=$(rg '^declare ' "$work/$name.ll" | rg -v '@llvm\.' | wc -l | tr -d ' ')
-protected_count=$(rg -c '^declare .* nobuiltin$' "$work/$name.ll" || true)
+"$compiler" -S --std-dir "$std" -o "$work/$name.ll" "$source"
+foreign_count=$(grep '^declare ' "$work/$name.ll" | grep -v '@llvm\.' | wc -l | tr -d ' ')
+protected_count=$(grep -c '^declare .* nobuiltin$' "$work/$name.ll" || true)
 protected_count=${protected_count:-0}
 if [ "$foreign_count" -ne "$protected_count" ]; then
-    echo "darwin allocation: $name protects $protected_count of $foreign_count externs" >&2
+    echo "allocation: $name protects $protected_count of $foreign_count externs" >&2
     exit 1
 fi
 foreign_total=$((foreign_total + foreign_count))
-"$cc" --target="$target" -isysroot "$sdk" -O1 -fPIE \
+"$cc" "${cc_args[@]}" -O1 -fPIE \
     -Wno-override-module -o "$work/$name" "$work/$name.ll"
 "$work/$name" > "$work/$name.out" 2> "$work/$name.err"
 sed -n 's@^//| @@p' "$source" > "$work/$name.expected"
 if ! cmp -s "$work/$name.expected" "$work/$name.out" || \
     [ -s "$work/$name.err" ]; then
-    echo "darwin allocation: $name output differs" >&2
+    echo "allocation: $name output differs" >&2
     exit 1
 fi
-echo "darwin allocation: $unused_count unused modes, $oom_count OOM runs, "\
-"$overflow_count overflow fixtures, 1 successful fixture, and "\
-"$foreign_total protected extern lines pass at Apple -O1"
+echo "allocation: $target; $unused_count unused modes, $oom_count OOM runs," \
+    "$overflow_count overflow fixtures, 1 successful fixture, and" \
+    "$foreign_total protected extern lines pass at -O1"

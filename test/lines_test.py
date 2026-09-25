@@ -45,7 +45,8 @@ class GlobMatching(unittest.TestCase):
             self.assertFalse(lines.path_matches(path, tests), path)
         for path in ("bootstrap0/test/diag_test.c", "bootstrap0/test/common/types_helpers.h",
                      "test/lang/run/arrays/001_x.ft", "test/lang/ffi/helpers.c",
-                     "test/fort/containers_test.ft", "test/darwin/open_tail_probe.c"):
+                     "test/fort/containers_test.ft", "test/core/open_tail_probe.c",
+                     "test/net/net_probe.c"):
             self.assertTrue(lines.path_matches(path, tests), path)
             self.assertFalse(lines.path_matches(path, source), path)
         for path in ("tools/lines.py", "spec/decisions.md", "editors/vscode/extension.js"):
@@ -89,9 +90,10 @@ class GlobMatching(unittest.TestCase):
         self.assertIn("rt.ft", names)
         self.assertIn(ROOT / "std/darwin/libc.ft", counted)
 
-    def test_the_real_darwin_c_probe_is_counted(self):
+    def test_the_real_c_probes_are_counted(self):
         counted = lines.collect(ROOT, lines.TEST_GLOBS)
-        self.assertIn(ROOT / "test/darwin/open_tail_probe.c", counted)
+        self.assertIn(ROOT / "test/core/open_tail_probe.c", counted)
+        self.assertIn(ROOT / "test/net/net_probe.c", counted)
 
 
 class Ratio(unittest.TestCase):

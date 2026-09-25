@@ -440,15 +440,26 @@ bullet at a time and without a rewrite.
   gitignored except `test/ir/*.ll`.
   `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
-- `tools/darwin core` runs ten core library programs on a darwin arm64 host (T-144).
-  It tests 004, 005, 019, 051, 053, 070, 071, 074, 094 and 095 in `test/lang/run/stdlib`.
-  It compiles one C open probe to check the Apple arm64 variable-tail stack slot.
-  It uses the darwin compiler and tests its standard root through an executable symlink.
-  It checks the compiler's fcntl stack slot and a `--cc` build with the darwin default target.
-  Only 005 links `ffi/std_libc_flags.c` to compare 13 constants with C headers.
-  The other nine programs and the compiler link from LLVM IR alone.
-  The linux gate excludes this host test because a linux host cannot run Mach-O programs.
-  The darwin gate builds `build/darwin/fort` before this host test.
+- **Four host tests take the compiler, its standard root, the target clang and the triple, and
+  run on both targets** (T-144, T-145, T-149, folded 2026-09-25). Each has a linux branch and a
+  darwin branch only where the platform fact differs: the SDK (`xcrun --sdk macosx
+  --show-sdk-path` on darwin), `QEMU_LD_PREFIX` on linux, and the assembly form.
+  `test/core_test.sh` (ctest `core`) compares 13 constants of the assembled `libc.ft` with the
+  C headers by value, checks the variable-tail form of `open` in `test/core/open_tail_probe.c`
+  and of the compiler's own `fcntl` call (a `str` into the frame on arm64, `movb $0, %al` on
+  x86-64), runs 004, 005, 019, 051, 053, 070, 071, 074, 094 and 095 of `test/lang/run/stdlib`,
+  and rebuilds the compiler from its own module: that binary resolves its standard root through
+  an executable symlink, takes `--cc` with `-Xcc` and reports `fort 0.1.0`.
+  `test/net_layout_test.sh` (ctest `net-layout`) compiles `test/net/net_probe.c` for the target:
+  five socket constants, the size and three offsets of `struct sockaddr_in`, and three errno
+  values, compared with what `test/net/net_layout.ft` and `test/net/net_errors.ft` print from
+  `std.net`; it also runs `--check` over a corpus program with the root of the other target.
+  `test/allocation_failure_test.sh` (ctest `allocation-failure`) proves that a failed allocation
+  survives clang `-O1`: 135 extern declarations carry `nobuiltin`, and `calloc` stays in the
+  optimized entry function of each OOM fixture. `test/abi/probe.sh` (ctest `abi-probe`) runs
+  the six ABI probes and counts the inline stack probe sites of the target (`str xzr, [sp]` on
+  arm64, `movq $0, (%rsp)` on x86-64). The scripts use `grep` and `python3`, not `rg`: the VM
+  has no ripgrep.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
@@ -525,8 +536,8 @@ bullet at a time and without a rewrite.
   **Raise each active file counter in the commit that adds the file.** `CORPUS_FILES` in
   `bootstrap0/test/parser_recovery_test.c` counts fail tests. The same name in
   `test/highlight_test.py` counts its source corpus.
-  T-145 adds two darwin test programs under `test/darwin/` and routes them into the grammar corpus.
-  Run `tools/darwin net` on the darwin arm64 host to compare C layout and four darwin programs.
+  T-145 adds two net test programs (now under `test/net/`) and routes them into the grammar
+  corpus; ctest `net-layout` compares the C layout with them on both targets (section 6).
   **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
   program, and a claim read off the source are three things, and an audit that gives them one word
   hides which rows a reader may rely on.
@@ -722,7 +733,8 @@ bullet at a time and without a rewrite.
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
   has. `tools/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the
   test-to-code ratio (T-144).
-  It counts `test/darwin/*.c` as test. The compiler and runtime are source too (D14.6).
+  It counts `test/core/*.c` and `test/net/*.c` as test. The compiler and runtime are source too
+  (D14.6).
   What still does not: **there is no formatter** -- indentation,
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
   fort equivalent; the lint sees only what the checker resolved, so an unresolved name is judged by
@@ -785,7 +797,8 @@ bullet at a time and without a rewrite.
   rediscovered this rule.
 - **`tools/lines.py` does not see a test written in shell or in Python either** (T-131). Its
   `TEST_GLOBS` are `bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft`,
-  `test/lang/ffi/*.c` and `test/darwin/*.c`. Its `SOURCE_GLOBS` include the two compilers,
+  `test/lang/ffi/*.c`, `test/core/*.c` and `test/net/*.c`. Its `SOURCE_GLOBS` include the two
+  compilers,
   `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` (T-144). So a ticket whose deliverable is
   the build or a tool gets no useful figure: T-131 changed `CMakeLists.txt`, six scripts under
   `tools/` and the language harness, and the tool read

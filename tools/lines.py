@@ -32,7 +32,8 @@ TEST_GLOBS = (
     "bootstrap0/test/common/*.h",
     "test/**/*.ft",
     "test/lang/ffi/*.c",
-    "test/darwin/*.c",
+    "test/core/*.c",
+    "test/net/*.c",
 )
 # Printed beside every ratio and compared with nothing: only --min fails a run.
 TARGET_RATIO = 2.0

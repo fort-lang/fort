@@ -348,11 +348,6 @@ add_test(NAME lsp-target
     COMMAND bash "${FORT_TEST_DIR}/lsp_target_test.sh")
 set_tests_properties(lsp-target PROPERTIES LABELS unit)
 
-add_test(NAME darwin-probe-target
-    COMMAND bash "${FORT_TEST_DIR}/abi/darwin_probe_target_test.sh"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(darwin-probe-target PROPERTIES LABELS unit)
-
 set(FORT_GRAPH_FIXPOINT_COMMAND
     bash "${CMAKE_SOURCE_DIR}/tools/fixpoint.sh" "${CMAKE_BINARY_DIR}/cmake-fixpoint"
     --compiler "${FORT_COMPILER_BINARY}"
@@ -416,6 +411,31 @@ add_test(NAME pipeline
 set_tests_properties(pipeline PROPERTIES
     LABELS unit
     ENVIRONMENT "FORT_TARGET=${FORT_TARGET};FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE};FORT_OPT=${FORT_OPT_PATH}")
+
+# The four host tests below take the compiler, its standard root, the target
+# clang and the triple. Each has a linux branch and a darwin branch only where
+# the platform fact differs: the SDK, the qemu prefix, the assembly form.
+#
+# core: 13 constants of std.libc against the C headers, the variable-tail form
+# of `open` and `fcntl`, ten library programs, and the compiler rebuilt from
+# its own module. net-layout: std.net against the C socket headers.
+# allocation-failure: a failed allocation survives clang -O1 (`nobuiltin`).
+# abi-probe: the six ABI probes and the inline stack probe of the target.
+set(FORT_HOST_TEST_ARGS
+    "${FORT_COMPILER_BINARY}" "${FORT_STD_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_TARGET_TRIPLE}")
+add_test(NAME core
+    COMMAND bash "${FORT_TEST_DIR}/core_test.sh" ${FORT_HOST_TEST_ARGS}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+add_test(NAME net-layout
+    COMMAND bash "${FORT_TEST_DIR}/net_layout_test.sh" ${FORT_HOST_TEST_ARGS}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+add_test(NAME allocation-failure
+    COMMAND bash "${FORT_TEST_DIR}/allocation_failure_test.sh" ${FORT_HOST_TEST_ARGS}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+add_test(NAME abi-probe
+    COMMAND bash "${FORT_TEST_DIR}/abi/probe.sh" ${FORT_HOST_TEST_ARGS}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(core net-layout allocation-failure abi-probe PROPERTIES LABELS unit)
 
 # The linux compiler emits darwin IR with a caller-selected standard root.
 # The verifier checks its form. Separate tests check the Darwin ABI and stack.
@@ -619,7 +639,7 @@ set_tests_properties(gate_ft_manifest PROPERTIES LABELS unit)
 # Thus, it needs a compiler.
 #
 # The product compiler reads all fort sources in the repository. The test has
-# label lang because it runs an x86-64 binary under qemu. It names --std-dir
+# label lang because it runs the product compiler. It names --std-dir
 # because the library does not stand beside that binary.
 add_test(NAME fort_lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
