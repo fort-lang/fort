@@ -17,6 +17,7 @@ import capture;
 import containers;
 import driver;
 import std.io;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -178,13 +179,39 @@ fn the_repeatable_options_keep_their_order() void {
     assert(containers.str_at(&opts.cc_args, 0) == "-g");
 }
 
-// The driver defaults: clang, because nothing else reads LLVM IR,
-// and the x86-64 Linux triple.
-fn the_defaults_are_clang_and_the_linux_triple() void {
+// The triple the module header of a target carries: the LLVM spelling of the
+// Linux target, and the Mac target as it is (D19.1).
+fn module_triple(string target) string {
+    if (target == "x86_64-linux-gnu") {
+        return "x86_64-unknown-linux-gnu";
+    }
+    return target;
+}
+
+// The target this compiler does not build for. A cross-target run names it.
+fn other_target() string {
+    if (os.TARGET == "x86_64-linux-gnu") {
+        return "arm64-apple-macosx15.0.0";
+    }
+    return "x86_64-linux-gnu";
+}
+
+// The line a module starts with for a target.
+fn header_line(strbuf.str_buf mut* b, string target) string {
+    strbuf.clear(b);
+    strbuf.append(b, "target triple = \"");
+    strbuf.append(b, module_triple(target));
+    strbuf.append(b, "\"\n");
+    return strbuf.view(b);
+}
+
+// The driver defaults: clang, because nothing else reads LLVM IR, and the
+// target of the standard library this compiler was built with (D14.1).
+fn the_defaults_are_clang_and_the_built_target() void {
     driver.options mut opts = driver.options_create();
     defer driver.options_free(&opts);
     assert(opts.cc == "clang");
-    assert(opts.target == "x86_64-linux-gnu");
+    assert(opts.target == os.TARGET);
     assert(!opts.have_entry);
     assert(!opts.have_output);
     assert(opts.output.len == 0);
@@ -371,7 +398,9 @@ fn a_clean_program_is_emitted_and_handed_to_the_cc() void {
     defer strbuf.free(&module);
     assert(io.read_file("clean.ll", &module));
     string text = strbuf.view(&module);
-    assert(str.starts_with(text, "target triple = \"x86_64-unknown-linux-gnu\"\n"));
+    strbuf.str_buf mut header = strbuf.create();
+    defer strbuf.free(&header);
+    assert(str.starts_with(text, header_line(&header, os.TARGET)));
     assert(str.find(text, "define dso_local i32 @\"clean.main\"() #0 {\n") >= 0);
     assert(str.find(text, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n") >= 0);
     // A --cc that cannot be run is a toolchain error naming the program and
@@ -404,30 +433,34 @@ fn target_error_is(string message) bool {
 // The four target errors stop before the front end opens
 // the entry. Each error uses the exact line and status the contract gives.
 fn target_errors_stop_before_output() void {
-    string mac = "arm64-apple-macosx15.0.0";
+    string foreign = other_target();
     strbuf.str_buf mut message = strbuf.create();
     defer strbuf.free(&message);
     string[7] mut unsupported = {"fort", "-S", "--target", "x86_64-linux-musl",
                                  "-o", "unsupported.ll", "missing.ft"};
     assert(run(unsupported[0..7]) == EXIT_USAGE);
     assert(target_error_is("unsupported target 'x86_64-linux-musl'"));
-    string[7] mut no_root = {"fort", "-S", "--target", mac, "-o", "no-root.ll",
+    string[7] mut no_root = {"fort", "-S", "--target", foreign, "-o", "no-root.ll",
                              "missing.ft"};
     assert(run(no_root[0..7]) == EXIT_USAGE);
     assert(target_error_is("--std-dir is required for cross-target -S"));
-    string[7] mut object = {"fort", "-c", "--target", mac, "-o", "foreign.o",
+    string[7] mut object = {"fort", "-c", "--target", foreign, "-o", "foreign.o",
                             "missing.ft"};
     assert(run(object[0..7]) == EXIT_USAGE);
     strbuf.append(&message, "cannot compile object for target '");
-    strbuf.append(&message, mac);
-    strbuf.append(&message, "' with a 'x86_64-linux-gnu' compiler");
+    strbuf.append(&message, foreign);
+    strbuf.append(&message, "' with a '");
+    strbuf.append(&message, os.TARGET);
+    strbuf.append(&message, "' compiler");
     assert(target_error_is(strbuf.view(&message)));
-    string[6] mut link = {"fort", "--target", mac, "-o", "foreign-bin", "missing.ft"};
+    string[6] mut link = {"fort", "--target", foreign, "-o", "foreign-bin", "missing.ft"};
     assert(run(link[0..6]) == EXIT_USAGE);
     strbuf.clear(&message);
     strbuf.append(&message, "cannot link target '");
-    strbuf.append(&message, mac);
-    strbuf.append(&message, "' with a 'x86_64-linux-gnu' compiler");
+    strbuf.append(&message, foreign);
+    strbuf.append(&message, "' with a '");
+    strbuf.append(&message, os.TARGET);
+    strbuf.append(&message, "' compiler");
     assert(target_error_is(strbuf.view(&message)));
     strbuf.str_buf mut file = strbuf.create();
     defer strbuf.free(&file);
@@ -452,18 +485,20 @@ fn target_forms_and_front_end_modes() void {
     assert(err_has("unsupported target 't'"));
 }
 
-// A caller root permits Mac IR from a Linux compiler. This test checks IR
-// form only. It does not check the Mac C ABI or Apple stack probes.
-fn mac_ir_uses_the_selected_triple() void {
-    write_file("mac-form.ft", "fn main() i32 {\n    return 0;\n}\n");
-    string[10] mut full = {"fort", "-S", "-c", "--target", "arm64-apple-macosx15.0.0",
-                          "--std-dir", "std", "-o", "mac-form.ll", "mac-form.ft"};
+// A caller root permits the IR of the other target from this compiler. This
+// test checks IR form only. It does not check the C ABI of that target.
+fn cross_ir_uses_the_selected_triple() void {
+    write_file("cross-form.ft", "fn main() i32 {\n    return 0;\n}\n");
+    string[10] mut full = {"fort", "-S", "-c", "--target", other_target(),
+                          "--std-dir", "std", "-o", "cross-form.ll", "cross-form.ft"};
     assert(run(full[0..10]) == EXIT_OK);
     strbuf.str_buf mut module = strbuf.create();
     defer strbuf.free(&module);
-    assert(io.read_file("mac-form.ll", &module));
+    assert(io.read_file("cross-form.ll", &module));
     string text = strbuf.view(&module);
-    assert(str.starts_with(text, "target triple = \"arm64-apple-macosx15.0.0\"\n"));
+    strbuf.str_buf mut header = strbuf.create();
+    defer strbuf.free(&header);
+    assert(str.starts_with(text, header_line(&header, other_target())));
     assert(str.find(text, "target datalayout") < 0);
 }
 
@@ -669,7 +704,7 @@ fn the_environment_is_read_when_the_option_is_absent() void {
 }
 
 // An empty value names no directory, so it counts as unset. The search then
-// uses `std` beside the binary named by /proc/self/exe.
+// uses `std` beside the binary that std.os.exe_path names.
 fn an_empty_std_dir_variable_counts_as_unset() void {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
@@ -794,7 +829,7 @@ fn main() i32 {
     println("flags ok");
     the_last_value_of_a_single_option_wins();
     the_repeatable_options_keep_their_order();
-    the_defaults_are_clang_and_the_linux_triple();
+    the_defaults_are_clang_and_the_built_target();
     a_valued_option_takes_the_next_argument_whatever_it_is();
     an_empty_output_option_is_an_output_that_was_named();
     println("valued ok");
@@ -817,7 +852,7 @@ fn main() i32 {
     a_clean_program_is_emitted_and_handed_to_the_cc();
     target_errors_stop_before_output();
     target_forms_and_front_end_modes();
-    mac_ir_uses_the_selected_triple();
+    cross_ir_uses_the_selected_triple();
     the_default_output_follows_the_mode();
     a_syntax_error_is_exit_one();
     a_lexical_error_is_exit_one();

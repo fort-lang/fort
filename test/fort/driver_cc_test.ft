@@ -13,6 +13,7 @@ import capture;
 import containers;
 import driver;
 import std.io;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -67,6 +68,15 @@ fn expect(string got, string want) void {
     assert(got == want);
 }
 
+// The --target argument of the default target, which is the target of the
+// standard library this compiler was built with (D14.1).
+fn target_argument(strbuf.str_buf mut* b) string {
+    strbuf.clear(b);
+    strbuf.append(b, "--target=");
+    strbuf.append(b, os.TARGET);
+    return strbuf.view(b);
+}
+
 // Ten or fewer lines of an expected command line joined. A command line is one
 // argument per line and fort joins no two adjacent string literals.
 fn lines(strbuf.str_buf mut* b, string@ parts) string {
@@ -90,9 +100,11 @@ fn the_checked_invocation_is_the_line_of_toolchain_two() void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     string[2] mut argv = {"fort", "main.ft"};
+    strbuf.str_buf mut t = strbuf.create();
+    defer strbuf.free(&t);
     string[8] mut want = {
         "clang",
-        "--target=x86_64-linux-gnu",
+        target_argument(&t),
         "-O1",
         "-fPIE",
         "-Wno-override-module",
@@ -133,9 +145,11 @@ fn libraries_then_cc_arguments_close_the_line() void {
     defer strbuf.free(&b);
     string[8] mut argv = {"fort", "-lm", "-Xcc", "-fuse-ld=lld", "-lz", "-Xcc", "-static",
                           "main.ft"};
+    strbuf.str_buf mut t = strbuf.create();
+    defer strbuf.free(&t);
     string[12] mut want = {
         "clang",
-        "--target=x86_64-linux-gnu",
+        target_argument(&t),
         "-O1",
         "-fPIE",
         "-Wno-override-module",
@@ -157,9 +171,11 @@ fn compile_only_puts_c_before_o_and_drops_the_link_arguments() void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     string[6] mut argv = {"fort", "-c", "-lm", "-Xcc", "-static", "main.ft"};
+    strbuf.str_buf mut t = strbuf.create();
+    defer strbuf.free(&t);
     string[10] mut want = {
         "clang",
-        "--target=x86_64-linux-gnu",
+        target_argument(&t),
         "-O1",
         "-fPIE",
         "-Wno-override-module",
@@ -255,9 +271,11 @@ fn a_temporary_directory_that_cannot_be_made_reports_its_errno() void {
     i32 mut failure = 0;
     set_env("TMPDIR", "nosuchdirectory");
     string dir = driver.make_temp_dir(&p, &parent, &failure);
+    // The parent is a view of the environment's own storage, which unsetenv
+    // frees on macOS. So the parent is read before the variable goes.
+    assert(parent == "nosuchdirectory");
     unset_env("TMPDIR");
     assert(dir.len == 0);
-    assert(parent == "nosuchdirectory");
     // ENOENT. The value is the system's and is read back through the same
     // call the driver reports with.
     assert(failure != 0);
@@ -378,8 +396,10 @@ fn the_child_receives_the_arguments_cc_argv_built() void {
     // module's own line is held by its ending.
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
+    strbuf.str_buf mut t = strbuf.create();
+    defer strbuf.free(&t);
     string[6] mut head = {
-        "--target=x86_64-linux-gnu",
+        target_argument(&t),
         "-O1",
         "-fPIE",
         "-Wno-override-module",
