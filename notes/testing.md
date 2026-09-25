@@ -142,7 +142,14 @@ bullet at a time and without a rewrite.
   describes every option and verdict). `test/lang/xfail.txt` lists tests the compiler cannot
   pass yet; a listed test that passes fails the run, so shrink the list in the same commit that
   makes tests pass. The product compiler runs the complete corpus with the current standard
-  library. The harness has no bootstrap expectation list. `run_tests.py --lint`
+  library, on both targets: a test whose outcome differs between them carries the plain
+  directive and its `-<os>` form (`//! signal: ILL` and `//! signal-macos: TRAP` in
+  `run/ffi/009`, `//! stdout-macos:` in `run/modules/conditional_imports`, D14.5), and the
+  harness selects the form of its `--target`. Until 2026-09-25 the darwin gate excluded 4
+  fixtures instead. A test that prints an errno number or writes a field whose type differs
+  (`sockaddr_in.family`) compares against the `std.libc` constant or writes under
+  `$if ($cfg(target_os) == ...)` instead, so its expected output is the same on both targets.
+  The harness has no bootstrap expectation list. `run_tests.py --lint`
   validates directives without a compiler and runs before every test run;
   `run_tests.py --check-json` is a mode of its own (ctest `lang-json`, also run by
   check-lang) that holds the document of `fort --check --json` against the text form on every fail

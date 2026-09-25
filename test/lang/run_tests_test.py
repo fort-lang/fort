@@ -594,6 +594,152 @@ class ParseDirectives(TempRoot):
 # ---- discovery and lint ----------------------------------------------------------------
 
 
+class PerTargetDirectives(TempRoot):
+    """The `-<os>` forms of `stdout`, `exit`, `abort`, `signal` and `stderr`."""
+
+    TEXT = """\
+        //! run
+        //! signal: ILL
+        //! signal-macos: TRAP
+        //! stdout:
+        //| before
+        //! stdout-macos:
+        //| before
+        //| on a mac
+        //! stderr: plain
+        //! stderr-macos: first
+        //! stderr-macos: second
+        fn main() i32 { return 0; }
+        """
+
+    def problems_of(self, text, entry="run/control/001_x.ft", expected_kind="run"):
+        return parse(self.root, entry, text, expected_kind).problems
+
+    def test_parsing_keeps_the_plain_form_and_records_each_variant(self):
+        test = parse(self.root, "run/ffi/001_x.ft", self.TEXT)
+        self.assertEqual(test.problems, [])
+        self.assertEqual(
+            (test.signal_name, test.stdout, test.stderr), ("ILL", b"before\n", ["plain"])
+        )
+        self.assertEqual(
+            test.variants,
+            {
+                "macos": {
+                    "signal_name": "TRAP",
+                    "stdout": b"before\non a mac\n",
+                    "stderr": ["first", "second"],
+                }
+            },
+        )
+
+    def test_selection_replaces_the_plain_form_for_that_os_only(self):
+        test = parse(self.root, "run/ffi/001_x.ft", self.TEXT)
+        linux = run_tests.select_target_os(test, "linux")
+        self.assertIs(linux, test)
+        macos = run_tests.select_target_os(test, "macos")
+        self.assertEqual((macos.signal_name, macos.stdout), ("TRAP", b"before\non a mac\n"))
+        self.assertEqual(macos.stderr, ["first", "second"])
+        self.assertEqual((macos.path, macos.kind, macos.problems), (test.path, "run", []))
+        # The source test is not changed by the selection.
+        self.assertEqual((test.signal_name, test.stderr), ("ILL", ["plain"]))
+
+    def test_an_outcome_is_replaced_whole(self):
+        test = parse(self.root, "run/ffi/001_x.ft", "//! run\n//! exit: 3\n//! abort-linux\n")
+        self.assertEqual(test.problems, [])
+        linux = run_tests.select_target_os(test, "linux")
+        self.assertEqual((linux.exit, linux.abort, linux.signal_name), (0, True, ""))
+        test = parse(self.root, "run/ffi/001_x.ft", "//! run\n//! abort\n//! exit-macos: 3\n")
+        self.assertEqual(test.problems, [])
+        macos = run_tests.select_target_os(test, "macos")
+        self.assertEqual((macos.exit, macos.abort, macos.signal_name), (3, False, ""))
+
+    def test_a_variant_needs_its_plain_form(self):
+        self.assertEqual(
+            self.problems_of("//! run\n//! stdout-macos:\n//| x\n"),
+            ["run/control/001_x.ft:2: 'stdout-macos' needs a plain 'stdout' directive"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! stderr-linux: x\n"),
+            ["run/control/001_x.ft:2: 'stderr-linux' needs a plain 'stderr' directive"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! signal-macos: TRAP\n"),
+            [
+                "run/control/001_x.ft:2: 'signal-macos' needs a plain 'exit', 'abort', 'signal' "
+                "directive"
+            ],
+        )
+        # Any plain outcome serves the three outcome forms.
+        self.assertEqual(self.problems_of("//! run\n//! exit: 1\n//! signal-macos: TRAP\n"), [])
+
+    def test_the_outcomes_of_one_os_are_mutually_exclusive(self):
+        self.assertEqual(
+            self.problems_of("//! run\n//! exit: 1\n//! exit-macos: 2\n//! signal-macos: TRAP\n"),
+            ["run/control/001_x.ft:1: 'exit-macos' and 'signal-macos' are mutually exclusive"],
+        )
+        # Two OSes do not exclude each other.
+        self.assertEqual(
+            self.problems_of("//! run\n//! exit: 1\n//! exit-linux: 2\n//! signal-macos: TRAP\n"),
+            [],
+        )
+
+    def test_the_plain_rules_hold_for_a_variant(self):
+        self.assertEqual(
+            self.problems_of("//! run\n//! exit: 1\n//! exit-macos: 2\n//! exit-macos: 3\n"),
+            ["run/control/001_x.ft:4: duplicate 'exit-macos:' directive"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! exit: 1\n//! exit-macos: 256\n"),
+            ["run/control/001_x.ft:3: exit: expected a status between 0 and 255"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! signal: ILL\n//! signal-macos: KILL\n"),
+            ["run/control/001_x.ft:3: signal: expected one of ABRT, BUS, FPE, ILL, SEGV, TRAP"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! abort\n//! abort-macos: yes\n"),
+            ["run/control/001_x.ft:3: 'abort-macos' takes no text"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! stdout:\n//! stdout-macos: x\n"),
+            ["run/control/001_x.ft:3: 'stdout-macos:' takes no text on its line"],
+        )
+        self.assertEqual(
+            self.problems_of(
+                "//! fail\n//! error-any: x\n//! exit-macos: 1\n", "fail/control/001_x.ft", "fail"
+            ),
+            ["fail/control/001_x.ft:3: 'exit-macos' is only allowed in run tests"],
+        )
+
+    def test_only_the_five_directives_and_the_two_oses_have_a_suffix(self):
+        self.assertEqual(
+            self.problems_of("//! run\n//! args: a\n//! args-macos: b\n"),
+            ["run/control/001_x.ft:3: unknown directive 'args-macos'"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! exit: 1\n//! exit-freebsd: 2\n"),
+            ["run/control/001_x.ft:3: unknown directive 'exit-freebsd'"],
+        )
+        self.assertEqual(
+            self.problems_of("//! run\n//! stdout:\n//! stdout-darwin:\n"),
+            ["run/control/001_x.ft:3: unknown directive 'stdout-darwin'"],
+        )
+
+    def test_lint_reports_a_variant_problem(self):
+        write(self.root, "run/control/001_x.ft", "//! run\n//! exit-macos: 1\n")
+        tests, problems = run_tests.discover(self.root)
+        self.assertEqual(problems, [])
+        for test in tests:
+            run_tests.load_test(self.root, test)
+        self.assertEqual(
+            [problem for test in tests for problem in test.problems],
+            [
+                "run/control/001_x.ft:2: 'exit-macos' needs a plain 'exit', 'abort', 'signal' "
+                "directive"
+            ],
+        )
+
+
 class Discovery(TempRoot):
     def test_layout(self):
         write(self.root, "run/arrays/001_a.ft", "//! run\n")
@@ -1092,6 +1238,11 @@ class Judging(unittest.TestCase):
 
 
 class ChildEnvironment(unittest.TestCase):
+    def test_target_os(self):
+        self.assertEqual(run_tests.target_os("arm64-apple-macosx11.0.0"), "macos")
+        self.assertEqual(run_tests.target_os("x86_64-linux-gnu"), "linux")
+        self.assertEqual(run_tests.target_os("arm64-apple-macosx26.6"), "linux")
+
     def test_valid_darwin_targets_remove_inherited_qemu_prefix(self):
         targets = ("arm64-apple-macosx15.0.0", "arm64-apple-macosx26.6.2")
         with mock.patch.dict(os.environ, {"QEMU_LD_PREFIX": "/inherited"}, clear=True):
@@ -1385,6 +1536,33 @@ class EndToEnd(TempRoot):
         self.assertEqual(status, 0)
         self.assertEqual(
             lines[-1], "run_tests.py: 5 tests: 5 passed, 0 failed, 0 xfail, 0 xpass, 0 errors"
+        )
+
+    def test_the_target_selects_the_per_os_directives(self):
+        """`--target` decides which of `exit` and `exit-macos` the run holds."""
+        write(
+            self.corpus,
+            "run/control/001_per_os.ft",
+            """\
+            //! run
+            //! stdout:
+            //| linux
+            //! stdout-macos:
+            //| mac
+            //! exit: 3
+            //! exit-macos: 4
+            //@ program echo mac
+            //@ program exit 4
+            """,
+        )
+        status, lines = self.run_main("--target", "arm64-apple-macosx11.0.0", "001_per_os")
+        self.assertEqual((status, lines[0]), (0, "PASS run/control/001_per_os.ft"))
+        status, lines = self.run_main("001_per_os")
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            lines[0],
+            "FAIL run/control/001_per_os.ft: stdout line 1: expected 'linux', "
+            "got 'mac'; expected exit 3, got exit 4",
         )
 
     def test_xpass_fails_the_run(self):

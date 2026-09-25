@@ -48,6 +48,12 @@ FAIL_ONLY = ("error", "error-any")
 BLOCKS = ("stdin", "stdout")
 WITH_TEXT = ("flags", "args", "link", "exit", "signal", "stderr", "error", "error-any")
 REPEATABLE = ("link", "stderr", "error-any")
+# A run directive of PER_OS can carry a target-OS suffix (`//! stdout-macos:`,
+# `//! signal-macos: TRAP`). The suffix is a `$cfg(target_os)` value. The
+# suffixed directive replaces the plain one when the harness runs for that OS.
+TARGET_OSES = ("linux", "macos")
+PER_OS = ("stdout", "exit", "abort", "signal", "stderr")
+OUTCOMES = ("exit", "abort", "signal")
 HEADER_MARKERS = ("//!", "//<", "//|")
 
 XFAIL_NAME = "xfail.txt"
@@ -56,6 +62,8 @@ DEFAULT_CC = "clang"
 DEFAULT_TARGET = "x86_64-linux-gnu"
 DEFAULT_OPT = "opt-18"
 DEFAULT_QEMU_LD_PREFIX = "/usr/x86_64-linux-gnu"
+# The Mac triple the compiler accepts (D14.1): a three-part version, ASCII digits only.
+MACOS_TARGET_RE = re.compile(r"arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+")
 DEFAULT_TIMEOUT = 60.0
 # qemu-user reports a fatal signal on the program's stderr ("qemu: uncaught
 # target signal 6 (Abort) - core dumped"); native execution prints nothing.
@@ -178,6 +186,9 @@ class Test:
     error_any: list = dataclasses.field(default_factory=list)
     problems: list = dataclasses.field(default_factory=list)
     golden_index: bool = False  # an index.json file contains its golden index
+    # The `-<os>` directives, by OS: a dict with keys among `stdout`, `exit`,
+    # `abort`, `signal_name` and `stderr`. `select_target_os` applies one.
+    variants: dict = dataclasses.field(default_factory=dict)
 
     @property
     def multi(self):
@@ -248,10 +259,10 @@ def parse_main(root, test, text):
     test.kind = lines[0][4:]
     if test.kind != test.expected_kind:
         problem(1, "'%s' test in a %s directory" % (test.kind, test.expected_kind))
-    seen = set()
+    seen = {}  # directive name (suffix included) -> its line
     block = None  # the stdin: or stdout: directive the //< or //| lines belong to
     stdin_lines = []
-    stdout_lines = []
+    stdout_lines = {}  # "stdout" or "stdout-<os>" -> its //| lines
     for lineno in range(2, header_end + 1):
         line = lines[lineno - 1]
         marker = line[:3]
@@ -260,8 +271,8 @@ def parse_main(root, test, text):
                 problem(lineno, "'%s' must be followed by a space" % marker)
             elif marker == "//<" and block == "stdin":
                 stdin_lines.append(line[4:])
-            elif marker == "//|" and block == "stdout":
-                stdout_lines.append(line[4:])
+            elif marker == "//|" and block in stdout_lines:
+                stdout_lines[block].append(line[4:])
             else:
                 problem(
                     lineno,
@@ -279,11 +290,12 @@ def parse_main(root, test, text):
             match.group(2) is not None,
             (match.group(3) or "").strip(),
         )
+        base, target = split_directive(name)
         if name in KINDS:
             problem(lineno, "'%s' is only allowed on the first line" % name)
         elif name == "error":
             problem(lineno, "'error' annotates a code line and cannot appear in the header")
-        elif name in BLOCKS:
+        elif base in BLOCKS:
             if not has_colon or value:
                 problem(lineno, "'%s:' takes no text on its line" % name)
             elif name in seen:
@@ -291,43 +303,103 @@ def parse_main(root, test, text):
             elif test.kind != "run":
                 problem(lineno, "'%s' is only allowed in run tests" % name)
             else:
-                seen.add(name)
+                seen[name] = lineno
                 block = name
-        elif name == "abort":
+                if base == "stdout":
+                    stdout_lines[name] = []
+        elif base == "abort":
             if has_colon or value:
-                problem(lineno, "'abort' takes no text")
+                problem(lineno, "'%s' takes no text" % name)
             elif name in seen:
-                problem(lineno, "duplicate 'abort' directive")
+                problem(lineno, "duplicate '%s' directive" % name)
             elif test.kind != "run":
-                problem(lineno, "'abort' is only allowed in run tests")
+                problem(lineno, "'%s' is only allowed in run tests" % name)
             else:
-                seen.add(name)
-                test.abort = True
-        elif name in WITH_TEXT:
+                seen[name] = lineno
+                if target is None:
+                    test.abort = True
+                else:
+                    test.variants.setdefault(target, {})["abort"] = True
+        elif base in WITH_TEXT:
             if not has_colon or not value:
                 problem(lineno, "'%s:' needs text" % name)
-            elif name not in REPEATABLE and name in seen:
+            elif base not in REPEATABLE and name in seen:
                 problem(lineno, "duplicate '%s:' directive" % name)
-            elif name in RUN_ONLY and test.kind != "run":
+            elif base in RUN_ONLY and test.kind != "run":
                 problem(lineno, "'%s' is only allowed in run tests" % name)
-            elif name in FAIL_ONLY and test.kind != "fail":
+            elif base in FAIL_ONLY and test.kind != "fail":
                 problem(lineno, "'%s' is only allowed in fail tests" % name)
             else:
-                seen.add(name)
-                _apply_text_directive(root, test, name, value, problem, lineno)
+                seen[name] = lineno
+                _apply_text_directive(root, test, base, value, problem, lineno, target)
         else:
             problem(lineno, "unknown directive '%s'" % name)
     # A run test states one outcome: a status, SIGABRT, or a named signal.
-    chosen = [name for name in ("exit", "abort", "signal") if name in seen]
-    for index, first in enumerate(chosen):
-        for second in chosen[index + 1 :]:
-            problem(1, "'%s' and '%s' are mutually exclusive" % (first, second))
+    # The `-<os>` directives state one outcome for each OS.
+    for target in (None,) + TARGET_OSES:
+        chosen = [_suffixed(name, target) for name in OUTCOMES if _suffixed(name, target) in seen]
+        for index, first in enumerate(chosen):
+            for second in chosen[index + 1 :]:
+                problem(1, "'%s' and '%s' are mutually exclusive" % (first, second))
+    # A `-<os>` directive refines a plain one: the plain one is the default of
+    # every other OS, so a reader sees both outcomes in the header.
+    for name, lineno in sorted(seen.items(), key=lambda item: item[1]):
+        base, target = split_directive(name)
+        if target is None:
+            continue
+        plain = OUTCOMES if base in OUTCOMES else (base,)
+        if not any(other in seen for other in plain):
+            problem(lineno, "'%s' needs a plain '%s' directive" % (name, "', '".join(plain)))
     test.stdin = b"".join(s.encode() + b"\n" for s in stdin_lines)
-    test.stdout = b"".join(s.encode() + b"\n" for s in stdout_lines)
+    for name, held in stdout_lines.items():
+        text = b"".join(s.encode() + b"\n" for s in held)
+        base, target = split_directive(name)
+        if target is None:
+            test.stdout = text
+        else:
+            test.variants.setdefault(target, {})["stdout"] = text
     parse_body(test, test.entry, lines[header_end:], header_end + 1)
 
 
-def _apply_text_directive(root, test, name, value, problem, lineno):
+def split_directive(name):
+    """`(base, os)` of a directive name: `stdout-macos` is `("stdout", "macos")`.
+
+    A name without a target suffix, `error-any` included, has os `None`.
+    """
+    base, dash, suffix = name.rpartition("-")
+    if dash and suffix in TARGET_OSES and base in PER_OS:
+        return base, suffix
+    return name, None
+
+
+def _suffixed(base, target):
+    return base if target is None else "%s-%s" % (base, target)
+
+
+def select_target_os(test, target):
+    """The test with its `-<os>` directives applied for `target`.
+
+    The plain directives stay in force where the OS states nothing. The
+    outcome (`exit`, `abort` or `signal`) is replaced whole. The result is a
+    copy, so a test object serves every OS.
+    """
+    chosen = test.variants.get(target)
+    if not chosen:
+        return test
+    fields = {}
+    if "stdout" in chosen:
+        fields["stdout"] = chosen["stdout"]
+    if "stderr" in chosen:
+        fields["stderr"] = list(chosen["stderr"])
+    if any(key in chosen for key in ("exit", "abort", "signal_name")):
+        fields["exit"] = chosen.get("exit", 0)
+        fields["abort"] = chosen.get("abort", False)
+        fields["signal_name"] = chosen.get("signal_name", "")
+    return dataclasses.replace(test, **fields)
+
+
+def _apply_text_directive(root, test, name, value, problem, lineno, target=None):
+    """Store a text directive; `target` names the OS of a `-<os>` form."""
     if name == "flags":
         test.flags = value.split()
     elif name == "args":
@@ -339,17 +411,24 @@ def _apply_text_directive(root, test, name, value, problem, lineno):
     elif name == "exit":
         if not value.isdigit() or int(value) > MAX_EXIT:
             problem(lineno, "exit: expected a status between 0 and %d" % MAX_EXIT)
-        else:
+        elif target is None:
             test.exit = int(value)
+        else:
+            test.variants.setdefault(target, {})["exit"] = int(value)
     elif name == "signal":
         # Accept only fixed POSIX names. Signal numbers are not portable
         # across the harness's native and qemu paths.
         if value not in SIGNALS:
             problem(lineno, "signal: expected one of %s" % ", ".join(sorted(SIGNALS)))
-        else:
+        elif target is None:
             test.signal_name = value
+        else:
+            test.variants.setdefault(target, {})["signal_name"] = value
     elif name == "stderr":
-        test.stderr.append(value)
+        if target is None:
+            test.stderr.append(value)
+        else:
+            test.variants.setdefault(target, {}).setdefault("stderr", []).append(value)
     elif name == "error-any":
         test.error_any.append(value)
 
@@ -1158,11 +1237,20 @@ class Config:
     verbose: bool = False
 
 
+def target_os(target):
+    """The `$cfg(target_os)` value of a `--target` triple.
+
+    A Mac triple with a three-part version is `macos`; every other string is
+    `linux`, the default target.
+    """
+    return "macos" if MACOS_TARGET_RE.fullmatch(target) else "linux"
+
+
 def child_env(workdir, target):
     env = dict(os.environ)
     env["TMPDIR"] = workdir
     env["LC_ALL"] = "C"
-    if re.fullmatch(r"arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+", target):
+    if target_os(target) == "macos":
         env.pop("QEMU_LD_PREFIX", None)
     else:
         env.setdefault("QEMU_LD_PREFIX", DEFAULT_QEMU_LD_PREFIX)
@@ -1313,6 +1401,7 @@ def execute(config, test):
         return execute_check_json(config, test)
     if test.problems:
         return Result(test, "ERROR", "invalid directives: " + test.problems[0])
+    test = select_target_os(test, target_os(config.target))
     workdir = tempfile.mkdtemp(prefix="fort-lang-")
     env = child_env(workdir, config.target)
     procs = []

@@ -530,15 +530,15 @@ class HistoryRepositoryTest(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         problems, count = lint.rule_history(root)
         self.assertEqual(problems, [])
-        self.assertEqual(count, "history: 62 history fields, 4 with a dated note")
+        self.assertEqual(count, "history: 63 history fields, 4 with a dated note")
 
     def test_the_field_count_is_the_one_grep_counts(self):
-        # `grep -c '^- history:' spec/decisions.md` says 62.
+        # `grep -c '^- history:' spec/decisions.md` says 63.
         root = Path(__file__).resolve().parent.parent
         text = (root / "spec/decisions.md").read_text(encoding="utf-8")
-        self.assertEqual(len(lint.history_fields(text)), 62)
+        self.assertEqual(len(lint.history_fields(text)), 63)
         self.assertEqual(
-            sum(1 for line in text.split("\n") if line.startswith("- history:")), 62)
+            sum(1 for line in text.split("\n") if line.startswith("- history:")), 63)
 
 
 class BudgetTest(unittest.TestCase):

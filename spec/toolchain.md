@@ -1493,12 +1493,26 @@ All directives are `//!` lines at the top of the file, except `error`, which ann
 | `//! abort`                     | expect termination by SIGABRT                            |
 | `//! signal: NAME`              | expect termination by that signal                        |
 | `//! stderr: <substring>`       | `<substring>` must appear in stderr; repeatable          |
+| `//! stdout-<os>:` then `//| ` lines | expected stdout when the harness runs for `<os>`      |
+| `//! exit-<os>: N`              | expected exit status when the harness runs for `<os>`    |
+| `//! abort-<os>`                | expect SIGABRT when the harness runs for `<os>`          |
+| `//! signal-<os>: NAME`         | expect that signal when the harness runs for `<os>`      |
+| `//! stderr-<os>: <substring>`  | in stderr when the harness runs for `<os>`; repeatable   |
 | `//! error: <substring>`        | `fail` tests only, at the end of the offending line      |
 | `//! error-any: <substring>`    | `fail` tests only, at the top                            |
 
 The expected output is each `//| ` line's text after the marker followed by a newline; a bare
 `//|` is an empty line. Output without a final newline cannot be expressed, so tests end their
 output with `println`. Every `stderr:` substring must appear in stderr.
+
+`<os>` is a `$cfg(target_os)` value, `linux` or `macos`. A target form states the expectation
+of one OS where the two targets differ: a trap is SIGILL on x86-64 and SIGTRAP on arm64, and an
+import `$cfg(target_os)` selects prints another value. The plain form stays the expectation of
+every other OS, so a reader sees both in the header. A target form without its plain form is a
+lint error; for `exit-<os>`, `abort-<os>` and `signal-<os>` any plain outcome serves. The rules
+of a plain directive hold for its target form: it appears at most once (`stderr-<os>` repeats),
+and the three outcome forms of one OS are mutually exclusive. `stderr-<os>` replaces every
+plain `stderr:`, and an outcome form replaces the plain outcome whole.
 
 In a `fail` test every `//! error:` line must produce a diagnostic on that line containing the
 substring, and no unannotated diagnostic may occur; `//! error-any:` requires some diagnostic to
@@ -1520,9 +1534,10 @@ number of parallel tests, `--timeout` the seconds per step, `-v` prints the comm
 of failures and `--keep` keeps the temporary directories. The
 compiler runs with `test/lang` as its working directory (D14.4). Each test uses a fresh
 temporary directory as `TMPDIR`, sets `LC_ALL=C`, and disables core dumps.
-The harness sets `QEMU_LD_PREFIX` for Linux unless it inherits a value.
-The harness removes this variable only for `arm64-apple-macosxM.m.p` with three ASCII numeric parts.
-For all other target strings, it keeps an inherited value or sets the Linux default:
+The `--target` triple names the target OS: `arm64-apple-macosxM.m.p` with three ASCII numeric
+parts is `macos`, and every other string is `linux`. The harness applies the `-<os>` directives
+of that OS (7.2) and sets `QEMU_LD_PREFIX` for `linux` unless it inherits a value; for `macos`
+it removes the variable:
 
 | Directive    | Harness action                                                              |
 |--------------|-----------------------------------------------------------------------------|

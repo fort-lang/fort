@@ -1659,14 +1659,29 @@ Sections:
   - `//! stdout:` followed by `//| ` lines: the expected output is each line's text after
     `//| ` followed by a newline (a bare `//|` is an empty line); compared exactly, trailing
     spaces included; output without a final newline cannot be expressed, use `println`;
-  - `//! exit: N` (default 0) or `//! abort` (expect SIGABRT);
+  - `//! exit: N` (default 0), `//! abort` (expect SIGABRT) or `//! signal: NAME` (expect that
+    signal; the names are in `toolchain.md` 7.3);
   - `//! stderr: <substring>` (repeatable; each must appear in stderr); `flags`, `args`,
-    `exit`, `abort`, `stdin` and `stdout` appear at most once, `link`, `stderr` and `error-any`
-    any number of times; a `fail` test carries at least one `error` or `error-any`;
+    `exit`, `abort`, `signal`, `stdin` and `stdout` appear at most once, `link`, `stderr` and
+    `error-any` any number of times; a `fail` test carries at least one `error` or `error-any`;
+  - `stdout`, `exit`, `abort`, `signal` and `stderr` each have a target form with the suffix
+    `-<os>`, where `<os>` is a `$cfg(target_os)` value (`linux` or `macos`): `//! stdout-macos:`,
+    `//! signal-macos: TRAP`, `//! exit-linux: 3`. The harness derives the OS from its `--target`
+    triple. When the OS matches, the target form replaces the plain one: `stdout-<os>` replaces
+    `stdout`, `stderr-<os>` replaces every `stderr`, and `exit-<os>`, `abort-<os>` or
+    `signal-<os>` replaces the outcome. The plain form is the expectation of every other OS. A
+    target form without its plain form (for an outcome, any of `exit`, `abort` and `signal`) is
+    a lint error, and the rules of a plain directive hold for its target form: the three
+    outcome forms of one OS are mutually exclusive, and only `stderr-<os>` repeats;
   - in `fail` tests, `//! error: <substring>` at the end of the offending line; every such line
     must produce a diagnostic on that line containing the substring, and no unannotated
     diagnostic may occur; `//! error-any: <substring>` at the top for errors without a useful
     line (for example circular imports).
+- history: Amended 2026-09-25: the `-<os>` target forms did not exist. Until then a run test
+  whose outcome differs between the two targets ran on Linux alone, by an exclusion list in the
+  darwin gate (4 fixtures: the trap signal, the errno numbers, the `sockaddr_in` family field
+  and the import `$cfg(target_os)` selects). The same amendment lists `signal:` here; before it
+  `toolchain.md` 7.2 alone named it.
 
 ### D14.6 The test-to-source ratio
 - owner: `toolchain.md`.
