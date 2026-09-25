@@ -20,7 +20,10 @@ import std.net;
 // fort's through C's member names. Nothing inside fort can see a disagreement:
 // a wrong offset used consistently agrees with itself, so this test writes each
 // field on one side of the boundary and reads it on the other, and holds every
-// offset and the size against C's offsetof and sizeof.
+// offset and the size against C's offsetof and sizeof. The family field is a
+// u16 on Linux and, after a u8 length, a u8 on a Mac; each target's std.net
+// declares its own layout, and this test writes the field under the matching
+// `$if`. Every printed value is the same on both targets.
 // D3.8, D9.9
 extern fn net_sizeof_sockaddr_in() u64;
 extern fn net_alignof_sockaddr_in() u64;
@@ -83,7 +86,11 @@ fn main() i32 {
             net.hton32(addr.addr), " ", addr.zero[0], " ", addr.zero[7]);
     // And the other way round.
     net.sockaddr_in mut mine = {};
-    mine.family = cast(net.AF_INET, u16);
+    $if ($cfg(target_os) == "macos") {
+        mine.family = cast(net.AF_INET, u8);
+    } else {
+        mine.family = cast(net.AF_INET, u16);
+    }
     mine.port = net.hton16(FILL_PORT);
     mine.addr = net.hton32(FILL_ADDR);
     u64 mut i = 0;

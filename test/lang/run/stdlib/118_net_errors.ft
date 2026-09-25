@@ -1,8 +1,8 @@
 //! run
 //! stdout:
-//| bad quad -1 22
-//| refused -1 111
-//| accept not a socket -1 88
+//| bad quad -1 EINVAL true
+//| refused -1 ECONNREFUSED true
+//| accept not a socket -1 ENOTSOCK true
 //| local_port bad fd true 7
 //| port in use true
 //| no descriptors leaked true
@@ -14,17 +14,19 @@ import std.sys;
 
 // The failure paths of std.net (stdlib.md 2.13): every one answers -1 with the
 // reason in sys.errno(), or false with an untouched out-parameter, and none of
-// them leaks the descriptor it opened. The errno numbers below are Linux's:
-// EINVAL is 22, ECONNREFUSED 111 and ENOTSOCK 88. The test names them rather
-// than testing that the answer is merely negative, because the value a caller
-// reads has to be the failing call's own and not close(2)'s.
+// them leaks the descriptor it opened. The test names the errno it expects
+// (EINVAL, ECONNREFUSED, ENOTSOCK) rather than testing that the answer is
+// merely negative, because the value a caller reads has to be the failing
+// call's own and not close(2)'s. It compares against the std.libc constant,
+// because the number differs between the targets: ECONNREFUSED is 111 on
+// Linux and 61 on a Mac, ENOTSOCK 88 and 38.
 // D13.3
 
 fn main() i32 {
     // A text parse_ipv4 refuses opens no socket at all: connect sets errno to
     // EINVAL itself, so one test answers every failure.
     i32 bad = net.connect("999.1.1.1", 80);
-    println("bad quad ", bad, " ", sys.errno());
+    println("bad quad ", bad, " EINVAL ", sys.errno() == libc.EINVAL);
 
     // A port nobody listens on: bind one, learn its number, close it, and
     // connect to it. Nothing else on the machine can hold the number in
@@ -40,7 +42,7 @@ fn main() i32 {
     // ECONNREFUSED, and not the EBADF that a close(2) of the already closed
     // descriptor would leave behind: connect closes its socket on the failure
     // path and writes errno back afterwards.
-    println("refused ", refused, " ", sys.errno());
+    println("refused ", refused, " ECONNREFUSED ", sys.errno() == libc.ECONNREFUSED);
     if (refused >= 0) {
         libc.close(refused);
     }
@@ -48,7 +50,8 @@ fn main() i32 {
     // accept(2) on a descriptor that is not a socket. Standard input is one:
     // the test harness gives the program a pipe or an empty file.
     i32 not_a_socket = net.accept(io.STDIN);
-    println("accept not a socket ", not_a_socket, " ", sys.errno());
+    println("accept not a socket ", not_a_socket, " ENOTSOCK ",
+            sys.errno() == libc.ENOTSOCK);
 
     // A getsockname(2) that fails leaves the out-parameter alone.
     u16 mut port = 7;
