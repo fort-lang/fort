@@ -208,6 +208,12 @@ came here.
   the freed block still held a NUL, so the document printed `"file":""` while the text form,
   written at report time, was right. `record_append` interns the name in the sink's own pool, and
   anything else a record must outlive its reporter for is copied the same way.
+- **A module's identity is its real path, and realpath of a relative path costs a getcwd.** On
+  macOS getcwd walks the entries of every directory on the way up, so a `-S` round of
+  `test/fort/driver_lifetime_closure_test.ft` spent 93% of its time there: 22 s for 4000 rounds
+  against 3.4 s for the `--ast` mode, and 60 s under `-j 6`. `modules.real_path` reads the
+  working directory once per module set (`working_dir`) and hands realpath an absolute path;
+  the same test then takes 12 s (2026-09-25).
 - **Reading a tree after the front end**: `driver_front_end` does not own the analysis. The
   module set (which owns every tree) and the checker (which owns every symbol and type the
   annotations point to) are a `driver_analysis_t` the caller prepares and frees, because a `sym`

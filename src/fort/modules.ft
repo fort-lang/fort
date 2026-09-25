@@ -17,6 +17,11 @@ import std.strmap;
 // This module declares them because the standard library has no bindings for them.
 extern fn realpath(char* name, char* resolved) char* own;
 extern fn access(char* path, i32 mode) i32;
+extern fn getcwd(char mut* buf, u64 size) char mut*;
+
+// The buffer size getcwd is given. A working directory above this size makes
+// getcwd fail, and a relative path then goes to realpath as it is.
+u64 CWD_CAP = 4096;
 
 // The mode bit access is asked about: readable.
 i32 R_OK = 4;
@@ -88,6 +93,7 @@ struct module_set {
     strmap.str_map by_real; // real path -> position in `modules`, the identity map
     string entry_dir;          // the first root: the directory containing the entry file
     string std_dir;            // the standard library directory, the last root
+    string cwd;                // the working directory, read once for the set; "" before
     containers.pool pool;      // interned paths and file names
     ast.arena arena;           // syntax trees for the module set
     strbuf.str_buf msg;        // the message under construction
@@ -345,11 +351,34 @@ fn find_file(module_set mut* set, ast.node* path, u64 n, string mut* out) bool {
     return false;
 }
 
+// The working directory, read once for the set. realpath reads it for each
+// relative path, and on macOS getcwd walks the entries of every directory on
+// the way up: 93% of a `-S` round of test/fort's closure probe went there.
+fn working_dir(module_set mut* set) string {
+    if (set->cwd.len == 0) {
+        char mut@ own buf = new(char, CWD_CAP);
+        defer del(buf);
+        if (getcwd(buf.ptr, CWD_CAP) != null) {
+            set->cwd = containers.pool_intern(&set->pool, str.from_cstr(buf.ptr));
+        }
+    }
+    return set->cwd;
+}
+
 // The real path of a file, symbolic links and `..` resolved: a module's
 // identity. A path realpath cannot resolve stands for itself, so a file that
-// vanished between the probe and here is still one module.
+// vanished between the probe and here is still one module. A relative path
+// is joined to the working directory first, so realpath does not read it.
 fn real_path(module_set mut* set, string path) string {
-    char mut@ own c_path = str.to_cstr(path);
+    strbuf.str_buf mut joined = strbuf.create();
+    defer strbuf.free(&joined);
+    string cwd = working_dir(set);
+    if (path.len > 0 && path[0] != '/' && cwd.len > 0) {
+        strbuf.append(&joined, cwd);
+        strbuf.push(&joined, '/');
+    }
+    strbuf.append(&joined, path);
+    char mut@ own c_path = str.to_cstr(strbuf.view(&joined));
     defer del(c_path);
     char* own mut resolved = realpath(c_path.ptr, null);
     if (resolved == null) {
@@ -962,6 +991,7 @@ fn free(module_set mut* set) void {
     strbuf.free(&set->msg);
     set->entry_dir = "";
     set->std_dir = "";
+    set->cwd = "";
     set->stopped = false;
     containers.pool_free(&set->pool);
 }
