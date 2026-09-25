@@ -10,6 +10,7 @@
 //| ok
 /// The arena of src/lsp/json.ft: what a document costs, what bounds it, and
 /// that json.free gives all of it back.
+import heap;
 import lsp.json;
 import lsp_json_env;
 import std.strbuf;
@@ -74,7 +75,7 @@ u64 STRBUF_MIN_CAP = 16;
 // Each round parses a document of 3999 bytes into 2001 nodes. So it allocates
 // 8 chunks, a chunk vector and the byte buffer -- 77919 bytes, measured with
 // json.arena_bytes -- and gives all of it back. One
-// retained chunk moves the break by 9232 bytes. Four
+// retained chunk moves the system view by 9232 bytes. Four
 // hundred retained chunks exceed the process's initial heap.
 u64 ROUNDS = 400;
 u64 BOUND = 4096;
@@ -83,35 +84,6 @@ u64 BOUND = 4096;
 // hand a round the same small block every time. The probe takes the smallest distance over a
 // window that covers the cycle.
 u64 LATE_SAMPLES = 16;
-
-// The current program break, which is the end of the heap. sbrk(0) moves
-// nothing and reports the break. std has no binding for it and these tests are
-// its only callers.
-extern fn sbrk(i64 increment) void*;
-
-fn probe_address() u64 {
-    return cast(sbrk(0), u64);
-}
-
-// The other view: the address a small fresh block gets. It moves when a round
-// kept a block the next round would have got. The probe releases the block at
-// once, so the probe itself leaks nothing.
-u64 PROBE_BLOCK = 32;
-
-fn probe_block() u64 {
-    u8 mut@ own block = new(u8, PROBE_BLOCK);
-    u64 at = cast(block.ptr, u64);
-    del(block);
-    return at;
-}
-
-// How far apart two addresses are, whichever way the allocator moved.
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
-}
 
 // An array of one-digit numbers of `size` bytes: `[1,1,...,1]`, the densest
 // document JSON admits, since every element is one digit and one comma.
@@ -520,7 +492,7 @@ fn free_gives_every_block_back() void {
 
 fn many_rounds_of_parse_and_free_leave_the_heap_where_it_was() void {
     // The heap view, which is the one that would see a chunk the free forgot. Two views,
-    // because each is blind to what the other sees. The program break moves for a leak the
+    // because each is blind to what the other sees. The system view moves for a leak the
     // allocator cannot serve out of a free chunk. The address of a fresh block moves for a leak
     // it can.
     strbuf.str_buf mut source = strbuf.create();
@@ -546,19 +518,19 @@ fn many_rounds_of_parse_and_free_leave_the_heap_where_it_was() void {
         // Failure allocates each node before
         // the bad byte. Each round frees
         // successful and failed documents, so a
-        // missed failure release moves the break.
+        // missed failure release moves the system view.
         json.doc mut refused = json.create();
         assert(!json.parse(&refused, half));
         assert(json.node_count(&refused) > 1000);
         json.free(&refused);
         json.free(&d);
         if (i == ROUNDS / 2) {
-            early = probe_address();
-            early_block = probe_block();
+            early = heap.system_view();
+            early_block = heap.block_view();
         }
         if (i + LATE_SAMPLES >= ROUNDS) {
-            u64 broke_now = distance(probe_address(), early);
-            u64 block_now = distance(probe_block(), early_block);
+            u64 broke_now = heap.distance(heap.system_view(), early);
+            u64 block_now = heap.distance(heap.block_view(), early_block);
             if (!sampled || broke_now < broke) {
                 broke = broke_now;
             }
@@ -571,7 +543,7 @@ fn many_rounds_of_parse_and_free_leave_the_heap_where_it_was() void {
     }
     assert(early != 0 && early_block != 0 && sampled);
     if (broke >= BOUND || block >= BOUND) {
-        println("the break moved ", broke, " and a block moved ", block);
+        println("the system view moved ", broke, " and a block moved ", block);
     }
     assert(broke < BOUND);
     assert(block < BOUND);
@@ -581,10 +553,10 @@ fn many_rounds_of_clear_leave_the_heap_where_it_was() void {
     // The other lifetime a server has: one document, cleared between
     // messages, freed once at the end.
     //
-    // The break is the only view here, and the measurement says why. The probe above gives a
+    // The system view is the only view here, and the measurement says why. The probe above gives a
     // hundred kilobytes back over its rounds. It leaves free chunks of every size and the
-    // 32-byte block view lands wherever one starts. Two probe_block calls in a row differ by
-    // 54000 bytes with nothing allocated between them. The break answers the question this
+    // 32-byte block view lands wherever one starts. Two block_view calls in a row differ by
+    // 54000 bytes with nothing allocated between them. The system view answers the question this
     // round asks. A clear that allocated anew would ask the allocator for
     // another chunk of the same shape for each of four hundred rounds.
     strbuf.str_buf mut source = strbuf.create();
@@ -595,14 +567,14 @@ fn many_rounds_of_clear_leave_the_heap_where_it_was() void {
     defer json.free(&d);
     assert(json.parse(&d, document));
     u64 allocated = json.arena_bytes(&d);
-    u64 early = probe_address();
+    u64 early = heap.system_view();
     u64 mut i = 0;
     while (i < ROUNDS) {
         json.clear(&d);
         assert(json.parse(&d, document));
         i += 1;
     }
-    assert(distance(probe_address(), early) < BOUND);
+    assert(heap.distance(heap.system_view(), early) < BOUND);
     // What the arena itself says, which no view of the heap can see: the
     // storage of the first parse served every round after it.
     lsp_json_env.check_u64(json.arena_bytes(&d), allocated, "four hundred clears");

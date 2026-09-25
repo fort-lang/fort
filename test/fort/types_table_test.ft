@@ -7,6 +7,7 @@
 /// Checks two fort-specific structures that the C suites cannot observe. The
 /// node vector moves owned pointers when it grows. A node copies its parameter
 /// list from the caller into an owned span.
+import heap;
 import prim;
 import types;
 import types_env;
@@ -114,15 +115,15 @@ fn a_grown_table_frees_everything_it_made() void {
 //
 // What can see one is the allocator, in two views, because each is blind to
 // what the other sees (modules_closure_test.ft says which and why). Two
-// hundred identical rounds build the same table and free it: the program
-// break sees a leak the allocator had to ask the kernel for. And the address
+// hundred identical rounds build the same table and free it: the system view
+// sees a leak the allocator had to ask the kernel for. And the address
 // a round is handed sees one it served out of its own free chunks. The early
 // round is held against the last two and the smaller distance taken. The
 // allocator alternates between two positions from one round to the next
 // once the program's path is long enough to change a bin.
 //
 // type_table_free makes four releases. `del(t->params)`, `del(t->layout)` and
-// `del(tt->nodes)` are each watched here by an address and by the break. And
+// `del(tt->nodes)` are each watched here by an address and by the system view. And
 // each was verified by deleting that one release and watching this test fail.
 // The fourth, `del(t)` on the node itself, is held by the language rather than
 // by a probe. Without this release, the checked
@@ -133,29 +134,11 @@ u64 LEAK_EARLY = 100;
 u64 LEAK_TYPES = 200;
 u64 LEAK_BOUND = 8192;
 
-// The current program break, which is where the heap ends: sbrk(0) moves
-// nothing and reports it. There is no std binding for it and this is its one
-// caller.
-extern fn sbrk(i64 increment) void*;
-
-fn heap_end() u64 {
-    return cast(sbrk(0), u64);
-}
-
-// How far apart two positions are, whichever way the heap moved: a subtraction
-// the wrong way round would trap before the assertion.
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
-}
-
 // The smaller of the distances from the early round to the last two.
 fn moved(u64 early, u64 late, u64 last) u64 {
     assert(early != 0 && late != 0 && last != 0);
-    u64 one = distance(late, early);
-    u64 other = distance(last, early);
+    u64 one = heap.distance(late, early);
+    u64 other = heap.distance(last, early);
     if (one < other) {
         return one;
     }
@@ -195,7 +178,7 @@ fn the_blocks_a_node_owns_are_released_with_it() void {
         if (round == LEAK_ROUNDS - 1) {
             slot = 2;
         }
-        // The addresses are read while the table still holds them, the break
+        // The addresses are read while the table still holds them, the system view
         // after it is freed, which is where a round's keeping shows.
         if (slot < 3) {
             param_at[slot] = cast(f->params.ptr, u64);
@@ -204,7 +187,7 @@ fn the_blocks_a_node_owns_are_released_with_it() void {
         }
         types.type_table_free(&tt);
         if (slot < 3) {
-            break_at[slot] = heap_end();
+            break_at[slot] = heap.system_view();
         }
         round += 1;
     }

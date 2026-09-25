@@ -13,13 +13,14 @@
 /// Checks the open-document store in src/lsp/docs.ft. The cases cover results, refusals, order,
 /// and resource release.
 
+import heap;
 import lsp.docs;
 import lsp_env;
 import std.strbuf;
 
 // The rounds of the release probe and the distance in bytes that fails it.
 // Each round opens twenty documents of about a kibibyte and closes them all.
-// One retained text moves the break by twenty kibibytes. Four
+// One retained text moves the system view by twenty kibibytes. Four
 // hundred retained texts exceed the process's initial heap.
 u64 ROUNDS = 400;
 u64 BOUND = 4096;
@@ -33,41 +34,12 @@ u64 LATE_SAMPLES = 16;
 u64 ROUND_DOCS = 20;
 u64 TEXT_BYTES = 1024;
 
-// The current program break, which is the end of the heap. sbrk(0) moves
-// nothing and reports it. std has no binding for it and this test is its one
-// caller.
-extern fn sbrk(i64 increment) void*;
-
-fn probe_address() u64 {
-    return cast(sbrk(0), u64);
-}
-
-// The other view: the address a small fresh block gets. It moves when a round
-// kept a block the next round would have got. The probe releases the block at
-// once, so the probe itself leaks nothing.
-u64 PROBE_BLOCK = 32;
-
-fn probe_block() u64 {
-    u8 mut@ own block = new(u8, PROBE_BLOCK);
-    u64 at = cast(block.ptr, u64);
-    del(block);
-    return at;
-}
-
-// How far apart two addresses are, whichever way the heap moved.
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
-}
-
 // The smallest distance from the early sample to any of the late ones.
 fn moved(u64 early, u64[16] late) u64 {
-    u64 mut best = distance(late[0], early);
+    u64 mut best = heap.distance(late[0], early);
     u64 mut i = 1;
     while (i < LATE_SAMPLES) {
-        u64 one = distance(late[i], early);
+        u64 one = heap.distance(late[i], early);
         if (one < best) {
             best = one;
         }
@@ -548,7 +520,7 @@ fn round() void {
 }
 
 fn a_store_gives_back_everything_it_took() void {
-    // Four hundred rounds against two views of the heap: the program break, which catches a
+    // Four hundred rounds against two views of the heap: the system view, which catches a
     // leak the allocator serves from the operating system. The address of a small fresh block,
     // which catches one it serves from its own free chunks.
     u64 mut early_break = 0;
@@ -559,19 +531,19 @@ fn a_store_gives_back_everything_it_took() void {
     while (i < ROUNDS) {
         round();
         if (i == 3) {
-            early_break = probe_address();
-            early_block = probe_block();
+            early_break = heap.system_view();
+            early_block = heap.block_view();
         }
         if (i + LATE_SAMPLES >= ROUNDS) {
-            late_break[i + LATE_SAMPLES - ROUNDS] = probe_address();
-            late_block[i + LATE_SAMPLES - ROUNDS] = probe_block();
+            late_break[i + LATE_SAMPLES - ROUNDS] = heap.system_view();
+            late_block[i + LATE_SAMPLES - ROUNDS] = heap.block_view();
         }
         i += 1;
     }
     u64 break_moved = moved(early_break, late_break);
     u64 block_moved = moved(early_block, late_block);
     if (break_moved >= BOUND || block_moved >= BOUND) {
-        println("the break moved ", break_moved, " and the block ", block_moved);
+        println("the system view moved ", break_moved, " and the block ", block_moved);
     }
     assert(break_moved < BOUND);
     assert(block_moved < BOUND);

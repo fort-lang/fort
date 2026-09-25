@@ -14,6 +14,7 @@
 /// The roots and the import readings are the other half, in modules_test.ft. Two declarations
 /// of one C symbol are compared where types exist, so they belong to the checker.
 import diag;
+import heap;
 import modules;
 import modules_env;
 import scope;
@@ -410,17 +411,17 @@ fn free_empties_the_set_and_leaves_it_usable() void {
 // each is blind to what the other sees. Two hundred identical rounds load the
 // same two modules and ask for the same blocks in the same order.
 //
-// The first view is the program break: a round that gives its blocks back
+// The first view is the system view: a round that gives its blocks back
 // leaves it where it was. A round that retains an allocation pushes it up.
 // This view sees a large leak but can miss a small one. The allocator can
 // serve a sixty-four-byte vector from its free chunks without more memory from
 // the kernel. Removing `del(set->modules.items)` therefore does not move the
-// break.
+// system view.
 //
 // The second view is the address of a block a round receives. A round that
 // frees what it took receives the same address again. This view sees a small
 // leak and misses a large one. With `defer analysis_free` deleted, it read 0
-// while the break climbed by megabytes. These checks watch the owned-module
+// while the system view climbed by megabytes. These checks watch the owned-module
 // vector, the dependency-order vector, and the pool's first block. One address
 // cannot see each release. A leak of the order vector alone left the
 // address of the modules vector where it was.
@@ -436,32 +437,14 @@ u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_BOUND = 1024;
 
-// The current program break, which is where the heap ends: sbrk(0) moves
-// nothing and reports it. There is no std binding for it and this is its one
-// caller.
-extern fn sbrk(i64 increment) void*;
-
-fn heap_end() u64 {
-    return cast(sbrk(0), u64);
-}
-
-// How far apart two positions are, whichever way the heap moved: a
-// subtraction the wrong way round would trap before the assertion.
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
-}
-
-// How far the break moved between the early round and the end of the rounds.
+// How far the system view moved between the early round and the end of the rounds.
 // Uses the smaller distance to the final
 // two samples. This ignores no steady growth
 // and absorbs alternating allocator growth.
 fn moved(u64 early, u64 late, u64 last) u64 {
     assert(early != 0 && late != 0 && last != 0);
-    u64 one = distance(late, early);
-    u64 other = distance(last, early);
+    u64 one = heap.distance(late, early);
+    u64 other = heap.distance(last, early);
     if (one < other) {
         return one;
     }
@@ -483,7 +466,7 @@ fn everything_a_set_holds_is_released_with_it() void {
         string own entry = modules_env.in_sandbox(&e, "main.ft");
         assert(modules.load(&e.s, &set, entry));
         del(entry);
-        // The addresses are read while the set still holds them, the break
+        // The addresses are read while the set still holds them, the system view
         // after it is freed, which is where a round's keeping shows.
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
@@ -502,7 +485,7 @@ fn everything_a_set_holds_is_released_with_it() void {
         }
         modules.free(&set);
         if (slot < 3) {
-            break_at[slot] = heap_end();
+            break_at[slot] = heap.system_view();
         }
         round += 1;
     }

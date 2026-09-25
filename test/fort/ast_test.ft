@@ -1,15 +1,16 @@
 //! run
-//! flags: -I ../../src/fort
+//! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
 /// Checks the AST arena, child lists, kind names, and S-expression output for hand-built trees.
 
 import ast;
 import diag;
+import heap;
 import lexer;
 import prim;
-import types;
 import std.strbuf;
+import types;
 
 // The arena and the buffer every assertion below works in. They are locals of
 // main's callees rather than module state. This is because a module of the compiler may
@@ -153,7 +154,7 @@ fn arena_init_zeroes_a_fresh_arena() void {
 //
 // What can see one is the allocator, in two views, because each is blind to
 // what the other sees (modules_closure_test.ft says which and why). Two
-// hundred identical rounds build the same tree and free it: the program break
+// hundred identical rounds build the same tree and free it: the system view
 // sees a leak the allocator had to ask the kernel for. And the address a
 // round is handed sees one it served out of its own free chunks. The early
 // round is held against the last two and the smaller distance taken. The
@@ -161,7 +162,7 @@ fn arena_init_zeroes_a_fresh_arena() void {
 // once the program's path is long enough to change a bin.
 //
 // ast_arena_free makes three releases. `list_free(&n->list)` and
-// `del(ar->nodes)` are each watched here by an address and by the break. And
+// `del(ar->nodes)` are each watched here by an address and by the system view. And
 // each was verified by deleting that one release and watching this test fail.
 // The third, `del(n)` on the node itself, is held by the language rather than
 // by a probe. Without it, the checked build aborts at the next write into the
@@ -171,29 +172,11 @@ u64 LEAK_EARLY = 100;
 u64 LEAK_CHILDREN = 1024;
 u64 LEAK_BOUND = 8192;
 
-// The current program break, which is where the heap ends: sbrk(0) moves
-// nothing and reports it. There is no std binding for it and this is its one
-// caller.
-extern fn sbrk(i64 increment) void*;
-
-fn heap_end() u64 {
-    return cast(sbrk(0), u64);
-}
-
-// How far apart two positions are, whichever way the heap moved: a
-// subtraction the wrong way round would trap before the assertion.
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
-}
-
 // The smaller of the distances from the early round to the last two.
 fn moved(u64 early, u64 late, u64 last) u64 {
     assert(early != 0 && late != 0 && last != 0);
-    u64 one = distance(late, early);
-    u64 other = distance(last, early);
+    u64 one = heap.distance(late, early);
+    u64 other = heap.distance(last, early);
     if (one < other) {
         return one;
     }
@@ -223,7 +206,7 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
         if (round == LEAK_ROUNDS - 1) {
             slot = 2;
         }
-        // The addresses are read while the arena still holds them, the break
+        // The addresses are read while the arena still holds them, the system view
         // after it is freed, which is where a round's keeping shows.
         if (slot < 3) {
             list_at[slot] = cast(parent->list.items.ptr, u64);
@@ -231,7 +214,7 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
         }
         close(&e);
         if (slot < 3) {
-            break_at[slot] = heap_end();
+            break_at[slot] = heap.system_view();
         }
         round += 1;
     }

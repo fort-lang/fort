@@ -1,0 +1,128 @@
+/// heap: the two views of the heap that the leak probes of test/fort share.
+//
+// A leak probe runs many identical rounds and holds an early sample of the
+// heap against the late ones. A round that gives every block back leaves the
+// heap where it was. A round that keeps a block moves it. The probe watches
+// two views, because each view is blind to what the other view sees.
+//
+// The system view is what the allocator holds from the operating system. It
+// moves for a leak the allocator serves with new memory. It does not move for
+// a leak the allocator serves out of a free chunk it already holds.
+//
+// The block view is what the allocator serves out of what it holds. It moves
+// for a small leak the system view misses. It can miss a large leak: without
+// `analysis_free`, the block view read 0 while the system view moved by
+// megabytes.
+//
+// Each target gives the two views its own way, and the values of the two
+// targets are not comparable. A probe compares two samples of one view on one
+// target, so a distance in bytes means the same thing on both.
+//
+// On Linux the system view is the program break, the end of the heap, which
+// sbrk(0) reports without moving it. glibc serves a block above 128 KB by
+// mmap, so the break does not move for a leak of such a block. The block view
+// is the address of a fresh 32-byte block, which the probe frees at once. A
+// round that kept a block gives the next round a different address.
+//
+// On macOS both views count the bytes of every live block, which the
+// allocator's own enumerator reports zone by zone, as the `heap` tool does.
+// One exact count covers what the two Linux views cover between them. The
+// statistics of `malloc_zone_statistics` are no view there: `size_in_use`
+// steps by 16384 bytes at a round the program does not choose, and the
+// address of a fresh block comes from a per-CPU magazine, so two rounds get
+// addresses gigabytes apart with nothing leaked.
+
+$if ($cfg(target_os) == "macos") {
+    // <malloc/malloc.h>: one range of live blocks, as the enumerator reports it.
+    struct range {
+        u64 address;
+        u64 size;
+    }
+
+    // The first field of malloc_introspection_t. The enumerator takes the
+    // task, a context, a type mask, the zone address, a reader (null reads
+    // this process) and the recorder it calls with each batch of ranges.
+    struct introspection {
+        fn (u32, void mut*, u32, u64, void*, fn (u32, void mut*, u32, range*, u32) void) i32
+            enumerator;
+    }
+
+    // malloc_zone_t up to its introspection pointer.
+    struct zone {
+        void* reserved1;
+        void* reserved2;
+        void* size;
+        void* malloc;
+        void* calloc;
+        void* valloc;
+        void* free;
+        void* realloc;
+        void* destroy;
+        char* name;
+        void* batch_malloc;
+        void* batch_free;
+        introspection* introspect;
+    }
+
+    extern fn mach_task_self() u32;
+    extern fn malloc_get_all_zones(u32 task, void* reader, zone* mut* mut* addresses,
+                                   u32 mut* count) i32;
+
+    // MALLOC_PTR_IN_USE_RANGE_TYPE: the live blocks.
+    u32 PTR_IN_USE = 1;
+
+    // Adds the size of each range to the total the context points at. The
+    // zones are locked while it runs, so it allocates nothing.
+    fn record(u32 task, void mut* total, u32 kind, range* ranges, u32 count) void {
+        u64 mut* sum = cast(total, u64 mut*);
+        for (range r : ranges[0..cast(count, u64)]) {
+            *sum += r.size;
+        }
+    }
+
+    fn system_view() u64 {
+        zone* mut* mut zones = null;
+        u32 mut count = 0;
+        u32 task = mach_task_self();
+        void* reader = null;
+        assert(malloc_get_all_zones(task, reader, &zones, &count) == 0);
+        u64 mut total = 0;
+        for (zone* z : zones[0..cast(count, u64)]) {
+            assert(z->introspect->enumerator(task, cast(&total, void mut*), PTR_IN_USE,
+                                             cast(z, u64), reader, record) == 0);
+        }
+        return total;
+    }
+
+    fn block_view() u64 {
+        return system_view();
+    }
+} else {
+    // sbrk(0) moves nothing and reports the break. std has no binding for it
+    // and this module is its one caller.
+    extern fn sbrk(i64 increment) void*;
+
+    fn system_view() u64 {
+        return cast(sbrk(0), u64);
+    }
+
+    // The probe releases the block at once, so the probe itself leaks nothing.
+    u64 PROBE_BLOCK = 32;
+
+    fn block_view() u64 {
+        u8 mut@ own block = new(u8, PROBE_BLOCK);
+        u64 at = cast(block.ptr, u64);
+        del(block);
+        return at;
+    }
+}
+
+// How far apart two samples are, whichever way the heap moved. A leak that
+// hands a later round a lower value is a leak too, and a subtraction the wrong
+// way round traps before the assertion.
+fn distance(u64 a, u64 b) u64 {
+    if (a > b) {
+        return a - b;
+    }
+    return b - a;
+}

@@ -1,5 +1,5 @@
 //! run
-//! flags: -I ../../src/fort
+//! flags: -I ../../src/fort -I support
 //! stdout:
 //| bindings ok
 //| collisions ok
@@ -14,6 +14,7 @@
 import ast;
 import containers;
 import diag;
+import heap;
 import scope;
 import std.strbuf;
 
@@ -299,7 +300,7 @@ fn free_empties_the_scope_and_leaves_it_usable() void {
 //
 // What can see one is the allocator, in two views, because each is blind to
 // what the other sees (modules_closure_test.ft says which and why). Two
-// hundred identical rounds fill and free one scope: the program break sees a
+// hundred identical rounds fill and free one scope: the system view sees a
 // leak the allocator had to ask the kernel for. And the address of the
 // binding vector sees one it served out of its own free chunks.
 //
@@ -314,26 +315,11 @@ u64 LEAK_EARLY = 100;
 u64 LEAK_NAMES = 200;
 u64 LEAK_BOUND = 1024;
 
-// The current program break, which is where the heap ends. There is no std
-// binding for sbrk and this is its one caller.
-extern fn sbrk(i64 increment) void*;
-
-fn heap_end() u64 {
-    return cast(sbrk(0), u64);
-}
-
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
-}
-
 // The smaller of the distances from the early round to the last two.
 fn moved(u64 early, u64 late, u64 last) u64 {
     assert(early != 0 && late != 0 && last != 0);
-    u64 one = distance(late, early);
-    u64 other = distance(last, early);
+    u64 one = heap.distance(late, early);
+    u64 other = heap.distance(last, early);
     if (one < other) {
         return one;
     }
@@ -373,7 +359,7 @@ fn everything_a_scope_holds_is_released_with_it() void {
         }
         scope.free(&s);
         if (slot < 3) {
-            break_at[slot] = heap_end();
+            break_at[slot] = heap.system_view();
         }
         round += 1;
     }

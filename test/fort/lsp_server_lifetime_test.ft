@@ -7,6 +7,7 @@
 //| ok
 /// Checks server resource release. A session that handles 2,000 messages must return the heap
 /// to its starting range.
+import heap;
 import lsp.docs;
 import lsp.rpc;
 import lsp.server;
@@ -21,16 +22,16 @@ import std.strbuf;
 // a test in a directory of its own, so a
 // file the test writes is the test's alone.
 //
-// The program break is the one view here, and the small-block view is off on purpose. A round
+// The system view is the one view here, and the block view is off on purpose. A round
 // of this file allocates tens of kilobytes and gives all of it back, which leaves free chunks
 // of every size. A 32-byte probe lands wherever one starts. It moved 22800
-// bytes with no leak. This noise makes the small-block view unsuitable.
-// Removing any of the six server.free releases turns the break probe red.
+// bytes with no leak. This noise makes the block view unsuitable.
+// Removing any of the six server.free releases turns the system-view probe red.
 
 // The rounds of the session probe and the distance in bytes that fails it.
 // Each round runs and frees a complete session. The session includes a server,
 // its buffers, its parsed document, and two open documents of about two kibibytes.
-// One retained document moves the break by kilobytes.
+// One retained document moves the system view by kilobytes.
 // Two hundred retained documents exceed the process's initial heap.
 u64 SESSION_ROUNDS = 200;
 u64 BOUND = 8192;
@@ -42,13 +43,13 @@ u64 BOUND = 8192;
 // rounds. 8192 over 181 is about 45 bytes a round. So a leak below 45 bytes
 // per session sits under this probe and a leak above it does not. Every
 // release of server.free is far above that. The smallest deletion moved the
-// break by 212992 bytes. A new release of a few bytes needs more rounds,
+// system view by 212992 bytes. A new release of a few bytes needs more rounds,
 // since the bound is the allocator's own noise.
 
 // The messages of the long session, and how many of them the probe holds
 // against the early sample. Two thousand didChange notifications of a
 // kibibyte each are 2 MB of text through one server. A server that kept one
-// text of each moves the break by that much.
+// text of each moves the system view by that much.
 u64 MESSAGES = 2000;
 u64 EARLY_MESSAGE = 200;
 
@@ -66,29 +67,12 @@ string SESSION_FILE = "session.bin";
 string LONG_FILE = "long.bin";
 string ANSWER_FILE = "answers.bin";
 
-// The current program break, which is the end of the heap. sbrk(0) moves
-// nothing and reports it. std has no binding for it and these tests are its
-// only callers.
-extern fn sbrk(i64 increment) void*;
-
-fn probe_address() u64 {
-    return cast(sbrk(0), u64);
-}
-
-// How far apart two addresses are, whichever way the heap moved.
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
-}
-
 // The smallest distance from the early sample to any of the late ones.
 fn moved(u64 early, u64[16] late) u64 {
-    u64 mut best = distance(late[0], early);
+    u64 mut best = heap.distance(late[0], early);
     u64 mut i = 1;
     while (i < LATE_SAMPLES) {
-        u64 one = distance(late[i], early);
+        u64 one = heap.distance(late[i], early);
         if (one < best) {
             best = one;
         }
@@ -195,7 +179,7 @@ fn the_session_script(strbuf.str_buf mut* script) void {
     // A request whose method name and whose string id are each a kibibyte.
     // The server copies the id into a buffer of its own and builds the "not
     // implemented" message in another. So a round that keeps either of those
-    // two buffers moves the break rather than hiding inside a round's noise.
+    // two buffers moves the system view rather than hiding inside a round's noise.
     strbuf.str_buf mut long_name = strbuf.create();
     defer strbuf.free(&long_name);
     while (long_name.len < TEXT_BYTES) {
@@ -225,16 +209,16 @@ fn a_session_gives_back_everything_it_took() void {
     while (i < SESSION_ROUNDS) {
         assert(session(SESSION_FILE) == 0);
         if (i == 3) {
-            early_break = probe_address();
+            early_break = heap.system_view();
         }
         if (i + LATE_SAMPLES >= SESSION_ROUNDS) {
-            late_break[i + LATE_SAMPLES - SESSION_ROUNDS] = probe_address();
+            late_break[i + LATE_SAMPLES - SESSION_ROUNDS] = heap.system_view();
         }
         i += 1;
     }
     u64 break_moved = moved(early_break, late_break);
     if (break_moved >= BOUND) {
-        println("the break moved ", break_moved);
+        println("the system view moved ", break_moved);
     }
     assert(break_moved < BOUND);
 }
@@ -245,7 +229,7 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
     // One server, one document, two thousand changes of a kibibyte each. The
     // document the reader parses is cleared and not freed between messages, so
     // the arena settles at the largest message. The read buffer drops the frame
-    // it answered, and the store holds one text at a time. The break must
+    // it answered, and the store holds one text at a time. The system view must
     // therefore stand still from the two-hundredth message to the last.
     strbuf.str_buf mut script = strbuf.create();
     defer strbuf.free(&script);
@@ -276,10 +260,10 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
     while (server.step(&srv)) {
         seen += 1;
         if (seen == EARLY_MESSAGE) {
-            early_break = probe_address();
+            early_break = heap.system_view();
         }
         if (seen + LATE_SAMPLES > steps) {
-            late_break[seen + LATE_SAMPLES - steps - 1] = probe_address();
+            late_break[seen + LATE_SAMPLES - steps - 1] = heap.system_view();
         }
     }
     lsp_env.check_u64(seen, steps, "the messages of the long session");
@@ -290,7 +274,7 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
                       cast(MESSAGES, i64) + 1, "the version after two thousand changes");
     u64 break_moved = moved(early_break, late_break);
     if (break_moved >= BOUND) {
-        println("the break moved ", break_moved);
+        println("the system view moved ", break_moved);
     }
     assert(break_moved < BOUND);
     server.free(&srv);
@@ -338,16 +322,16 @@ fn a_session_of_many_documents_gives_them_all_back() void {
         // The status is 1: the stream ends without a shutdown.
         assert(session(SESSION_FILE) == 1);
         if (round == 3) {
-            early_break = probe_address();
+            early_break = heap.system_view();
         }
         if (round + LATE_SAMPLES >= 60) {
-            late_break[round + LATE_SAMPLES - 60] = probe_address();
+            late_break[round + LATE_SAMPLES - 60] = heap.system_view();
         }
         round += 1;
     }
     u64 break_moved = moved(early_break, late_break);
     if (break_moved >= BOUND) {
-        println("the break moved ", break_moved);
+        println("the system view moved ", break_moved);
     }
     assert(break_moved < BOUND);
 }

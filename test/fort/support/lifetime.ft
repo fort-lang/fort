@@ -6,15 +6,15 @@
 // the harness runs.
 //
 // The heap sees one. Many runs of one command line ask for the same blocks
-// in the same order. A run that gives the blocks back leaves the program
-// break where it was. A run that keeps one block pushes the break up by the
-// leaked bytes of each round.
+// in the same order. A run that gives the blocks back leaves the heap where
+// it was. A run that keeps one block moves a view of the heap by the leaked
+// bytes of each round. support/heap.ft gives the two views of each target.
 //
 // The probe watches two views, because each view is blind to what the other
-// view sees. The program break does not move for a leak that the allocator
+// view sees. The system view does not move for a leak that the allocator
 // serves out of a free chunk it already holds. The address of a fresh block
 // does not show a large leak. Without `analysis_free`, the address probe read
-// 0 while the break moved by megabytes. The
+// 0 while the system view moved by megabytes. The
 // answer is the larger of the two distances.
 //
 // Two views are necessary and not sufficient. A round must also be large
@@ -27,7 +27,7 @@
 // test goes red.
 //
 // Neither view sees a leak of a block above 128 KB. glibc serves such an
-// allocation by mmap, so the program break does not move. Such a large round
+// allocation by mmap, so the system view does not move. Such a large round
 // also makes the block view unsuitable. The emitter module is 226998 bytes,
 // and its module buffer is an mmap block. Removing that buffer's release is
 // invisible to the emitter test. The closure mode emits about two kilobytes
@@ -49,6 +49,7 @@
 
 import capture;
 import driver;
+import heap;
 import std.io;
 import std.sys;
 
@@ -73,27 +74,6 @@ u64 LATE_SAMPLES = 16;
 // refused program asserts this status of its first round.
 i32 EXIT_COMPILE_ERROR = 1;
 
-// The current program break, which is the end of the heap. sbrk(0) moves
-// nothing and reports the break. std has no binding for it and these tests are
-// its only callers.
-extern fn sbrk(i64 increment) void*;
-
-fn probe_address() u64 {
-    return cast(sbrk(0), u64);
-}
-
-// The other view: the address that a small fresh block gets. It moves when a
-// round kept a block that the next round would have got. The probe releases
-// the block at once, so the probe itself leaks nothing.
-u64 PROBE_BLOCK = 32;
-
-fn probe_block() u64 {
-    u8 mut@ own block = new(u8, PROBE_BLOCK);
-    u64 at = cast(block.ptr, u64);
-    del(block);
-    return at;
-}
-
 // Measures a front-end mode over ROUNDS iterations, with both views on.
 fn measure(string@ args) u64 {
     return measure_rounds(args, ROUNDS, true);
@@ -109,10 +89,10 @@ fn measure(string@ args) u64 {
 // leaves the heap with free chunks of every size. So the address that a
 // 32-byte probe gets lands where one of those chunks starts. It moved through
 // a range of 450 KB over rounds that leaked nothing, and no window or cycle
-// makes it repeat. The break is the view that answers for that mode, and it
+// makes it repeat. The system view is the view that answers for that mode, and it
 // answers for all of it. Each of the sixteen releases exceeds
 // one kilobyte per round. A missing release therefore moves
-// the break by hundreds of kilobytes. The block view remains
+// the system view by hundreds of kilobytes. The block view remains
 // enabled for four front-end modes and index mode. It
 // stays steady and uniquely detects small index releases.
 fn measure_rounds(string@ args, u64 rounds, bool watch_block) u64 {
@@ -147,14 +127,14 @@ fn measure_status(string@ args, u64 rounds, bool watch_block, i32 want_status) u
             assert(status == want_status);
         }
         if (i == rounds / 2) {
-            early = probe_address();
-            early_block = probe_block();
+            early = heap.system_view();
+            early_block = heap.block_view();
         }
         if (i + LATE_SAMPLES >= rounds) {
-            u64 broke_now = distance(probe_address(), early);
+            u64 broke_now = heap.distance(heap.system_view(), early);
             u64 mut block_now = 0;
             if (watch_block) {
-                block_now = distance(probe_block(), early_block);
+                block_now = heap.distance(heap.block_view(), early_block);
             }
             if (!sampled || broke_now < broke) {
                 broke = broke_now;
@@ -172,16 +152,6 @@ fn measure_status(string@ args, u64 rounds, bool watch_block, i32 want_status) u
         return broke;
     }
     return block;
-}
-
-// How far apart two addresses are, whichever way the allocator moved. A leak
-// that hands a later round a lower address is a leak too, and a subtraction
-// the wrong way round traps before the assertion.
-fn distance(u64 a, u64 b) u64 {
-    if (a > b) {
-        return a - b;
-    }
-    return b - a;
 }
 
 fn write_file(string path, string text) void {
