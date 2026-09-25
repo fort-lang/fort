@@ -430,9 +430,13 @@ def main(argv=None):
     )
     parser.add_argument("paths", nargs="*", type=Path, help="the files to check")
     args = parser.parse_args(argv)
+    # One spelling of the root and of each path: a temporary directory on
+    # macOS is a symbolic link (/var -> /private/var), and a relative path
+    # between the two spellings climbs to the file system root.
+    args.root = args.root.resolve()
 
     if args.paths:
-        files = [(path, tuple(args.include)) for path in args.paths]
+        files = [(path.resolve(), tuple(args.include)) for path in args.paths]
         empty = []
     else:
         files = default_file_set(args.root)

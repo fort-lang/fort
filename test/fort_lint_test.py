@@ -430,6 +430,37 @@ class FakeCompiler(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         self.assertIn("no violation of D1.4", got.stdout)
 
+    def test_a_root_reached_through_a_symbolic_link_is_the_same_root(self):
+        """A temporary directory on macOS is /var/..., a link to /private/var/..."""
+        link = Path(tempfile.mkdtemp()) / "link"
+        try:
+            link.symlink_to(self.root, target_is_directory=True)
+            document = (
+                '{"diagnostics":[],"symbols":[{"file":"a.ft","line":1,"col":1,"name":"ok",'
+                '"kind":"fn","type":"fn () void","is_decl":true}]}'
+            )
+            fort = self.fake_fort("print(%r)\n" % document)
+            got = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "fort_lint.py"),
+                    "--root",
+                    str(link),
+                    "--fort",
+                    fort,
+                    str(link / "a.ft"),
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(self.root),
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            self.assertIn("no violation of D1.4", got.stdout)
+        finally:
+            link.unlink()
+            link.parent.rmdir()
+
     def test_a_violation_fails_the_run(self):
         document = (
             '{"diagnostics":[],"symbols":[{"file":"a.ft","line":2,"col":3,"name":"Bad",'
