@@ -647,8 +647,8 @@ library (T-160).
   D10.8, D14.3).
 
   Set `FORT_STAGE1_COMPILER` to build HEAD with an external compiler and no listed revision.
-  `FORT_ENABLE_BOOTSTRAP=OFF` requires this setting.
-  `FORT_ENABLE_BOOTSTRAP=ON` rejects it. External-stage1 mode reads no pin and registers no
+  `FORT_ENABLE_BOOTSTRAP0=OFF` requires this setting.
+  `FORT_ENABLE_BOOTSTRAP0=ON` rejects it. External-stage1 mode reads no pin and registers no
   bootstrap tests. A successful native build proves the bootstrap edge.
 
   - No unions, no bitfields, no anonymous struct or union members: a fat tagged struct with a

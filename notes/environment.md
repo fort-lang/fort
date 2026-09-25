@@ -412,21 +412,22 @@ without a rewrite.
   runtime object). `tools/vm workflow <preset>` configures, builds and runs ctest; build
   directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
   -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
-- C-started mode (`FORT_ENABLE_BOOTSTRAP=ON`) adds `bootstrap0/CMakeLists.txt` with the binary
-  directory `build/<preset>/bootstrap`. That file builds `fort_core` and `fort_bootstrap`. It sets
+- C-started mode (`FORT_ENABLE_BOOTSTRAP0=ON`) adds `bootstrap0/CMakeLists.txt` with the binary
+  directory `build/<preset>/bootstrap`. That file builds `fort_core` and `fort_bootstrap0`. It sets
   its own C11 settings, warnings and definitions. It reads the target and the tool paths from the
-  top-level file, and it does not configure alone. The top-level chain starts at `fort_bootstrap`,
+  top-level file, and it does not configure alone. The top-level chain starts at `fort_bootstrap0`,
   which builds bootstrap-1 (T-160). Each source pin builds the next one.
   `bootstrap0/extract_pin.sh <sha> <dir> <linux|darwin>` extracts `src/fort`, `std` and
-  `tools/assemble_std.sh` of a pin with `git archive`. Then it runs the pin's own `tools/assemble_std.sh`,
-  which writes the pin's standard root for the target to `<dir>/std-root`. The pin builds from
+  `tools/assemble_std.sh` of a pin with `git archive`, moves the pin's `std` to `<dir>/std-pin` and
+  runs the pin's own `tools/assemble_std.sh`, which writes the pin's standard root for the target to
+  `<dir>/std`. The pin builds from
   `<dir>/src/fort/main.ft` with that root. No compiler of the chain gets `--target`: each one
   builds for its own built target, `std.os.TARGET` of its standard root (D14.1).
   The last source compiler builds working-tree HEAD as `fort`.
-- `FORT_BOOTSTRAP_BUILD_TESTS` (default OFF; every preset sets it ON) adds the C unit tests on
-  linux and on darwin. `FORT_BOOTSTRAP_E2E_TEST` (default ON, and OFF when
-  `FORT_BOOTSTRAP_BUILD_TESTS` is OFF) adds the ctest `bootstrap-e2e`: bootstrap-0 builds
-  bootstrap-1 in `build/<preset>/bootstrap/e2e`. That tree is not the tree of the chain. The
+- `FORT_BOOTSTRAP0_BUILD_TESTS` (default OFF; every preset sets it ON) adds the C unit tests on
+  linux and on darwin. `FORT_BOOTSTRAP0_E2E_TEST` (default ON, and OFF when
+  `FORT_BOOTSTRAP0_BUILD_TESTS` is OFF) adds the ctest `bootstrap-e2e`: bootstrap-0 builds
+  bootstrap-1 in `build/<preset>/bootstrap/e2e/bootstrap1`. That tree is not the tree of the chain. The
   contract suites read its standard root, so it is extracted whenever the tests are on.
 - External-stage1 mode builds only HEAD with `FORT_STAGE1_COMPILER`. It does not create C
   compiler or C unit-test targets.
@@ -480,15 +481,15 @@ without a rewrite.
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
   the helper -- as `bootstrap0/test/modules_test.c` and `bootstrap0/test/gen_test.c` do.
-- Binaries: `build/<preset>/bootstrap/bootstrap-0/fort` is the C compiler.
+- Binaries: `build/<preset>/bootstrap/fort` is the C compiler.
   `build/<preset>/bootstrap/bootstrap-N/fort` is source pin N from `tools/bootstrap.ref`, which
   starts at bootstrap-1. `build/<preset>/fort` is HEAD built by the last source pin (T-155).
   Stage1 is the compiler that builds HEAD: the last pin, or `FORT_STAGE1_COMPILER`. Stage2 is
   `build/<preset>/fort`, and `tools/fixpoint.sh` builds stage3 and stage4 from it. Text before
   2026-09-24 calls the C compiler stage1 and the first pin bootstrap-0.
   CMake validates the list and owns all extraction and build edges. `FORT_STAGE1_COMPILER` names an
-  external compiler and skips the list. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external path.
-  `FORT_ENABLE_BOOTSTRAP=ON` rejects that external path. External-stage1 mode reads no pin
+  external compiler and skips the list. `FORT_ENABLE_BOOTSTRAP0=OFF` requires that external path.
+  `FORT_ENABLE_BOOTSTRAP0=ON` rejects that external path. External-stage1 mode reads no pin
   (T-160).
   `tools/target linux|darwin workflow|gate` is the common host interface (T-152).
   The workflow runs CMake directly on the selected host. `tools/vm gate` enters the linux VM once,

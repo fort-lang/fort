@@ -43,19 +43,19 @@ set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
 set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
 set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
 set(FORT_FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/fort")
-option(FORT_ENABLE_BOOTSTRAP "Build fort through the C-started source chain" ON)
+option(FORT_ENABLE_BOOTSTRAP0 "Build fort through the C-started source chain" ON)
 set(FORT_STAGE1_COMPILER "" CACHE FILEPATH
     "External fort compiler that builds working-tree HEAD")
 
-if(FORT_ENABLE_BOOTSTRAP AND FORT_STAGE1_COMPILER)
+if(FORT_ENABLE_BOOTSTRAP0 AND FORT_STAGE1_COMPILER)
     message(FATAL_ERROR
-        "FORT_ENABLE_BOOTSTRAP=ON does not accept FORT_STAGE1_COMPILER")
-elseif(NOT FORT_ENABLE_BOOTSTRAP AND NOT FORT_STAGE1_COMPILER)
+        "FORT_ENABLE_BOOTSTRAP0=ON does not accept FORT_STAGE1_COMPILER")
+elseif(NOT FORT_ENABLE_BOOTSTRAP0 AND NOT FORT_STAGE1_COMPILER)
     message(FATAL_ERROR
-        "FORT_ENABLE_BOOTSTRAP=OFF requires FORT_STAGE1_COMPILER")
+        "FORT_ENABLE_BOOTSTRAP0=OFF requires FORT_STAGE1_COMPILER")
 endif()
 
-if(FORT_ENABLE_BOOTSTRAP)
+if(FORT_ENABLE_BOOTSTRAP0)
     set(FORT_BOOTSTRAP_DIR "${CMAKE_BINARY_DIR}/bootstrap")
     set(FORT_BOOTSTRAP_REF "${CMAKE_SOURCE_DIR}/tools/bootstrap.ref" CACHE FILEPATH
         "Ordered source revisions for the C-started bootstrap")
@@ -115,9 +115,9 @@ if(NOT FORT_OPT_PATH)
 endif()
 
 # ---- the bootstrap compiler ---------------------------------------------------
-# bootstrap0/ builds the C compiler fort_bootstrap and its tests. Its binary
-# directory is FORT_BOOTSTRAP_DIR, so the compiler is bootstrap/bootstrap-0/fort.
-if(FORT_ENABLE_BOOTSTRAP)
+# bootstrap0/ builds the C compiler fort_bootstrap0 and its tests. Its binary
+# directory is FORT_BOOTSTRAP_DIR, so the compiler is bootstrap/fort.
+if(FORT_ENABLE_BOOTSTRAP0)
     add_subdirectory(bootstrap0 "${FORT_BOOTSTRAP_DIR}")
 endif()
 
@@ -144,7 +144,7 @@ add_custom_target(fort_std ALL DEPENDS ${FORT_STD_OUTPUTS})
 # ---- the chain of source compilers ---------------------------------------------
 # CMake reads, validates, and orders this list. A shell script does not select
 # a predecessor. An external stage1 skips the complete list.
-if(FORT_ENABLE_BOOTSTRAP)
+if(FORT_ENABLE_BOOTSTRAP0)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FORT_BOOTSTRAP_REF}")
     set(FORT_PIN_NUMBERS "")
     set(FORT_PIN_SHAS "")
@@ -249,12 +249,12 @@ endif()
 file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
 set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/bootstrap0/extract_pin.sh")
 
-if(NOT FORT_ENABLE_BOOTSTRAP)
+if(NOT FORT_ENABLE_BOOTSTRAP0)
     set(FORT_PREVIOUS_COMPILER "${FORT_STAGE1_COMPILER}")
     set(FORT_PREVIOUS_DEPENDENCY "${FORT_STAGE1_COMPILER}")
 else()
-    set(FORT_PREVIOUS_COMPILER "$<TARGET_FILE:fort_bootstrap>")
-    set(FORT_PREVIOUS_DEPENDENCY fort_bootstrap)
+    set(FORT_PREVIOUS_COMPILER "$<TARGET_FILE:fort_bootstrap0>")
+    set(FORT_PREVIOUS_DEPENDENCY fort_bootstrap0)
     list(LENGTH FORT_PIN_SHAS FORT_PIN_COUNT)
     math(EXPR FORT_LAST_PIN_INDEX "${FORT_PIN_COUNT} - 1")
     foreach(pin_index RANGE 0 ${FORT_LAST_PIN_INDEX})
@@ -273,7 +273,7 @@ else()
         add_custom_command(
             OUTPUT "${pin_binary}"
             COMMAND "${FORT_PREVIOUS_COMPILER}" ${FORT_STAGE_MODE_ARGS}
-                --std-dir "${pin_dir}/std-root"
+                --std-dir "${pin_dir}/std"
                 --cc "${FORT_TARGET_CC_PATH}"
                 -o "${pin_binary}" "${pin_dir}/src/fort/main.ft"
             DEPENDS "${pin_stamp}" ${FORT_PREVIOUS_DEPENDENCY}
@@ -287,7 +287,7 @@ else()
 endif()
 
 set(FORT_HEAD_ENTRY "${FORT_FORT_SRC_DIR}/main.ft")
-if(FORT_ENABLE_BOOTSTRAP)
+if(FORT_ENABLE_BOOTSTRAP0)
     set(FORT_HEAD_DIR "${FORT_BOOTSTRAP_DIR}/head")
     set(FORT_HEAD_STD "${FORT_HEAD_DIR}/std")
     set(FORT_HEAD_STD_STAMP "${FORT_HEAD_STD}/.assembled")
@@ -468,8 +468,8 @@ add_custom_target(check
     USES_TERMINAL
 )
 add_dependencies(check fort fort_std)
-if(TARGET fort_bootstrap_unit_tests)
-    add_dependencies(check fort_bootstrap_unit_tests)
+if(TARGET fort_bootstrap0_unit_tests)
+    add_dependencies(check fort_bootstrap0_unit_tests)
 endif()
 
 # The language test harness drives the compiler over test/lang.
@@ -705,7 +705,7 @@ add_custom_target(check-all COMMENT "Running every test")
 add_dependencies(check-all check check-lang)
 
 # ---- format, tidy, lines -----------------------------------------------------------
-# The lint targets cover the bootstrap sources also when FORT_ENABLE_BOOTSTRAP is OFF.
+# The lint targets cover the bootstrap sources also when FORT_ENABLE_BOOTSTRAP0 is OFF.
 file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/bootstrap0/*.c" "${CMAKE_SOURCE_DIR}/bootstrap0/*.h"
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"

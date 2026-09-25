@@ -1,22 +1,22 @@
 # The C bootstrap compiler (bootstrap-0) and its tests. The top-level project adds
-# this directory only when FORT_ENABLE_BOOTSTRAP is ON, and this directory
+# this directory only when FORT_ENABLE_BOOTSTRAP0 is ON, and this directory
 # never configures alone. The parent gives these variables:
 # - the target: FORT_TARGET, FORT_TARGET_TRIPLE and FORT_DEFAULT_TARGET_CC.
 # - the tools: FORT_TARGET_CC_PATH, FORT_OPT_PATH and FORT_PYTHON3.
 # - the tests: FORT_TEST_DIR and FORT_SANITIZER_TEST_ENV.
 #
 # The binary directory of this file is build/<preset>/bootstrap, so the
-# compiler is bootstrap/bootstrap-0/fort. The parent builds its chain of source
-# compilers from fort_bootstrap. The e2e test below does not use that chain.
+# compiler is bootstrap/fort. The parent builds its chain of source compilers
+# from fort_bootstrap0. The e2e test below does not use that chain.
 
 include(CMakeDependentOption)
-option(FORT_BOOTSTRAP_BUILD_TESTS "Build and register the tests of the C compiler" OFF)
-cmake_dependent_option(FORT_BOOTSTRAP_E2E_TEST
+option(FORT_BOOTSTRAP0_BUILD_TESTS "Build and register the tests of the C compiler" OFF)
+cmake_dependent_option(FORT_BOOTSTRAP0_E2E_TEST
     "Test the C compiler: it builds the bootstrap-1 compiler" ON
-    "FORT_BOOTSTRAP_BUILD_TESTS" OFF)
+    "FORT_BOOTSTRAP0_BUILD_TESTS" OFF)
 
-set(FORT_BOOTSTRAP_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
-set(FORT_BOOTSTRAP_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
+set(FORT_BOOTSTRAP0_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+set(FORT_BOOTSTRAP0_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
 
 # ---- toolchain -----------------------------------------------------------------
 # Use C11 without extensions. Make POSIX.1-2008 visible. These settings repeat
@@ -45,31 +45,31 @@ if(APPLE)
 endif()
 
 # ---- the C compiler ------------------------------------------------------------
-file(GLOB FORT_BOOTSTRAP_CORE_LIST CONFIGURE_DEPENDS "${FORT_BOOTSTRAP_SRC_DIR}/*.c")
-list(REMOVE_ITEM FORT_BOOTSTRAP_CORE_LIST "${FORT_BOOTSTRAP_SRC_DIR}/main.c")
+file(GLOB FORT_BOOTSTRAP0_CORE_LIST CONFIGURE_DEPENDS "${FORT_BOOTSTRAP0_SRC_DIR}/*.c")
+list(REMOVE_ITEM FORT_BOOTSTRAP0_CORE_LIST "${FORT_BOOTSTRAP0_SRC_DIR}/main.c")
 
-add_library(fort_core STATIC ${FORT_BOOTSTRAP_CORE_LIST})
-target_include_directories(fort_core PUBLIC "${FORT_BOOTSTRAP_SRC_DIR}")
+add_library(fort_core STATIC ${FORT_BOOTSTRAP0_CORE_LIST})
+target_include_directories(fort_core PUBLIC "${FORT_BOOTSTRAP0_SRC_DIR}")
 target_compile_definitions(fort_core PUBLIC
     FORT_DEFAULT_CC="${FORT_DEFAULT_TARGET_CC}"
     FORT_DEFAULT_TARGET="${FORT_TARGET_TRIPLE}"
 )
 
-add_executable(fort_bootstrap "${FORT_BOOTSTRAP_SRC_DIR}/main.c")
-target_link_libraries(fort_bootstrap PRIVATE fort_core)
-set_target_properties(fort_bootstrap PROPERTIES
+add_executable(fort_bootstrap0 "${FORT_BOOTSTRAP0_SRC_DIR}/main.c")
+target_link_libraries(fort_bootstrap0 PRIVATE fort_core)
+set_target_properties(fort_bootstrap0 PROPERTIES
     OUTPUT_NAME fort
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bootstrap-0"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
-if(FORT_BOOTSTRAP_BUILD_TESTS)
+if(FORT_BOOTSTRAP0_BUILD_TESTS)
     # unit tests
-    file(GLOB FORT_BOOTSTRAP_TEST_LIST CONFIGURE_DEPENDS "${FORT_BOOTSTRAP_TEST_DIR}/*_test.c")
+    file(GLOB FORT_BOOTSTRAP0_TEST_LIST CONFIGURE_DEPENDS "${FORT_BOOTSTRAP0_TEST_DIR}/*_test.c")
     set(FORT_UNIT_TEST_TARGETS "")
-    foreach(TEST_SRC_FILE IN LISTS FORT_BOOTSTRAP_TEST_LIST)
+    foreach(TEST_SRC_FILE IN LISTS FORT_BOOTSTRAP0_TEST_LIST)
         get_filename_component(TEST_TARGET "${TEST_SRC_FILE}" NAME_WE)
         add_executable("${TEST_TARGET}" "${TEST_SRC_FILE}")
-        target_include_directories("${TEST_TARGET}" PRIVATE "${FORT_BOOTSTRAP_TEST_DIR}")
+        target_include_directories("${TEST_TARGET}" PRIVATE "${FORT_BOOTSTRAP0_TEST_DIR}")
         target_link_libraries("${TEST_TARGET}" PRIVATE fort_core)
         set_target_properties("${TEST_TARGET}" PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test")
@@ -84,30 +84,30 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
     # ---- the bootstrap-1 source ----------------------------------------------------
     # The contract suites and the e2e test read bootstrap-1 from a tree of their
     # own. The parent's chain extracts its pins from tools/bootstrap.ref.
-    set(FORT_BOOTSTRAP_1_SHA 0fe521c08a4541ec8f1a9563bc177630cb59316e)
+    set(FORT_BOOTSTRAP1_SHA 0fe521c08a4541ec8f1a9563bc177630cb59316e)
 
-    set(FORT_BOOTSTRAP_1_DIR "${CMAKE_CURRENT_BINARY_DIR}/e2e/bootstrap-1")
-    set(FORT_BOOTSTRAP_1_STAMP
-        "${FORT_BOOTSTRAP_1_DIR}/.assembled-${FORT_BOOTSTRAP_1_SHA}-${FORT_TARGET}")
+    set(FORT_BOOTSTRAP1_DIR "${CMAKE_CURRENT_BINARY_DIR}/e2e/bootstrap1")
+    set(FORT_BOOTSTRAP1_STAMP
+        "${FORT_BOOTSTRAP1_DIR}/.assembled-${FORT_BOOTSTRAP1_SHA}-${FORT_TARGET}")
     add_custom_command(
-        OUTPUT "${FORT_BOOTSTRAP_1_STAMP}"
+        OUTPUT "${FORT_BOOTSTRAP1_STAMP}"
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/extract_pin.sh"
-            "${FORT_BOOTSTRAP_1_SHA}" "${FORT_BOOTSTRAP_1_DIR}" "${FORT_TARGET}"
+            "${FORT_BOOTSTRAP1_SHA}" "${FORT_BOOTSTRAP1_DIR}" "${FORT_TARGET}"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/extract_pin.sh"
         COMMENT "Extracting bootstrap-1 for the tests of the C compiler"
         VERBATIM
     )
-    add_custom_target(fort_bootstrap_1_source ALL DEPENDS "${FORT_BOOTSTRAP_1_STAMP}")
+    add_custom_target(fort_bootstrap1_source ALL DEPENDS "${FORT_BOOTSTRAP1_STAMP}")
 
     # ---- the e2e test ---------------------------------------------------------------
     # The end-to-end test of the C compiler: bootstrap-0 builds the bootstrap-1 compiler
     # from the bootstrap-1 source. The test passes when that build exits 0.
-    if(FORT_BOOTSTRAP_E2E_TEST)
+    if(FORT_BOOTSTRAP0_E2E_TEST)
         add_test(NAME bootstrap-e2e
-            COMMAND "$<TARGET_FILE:fort_bootstrap>" ${FORT_BOOTSTRAP_1_MODE_ARGS}
-                --std-dir "${FORT_BOOTSTRAP_1_DIR}/std-root"
+            COMMAND "$<TARGET_FILE:fort_bootstrap0>" ${FORT_STAGE_MODE_ARGS}
+                --std-dir "${FORT_BOOTSTRAP1_DIR}/std"
                 --cc "${FORT_TARGET_CC_PATH}"
-                -o "${FORT_BOOTSTRAP_1_DIR}/fort" "${FORT_BOOTSTRAP_1_DIR}/src/fort/main.ft"
+                -o "${FORT_BOOTSTRAP1_DIR}/fort" "${FORT_BOOTSTRAP1_DIR}/src/fort/main.ft"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
         set_tests_properties(bootstrap-e2e PROPERTIES
             LABELS "unit;bootstrap"
@@ -115,9 +115,9 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
     endif()
 
     # The parent's `check` target depends on this target, so it builds each suite.
-    add_custom_target(fort_bootstrap_unit_tests)
+    add_custom_target(fort_bootstrap0_unit_tests)
     if(FORT_UNIT_TEST_TARGETS)
-        add_dependencies(fort_bootstrap_unit_tests ${FORT_UNIT_TEST_TARGETS})
+        add_dependencies(fort_bootstrap0_unit_tests ${FORT_UNIT_TEST_TARGETS})
     endif()
 
     # The driver tests spawn bootstrap0/test/common/fake_cc.sh as their --cc: it
@@ -128,7 +128,7 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
                         driver_ast_test)
         if(TARGET "${driver_suite}")
             target_compile_definitions("${driver_suite}"
-                PRIVATE FORT_FAKE_CC="${FORT_BOOTSTRAP_TEST_DIR}/common/fake_cc.sh")
+                PRIVATE FORT_FAKE_CC="${FORT_BOOTSTRAP0_TEST_DIR}/common/fake_cc.sh")
         endif()
     endforeach()
 
@@ -153,8 +153,8 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
     foreach(std_reader runtime_sig_test check_conv_test)
         if(TARGET "${std_reader}")
             target_compile_definitions("${std_reader}"
-                PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP_1_DIR}/std-root")
-            add_dependencies("${std_reader}" fort_bootstrap_1_source)
+                PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP1_DIR}/std")
+            add_dependencies("${std_reader}" fort_bootstrap1_source)
             set_tests_properties("${std_reader}" PROPERTIES
                 LABELS "unit;bootstrap;bootstrap-contract")
         endif()

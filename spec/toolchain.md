@@ -1814,7 +1814,7 @@ implementable; the design is to be planned in the implementation phase.
   graph does not call a shell script to read the list or select a predecessor. A shallow clone that
   lacks
   a listed commit cannot bootstrap. `FORT_STAGE1_COMPILER` skips the list and builds HEAD directly.
-  `FORT_ENABLE_BOOTSTRAP=OFF` requires this external compiler. Add a pin only when the current last
+  `FORT_ENABLE_BOOTSTRAP0=OFF` requires this external compiler. Add a pin only when the current last
   pin cannot build a required later revision. A new pin must build with its predecessor and build
   its successor. Both builds must pass on both supported host systems before the pin enters the list.
   The C unit suites test the C implementation. Product tests use the current compiler and

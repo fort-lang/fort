@@ -1722,7 +1722,7 @@ Sections:
   list or select a predecessor. CMake applies the configured checked or release mode to each source
   stage.
   `FORT_STAGE1_COMPILER` can name an external compiler. This mode skips the list and builds HEAD
-  directly. `FORT_ENABLE_BOOTSTRAP=OFF` requires that external compiler. Bootstrap mode rejects
+  directly. `FORT_ENABLE_BOOTSTRAP0=OFF` requires that external compiler. Bootstrap mode rejects
   an external compiler. External-stage1 mode builds no C compiler target and registers no C
   compiler test. A successful native build proves the bootstrap edge.
   Add a pin only when the current last pin cannot build a required later revision. A new pin must
