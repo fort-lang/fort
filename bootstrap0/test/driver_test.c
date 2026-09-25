@@ -814,12 +814,12 @@ TEST(cross_target_s_wins_over_c_and_emits_the_selected_target, {
     slurp(file, text, sizeof text);
     TEST_UNUSED(fclose(file));
     // The linux module names the vendor of the triple, as LLVM spells it.
+    const char* module_triple = cross_target();
+    if (strcmp(FORT_DEFAULT_TARGET, "x86_64-linux-gnu") != 0) {
+        module_triple = "x86_64-unknown-linux-gnu";
+    }
     char triple[PATH_CAP];
-    expect1(triple,
-            sizeof triple,
-            "target triple = \"%s\"\n",
-            strcmp(FORT_DEFAULT_TARGET, "x86_64-linux-gnu") != 0 ? "x86_64-unknown-linux-gnu"
-                                                           : cross_target());
+    expect1(triple, sizeof triple, "target triple = \"%s\"\n", module_triple);
     TEST_ASSERT_TRUE(strncmp(text, triple, strlen(triple)) == 0);
     TEST_ASSERT_EQ_INT32(access(box.log, F_OK), -1);
     sandbox_close(&box);

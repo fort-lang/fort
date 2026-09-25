@@ -11,9 +11,12 @@ bullet at a time and without a rewrite.
 
 ## 1. The merge gate
 
-- `tools/vm gate` is the merge gate: `format-check`, `tidy`, and `check-all` under `debug`,
-  `asan` and `ubsan` (it configures `debug` first, then configures and builds each preset before
-  its `check-all`).
+- `tools/target <target> gate` is the merge gate: `format-check`, `tidy`, and `check-all` under
+  each preset of the target -- `debug`, `asan` and `ubsan` on linux, `darwin`, `darwin-asan` and
+  `darwin-ubsan` on darwin (it configures the first preset, then configures and builds each
+  preset before its `check-all`; the darwin gate ends with the host identity record).
+  `tools/vm gate` runs the linux gate in the VM. The same tests register on both targets: the
+  test graph has no target-only branch since 2026-09-25.
   **Never kill a guest process by pattern.** The VM is shared by every worktree, so
   `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as
   well, and each of them reads the kill as a test failure in their own branch. T-043 did it to

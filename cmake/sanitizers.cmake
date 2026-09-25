@@ -22,8 +22,17 @@ elseif(FORT_SANITIZER STREQUAL "address")
         -g
     )
     add_link_options(-fsanitize=address)
-    set(FORT_SANITIZER_TEST_ENV
-        "ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1:allocator_may_return_null=1")
+    if(APPLE)
+        # LeakSanitizer does not exist on arm64 darwin: the runtime aborts with
+        # "detect_leaks is not supported on this platform". The Homebrew clang
+        # AddressSanitizer runtime hangs at exit on darwin 25; the darwin-asan
+        # preset selects Apple clang.
+        set(FORT_SANITIZER_TEST_ENV
+            "ASAN_OPTIONS=detect_stack_use_after_return=1:allocator_may_return_null=1")
+    else()
+        set(FORT_SANITIZER_TEST_ENV
+            "ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1:allocator_may_return_null=1")
+    endif()
 elseif(FORT_SANITIZER STREQUAL "memory")
     if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
         message(FATAL_ERROR

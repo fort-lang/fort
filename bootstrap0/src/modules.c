@@ -20,7 +20,9 @@
 // The real file path, which is a module's identity. POSIX declares realpath in
 // <stdlib.h>. glibc hides it behind __USE_XOPEN_EXTENDED, which these C11
 // options do not set. This file therefore declares it, as driver.c declares
-// `environ`.
+// `environ`. The darwin <stdlib.h> declares it under these options, where the
+// line is a redundant declaration to clang-tidy.
+// NOLINTNEXTLINE(readability-redundant-declaration)
 extern char* realpath(const char* name, char* resolved);
 
 // The extension of a fort source file; a file with any other extension is

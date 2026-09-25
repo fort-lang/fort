@@ -1,5 +1,12 @@
 #!/bin/bash
-# Run one build workflow or gate for the selected production target.
+# Run one build workflow or the counted merge gate for the selected target.
+#
+# `workflow` configures, builds and tests the target's base preset. `gate`
+# runs `format-check`, `tidy` and `check-all` under each preset of the target:
+# `debug`, `asan` and `ubsan` on linux; `darwin`, `darwin-asan` and
+# `darwin-ubsan` on darwin. The darwin gate ends with the host identity
+# record, which requires a clean source tree. Either action requires the
+# native host of the target.
 set -eu
 
 usage() {
@@ -16,41 +23,55 @@ action=$2
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 cd "$root"
 
-run_workflow() {
-    local selected_target=$1
-    local opt_arg=""
-    if [ "$selected_target" = darwin ] && [ -n "${FORT_DARWIN_OPT:-}" ]; then
-        opt_arg="-DFORT_OPT:FILEPATH=$FORT_DARWIN_OPT"
-    fi
-    if [ -n "$opt_arg" ]; then
-        cmake --preset "$selected_target" "$opt_arg"
-    else
-        cmake --preset "$selected_target"
-    fi
-    cmake --build --preset "$selected_target"
-    ctest --preset "$selected_target"
+case "$target" in
+linux)
+    host=Linux
+    presets=(debug asan ubsan)
+    ;;
+darwin)
+    host=Darwin
+    presets=(darwin darwin-asan darwin-ubsan)
+    ;;
+*)
+    usage
+    exit 2
+    ;;
+esac
+[ "$(uname -s)" = "$host" ] || {
+    echo "tools/target: $target requires a $host host" >&2
+    exit 2
 }
 
-case "$target:$action" in
-linux:workflow)
-    [ "$(uname -s)" = "Linux" ] || {
-        echo "tools/target: linux requires a Linux host" >&2
-        exit 2
-    }
-    run_workflow linux
+case "$action" in
+workflow)
+    cmake --preset "$target"
+    cmake --build --preset "$target"
+    ctest --preset "$target"
     ;;
-darwin:workflow)
-    [ "$(uname -s)" = "Darwin" ] || {
-        echo "tools/target: darwin requires a Darwin host" >&2
-        exit 2
-    }
-    run_workflow darwin
-    ;;
-linux:gate)
-    exec bash test/linux_gate_test.sh
-    ;;
-darwin:gate)
-    exec tools/darwin gate
+gate)
+    echo "selected target: $target"
+    first=${presets[0]}
+    echo "$target gate: configure $first"
+    cmake --preset "$first"
+    for step in format-check tidy; do
+        echo "$target gate: $step"
+        cmake --build --preset "$first" --target "$step"
+    done
+    for preset in "${presets[@]}"; do
+        if [ "$preset" != "$first" ]; then
+            echo "$target gate: configure $preset"
+            cmake --preset "$preset"
+        fi
+        echo "$target gate: build $preset"
+        cmake --build --preset "$preset"
+        echo "$target gate: check-all $preset"
+        cmake --build --preset "$preset" --target check-all
+    done
+    if [ "$target" = darwin ]; then
+        echo "$target gate: identity"
+        bash tools/darwin_host_identity.sh
+    fi
+    echo "tools/target $target gate: green"
     ;;
 *)
     usage

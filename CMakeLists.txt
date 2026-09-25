@@ -718,7 +718,13 @@ add_custom_target(check-comments
     VERBATIM
 )
 
-find_program(FORT_CLANG_FORMAT NAMES clang-format clang-format-18)
+# The lint configuration is clang 18's (.clang-format, .clang-tidy). The
+# versioned name wins where the host has one; the darwin host keeps llvm@18
+# keg-only under /opt/homebrew/opt/llvm@18, where the names are unversioned.
+# NO_CACHE, so that a tool installed later is found on the next configure.
+set(FORT_CLANG_18_HINTS /opt/homebrew/opt/llvm@18/bin)
+find_program(FORT_CLANG_FORMAT NAMES clang-format-18 clang-format
+    HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
 if(FORT_CLANG_FORMAT)
     add_custom_target(format
         COMMAND "${FORT_CLANG_FORMAT}" -i ${FORT_LINT_SOURCES}
@@ -738,10 +744,25 @@ else()
 endif()
 add_dependencies(format-check check-comments)
 
-find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy run-clang-tidy-18)
+find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy-18 run-clang-tidy
+    HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
+# run-clang-tidy runs the `clang-tidy` of the PATH unless told otherwise, which
+# on the darwin host is a newer one; name the clang-tidy 18 beside it.
+find_program(FORT_CLANG_TIDY NAMES clang-tidy-18 clang-tidy
+    HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
+# clang-tidy does not find the SDK headers on its own as the darwin clang
+# does: the compile commands carry no -isysroot, so the tidy target adds it.
+set(FORT_TIDY_EXTRA_ARGS "")
+if(APPLE)
+    execute_process(COMMAND xcrun --sdk macosx --show-sdk-path
+        OUTPUT_VARIABLE FORT_DARWIN_SDK OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY)
+    set(FORT_TIDY_EXTRA_ARGS -extra-arg=-isysroot "-extra-arg=${FORT_DARWIN_SDK}")
+endif()
 if(FORT_RUN_CLANG_TIDY)
     add_custom_target(tidy
         COMMAND "${FORT_RUN_CLANG_TIDY}" -p "${CMAKE_BINARY_DIR}" -quiet
+                -clang-tidy-binary "${FORT_CLANG_TIDY}" ${FORT_TIDY_EXTRA_ARGS}
                 "${CMAKE_SOURCE_DIR}/bootstrap0" "${FORT_TEST_DIR}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Running clang-tidy over bootstrap and test"

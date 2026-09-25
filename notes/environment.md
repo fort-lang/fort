@@ -512,8 +512,20 @@ without a rewrite.
 
 ## 6. The host side
 
-- **The `darwin` gate uses the Darwin host** (T-147, T-152).
-  Check the host tools before the build:
+- **The `darwin` gate uses the Darwin host** (T-147, T-152). The host needs clang-format 18
+  and clang-tidy 18 (`brew install llvm@18`, keg-only under `/opt/homebrew/opt/llvm@18/bin`,
+  where `CMakeLists.txt` looks first), because the gate runs `format-check` and `tidy` there as
+  on linux, and the lint configuration is clang 18's: clang-format 19 wraps one ternary of
+  `bootstrap0/test/driver_test.c` differently and clang-tidy 19 adds checks the configuration
+  does not name (measured 2026-09-25: 23 `readability-enum-initial-value` and 10
+  `readability-math-missing-parentheses` findings). The `tidy` target passes
+  `-clang-tidy-binary` (run-clang-tidy runs the `clang-tidy` of the PATH otherwise) and, on
+  darwin, `-extra-arg=-isysroot <sdk>` (clang-tidy does not find the SDK headers as the darwin
+  clang does). The three tool variables are `NO_CACHE`; a build directory configured before
+  2026-09-25 still holds `FORT_CLANG_FORMAT` and `FORT_RUN_CLANG_TIDY` in its cache, and
+  `find_program` skips its search for a variable that the cache defines: run
+  `cmake -U FORT_CLANG_FORMAT -U FORT_RUN_CLANG_TIDY --preset darwin` once. Check the host tools
+  before the build:
 
   ```sh
   xcode-select -p
@@ -530,9 +542,9 @@ without a rewrite.
   `tools/darwin_host_identity.sh` requires each tool it hashes, `rg` among them; a host without
   ripgrep exits 2 with `darwin identity: missing tool rg` before the gate runs (T-183, measured
   2026-09-19; `brew install ripgrep` cured it).
-  Set `FORT_DARWIN_OPT` to a different `opt` path only when that tool verifies LLVM IR.
-  Each `tools/target darwin workflow` call writes this path to the CMake cache.
-  Configure and build the `darwin` compiler and language server on the darwin host:
+  The verifier is the `FORT_OPT` cache value (`/opt/homebrew/bin/opt` by default on darwin);
+  pass `-DFORT_OPT:FILEPATH=<path>` to `cmake --preset darwin` only when that tool verifies
+  LLVM IR. Configure and build the `darwin` compiler and language server on the darwin host:
 
   ```sh
   tools/target darwin workflow
@@ -542,27 +554,34 @@ without a rewrite.
   `build/darwin/fort-lsp` is the `darwin` language server.
   The compiler and language server use the target that CMake selects. The build calls `tools/vm`
   zero times while it builds the source chain and tests the fixed point.
-  The darwin gate exports `SDKROOT` from `xcrun --sdk macosx --show-sdk-path`.
-  The compiler and corpus C helpers use that SDK path for darwin links.
+  The host scripts take the SDK from `xcrun --sdk macosx --show-sdk-path` and pass it as
+  `-isysroot`; the compiler's own `--cc` link finds it through clang.
   Run the counted `darwin` gate on a clean source tree:
 
   ```sh
   tools/target darwin gate > build/darwin-gate.log 2>&1
   ```
 
-  The gate runs the pipeline, `darwin` CMake tests, corpus, trap, lint, core, and network tests.
-  It names each Linux-only corpus exclusion and gives the selected corpus count.
-  `tools/darwin identity` records the source and main SHAs and requires empty git status.
-  It records the host OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes.
+  The darwin gate is the linux gate under the darwin presets: `format-check`, `tidy` and
+  `check-all` under `darwin`, `darwin-asan` and `darwin-ubsan`, then the host identity record
+  (`notes/testing.md` 1). The same tests register on both targets; the gate excludes no corpus
+  fixture. `darwin-asan` selects Apple clang (`/usr/bin/clang`): the Homebrew clang 19 address
+  sanitizer runtime hangs at exit on darwin 25 (measured 2026-09-25 on a five-line C program),
+  and LeakSanitizer does not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops
+  `detect_leaks=1` there. There is no `darwin-msan` and no `darwin-tsan`: MemorySanitizer is
+  linux-only and ThreadSanitizer needs no run, since nothing here has threads.
+  `tools/darwin_host_identity.sh` records the source and main SHAs and requires empty git status.
+  It records the host OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes; the clang
+  and verifier are the `FORT_TARGET_CC` and `FORT_OPT` values of `build/darwin/CMakeCache.txt`.
   It records the selected target, compiler hash, and language-server hash.
   It records a counted path, symlink, and content manifest for `.ft` inputs.
   The manifest includes ignored `.ft` files and `build/darwin`.
   Capture identity before the gate and after final review:
 
   ```sh
-  tools/darwin identity > build/darwin-identity-before.log
+  bash tools/darwin_host_identity.sh > build/darwin-identity-before.log
   tools/target darwin gate > build/darwin-gate.log 2>&1
-  tools/darwin identity > build/darwin-identity-after.log
+  bash tools/darwin_host_identity.sh > build/darwin-identity-after.log
   cmp build/darwin-identity-before.log build/darwin-identity-after.log
   shasum -a 256 build/darwin-gate.log
   ```
@@ -574,9 +593,11 @@ without a rewrite.
   Require each native output directory before a freshness count:
 
   ```sh
-  test -f build/darwin-gate.log && test -d build/darwin && test -d build/darwin/std &&
+  test -f build/darwin-gate.log && test -d build/darwin && test -d build/darwin-asan &&
+    test -d build/darwin-ubsan && test -d build/darwin/std &&
     test -d build/darwin/cmake-fixpoint/fixpoint &&
-    bash -o pipefail -c 'find build/darwin -newer build/darwin-gate.log | wc -l'
+    bash -o pipefail -c \
+      'find build/darwin build/darwin-asan build/darwin-ubsan -newer build/darwin-gate.log | wc -l'
   ```
 
   The freshness command must exit 0 and print 0.

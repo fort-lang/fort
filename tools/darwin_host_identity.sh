@@ -33,8 +33,9 @@ echo "SDK path: $(xcrun --sdk macosx --show-sdk-path)"
 echo "SDK version: $(xcrun --sdk macosx --show-sdk-version)"
 echo "Xcode: $(xcodebuild -version | tr '\n' ' ')"
 
-opt=${FORT_DARWIN_OPT:-/opt/homebrew/bin/opt}
-cc=$(xcrun --sdk macosx --find clang)
+# The verifier and the target clang of the build, read from its cache.
+opt=$(sed -n 's/^FORT_OPT:FILEPATH=//p' build/darwin/CMakeCache.txt)
+cc=$(command -v "$(sed -n 's/^FORT_TARGET_CC:STRING=//p' build/darwin/CMakeCache.txt)")
 tools=(bash sh awk basename cat chmod cmp cmake ctest cp cut diff dirname file find git grep \
        head ln mkdir mktemp mv nm node od otool python3 rg rm sed shasum sort tail \
        tr uname wc xcrun xcode-select xcodebuild sw_vers ninja)
