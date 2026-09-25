@@ -10,7 +10,8 @@ find . -path ./build -prune -o -path ./.git -prune -o -path ./.worktrees -prune 
     LC_ALL=C sort -z |
     while IFS= read -r -d '' source_path; do
         if [ -L "$source_path" ]; then
-            readlink -z -- "$source_path"
+            # GNU readlink has -z; BSD readlink does not. Print the NUL here.
+            printf '%s\0' "$(readlink -- "$source_path")"
         fi
         sha256sum -- "$source_path"
     done |

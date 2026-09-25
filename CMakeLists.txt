@@ -405,22 +405,17 @@ add_test(NAME lsp-binary
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(lsp-binary PROPERTIES LABELS lang)
 
-if(FORT_TARGET STREQUAL "darwin")
-    # The remaining targets are the linux tests and the C lint targets. They do
-    # not belong to the darwin graph.
-    return()
-endif()
-
-# The cross pipeline: the hand-written LLVM IR modules under test/ir, which
+# The target pipeline: the hand-written LLVM IR modules under test/ir, which
 # are complete modules. The pipeline verifies and compiles each module.
-# It links each module alone and runs it under qemu. A module contains the runtime.
-# The link takes no other object. This unit test needs the target clang, not fort.
+# It links each module alone and runs it: under qemu for linux, on the host
+# for darwin. A module contains the runtime. The link takes no other object.
+# This unit test needs the target clang and the verifier, not fort.
 add_test(NAME pipeline
     COMMAND bash "${FORT_TEST_DIR}/pipeline_test.sh"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(pipeline PROPERTIES
     LABELS unit
-    ENVIRONMENT "FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE}")
+    ENVIRONMENT "FORT_TARGET=${FORT_TARGET};FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE};FORT_OPT=${FORT_OPT_PATH}")
 
 # The linux compiler emits darwin IR with a caller-selected standard root.
 # The verifier checks its form. Separate tests check the Darwin ABI and stack.
@@ -430,9 +425,9 @@ add_test(NAME target-ir
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
 set_tests_properties(target-ir PROPERTIES LABELS unit)
 
-# The C helpers of the language tests are cross-compiled by the harness; they
-# also build on the host so that -Werror and clang-tidy cover them. They
-# are FFI entry points declared by the tests, hence no prototypes.
+# The C helpers of the language tests are compiled for the target by the
+# harness; they also build on the host so that -Werror and clang-tidy cover
+# them. They are FFI entry points declared by the tests, hence no prototypes.
 file(GLOB FORT_LANG_FFI_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/lang/ffi/*.c")
 add_library(lang_ffi_helpers OBJECT ${FORT_LANG_FFI_SOURCES})
 target_compile_options(lang_ffi_helpers PRIVATE -Wno-missing-prototypes)
@@ -477,6 +472,7 @@ set(FORT_MODULE_TEST_COMMAND
     --fort "${FORT_COMPILER_BINARY}"
     --std-dir "${FORT_STD_DIR}"
     --cc "${FORT_TARGET_CC_PATH}"
+    --target "${FORT_TARGET_TRIPLE}"
     --opt "${FORT_OPT_PATH}"
     --verify-ir
     -j "${FORT_LANG_JOBS}"
@@ -493,6 +489,7 @@ set(FORT_LANG_COMMAND
     --fort "${FORT_COMPILER_BINARY}"
     --std-dir "${FORT_STD_DIR}"
     --cc "${FORT_TARGET_CC_PATH}"
+    --target "${FORT_TARGET_TRIPLE}"
     --opt "${FORT_OPT_PATH}"
     --xfail "${FORT_LANG_DIR}/xfail.txt"
     --verify-ir
@@ -506,6 +503,11 @@ set_tests_properties(lang PROPERTIES LABELS lang)
 # The harness compares the index byte for byte and reports the measured count.
 add_test(NAME lang-json COMMAND ${FORT_LANG_COMMAND} --check-json)
 set_tests_properties(lang-json PROPERTIES LABELS lang)
+# Each harness run takes FORT_LANG_JOBS processors. Told so, `ctest -j` runs
+# nothing beside it; untold, it ran seven tests beside a full-load harness on
+# the darwin host and `lang_selftest` reported its 5 s fake compiler as timed
+# out (2026-09-25, three presets).
+set_tests_properties(fort-modules lang lang-json PROPERTIES PROCESSORS ${FORT_LANG_JOBS})
 
 add_test(NAME stage2-ast-variadic
     COMMAND bash "${FORT_TEST_DIR}/stage2_ast_variadic_test.sh" "${FORT_COMPILER_BINARY}"

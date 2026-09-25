@@ -1,4 +1,4 @@
-target triple = "arm64-apple-macosx15.0.0"
+target triple = "x86_64-unknown-linux-gnu"
 
 define dso_local i32 @"my:app.main"() {
 entry:

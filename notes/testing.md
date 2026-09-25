@@ -424,24 +424,23 @@ bullet at a time and without a rewrite.
 
 ## 6. Generated code and the cross pipeline
 
-- The cross pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
+- The target pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
   `spec/toolchain.md` 6 specifies (D19.1); `hello.ll` and `abort.ll` are its two worked
-  examples byte for byte, so a change to one changes the other, while `colons.ll` answers a
-  question of its own (`test/ir/README.md` says which). `test/pipeline_test.sh`
-  verifies each with `opt-18 -passes=verify`, compiles and links it with `clang
-  --target=x86_64-linux-gnu` alone -- a module holds the whole program, the runtime included, so
-  each file defines the handful of `std.rt` entry points it calls over libc -- runs it under
-  qemu and checks stdout, stderr and the status byte-exactly; ctest `pipeline` (label `unit`).
-  Adding one means
-  adding its name to the `for prog in` loop of that script and a block of expectations beside
-  the others; the list is not globbed, since each module's output is its own. `*.ll` is
-  gitignored except `test/ir/*.ll` and `test/darwin/ir/*.ll`.
+  examples byte for byte, so a change to one changes the other, while `colons.ll` and
+  `trap.ll` answer a question of their own (`test/ir/README.md` says which).
+  `test/pipeline_test.sh` verifies each with `opt -passes=verify`, compiles and links it with
+  the target clang alone -- a module holds the whole program, the runtime included, so each file
+  defines the handful of `std.rt` entry points it calls over libc -- runs it (under qemu on
+  linux, on the host on darwin) and checks stdout, stderr and the status byte-exactly; ctest
+  `pipeline` (label `unit`) on both targets. The modules carry the linux triple; the darwin run
+  rewrites that one line, because the compiler emits one IR for both targets. The trap module
+  states the signal of `llvm.trap`: SIGILL (132) on x86-64, SIGTRAP (133) on arm64. Adding one
+  means adding its name to the `for prog in` loop of that script and a block of expectations
+  beside the others; the list is not globbed, since each module's output is its own. `*.ll` is
+  gitignored except `test/ir/*.ll`.
   `run_tests.py --verify-ir` runs the same verifier over the
   `-S` output of every language test that compiles.
-- The darwin pipeline uses `test/darwin/ir/darwin.ll` as a host sample (T-143, T-152).
-  This sample is outside the `test/ir/*.ll` compiler-form corpus.
-  `tools/darwin pipeline` verifies, links, and runs it, then checks Mach-O PIE and SIGTRAP.
-  `tools/darwin core` runs ten core library programs on a darwin arm64 host (T-144).
+- `tools/darwin core` runs ten core library programs on a darwin arm64 host (T-144).
   It tests 004, 005, 019, 051, 053, 070, 071, 074, 094 and 095 in `test/lang/run/stdlib`.
   It compiles one C open probe to check the Apple arm64 variable-tail stack slot.
   It uses the darwin compiler and tests its standard root through an executable symlink.

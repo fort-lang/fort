@@ -2,8 +2,10 @@
 
 Hand-written LLVM IR modules (LLVM 18, opaque pointers) in the form the compiler emits, one per
 program. `test/pipeline_test.sh` verifies each module with `opt -passes=verify`, compiles and
-links it with the target clang and runs it under qemu (toolchain.md 2). The link takes the module
-alone: one module holds the whole program, the runtime included (D9.10, D13.1), so each file here
+links it with the target clang and runs it (toolchain.md 2): under qemu for the linux target,
+on the host for darwin. The modules carry the linux triple; the darwin run rewrites that one
+line to the darwin triple, because the compiler emits one IR for both targets. The link takes
+the module alone: one module holds the whole program, the runtime included (D9.10, D13.1), so each file here
 defines the handful of `std.rt` entry points it calls, over `write` and `abort` from the C
 library. The code generation contract (toolchain.md 6, D19.1) quotes `hello.ll` and `abort.ll` as
 its worked examples, byte for byte, so a change here is a change there, and every rule about the
@@ -62,7 +64,15 @@ in `my:app.ft`, whose module path is therefore `my:app` and whose `main` is the 
 `my:app.main` (D9.1, D9.7). It is `hello.ll` with that one name changed, and it exists because
 nothing before the link can check that the byte survives: LLVM quotes a name its unquoted
 identifier syntax does not admit, the assembler quotes the label in turn, and the ELF symbol is
-the name itself. The pipeline test reads it back out of the symbol table with `nm`.
+the name itself. The pipeline test reads it back out of the symbol table with `nm`; the darwin
+symbol carries the Mach-O underscore prefix, `_my:app.main`.
+
+`trap.ll` is not in the compiler's form. It is `colons.ll` reduced to `main` and `my:app.main`
+with one branch added: with one argument `main` reaches `llvm.trap` and `unreachable`. The
+pipeline test checks the signal that the trap instruction of the target raises: `ud2` gives
+SIGILL (status 132) on x86-64 and `brk #1` gives SIGTRAP (status 133) on arm64. The corpus
+states the same fact for a `noreturn` function that returns
+(`test/lang/run/ffi/009_noreturn_returns_anyway.ft`).
 
 There is no float module here. `std.rt` holds the two float printers of D18.1, folded in by
 T-132, and a hand-written module that exercised them returns with that work.

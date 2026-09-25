@@ -31,7 +31,7 @@ after_link=$(bash "$source_root/tools/gate_ft_manifest.sh" "$fixture")
 test "$after_content" != "$after_link"
 
 cmp "$fixture/base.ft" "$fixture/.user-originals/alternate.txt"
-ln -s alternate.txt "$fixture/.user-originals/next_link.ft"
-mv -fT "$fixture/.user-originals/next_link.ft" "$fixture/.user-originals/link.ft"
+# `ln -sf` replaces the link in place on GNU and BSD alike; `mv -T` is GNU only.
+ln -sf alternate.txt "$fixture/.user-originals/link.ft"
 after_retarget=$(bash "$source_root/tools/gate_ft_manifest.sh" "$fixture")
 test "$after_link" != "$after_retarget"

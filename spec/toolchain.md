@@ -273,11 +273,12 @@ under inspection rather than a program.
   `-fPIE` and the target's PIE link flag make a position-independent executable (D14.3, D16).
 - Every emitted module passes `opt -passes=verify` (D19.1). `test/ir/*.ll` are hand-written
   modules in the form the compiler emits and `test/pipeline_test.sh` runs this pipeline over
-  them; the language-test harness verifies the module of every test that compiles
-  (`run_tests.py --verify-ir`, section 7.3).
-- The darwin hand IR sample is `test/darwin/ir/darwin.ll`.
-  `tools/darwin pipeline` verifies, links, and runs it on a darwin arm64 host.
-  This host sample checks Mach-O PIE and SIGTRAP. It does not stand for full compiler output.
+  them on both targets (the darwin run rewrites the triple line of each module, since the
+  compiler emits one IR for both targets); the language-test harness verifies the module of
+  every test that compiles (`run_tests.py --verify-ir`, section 7.3).
+- `test/ir/trap.ll` is the one module outside the compiler's form. The pipeline test runs it
+  to state the signal of `llvm.trap`: SIGILL on x86-64 and SIGTRAP on arm64. On darwin the test
+  also checks that the binary is arm64 Mach-O with the PIE flag.
 - An object from `-c` contains the whole program, the runtime included, so linking it needs no
   input the compiler produced beyond the object itself (D9.10, D13.1).
 

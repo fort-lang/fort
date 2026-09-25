@@ -139,7 +139,7 @@ write_source "$work/select.ft" \
     '} else {' \
     '    i32 SELECTED_NUMBER = 4;' \
     '}' \
-    '$if (OS == "linux") {' \
+    '$if (OS == "linux" || OS == "macos") {' \
     '    fn main() i32 {' \
     '        $if (false) {' \
     '            return missing_value;' \
