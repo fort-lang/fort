@@ -1,7 +1,7 @@
 // Tests driver behavior that requires a compiler.
 //
 // The command line itself, its error texts and the clang invocation are
-// bootstrap/test/driver_test.c; the check mode is bootstrap/test/driver_check_test.c.
+// bootstrap0/test/driver_test.c; the check mode is bootstrap0/test/driver_check_test.c.
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>

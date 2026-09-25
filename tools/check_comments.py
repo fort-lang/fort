@@ -2,7 +2,7 @@
 """Reject block comments in the project's C sources.
 
 fort and project C use `//` comments. This keeps the bootstrap transliterable into fort.
-The tool scans C files under bootstrap/ and test/lang/ffi/. It tracks strings, characters,
+The tool scans C files under bootstrap0/ and test/lang/ffi/. It tracks strings, characters,
 escapes, and `//` comments. It reports each real `/*` opener as `<file>:<line>: block comment`.
 It exits 1 for a problem and 0 otherwise.
 """
@@ -12,10 +12,10 @@ import sys
 from pathlib import Path
 
 SOURCE_GLOBS = (
-    "bootstrap/src/*.c",
-    "bootstrap/src/*.h",
-    "bootstrap/test/*.c",
-    "bootstrap/test/common/*.h",
+    "bootstrap0/src/*.c",
+    "bootstrap0/src/*.h",
+    "bootstrap0/test/*.c",
+    "bootstrap0/test/common/*.h",
     "test/lang/ffi/*.c",
 )
 

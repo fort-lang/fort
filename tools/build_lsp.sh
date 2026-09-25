@@ -1,27 +1,21 @@
 #!/bin/bash
-# Build the language server for the selected target.
+# Build the language server for the compiler's own target.
 set -euo pipefail
 
-if [ "$#" -lt 7 ]; then
-    echo "usage: build_lsp.sh <compiler> <target> <std> <cc> <output> <entry> <include>..." >&2
+if [ "$#" -lt 6 ]; then
+    echo "usage: build_lsp.sh <compiler> <std> <cc> <output> <entry> <include>..." >&2
     exit 2
 fi
 
 compiler=$1
-target=$2
-std=$3
-cc=$4
-output=$5
-entry=$6
-shift 6
+std=$2
+cc=$3
+output=$4
+entry=$5
+shift 5
 
 if [ ! -x "$compiler" ]; then
     echo "build_lsp.sh: compiler is missing" >&2
-    exit 2
-fi
-if [ "$target" != x86_64-linux-gnu ] &&
-   ! [[ "$target" =~ ^arm64-apple-macosx[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "build_lsp.sh: unsupported target '$target'" >&2
     exit 2
 fi
 
@@ -29,5 +23,4 @@ args=()
 for root in "$@"; do
     args+=(-I "$root")
 done
-exec "$compiler" --std-dir "$std" --cc "$cc" --target "$target" \
-    "${args[@]}" -o "$output" "$entry"
+exec "$compiler" --std-dir "$std" --cc "$cc" "${args[@]}" -o "$output" "$entry"

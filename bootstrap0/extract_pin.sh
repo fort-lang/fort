@@ -6,9 +6,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 sha=$1 out=$2 target=$3
 
 rm -rf "$out"
-mkdir -p "$out/target/entry"
+mkdir -p "$out"
 git -C "$root" archive "$sha" src/fort std tools/assemble_std.sh | tar -x -C "$out"
-bash "$out/tools/assemble_std.sh" "$target" "$out/std" "$out/target/std"
-cp "$out/src/fort/main.ft" "$out/target/entry/"
+bash "$out/tools/assemble_std.sh" "$target" "$out/std" "$out/std-root"
 
 echo "$sha" >"$out/.assembled-$sha-$target"

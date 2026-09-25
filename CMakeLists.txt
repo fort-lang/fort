@@ -115,10 +115,10 @@ if(NOT FORT_OPT_PATH)
 endif()
 
 # ---- the bootstrap compiler ---------------------------------------------------
-# bootstrap/ builds the C compiler fort_bootstrap and its tests. Its binary
+# bootstrap0/ builds the C compiler fort_bootstrap and its tests. Its binary
 # directory is FORT_BOOTSTRAP_DIR, so the compiler is bootstrap/bootstrap-0/fort.
 if(FORT_ENABLE_BOOTSTRAP)
-    add_subdirectory(bootstrap "${FORT_BOOTSTRAP_DIR}")
+    add_subdirectory(bootstrap0 "${FORT_BOOTSTRAP_DIR}")
 endif()
 
 # ---- the standard library ------------------------------------------------------
@@ -247,7 +247,7 @@ endif()
 
 # ---- the self-hosted compiler --------------------------------------------------
 file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
-set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/bootstrap/extract_pin.sh")
+set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/bootstrap0/extract_pin.sh")
 
 if(NOT FORT_ENABLE_BOOTSTRAP)
     set(FORT_PREVIOUS_COMPILER "${FORT_STAGE1_COMPILER}")
@@ -273,10 +273,9 @@ else()
         add_custom_command(
             OUTPUT "${pin_binary}"
             COMMAND "${FORT_PREVIOUS_COMPILER}" ${FORT_STAGE_MODE_ARGS}
-                --std-dir "${pin_dir}/target/std"
-                -I "${pin_dir}/src/fort"
+                --std-dir "${pin_dir}/std-root"
                 --cc "${FORT_TARGET_CC_PATH}"
-                -o "${pin_binary}" "${pin_dir}/target/entry/main.ft"
+                -o "${pin_binary}" "${pin_dir}/src/fort/main.ft"
             DEPENDS "${pin_stamp}" ${FORT_PREVIOUS_DEPENDENCY}
             COMMENT "Building bootstrap-${pin_number} with its predecessor"
             VERBATIM
@@ -358,7 +357,6 @@ set(FORT_GRAPH_FIXPOINT_COMMAND
     bash "${CMAKE_SOURCE_DIR}/tools/fixpoint.sh" "${CMAKE_BINARY_DIR}/cmake-fixpoint"
     --compiler "${FORT_COMPILER_BINARY}"
     --cc "${FORT_TARGET_CC_PATH}"
-    --target "${FORT_TARGET_TRIPLE}"
     --entry "${FORT_HEAD_ENTRY}"
     --std "${FORT_STD_DIR}"
     --source-root "${FORT_FORT_SRC_DIR}"
@@ -385,7 +383,7 @@ set(FORT_LSP_BINARY "${CMAKE_BINARY_DIR}/fort-lsp")
 add_custom_command(
     OUTPUT "${FORT_LSP_BINARY}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/tools/build_lsp.sh"
-            "${FORT_COMPILER_BINARY}" "${FORT_TARGET_TRIPLE}"
+            "${FORT_COMPILER_BINARY}"
             "${FORT_STD_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_LSP_BINARY}"
             "${FORT_LSP_SRC_DIR}/main.ft"
             "${CMAKE_SOURCE_DIR}/src" "${FORT_FORT_SRC_DIR}"
@@ -685,7 +683,7 @@ add_dependencies(check-all check check-lang)
 # ---- format, tidy, lines -----------------------------------------------------------
 # The lint targets cover the bootstrap sources also when FORT_ENABLE_BOOTSTRAP is OFF.
 file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/bootstrap/*.c" "${CMAKE_SOURCE_DIR}/bootstrap/*.h"
+    "${CMAKE_SOURCE_DIR}/bootstrap0/*.c" "${CMAKE_SOURCE_DIR}/bootstrap0/*.h"
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
 )
 
@@ -722,7 +720,7 @@ find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy run-clang-tidy-18)
 if(FORT_RUN_CLANG_TIDY)
     add_custom_target(tidy
         COMMAND "${FORT_RUN_CLANG_TIDY}" -p "${CMAKE_BINARY_DIR}" -quiet
-                "${CMAKE_SOURCE_DIR}/bootstrap" "${FORT_TEST_DIR}"
+                "${CMAKE_SOURCE_DIR}/bootstrap0" "${FORT_TEST_DIR}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Running clang-tidy over bootstrap and test"
         VERBATIM

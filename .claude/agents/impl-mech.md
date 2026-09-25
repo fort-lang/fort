@@ -11,7 +11,7 @@ worktree and the branch.
 
 fort is a C-like systems language: immutable by default, sized arrays and spans, ownership
 (`own`/`move`), modules, checked arithmetic. It targets x86-64 Linux through GNU assembly and a
-small C runtime. You write C11 in `bootstrap/src/` or fort in `src/fort/`.
+small C runtime. You write C11 in `bootstrap0/src/` or fort in `src/fort/`.
 
 Normative order: `spec/decisions.md` (numbered `Dn.m`) and `spec/grammar.md` win over the
 specification documents, which win over comments and code. Read only what your ticket cites:
@@ -41,8 +41,8 @@ does not settle, stop, write it in the ticket's Notes and report it rather than 
    ticket file, which you edit in place at its absolute path.
 3. Commit in small units, each green under `tools/vm check`. Titles about 50 characters, bodies
    wrapped at 72, with the trailer AGENTS.md gives.
-4. Write the tests with the code: unit tests in `bootstrap/test/*_test.c` using
-   `bootstrap/test/common/test.h`, language tests in `test/lang/` in the directive format. Three
+4. Write the tests with the code: unit tests in `bootstrap0/test/*_test.c` using
+   `bootstrap0/test/common/test.h`, language tests in `test/lang/` in the directive format. Three
    lines of test per line of code.
 5. Shrink `test/lang/xfail.txt` in the same commit that makes a test pass.
 6. Squash to one commit if the ticket is a single unit of work:

@@ -2,7 +2,7 @@
 //
 // The suite asserts the shape of the document byte for byte, that it holds what the text form
 // holds. The sandbox and the captured diagnostics are driver_helpers.h;
-// bootstrap/test/common/fake_cc.sh is the `--cc` a run under `--check` must never spawn.
+// bootstrap0/test/common/fake_cc.sh is the `--cc` a run under `--check` must never spawn.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -711,7 +711,7 @@ static void check_run_then_internal_error(void) {
 
 // Runs `fn` in a forked child and writes its stdout to `path`.
 // Drops stderr and returns the child status or `FORKED_ABNORMAL`.
-// `bootstrap/test/common/fork.h` captures stderr, so this helper supplies the separate stdout
+// `bootstrap0/test/common/fork.h` captures stderr, so this helper supplies the separate stdout
 // contract.
 static int run_forked_stdout(void (*fn)(void), const char* path) {
     enum { FORKED_ABNORMAL = -1, FORKED_SETUP_FAILED = 127 };

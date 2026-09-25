@@ -1,5 +1,5 @@
 #!/bin/bash
-# bootstrap/test/common/fake_cc.sh: the --cc program for driver unit tests.
+# bootstrap0/test/common/fake_cc.sh: the --cc program for driver unit tests.
 # Record the spawned command in $FORT_FAKE_CC_LOG, one argument per line.
 # Then exit with $FORT_FAKE_CC_STATUS, which defaults to 0.
 # If set, $FORT_FAKE_CC_SIGNAL makes the script kill itself.

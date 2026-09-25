@@ -14,7 +14,7 @@ set -eu
 usage() {
     echo "usage: fixpoint.sh <build-dir> --compiler <fort>" >&2
     echo "                   [--cc <clang>]" >&2
-    echo "                   [--target <triple>] [--opt <opt>] [--entry <file>]" >&2
+    echo "                   [--opt <opt>] [--entry <file>]" >&2
     echo "                   [--std <dir>] [--source-root <dir>]" >&2
 }
 
@@ -23,7 +23,6 @@ usage() {
 # CMake passes the configured compiler and verifier. Environment variables support hand runs.
 cc=${FORT_TARGET_CC:-clang}
 opt=${FORT_OPT:-opt-18}
-target=${FORT_TARGET_TRIPLE:-x86_64-linux-gnu}
 # The current compiler. CMake passes it from the graph.
 compiler=
 entry=
@@ -45,7 +44,6 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --compiler) compiler=$2 ;;
         --cc) cc=$2 ;;
-        --target) target=$2 ;;
         --opt) opt=$2 ;;
         --entry) entry=$2 ;;
         --std) std=$2 ;;
@@ -68,6 +66,12 @@ if [ -z "$compiler" ]; then
 fi
 export QEMU_LD_PREFIX=${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}
 
+if [ ! -x "$compiler" ]; then
+    echo "fixpoint.sh: build/fort is not built" >&2
+    exit 2
+fi
+# Each stage builds for its own built target, which --help prints as the default.
+target=$("$compiler" --help | sed -n 's/^  --target <triple>.*(default \(.*\))$/\1/p')
 case "$target" in
 x86_64-linux-gnu)
     expected_triple=x86_64-unknown-linux-gnu
@@ -87,10 +91,6 @@ arm64-apple-macosx[0-9]*.[0-9]*.[0-9]*)
     ;;
 esac
 
-if [ ! -x "$compiler" ]; then
-    echo "fixpoint.sh: build/fort is not built" >&2
-    exit 2
-fi
 if [ ! -f "$entry" ] || [ ! -d "$std" ] || [ ! -d "$source_root" ]; then
     echo "fixpoint.sh: target entry, source root, or standard root is missing" >&2
     exit 2
@@ -122,7 +122,7 @@ compile() {
     # argument is what is wanted here.
     # shellcheck disable=SC2086
     "$compiler" $flags --std-dir "$std" -I "$source_root" \
-        --cc "$cc" --target "$target" \
+        --cc "$cc" \
         -o "$output" "$entry"
     if [ ! -x "$output" ]; then
         echo "fixpoint.sh: $compiler exited 0 and wrote no $output" >&2
@@ -149,10 +149,8 @@ emit() {
     local flags=$2
     local output=$3
     # `-S` stops before --cc, so it names no target compiler.
-    # It keeps --target, which names the triple that the module carries.
     # shellcheck disable=SC2086
-    "$compiler" $flags -S --std-dir "$std" -I "$source_root" --target "$target" \
-        -o "$output" "$entry"
+    "$compiler" $flags -S --std-dir "$std" -I "$source_root" -o "$output" "$entry"
 }
 
 # check_mode <name> <mode-flags> -- the fixed point in one build mode.

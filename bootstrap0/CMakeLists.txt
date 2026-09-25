@@ -105,10 +105,9 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
     if(FORT_BOOTSTRAP_E2E_TEST)
         add_test(NAME bootstrap-e2e
             COMMAND "$<TARGET_FILE:fort_bootstrap>" ${FORT_BOOTSTRAP_1_MODE_ARGS}
-                --std-dir "${FORT_BOOTSTRAP_1_DIR}/target/std"
-                -I "${FORT_BOOTSTRAP_1_DIR}/src/fort"
+                --std-dir "${FORT_BOOTSTRAP_1_DIR}/std-root"
                 --cc "${FORT_TARGET_CC_PATH}"
-                -o "${FORT_BOOTSTRAP_1_DIR}/fort" "${FORT_BOOTSTRAP_1_DIR}/target/entry/main.ft"
+                -o "${FORT_BOOTSTRAP_1_DIR}/fort" "${FORT_BOOTSTRAP_1_DIR}/src/fort/main.ft"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
         set_tests_properties(bootstrap-e2e PROPERTIES
             LABELS "unit;bootstrap"
@@ -121,7 +120,7 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
         add_dependencies(fort_bootstrap_unit_tests ${FORT_UNIT_TEST_TARGETS})
     endif()
 
-    # The driver tests spawn bootstrap/test/common/fake_cc.sh as their --cc: it
+    # The driver tests spawn bootstrap0/test/common/fake_cc.sh as their --cc: it
     # records the command line that the driver built. The check suite asserts that
     # `--check` does not start it. The conformance suite makes the same assertion
     # for runs that stop before it.
@@ -134,7 +133,7 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
     endforeach()
 
     # The emitter suites run the LLVM verifier over each emitted module.
-    # Each suite needs the verifier path. Every bootstrap/test/gen*_test.c gets it.
+    # Each suite needs the verifier path. Every bootstrap0/test/gen*_test.c gets it.
     # Adding a file covers a new suite. `opt` is a default for these tests.
     # The pipeline test and language harness require it during configuration.
     foreach(gen_suite IN LISTS FORT_UNIT_TEST_TARGETS)
@@ -154,7 +153,7 @@ if(FORT_BOOTSTRAP_BUILD_TESTS)
     foreach(std_reader runtime_sig_test check_conv_test)
         if(TARGET "${std_reader}")
             target_compile_definitions("${std_reader}"
-                PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP_1_DIR}/target/std")
+                PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP_1_DIR}/std-root")
             add_dependencies("${std_reader}" fort_bootstrap_1_source)
             set_tests_properties("${std_reader}" PROPERTIES
                 LABELS "unit;bootstrap;bootstrap-contract")

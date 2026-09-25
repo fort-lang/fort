@@ -18,17 +18,18 @@ import sys
 from pathlib import Path
 
 SOURCE_GLOBS = (
-    "bootstrap/src/*.c",
-    "bootstrap/src/*.h",
+    "bootstrap0/src/*.c",
+    "bootstrap0/src/*.h",
     "src/fort/*.ft",
+    "src/fort/*/*.ft",
     "src/lsp/*.ft",
     "std/*.ft",
     "std/darwin/*.ft",
     "std/linux/*.ft",
 )
 TEST_GLOBS = (
-    "bootstrap/test/*.c",
-    "bootstrap/test/common/*.h",
+    "bootstrap0/test/*.c",
+    "bootstrap0/test/common/*.h",
     "test/**/*.ft",
     "test/lang/ffi/*.c",
     "test/darwin/*.c",

@@ -65,11 +65,11 @@ bullet at a time and without a rewrite.
 - New C unit suites use inline source or local sandbox fixtures. Only a bootstrap-library contract
   can read the bootstrap-1 standard library. `runtime_sig_test` and `check_conv_test` are the two
   contract suites. They also have the label `bootstrap-contract`.
-- Unit tests: `bootstrap/test/<component>_test.c` with `bootstrap/test/common/test.h`; the suite
-  name is the file stem and `bootstrap/test/` already holds one per component, `runtime_test.c`
+- Unit tests: `bootstrap0/test/<component>_test.c` with `bootstrap0/test/common/test.h`; the suite
+  name is the file stem and `bootstrap0/test/` already holds one per component, `runtime_test.c`
   being the C runtime's and not the compiler's, so check the name is free before writing the file (a
   shell redirection overwrites a suite silently and the gate then reports only its absence); every
-  `bootstrap/test/*_test.c` is globbed into an executable `build/<preset>/test/<component>_test`
+  `bootstrap0/test/*_test.c` is globbed into an executable `build/<preset>/test/<component>_test`
   linked against `fort_core`, and a ctest of the same name. A `TEST` body is one macro argument: a
   comma outside parentheses (a brace initializer, for example) splits it. `#val` in an assertion
   message is the argument after macro expansion, so compare through a variable when the
@@ -87,13 +87,13 @@ bullet at a time and without a rewrite.
   - Compare a `uint64_t` with `TEST_ASSERT_EQ_UINT64`, not `TEST_ASSERT_EQ_SIZE`. `size_t` is
     `unsigned long` on darwin and `uint64_t` is `unsigned long long`, so `%zu` fails `-Wformat`.
   - Build an expected command line from `FORT_DEFAULT_CC`, `FORT_DEFAULT_TARGET` and
-    `cross_target()` in `bootstrap/test/common/driver_helpers.h`. Do not write `clang` or
+    `cross_target()` in `bootstrap0/test/common/driver_helpers.h`. Do not write `clang` or
     `x86_64-linux-gnu` in the text.
   - Capture driver output with `capture_stream()`, not `tmpfile()`. Darwin's `tmpfile()` reads
     `TMPDIR`, and 2 driver tests set `TMPDIR` to an empty or a missing directory.
   - Find the running binary with `_NSGetExecutablePath` on darwin; `/proc/self/exe` is linux only.
 - A test that must observe a program the compiler spawns uses a fake one:
-  `bootstrap/test/common/fake_cc.sh` is the `--cc` of the driver suites, it writes its own path and
+  `bootstrap0/test/common/fake_cc.sh` is the `--cc` of the driver suites, it writes its own path and
   every argument, one per line, into `$FORT_FAKE_CC_LOG` and exits with `$FORT_FAKE_CC_STATUS`, so
   the whole clang command line is one string comparison and the failure path is a variable away.
   CMake passes its path as `FORT_FAKE_CC` to the suites that name it, and to no others (a
@@ -101,21 +101,21 @@ bullet at a time and without a rewrite.
   line, `driver_check_test` that `--check` spawns nothing and `driver_conformance_test` that the
   runs which stop before `--cc` spawn nothing), since a unit test has no working directory it can
   rely on. A new suite that needs it is added to that list, not left to inherit it.
-- The code that two or more suites share lives in `bootstrap/test/common/`: `test.h`, `common.h`,
+- The code that two or more suites share lives in `bootstrap0/test/common/`: `test.h`, `common.h`,
   `fork.h`, the `<component>_helpers.h` files and `fake_cc.sh`. The suites are the `*_test.c` files
-  of `bootstrap/test/` and nothing else. A suite includes a shared header as `"common/<name>.h"`,
+  of `bootstrap0/test/` and nothing else. A suite includes a shared header as `"common/<name>.h"`,
   which resolves from the directory of the suite; no include path names `common/`. Each suite links
   `fort_core` directly. The shared code is headers only today. Its one compiled member,
-  `test/ast_dump.c`, became what `fort --ast` writes and moved to `bootstrap/src/ast_dump.c`
+  `test/ast_dump.c`, became what `fort --ast` writes and moved to `bootstrap0/src/ast_dump.c`
   (T-033). A new compiled helper goes into `common/` and needs an OBJECT library in
-  `bootstrap/CMakeLists.txt`, so that `-Werror` and clang-tidy read it once. A suite links
+  `bootstrap0/CMakeLists.txt`, so that `-Werror` and clang-tidy read it once. A suite links
   `fort_core`, so a helper may not take the name of a compiler function (`type_error` is types.h's
   error-type constructor, not a test helper).
 - clang-tidy's `readability-function-size` caps `main` at about 60 `TEST_RUN`s (statement
   threshold 800; each `TEST_RUN` expands to about 13 statements, so 89 measured 1162): split a
-  larger suite into two files with a shared `bootstrap/test/common/<component>_helpers.h` whose
+  larger suite into two files with a shared `bootstrap0/test/common/<component>_helpers.h` whose
   helpers are `static inline` so that a suite using only some of them still builds under `-Werror`.
-  `bootstrap/test/common/fork.h` runs a function in a forked child and captures its stderr and exit
+  `bootstrap0/test/common/fork.h` runs a function in a forked child and captures its stderr and exit
   status, for paths that end the process (`fatal_oom`); under asan the child runs LeakSanitizer at
   exit, so the forked function must not drop a block it allocated (blocks its still-live frames
   point to are reachable and fine).
@@ -178,7 +178,7 @@ bullet at a time and without a rewrite.
   again on 2026-09-14: a guard that reported where a child had already reported left
   `648 tests: 648 passed`. Both times one unit test went red and nothing else did. So a ticket
   that adds, moves or removes a diagnostic asserts the count where a test can read it --
-  `diag_lines()` in `bootstrap/test/*_test.c` or `check_env.errors(&e)` in `test/fort/*_test.ft` --
+  `diag_lines()` in `bootstrap0/test/*_test.c` or `check_env.errors(&e)` in `test/fort/*_test.ft` --
   and uses the `fail` test for the text and the position.
   **A diagnostic that is removed is as invisible as one that is added, and neither directive can
   see it** (T-129, the first mutation measurement of a removal). `judge_fail` asks whether an
@@ -188,7 +188,7 @@ bullet at a time and without a rewrite.
   silences `the expression expects <error>, not a constant` took `fail/constants/012` from 27
   diagnostics on 13 lines to 14 and the whole corpus from 14 such diagnostics to 0, and the
   corpus read `665 tests: 665 passed` with the guard reverted in both compilers. Three of the
-  five tests of `bootstrap/test/check_poison_test.c` went red under that mutant and
+  five tests of `bootstrap0/test/check_poison_test.c` went red under that mutant and
   `test/fort/check_test.ft` aborted. A removal therefore needs the count and nothing else will do.
   **The position a `//! error:` annotation pins is the line alone. `//! stderr:` pins the
   column** (T-128). The harness matches an annotation to a diagnostic by `(file, line)` and by
@@ -240,9 +240,9 @@ bullet at a time and without a rewrite.
   module set answers a path it has already loaded from the tree that load left, so a second
   `check_env.check_src` over one environment silently re-checks the first source and its
   assertions then pass or fail for the wrong reason; the first sink still holds the first check's
-  diagnostics as well. `check_env.reopen` is `bootstrap/test/common/check_helpers.h`'s `begin()` and
-  goes between the assertions about one source and the next check. The C helpers reset per check, so
-  a translated suite that drops the reset is the failure mode to look for.
+  diagnostics as well. `check_env.reopen` is `bootstrap0/test/common/check_helpers.h`'s `begin()`
+  and goes between the assertions about one source and the next check. The C helpers reset per
+  check, so a translated suite that drops the reset is the failure mode to look for.
 - **Run a `test/fort` binary from a scratch directory, never from `test/fort`.**
   `check_env.open` and `modules_env.open` create `sandbox<n>/` **relative to the working
   directory** (`test/fort/support/modules_env.ft:56`) and `close` never removes it (`:64`), so a
@@ -280,7 +280,7 @@ bullet at a time and without a rewrite.
   **Code several of those tests share lives in `test/fort/support/*.ft`**, which they reach with a
   second include root (`//! flags: -I ../../src/fort -I support`): a `test/fort` test is a program
   rather than a translation unit, so the `#include`d helper a C suite would use
-  (`bootstrap/test/common/types_helpers.h`) has to be an imported module (`support/types_env.ft`,
+  (`bootstrap0/test/common/types_helpers.h`) has to be an imported module (`support/types_env.ft`,
   T-032). The directory is invisible to the harness: `discover` walks `run`, `fail`, `programs` and
   the `*_test.ft` of the root and nothing else, so a test misfiled there would run nowhere and say
   nothing. `_report_misplaced_tests` closes that (T-079): a `*_test.ft` anywhere below the root
@@ -454,7 +454,7 @@ bullet at a time and without a rewrite.
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
   verifier reads and to nothing else, so `ir()` stays the emitter's own text
-  (`gen_runtime_declarations` in `bootstrap/test/common/gen_helpers.h`, which skips a name the
+  (`gen_runtime_declarations` in `bootstrap0/test/common/gen_helpers.h`, which skips a name the
   module defines). A test that needs the runtime's own definitions -- the `#8` of item 14, the
   `%fort.enum_member` of item 2, the dependency order -- calls `emit_with_runtime`, which writes a
   small `std/rt.ft` in the sandbox and names that directory. A `fn noreturn` in such a stub needs a
@@ -513,7 +513,7 @@ bullet at a time and without a rewrite.
   citation names a rule another pass holds, and each is a build error or a lint failure rather
   than a test.
   Three of the four survivors had one shape, and the shape is the reason to run this on a
-  transliterated module: the C twin is pinned by a unit test in `bootstrap/test/*_test.c` that the
+  transliterated module: the C twin is pinned by a unit test in `bootstrap0/test/*_test.c` that the
   fort port never got, while the language corpus, which judges both compilers, held the rule for
   neither. Mutating the three C lines names the three tests that hold them. The fourth survivor was
   held on neither side, which the same method measured.
@@ -524,7 +524,7 @@ bullet at a time and without a rewrite.
   **Do not edit the test tree while a batch runs.** A harness that reads a file during the write
   reports a failure that belongs to no mutation.
   **Raise each active file counter in the commit that adds the file.** `CORPUS_FILES` in
-  `bootstrap/test/parser_recovery_test.c` counts fail tests. The same name in
+  `bootstrap0/test/parser_recovery_test.c` counts fail tests. The same name in
   `test/highlight_test.py` counts its source corpus.
   T-145 adds two darwin test programs under `test/darwin/` and routes them into the grammar corpus.
   Run `tools/darwin net` on the darwin arm64 host to compare C layout and four darwin programs.
@@ -548,7 +548,7 @@ bullet at a time and without a rewrite.
   median of 6 s over a 3 s to 19 s range, against 320 s to 420 s for a round that goes on to
   `ctest -L unit` and `ctest -L lang`. 69 of 72 rounds stopped at the cheap stage.
   **A test that reads a source must not judge a round that rewrites it.** `mutate_selftest`
-  asserts the table's anchors against the live `bootstrap/src/gen*.c`. A round mutates one of
+  asserts the table's anchors against the live `bootstrap0/src/gen*.c`. A round mutates one of
   those files, so the suite went red inside the round, at the stage that runs every unit test,
   and the row read `caught` when no test of the compiler had seen the mutation. All three
   survivors reproduced wrongly. Three guards close it: the table's stage excludes the suite by
@@ -569,7 +569,7 @@ bullet at a time and without a rewrite.
   (`python3 tools/mutate.py tools/mutations/emitter_bootstrap.json --only D6.14`). Or it adds a
   row that records why the rule needs no mutation. Or, if the citation sits on a line that
   implements no rule, it says so in the row and moves the citation. The coupling is what stops an
-  audit going stale. T-046 froze `bootstrap/src` on 2026-09-14, so from that date the count moves
+  audit going stale. T-046 froze `bootstrap0/src` on 2026-09-14, so from that date the count moves
   only when a bug fix adds or removes a `Dn.m` citation in one of the four files.
   **Mutate through `tools/mutate.py`, and never leave a mutated source across a tool call.** The
   runner restores in a `finally`, reads the copy it saved rather than `git checkout`, and ends a
@@ -577,12 +577,12 @@ bullet at a time and without a rewrite.
   restores the files, builds nothing and says it measured nothing. So a restore that did not
   compile is visible at once. A mutation by hand has none of that: on 2026-09-14 two
   implementors stopped at once on a spend limit, and T-127's worktree then held a mutation of
-  `bootstrap/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
+  `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
   **One table exists today**, and it covers 4 files:
   `ls tools/mutations/*.json | wc -l` prints 1, and
-  `grep -o 'bootstrap/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
+  `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
   the four files of the C emitter, which is the `"sources"` list the runner saves. T-126 mutated
   `src/fort/check.ft` by hand and T-127 mutated both compilers by hand, because no table covers
   either.
@@ -638,7 +638,7 @@ bullet at a time and without a rewrite.
   `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
   `test/fort_lint` and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
   ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
-  writes it there, as it does for `CORPUS_FILES` in `bootstrap/test/parser_recovery_test.c`.
+  writes it there, as it does for `CORPUS_FILES` in `bootstrap0/test/parser_recovery_test.c`.
   The other `.ft` files are listed in `EXCLUDED_DIRS`, each
   because it is meant to hold a lexical error (`test/lang/fail`, `test/highlight/scopes.ft`,
   `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
@@ -785,7 +785,7 @@ bullet at a time and without a rewrite.
   retroactive. The branch figure is the one the criterion asks for. T-089 and T-092 both
   rediscovered this rule.
 - **`tools/lines.py` does not see a test written in shell or in Python either** (T-131). Its
-  `TEST_GLOBS` are `bootstrap/test/*.c`, `bootstrap/test/common/*.h`, `test/**/*.ft`,
+  `TEST_GLOBS` are `bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft`,
   `test/lang/ffi/*.c` and `test/darwin/*.c`. Its `SOURCE_GLOBS` include the two compilers,
   `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` (T-144). So a ticket whose deliverable is
   the build or a tool gets no useful figure: T-131 changed `CMakeLists.txt`, six scripts under
