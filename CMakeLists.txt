@@ -400,6 +400,22 @@ add_test(NAME lsp-binary
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(lsp-binary PROPERTIES LABELS lang)
 
+# The compiler emits the IR of the other target with a caller-selected
+# standard root. The verifier checks its form. The other host checks its ABI.
+add_test(NAME target-ir
+    COMMAND bash "${FORT_TEST_DIR}/target_ir_test.sh" "${FORT_COMPILER_BINARY}"
+            "${FORT_OPT_PATH}" "${FORT_TARGET}"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+set_tests_properties(target-ir PROPERTIES LABELS unit)
+
+# The declarations of the other target need a standard root of that target.
+# This compiler checks their names.
+add_test(NAME fort_lint_cross
+    COMMAND bash "${FORT_TEST_DIR}/cross_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+            "${FORT_TARGET}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fort_lint_cross PROPERTIES LABELS lang)
+
 # The target pipeline: the hand-written LLVM IR modules under test/ir, which
 # are complete modules. The pipeline verifies and compiles each module.
 # It links each module alone and runs it: under qemu for linux, on the host
@@ -436,14 +452,6 @@ add_test(NAME abi-probe
     COMMAND bash "${FORT_TEST_DIR}/abi/probe.sh" ${FORT_HOST_TEST_ARGS}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(core net-layout allocation-failure abi-probe PROPERTIES LABELS unit)
-
-# The linux compiler emits darwin IR with a caller-selected standard root.
-# The verifier checks its form. Separate tests check the Darwin ABI and stack.
-add_test(NAME target-ir
-    COMMAND bash "${FORT_TEST_DIR}/target_ir_test.sh" "${FORT_COMPILER_BINARY}"
-            "${FORT_STD_DIR}" "${FORT_OPT_PATH}"
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
-set_tests_properties(target-ir PROPERTIES LABELS unit)
 
 # The C helpers of the language tests are compiled for the target by the
 # harness; they also build on the host so that -Werror and clang-tidy cover
@@ -647,13 +655,6 @@ add_test(NAME fort_lint
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fort_lint PROPERTIES LABELS lang)
 
-# darwin declarations need a darwin standard root. The linux compiler checks
-# their names.
-add_test(NAME fort_lint_darwin
-    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fort_lint_darwin PROPERTIES LABELS lang)
-
 # These unit tests check synthetic index records and a fake compiler.
 # They also check test/fort_lint fixtures with the compiler in FORT_BINARY.
 add_test(NAME fort_lint_selftest
@@ -689,7 +690,8 @@ add_custom_target(check-lang
     COMMAND ${FORT_LANG_COMMAND} --check-json
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+    COMMAND bash "${FORT_TEST_DIR}/cross_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+            "${FORT_TARGET}"
     COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
     COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -776,7 +778,8 @@ endif()
 add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-    COMMAND bash "${FORT_TEST_DIR}/darwin_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+    COMMAND bash "${FORT_TEST_DIR}/cross_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
+            "${FORT_TARGET}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM

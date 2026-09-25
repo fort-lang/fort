@@ -731,8 +731,11 @@ bullet at a time and without a rewrite.
   `src/fort/*.ft` to the identifier conventions of D1.4 and to 100 columns;
   it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
-  second tokenizer cannot drift from the language. `fort_lint_darwin` uses a temporary darwin root
-  to lint `std/darwin/*.ft` with stage2 (T-144). The linux root conflicts with darwin declarations.
+  second tokenizer cannot drift from the language. `fort_lint_cross`
+  (`test/cross_fort_lint_test.sh`) lints the `std/<other>/*.ft` of the target the compiler does
+  not build for under a temporary root of that target, on both hosts (T-144); one root declares
+  one libc, so the compiler's own root cannot hold them. `target-ir` (`test/target_ir_test.sh`)
+  emits one module for that other target the same way and verifies its form on both hosts.
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
   has. `tools/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the
