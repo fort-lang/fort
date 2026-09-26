@@ -502,6 +502,36 @@ fn cross_ir_uses_the_selected_triple() void {
     assert(str.find(text, "target datalayout") < 0);
 }
 
+// `--cfg` takes `key=value` pairs, refuses a malformed pair and a compiler
+// key, and hands the target keys their documented values for either target
+// (D21.1, D21.2). A wrong value makes an array length zero, which `--check`
+// reports.
+fn cfg_pairs_are_checked_and_the_target_keys_are_the_compilers() void {
+    string[5] mut malformed = {"fort", "--check", "--cfg", "missing", "entry.ft"};
+    assert(run(malformed[0..5]) == EXIT_USAGE);
+    assert(err_has("invalid --cfg assignment 'missing'"));
+    string[5] mut reserved = {"fort", "--check", "--cfg", "target_os=value", "entry.ft"};
+    assert(run(reserved[0..5]) == EXIT_USAGE);
+    assert(err_has("cannot override compiler configuration key 'target_os'"));
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "string WANT_OS = $cfg(want_os);\n");
+    strbuf.append(&source, "string WANT_ARCH = $cfg(want_arch);\n");
+    strbuf.append(&source, "string WANT_ABI = $cfg(want_abi);\n");
+    strbuf.append(&source, "i32[($cfg(target_os) == WANT_OS ? 1 : 0)] OS = {0};\n");
+    strbuf.append(&source, "i32[($cfg(target_arch) == WANT_ARCH ? 1 : 0)] ARCH = {0};\n");
+    strbuf.append(&source, "i32[($cfg(target_abi) == WANT_ABI ? 1 : 0)] ABI = {0};\n");
+    write_file("cfg-target.ft", strbuf.view(&source));
+    string[9] mut linux_full = {"fort", "--check", "--std-dir", "std", "--target",
+                                "x86_64-linux-gnu", "--cfg",
+                                "want_os=linux,want_arch=x86_64,want_abi=", "cfg-target.ft"};
+    assert(run(linux_full[0..9]) == EXIT_OK);
+    string[9] mut mac_full = {"fort", "--check", "--std-dir", "std", "--target",
+                              "arm64-apple-macosx11.0.0", "--cfg",
+                              "want_os=macos,want_arch=aarch64,want_abi=", "cfg-target.ft"};
+    assert(run(mac_full[0..9]) == EXIT_OK);
+}
+
 // The default output names are `<entry>.ll`, `<entry>.o`, and `a.out`. Each
 // file uses the working directory or the entry file's directory.
 fn the_default_output_follows_the_mode() void {
@@ -853,6 +883,7 @@ fn main() i32 {
     target_errors_stop_before_output();
     target_forms_and_front_end_modes();
     cross_ir_uses_the_selected_triple();
+    cfg_pairs_are_checked_and_the_target_keys_are_the_compilers();
     the_default_output_follows_the_mode();
     a_syntax_error_is_exit_one();
     a_lexical_error_is_exit_one();

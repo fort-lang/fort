@@ -477,12 +477,6 @@ set_tests_properties(lang-json PROPERTIES LABELS lang)
 # out (2026-09-25, three presets).
 set_tests_properties(fort-modules lang lang-json PROPERTIES PROCESSORS ${FORT_LANG_JOBS})
 
-add_test(NAME stage2-cfg
-    COMMAND bash "${FORT_TEST_DIR}/stage2_cfg_test.sh" "${FORT_COMPILER_BINARY}"
-            "${FORT_STD_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(stage2-cfg PROPERTIES LABELS unit)
-
 add_test(NAME stage2-import-if
     COMMAND bash "${FORT_TEST_DIR}/stage2_import_if_test.sh" "${FORT_COMPILER_BINARY}"
             "${FORT_STD_DIR}"
