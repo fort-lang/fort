@@ -386,28 +386,28 @@ came here.
   callee are compiled together, the `-O1` of the `--cc` line inlines the mismatch away, and a
   convention both sides get wrong agrees with itself. The corpus can only see what the *program* can
   observe -- evaluation order, a callee writing to its parameter, a trap that must fire. Everything
-  else is pinned by the text: the assertions and goldens in `bootstrap0/test/gen*_test.c`. A ticket that touches the calling convention therefore asserts the emitted text
-  and proves the assertion by mutation -- change the emitter, watch that one test fail, change it
-  back -- rather than trusting that a run test would have caught it. The same held for the
-  `llvm.trap` of D19.7: the review broke it and all 55 suites and 280 language tests stayed green.
-  **A C mirror is the exception, and only when the mirror is optimised.** T-025 re-measured the
-  `zeroext`/`signext` swap with `test/lang/run/ffi/007` sending `i8`, `u8`, `i16`, `u16`, `char` and
-  `bool` into separately compiled helpers: with the helper at `-O0` the whole corpus stayed green,
-  with the helper at `-O1` it printed `4295032812` for `-20` and failed. An unoptimised callee
-  spills its narrow parameter to a stack slot and re-narrows it from there, which repairs the
-  caller's mistake; at `-O1` the callee keeps the argument under the `AssertSext`/`AssertZext` its
-  parameter attribute states, folds the re-narrowing away, and the wrong extension reaches the
-  arithmetic. That is why `link_command` in `test/lang/run_tests.py` passes `-O1`, matching the
-  `-O1` the driver gives the fort side: a mirror built at `-O0` silently answers a weaker question
-  than the one it was written to ask. So the emitted text in `bootstrap0/test/gen*_test.c` is where
-  a convention rule is pinned *first*, and a `run/ffi` mirror is the second, independent witness --
-  not a blind one. **Under opaque pointers a field's type in a named struct type is observable
-  through the offsets it moves and through one other window, a module-level constant initializer.**
-  A substitution that leaves every later offset unchanged is invisible to every run test and to C
-  interop, when it also keeps the struct's size and alignment. Two shapes do that. One is a
-  same-size swap: `i32` for an enum, `i64` for a `ptr`. The other is a widening that fits in padding
-  the field already had, such as `u16` written as `i32` or as `i64` in `{ u8; i32; u16; i64 }`.
-  It is **not** invisible to `opt` when the module
+  else is pinned by the text: the assertions and goldens in `bootstrap0/test/gen*_test.c`. A ticket
+  that touches the calling convention therefore asserts the emitted text and proves the assertion by
+  mutation -- change the emitter, watch that one test fail, change it back -- rather than trusting
+  that a run test would have caught it. The same held for the `llvm.trap` of D19.7: the review broke
+  it and all 55 suites and 280 language tests stayed green. **A C mirror is the exception, and only
+  when the mirror is optimised.** T-025 re-measured the `zeroext`/`signext` swap with
+  `test/lang/run/ffi/007` sending `i8`, `u8`, `i16`, `u16`, `char` and `bool` into separately
+  compiled helpers: with the helper at `-O0` the whole corpus stayed green, with the helper at `-O1`
+  it printed `4295032812` for `-20` and failed. An unoptimised callee spills its narrow parameter to
+  a stack slot and re-narrows it from there, which repairs the caller's mistake; at `-O1` the callee
+  keeps the argument under the `AssertSext`/`AssertZext` its parameter attribute states, folds the
+  re-narrowing away, and the wrong extension reaches the arithmetic. That is why `link_command` in
+  `test/lang/run_tests.py` passes `-O1`, matching the `-O1` the driver gives the fort side: a mirror
+  built at `-O0` silently answers a weaker question than the one it was written to ask. So the
+  emitted text in `bootstrap0/test/gen*_test.c` is where a convention rule is pinned *first*, and a
+  `run/ffi` mirror is the second, independent witness -- not a blind one. **Under opaque pointers a
+  field's type in a named struct type is observable through the offsets it moves and through one
+  other window, a module-level constant initializer.** A substitution that leaves every later offset
+  unchanged is invisible to every run test and to C interop, when it also keeps the struct's size
+  and alignment. Two shapes do that. One is a same-size swap: `i32` for an enum, `i64` for a `ptr`.
+  The other is a widening that fits in padding the field already had, such as `u16` written as `i32`
+  or as `i64` in `{ u8; i32; u16; i64 }`. It is **not** invisible to `opt` when the module
   holds a constant or a global of that struct type. LLVM writes such an initializer with the named
   type. It then checks each element against the type's element. T-078 printed a `ptr` field
   as `i64`. `opt-18` answered `element 1 of struct initializer doesn't match struct element type` on
@@ -534,16 +534,16 @@ after `tools/vm build debug fort`:
 printf 'fn main() i32 {\n    println(1);\n    return 0;\n}\n' > /tmp/int.ft
 printf 'fn main() i32 {\n    println(1.5);\n    return 0;\n}\n' > /tmp/flt.ft
 for p in int flt; do
-    build/debug/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
+    build/Linux/debug/fort -S --std-dir build/Linux/debug/std -o /tmp/$p.ll /tmp/$p.ft
     echo "$p $(wc -c < /tmp/$p.ll) $(grep -c '^define' /tmp/$p.ll)"
-    build/debug/fort --index --std-dir build/debug/std /tmp/$p.ft |
+    build/Linux/debug/fort --index --std-dir build/Linux/debug/std /tmp/$p.ft |
         python3 -c 'import json, sys; print(len(json.load(sys.stdin)["files"]))'
-    build/debug/fort --std-dir build/debug/std --cc "$(command -v clang)" \
+    build/Linux/debug/fort --std-dir build/Linux/debug/std --cc "$(command -v clang)" \
         -o /tmp/$p /tmp/$p.ft
     size /tmp/$p | tail -1
     for i in $(seq 7); do
         t=$(date +%s%N)
-        build/debug/fort -S --std-dir build/debug/std -o /tmp/$p.ll /tmp/$p.ft
+        build/Linux/debug/fort -S --std-dir build/Linux/debug/std -o /tmp/$p.ll /tmp/$p.ft
         echo $(( ($(date +%s%N) - t) / 1000000 ))
     done | sort -n | sed -n 4p
 done
@@ -633,9 +633,9 @@ library (T-160).
      extraction and compiler edge. The graph does not call a shell script to read the list or select
      a predecessor.
   4. **A source pin moves only when the previous source stage cannot build a required later tree.**
-     A new pin must build with its predecessor and build its successor. Both builds must pass on both
-     supported hosts. Each pin is an ancestor of HEAD. A shallow clone that lacks one pin cannot
-     bootstrap.
+     A new pin must build with its predecessor and build its successor. Both builds must pass on
+     both supported hosts. Each pin is an ancestor of HEAD. A shallow clone that lacks one pin
+     cannot bootstrap.
   5. **The C compiler has one production job.** It builds `bootstrap-1`.
 
   **The C compiler stays frozen against general language work** (T-046, T-160). Change it only to

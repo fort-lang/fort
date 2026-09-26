@@ -1,5 +1,20 @@
 cmake_minimum_required(VERSION 3.25)
+# An address-sanitized build on darwin uses Apple clang: the AddressSanitizer
+# runtime of Homebrew clang 19 hangs at exit on darwin 25 (a five-line C program
+# did not return in 20 s, 2026-09-25). The asan preset names `clang` on both
+# hosts; this is the one place the choice differs. It must precede project().
+if(CMAKE_HOST_APPLE AND FORT_SANITIZER STREQUAL "address")
+    set(CMAKE_C_COMPILER /usr/bin/clang CACHE FILEPATH "The C compiler" FORCE)
+endif()
 project(fort LANGUAGES C)
+
+# The gcc preset asks for GCC. On darwin `gcc` is Apple clang under another name,
+# so the preset would build with clang and say it built with GCC: stop instead.
+if(CMAKE_C_COMPILER MATCHES "(^|/)gcc(-[0-9]+)?$" AND NOT CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    message(FATAL_ERROR
+        "CMAKE_C_COMPILER=${CMAKE_C_COMPILER} is ${CMAKE_C_COMPILER_ID}, not GCC; "
+        "the gcc preset needs GCC, which this host does not provide")
+endif()
 
 # ---- toolchain --------------------------------------------------------------
 # Use C11 without extensions. Make POSIX.1-2008 visible.
@@ -510,14 +525,9 @@ set_tests_properties(extension_selftest PROPERTIES LABELS unit)
 # ---- the gate --------------------------------------------------------------------
 # `gate` is the merge gate of the selected target, run from this build directory:
 # `check-all`, then the workflow (configure, build, test) of each sanitizer preset of
-# the target. `tools/vm gate` runs it under the debug preset in the VM. The
-# sanitizer presets are the target's own: msan and tsan exist on linux alone
-# (notes/environment.md 6).
-if(FORT_TARGET STREQUAL "linux")
-    set(FORT_GATE_PRESETS asan ubsan)
-else()
-    set(FORT_GATE_PRESETS darwin-asan darwin-ubsan)
-endif()
+# the target: asan and ubsan, which both hosts provide. `tools/vm gate` runs it
+# under the debug preset in the VM.
+set(FORT_GATE_PRESETS asan ubsan)
 set(FORT_GATE_COMMANDS "")
 foreach(gate_preset IN LISTS FORT_GATE_PRESETS)
     list(APPEND FORT_GATE_COMMANDS

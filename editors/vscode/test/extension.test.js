@@ -18,7 +18,7 @@ const LEXICAL_FT = path.join(FIXTURES, 'lexical.ft');
 const DOCUMENT = fs.readFileSync(path.join(FIXTURES, 'check-document.json'), 'utf8');
 const NOTES = fs.readFileSync(path.join(FIXTURES, 'notes-document.json'), 'utf8');
 const LEXICAL = fs.readFileSync(path.join(FIXTURES, 'lexical-document.json'), 'utf8');
-const COMPILER = '/vagrant/build/release/fort';
+const COMPILER = '/vagrant/build/Linux/release/fort';
 const VM = path.join(PROJECT, 'tools', 'vm');
 // `tools/vm run` receives one shell argument. Its quoted path is relative to
 // the workspace folder.

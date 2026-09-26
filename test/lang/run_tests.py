@@ -22,6 +22,7 @@ import concurrent.futures
 import dataclasses
 import json
 import os
+import platform
 import re
 import resource
 import shutil
@@ -1472,8 +1473,10 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--fort",
-        default=os.environ.get("FORT", str(ROOT.parent.parent / "build" / "debug" / "fort")),
-        help="the compiler (default: $FORT or build/debug/fort)",
+        default=os.environ.get(
+            "FORT", str(ROOT.parent.parent / "build" / platform.system() / "debug" / "fort")
+        ),
+        help="the compiler (default: $FORT or build/<Host>/debug/fort)",
     )
     parser.add_argument(
         "--std-dir",

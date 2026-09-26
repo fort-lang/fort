@@ -10,6 +10,7 @@ Exit 0 when both fixtures pass, 1 for a behavior failure, or 2 for an environmen
 
 import argparse
 import os
+import platform
 import pty
 import select
 import shutil
@@ -125,8 +126,9 @@ def check(failures, what, actual, expected):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fort", default="build/debug/fort", help="the compiler to drive")
-    parser.add_argument("--std-dir", default="build/debug/std", help="passed as --std-dir")
+    host = platform.system()
+    parser.add_argument("--fort", default=f"build/{host}/debug/fort", help="the compiler to drive")
+    parser.add_argument("--std-dir", default=f"build/{host}/debug/std", help="passed as --std-dir")
     parser.add_argument("--cc", default="clang", help="clang for --cc and the link")
     args = parser.parse_args()
 

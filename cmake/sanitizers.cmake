@@ -11,6 +11,14 @@ set_property(CACHE FORT_SANITIZER PROPERTY STRINGS "" address memory thread unde
 
 set(FORT_SANITIZER_TEST_ENV "")
 
+# The presets are the same on every host. MemorySanitizer and ThreadSanitizer do
+# not exist for arm64 darwin, so the msan and tsan presets stop here, at configure
+# time, and not at the first link.
+if(APPLE AND FORT_SANITIZER MATCHES "^(memory|thread)$")
+    message(FATAL_ERROR
+        "FORT_SANITIZER=${FORT_SANITIZER} is not available on darwin; use asan or ubsan")
+endif()
+
 if(FORT_SANITIZER STREQUAL "")
     # Plain build.
 elseif(FORT_SANITIZER STREQUAL "address")
@@ -25,8 +33,8 @@ elseif(FORT_SANITIZER STREQUAL "address")
     if(APPLE)
         # LeakSanitizer does not exist on arm64 darwin: the runtime aborts with
         # "detect_leaks is not supported on this platform". The Homebrew clang
-        # AddressSanitizer runtime hangs at exit on darwin 25; the darwin-asan
-        # preset selects Apple clang.
+        # AddressSanitizer runtime hangs at exit on darwin 25; CMakeLists.txt
+        # selects Apple clang for an address build on darwin.
         set(FORT_SANITIZER_TEST_ENV
             "ASAN_OPTIONS=detect_stack_use_after_return=1:allocator_may_return_null=1")
     else()

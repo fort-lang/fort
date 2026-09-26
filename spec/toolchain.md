@@ -39,9 +39,9 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
-- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg` and `-Xcc` take the following argument; `-l<lib>`
-  is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc` arguments are
-  passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
+- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg` and `-Xcc` take the following argument;
+  `-l<lib>` is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc`
+  arguments are passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
 - `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1).
   The compiler defaults to `clang` on both targets (D14.3).
 - The default target is the compiler binary's built target (D14.1).
@@ -1516,17 +1516,17 @@ contain the substring and is for errors without a useful line, such as circular 
 ### 7.3 What the harness does
 
 `test/lang/run_tests.py [options] [filter...]` (Python 3, standard library only) runs the
-compiler named by `--fort` (default `$FORT`, else `build/debug/fort`) with `--std-dir` from
-`--std-dir` (default `$FORT_STD_DIR`, else `std` beside the compiler) and `--cc` from `--cc`
-(default `clang`, which must be a clang as `--cc` is, D14.1). `--target` (default
-`x86_64-linux-gnu`) is the triple the harness passes to `--cc` as `--target=<triple>` when it
-links a test's C helpers itself. `--verify-ir` runs `fort -S -o prog.ll <test>` for every test
-whose compilation succeeds and verifies the module with `<opt> -passes=verify -disable-output`
-(D19.1); `--opt` names that program (default `opt-18`). A module the verifier rejects is a FAIL;
-an `opt` that cannot be launched, times out or dies by a signal is an ERROR, like a compiler exit
-2 (D14.1). `--runner` names a command that runs the programs when binfmt does not, `-j` the
-number of parallel tests, `--timeout` the seconds per step, `-v` prints the commands and outputs
-of failures and `--keep` keeps the temporary directories. The
+compiler named by `--fort` (default `$FORT`, else `build/<Host>/debug/fort`, `<Host>` being `Linux`
+or `Darwin`) with `--std-dir` from `--std-dir` (default `$FORT_STD_DIR`, else `std` beside the
+compiler) and `--cc` from `--cc` (default `clang`, which must be a clang as `--cc` is, D14.1).
+`--target` (default `x86_64-linux-gnu`) is the triple the harness passes to `--cc` as
+`--target=<triple>` when it links a test's C helpers itself. `--verify-ir` runs `fort -S -o prog.ll
+<test>` for every test whose compilation succeeds and verifies the module with `<opt> -passes=verify
+-disable-output` (D19.1); `--opt` names that program (default `opt-18`). A module the verifier
+rejects is a FAIL; an `opt` that cannot be launched, times out or dies by a signal is an ERROR, like
+a compiler exit 2 (D14.1). `--runner` names a command that runs the programs when binfmt does not,
+`-j` the number of parallel tests, `--timeout` the seconds per step, `-v` prints the commands and
+outputs of failures and `--keep` keeps the temporary directories. The
 compiler runs with `test/lang` as its working directory (D14.4). Each test uses a fresh
 temporary directory as `TMPDIR`, sets `LC_ALL=C`, and disables core dumps.
 The `--target` triple names the target OS: `arm64-apple-macosxM.m.p` with three ASCII numeric
@@ -1756,11 +1756,11 @@ the token stream, the parser's speculative rewinds, constant folding at the edge
 
 ### 7.6 Coverage target (D14.6)
 
-The corpus aims at more than two lines of test for each line of source (`agents/lines.py`): `wc -l` over
-`bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` against
-`wc -l` over `bootstrap0/src/*.c`, `bootstrap0/src/*.h`, `src/fort/*.ft` and `std/*.ft`, the runtime
-among them (D13.1). The standard library is source and not test (D14.6): it is code the project
-ships, and the tests that exercise it are `test/lang/run/stdlib`. The seed tests of the
+The corpus aims at more than two lines of test for each line of source (`agents/lines.py`): `wc -l`
+over `bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c`
+against `wc -l` over `bootstrap0/src/*.c`, `bootstrap0/src/*.h`, `src/fort/*.ft` and `std/*.ft`, the
+runtime among them (D13.1). The standard library is source and not test (D14.6): it is code the
+project ships, and the tests that exercise it are `test/lang/run/stdlib`. The seed tests of the
 design phase establish the format with one example per area; the full corpus is sized as follows,
 in files:
 
@@ -1811,8 +1811,8 @@ implementable; the design is to be planned in the implementation phase.
   a listed commit cannot bootstrap. `FORT_STAGE1_COMPILER` skips the list and builds HEAD directly.
   `FORT_ENABLE_BOOTSTRAP0=OFF` requires this external compiler. Add a pin only when the current last
   pin cannot build a required later revision. A new pin must build with its predecessor and build
-  its successor. Both builds must pass on both supported host systems before the pin enters the list.
-  The C unit suites test the C implementation. Product tests use the current compiler and
+  its successor. Both builds must pass on both supported host systems before the pin enters the
+  list. The C unit suites test the C implementation. Product tests use the current compiler and
   current standard library. A successful native build proves the C-to-bootstrap-1 edge.
   External-stage1 mode registers no bootstrap tests. The project does not maintain C-to-fort parity.
 - **Driver.** Parses options (section 1), owns the module table keyed by real path, runs the

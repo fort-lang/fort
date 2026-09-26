@@ -27,7 +27,7 @@ import closure holds it, so every program carries it (D9.10). The tests under
 `test/lang/run/stdlib` call an entry point directly beside the builtin the compiler lowers to it,
 which is what holds the lowering to the text D11.7 and D11.4 fix.
 
-The build copies `std/*.ft` and `std/<target>/*.ft` into `build/<preset>/std/`, which the
+The build copies `std/*.ft` and `std/<target>/*.ft` into `build/<Host>/<preset>/std/`, which the
 compiler uses as its fallback `--std-dir` (`spec/toolchain.md` sections 1 and 2), so a new module
 is visible to `test/lang/run_tests.py` only after `tools/vm build <preset>` has copied it. The
 language tests of the library are `test/lang/run/stdlib/`.

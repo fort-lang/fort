@@ -42,7 +42,7 @@ Nothing is built on the host, so the compiler that answers is the one in the dev
 save of a `.ft` file the extension runs, in a child process and never on the UI thread:
 
 ```sh
-<workspace>/tools/vm run '/vagrant/build/release/fort --check --json [-I <root>]... <path>'
+<workspace>/tools/vm run '/vagrant/build/Linux/release/fort --check --json [-I <root>]... <path>'
 ```
 
 with the working directory set to the workspace folder the file belongs to. `tools/vm run` finds
@@ -59,12 +59,13 @@ belongs to no workspace folder is not checked, since `tools/vm run` works in the
 its own and there is nothing to say about such a file.
 
 The compiler needs one other argument at most. It finds its standard library in the `std` directory
-beside the binary (D14.1), and `/vagrant/build/release/std` sits next to
-`/vagrant/build/release/fort`, so `--std-dir` is unnecessary. A `-I` is on the line only for a file
-the window has already seen inside another file's closure, which the section below explains. The
-answers therefore come from the **release** build in the main checkout: run `tools/vm build
+beside the binary (D14.1), and `/vagrant/build/Linux/release/std` sits next to
+`/vagrant/build/Linux/release/fort`, so `--std-dir` is unnecessary. A `-I` is on the line only for a
+file the window has already seen inside another file's closure, which the section below explains.
+The answers therefore come from the **release** build in the main checkout: run `tools/vm build
 release` after a merge to keep them current. A window opened on a worktree gets that same
-compiler, since every worktree shares one VM and `/vagrant/build/release` is the main checkout's.
+compiler, since every worktree shares one VM and `/vagrant/build/Linux/release` is the main
+checkout's.
 
 The compiler answers with one JSON document (D20.2): the files it read and the diagnostics. A
 diagnostic is an error, or a note that follows no error and so stands on its own, which is shown as
@@ -147,10 +148,10 @@ visible.
 
 A run that produces no JSON document is no answer, and never an answer of "no errors": the document
 is complete or absent and never truncated (D20.1). That covers a VM that is down, a
-`/vagrant/build/release/fort` nobody has built, and a compiler that died. The diagnostics already
-on screen therefore stay, and the *fort* output channel gets the command that ran, the reason, and
-the command's stderr. The command there is the line to paste into a terminal in the workspace
-folder; running it by hand is the next step.
+`/vagrant/build/Linux/release/fort` nobody has built, and a compiler that died. The diagnostics
+already on screen therefore stay, and the *fort* output channel gets the command that ran, the
+reason, and the command's stderr. The command there is the line to paste into a terminal in the
+workspace folder; running it by hand is the next step.
 
 ## Limitations of this path
 
@@ -186,7 +187,7 @@ current:
 
 ```sh
 tools/vm run 'for f in $(git ls-files "*.ft"); do
-    out=$(/vagrant/build/release/fort --check --json "$f")
+    out=$(/vagrant/build/Linux/release/fort --check --json "$f")
     case "$out" in *"not found"*) echo "$f $out" ;; esac
 done' > /tmp/painted.txt
 wc -l < /tmp/painted.txt                                        # 191

@@ -19,20 +19,18 @@ bullet at a time and without a rewrite.
   for `fort`), `unit` and `integration` (its ctests with that label), and `check`, which runs
   `format-check`, `lint`, `unit` and `integration` and stops at the first failure. The fort
   targets carry the step's name (`check`); `bootstrap0/CMakeLists.txt` defines `bootstrap0-<step>`,
-  whose ctest runs over `build/<preset>/bootstrap` and so sees bootstrap0's tests alone; and
+  whose ctest runs over `build/<Host>/<preset>/bootstrap` and so sees bootstrap0's tests alone; and
   `<step>-all` runs the step for both components. The bootstrap0 tests carry the label
   `bootstrap0`, which the fort targets exclude (`ctest -L '^unit$' -LE '^bootstrap0$'`). Unit:
   `test/fort` (`fort-modules`), `lang_selftest`, `fort_lint_selftest`, `highlight_selftest` and
   `extension_selftest`; the 68 bootstrap0 C suites and `mutate_selftest`. Integration: the corpus
   (`lang`, `lang-json`), `fixpoint`, `tty` and `lsp-binary`; `bootstrap-e2e`. On
   linux each target runs as `tools/vm <target>`.
-- The merge gate is the `gate` target of the target's base preset (`ninja gate` in
-  `build/debug` on linux, in `build/darwin` on darwin): `check-all`, then the workflow -- configure,
-  build, test -- of each sanitizer preset of the target (`asan` and `ubsan`; `darwin-asan` and
-  `darwin-ubsan`). On darwin run
-  `cmake --preset darwin && cmake --build --preset darwin --target gate`; `tools/vm gate` does the
-  same for `debug` in the VM. The same tests register on both targets: the test graph has no
-  target-only branch since 2026-09-25.
+- The merge gate is the `gate` target of the `debug` preset (`ninja -C build/<Host>/debug gate` on
+  both hosts): `check-all`, then the workflow -- configure, build, test -- of the `asan` and `ubsan`
+  presets. On darwin run `cmake --preset debug && cmake --build --preset debug --target gate`;
+  `tools/vm gate` does the same in the VM. The same tests register on both targets: the test graph
+  has no target-only branch since 2026-09-25.
   **Never kill a guest process by pattern.** The VM is shared by every worktree, so
   `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as
   well, and each of them reads the kill as a test failure in their own branch. T-043 did it to
@@ -44,15 +42,15 @@ bullet at a time and without a rewrite.
   What a kill does **not** do is stop a ninja already running in the guest: `ssh -T` allocates no
   pty, so the guest command gets no `SIGHUP` when the connection drops. A leftover build is made
   harmless by the hold rather than prevented; `notes/environment.md` 1 says how to find one.
-  **One worktree has one `build/<preset>`, so two gates in it collide** and the collision reads as
-  a test failure rather than as contention: two ninja processes drive the same directory, one
-  rewrites an object the other is linking, and the tail of the log names whichever test lost. The
-  worktree belongs to whoever holds the ticket until they hand it back, so a coordinator re-gates
-  only after the implementor has reported, never beside it (T-087, where a coordinator gate and
-  an implementor gate ran together and the exit 1 was the collision). Two other readings cost the
-  same hour there and are worth knowing as shapes: a `tail` of a log file the run has not finished
-  writing reports the previous run's verdict, and piping the gate into `head` closes the pipe
-  early, which kills it with SIGPIPE and yields a status that has nothing to do with the tests.
+  **One worktree has one `build/<Host>/<preset>`, so two gates in it collide** and the collision
+  reads as a test failure rather than as contention: two ninja processes drive the same directory,
+  one rewrites an object the other is linking, and the tail of the log names whichever test lost.
+  The worktree belongs to whoever holds the ticket until they hand it back, so a coordinator
+  re-gates only after the implementor has reported, never beside it (T-087, where a coordinator gate
+  and an implementor gate ran together and the exit 1 was the collision). Two other readings cost
+  the same hour there and are worth knowing as shapes: a `tail` of a log file the run has not
+  finished writing reports the previous run's verdict, and piping the gate into `head` closes the
+  pipe early, which kills it with SIGPIPE and yields a status that has nothing to do with the tests.
   Capture the whole output to a file under the worktree, wait for the process, and report the
   exit status the shell gives (`tools/vm gate > build/gate.log 2>&1; echo $?`).
 
@@ -88,15 +86,15 @@ bullet at a time and without a rewrite.
   name is the file stem and `bootstrap0/test/` already holds one per component, `runtime_test.c`
   being the C runtime's and not the compiler's, so check the name is free before writing the file (a
   shell redirection overwrites a suite silently and the gate then reports only its absence); every
-  `bootstrap0/test/*_test.c` is globbed into an executable `build/<preset>/test/<component>_test`
-  linked against `fort_core`, and a ctest of the same name. A `TEST` body is one macro argument: a
-  comma outside parentheses (a brace initializer, for example) splits it. `#val` in an assertion
-  message is the argument after macro expansion, so compare through a variable when the
-  expected text matters. Suites are ordinary C11: no `__VA_OPT__`, and `-Wtype-limits` (gcc)
-  rejects assertions that are always true, such as `TEST_ASSERT_GE_SIZE(n, 0)`. The
-  `TEST_ASSERT_*_INT64`/`_SIZE` operands are printed with `PRId64`/`%zu`, so cast plain
-  literals and `long` values (`(int64_t)0`) or `-Wformat` fails the build. A suite whose
-  literals are the test data (sample values, expected texts) wraps them in
+  `bootstrap0/test/*_test.c` is globbed into an executable
+  `build/<Host>/<preset>/test/<component>_test` linked against `fort_core`, and a ctest of the same
+  name. A `TEST` body is one macro argument: a comma outside parentheses (a brace initializer, for
+  example) splits it. `#val` in an assertion message is the argument after macro expansion, so
+  compare through a variable when the expected text matters. Suites are ordinary C11: no
+  `__VA_OPT__`, and `-Wtype-limits` (gcc) rejects assertions that are always true, such as
+  `TEST_ASSERT_GE_SIZE(n, 0)`. The `TEST_ASSERT_*_INT64`/`_SIZE` operands are printed with
+  `PRId64`/`%zu`, so cast plain literals and `long` values (`(int64_t)0`) or `-Wformat` fails the
+  build. A suite whose literals are the test data (sample values, expected texts) wraps them in
   `// NOLINTBEGIN(readability-magic-numbers)` with a comment saying so rather than naming each.
   The sanitizer presets run the unit tests with `allocator_may_return_null=1` (ctest sets the
   environment, `cmake/sanitizers.cmake`) because the runtime's out-of-memory path is tested with
@@ -256,7 +254,7 @@ bullet at a time and without a rewrite.
   at all. A ticket that adds a pass reads `xfail.txt` for the directories its pass now walks and
   writes one test per class they cover, rather than trusting the corpus it can see.
 - A new `std/*.ft` reaches the language harness only after `tools/vm build <preset>` copies it
-  into `build/<preset>/std`: running `run_tests.py` by hand against a source
+  into `build/<Host>/<preset>/std`: running `run_tests.py` by hand against a source
   that has not been copied reports `module 'std.x' not found`. `test/lang/run/stdlib` is where a
   library module is tested.
 
@@ -437,12 +435,12 @@ bullet at a time and without a rewrite.
   the descriptors, the loop's status as the process status -- were covered by nothing until
   `test/lsp_binary_test.sh` fed the binary a recorded script (ctest `lsp-binary`, label lang,
   since it runs an x86-64 binary under qemu). Hold such a script against a wrong binary before
-  trusting it: this one exits 1 for `/bin/cat` and for `build/<preset>/fort` (T-064).
+  trusting it: this one exits 1 for `/bin/cat` and for `build/<Host>/<preset>/fort` (T-064).
 
 ## 5. Product tests and the fixed point
 
-- Product tests use `build/<preset>/fort` and `build/<preset>/std`. They do not compare the C
-  compiler with the fort compiler.
+- Product tests use `build/<Host>/<preset>/fort` and `build/<Host>/<preset>/std`. They do not
+  compare the C compiler with the fort compiler.
 - The ctest `fixpoint` compiles HEAD twice. It compares the two LLVM modules and the two compiler
   binaries. It also verifies both modules with LLVM.
 - A successful native build proves the bootstrap edge. The C compiler builds bootstrap-1.
@@ -635,8 +633,8 @@ bullet at a time and without a rewrite.
 - The TextMate grammar is checked by `test/highlight_test.py` (ctest `highlight_selftest`, label
   `unit`, run from `test/`): it reads the D2.4 keyword lists and the D2.10 operator list out of
   `spec/decisions.md` and the same sets out of the grammar, so the two cannot drift. It reads them
-  through `decisions.rule_of` (`test/decisions.py`), which returns the `rule` field of one entry, and
-  `test/fort_lint_test.py` reads the D20.3 kind list the same way (T-100): a test that opens the
+  through `decisions.rule_of` (`test/decisions.py`), which returns the `rule` field of one entry,
+  and `test/fort_lint_test.py` reads the D20.3 kind list the same way (T-100): a test that opens the
   decision log calls that one parser rather than matching the entry shape itself, and it collapses
   the whitespace of the rule before it searches for a sentence, because the rule wraps at 100
   columns and a line break must not decide whether a test passes. That only

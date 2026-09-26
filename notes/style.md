@@ -112,15 +112,15 @@ shebang.
   `WarningsAsErrors: '*'` means a real one would have failed the gate. Check in the guest before
   acting on an editor's warning, and never edit code to satisfy a check the project does not run.
   `tools/vm format` reformats. Do not write a C block comment (`/* */`), in the test helpers
-  under `bootstrap0/test/` and `test/lang/ffi/` too; no tool rejects one since 2026-09-25. Two gaps of clang-tidy 18 are
-  covered by review: `bugprone-unused-return-value` takes function names, not patterns (patterns
-  arrive in clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the
-  project's own functions are unchecked; and **clang-tidy 18's macro-argument blind spot covers
-  `readability-identifier-naming` as well as `readability-magic-numbers`**, so nothing inside a
-  `TEST(name, { ... })` body is checked for either -- a `static const char program[]` there draws
-  no `invalid case style for static constant` while the same declaration at ordinary source
-  location does. An experiment that renames an identifier *inside* a `TEST` body and sees no
-  complaint has measured nothing; move the declaration out, or read the convention off a
+  under `bootstrap0/test/` and `test/lang/ffi/` too; no tool rejects one since 2026-09-25. Two gaps
+  of clang-tidy 18 are covered by review: `bugprone-unused-return-value` takes function names, not
+  patterns (patterns arrive in clang-tidy 19), so `.clang-tidy` lists the C library and POSIX
+  functions and the project's own functions are unchecked; and **clang-tidy 18's macro-argument
+  blind spot covers `readability-identifier-naming` as well as `readability-magic-numbers`**, so
+  nothing inside a `TEST(name, { ... })` body is checked for either -- a `static const char
+  program[]` there draws no `invalid case style for static constant` while the same declaration at
+  ordinary source location does. An experiment that renames an identifier *inside* a `TEST` body and
+  sees no complaint has measured nothing; move the declaration out, or read the convention off a
   comparable one in a `main` (`SOURCE` in `bootstrap0/test/gen_control_test.c`).
   **A suite's `main` trips `readability-function-size` at 61 tests**, because `TEST_RUN` expands
   to thirteen statements and the check's default threshold is 800. The number measures the macro
@@ -143,7 +143,7 @@ shebang.
   namespace (D7.9). `tools/fort_lint.py` enforces exactly that, and the 100-column wrap, over
   `std/` and `src/fort/`; nothing formats `.ft`, so indentation and spacing are still written by
   hand and read by review. Run it with `tools/vm lint`, or by hand as
-  `tools/vm run 'python3 tools/fort_lint.py --fort build/debug/fort <file.ft>'`.
+  `tools/vm run 'python3 tools/fort_lint.py --fort build/Linux/debug/fort <file.ft>'`.
 
 ## 4. Markdown and specification text
 

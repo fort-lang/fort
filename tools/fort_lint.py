@@ -4,7 +4,8 @@
 The tool reads `fort --index` output instead of parsing fort again. It checks each imported
 file once and reports problems as `<file>:<line>:<col>: <message>`.
 
-Use `fort_lint.py --fort build/<preset>/fort [--target linux|darwin] [-I dir ...] [file.ft ...]`.
+Use `fort_lint.py --fort build/<Host>/<preset>/fort [--target linux|darwin] [-I dir ...]
+[file.ft ...]`.
 Without file arguments, the tool checks the source sets of the target except SKIPPED. The
 target selects `std/<target>/*.ft`: a standard root declares one libc, so each target's
 modules are checked under the root of that target, on its own host.
@@ -187,7 +188,7 @@ def real_path(root, recorded, cache):
     """The real path of a file name a record or the file set spells.
 
     An import resolves to the library copy beside the compiler. Thus, one
-    module closure also has records below build/<preset>/std. Real paths make
+    module closure also has records below build/<Host>/<preset>/std. Real paths make
     different spellings of one file equal. The cache holds one entry for each
     distinct name. One run names 33000 records across 40 files, and
     os.path.realpath calls the system for each name component. The recorded

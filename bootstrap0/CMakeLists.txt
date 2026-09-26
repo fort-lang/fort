@@ -5,7 +5,7 @@
 # - the tools: FORT_TARGET_CC_PATH, FORT_OPT_PATH and FORT_PYTHON3.
 # - the tests: FORT_TEST_DIR and FORT_SANITIZER_TEST_ENV.
 #
-# The binary directory of this file is build/<preset>/bootstrap, so the
+# The binary directory of this file is build/<Host>/<preset>/bootstrap, so the
 # compiler is bootstrap/fort. The parent builds its chain of source compilers
 # from fort_bootstrap0. The e2e test below does not use that chain.
 

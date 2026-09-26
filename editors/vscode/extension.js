@@ -10,7 +10,7 @@ const vscode = require('vscode');
 const check = require('./lib/check');
 
 // Use the release compiler in the development VM.
-const COMPILER = '/vagrant/build/release/fort';
+const COMPILER = '/vagrant/build/Linux/release/fort';
 
 // Bound a stalled compiler and output from a large module closure.
 const CHECK_TIMEOUT_MS = 60000;

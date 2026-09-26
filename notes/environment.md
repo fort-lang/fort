@@ -117,14 +117,14 @@ without a rewrite.
 
 - **Do not run a binary in the slot that did not build it.** The two slots share one build
   directory through the VirtualBox shared folder, and the folder serves an executable's pages from
-  a cache that `md5sum` does not read. T-135 built `build/debug/fort` in slot 1 and ran it in slot
-  2: both slots reported the md5 `786cb6b9559f368f9399d2a52af43164`, slot 1 answered with the
+  a cache that `md5sum` does not read. T-135 built `build/Linux/debug/fort` in slot 1 and ran it in
+  slot 2: both slots reported the md5 `786cb6b9559f368f9399d2a52af43164`, slot 1 answered with the
   compiler in that file and slot 2 answered with the compiler it had built there itself an hour
   before. `ninja` said `no work to do`, because the file was current; only the mapping was stale.
   The symptom is a test that fails in one slot and passes in the other with the same bytes, which
   reads as a flaky test and is not one. Two cures: run the binary in the slot that built it, or
-  copy it into the guest first (`cp build/debug/fort /tmp/f && /tmp/f ...`), which T-135 used to
-  prove the diagnosis, since the copy answered correctly from the same md5. Use the second slot
+  copy it into the guest first (`cp build/Linux/debug/fort /tmp/f && /tmp/f ...`), which T-135 used
+  to prove the diagnosis, since the copy answered correctly from the same md5. Use the second slot
   for a build of its own, never for a run against the first slot's build directory.
 - **Two VMs, both from the main checkout, selected by `FORT_VM_SLOT`** (T-114, set by the user
   on 2026-09-13: two VMs at all times, both in use). The host has 10 physical cores and one
@@ -147,14 +147,14 @@ without a rewrite.
   branch that added the slot logic failed with "machine fort-dev-fort already exists".
   A gate is reused only on the same source SHA with the same `build/` outputs; a doubt means a
   rerun (the identity record of T-148 and its darwin form of T-147 were retired on 2026-09-25).
-- **Every `tools/vm` subcommand that drives `build/<preset>` holds its worktree, and a build is
-  stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `gate` and
-  every development target (each step, its `bootstrap0-` form and its `-all` form,
+- **Every `tools/vm` subcommand that drives `build/<Host>/<preset>` holds its worktree, and a build
+  is stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `gate`
+  and every development target (each step, its `bootstrap0-` form and its `-all` form,
   `notes/testing.md` 1). **`run` and
   `ssh` take no hold**: the first runs whatever it is given, and the second is an interactive
   shell that may sit open for hours. So a build started through `run` is the one way round the
   hold. One worktree
-  has one `build/<preset>`, so two gates in it make two ninja processes rewrite each other's
+  has one `build/<Host>/<preset>`, so two gates in it make two ninja processes rewrite each other's
   objects and the log names whichever test lost -- a collision that reads as a test failure
   (T-087; again 2026-09-13, an orphan at ppid 1 driving `fort-t064` for 23 minutes beside the
   live gate). The gate now writes its pid to `build/vm-hold.pid`, refuses to start while that pid is
@@ -274,7 +274,7 @@ without a rewrite.
   T-125 also measured the worse face of it.
   An in-place restore inside the guest, followed by a rebuild, left a **compiler that linked and
   ran and was wrong**: `check_conv_test`, `check_extern_test` and `check_const_test` went red on
-  diagnostics the restored source cannot produce, and `build/debug/fort --check` printed
+  diagnostics the restored source cannot produce, and `build/Linux/debug/fort --check` printed
   `constant expression out of range` on a program with no constant in it. No build error said so.
   `ninja -t clean` and a full rebuild cleared it, and the same three suites then passed.
 - **A mutation harness must restore on the path it does not plan to take, and must prove the
@@ -299,9 +299,9 @@ without a rewrite.
   and the suite keeps failing on text the file no longer holds; `md5sum` in the guest reads the
   new bytes and dropping the caches does not help, because it is the timestamp and not the
   content that is stale. Delete that target's object
-  (`build/<preset>/CMakeFiles/<target>.dir/<path>.o`; a target of `bootstrap0/CMakeLists.txt`
-  keeps it in `build/<preset>/bootstrap/CMakeFiles`) and build again. A mutation experiment --
-  break a rule in the compiler, watch the test go red, restore it, watch it go green -- runs into
+  (`build/<Host>/<preset>/CMakeFiles/<target>.dir/<path>.o`; a target of `bootstrap0/CMakeLists.txt`
+  keeps it in `build/<Host>/<preset>/bootstrap/CMakeFiles`) and build again. A mutation experiment
+  -- break a rule in the compiler, watch the test go red, restore it, watch it go green -- runs into
   this more than anything else, because every step rewrites a file the last step just built from,
   and a stale mtime makes the next step report the previous binary's colours. Edit and restore
   from the host, `touch` the sources there, and prove the restore by comparing the rebuilt
@@ -357,18 +357,23 @@ without a rewrite.
 
 ## 5. The build
 
-- Presets (`CMakePresets.json`, Ninja, clang unless noted): `linux`, `darwin`, `debug`,
-  `release` (RelWithDebInfo),
-  `gcc`, `asan`, `msan`, `tsan`, `ubsan` (the last four set `FORT_SANITIZER` for
-  `cmake/sanitizers.cmake`, which instruments every native target but never the cross-compiled
-  runtime object). `tools/vm workflow <preset>` configures, builds and runs ctest; build
-  directories are `build/<preset>` inside the worktree. `-Wall -Wextra -Wpedantic -Werror
-  -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every C target.
+- Presets (`CMakePresets.json`, Ninja, clang unless noted): `debug`, `release`
+  (RelWithDebInfo), `asan`, `ubsan`, `msan`, `tsan` and `gcc`; the sanitizer presets set
+  `FORT_SANITIZER` for `cmake/sanitizers.cmake`, which instruments every native target but never
+  the cross-compiled runtime object. **The presets are the same on every host** (2026-09-26): the
+  host decides the target, and a preset the host cannot provide stops at configure time with its
+  reason -- `msan` and `tsan` on darwin (no MemorySanitizer or ThreadSanitizer for arm64 darwin),
+  `gcc` where `gcc` is Apple clang. `asan` on darwin builds with Apple clang (`/usr/bin/clang`,
+  set in `CMakeLists.txt` before `project()`), because the Homebrew clang 19 AddressSanitizer
+  runtime hangs at exit on darwin 25. `tools/vm workflow <preset>` configures, builds and runs
+  ctest; build directories are `build/<Host>/<preset>` inside the worktree. `-Wall -Wextra
+  -Wpedantic -Werror -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every
+  C target.
 - C-started mode (`FORT_ENABLE_BOOTSTRAP0=ON`) adds `bootstrap0/CMakeLists.txt` with the binary
-  directory `build/<preset>/bootstrap`. That file builds `fort_core` and `fort_bootstrap0`. It sets
-  its own C11 settings, warnings and definitions. It reads the target and the tool paths from the
-  top-level file, and it does not configure alone. The top-level chain starts at `fort_bootstrap0`,
-  which builds bootstrap-1 (T-160). Each source pin builds the next one.
+  directory `build/<Host>/<preset>/bootstrap`. That file builds `fort_core` and `fort_bootstrap0`.
+  It sets its own C11 settings, warnings and definitions. It reads the target and the tool paths
+  from the top-level file, and it does not configure alone. The top-level chain starts at
+  `fort_bootstrap0`, which builds bootstrap-1 (T-160). Each source pin builds the next one.
   `bootstrap0/extract_pin.sh <sha> <dir> <linux|darwin>` extracts `src/fort`, `std` and
   `tools/assemble_std.sh` of a pin with `git archive`, moves the pin's `std` to `<dir>/std-pin` and
   runs the pin's own `tools/assemble_std.sh`, which writes the pin's standard root for the target to
@@ -379,12 +384,12 @@ without a rewrite.
 - `FORT_BOOTSTRAP0_BUILD_TESTS` (default OFF; every preset sets it ON) adds the C unit tests on
   linux and on darwin. `FORT_BOOTSTRAP0_E2E_TEST` (default ON, and OFF when
   `FORT_BOOTSTRAP0_BUILD_TESTS` is OFF) adds the ctest `bootstrap-e2e`: bootstrap-0 builds
-  bootstrap-1 in `build/<preset>/bootstrap/e2e/bootstrap1`. That tree is not the tree of the chain. The
-  contract suites read its standard root, so it is extracted whenever the tests are on.
+  bootstrap-1 in `build/<Host>/<preset>/bootstrap/e2e/bootstrap1`. That tree is not the tree of the
+  chain. The contract suites read its standard root, so it is extracted whenever the tests are on.
 - External-stage1 mode builds only HEAD with `FORT_STAGE1_COMPILER`. It does not create C
   compiler or C unit-test targets.
   Both modes build `fort_std`, a copy of
-  `std/*.ft` and `std/<target>/*.ft` in `build/<preset>/std`, which is
+  `std/*.ft` and `std/<target>/*.ft` in `build/<Host>/<preset>/std`, which is
   what the compiler reads as `--std-dir`; `FORT_TARGET_CC`, a clang (default `clang`) with
   `--target=${FORT_TARGET_TRIPLE}` (default `x86_64-linux-gnu`), is what the driver runs over the
   emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` covers
@@ -400,20 +405,20 @@ without a rewrite.
   working tree**, so a file that is only written or only staged counts as 0 lines and the ratio
   answers about the last commit: commit first, then measure (T-093); its own tests are
   `agents/lines_test.py`).
-  `tools/vm <target> [preset]` runs one. CMake detects Linux or Darwin from the host system.
-  The `linux` and `darwin` presets set no `FORT_TARGET` cache value.
+  `tools/vm <target> [preset]` runs one. CMake detects Linux or Darwin from the host system; no
+  preset sets `FORT_TARGET`.
 - **The `darwin` build copies target library modules** (T-145, T-152).
-  `cmake --workflow --preset darwin` builds and tests on a Darwin host.
+  `cmake --workflow --preset debug` builds and tests on a Darwin host.
   `fort_std` copies `std/*.ft` and `std/darwin/*.ft` to the standard root: the target's
   `libc.ft`, `net.ft` and `os.ft` stand only in `std/linux/` and `std/darwin/`.
-  The root holds 13 fort files under `build/darwin/std`.
-  `build/darwin/fort` loads that root when a program imports `std.net`.
+  The root holds 13 fort files under `build/Darwin/debug/std`.
+  `build/Darwin/debug/fort` loads that root when a program imports `std.net`.
 - A CMake variable derived from a cache variable must not be cached itself: `find_program`
   caches by default, so `FORT_TARGET_CC_PATH` kept resolving to the old program after
   `FORT_TARGET_CC` changed in an existing build directory, and the build then ran gcc with
   clang's arguments. It uses `NO_CACHE`; check for the same trap before adding a `find_program`
-  or `find_file` whose `NAMES` come from a cache variable, or delete `build/<preset>` after such
-  a change.
+  or `find_file` whose `NAMES` come from a cache variable, or delete `build/<Host>/<preset>` after
+  such a change.
 - Put generated source that a CTest reads under an `ALL` target. `tools/vm workflow` builds
   default targets before CTest starts (T-141).
 - The `gcc` preset is the project's only cross-compiler check and it is **not** part of the gate,
@@ -428,12 +433,12 @@ without a rewrite.
   (`join_sandbox_path`, `gen_join_path`), never widen the buffer or cast the result away. A guard
   only gcc enforces is a guard no test holds, so assert each one -- the call sites too, not only
   the helper -- as `bootstrap0/test/modules_test.c` and `bootstrap0/test/gen_test.c` do.
-- Binaries: `build/<preset>/bootstrap/fort` is the C compiler.
-  `build/<preset>/bootstrap/bootstrap-N/fort` is source pin N from `tools/bootstrap.ref`, which
-  starts at bootstrap-1. `build/<preset>/fort` is HEAD built by the last source pin (T-155).
-  Stage1 is the compiler that builds HEAD: the last pin, or `FORT_STAGE1_COMPILER`. Stage2 is
-  `build/<preset>/fort`, and `tools/fixpoint.sh` builds stage3 and stage4 from it. Text before
-  2026-09-24 calls the C compiler stage1 and the first pin bootstrap-0.
+- Binaries: `build/<Host>/<preset>/bootstrap/fort` is the C compiler.
+  `build/<Host>/<preset>/bootstrap/bootstrap-N/fort` is source pin N from `tools/bootstrap.ref`,
+  which starts at bootstrap-1. `build/<Host>/<preset>/fort` is HEAD built by the last source pin
+  (T-155). Stage1 is the compiler that builds HEAD: the last pin, or `FORT_STAGE1_COMPILER`. Stage2
+  is `build/<Host>/<preset>/fort`, and `tools/fixpoint.sh` builds stage3 and stage4 from it. Text
+  before 2026-09-24 calls the C compiler stage1 and the first pin bootstrap-0.
   CMake validates the list and owns all extraction and build edges. `FORT_STAGE1_COMPILER` names an
   external compiler and skips the list. `FORT_ENABLE_BOOTSTRAP0=OFF` requires that external path.
   `FORT_ENABLE_BOOTSTRAP0=ON` rejects that external path. External-stage1 mode reads no pin
@@ -448,8 +453,8 @@ without a rewrite.
   made it, and the guest reaches that store through the symlink provisioning makes (see the git
   entry below). It therefore does **not** work in the guest of a VM a worktree owns, for the reason
   that entry gives.
-  `build/<preset>/fort-lsp` is the language server. The `fort_lsp` target builds it from
-  `src/lsp/main.ft` with `build/<preset>/fort`.
+  `build/<Host>/<preset>/fort-lsp` is the language server. The `fort_lsp` target builds it from
+  `src/lsp/main.ft` with `build/<Host>/<preset>/fort`.
 - **A ninja target may not have the name of an output path in the same directory.** `fort_lsp`
   writing `${CMAKE_BINARY_DIR}/fort_lsp` configures cleanly and then fails the build with
   `ninja: error: build.ninja:2880: multiple rules generate fort_lsp`, preceded by
@@ -471,7 +476,7 @@ without a rewrite.
   clang does). The three tool variables are `NO_CACHE`; a build directory configured before
   2026-09-25 still holds `FORT_CLANG_FORMAT` and `FORT_RUN_CLANG_TIDY` in its cache, and
   `find_program` skips its search for a variable that the cache defines: run
-  `cmake -U FORT_CLANG_FORMAT -U FORT_RUN_CLANG_TIDY --preset darwin` once. Check the host tools
+  `cmake -U FORT_CLANG_FORMAT -U FORT_RUN_CLANG_TIDY --preset debug` once. Check the host tools
   before the build:
 
   ```sh
@@ -487,15 +492,15 @@ without a rewrite.
   ```
 
   The verifier is the `FORT_OPT` cache value (`/opt/homebrew/bin/opt` by default on darwin);
-  pass `-DFORT_OPT:FILEPATH=<path>` to `cmake --preset darwin` only when that tool verifies
+  pass `-DFORT_OPT:FILEPATH=<path>` to `cmake --preset debug` only when that tool verifies
   LLVM IR. Configure and build the `darwin` compiler and language server on the darwin host:
 
   ```sh
-  cmake --workflow --preset darwin
+  cmake --workflow --preset debug
   ```
 
-  `build/darwin/fort` is the compiler from the CMake graph.
-  `build/darwin/fort-lsp` is the `darwin` language server.
+  `build/Darwin/debug/fort` is the compiler from the CMake graph.
+  `build/Darwin/debug/fort-lsp` is the `darwin` language server.
   The compiler and language server use the target that CMake selects. The build calls `tools/vm`
   zero times while it builds the source chain and tests the fixed point.
   The host scripts take the SDK from `xcrun --sdk macosx --show-sdk-path` and pass it as
@@ -503,17 +508,14 @@ without a rewrite.
   Run the `darwin` gate:
 
   ```sh
-  cmake --preset darwin && cmake --build --preset darwin --target gate > build/darwin-gate.log 2>&1
+  cmake --preset debug && cmake --build --preset debug --target gate > build/Darwin/gate.log 2>&1
   ```
 
-  The darwin gate is the `gate` target of the `darwin` preset (`notes/testing.md` 1):
-  `check-all`, then the `darwin-asan` and `darwin-ubsan` workflows. The
-  same tests register on both targets; the gate excludes no corpus fixture. `darwin-asan`
-  selects Apple clang (`/usr/bin/clang`): the Homebrew clang 19 address sanitizer runtime hangs
-  at exit on darwin 25 (measured 2026-09-25 on a five-line C program), and LeakSanitizer does
-  not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops `detect_leaks=1` there. There is
-  no `darwin-msan` and no `darwin-tsan`: MemorySanitizer is linux-only and ThreadSanitizer needs
-  no run, since nothing here has threads.
+  The darwin gate is the `gate` target of the `debug` preset (`notes/testing.md` 1): `check-all`,
+  then the `asan` and `ubsan` workflows, as on linux. The same tests register on both targets;
+  the gate excludes no corpus fixture. On darwin `asan` builds with Apple clang (section 5), and
+  LeakSanitizer does not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops
+  `detect_leaks=1` there (measured 2026-09-25).
 
 - An ssh `ControlPath` under `os.tmpdir()` does not work on macOS: the host's temporary directory
   is `/var/folders/<...>/T`, ssh binds the socket under a temporary name of its own, and the total
@@ -536,9 +538,9 @@ without a rewrite.
   `bootstrap0/test/driver_check_test.c` is what pins it: an absolute path there would put every
   record outside the workspace and the extension would go **silent** rather than wrong, which is the
   worst failure shape an editor has. What comes back absolute is what the compiler found for itself
-  -- the standard library under `/vagrant/build/release/std` -- and those files are the guest's, so
-  an editor drops them rather than painting a path the host cannot open. The argument of `run` is
-  handed to a shell in the guest, so a path is quoted before it goes in.
+  -- the standard library under `/vagrant/build/Linux/release/std` -- and those files are the
+  guest's, so an editor drops them rather than painting a path the host cannot open. The argument of
+  `run` is handed to a shell in the guest, so a path is quoted before it goes in.
 - **git does not work in the guest of a VM that a worktree owns.** `/vagrant` is then the worktree,
   and the worktree's `.git` file names `<main checkout>/.git/worktrees/<name>`, which that guest
   has no path to. `git diff main...HEAD` exits 128, and `agents/lines.py --since main` ends in a
