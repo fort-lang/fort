@@ -1669,9 +1669,13 @@ class EndToEnd(TempRoot):
         )
 
     def test_timeouts(self):
+        # The budget is 5 s and not 1 s: under a full gate the fake compiler of
+        # the second test took more than 1 s to start, and the harness then
+        # reported a compiler timeout where the program timeout was expected
+        # (darwin, 2026-09-25, three presets building at once).
         write(self.corpus, "run/control/001_slow_compiler.ft", "//! run\n//@ hang\n")
         write(self.corpus, "run/control/002_slow_program.ft", "//! run\n//@ program sleep 30\n")
-        status, lines = self.run_main("--timeout", "1")
+        status, lines = self.run_main("--timeout", "5")
         self.assertEqual(
             lines[:2],
             [
