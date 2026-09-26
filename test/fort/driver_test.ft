@@ -532,6 +532,49 @@ fn cfg_pairs_are_checked_and_the_target_keys_are_the_compilers() void {
     assert(run(mac_full[0..9]) == EXIT_OK);
 }
 
+// One source selects a different import for each target (D21.3). The index
+// and the emitted module hold the selected module and nothing of the other.
+fn a_conditional_import_follows_the_target() void {
+    assert(make_directory("target"));
+    write_file("target/linux_dep.ft",
+               "fn selected_value() i32 { return 0; }\nfn linux_only() i32 { return 0; }\n");
+    write_file("target/darwin_dep.ft",
+               "fn selected_value() i32 { return 0; }\nfn darwin_only() i32 { return 0; }\n");
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "$if ($cfg(target_os) == \"linux\") {\n");
+    strbuf.append(&source, "    import linux_dep as chosen;\n} else {\n");
+    strbuf.append(&source, "    import darwin_dep as chosen;\n}\n");
+    strbuf.append(&source, "fn main() i32 { return chosen.selected_value(); }\n");
+    write_file("target/main.ft", strbuf.view(&source));
+    string[9] mut linux_index_full = {"fort", "--index", "--target", "x86_64-linux-gnu",
+                                      "--std-dir", "std", "-I", "target", "target/main.ft"};
+    assert(run(linux_index_full[0..9]) == EXIT_OK);
+    assert(out_has("linux_dep") && !out_has("darwin_dep"));
+    string[9] mut mac_index_full = {"fort", "--index", "--target", "arm64-apple-macosx11.0.0",
+                                    "--std-dir", "std", "-I", "target", "target/main.ft"};
+    assert(run(mac_index_full[0..9]) == EXIT_OK);
+    assert(out_has("darwin_dep") && !out_has("linux_dep"));
+    string[11] mut linux_ir = {"fort", "-S", "--target", "x86_64-linux-gnu", "--std-dir", "std",
+                               "-I", "target", "-o", "target-linux.ll", "target/main.ft"};
+    assert(run(linux_ir[0..11]) == EXIT_OK);
+    string[11] mut mac_ir = {"fort", "-S", "--target", "arm64-apple-macosx11.0.0", "--std-dir",
+                             "std", "-I", "target", "-o", "target-mac.ll", "target/main.ft"};
+    assert(run(mac_ir[0..11]) == EXIT_OK);
+    strbuf.str_buf mut module = strbuf.create();
+    defer strbuf.free(&module);
+    assert(io.read_file("target-linux.ll", &module));
+    string linux_text = strbuf.view(&module);
+    assert(str.find(linux_text, "linux_only") >= 0);
+    assert(str.find(linux_text, "darwin_only") < 0);
+    strbuf.str_buf mut mac_module = strbuf.create();
+    defer strbuf.free(&mac_module);
+    assert(io.read_file("target-mac.ll", &mac_module));
+    string mac_text = strbuf.view(&mac_module);
+    assert(str.find(mac_text, "darwin_only") >= 0);
+    assert(str.find(mac_text, "linux_only") < 0);
+}
+
 // The default output names are `<entry>.ll`, `<entry>.o`, and `a.out`. Each
 // file uses the working directory or the entry file's directory.
 fn the_default_output_follows_the_mode() void {
@@ -884,6 +927,7 @@ fn main() i32 {
     target_forms_and_front_end_modes();
     cross_ir_uses_the_selected_triple();
     cfg_pairs_are_checked_and_the_target_keys_are_the_compilers();
+    a_conditional_import_follows_the_target();
     the_default_output_follows_the_mode();
     a_syntax_error_is_exit_one();
     a_lexical_error_is_exit_one();
