@@ -343,7 +343,7 @@ without a rewrite.
   sets `QEMU_LD_PREFIX`; the test harness sets it itself. When a cross program dies by a signal,
   qemu-user appends `qemu: uncaught target signal 6 (Aborted) - core dumped` to the program's
   stderr; native execution prints nothing, so a harness comparing stderr drops that line
-  (`test/pipeline_test.sh` and `test/lang/run_tests.py` do). The number and the name vary with
+  (`test/lang/run_tests.py` does). The number and the name vary with
   the signal, so the filter matches the shape (`qemu: uncaught target signal`) and not one line.
   **No language test can go red from a leaked notice**, and the same holds for anything else a
   harness claims to strip from stderr: `//! stderr:` is a containment check, so an extra line

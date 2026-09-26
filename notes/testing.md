@@ -434,44 +434,17 @@ bullet at a time and without a rewrite.
 - External-stage1 mode uses an external compiler to build HEAD. It registers no bootstrap tests
   and no C unit suites (T-160).
 
-## 6. Generated code and the cross pipeline
+## 6. Generated code
 
-- The target pipeline: `test/ir/*.ll` are hand-written LLVM 18 modules in the form
-  `spec/toolchain.md` 6 specifies (D19.1); `hello.ll` and `abort.ll` are its two worked
-  examples byte for byte, so a change to one changes the other, while `colons.ll` and
-  `trap.ll` answer a question of their own (`test/ir/README.md` says which).
-  `test/pipeline_test.sh` verifies each with `opt -passes=verify`, compiles and links it with
-  the target clang alone -- a module holds the whole program, the runtime included, so each file
-  defines the handful of `std.rt` entry points it calls over libc -- runs it (under qemu on
-  linux, on the host on darwin) and checks stdout, stderr and the status byte-exactly; ctest
-  `pipeline` (label `unit`) on both targets. The modules carry the linux triple; the darwin run
-  rewrites that one line, because the compiler emits one IR for both targets. The trap module
-  states the signal of `llvm.trap`: SIGILL (132) on x86-64, SIGTRAP (133) on arm64. Adding one
-  means adding its name to the `for prog in` loop of that script and a block of expectations
-  beside the others; the list is not globbed, since each module's output is its own. `*.ll` is
-  gitignored except `test/ir/*.ll`.
-  `run_tests.py --verify-ir` runs the same verifier over the
-  `-S` output of every language test that compiles.
-- **Four host tests take the compiler, its standard root, the target clang and the triple, and
-  run on both targets** (T-144, T-145, T-149, folded 2026-09-25). Each has a linux branch and a
-  darwin branch only where the platform fact differs: the SDK (`xcrun --sdk macosx
-  --show-sdk-path` on darwin), `QEMU_LD_PREFIX` on linux, and the assembly form.
-  `test/core_test.sh` (ctest `core`) compares 13 constants of the assembled `libc.ft` with the
-  C headers by value, checks the variable-tail form of `open` in `test/core/open_tail_probe.c`
-  and of the compiler's own `fcntl` call (a `str` into the frame on arm64, `movb $0, %al` on
-  x86-64), runs 004, 005, 019, 051, 053, 070, 071, 074, 094 and 095 of `test/lang/run/stdlib`,
-  and rebuilds the compiler from its own module: that binary resolves its standard root through
-  an executable symlink, takes `--cc` with `-Xcc` and reports `fort 0.1.0`.
-  `test/net_layout_test.sh` (ctest `net-layout`) compiles `test/net/net_probe.c` for the target:
-  five socket constants, the size and three offsets of `struct sockaddr_in`, and three errno
-  values, compared with what `test/net/net_layout.ft` and `test/net/net_errors.ft` print from
-  `std.net`; it also runs `--check` over a corpus program with the root of the other target.
-  `test/allocation_failure_test.sh` (ctest `allocation-failure`) proves that a failed allocation
-  survives clang `-O1`: 135 extern declarations carry `nobuiltin`, and `calloc` stays in the
-  optimized entry function of each OOM fixture. `test/abi/probe.sh` (ctest `abi-probe`) runs
-  the six ABI probes and counts the inline stack probe sites of the target (`str xzr, [sp]` on
-  arm64, `movq $0, (%rsp)` on x86-64). The scripts use `grep` and `python3`, not `rg`: the VM
-  has no ripgrep.
+- `run_tests.py --verify-ir` runs `opt -passes=verify` over the `-S` output of every language
+  test that compiles, and every emitter suite verifies each module it emits. The worked examples
+  of `spec/toolchain.md` 6 are held by the goldens of `bootstrap0/test/gen_module_test.c`. Until
+  2026-09-25 hand-written modules under `test/ir/` and `test/pipeline_test.sh` ran the pipeline
+  over them, and four host scripts (`core`, `net-layout`, `allocation-failure`, `abi-probe`)
+  compared the std with the C headers and read clang's assembly; each fact they held that the
+  corpus did not is a corpus test now (`run/ffi/013` writes the BSD `sin_len`, `run/errors/034`
+  and `run/modes/031` request a block nothing reads), and the rest was covered by `run/ffi`,
+  `run/stdlib`, `test/fort/gen_*_test.ft` and `fixpoint`.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
@@ -548,8 +521,8 @@ bullet at a time and without a rewrite.
   **Raise each active file counter in the commit that adds the file.** `CORPUS_FILES` in
   `bootstrap0/test/parser_recovery_test.c` counts fail tests. The same name in
   `test/highlight_test.py` counts its source corpus.
-  T-145 adds two net test programs (now under `test/net/`) and routes them into the grammar
-  corpus; ctest `net-layout` compares the C layout with them on both targets (section 6).
+  T-145 added two net test programs and routed them into the grammar corpus; since 2026-09-25
+  `run/ffi/013` and `run/stdlib/118` hold the C layout and the errno values on both targets.
   **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
   program, and a claim read off the source are three things, and an audit that gives them one word
   hides which rows a reader may rely on.
@@ -748,8 +721,7 @@ bullet at a time and without a rewrite.
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
   has. `agents/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the
   test-to-code ratio (T-144).
-  It counts `test/core/*.c` and `test/net/*.c` as test. The compiler and runtime are source too
-  (D14.6).
+  The compiler and runtime are source too (D14.6).
   What still does not: **there is no formatter** -- indentation,
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
   fort equivalent; the lint sees only what the checker resolved, so an unresolved name is judged by
@@ -812,8 +784,7 @@ bullet at a time and without a rewrite.
   rediscovered this rule.
 - **`agents/lines.py` does not see a test written in shell or in Python either** (T-131). Its
   `TEST_GLOBS` are `bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft`,
-  `test/lang/ffi/*.c`, `test/core/*.c` and `test/net/*.c`. Its `SOURCE_GLOBS` include the two
-  compilers,
+  and `test/lang/ffi/*.c`. Its `SOURCE_GLOBS` include the two compilers,
   `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` (T-144). So a ticket whose deliverable is
   the build or a tool gets no useful figure: T-131 changed `CMakeLists.txt`, six scripts under
   `tools/` and the language harness, and the tool read

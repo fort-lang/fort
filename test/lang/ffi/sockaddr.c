@@ -75,6 +75,12 @@ void net_fill_sockaddr_in(struct sockaddr_in* a) {
 // C reads the same values through the platform declaration.
 bool net_check_sockaddr_in(const struct sockaddr_in* a) {
     const unsigned char* zero = (const unsigned char*)a->sin_zero;
+#ifdef __APPLE__
+    // The BSD length byte, which fort writes under the same `$if`.
+    if (a->sin_len != sizeof *a) {
+        return false;
+    }
+#endif
     if (a->sin_family != AF_INET || a->sin_port != htons(FILL_PORT)) {
         return false;
     }

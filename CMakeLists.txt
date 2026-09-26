@@ -400,43 +400,6 @@ add_test(NAME fort_lint_cross
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fort_lint_cross PROPERTIES LABELS lang)
 
-# The target pipeline: the hand-written LLVM IR modules under test/ir, which
-# are complete modules. The pipeline verifies and compiles each module.
-# It links each module alone and runs it: under qemu for linux, on the host
-# for darwin. A module contains the runtime. The link takes no other object.
-# This unit test needs the target clang and the verifier, not fort.
-add_test(NAME pipeline
-    COMMAND bash "${FORT_TEST_DIR}/pipeline_test.sh"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(pipeline PROPERTIES
-    LABELS unit
-    ENVIRONMENT "FORT_TARGET=${FORT_TARGET};FORT_TARGET_CC=${FORT_TARGET_CC_PATH};FORT_TARGET_TRIPLE=${FORT_TARGET_TRIPLE};FORT_OPT=${FORT_OPT_PATH}")
-
-# The four host tests below take the compiler, its standard root, the target
-# clang and the triple. Each has a linux branch and a darwin branch only where
-# the platform fact differs: the SDK, the qemu prefix, the assembly form.
-#
-# core: 13 constants of std.libc against the C headers, the variable-tail form
-# of `open` and `fcntl`, ten library programs, and the compiler rebuilt from
-# its own module. net-layout: std.net against the C socket headers.
-# allocation-failure: a failed allocation survives clang -O1 (`nobuiltin`).
-# abi-probe: the six ABI probes and the inline stack probe of the target.
-set(FORT_HOST_TEST_ARGS
-    "${FORT_COMPILER_BINARY}" "${FORT_STD_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_TARGET_TRIPLE}")
-add_test(NAME core
-    COMMAND bash "${FORT_TEST_DIR}/core_test.sh" ${FORT_HOST_TEST_ARGS}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-add_test(NAME net-layout
-    COMMAND bash "${FORT_TEST_DIR}/net_layout_test.sh" ${FORT_HOST_TEST_ARGS}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-add_test(NAME allocation-failure
-    COMMAND bash "${FORT_TEST_DIR}/allocation_failure_test.sh" ${FORT_HOST_TEST_ARGS}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-add_test(NAME abi-probe
-    COMMAND bash "${FORT_TEST_DIR}/abi/probe.sh" ${FORT_HOST_TEST_ARGS}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(core net-layout allocation-failure abi-probe PROPERTIES LABELS unit)
-
 # The C helpers of the language tests are compiled for the target by the
 # harness; they also build on the host so that -Werror and clang-tidy cover
 # them. They are FFI entry points declared by the tests, hence no prototypes.
@@ -520,11 +483,6 @@ set_tests_properties(lang-json PROPERTIES LABELS lang)
 # the darwin host and `lang_selftest` reported its 5 s fake compiler as timed
 # out (2026-09-25, three presets).
 set_tests_properties(fort-modules lang lang-json PROPERTIES PROCESSORS ${FORT_LANG_JOBS})
-
-add_test(NAME stage2-ast-variadic
-    COMMAND bash "${FORT_TEST_DIR}/stage2_ast_variadic_test.sh" "${FORT_COMPILER_BINARY}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(stage2-ast-variadic PROPERTIES LABELS unit)
 
 add_test(NAME stage2-cfg
     COMMAND bash "${FORT_TEST_DIR}/stage2_cfg_test.sh" "${FORT_COMPILER_BINARY}"

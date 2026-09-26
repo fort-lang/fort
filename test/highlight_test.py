@@ -29,8 +29,6 @@ LSP_SRC_DIR = ROOT / "src" / "lsp"
 FORT_TESTS_DIR = ROOT / "test" / "fort"
 FORT_LINT_DIR = ROOT / "test" / "fort_lint"
 TTY_DIR = ROOT / "test" / "tty"
-CORE_TEST_DIR = ROOT / "test" / "core"
-NET_TEST_DIR = ROOT / "test" / "net"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
 # Every directory of fort the grammar is held over. `src/fort` is the only one
@@ -44,13 +42,11 @@ CORPUS_DIRS = (
     FORT_TESTS_DIR,
     FORT_LINT_DIR,
     TTY_DIR,
-    CORE_TEST_DIR,
-    NET_TEST_DIR,
 )
 # The number of files those directories hold. A floor cannot detect a directory
 # that the scan stopped using. When a `.ft` file changes this count, use the
 # number from the failure. bootstrap0/test/parser_recovery_test.c uses the same method.
-CORPUS_FILES = 705
+CORPUS_FILES = 702
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total.
 # A floor of 1 only proves that the directory exists.
@@ -67,8 +63,6 @@ CORPUS_MINIMUMS = {
     FORT_TESTS_DIR: 80,
     FORT_LINT_DIR: 3,
     TTY_DIR: 2,
-    CORE_TEST_DIR: 1,
-    NET_TEST_DIR: 2,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error.
@@ -797,14 +791,6 @@ class CorpusTest(unittest.TestCase):
     def test_every_terminal_program_spells_correctly(self):
         """Check the terminal test programs."""
         self.check_directory(TTY_DIR)
-
-    def test_every_core_program_spells_correctly(self):
-        """Test the fort programs of the core host test."""
-        self.check_directory(CORE_TEST_DIR)
-
-    def test_every_net_program_spells_correctly(self):
-        """Test the fort programs of the net host test."""
-        self.check_directory(NET_TEST_DIR)
 
     def test_the_corpus_is_the_size_it_says_it_is(self):
         """The count of files walked, so a glob that stopped matching is seen.

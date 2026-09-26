@@ -20,7 +20,7 @@ if [ $# -ne 1 ]; then
 fi
 server=$1
 # A missing binary is a broken environment and not a failing module. The test
-# exits 2 for this case, as test/pipeline_test.sh does.
+# exits 2 for this case.
 if [ ! -x "$server" ]; then
     echo "lsp-binary: not built: $server" >&2
     exit 2

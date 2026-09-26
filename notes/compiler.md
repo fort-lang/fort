@@ -346,7 +346,7 @@ came here.
   `FORT_IR_DIR`, and the ctest `lang` passes `--verify-ir`, so every module either suite produces is
   checked by `opt -passes=verify`. `opt` is a default, not a configure-time requirement, so each
   suite must report a missing one as a broken environment (`gen_no_verifier`, exit
-  `TEST_RESULT_ERR`) the way `test/pipeline_test.sh` exits 2: a spawn that succeeds and a child that
+  `TEST_RESULT_ERR`): a spawn that succeeds and a child that
   exits 127 otherwise reads as "the verifier rejected this IR", which blames the wrong thing.
   A duplicate the emitter stops writing is only a fix if something else refuses the program: `opt`
   rejected a `declare` beside a `define` of `fort_entry`, and dropping the declaration to satisfy
@@ -373,7 +373,7 @@ came here.
   quietly manufactures the implicit numbering D19.5 forbids rather than reporting the module that
   caused it. An emitter whose block structure is wrong therefore passes the whole gate: `gen_for`
   emitted its back edge after a `noreturn` call in a `for` header for a whole ticket while the unit
-  tests, the language corpus, `--verify-ir` and `test/pipeline_test.sh` all stayed green. Block
+  tests, the language corpus and `--verify-ir` all stayed green. Block
   structure is asserted by the suites themselves: `verified()` in
   `bootstrap0/test/common/gen_helpers.h` runs `gen_block_terminators` before it calls `opt`, so
   every call site in every emitter suite checks contract item 10 and a new suite inherits it. Treat
@@ -386,8 +386,7 @@ came here.
   callee are compiled together, the `-O1` of the `--cc` line inlines the mismatch away, and a
   convention both sides get wrong agrees with itself. The corpus can only see what the *program* can
   observe -- evaluation order, a callee writing to its parameter, a trap that must fire. Everything
-  else is pinned by the text: the assertions in `bootstrap0/test/gen*_test.c` and the goldens in
-  `test/ir/*.ll`. A ticket that touches the calling convention therefore asserts the emitted text
+  else is pinned by the text: the assertions and goldens in `bootstrap0/test/gen*_test.c`. A ticket that touches the calling convention therefore asserts the emitted text
   and proves the assertion by mutation -- change the emitter, watch that one test fail, change it
   back -- rather than trusting that a run test would have caught it. The same held for the
   `llvm.trap` of D19.7: the review broke it and all 55 suites and 280 language tests stayed green.
@@ -456,7 +455,7 @@ came here.
   Check the optimized entry function for `call ptr @calloc` in the OOM fixtures.
 
 - **Mac std.net uses Darwin's 16-byte IPv4 address** (T-145).
-  `test/net/net_probe.c` measures length, family, port, and address offsets at 0, 1, 2, and 4.
+  `test/lang/ffi/sockaddr.c` holds the length, family, port and address offsets at 0, 1, 2 and 4.
   Set the length byte to 16 before bind and connect.
   Use Darwin SOL_SOCKET 65535 and SO_REUSEADDR 4.
   Mac `std.libc` declares seven socket calls with a 4-byte `socklen_t`.

@@ -963,7 +963,8 @@ Sections:
   emits `my:app.main`, and no module path can spell that, since every segment of one is an
   identifier and an identifier holds no `:`. The bar on `:` is therefore dropped and only the bar on
   `.` is re-derived. A `:` reaches the ELF symbol through a quoted LLVM name (D9.7) and through the
-  assembler, which quotes it in turn; `test/ir/colons.ll` is that witness end to end.
+  assembler, which quotes it in turn; `bootstrap0/test/gen_symbols_test.c` holds the IR name (the
+  hand-written end-to-end witness `test/ir/colons.ll` was retired 2026-09-25).
 
 ### D9.2 Search roots
 - owner: `module-system.md`.
@@ -2164,10 +2165,12 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   `arm64-apple-macosxM.m.p` for Mac. It carries no datalayout, module flags, comments or
   `source_filename`. Clang derives the target layout from the selected triple.
   Every emitted module must pass `opt -passes=verify`; the language-test harness
-  checks that (`run_tests.py --verify-ir`) and the pipeline test checks its hand-written samples
-  under `test/ir/`, which are the reference for the form of a module until the contract below says
-  otherwise.
+  checks that (`run_tests.py --verify-ir`) and the emitter suites verify each module they emit.
+  The goldens of `bootstrap0/test/gen_module_test.c` are the reference for the form of a module
+  until the contract below says otherwise.
 - history: Amended 2026-09-15 (T-140): Mac IR uses the selected Apple triple without a datalayout.
+  Amended 2026-09-25 (the user): the hand-written samples under `test/ir/` and the pipeline test
+  that ran them were retired; until then they were the reference for the form of a module.
 
 ### D19.2 Type mapping
 - owner: `toolchain.md` (6, the IR contract).

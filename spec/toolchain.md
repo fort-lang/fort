@@ -271,14 +271,10 @@ under inspection rather than a program.
   whether or not `--cc` succeeded.
 - `--cc` uses the selected built-target line above, in that order.
   `-fPIE` and the target's PIE link flag make a position-independent executable (D14.3, D16).
-- Every emitted module passes `opt -passes=verify` (D19.1). `test/ir/*.ll` are hand-written
-  modules in the form the compiler emits and `test/pipeline_test.sh` runs this pipeline over
-  them on both targets (the darwin run rewrites the triple line of each module, since the
-  compiler emits one IR for both targets); the language-test harness verifies the module of
-  every test that compiles (`run_tests.py --verify-ir`, section 7.3).
-- `test/ir/trap.ll` is the one module outside the compiler's form. The pipeline test runs it
-  to state the signal of `llvm.trap`: SIGILL on x86-64 and SIGTRAP on arm64. On darwin the test
-  also checks that the binary is arm64 Mach-O with the PIE flag.
+- Every emitted module passes `opt -passes=verify` (D19.1): the language-test harness verifies
+  the module of every test that compiles (`run_tests.py --verify-ir`, section 7.3), and the
+  emitter suites verify each module they emit. `llvm.trap` raises SIGILL on x86-64 and SIGTRAP
+  on arm64 (`test/lang/run/ffi/009`).
 - An object from `-c` contains the whole program, the runtime included, so linking it needs no
   input the compiler produced beyond the object itself (D9.10, D13.1).
 
@@ -709,11 +705,11 @@ interactive path, and the script drives a compiled program on a real pseudo term
 ## 6. Code generation contract
 
 This section is normative for the compiler. The LLVM IR module it emits must satisfy every item
-and must pass `opt -passes=verify` (D19.1). The two examples at the end are `test/ir/hello.ll`
-and `test/ir/abort.ll` byte for byte; the pipeline test builds and runs them (section 2). They
-are hand-written modules that exercise the pipeline, not output of the compiler: each defines the
-handful of `std.rt` entry points it calls, over the C library, where a module the compiler builds
-holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a change here.
+and must pass `opt -passes=verify` (D19.1). The two examples at the end are what the compiler
+emits for their programs, as the goldens of `bootstrap0/test/gen_module_test.c` hold it, plus a
+hand-written definition of each `std.rt` entry point the example calls, over the C library,
+where a module the compiler builds holds the whole of `std.rt` (item 8, D9.10, D13.1). A change
+to the emitter's text is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
    the whole program (D9.10, D19.1) and is built by appending text in one forward pass. It
@@ -825,7 +821,7 @@ holds the whole of `std.rt` (item 8, D9.10, D13.1). A change to one of them is a
    - Every global, `alloca`, `load` and `store` carries an explicit `align N` from D3.1 and
      D3.8.
    - Only referenced private data is emitted: a program with no check has no `@.file.N`
-     (`test/ir/hello.ll`), and an enum table exists only if some `print` of that enum type is
+     (the example of 6.1), and an enum table exists only if some `print` of that enum type is
      compiled (item 21).
 
 6. **Position independence** (D14.3, D16). Nothing in the IR expresses it: `dso_local` (item 4)
@@ -1239,7 +1235,7 @@ D14.2 emits no warning about what follows it).
 fn main() i32 { println("hello, world!"); return 0; }
 ```
 
-in `main.ft` is `test/ir/hello.ll`:
+in `main.ft` is:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1315,7 +1311,7 @@ attributes #3 = { nobuiltin }
 The module the compiler emits for that program differs from this one in one way, and the way is
 the size: it also holds every definition of `std.rt` and of `std.libc`, because every closure
 holds the runtime (D9.10, D13.1). The five definitions above stand for them, over the C library's
-`write`, so that the file is small enough to read and the pipeline test links it on its own. Every
+`write`, so that the example is small enough to read and links on its own. Every
 other byte is what the compiler writes: `main.main`, `fort_entry` and the `main` of item 22, the
 quoted dotted names of item 4, the private data of item 5 and the attribute group of item 7.
 
@@ -1331,8 +1327,7 @@ fn main() i32 {
 ```
 
 in `abort.ft`, whose module path is therefore `abort` (D9.1) and whose `main` is the symbol
-`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, is `test/ir/abort.ll` on the
-same terms:
+`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, is, on the same terms:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
