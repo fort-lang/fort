@@ -483,12 +483,6 @@ add_test(NAME stage2-cfg
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(stage2-cfg PROPERTIES LABELS unit)
 
-add_test(NAME stage2-if
-    COMMAND bash "${FORT_TEST_DIR}/stage2_if_test.sh" "${FORT_COMPILER_BINARY}"
-            "${FORT_STD_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(stage2-if PROPERTIES LABELS unit)
-
 add_test(NAME stage2-import-if
     COMMAND bash "${FORT_TEST_DIR}/stage2_import_if_test.sh" "${FORT_COMPILER_BINARY}"
             "${FORT_STD_DIR}"

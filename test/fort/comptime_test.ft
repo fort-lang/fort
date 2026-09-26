@@ -1,0 +1,270 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| chain ok
+//| cycles ok
+//| output ok
+//| ok
+/// Checks the limits and the reach of `$if` selection in src/fort/comptime.ft:
+/// the chain length, a source of 65024 conditions, the cycle report, and what
+/// an inactive branch leaves in the index and in the module.
+import capture;
+import driver;
+import std.io;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+//
+// The language of `$if` is tested by the corpus (run/control/015-017 and
+// fail/control/008-011). This suite drives the driver in process on sources
+// that are too large or too particular for a corpus file, as
+// test/fort/driver_test.ft does, and reads the diagnostics, the dumps, the
+// index and the module it writes.
+
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+
+// The number of conditions one chain accepts (spec/decisions.md, `$if`).
+u64 CHAIN_LIMIT = 256;
+
+// ---- running the driver with its output captured --------------------------------
+
+fn run(string@ args) i32 {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+fn captured_out() string own {
+    return capture.text("out.txt");
+}
+
+fn captured_err() string own {
+    return capture.text("err.txt");
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+fn read_file(string path) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(io.read_file(path, &b));
+    return strbuf.take(&b);
+}
+
+// The errno a directory that already exists reports.
+i32 EEXIST = 17;
+
+extern fn mkdir(char* path, u32 mode) i32;
+
+// Every closure holds `std.rt`; the driver reads it from `std` beside
+// argv[0], which is this working directory. A file that parses is enough:
+// nothing this suite emits is run.
+fn write_runtime() void {
+    assert(mkdir("std".ptr, 0o700) == 0 || sys.errno() == EEXIST);
+    write_file("std/rt.ft", "// The empty runtime of a comptime test.\n");
+}
+
+// How many times `needle` occurs in `s`.
+fn count(string s, string needle) u64 {
+    u64 mut n = 0;
+    u64 mut from = 0;
+    while (from < s.len) {
+        i64 at = str.find(s[from..s.len], needle);
+        if (at < 0) {
+            break;
+        }
+        n += 1;
+        from += cast(at, u64) + needle.len;
+    }
+    return n;
+}
+
+// The number of `error:` lines of the last run's stderr.
+fn error_count() u64 {
+    string own err = captured_err();
+    defer del(err);
+    return count(err, " error: ");
+}
+
+fn err_has(string text) bool {
+    string own err = captured_err();
+    defer del(err);
+    return str.find(err, text) >= 0;
+}
+
+// ---- the chain limit -------------------------------------------------------------
+
+// A chain of `n` conditions: the last one true, every other one false.
+fn write_chain(string path, u64 n) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "$if (false) { i32 CHOICE = 0; }\n");
+    u64 mut i = 1;
+    while (i < n) {
+        if (i == n - 1) {
+            strbuf.append(&b, "else $if (true) { i32 CHOICE = 1; }\n");
+        } else {
+            strbuf.append(&b, "else $if (false) { i32 CHOICE = 0; }\n");
+        }
+        i += 1;
+    }
+    write_file(path, strbuf.view(&b));
+}
+
+// The limit is a count of conditions, and the one past it reports once, at
+// its own `$if`.
+fn a_chain_accepts_the_limit_and_rejects_one_more() void {
+    write_chain("chain_ok.ft", CHAIN_LIMIT);
+    string[3] mut ok = {"fort", "--check", "chain_ok.ft"};
+    assert(run(ok[0..3]) == EXIT_OK);
+    assert(error_count() == 0);
+    write_chain("chain_over.ft", CHAIN_LIMIT + 1);
+    string[3] mut over = {"fort", "--check", "chain_over.ft"};
+    assert(run(over[0..3]) == EXIT_COMPILE_ERROR);
+    assert(error_count() == 1);
+    assert(err_has("chain_over.ft:257:6: error: a $if chain can have at most 256 conditions"));
+}
+
+// `levels` nested chains of CHAIN_LIMIT conditions each, the last condition
+// of each true and a `main` at the bottom.
+fn write_nested_chains(string path, u64 levels) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut level = 0;
+    while (level < levels) {
+        strbuf.append(&b, "$if (false) { i32 UNUSED_");
+        strbuf.append_u64(&b, level);
+        strbuf.append(&b, "_0 = 0; }\n");
+        u64 mut condition = 1;
+        while (condition < CHAIN_LIMIT) {
+            if (condition == CHAIN_LIMIT - 1) {
+                strbuf.append(&b, "else $if (true) {\n");
+            } else {
+                strbuf.append(&b, "else $if (false) { i32 UNUSED_");
+                strbuf.append_u64(&b, level);
+                strbuf.push(&b, '_');
+                strbuf.append_u64(&b, condition);
+                strbuf.append(&b, " = 0; }\n");
+            }
+            condition += 1;
+        }
+        level += 1;
+    }
+    strbuf.append(&b, "fn main() i32 { return 0; }\n");
+    while (level > 0) {
+        strbuf.append(&b, "}\n");
+        level -= 1;
+    }
+    write_file(path, strbuf.view(&b));
+}
+
+// Selection walks a chain without adding its length to the recursion that
+// the selected tree costs: 254 levels stay below the parser's nesting limit,
+// the dump holds every node, and the module is emitted.
+fn nested_chains_keep_every_node_and_emit() void {
+    u64 levels = 254;
+    write_nested_chains("nested.ft", levels);
+    string[3] mut ast = {"fort", "--ast", "nested.ft"};
+    assert(run(ast[0..3]) == EXIT_OK);
+    string own dump = captured_out();
+    defer del(dump);
+    assert(count(dump, "compile-if") == levels * CHAIN_LIMIT);
+    string[5] mut emit = {"fort", "-S", "-o", "nested.ll", "nested.ft"};
+    assert(run(emit[0..5]) == EXIT_OK);
+    assert(error_count() == 0);
+}
+
+// ---- cycles -----------------------------------------------------------------------
+
+// A cycle among the constants a condition reads reports once, at the first
+// declaration of the cycle, and a cycle in an operand the condition skips is
+// still the ordinary checker's one report.
+fn a_cycle_reports_once() void {
+    write_file("cycle.ft", "bool A = B;\nbool B = A;\n$if (A) { fn main() i32 { return 0; } }\n");
+    string[3] mut read = {"fort", "--check", "cycle.ft"};
+    assert(run(read[0..3]) == EXIT_COMPILE_ERROR);
+    assert(error_count() == 1);
+    assert(err_has("is defined in terms of itself"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "bool FIRST = SECOND;\nbool SECOND = FIRST;\n");
+    strbuf.append(&b, "$if (true || FIRST) { fn main() i32 { return 0; } }\n");
+    write_file("skipped_cycle.ft", strbuf.view(&b));
+    string[3] mut skipped = {"fort", "--check", "skipped_cycle.ft"};
+    assert(run(skipped[0..3]) == EXIT_COMPILE_ERROR);
+    assert(error_count() == 1);
+    assert(err_has("skipped_cycle.ft:1:6: error: 'FIRST' is defined in terms of itself"));
+}
+
+// ---- what an inactive branch leaves behind ---------------------------------------
+
+// A program with one inactive declaration branch and one inactive statement
+// branch, whose names and bytes nothing else in the program spells.
+fn write_selected(string path) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "bool SELECT_FLAG = true;\n$if (SELECT_FLAG) {\n");
+    strbuf.append(&b, "    string ACTIVE_TEXT = \"active_bytes\";\n");
+    strbuf.append(&b, "    fn active_symbol() i32 { return 0; }\n} else {\n");
+    strbuf.append(&b, "    string INACTIVE_TEXT = \"inactive_bytes_unique\";\n");
+    strbuf.append(&b, "    fn inactive_symbol_unique() i32 { return 1; }\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    println(ACTIVE_TEXT);\n    $if (true) {\n");
+    strbuf.append(&b, "        return active_symbol();\n    } else {\n");
+    strbuf.append(&b, "        return active_symbol() * 37;\n    }\n}\n");
+    write_file(path, strbuf.view(&b));
+}
+
+// The index holds the selected declarations, the condition's own reference,
+// and nothing of the other branch.
+fn the_index_holds_the_selected_names_only() void {
+    write_selected("selected.ft");
+    string[3] mut index = {"fort", "--index", "selected.ft"};
+    assert(run(index[0..3]) == EXIT_OK);
+    string own document = captured_out();
+    defer del(document);
+    assert(count(document, "\"name\":\"SELECT_FLAG\"") == 2);
+    assert(str.find(document, "\"name\":\"active_symbol\"") >= 0);
+    assert(str.find(document, "inactive_symbol_unique") < 0);
+    assert(str.find(document, "INACTIVE_TEXT") < 0);
+}
+
+// The module holds no symbol and no bytes of the inactive declarations, and
+// the statement `$if` leaves no branch and no dead arithmetic in `main`.
+fn the_module_holds_no_inactive_content() void {
+    write_selected("selected.ft");
+    string[5] mut emit = {"fort", "-S", "-o", "selected.ll", "selected.ft"};
+    assert(run(emit[0..5]) == EXIT_OK);
+    string own module = read_file("selected.ll");
+    defer del(module);
+    assert(str.find(module, "inactive_symbol_unique") < 0);
+    assert(str.find(module, "inactive_bytes_unique") < 0);
+    i64 start = str.find(module, "define dso_local i32 @\"selected.main\"()");
+    assert(start >= 0);
+    string body = module[cast(start, u64)..module.len];
+    i64 end = str.find(body, "\n}\n");
+    assert(end >= 0);
+    string user_main = body[0..cast(end, u64)];
+    assert(str.find(user_main, "mul i32") < 0);
+    assert(str.find(user_main, "  br i1 ") < 0);
+}
+
+fn main() i32 {
+    write_runtime();
+    a_chain_accepts_the_limit_and_rejects_one_more();
+    nested_chains_keep_every_node_and_emit();
+    println("chain ok");
+    a_cycle_reports_once();
+    println("cycles ok");
+    the_index_holds_the_selected_names_only();
+    the_module_holds_no_inactive_content();
+    println("output ok");
+    println("ok");
+    return 0;
+}
