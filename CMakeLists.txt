@@ -335,10 +335,6 @@ add_custom_target(fort ALL
 
 set(FORT_COMPILER_BINARY "${CMAKE_BINARY_DIR}/fort")
 
-add_test(NAME lsp-target
-    COMMAND bash "${FORT_TEST_DIR}/lsp_target_test.sh")
-set_tests_properties(lsp-target PROPERTIES LABELS unit)
-
 set(FORT_GRAPH_FIXPOINT_COMMAND
     bash "${CMAKE_SOURCE_DIR}/tools/fixpoint.sh" "${CMAKE_BINARY_DIR}/cmake-fixpoint"
     --compiler "${FORT_COMPILER_BINARY}"
@@ -368,16 +364,13 @@ file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
 set(FORT_LSP_BINARY "${CMAKE_BINARY_DIR}/fort-lsp")
 add_custom_command(
     OUTPUT "${FORT_LSP_BINARY}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/tools/build_lsp.sh"
-            "${FORT_COMPILER_BINARY}"
-            "${FORT_STD_DIR}" "${FORT_TARGET_CC_PATH}" "${FORT_LSP_BINARY}"
-            "${FORT_LSP_SRC_DIR}/main.ft"
-            "${CMAKE_SOURCE_DIR}/src" "${FORT_FORT_SRC_DIR}"
+    # The compiler builds for its own target, so no --target is passed (D14.1).
+    COMMAND "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}" --cc "${FORT_TARGET_CC_PATH}"
+            -I "${CMAKE_SOURCE_DIR}/src" -I "${FORT_FORT_SRC_DIR}"
+            -o "${FORT_LSP_BINARY}" "${FORT_LSP_SRC_DIR}/main.ft"
     # Depend on the input files and the target. A custom target creates only an
     # order edge. Without the file inputs, a module edit would not rebuild this binary.
-    DEPENDS fort "${FORT_COMPILER_BINARY}"
-            "${CMAKE_SOURCE_DIR}/tools/build_lsp.sh"
-            ${FORT_LSP_SOURCES} ${FORT_STD_OUTPUTS}
+    DEPENDS fort "${FORT_COMPILER_BINARY}" ${FORT_LSP_SOURCES} ${FORT_STD_OUTPUTS}
     COMMENT "Compiling src/lsp with the product compiler into fort-lsp"
     VERBATIM
 )
