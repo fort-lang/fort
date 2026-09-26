@@ -389,7 +389,7 @@ without a rewrite.
   emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
   tidy cover them), `check` (ctest label `unit`, including `lang_lint` and `lang_selftest`),
   `check-lang` (ctest label `lang`: the corpus, `test/fort`, `lang-json`, `fixpoint`,
-  `lsp-binary`, `fort_lint_cross` and `tty`), `check-all` (every test, what `test` runs too),
+  `lsp-binary`, `cross-target` and `tty`), `check-all` (every test, what `test` runs too),
   `gate` (the merge gate, `notes/testing.md` 1), `format` and `format-check` (clang-format
   over `src`, `runtime`, `test`), `tidy` (`run-clang-tidy` over the same),
   `fort-lint` (`tools/fort_lint.py`: the identifier conventions of D1.4 over `std/*.ft` and

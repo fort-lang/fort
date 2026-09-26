@@ -384,21 +384,14 @@ add_test(NAME lsp-binary
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(lsp-binary PROPERTIES LABELS lang)
 
-# The compiler emits the IR of the other target with a caller-selected
-# standard root. The verifier checks its form. The other host checks its ABI.
-add_test(NAME target-ir
-    COMMAND bash "${FORT_TEST_DIR}/target_ir_test.sh" "${FORT_COMPILER_BINARY}"
+# The other target on this host: its standard root assembled, its std modules
+# linted under that root, and one module emitted for it that the verifier
+# accepts. The other host checks its C ABI.
+add_test(NAME cross-target
+    COMMAND bash "${FORT_TEST_DIR}/cross_target_test.sh" "${FORT_COMPILER_BINARY}"
             "${FORT_OPT_PATH}" "${FORT_TARGET}"
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
-set_tests_properties(target-ir PROPERTIES LABELS unit)
-
-# The declarations of the other target need a standard root of that target.
-# This compiler checks their names.
-add_test(NAME fort_lint_cross
-    COMMAND bash "${FORT_TEST_DIR}/cross_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
-            "${FORT_TARGET}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fort_lint_cross PROPERTIES LABELS lang)
+set_tests_properties(cross-target PROPERTIES LABELS lang)
 
 # The C helpers of the language tests are compiled for the target by the
 # harness; they also build on the host so that -Werror and clang-tidy cover
@@ -685,8 +678,6 @@ endif()
 add_custom_target(fort-lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
             --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-    COMMAND bash "${FORT_TEST_DIR}/cross_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
-            "${FORT_TARGET}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
     VERBATIM
