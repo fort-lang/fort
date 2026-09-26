@@ -583,61 +583,6 @@ set_tests_properties(lang_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The unit tests of tools/check_comments.py (label unit); the tool itself runs
-# as part of format-check below.
-add_test(NAME check_comments_selftest
-    COMMAND "${FORT_PYTHON3}" -m unittest check_comments_test
-    WORKING_DIRECTORY "${FORT_TEST_DIR}")
-set_tests_properties(check_comments_selftest PROPERTIES
-    LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# The tools/lines.py unit tests cover the custom glob matcher.
-# They also cover --since measurement of a branch diff.
-add_test(NAME lines_selftest
-    COMMAND "${FORT_PYTHON3}" -m unittest lines_test
-    WORKING_DIRECTORY "${FORT_TEST_DIR}")
-set_tests_properties(lines_selftest PROPERTIES
-    LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# The shape of the decision log (label unit): every entry is `### Dn.m Title`
-# with an owner field and a rule field. It also limits lines to 100 columns.
-# The log is normative, so the gate must detect a malformed entry.
-# Two other tests read rules through the same parser.
-add_test(NAME check_decisions
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_decisions.py"
-            "${CMAKE_SOURCE_DIR}/spec/decisions.md" --expect 148
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(check_decisions PROPERTIES LABELS unit)
-
-# Its unit tests cover both readers and each reported problem.
-# They also compare two log revisions.
-add_test(NAME check_decisions_selftest
-    COMMAND "${FORT_PYTHON3}" -m unittest check_decisions_test
-    WORKING_DIRECTORY "${FORT_TEST_DIR}")
-set_tests_properties(check_decisions_selftest PROPERTIES
-    LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# These unit tests enforce the knowledge rules of notes/style.md and AGENTS.md.
-# They check the AGENTS.md line budget and the required decision fields.
-# They also check dated history notes and document paths. They run no build.
-add_test(NAME knowledge_lint
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/knowledge_lint.py"
-            --root "${CMAKE_SOURCE_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(knowledge_lint PROPERTIES LABELS unit)
-
-# These unit tests cover seeded history notes and the history-rule limits.
-# They also cover each other rule on clean and broken seeded trees.
-add_test(NAME knowledge_lint_selftest
-    COMMAND "${FORT_PYTHON3}" -m unittest knowledge_lint_test
-    WORKING_DIRECTORY "${FORT_TEST_DIR}")
-set_tests_properties(knowledge_lint_selftest PROPERTIES
-    LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
 # The VM gate manifest detects ignored fort files and symlinks. It skips build outputs.
 add_test(NAME gate_ft_manifest
     COMMAND bash "${FORT_TEST_DIR}/gate_ft_manifest_test.sh")
@@ -751,14 +696,6 @@ file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
 )
 
-# fort and project C sources do not permit block comments.
-# format-check depends on this target, so a `/* */` fails the gate.
-add_custom_target(check-comments
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/check_comments.py"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Checking that no C source uses a block comment"
-    VERBATIM
-)
 
 # The lint configuration is clang 18's (.clang-format, .clang-tidy). The
 # versioned name wins where the host has one; the darwin host keeps llvm@18
@@ -784,7 +721,6 @@ else()
     add_custom_target(format COMMAND false COMMENT "format: clang-format not found")
     add_custom_target(format-check COMMAND false COMMENT "format-check: clang-format not found")
 endif()
-add_dependencies(format-check check-comments)
 
 find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy-18 run-clang-tidy
     HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
@@ -825,10 +761,3 @@ add_custom_target(fort-lint
     VERBATIM
 )
 add_dependencies(fort-lint fort fort_std)
-
-add_custom_target(lines
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/lines.py"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Counting test lines per compiler line"
-    VERBATIM
-)

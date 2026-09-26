@@ -48,7 +48,7 @@ A safe(r) C-like systems programming language.
   whose modules are reached as `lsp.<name>` and never `<name>` through the search root `src`
   (T-063, `notes/compiler.md` 8). `std/`: the standard library in fort, the runtime (`std/rt.ft`)
   among its modules; there is no C runtime and no object linked beside the program (T-091).
-  `tools/`: `vm`, `provision.sh`, and `lines.py`.
+  `tools/`: `vm`, `provision.sh`, `fort_lint.py`; `agents/` (gitignored) holds the process tools.
 - `editors/`: `editors/vscode/` is the VS Code extension -- `package.json`,
   `language-configuration.json`, `syntaxes/fort.tmLanguage.json`, `extension.js`, and the one pure
   module it is tested through, `lib/check.js` -- and `editors/README.md` is its install guide, its
@@ -216,7 +216,7 @@ An agent MUST write down a learning or a course correction at once. Two cases st
 **One home for each kind of knowledge.** `AGENTS.md` is not the default home: before T-098 it
 measured 1491 lines and 128 KB, and the cause was a rule that sent every learning here. The table
 says where a fact goes. **The first row that fits wins**, so a fact that two rows accept goes to
-the higher row: the `pkill` rule is the VM's, `tools/lines.py` and the test ratio are the tests',
+the higher row: the `pkill` rule is the VM's, `agents/lines.py` and the test ratio are the tests',
 and "What checks `.ft` source" is the tests' as well.
 
 | what you learned | where it goes |
@@ -240,7 +240,7 @@ that move and 223 after it. The 73 lines above the budget have one candidate and
 `notes/style.md`. Everything else here is the layout, the process or this table, so a move that
 closes the last 46 lines would put process knowledge outside `AGENTS.md`. The user decides which
 of the two the budget means; until then the number stands as a target and not as a rule (T-099).
-The lint holds that number: `BUDGET_LIMIT` in `tools/knowledge_lint.py` is 252, the measured
+The lint holds that number: `BUDGET_LIMIT` in `agents/knowledge_lint.py` is 252, the measured
 value, so any growth trips it; `BUDGET_TARGET` is 150 and no test reads it (T-103).
 
 Five rules for an entry:

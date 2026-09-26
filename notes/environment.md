@@ -378,7 +378,7 @@ without a rewrite.
   directory alone (`ln -s /vagrant "$FORT_HOST_REPO"`, line 63). A worktree that runs its own VM
   with `FORT_VM_DIR="$PWD"` is therefore `/vagrant`, and the main checkout is not there, so the
   `gitdir:` line of the worktree's `.git` file points at a path the guest cannot open. Every git
-  command in the guest then exits 128, and `tools/vm run 'python3 tools/lines.py --since main'`
+  command in the guest then exits 128, and `tools/vm run 'python3 agents/lines.py --since main'`
   fails inside `git diff main...HEAD` rather than reporting a ratio. Run a measurement that needs
   git history on the host, which has the whole repository, or share the main checkout's VM
   (T-099).
@@ -440,20 +440,18 @@ without a rewrite.
   `check-lang` (ctest label `lang`: the corpus, `test/fort`, `lang-json`, `fixpoint`,
   `lsp-binary`, `fort_lint_cross` and `tty`), `check-all` (every test, what `test` runs too),
   `gate` (the merge gate, `notes/testing.md` 1), `format` and `format-check` (clang-format
-  over `src`, `runtime`, `test`), `check-comments` (`tools/check_comments.py`, which
-  `format-check` depends on: it rejects a `/* */` in the same sources, D2.2, and its own unit
-  tests are the ctest `check_comments_selftest`), `tidy` (`run-clang-tidy` over the same),
+  over `src`, `runtime`, `test`), `tidy` (`run-clang-tidy` over the same),
   `fort-lint` (`tools/fort_lint.py`: the identifier conventions of D1.4 over `std/*.ft` and
   `src/fort/*.ft`, read off `fort --index`; the ctests are `fort_lint` and `fort_lint_selftest`),
-  `lines` (`tools/lines.py`: test lines per source line, source being the compiler, `std/*.ft`
+  `agents/lines.py` (run by hand: test lines per source line, source being the compiler, `std/*.ft`
   and the runtime (D14.6, amended by T-076); `TARGET_RATIO` in that file holds the corpus
   target, which is above 2:1 since T-123, and is printed and never compared, so `--min RATIO`
   from the caller is the only value that fails a run; `--since REF` measures a branch's own diff
   instead of the whole repository, which is how a ticket answers for the code it introduces
   rather than hiding behind the corpus already there; **`--since` reads the commits, not the
   working tree**, so a file that is only written or only staged counts as 0 lines and the ratio
-  answers about the last commit: commit first, then measure (T-093); its own tests are the
-  ctest `lines_selftest`).
+  answers about the last commit: commit first, then measure (T-093); its own tests are
+  `agents/lines_test.py`).
   `tools/vm <target> [preset]` runs one. CMake detects Linux or Darwin from the host system.
   The `linux` and `darwin` presets set no `FORT_TARGET` cache value.
 - **The `darwin` build copies target library modules** (T-145, T-152).
@@ -632,7 +630,7 @@ without a rewrite.
   handed to a shell in the guest, so a path is quoted before it goes in.
 - **git does not work in the guest of a VM that a worktree owns.** `/vagrant` is then the worktree,
   and the worktree's `.git` file names `<main checkout>/.git/worktrees/<name>`, which that guest
-  has no path to. `git diff main...HEAD` exits 128, and `tools/lines.py --since main` ends in a
-  CalledProcessError from that command. Run `python3 tools/lines.py --since main --min 3.0` on the
+  has no path to. `git diff main...HEAD` exits 128, and `agents/lines.py --since main` ends in a
+  CalledProcessError from that command. Run `python3 agents/lines.py --since main --min 3.0` on the
   host: it needs git and Python 3 and nothing of the build. On the shared VM git works, because
   provisioning symlinks the host path of the main checkout to `/vagrant` (T-094).

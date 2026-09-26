@@ -1689,7 +1689,7 @@ Sections:
   project writes and ships -- the compiler (`bootstrap0/src/*.c`, `*.h`, `src/fort/*.ft`) and the
   standard library (`std/*.ft`), the runtime included, since it is `std.rt` -- measured against
   `bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` by
-  `tools/lines.py`. The implementation plan will size the corpus; the seed tests written in this
+  `agents/lines.py`. The implementation plan will size the corpus; the seed tests written in this
   phase establish the format and one example per feature area.
 - history: Amended 2026-09-11 (T-076): until then the target was "three lines of test for each line
   of compiler", with the runtime and the standard library excluded from both sides, which credited
@@ -1699,14 +1699,16 @@ Sections:
   neither side, that being a separate question about non-compiler code. Amended 2026-09-11 (T-088):
   the runtime is `std.rt` now (D13.1 as amended) and counts with `std/*.ft`; `runtime/*.c` and `*.h`
   stayed on the source side while those files existed. Amended 2026-09-12 (T-091): they are deleted
-  and `tools/lines.py` globs them no longer, so the source side is the compiler and the standard
+  and `agents/lines.py` globs them no longer, so the source side is the compiler and the standard
   library and nothing else. Amended 2026-09-14 (T-123, the user): until then the target was
   "about three lines of test for each line of source", and the corpus had never met it. Measured
   on 865a15c: 2.19, from 52963 source lines against 115824 test lines, so 3.0 needed about 43000
   further test lines. The user refused that backfill and set the target above 2.0, which the
   corpus meets today. The number changed and the rule that a ticket's own diff carries its
-  tests did not: `tools/lines.py --since main --min 3.0` stays an acceptance criterion, because a
-  per-branch minimum above the corpus target is what holds the corpus above its floor.
+  tests did not: `agents/lines.py --since main --min 3.0` stays an acceptance criterion, because a
+  per-branch minimum above the corpus target is what holds the corpus above its floor. Amended
+  2026-09-25 (the user): the tool is `agents/lines.py`, in the gitignored directory of the process
+  tooling, and no ctest runs it; until then it was `tools/lines.py` with the ctest `lines_selftest`.
 
 ### D14.7 The C-started target bootstrap chain
 - owner: `toolchain.md` (8).
@@ -2102,7 +2104,7 @@ Names the entry points that produce D11.7's float text and settles what D11.7 le
   had narrowed the loading rule to a closure that holds a float, and the narrowing reached
   `src/fort/modules.ft` and `notes/compiler.md` and never this field. T-096's first commit left
   the old sentence standing beside its own and so made one field state two loading rules; the
-  review of 2026-09-14 found it, since `tools/check_decisions.py` compares two revisions and
+  review of 2026-09-14 found it, since `agents/check_decisions.py` compares two revisions and
   cannot see a field that contradicts itself. Amended 2026-09-14 (T-131): **the condition named
   above arrived on this date.** The `fort_stage2` target takes the last pin of `tools/bootstrap.ref`
   as its input and not the binary built from `bootstrap0/src`, so a fort compiler builds the fort

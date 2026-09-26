@@ -15,7 +15,7 @@ design review.
 - Run the `code-review` skill on the branch against `main` at `low` effort and report what it
   finds.
 - Then check, by reading the diff:
-  - the tests grew with the code, and `python3 tools/lines.py --since main --min 3.0` exits 0;
+  - the tests grew with the code, and `python3 agents/lines.py --since main --min 3.0` exits 0;
   - `test/lang/xfail.txt` shrank for every test the change makes pass;
   - confirm completed pre-merge evidence; state gate pending if it still runs;
   - the commits follow AGENTS.md (title about 50 characters, body wrapped at 72, trailer);

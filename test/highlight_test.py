@@ -15,9 +15,7 @@ from pathlib import Path
 
 TEST_DIR = Path(__file__).resolve().parent
 ROOT = TEST_DIR.parent
-sys.path.insert(0, str(ROOT / "tools"))
-
-import check_decisions  # noqa: E402
+import decisions  # noqa: E402
 
 GRAMMAR_PATH = ROOT / "editors" / "vscode" / "syntaxes" / "fort.tmLanguage.json"
 DECISIONS_PATH = ROOT / "spec" / "decisions.md"
@@ -119,8 +117,8 @@ class Token:
 
 def decision_lexicon(text):
     """Read keyword, reserved-word, and operator lists from the decision log."""
-    spans = re.findall(r"`([^`]*)`", check_decisions.rule_of(text, "D2.4"), re.DOTALL)
-    operators = re.search(r"`([^`]*)`", check_decisions.rule_of(text, "D2.10"), re.DOTALL)
+    spans = re.findall(r"`([^`]*)`", decisions.rule_of(text, "D2.4"), re.DOTALL)
+    operators = re.search(r"`([^`]*)`", decisions.rule_of(text, "D2.10"), re.DOTALL)
     return Lexicon(
         keywords=frozenset(spans[0].split()),
         reserved=frozenset(spans[1].split()),
@@ -435,7 +433,7 @@ def invalid_tokens(tokens):
 def marker_declarations(text, tag):
     """Return the declarations in the first column of a decision's marker table."""
     rows = []
-    for line in check_decisions.rule_of(text, tag).split("\n"):
+    for line in decisions.rule_of(text, tag).split("\n"):
         match = re.match(r"\s*\|\s*`([^`]+)`\s*\|", line)
         if match:
             rows.append(match.group(1))

@@ -297,7 +297,7 @@ bullet at a time and without a rewrite.
   nothing. `_report_misplaced_tests` closes that (T-079): a `*_test.ft` anywhere below the root
   outside those three directories is `test outside the root of the corpus`, which is a lint
   problem and not a test, since what belongs under `support/` is shared code and nothing else.
-  `tools/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` and `src/lsp/*.ft`
+  `agents/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` and `src/lsp/*.ft`
   as source lines, `test/highlight_test.py` tokenizes them, and `tools/fort_lint.py` lints them
   with the search roots its `SOURCE_SETS` table pairs with the glob
   (`-I src -I src/fort -I test/fort/support`); a file named on its command line takes the roots of
@@ -645,7 +645,7 @@ bullet at a time and without a rewrite.
 - The TextMate grammar is checked by `test/highlight_test.py` (ctest `highlight_selftest`, label
   `unit`, run from `test/`): it reads the D2.4 keyword lists and the D2.10 operator list out of
   `spec/decisions.md` and the same sets out of the grammar, so the two cannot drift. It reads them
-  through `check_decisions.rule_of`, which returns the `rule` field of one entry, and
+  through `decisions.rule_of` (`test/decisions.py`), which returns the `rule` field of one entry, and
   `test/fort_lint_test.py` reads the D20.3 kind list the same way (T-100): a test that opens the
   decision log calls that one parser rather than matching the entry shape itself, and it collapses
   the whitespace of the rule before it searches for a sentence, because the rule wraps at 100
@@ -746,7 +746,7 @@ bullet at a time and without a rewrite.
   emits one module for that other target the same way and verifies its form on both hosts.
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
-  has. `tools/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the
+  has. `agents/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the
   test-to-code ratio (T-144).
   It counts `test/core/*.c` and `test/net/*.c` as test. The compiler and runtime are source too
   (D14.6).
@@ -780,7 +780,7 @@ bullet at a time and without a rewrite.
 ## 9. The test-to-code ratio
 
 - Every ticket meets the 3:1 test-to-code ratio on its own diff, not on the repository average:
-  `python3 tools/lines.py --since main --min 3.0` is an acceptance criterion of every
+  `python3 agents/lines.py --since main --min 3.0` is an acceptance criterion of every
   ticket that adds **source** lines -- the compiler, `std/*.ft` and the runtime, which are what
   D14.6 counts since T-076, so a ticket writing only library or runtime code answers for its
   tests like any other -- and the implementor runs it before the gate. The repository ratio
@@ -790,16 +790,16 @@ bullet at a time and without a rewrite.
   questions and both are working: the per-ticket rule is not retroactive, so the corpus figure is
   a lagging indicator of everything that landed before it and climbs only asymptotically even if
   every future ticket hits 3:1 exactly. Measure it with
-  `tools/vm run 'python3 tools/lines.py'` before quoting it; never repeat the figure from this
+  `tools/vm run 'python3 agents/lines.py'` before quoting it; never repeat the figure from this
   line. A ticket that cannot reach 3:1 says so in its log with the reason rather than lowering the
   number. Run it on the host when the worktree has a VM of its own, because git in that guest
   cannot open the main checkout (`notes/environment.md` 3, T-099); `tools/vm run 'python3
-  tools/lines.py --since main --min 3.0'` works only in a VM brought up from the main checkout.
+  agents/lines.py --since main --min 3.0'` works only in a VM brought up from the main checkout.
   `--since` reads `git diff main...HEAD`, so it counts **committed** work only. A branch
   whose tests are still staged or untracked reads as the ratio of the commits before them. That
   number is smaller than the truth, and it sends an implementor off to write tests the branch
   already has. Commit first, then measure.
-- `tools/lines.py` does not see `editors/`. A branch that changes the VS Code extension alone
+- `agents/lines.py` does not see `editors/`. A branch that changes the VS Code extension alone
   therefore has no figure from the tool, and the criterion is met by hand. Count with `git diff
   --numstat main...HEAD` and the tool's own convention: net lines, raw `wc -l`, comments and blank
   lines counted on both sides. T-092 measured 208 net source lines against 710 net test lines,
@@ -810,7 +810,7 @@ bullet at a time and without a rewrite.
   That figure lags for the same reason the repository figure does: the per-ticket rule is not
   retroactive. The branch figure is the one the criterion asks for. T-089 and T-092 both
   rediscovered this rule.
-- **`tools/lines.py` does not see a test written in shell or in Python either** (T-131). Its
+- **`agents/lines.py` does not see a test written in shell or in Python either** (T-131). Its
   `TEST_GLOBS` are `bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft`,
   `test/lang/ffi/*.c`, `test/core/*.c` and `test/net/*.c`. Its `SOURCE_GLOBS` include the two
   compilers,
@@ -835,10 +835,10 @@ bullet at a time and without a rewrite.
   20. The largest gaps are `strings` (5 of 30 `run`), `mutability` (5 of 20 and 10 of 40),
   `lexical` (5 of 30 and 15 of 30) and `control` (14 of 45). Four directories have no row in the
   table at all and hold 89 tests: `errors` (32), `modes` (30), `switch` (16) and `declarations`
-  (11). The corpus figure of `tools/lines.py` moves with the same shortfall: it read 2.17 on
+  (11). The corpus figure of `agents/lines.py` moves with the same shortfall: it read 2.17 on
   47f98c2 (52163 source lines against 113082 test lines) against the 3.0 D14.6 then set. **The
   user took that decision on 2026-09-14: no backfill, and the target drops to above 2.0**, which
-  the corpus meets (2.19 on 865a15c, `python3 tools/lines.py`). The per-branch criterion stays at
+  the corpus meets (2.19 on 865a15c, `python3 agents/lines.py`). The per-branch criterion stays at
   `--min 3.0`, because a branch minimum above the corpus target is what holds the corpus above its
   floor; a ticket still answers for its own diff.
 - The ratio is a prompt, not a verdict: what a review asks is which rules of the decisions a ticket

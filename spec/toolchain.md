@@ -1761,7 +1761,7 @@ the token stream, the parser's speculative rewinds, constant folding at the edge
 
 ### 7.6 Coverage target (D14.6)
 
-The corpus aims at more than two lines of test for each line of source: `wc -l` over
+The corpus aims at more than two lines of test for each line of source (`agents/lines.py`): `wc -l` over
 `bootstrap0/test/*.c`, `bootstrap0/test/common/*.h`, `test/**/*.ft` and `test/lang/ffi/*.c` against
 `wc -l` over `bootstrap0/src/*.c`, `bootstrap0/src/*.h`, `src/fort/*.ft` and `std/*.ft`, the runtime
 among them (D13.1). The standard library is source and not test (D14.6): it is code the project

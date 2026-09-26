@@ -63,8 +63,8 @@ Use `//` for all C comments. This rule applies to module, API, internal, and fun
 comments. Put needed API documentation on the header declaration. Do not repeat it on the
 definition.
 
-State ownership or lifetime only when the C type cannot express it. `tools/check_comments.py`
-rejects C block comments.
+State ownership or lifetime only when the C type cannot express it. Do not write a C block
+comment.
 
 ### 1.4 JavaScript
 
@@ -112,10 +112,8 @@ shebang.
   `test/lang/ffi/layout.c`, flagged on the host and silent under `clang-tidy-18` in the guest, where
   `WarningsAsErrors: '*'` means a real one would have failed the gate. Check in the guest before
   acting on an editor's warning, and never edit code to satisfy a check the project does not run.
-  `tools/vm format` reformats,
-  and `tools/check_comments.py` rejects a block comment (`tools/vm format-check` runs it; it
-  skips a `/*` inside a string literal, a character literal or a `//` comment). This applies to
-  test helpers under `bootstrap0/test/` and `test/lang/ffi/` too. Two gaps of clang-tidy 18 are
+  `tools/vm format` reformats. Do not write a C block comment (`/* */`), in the test helpers
+  under `bootstrap0/test/` and `test/lang/ffi/` too; no tool rejects one since 2026-09-25. Two gaps of clang-tidy 18 are
   covered by review: `bugprone-unused-return-value` takes function names, not patterns (patterns
   arrive in clang-tidy 19), so `.clang-tidy` lists the C library and POSIX functions and the
   project's own functions are unchecked; and **clang-tidy 18's macro-argument blind spot covers
@@ -162,8 +160,8 @@ shebang.
   `- rationale:` (why the rule is this one) and `- history:` (one dated note for each amendment,
   oldest first, and for each reading of the rule that a ticket had to settle -- D4.4 carries such a
   note from T-041, which changes no word of the rule and records how an `f32` context reads it).
-  An entry always has an owner and a rule. `tools/check_decisions.py` checks that
-  shape and the ctest `check_decisions` runs it over the log. An amendment rewrites the `rule` so
+  An entry always has an owner and a rule. `agents/check_decisions.py` checks that
+  shape when run by hand. An amendment rewrites the `rule` so
   that it states the rule in force, and appends a note to `history` that says what the rule said
   before: `Amended YYYY-MM-DD (T-nnn): <what changed>`. A note that changes no word of the rule
   carries `Note YYYY-MM-DD (T-nnn): <what the reading settles>` instead. Use that marker for a
@@ -182,8 +180,8 @@ shebang.
   not. A note that reports another entry in the present tense goes stale the same way: two of the
   49 held one on 2026-09-13 (D19.5's and D20.5's, both about D19.5's rule). Append a dated note
   that says what has changed since, and leave the words of the old note alone, because the
-  sentence above forbids deleting them (T-109). The `history` rule of `tools/knowledge_lint.py`
-  checks this one, and the ctest `knowledge_lint` runs it: it reports a sentence of a `history`
+  sentence above forbids deleting them (T-109). The `history` rule of `agents/knowledge_lint.py`
+  checks this one when run by hand: it reports a sentence of a `history`
   field whose subject names a rule (`the rule`, `its rule`, `this decision`, `D19.5's rule`, or a
   bare tag at the head of the sentence, as in `D3.10 decides`) and whose verb is a present-tense
   verb of saying. Two things silence it, and only the second is a repair: a quotation of the old
@@ -192,7 +190,7 @@ shebang.
   third: `until then the rule read: this decision requires two runs` is still red, because the
   clause after the colon is a sentence of its own and it is present-tense. Quote the old words,
   and the rule reads them as the old rule. The rule states its blind spots in its own docstring,
-  `test/knowledge_lint_test.py` measures each of them and counts them, and no number for them
+  `agents/knowledge_lint_test.py` measures each of them and counts them, and no number for them
   stands here, because a number in prose rots and this paragraph is one file away from the check.
   The two widest gaps: a bare tag is a subject only at the head of a sentence, because inside one
   it is as often a relative clause that reports nothing (T-122 dated D17.4's `D3.10 decides
@@ -200,7 +198,7 @@ shebang.
   D9.1's `every test file D14.4 names NNN_name.ft` and a report one subordinator from the head),
   and one dated note excuses its whole field wherever the report stands in it (T-121).
 - **Moving text inside the decision log**: the risk of an edit to `spec/decisions.md` is a changed
-  meaning, which no build and no test can see. `tools/check_decisions.py --against <old file>`
+  meaning, which no build and no test can see. `agents/check_decisions.py --against <old file>`
   compares the words of every entry between two revisions of the log. It fails on an entry whose
   words changed, and on an entry whose words only moved, because a permutation keeps every word and
   can still invert a rule: "widening extends, narrowing truncates" and "narrowing extends, widening
