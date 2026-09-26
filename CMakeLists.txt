@@ -685,24 +685,64 @@ add_test(NAME extension_selftest
 set_tests_properties(extension_selftest PROPERTIES LABELS unit)
 
 add_custom_target(check-lang
-    COMMAND ${FORT_MODULE_TEST_COMMAND}
-    COMMAND ${FORT_LANG_COMMAND}
-    COMMAND ${FORT_LANG_COMMAND} --check-json
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-    COMMAND bash "${FORT_TEST_DIR}/cross_fort_lint_test.sh" "${FORT_COMPILER_BINARY}"
-            "${FORT_TARGET}"
-    COMMAND bash "${CMAKE_SOURCE_DIR}/test/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
-    COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMAND "${CMAKE_CTEST_COMMAND}" -L lang --output-on-failure
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     COMMENT "Running the language tests"
     USES_TERMINAL
-    VERBATIM
 )
 add_dependencies(check-lang fort fort_std fort_lsp)
 
-add_custom_target(check-all COMMENT "Running every test")
-add_dependencies(check-all check check-lang)
+# `check-all` is every test of the preset: what `ctest` and the `test` target run.
+add_custom_target(check-all
+    COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "Running every test"
+    USES_TERMINAL
+)
+add_dependencies(check-all fort fort_std fort_lsp)
+if(TARGET fort_bootstrap0_unit_tests)
+    add_dependencies(check-all fort_bootstrap0_unit_tests)
+endif()
+
+# ---- the gate --------------------------------------------------------------------
+# `gate` is the merge gate of the selected target, run from this build directory:
+# format-check and tidy, every test of this preset, the workflow (configure, build,
+# test) of each sanitizer preset of the target, and on darwin the host identity
+# record. `tools/target <target> gate` and `tools/vm gate` run it under the base
+# preset of the target. The sanitizer presets are the target's own: msan and tsan
+# exist on linux alone (notes/environment.md 6).
+if(FORT_TARGET STREQUAL "linux")
+    set(FORT_GATE_PRESETS asan ubsan)
+else()
+    set(FORT_GATE_PRESETS darwin-asan darwin-ubsan)
+endif()
+set(FORT_GATE_COMMANDS "")
+foreach(gate_preset IN LISTS FORT_GATE_PRESETS)
+    list(APPEND FORT_GATE_COMMANDS
+        COMMAND "${CMAKE_COMMAND}" -E echo "gate: workflow ${gate_preset}"
+        COMMAND "${CMAKE_COMMAND}" --workflow --preset "${gate_preset}")
+endforeach()
+if(FORT_TARGET STREQUAL "darwin")
+    list(APPEND FORT_GATE_COMMANDS
+        COMMAND "${CMAKE_COMMAND}" -E echo "gate: identity"
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/darwin_host_identity.sh")
+endif()
+add_custom_target(gate
+    COMMAND "${CMAKE_COMMAND}" -E echo "gate: format-check and tidy"
+    COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}" --target format-check tidy
+    COMMAND "${CMAKE_COMMAND}" -E echo "gate: every test of this preset"
+    COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${CMAKE_BINARY_DIR}" --output-on-failure
+    ${FORT_GATE_COMMANDS}
+    COMMAND "${CMAKE_COMMAND}" -E echo "gate: green"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Running the merge gate of the ${FORT_TARGET} target"
+    USES_TERMINAL
+    VERBATIM
+)
+add_dependencies(gate fort fort_std fort_lsp)
+if(TARGET fort_bootstrap0_unit_tests)
+    add_dependencies(gate fort_bootstrap0_unit_tests)
+endif()
 
 # ---- format, tidy, lines -----------------------------------------------------------
 # The lint targets cover the bootstrap sources also when FORT_ENABLE_BOOTSTRAP0 is OFF.

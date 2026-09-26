@@ -437,8 +437,9 @@ without a rewrite.
   `--target=${FORT_TARGET_TRIPLE}` (default `x86_64-linux-gnu`), is what the driver runs over the
   emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
   tidy cover them), `check` (ctest label `unit`, including `lang_lint` and `lang_selftest`),
-  `check-lang` (`test/lang/run_tests.py` with the built compiler; the same command is the ctest
-  `lang`, label `lang`), `check-all` (both), `format` and `format-check` (clang-format
+  `check-lang` (ctest label `lang`: the corpus, `test/fort`, `lang-json`, `fixpoint`,
+  `lsp-binary`, `fort_lint_cross` and `tty`), `check-all` (every test, what `test` runs too),
+  `gate` (the merge gate, `notes/testing.md` 1), `format` and `format-check` (clang-format
   over `src`, `runtime`, `test`), `check-comments` (`tools/check_comments.py`, which
   `format-check` depends on: it rejects a `/* */` in the same sources, D2.2, and its own unit
   tests are the ctest `check_comments_selftest`), `tidy` (`run-clang-tidy` over the same),
@@ -456,7 +457,8 @@ without a rewrite.
   `tools/vm <target> [preset]` runs one. CMake detects Linux or Darwin from the host system.
   The `linux` and `darwin` presets set no `FORT_TARGET` cache value.
 - **The `darwin` build copies target library modules** (T-145, T-152).
-  `tools/target darwin workflow` runs the `darwin` CMake workflow on a Darwin host.
+  `tools/target darwin workflow` runs the `darwin` CMake workflow on a Darwin host;
+  `tools/target darwin gate` runs its `gate` target.
   `fort_std` copies `std/*.ft` and `std/darwin/*.ft` to the standard root: the target's
   `libc.ft`, `net.ft` and `os.ft` stand only in `std/linux/` and `std/darwin/`.
   The root holds 13 fort files under `build/darwin/std`.
@@ -492,8 +494,8 @@ without a rewrite.
   `FORT_ENABLE_BOOTSTRAP0=ON` rejects that external path. External-stage1 mode reads no pin
   (T-160).
   `tools/target linux|darwin workflow|gate` is the common host interface (T-152).
-  The workflow runs CMake directly on the selected host. `tools/vm gate` enters the linux VM once,
-  then runs `tools/target linux gate` there.
+  Both run CMake directly on the selected host; the gate is the `gate` target of the base
+  preset. `tools/vm gate` enters the linux VM once, then runs `tools/target linux gate` there.
 - **A full clone is a build requirement, and a shallow one cannot build** (T-131). Every pin of
   `tools/bootstrap.ref` is a commit of this repository. CMake reaches it with `git cat-file`,
   `git merge-base`, and `git archive`. Validation runs at configure time. A missing pin stops the
@@ -563,9 +565,9 @@ without a rewrite.
   tools/target darwin gate > build/darwin-gate.log 2>&1
   ```
 
-  The darwin gate is the linux gate under the darwin presets: `format-check`, `tidy` and
-  `check-all` under `darwin`, `darwin-asan` and `darwin-ubsan`, then the host identity record
-  (`notes/testing.md` 1). The same tests register on both targets; the gate excludes no corpus
+  The darwin gate is the `gate` target of the `darwin` preset (`notes/testing.md` 1):
+  `format-check`, `tidy`, every test, the `darwin-asan` and `darwin-ubsan` workflows, then the
+  host identity record. The same tests register on both targets; the gate excludes no corpus
   fixture. `darwin-asan` selects Apple clang (`/usr/bin/clang`): the Homebrew clang 19 address
   sanitizer runtime hangs at exit on darwin 25 (measured 2026-09-25 on a five-line C program),
   and LeakSanitizer does not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops

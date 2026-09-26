@@ -11,11 +11,12 @@ bullet at a time and without a rewrite.
 
 ## 1. The merge gate
 
-- `tools/target <target> gate` is the merge gate: `format-check`, `tidy`, and `check-all` under
-  each preset of the target -- `debug`, `asan` and `ubsan` on linux, `darwin`, `darwin-asan` and
-  `darwin-ubsan` on darwin (it configures the first preset, then configures and builds each
-  preset before its `check-all`; the darwin gate ends with the host identity record).
-  `tools/vm gate` runs the linux gate in the VM. The same tests register on both targets: the
+- The merge gate is the `gate` target of the target's base preset (`ninja gate` in
+  `build/debug` on linux, in `build/darwin` on darwin): `format-check`, `tidy`, every test of
+  that preset (`ninja test`), then the workflow -- configure, build, test -- of each sanitizer
+  preset of the target (`asan` and `ubsan`; `darwin-asan` and `darwin-ubsan`), and on darwin
+  the host identity record. `tools/target <target> gate` configures the base preset and builds
+  that target; `tools/vm gate` does the same in the VM. The same tests register on both targets: the
   test graph has no target-only branch since 2026-09-25.
   **Never kill a guest process by pattern.** The VM is shared by every worktree, so
   `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as

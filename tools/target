@@ -1,12 +1,11 @@
 #!/bin/bash
-# Run one build workflow or the counted merge gate for the selected target.
+# Run one build workflow or the merge gate for the selected production target.
 #
-# `workflow` configures, builds and tests the target's base preset. `gate`
-# runs `format-check`, `tidy` and `check-all` under each preset of the target:
-# `debug`, `asan` and `ubsan` on linux; `darwin`, `darwin-asan` and
-# `darwin-ubsan` on darwin. The darwin gate ends with the host identity
-# record, which requires a clean source tree. Either action requires the
-# native host of the target.
+# `workflow` configures, builds and tests the target's base preset (`debug` on
+# linux, `darwin` on darwin). `gate` configures that preset and builds its
+# `gate` target: format-check, tidy, every test, the workflow of each sanitizer
+# preset of the target, and on darwin the host identity record, which requires
+# a clean source tree. Either action requires the native host of the target.
 set -eu
 
 usage() {
@@ -26,11 +25,11 @@ cd "$root"
 case "$target" in
 linux)
     host=Linux
-    presets=(debug asan ubsan)
+    preset=debug
     ;;
 darwin)
     host=Darwin
-    presets=(darwin darwin-asan darwin-ubsan)
+    preset=darwin
     ;;
 *)
     usage
@@ -44,33 +43,12 @@ esac
 
 case "$action" in
 workflow)
-    cmake --preset "$target"
-    cmake --build --preset "$target"
-    ctest --preset "$target"
+    cmake --workflow --preset "$preset"
     ;;
 gate)
     echo "selected target: $target"
-    first=${presets[0]}
-    echo "$target gate: configure $first"
-    cmake --preset "$first"
-    for step in format-check tidy; do
-        echo "$target gate: $step"
-        cmake --build --preset "$first" --target "$step"
-    done
-    for preset in "${presets[@]}"; do
-        if [ "$preset" != "$first" ]; then
-            echo "$target gate: configure $preset"
-            cmake --preset "$preset"
-        fi
-        echo "$target gate: build $preset"
-        cmake --build --preset "$preset"
-        echo "$target gate: check-all $preset"
-        cmake --build --preset "$preset" --target check-all
-    done
-    if [ "$target" = darwin ]; then
-        echo "$target gate: identity"
-        bash tools/darwin_host_identity.sh
-    fi
+    cmake --preset "$preset"
+    cmake --build --preset "$preset" --target gate
     echo "tools/target $target gate: green"
     ;;
 *)
