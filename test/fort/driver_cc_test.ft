@@ -13,6 +13,7 @@ import capture;
 import containers;
 import driver;
 import std.io;
+import std.libc;
 import std.os;
 import std.str;
 import std.strbuf;
@@ -279,7 +280,7 @@ fn a_temporary_directory_that_cannot_be_made_reports_its_errno() void {
     // ENOENT. The value is the system's and is read back through the same
     // call the driver reports with.
     assert(failure != 0);
-    assert(str.from_cstr(strerror(failure)) == "No such file or directory");
+    assert(str.from_cstr(libc.strerror(failure)) == "No such file or directory");
 }
 
 // An empty $TMPDIR names no directory, so it counts as unset.
@@ -380,7 +381,7 @@ fn the_child_receives_the_arguments_cc_argv_built() void {
     write_file("logger.sh", "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > cc.log\n");
     char mut@ own path = str.to_cstr("./logger.sh");
     defer del(path);
-    assert(chmod(path.ptr, 493) == 0);
+    assert(libc.chmod(path.ptr, 493) == 0);
     set_env("TMPDIR", ".");
     string[11] mut whole = {"fort", "--cc", "./logger.sh", "--std-dir", "std", "-lm",
                             "-Xcc", "-static", "-o", "out", "unit.ft"};
@@ -442,7 +443,7 @@ fn a_cc_that_dies_by_a_signal_is_reported_by_its_signal() void {
     char mut@ own path = str.to_cstr("./killer.sh");
     defer del(path);
     // 0o755: the script has to be executable before it can be a --cc.
-    assert(chmod(path.ptr, 493) == 0);
+    assert(libc.chmod(path.ptr, 493) == 0);
     string[4] mut argv = {"fort", "--cc", "./killer.sh", "prog.ft"};
     assert(run_quiet(argv[0..4]) == driver.EXIT_USAGE);
     assert(said("fort: error: cc failed with signal 9\n"));
@@ -459,34 +460,23 @@ fn a_module_that_cannot_be_written_is_a_toolchain_error() void {
 
 // ---- the sandbox ---------------------------------------------------------------------
 
-extern fn strerror(i32 code) char*;
-extern fn chmod(char* path, u32 mode) i32;
-extern fn setenv(char* name, char* value, i32 overwrite) i32;
-extern fn unsetenv(char* name) i32;
-
 fn set_env(string name, string value) void {
     char mut@ own key = str.to_cstr(name);
     defer del(key);
     char mut@ own text = str.to_cstr(value);
     defer del(text);
-    assert(setenv(key.ptr, text.ptr, 1) == 0);
+    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
 }
 
 fn unset_env(string name) void {
     char mut@ own key = str.to_cstr(name);
     defer del(key);
-    assert(unsetenv(key.ptr) == 0);
+    assert(libc.unsetenv(key.ptr) == 0);
 }
 
 fn write_file(string path, string text) void {
     assert(io.write_file(path, cast(text, u8@)));
 }
-
-// Creates one directory, which may already exist.
-extern fn mkdir(char* path, u32 mode) i32;
-
-// The errno a directory that already exists reports.
-i32 EEXIST = 17;
 
 // Every closure holds `std.rt`, which the driver reads from `<std-dir>/rt.ft`.
 // The driver uses `std` beside the program when no option names a directory.
@@ -494,7 +484,7 @@ i32 EEXIST = 17;
 // is `std` of this test's own working directory. What the driver needs there
 // is a file that parses, not a runtime: nothing these tests build is ever run.
 fn write_runtime() void {
-    assert(mkdir("std".ptr, 0o700) == 0 || sys.errno() == EEXIST);
+    assert(libc.mkdir("std".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
     write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
 }
 

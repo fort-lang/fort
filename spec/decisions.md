@@ -1448,7 +1448,9 @@ Sections:
   `std.libc`, IPv4 only and with no name resolution), `std.os` (the target triple and the path of
   the running binary) and `std.rt` (the runtime itself, D13.1:
   process start and exit, allocation, the failure paths, the print buffers and the float text of
-  D18.1 to a descriptor or to a `str_buf`, over `std.libc` and `std.strbuf`).
+  D18.1 to a descriptor or to a `str_buf`, over `std.libc` and `std.strbuf`). A C library
+  function is declared in `std.libc` and nowhere else: the compiler, the runtime and the tests
+  import it for `strerror`, `mkdtemp`, `fork`, `mkdir` and the like.
 - history: Amended 2026-09-11 (T-087): the five `fort_rt_*` declarations stood in `std.libc`, whose
   header had to describe itself as libc "plus" the runtime; they moved to `std.rt`, so "thin libc
   externs" is true of `std.libc` without qualification. Amended 2026-09-11 (T-088): `std.rt` held
@@ -1486,6 +1488,8 @@ Sections:
   date the Linux sources of `std.libc` and `std.net` stood in `std/` and the Mac sources in
   `std/darwin/`. From that date `std.libc`, `std.net` and `std.os` had one source for each target,
   in `std/linux/` and `std/darwin/`.
+  Amended 2026-09-25 (the user): every C library declaration moved into `std.libc`; until then
+  the compiler, the runtime and the `test/fort` suites declared the functions they alone called.
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.

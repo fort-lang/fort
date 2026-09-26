@@ -45,28 +45,10 @@ i32 PARSE_OK = 0;
 i32 PARSE_DONE = 1;
 i32 PARSE_ERROR = 2;
 
-// Declares the system error text used in a `cannot read` reason. It is the C library's. The
-// standard library has no binding for it and this is its one caller.
-extern fn strerror(i32 code) char*;
-
-
-// The temporary directory and the removal of what the driver
-// put in it. The standard library has no binding for any of them and this is
-// their one caller. `mkdtemp` replaces the six `X` at the end of its argument in
-// place, so the buffer it is given is the compiler's own.
-extern fn mkdtemp(char mut* tmpl) char*;
-extern fn unlink(char* path) i32;
-extern fn rmdir(char* path) i32;
-
 // Running --cc once over the module. bootstrap0/src/driver.c calls posix_spawnp with `environ`,
 // which fort cannot name: an `extern` declares a function and never a variable. `fork` with
 // `execvp` matches posix_spawnp(..., environ). Both search PATH and pass the caller's environment.
 // The pipe returns errno when `execvp` fails. Thus, both drivers report the same command failure.
-extern fn fork() i32;
-extern fn execvp(char* file, void* argv) i32;
-extern fn waitpid(i32 pid, i32 mut* status, i32 options) i32;
-extern fn pipe(i32 mut* fds) i32;
-extern fn _exit(i32 status) noreturn;
 
 // The parsed command line. Repeated options remain in command-line order.
 struct options {
@@ -480,7 +462,7 @@ fn tokens_entry(options* opts) i32 {
     defer session.free(&s);
     string mut source = "";
     if (!session.read_source(&s, opts->entry, &source)) {
-        error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
+        error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     // a batch driver writes the text form as it arrives
@@ -507,7 +489,7 @@ fn ast_entry(options* opts) i32 {
     defer session.free(&s);
     string mut source = "";
     if (!session.read_source(&s, opts->entry, &source)) {
-        error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
+        error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     // a batch driver writes the text form as it arrives
@@ -674,7 +656,7 @@ fn make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_
     char mut@ own tmpl = str.to_cstr(strbuf.view(&b));
     defer del(tmpl);
     *error_out = 0;
-    if (mkdtemp(&tmpl[0]) == null) {
+    if (libc.mkdtemp(&tmpl[0]) == null) {
         *error_out = sys.errno();
         return "";
     }
@@ -689,11 +671,11 @@ fn remove_temp_dir(string dir, string ir_path) void {
     if (ir_path.len > 0) {
         char mut@ own path = str.to_cstr(ir_path);
         defer del(path);
-        unlink(&path[0]);
+        libc.unlink(&path[0]);
     }
     char mut@ own d = str.to_cstr(dir);
     defer del(d);
-    rmdir(&d[0]);
+    libc.rmdir(&d[0]);
 }
 
 // ---- the clang invocation --------------------------------------------------------
@@ -838,8 +820,8 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
     cc_command mut cmd = cc_command_build(&argv);
     defer cc_command_free(&cmd);
     i32[2] mut fds = {};
-    if (pipe(&fds[0]) != 0) {
-        error_path("cannot run", opts->cc, str.from_cstr(strerror(sys.errno())));
+    if (libc.pipe(&fds[0]) != 0) {
+        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     if (libc.fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
@@ -847,24 +829,24 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
         // An open write end in --cc or its child keeps the read blocked until the last process
         // exits. This is only a delay. Report close failure here instead of treating it as a
         // missing errno.
-        error_path("cannot run", opts->cc, str.from_cstr(strerror(sys.errno())));
+        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(sys.errno())));
         io.close(fds[0]);
         io.close(fds[1]);
         return EXIT_USAGE;
     }
-    i32 child = fork();
+    i32 child = libc.fork();
     if (child < 0) {
         i32 failure = sys.errno();
         io.close(fds[0]);
         io.close(fds[1]);
-        error_path("cannot run", opts->cc, str.from_cstr(strerror(failure)));
+        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
     if (child == 0) {
         // The child replaces itself with --cc. Reaching the line after execvp means it failed. The
         // child sends errno through the pipe. The parent reports it as a posix_spawnp result.
         io.close(fds[0]);
-        execvp(&cmd.bytes[0], cast(&cmd.items[0], void*));
+        libc.execvp(&cmd.bytes[0], cast(&cmd.items[0], void*));
         u64 e = cast(sys.errno(), u64);
         u8[4] mut buf = {};
         u64 mut i = 0;
@@ -873,7 +855,7 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
             i += 1;
         }
         io.write_all(fds[1], buf[0..ERRNO_BYTES]);
-        _exit(EXEC_FAILED_STATUS);
+        libc._exit(EXEC_FAILED_STATUS);
     }
     io.close(fds[1]);
     u8[4] mut got = {};
@@ -882,9 +864,9 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
     i32 mut status = 0;
     // The child is reaped whatever it did, so no zombie outlives the run. A
     // signal caught while clang runs interrupts the wait, not the child.
-    i32 mut waited = waitpid(child, &status, 0);
+    i32 mut waited = libc.waitpid(child, &status, 0);
     while (waited < 0 && sys.errno() == EINTR) {
-        waited = waitpid(child, &status, 0);
+        waited = libc.waitpid(child, &status, 0);
     }
     if (read == cast(ERRNO_BYTES, i64)) {
         u64 mut e = 0;
@@ -893,11 +875,11 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
             e |= cast(got[i], u64) << (i * BYTE_BITS);
             i += 1;
         }
-        error_path("cannot run", opts->cc, str.from_cstr(strerror(cast(e, i32))));
+        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(cast(e, i32))));
         return EXIT_USAGE;
     }
     if (waited < 0) {
-        error_path("cannot wait for", opts->cc, str.from_cstr(strerror(sys.errno())));
+        error_path("cannot wait for", opts->cc, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     if (wait_signaled(status)) {
@@ -981,7 +963,7 @@ fn front_end(session.session mut* s, options* opts, string program, analysis mut
     // The loader reads each file through the session.
     // This keeps a server buffer consistent across the closure.
     if (!entry_opens(opts->entry)) {
-        error_path("cannot read", opts->entry, str.from_cstr(strerror(sys.errno())));
+        error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     // --json writes the document and no text line
@@ -1016,7 +998,7 @@ fn emit_module(session.session mut* s, options* opts, analysis mut* an, string i
         return EXIT_COMPILE_ERROR;
     }
     if (!io.write_file(ir_path, strbuf.bytes(&g.out))) {
-        error_path("cannot write", ir_path, str.from_cstr(strerror(sys.errno())));
+        error_path("cannot write", ir_path, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     return EXIT_OK;
@@ -1139,7 +1121,7 @@ fn compile_entry(options* opts, string program) i32 {
     string dir = make_temp_dir(&p, &parent, &failure);
     if (dir.len == 0) {
         error_path("cannot create a temporary directory in", parent,
-                   str.from_cstr(strerror(failure)));
+                   str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
     string ir_path = join_path(&p, dir, entry_base(opts->entry), IR_SUFFIX);

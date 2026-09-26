@@ -17,6 +17,7 @@ import capture;
 import containers;
 import driver;
 import std.io;
+import std.libc;
 import std.os;
 import std.str;
 import std.strbuf;
@@ -78,16 +79,13 @@ fn write_file(string path, string text) void {
     assert(io.write_file(path, cast(text, u8@)));
 }
 
-// The errno a directory that already exists reports.
-i32 EEXIST = 17;
-
 // Every closure holds `std.rt`, which the driver reads from `<std-dir>/rt.ft`.
 // The driver uses `std` beside the program when no option names a directory.
 // The runs below give `fort` as argv[0], so that directory
 // is `std` of this test's own working directory. What the driver needs there
 // is a file that parses, not a runtime: nothing these tests build is ever run.
 fn write_runtime() void {
-    assert(mkdir("std".ptr, 0o700) == 0 || sys.errno() == EEXIST);
+    assert(libc.mkdir("std".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
     write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
 }
 
@@ -729,12 +727,10 @@ fn the_current_directory_is_not_a_search_root() void {
     assert(err_has("module 'lib2' not found"));
 }
 
-extern fn mkdir(char* path, u32 mode) i32;
-
 fn make_directory(string path) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
-    return mkdir(c_path.ptr, 0o700) == 0;
+    return libc.mkdir(c_path.ptr, 0o700) == 0;
 }
 
 // ---- the standard library directory ---------------------------------------------
@@ -833,23 +829,20 @@ fn an_empty_std_dir_option_resolves_no_std_import() void {
 }
 
 // The environment of this process, which the two tests above set and clear so
-// that each arm of the search is forced rather than observed. Neither has a
-// std binding and this is their one caller.
-extern fn setenv(char* name, char* value, i32 overwrite) i32;
-extern fn unsetenv(char* name) i32;
+// that each arm of the search is forced rather than observed.
 
 fn set_env(string name, string value) void {
     char mut@ own c_name = str.to_cstr(name);
     defer del(c_name);
     char mut@ own c_value = str.to_cstr(value);
     defer del(c_value);
-    assert(setenv(c_name.ptr, c_value.ptr, 1) == 0);
+    assert(libc.setenv(c_name.ptr, c_value.ptr, 1) == 0);
 }
 
 fn unset_env(string name) void {
     char mut@ own c_name = str.to_cstr(name);
     defer del(c_name);
-    assert(unsetenv(c_name.ptr) == 0);
+    assert(libc.unsetenv(c_name.ptr) == 0);
 }
 
 // ---- re-entrancy ----------------------------------------------------------------

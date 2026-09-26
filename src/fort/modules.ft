@@ -13,18 +13,9 @@ import std.str;
 import std.strbuf;
 import std.strmap;
 
-// POSIX functions for canonical paths and readable-file checks.
-// This module declares them because the standard library has no bindings for them.
-extern fn realpath(char* name, char* resolved) char* own;
-extern fn access(char* path, i32 mode) i32;
-extern fn getcwd(char mut* buf, u64 size) char mut*;
-
 // The buffer size getcwd is given. A working directory above this size makes
 // getcwd fail, and a relative path then goes to realpath as it is.
 u64 CWD_CAP = 4096;
-
-// The mode bit access is asked about: readable.
-i32 R_OK = 4;
 
 // The extension of a fort source file; a file with any other extension is
 // never a module.
@@ -328,7 +319,7 @@ fn candidate_at(module_set* set, strbuf.str_buf mut* out, ast.node* path, u64 n,
 fn file_exists(string path) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
-    return access(c_path.ptr, R_OK) == 0;
+    return libc.access(c_path.ptr, libc.R_OK) == 0;
 }
 
 // Finds the first root with a file for the first `n` path segments.
@@ -358,7 +349,7 @@ fn working_dir(module_set mut* set) string {
     if (set->cwd.len == 0) {
         char mut@ own buf = new(char, CWD_CAP);
         defer del(buf);
-        if (getcwd(buf.ptr, CWD_CAP) != null) {
+        if (libc.getcwd(buf.ptr, CWD_CAP) != null) {
             set->cwd = containers.pool_intern(&set->pool, str.from_cstr(buf.ptr));
         }
     }
@@ -380,7 +371,7 @@ fn real_path(module_set mut* set, string path) string {
     strbuf.append(&joined, path);
     char mut@ own c_path = str.to_cstr(strbuf.view(&joined));
     defer del(c_path);
-    char* own mut resolved = realpath(c_path.ptr, null);
+    char* own mut resolved = libc.realpath(c_path.ptr, null);
     if (resolved == null) {
         return containers.pool_intern(&set->pool, path);
     }

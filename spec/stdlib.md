@@ -203,7 +203,7 @@ fn std_dir() string {
 
 The target-specific `std.libc` module supplies C extern declarations and fixed fort wrappers.
 It maps C types per D9.8: `int` is `i32`, `size_t` is `u64`, `ssize_t` and `off_t` are `i64`.
-`mode_t` is `u32` on Linux and `u16` on Mac. `char*` is `char*`.
+`mode_t` is `u32` on Linux and `u16` on Mac, and crosses as `u32` on both. `char*` is `char*`.
 A buffer C fixes as bytes is `u8*` or `u8 mut*`. A buffer of no fixed
 type is `void*` or `void mut*` (1.4). C extern names are unmangled (D9.7). `open` is
 variadic in C, so both targets declare `open` with `...` (D9.8). Apple arm64 then places its
@@ -268,7 +268,38 @@ extern fn __errno_location() i32 mut*;
 extern fn fcntl(i32 fd, i32 cmd, ...) i32;
 extern fn readlink(char* path, char* buf, u64 size) i64;
 extern fn realpath(char* path, char* resolved) char* own;
+
+// <string.h>, <stdlib.h>, <unistd.h>, <sys/stat.h>, <sys/wait.h>: what the compiler and its
+// tests call. `mode_t` crosses as u32 on both targets: one signature serves both roots.
+i32 EEXIST = 17;
+i32 R_OK = 4;
+extern fn strerror(i32 code) char*;
+extern fn strtod(char* s, void* end) f64;
+extern fn strtof(char* s, void* end) f32;
+extern fn mkdtemp(char mut* tmpl) char*;
+extern fn setenv(char* name, char* value, i32 overwrite) i32;
+extern fn unsetenv(char* name) i32;
+extern fn access(char* path, i32 mode) i32;
+extern fn getcwd(char mut* buf, u64 size) char mut*;
+extern fn unlink(char* path) i32;
+extern fn rmdir(char* path) i32;
+extern fn symlink(char* target, char* link_path) i32;
+extern fn mkdir(char* path, u32 mode) i32;
+extern fn chmod(char* path, u32 mode) i32;
+extern fn dup(i32 fd) i32;
+extern fn dup2(i32 old_fd, i32 new_fd) i32;
+extern fn pipe(i32 mut* fds) i32;
+extern fn fork() i32;
+extern fn execvp(char* file, void* argv) i32;
+extern fn waitpid(i32 pid, i32 mut* status, i32 options) i32;
+extern fn _exit(i32 status) noreturn;
 ```
+
+A C library function is declared here and nowhere else (since 2026-09-25): the compiler
+(`realpath`, `access`, `getcwd`, `strerror`, `mkdtemp`, `unlink`, `rmdir`, `fork`, `execvp`,
+`waitpid`, `pipe`, `_exit`), the runtime (`strtod`, `strtof`) and the `test/fort` suites
+(`mkdir`, `chmod`, `symlink`, `dup`, `dup2`, `setenv`, `unsetenv`) import `std.libc` for them.
+`_NSGetExecutablePath` stays in the Mac `std.os`: it is dyld's, not the C library's.
 
 Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
 `read`, `write` and the four `<string.h>` entries count bytes, so they take `u8*` and `u8 mut*`
