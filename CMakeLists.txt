@@ -335,15 +335,6 @@ add_custom_target(fort ALL
 
 set(FORT_COMPILER_BINARY "${CMAKE_BINARY_DIR}/fort")
 
-add_test(NAME target-host
-    COMMAND bash "${FORT_TEST_DIR}/target_host_test.sh" "${FORT_TARGET}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(target-host PROPERTIES LABELS unit)
-
-add_test(NAME target-workflow
-    COMMAND bash "${FORT_TEST_DIR}/target_workflow_test.sh")
-set_tests_properties(target-workflow PROPERTIES LABELS unit)
-
 add_test(NAME lsp-target
     COMMAND bash "${FORT_TEST_DIR}/lsp_target_test.sh")
 set_tests_properties(lsp-target PROPERTIES LABELS unit)
@@ -583,11 +574,6 @@ set_tests_properties(lang_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# The VM gate manifest detects ignored fort files and symlinks. It skips build outputs.
-add_test(NAME gate_ft_manifest
-    COMMAND bash "${FORT_TEST_DIR}/gate_ft_manifest_test.sh")
-set_tests_properties(gate_ft_manifest PROPERTIES LABELS unit)
-
 # The identifier check reads `fort --index` instead of tokenizing fort again.
 # Thus, it needs a compiler.
 #
@@ -651,11 +637,10 @@ endif()
 
 # ---- the gate --------------------------------------------------------------------
 # `gate` is the merge gate of the selected target, run from this build directory:
-# format-check and tidy, every test of this preset, the workflow (configure, build,
-# test) of each sanitizer preset of the target, and on darwin the host identity
-# record. `tools/target <target> gate` and `tools/vm gate` run it under the base
-# preset of the target. The sanitizer presets are the target's own: msan and tsan
-# exist on linux alone (notes/environment.md 6).
+# format-check and tidy, every test of this preset, and the workflow (configure,
+# build, test) of each sanitizer preset of the target. `tools/vm gate` runs it
+# under the debug preset in the VM. The sanitizer presets are the target's own:
+# msan and tsan exist on linux alone (notes/environment.md 6).
 if(FORT_TARGET STREQUAL "linux")
     set(FORT_GATE_PRESETS asan ubsan)
 else()
@@ -667,11 +652,6 @@ foreach(gate_preset IN LISTS FORT_GATE_PRESETS)
         COMMAND "${CMAKE_COMMAND}" -E echo "gate: workflow ${gate_preset}"
         COMMAND "${CMAKE_COMMAND}" --workflow --preset "${gate_preset}")
 endforeach()
-if(FORT_TARGET STREQUAL "darwin")
-    list(APPEND FORT_GATE_COMMANDS
-        COMMAND "${CMAKE_COMMAND}" -E echo "gate: identity"
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tools/darwin_host_identity.sh")
-endif()
 add_custom_target(gate
     COMMAND "${CMAKE_COMMAND}" -E echo "gate: format-check and tidy"
     COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}" --target format-check tidy

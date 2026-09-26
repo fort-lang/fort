@@ -178,7 +178,7 @@ target moved and the rebase is missing. No merge commit enters the history. Unti
 - Implementor: reads only the ticket and its cited specification sections; codes and tests there.
   Keep each commit green under `tools/vm check`. Squash a single-unit ticket first.
   Hand off a clean SHA and `tools/vm check` evidence in 40 lines. Do not start the gate or review.
-- Coordinator: records identity. A worker starts one ticket-worktree `tools/vm gate` and waits.
+- Coordinator: a worker starts one ticket-worktree `tools/vm gate` and waits.
   The worker messages at exit or for help. Start read-only review on that SHA; move the ticket to
   `inreview/`. For `rev-std`, use:
 
@@ -192,10 +192,9 @@ target moved and the rebase is missing. No merge commit enters the history. Unti
   Check xfail and the ticket. Route learning below. A live gate is pending; never edit or merge.
 - Coordinator: uses gate-worker messages for live state. Do not poll a responsive worker.
   Make at most one fallback poll per 20 message-free minutes, only when the worker appears stuck.
-  Require `tools/vm gate: green`. Log counts, source SHA, log SHA, and freshness.
-  After gate exit and final review, measure identity under `notes/environment.md` 1.
-  Reuse a green gate only if identity and log SHA match and preset count is zero. Log reuse.
-  If proof differs or is missing, rebase when `main` changed, then rerun the gate.
+  Require `tools/vm gate: green`. Log the counts and the source SHA.
+  Reuse a green gate only on the same SHA with untouched `build/` outputs. Log reuse.
+  If `main` moved, rebase, then rerun the gate.
   Review again if rebase changes behavior. Read `git diff --stat main...HEAD` and new files.
   Merge per the Change Implementation Loop. Record the merge sha and agent tokens in the Log.
   Tick merge criteria. Move the ticket to `done/`. Remove its worktree and branch. Assign tickets.

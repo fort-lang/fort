@@ -14,10 +14,10 @@ bullet at a time and without a rewrite.
 - The merge gate is the `gate` target of the target's base preset (`ninja gate` in
   `build/debug` on linux, in `build/darwin` on darwin): `format-check`, `tidy`, every test of
   that preset (`ninja test`), then the workflow -- configure, build, test -- of each sanitizer
-  preset of the target (`asan` and `ubsan`; `darwin-asan` and `darwin-ubsan`), and on darwin
-  the host identity record. `tools/target <target> gate` configures the base preset and builds
-  that target; `tools/vm gate` does the same in the VM. The same tests register on both targets: the
-  test graph has no target-only branch since 2026-09-25.
+  preset of the target (`asan` and `ubsan`; `darwin-asan` and `darwin-ubsan`). On darwin run
+  `cmake --preset darwin && cmake --build --preset darwin --target gate`; `tools/vm gate` does the
+  same for `debug` in the VM. The same tests register on both targets: the test graph has no
+  target-only branch since 2026-09-25.
   **Never kill a guest process by pattern.** The VM is shared by every worktree, so
   `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as
   well, and each of them reads the kill as a test failure in their own branch. T-043 did it to

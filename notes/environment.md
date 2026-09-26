@@ -145,57 +145,8 @@ without a rewrite.
   two long gates land on different slots. And the Vagrantfile vagrant reads is the **main
   checkout's**, so a change to it is live only after it merges -- a slot-2 `up` run from a
   branch that added the slot logic failed with "machine fort-dev-fort already exists".
-  **Gate input identity (T-148).** A reusable `tools/vm gate` reads the branch tree, the main VM
-  configuration, guest packages, the guest profile, kernel, QEMU registration, and build outputs.
-  Record `git rev-parse HEAD main` in the worktree before the gate and after final review.
-  Require empty `git status --porcelain --untracked-files=all` output at both times.
-  That status omits ignored `.ft` inputs. Record their path and content manifest too:
-
-  ```sh
-  FORT_VM_SLOT=<n> tools/vm run 'bash tools/gate_ft_manifest.sh'
-  ```
-
-  The manifest hashes `.ft` paths, symlink targets, and contents outside `build/`, `.git/`,
-  and `.worktrees/`.
-  Require the same manifest value after final review. A new ignored `.ft` file changes it.
-  The VM uses the main checkout's `Vagrantfile`, not the branch copy.
-  Record its content hash before the gate and after final review:
-
-  ```sh
-  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /vagrant/Vagrantfile'
-  ```
-
-  A changed main `Vagrantfile` invalidates reuse even when the main SHA stays equal.
-  Record the physical VM directory, `FORT_VM_SLOT`, and the VM UUID.
-  Read the UUID from `.vagrant/machines/default/virtualbox/id` for slot 1.
-  Read it from `.vagrant-2/machines/default/virtualbox/id` for slot 2.
-  Record the guest values with these read-only commands in the same slot:
-
-  ```sh
-  FORT_VM_SLOT=<n> tools/vm run 'uname -rm'
-  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /var/lib/dpkg/status /etc/profile.d/fort.sh'
-  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /proc/sys/kernel/core_pattern'
-  FORT_VM_SLOT=<n> tools/vm run 'sha256sum /proc/sys/fs/binfmt_misc/qemu-x86_64'
-  ```
-
-  The package hash detects package version changes. The profile hash detects fort environment
-  changes. The kernel, core, and QEMU values detect changes to the test runtime.
-  The gate also uses `build/debug`, `build/asan`, and `build/ubsan` as cache inputs.
-  Capture the gate output in `build/gate.log`. Record its SHA256 value after the gate.
-  At final review, require the same log SHA256 value and this count to equal zero:
-
-  ```sh
-  test -f build/gate.log && test -d build/debug && test -d build/asan &&
-    test -d build/ubsan &&
-    bash -o pipefail -c 'find build/debug build/asan build/ubsan -newer build/gate.log | wc -l'
-  ```
-
-  Use the actual gate log path if it differs. A changed or missing log invalidates reuse.
-  A positive count means a preset file or directory changed after the gate.
-  A missing log, missing preset directory, or failed `find` command invalidates reuse.
-  A review log in `build/` does not change a preset input.
-  A manual guest edit outside this identity also invalidates reuse. Rerun if evidence is missing.
-  This identity applies to `tools/vm gate`, not darwin host tests. T-147 owns the darwin identity.
+  A gate is reused only on the same source SHA with the same `build/` outputs; a doubt means a
+  rerun (the identity record of T-148 and its darwin form of T-147 were retired on 2026-09-25).
 - **Every `tools/vm` subcommand that drives `build/<preset>` holds its worktree, and a build is
   stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `check`,
   `check-lang`, `check-all`, `format`, `format-check`, `tidy`, `lines` and `gate`. **`run` and
@@ -455,8 +406,7 @@ without a rewrite.
   `tools/vm <target> [preset]` runs one. CMake detects Linux or Darwin from the host system.
   The `linux` and `darwin` presets set no `FORT_TARGET` cache value.
 - **The `darwin` build copies target library modules** (T-145, T-152).
-  `tools/target darwin workflow` runs the `darwin` CMake workflow on a Darwin host;
-  `tools/target darwin gate` runs its `gate` target.
+  `cmake --workflow --preset darwin` builds and tests on a Darwin host.
   `fort_std` copies `std/*.ft` and `std/darwin/*.ft` to the standard root: the target's
   `libc.ft`, `net.ft` and `os.ft` stand only in `std/linux/` and `std/darwin/`.
   The root holds 13 fort files under `build/darwin/std`.
@@ -491,9 +441,8 @@ without a rewrite.
   external compiler and skips the list. `FORT_ENABLE_BOOTSTRAP0=OFF` requires that external path.
   `FORT_ENABLE_BOOTSTRAP0=ON` rejects that external path. External-stage1 mode reads no pin
   (T-160).
-  `tools/target linux|darwin workflow|gate` is the common host interface (T-152).
-  Both run CMake directly on the selected host; the gate is the `gate` target of the base
-  preset. `tools/vm gate` enters the linux VM once, then runs `tools/target linux gate` there.
+  The host interface is CMake itself: `cmake --workflow --preset <p>` and the `gate` target of
+  the base preset. `tools/vm gate` enters the linux VM once and builds that target there.
 - **A full clone is a build requirement, and a shallow one cannot build** (T-131). Every pin of
   `tools/bootstrap.ref` is a commit of this repository. CMake reaches it with `git cat-file`,
   `git merge-base`, and `git archive`. Validation runs at configure time. A missing pin stops the
@@ -540,15 +489,12 @@ without a rewrite.
   rg --version
   ```
 
-  `tools/darwin_host_identity.sh` requires each tool it hashes, `rg` among them; a host without
-  ripgrep exits 2 with `darwin identity: missing tool rg` before the gate runs (T-183, measured
-  2026-09-19; `brew install ripgrep` cured it).
   The verifier is the `FORT_OPT` cache value (`/opt/homebrew/bin/opt` by default on darwin);
   pass `-DFORT_OPT:FILEPATH=<path>` to `cmake --preset darwin` only when that tool verifies
   LLVM IR. Configure and build the `darwin` compiler and language server on the darwin host:
 
   ```sh
-  tools/target darwin workflow
+  cmake --workflow --preset darwin
   ```
 
   `build/darwin/fort` is the compiler from the CMake graph.
@@ -557,52 +503,20 @@ without a rewrite.
   zero times while it builds the source chain and tests the fixed point.
   The host scripts take the SDK from `xcrun --sdk macosx --show-sdk-path` and pass it as
   `-isysroot`; the compiler's own `--cc` link finds it through clang.
-  Run the counted `darwin` gate on a clean source tree:
+  Run the `darwin` gate:
 
   ```sh
-  tools/target darwin gate > build/darwin-gate.log 2>&1
+  cmake --preset darwin && cmake --build --preset darwin --target gate > build/darwin-gate.log 2>&1
   ```
 
   The darwin gate is the `gate` target of the `darwin` preset (`notes/testing.md` 1):
-  `format-check`, `tidy`, every test, the `darwin-asan` and `darwin-ubsan` workflows, then the
-  host identity record. The same tests register on both targets; the gate excludes no corpus
-  fixture. `darwin-asan` selects Apple clang (`/usr/bin/clang`): the Homebrew clang 19 address
-  sanitizer runtime hangs at exit on darwin 25 (measured 2026-09-25 on a five-line C program),
-  and LeakSanitizer does not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops
-  `detect_leaks=1` there. There is no `darwin-msan` and no `darwin-tsan`: MemorySanitizer is
-  linux-only and ThreadSanitizer needs no run, since nothing here has threads.
-  `tools/darwin_host_identity.sh` records the source and main SHAs and requires empty git status.
-  It records the host OS, SDK, Xcode, clang, verifier, CMake, Node, and tool hashes; the clang
-  and verifier are the `FORT_TARGET_CC` and `FORT_OPT` values of `build/darwin/CMakeCache.txt`.
-  It records the selected target, compiler hash, and language-server hash.
-  It records a counted path, symlink, and content manifest for `.ft` inputs.
-  The manifest includes ignored `.ft` files and `build/darwin`.
-  Capture identity before the gate and after final review:
-
-  ```sh
-  bash tools/darwin_host_identity.sh > build/darwin-identity-before.log
-  tools/target darwin gate > build/darwin-gate.log 2>&1
-  bash tools/darwin_host_identity.sh > build/darwin-identity-after.log
-  cmp build/darwin-identity-before.log build/darwin-identity-after.log
-  shasum -a 256 build/darwin-gate.log
-  ```
-
-  Record the gate log SHA256 again after final review.
-  Require the same gate log hash and identity record before gate reuse.
-  A changed SHA, status, tool, SDK, VM, or `.ft` manifest invalidates reuse.
-  A changed or missing build output invalidates reuse.
-  Require each native output directory before a freshness count:
-
-  ```sh
-  test -f build/darwin-gate.log && test -d build/darwin && test -d build/darwin-asan &&
-    test -d build/darwin-ubsan && test -d build/darwin/std &&
-    test -d build/darwin/cmake-fixpoint/fixpoint &&
-    bash -o pipefail -c \
-      'find build/darwin build/darwin-asan build/darwin-ubsan -newer build/darwin-gate.log | wc -l'
-  ```
-
-  The freshness command must exit 0 and print 0.
-  A missing value requires a new `tools/target darwin gate` run.
+  `format-check`, `tidy`, every test, then the `darwin-asan` and `darwin-ubsan` workflows. The
+  same tests register on both targets; the gate excludes no corpus fixture. `darwin-asan`
+  selects Apple clang (`/usr/bin/clang`): the Homebrew clang 19 address sanitizer runtime hangs
+  at exit on darwin 25 (measured 2026-09-25 on a five-line C program), and LeakSanitizer does
+  not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops `detect_leaks=1` there. There is
+  no `darwin-msan` and no `darwin-tsan`: MemorySanitizer is linux-only and ThreadSanitizer needs
+  no run, since nothing here has threads.
 
 - An ssh `ControlPath` under `os.tmpdir()` does not work on macOS: the host's temporary directory
   is `/var/folders/<...>/T`, ssh binds the socket under a temporary name of its own, and the total
