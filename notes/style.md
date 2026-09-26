@@ -142,7 +142,7 @@ shebang.
   field may (`node mut* own node`), since fields are not variables and are outside the module
   namespace (D7.9). `tools/fort_lint.py` enforces exactly that, and the 100-column wrap, over
   `std/` and `src/fort/`; nothing formats `.ft`, so indentation and spacing are still written by
-  hand and read by review. Run it with `tools/vm fort-lint`, or by hand as
+  hand and read by review. Run it with `tools/vm lint`, or by hand as
   `tools/vm run 'python3 tools/fort_lint.py --fort build/debug/fort <file.ft>'`.
 
 ## 4. Markdown and specification text

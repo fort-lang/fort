@@ -76,7 +76,7 @@ if(FORT_BOOTSTRAP0_BUILD_TESTS)
         add_test(NAME "${TEST_TARGET}" COMMAND "${TEST_TARGET}"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
         set_tests_properties("${TEST_TARGET}" PROPERTIES
-            LABELS "unit;bootstrap"
+            LABELS "bootstrap0;unit"
             ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
         list(APPEND FORT_UNIT_TEST_TARGETS "${TEST_TARGET}")
     endforeach()
@@ -110,11 +110,11 @@ if(FORT_BOOTSTRAP0_BUILD_TESTS)
                 -o "${FORT_BOOTSTRAP1_DIR}/fort" "${FORT_BOOTSTRAP1_DIR}/src/fort/main.ft"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
         set_tests_properties(bootstrap-e2e PROPERTIES
-            LABELS "unit;bootstrap"
+            LABELS "bootstrap0;integration"
             ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
     endif()
 
-    # The parent's `check` target depends on this target, so it builds each suite.
+    # The parent's `bootstrap0-unit` target depends on this target, so it builds each suite.
     add_custom_target(fort_bootstrap0_unit_tests)
     if(FORT_UNIT_TEST_TARGETS)
         add_dependencies(fort_bootstrap0_unit_tests ${FORT_UNIT_TEST_TARGETS})
@@ -156,7 +156,7 @@ if(FORT_BOOTSTRAP0_BUILD_TESTS)
                 PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP1_DIR}/std")
             add_dependencies("${std_reader}" fort_bootstrap1_source)
             set_tests_properties("${std_reader}" PROPERTIES
-                LABELS "unit;bootstrap;bootstrap-contract")
+                LABELS "bootstrap0;unit;bootstrap-contract")
         endif()
     endforeach()
 
@@ -174,6 +174,22 @@ if(FORT_BOOTSTRAP0_BUILD_TESTS)
         COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
         WORKING_DIRECTORY "${FORT_TEST_DIR}")
     set_tests_properties(mutate_selftest PROPERTIES
-        LABELS unit
+        LABELS "bootstrap0;unit"
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 endif()
+
+# ---- the development targets ----------------------------------------------------
+# The bootstrap0 steps of cmake/dev_targets.cmake. ctest runs over this binary
+# directory, so it sees the tests of bootstrap0 and nothing else.
+file(GLOB_RECURSE FORT_BOOTSTRAP0_C_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.c" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
+fort_format_targets("bootstrap0-" ${FORT_BOOTSTRAP0_C_SOURCES})
+fort_tidy_target(bootstrap0-lint "${CMAKE_CURRENT_SOURCE_DIR}")
+fort_ctest_target(bootstrap0-unit "${CMAKE_CURRENT_BINARY_DIR}" -L "^unit$")
+fort_ctest_target(bootstrap0-integration "${CMAKE_CURRENT_BINARY_DIR}" -L "^integration$")
+if(TARGET fort_bootstrap0_unit_tests)
+    add_dependencies(bootstrap0-unit fort_bootstrap0_unit_tests)
+    add_dependencies(bootstrap0-integration fort_bootstrap0 fort_bootstrap1_source)
+endif()
+fort_sequence_target(bootstrap0-check
+    bootstrap0-format-check bootstrap0-lint bootstrap0-unit bootstrap0-integration)

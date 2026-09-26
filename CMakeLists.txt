@@ -117,6 +117,7 @@ endif()
 # ---- the bootstrap compiler ---------------------------------------------------
 # bootstrap0/ builds the C compiler fort_bootstrap0 and its tests. Its binary
 # directory is FORT_BOOTSTRAP_DIR, so the compiler is bootstrap/fort.
+include(cmake/dev_targets.cmake)
 if(FORT_ENABLE_BOOTSTRAP0)
     add_subdirectory(bootstrap0 "${FORT_BOOTSTRAP_DIR}")
 endif()
@@ -346,7 +347,7 @@ set(FORT_GRAPH_FIXPOINT_COMMAND
 add_test(NAME fixpoint
     COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fixpoint PROPERTIES LABELS lang)
+set_tests_properties(fixpoint PROPERTIES LABELS integration)
 
 # ---- the language server -------------------------------------------------------
 # fort_lsp is src/lsp compiled by the production compiler. It stands at the
@@ -382,40 +383,19 @@ add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
 add_test(NAME lsp-binary
     COMMAND bash "${FORT_TEST_DIR}/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(lsp-binary PROPERTIES LABELS lang)
-
-# The other target on this host: its standard root assembled, its std modules
-# linted under that root, and one module emitted for it that the verifier
-# accepts. The other host checks its C ABI.
-add_test(NAME cross-target
-    COMMAND bash "${FORT_TEST_DIR}/cross_target_test.sh" "${FORT_COMPILER_BINARY}"
-            "${FORT_OPT_PATH}" "${FORT_TARGET}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(cross-target PROPERTIES LABELS lang)
+set_tests_properties(lsp-binary PROPERTIES LABELS integration)
 
 # The C helpers of the language tests are compiled for the target by the
-# harness; they also build on the host so that -Werror and clang-tidy cover
-# them. They are FFI entry points declared by the tests, hence no prototypes.
+# harness; they also build on the host so that -Werror covers them. They are FFI entry points
+# declared by the tests, hence no prototypes.
 file(GLOB FORT_LANG_FFI_SOURCES CONFIGURE_DEPENDS "${FORT_TEST_DIR}/lang/ffi/*.c")
 add_library(lang_ffi_helpers OBJECT ${FORT_LANG_FFI_SOURCES})
 target_compile_options(lang_ffi_helpers PRIVATE -Wno-missing-prototypes)
 
-# ---- check targets ---------------------------------------------------------------
-add_custom_target(check
-    COMMAND "${CMAKE_CTEST_COMMAND}" -L unit --output-on-failure
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-    COMMENT "Running the unit tests"
-    USES_TERMINAL
-)
-add_dependencies(check fort fort_std)
-if(TARGET fort_bootstrap0_unit_tests)
-    add_dependencies(check fort_bootstrap0_unit_tests)
-endif()
-
 # The language test harness drives the compiler over test/lang.
-# The ctests `lang` and `lang-json` use
-# the product compiler. `lang_lint` validates the directives, and
-# `lang_selftest` runs the harness's own unit tests (both label unit).
+# The ctests `lang` and `lang-json` use the product compiler, and
+# `lang_selftest` runs the harness's own unit tests. The harness validates the
+# directives of the corpus before every run.
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
 set(FORT_LANG_HARNESS "${FORT_LANG_DIR}/run_tests.py")
 include(ProcessorCount)
@@ -447,7 +427,7 @@ set(FORT_MODULE_TEST_COMMAND
 )
 add_test(NAME fort-modules COMMAND ${FORT_MODULE_TEST_COMMAND})
 set_tests_properties(fort-modules PROPERTIES
-    LABELS lang
+    LABELS unit
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
 # The product language test uses the current compiler and standard library.
@@ -464,13 +444,13 @@ set(FORT_LANG_COMMAND
     -j "${FORT_LANG_JOBS}"
 )
 add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
-set_tests_properties(lang PROPERTIES LABELS lang)
+set_tests_properties(lang PROPERTIES LABELS integration)
 
 # Product check mode runs over the same corpus. It compares JSON and text diagnostics.
 # It runs `--index` on each test with a golden index.json file.
 # The harness compares the index byte for byte and reports the measured count.
 add_test(NAME lang-json COMMAND ${FORT_LANG_COMMAND} --check-json)
-set_tests_properties(lang-json PROPERTIES LABELS lang)
+set_tests_properties(lang-json PROPERTIES LABELS integration)
 # Each harness run takes FORT_LANG_JOBS processors. Told so, `ctest -j` runs
 # nothing beside it; untold, it ran seven tests beside a full-load harness on
 # the darwin host and `lang_selftest` reported its 5 s fake compiler as timed
@@ -488,29 +468,15 @@ add_test(NAME tty
             --cc "${FORT_TARGET_CC_PATH}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(tty PROPERTIES
-    LABELS unit
+    LABELS integration
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
-add_test(NAME lang_lint COMMAND "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}" --lint)
-set_tests_properties(lang_lint PROPERTIES LABELS unit)
 add_test(NAME lang_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest run_tests_test
     WORKING_DIRECTORY "${FORT_LANG_DIR}")
 set_tests_properties(lang_selftest PROPERTIES
     LABELS unit
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# The identifier check reads `fort --index` instead of tokenizing fort again.
-# Thus, it needs a compiler.
-#
-# The product compiler reads all fort sources in the repository. The test has
-# label lang because it runs the product compiler. It names --std-dir
-# because the library does not stand beside that binary.
-add_test(NAME fort_lint
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fort_lint PROPERTIES LABELS lang)
 
 # These unit tests check synthetic index records and a fake compiler.
 # They also check test/fort_lint fixtures with the compiler in FORT_BINARY.
@@ -541,32 +507,12 @@ add_test(NAME extension_selftest
     WORKING_DIRECTORY "${FORT_EDITORS_DIR}/vscode")
 set_tests_properties(extension_selftest PROPERTIES LABELS unit)
 
-add_custom_target(check-lang
-    COMMAND "${CMAKE_CTEST_COMMAND}" -L lang --output-on-failure
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-    COMMENT "Running the language tests"
-    USES_TERMINAL
-)
-add_dependencies(check-lang fort fort_std fort_lsp)
-
-# `check-all` is every test of the preset: what `ctest` and the `test` target run.
-add_custom_target(check-all
-    COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-    COMMENT "Running every test"
-    USES_TERMINAL
-)
-add_dependencies(check-all fort fort_std fort_lsp)
-if(TARGET fort_bootstrap0_unit_tests)
-    add_dependencies(check-all fort_bootstrap0_unit_tests)
-endif()
-
 # ---- the gate --------------------------------------------------------------------
 # `gate` is the merge gate of the selected target, run from this build directory:
-# format-check and tidy, every test of this preset, and the workflow (configure,
-# build, test) of each sanitizer preset of the target. `tools/vm gate` runs it
-# under the debug preset in the VM. The sanitizer presets are the target's own:
-# msan and tsan exist on linux alone (notes/environment.md 6).
+# `check-all`, then the workflow (configure, build, test) of each sanitizer preset of
+# the target. `tools/vm gate` runs it under the debug preset in the VM. The
+# sanitizer presets are the target's own: msan and tsan exist on linux alone
+# (notes/environment.md 6).
 if(FORT_TARGET STREQUAL "linux")
     set(FORT_GATE_PRESETS asan ubsan)
 else()
@@ -579,10 +525,8 @@ foreach(gate_preset IN LISTS FORT_GATE_PRESETS)
         COMMAND "${CMAKE_COMMAND}" --workflow --preset "${gate_preset}")
 endforeach()
 add_custom_target(gate
-    COMMAND "${CMAKE_COMMAND}" -E echo "gate: format-check and tidy"
-    COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}" --target format-check tidy
-    COMMAND "${CMAKE_COMMAND}" -E echo "gate: every test of this preset"
-    COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${CMAKE_BINARY_DIR}" --output-on-failure
+    COMMAND "${CMAKE_COMMAND}" -E echo "gate: check-all"
+    COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}" --target check-all
     ${FORT_GATE_COMMANDS}
     COMMAND "${CMAKE_COMMAND}" -E echo "gate: green"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -590,78 +534,42 @@ add_custom_target(gate
     USES_TERMINAL
     VERBATIM
 )
-add_dependencies(gate fort fort_std fort_lsp)
-if(TARGET fort_bootstrap0_unit_tests)
-    add_dependencies(gate fort_bootstrap0_unit_tests)
-endif()
-
-# ---- format, tidy, lines -----------------------------------------------------------
-# The lint targets cover the bootstrap sources also when FORT_ENABLE_BOOTSTRAP0 is OFF.
-file(GLOB_RECURSE FORT_LINT_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/bootstrap0/*.c" "${CMAKE_SOURCE_DIR}/bootstrap0/*.h"
-    "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h"
-)
 
 
-# The lint configuration is clang 18's (.clang-format, .clang-tidy). The
-# versioned name wins where the host has one; the darwin host keeps llvm@18
-# keg-only under /opt/homebrew/opt/llvm@18, where the names are unversioned.
-# NO_CACHE, so that a tool installed later is found on the next configure.
-set(FORT_CLANG_18_HINTS /opt/homebrew/opt/llvm@18/bin)
-find_program(FORT_CLANG_FORMAT NAMES clang-format-18 clang-format
-    HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
-if(FORT_CLANG_FORMAT)
-    add_custom_target(format
-        COMMAND "${FORT_CLANG_FORMAT}" -i ${FORT_LINT_SOURCES}
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Formatting the C sources"
-        VERBATIM
-    )
-    add_custom_target(format-check
-        COMMAND "${FORT_CLANG_FORMAT}" --dry-run --Werror ${FORT_LINT_SOURCES}
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Checking the formatting of the C sources"
-        VERBATIM
-    )
-else()
-    add_custom_target(format COMMAND false COMMENT "format: clang-format not found")
-    add_custom_target(format-check COMMAND false COMMENT "format-check: clang-format not found")
-endif()
+# ---- the development targets -------------------------------------------------------
+# cmake/dev_targets.cmake names the steps and the helper functions. These are the
+# targets of the fort component and the `-all` targets of both components;
+# bootstrap0/CMakeLists.txt defines the `bootstrap0-` targets.
+file(GLOB_RECURSE FORT_FORT_C_SOURCES CONFIGURE_DEPENDS
+    "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h")
+fort_format_targets("" ${FORT_FORT_C_SOURCES})
 
-find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy-18 run-clang-tidy
-    HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
-# run-clang-tidy runs the `clang-tidy` of the PATH unless told otherwise, which
-# on the darwin host is a newer one; name the clang-tidy 18 beside it.
-find_program(FORT_CLANG_TIDY NAMES clang-tidy-18 clang-tidy
-    HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
-# clang-tidy does not find the SDK headers on its own as the darwin clang
-# does: the compile commands carry no -isysroot, so the tidy target adds it.
-set(FORT_TIDY_EXTRA_ARGS "")
-if(APPLE)
-    execute_process(COMMAND xcrun --sdk macosx --show-sdk-path
-        OUTPUT_VARIABLE FORT_DARWIN_SDK OUTPUT_STRIP_TRAILING_WHITESPACE
-        COMMAND_ERROR_IS_FATAL ANY)
-    set(FORT_TIDY_EXTRA_ARGS -extra-arg=-isysroot "-extra-arg=${FORT_DARWIN_SDK}")
-endif()
-if(FORT_RUN_CLANG_TIDY)
-    add_custom_target(tidy
-        COMMAND "${FORT_RUN_CLANG_TIDY}" -p "${CMAKE_BINARY_DIR}" -quiet
-                -clang-tidy-binary "${FORT_CLANG_TIDY}" ${FORT_TIDY_EXTRA_ARGS}
-                "${CMAKE_SOURCE_DIR}/bootstrap0" "${FORT_TEST_DIR}"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Running clang-tidy over bootstrap and test"
-        VERBATIM
-    )
-else()
-    add_custom_target(tidy COMMAND false COMMENT "tidy: run-clang-tidy not found")
-endif()
-
-# The same check as the ctest fort_lint, for running by hand over a file.
-add_custom_target(fort-lint
+# lint: the D1.4 names and the line width of every fort source. fort_lint.py
+# reads `fort --index`, so it needs the compiler, and it names --std-dir because
+# the library does not stand beside that binary. The C helpers of the corpus build
+# with -Werror (lang_ffi_helpers) and have no lint of their own; the harness lints
+# the directives of the corpus before every run.
+add_custom_target(lint
     COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fort_lint.py"
-            --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
+            --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}" --target "${FORT_TARGET}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Checking the identifier conventions of D1.4 in the project's fort"
-    VERBATIM
-)
-add_dependencies(fort-lint fort fort_std)
+    COMMENT "Linting the fort sources"
+    VERBATIM)
+add_dependencies(lint fort fort_std)
+
+# unit and integration: the top-level ctest also runs the tests of bootstrap0/,
+# whose tests carry the label `bootstrap0`, so the fort targets leave them out.
+fort_ctest_target(unit "${CMAKE_BINARY_DIR}" -L "^unit$" -LE "^bootstrap0$")
+fort_ctest_target(integration "${CMAKE_BINARY_DIR}" -L "^integration$" -LE "^bootstrap0$")
+add_dependencies(unit fort fort_std fort_lsp)
+add_dependencies(integration fort fort_std fort_lsp)
+fort_sequence_target(check format-check lint unit integration)
+
+# <step>-all: the step of bootstrap0, when it is part of the build, then of fort.
+foreach(step format format-check lint unit integration check)
+    if(TARGET bootstrap0-${step})
+        fort_sequence_target(${step}-all bootstrap0-${step} ${step})
+    else()
+        fort_sequence_target(${step}-all ${step})
+    endif()
+endforeach()

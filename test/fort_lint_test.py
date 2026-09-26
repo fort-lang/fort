@@ -823,6 +823,12 @@ class IncludeRoots(unittest.TestCase):
         self.assertGreaterEqual(counts["test/fort"], 80)
         self.assertGreaterEqual(counts["test/fort/support"], 4)
 
+    def test_the_target_selects_its_own_standard_modules(self):
+        files = fort_lint.default_file_set(ROOT, fort_lint.source_sets("darwin"))
+        dirs = {path.parent.relative_to(ROOT).as_posix() for path, _ in files}
+        self.assertIn("std/darwin", dirs)
+        self.assertNotIn("std/linux", dirs)
+
     def test_an_overlapping_glob_takes_the_roots_of_the_first(self):
         """The table's order decides, not the filesystem's."""
         sets = (("std/*.ft", ("first",)), ("std/vec.ft", ("second",)))

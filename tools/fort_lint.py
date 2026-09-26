@@ -4,8 +4,10 @@
 The tool reads `fort --index` output instead of parsing fort again. It checks each imported
 file once and reports problems as `<file>:<line>:<col>: <message>`.
 
-Use `fort_lint.py --fort build/<preset>/fort [-I dir ...] [file.ft ...]`.
-Without file arguments, the tool checks SOURCE_SETS except SKIPPED.
+Use `fort_lint.py --fort build/<preset>/fort [--target linux|darwin] [-I dir ...] [file.ft ...]`.
+Without file arguments, the tool checks the source sets of the target except SKIPPED. The
+target selects `std/<target>/*.ft`: a standard root declares one libc, so each target's
+modules are checked under the root of that target, on its own host.
 """
 
 import argparse
@@ -27,6 +29,13 @@ SOURCE_SETS = (
     ("test/fort/support/*.ft", ("src", "src/fort", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
+TARGETS = ("linux", "darwin")
+
+
+def source_sets(target):
+    """SOURCE_SETS with `std/linux/*.ft` replaced by the modules of `target`."""
+    return tuple(("std/%s/*.ft" % target, inc) if glob == "std/linux/*.ft" else (glob, inc)
+                 for glob, inc in SOURCE_SETS)
 
 # A file named on the command line is checked even when this tuple excludes it.
 SKIPPED = ()
@@ -384,7 +393,7 @@ def lint_files(fort, root, files, std_dir=None):
     return lines, runs
 
 
-def empty_set_problems(root, paths):
+def empty_set_problems(root, paths, globs=SOURCE_GLOBS):
     """The reasons the default file set is not the one this tool means to check.
 
     A mistyped glob, renamed directory, or empty `std/` could make the lint
@@ -395,9 +404,9 @@ def empty_set_problems(root, paths):
     """
     problems = []
     if not paths:
-        problems.append("fort_lint: no fort source matched %s" % ", ".join(SOURCE_GLOBS))
+        problems.append("fort_lint: no fort source matched %s" % ", ".join(globs))
         return problems
-    for pattern in SOURCE_GLOBS:
+    for pattern in globs:
         directory = root / os.path.dirname(pattern)
         if not directory.is_dir():
             continue
@@ -428,6 +437,12 @@ def main(argv=None):
         metavar="DIR",
         help="a module search root to pass to fort (D9.2); repeatable",
     )
+    parser.add_argument(
+        "--target",
+        choices=TARGETS,
+        default="linux",
+        help="the target whose std/<target>/*.ft the default set holds (default: %(default)s)",
+    )
     parser.add_argument("paths", nargs="*", type=Path, help="the files to check")
     args = parser.parse_args(argv)
     # One spelling of the root and of each path: a temporary directory on
@@ -439,10 +454,12 @@ def main(argv=None):
         files = [(path.resolve(), tuple(args.include)) for path in args.paths]
         empty = []
     else:
-        files = default_file_set(args.root)
+        sets = source_sets(args.target)
+        files = default_file_set(args.root, sets)
         for index, (path, includes) in enumerate(files):
             files[index] = (path, tuple(args.include) + includes)
-        empty = empty_set_problems(args.root, [path for path, _ in files])
+        globs = tuple(glob for glob, _ in sets)
+        empty = empty_set_problems(args.root, [path for path, _ in files], globs)
     if empty:
         for problem in empty:
             print(problem, file=sys.stderr)

@@ -11,10 +11,25 @@ bullet at a time and without a rewrite.
 
 ## 1. The merge gate
 
+- **The development targets** (2026-09-26; `cmake/dev_targets.cmake`). The build has two
+  components: `fort` (the compiler, the standard library, the language server and the editor
+  extension; the language server imports the compiler's modules, so one component holds both)
+  and `bootstrap0` (the C bootstrap compiler). Each has six steps: `format` and `format-check`
+  (clang-format over its C sources), `lint` (clang-tidy for `bootstrap0`; `tools/fort_lint.py`
+  for `fort`), `unit` and `integration` (its ctests with that label), and `check`, which runs
+  `format-check`, `lint`, `unit` and `integration` and stops at the first failure. The fort
+  targets carry the step's name (`check`); `bootstrap0/CMakeLists.txt` defines `bootstrap0-<step>`,
+  whose ctest runs over `build/<preset>/bootstrap` and so sees bootstrap0's tests alone; and
+  `<step>-all` runs the step for both components. The bootstrap0 tests carry the label
+  `bootstrap0`, which the fort targets exclude (`ctest -L '^unit$' -LE '^bootstrap0$'`). Unit:
+  `test/fort` (`fort-modules`), `lang_selftest`, `fort_lint_selftest`, `highlight_selftest` and
+  `extension_selftest`; the 68 bootstrap0 C suites and `mutate_selftest`. Integration: the corpus
+  (`lang`, `lang-json`), `fixpoint`, `tty` and `lsp-binary`; `bootstrap-e2e`. On
+  linux each target runs as `tools/vm <target>`.
 - The merge gate is the `gate` target of the target's base preset (`ninja gate` in
-  `build/debug` on linux, in `build/darwin` on darwin): `format-check`, `tidy`, every test of
-  that preset (`ninja test`), then the workflow -- configure, build, test -- of each sanitizer
-  preset of the target (`asan` and `ubsan`; `darwin-asan` and `darwin-ubsan`). On darwin run
+  `build/debug` on linux, in `build/darwin` on darwin): `check-all`, then the workflow -- configure,
+  build, test -- of each sanitizer preset of the target (`asan` and `ubsan`; `darwin-asan` and
+  `darwin-ubsan`). On darwin run
   `cmake --preset darwin && cmake --build --preset darwin --target gate`; `tools/vm gate` does the
   same for `debug` in the VM. The same tests register on both targets: the test graph has no
   target-only branch since 2026-09-25.
@@ -152,9 +167,9 @@ bullet at a time and without a rewrite.
   `$if ($cfg(target_os) == ...)` instead, so its expected output is the same on both targets.
   The harness has no bootstrap expectation list. `run_tests.py --lint`
   validates directives without a compiler and runs before every test run;
-  `run_tests.py --check-json` is a mode of its own (ctest `lang-json`, also run by
-  check-lang) that holds the document of `fort --check --json` against the text form on every fail
-  test and ignores `xfail.txt`, since it judges the
+  `run_tests.py --check-json` is a mode of its own (ctest `lang-json`, label
+  `integration`) that holds the document of `fort --check --json` against the text form on every
+  fail test and ignores `xfail.txt`, since it judges the
   two forms of one run rather than the test. It also selects a test with an `index.json` beside
   it, runs that one with `--index` and holds its `"symbols"` against the file byte for byte
   (D20.3): the golden is one record per line as `render_index` spells it, it is the one non-`.ft`
@@ -278,8 +293,9 @@ bullet at a time and without a rewrite.
 - Two corpora run through `run_tests.py`, which takes their root as `--root`.
   CTest `lang` runs the product language corpus with `xfail.txt`. CTest
   `fort-modules` runs `test/fort/<x>_test.ft` against the compiler modules.
-  Both are commands of `check-lang`. A `test/fort` test is an ordinary run test in the D14.5
-  directives whose header carries `//! flags: -I ../../src/fort` (the compiler's working
+  `lang` is an integration test and `fort-modules` a unit test. A `test/fort` test is an ordinary
+  run test in the D14.5 directives whose header carries `//! flags: -I ../../src/fort` (the
+  compiler's working
   directory is the corpus root, so the path has two `..`, not three). **`test/fort` holds the
   tests of `src/lsp` as well**, and a test of a server module carries `-I ../../src` beside that
   root, since a server module is `lsp.<name>` under the root `src` (T-063); the corpus needs no
@@ -338,7 +354,7 @@ bullet at a time and without a rewrite.
   sixteen** rounds and take the smallest distance: the allocator's small-block position runs
   through a cycle once the program's own path is long enough to change a bin -- which the
   harness's `mkdtemp` directory is, while a hand run from `/tmp/prog` is not, so a probe reads 0
-  by hand and 12208 under `check-lang` -- and one late round in every cycle is in step with the
+  by hand and 12208 under the harness -- and one late round in every cycle is in step with the
   early one whatever the period, while a leak moves all of them. Two late samples were the rule
   until T-038 measured a period of **eight** over the emitter's round and read 26512 with nothing
   leaking; the window has to cover the cycle, and sixteen covers every period seen so far.
@@ -462,8 +478,8 @@ bullet at a time and without a rewrite.
 - **A terminal is a test environment no pipe can stand in for.** `test/lang/run_tests.py` captures
   a program's stdout through a pipe, so a rule that only holds on an interactive descriptor --
   D11.5's line buffering -- is invisible to the whole language corpus, which stays green with the
-  feature deleted. `test/tty_test.py` (ctest `tty`, label `unit`) is the shape that sees it: it
-  compiles one program with the built compiler and runs it twice, under `pty.fork()` and under
+  feature deleted. `test/tty_test.py` (ctest `tty`, label `integration`) is the shape that sees it:
+  it compiles one program with the built compiler and runs it twice, under `pty.fork()` and under
   pipes, asking what has arrived while the program is still blocked in a read of stdin. Two
   traps cost T-083 an hour between them. A pty master loses whatever is still in the line
   discipline once the last slave closes, so the program blocks a second time and the parent reads
@@ -541,7 +557,8 @@ bullet at a time and without a rewrite.
   **Order the stages by cost and stop at the first red one.** In the emitter that is one `ninja`
   and `ctest -L unit -R '^(gen|driver|selfcheck|runtime_sig|types_abi|mem)[a-z_]*_test$'`, a
   median of 6 s over a 3 s to 19 s range, against 320 s to 420 s for a round that goes on to
-  `ctest -L unit` and `ctest -L lang`. 69 of 72 rounds stopped at the cheap stage.
+  `ctest -L unit` and `ctest -L integration` (`lang` before 2026-09-26). 69 of 72 rounds stopped at
+  the cheap stage.
   **A test that reads a source must not judge a round that rewrites it.** `mutate_selftest`
   asserts the table's anchors against the live `bootstrap0/src/gen*.c`. A round mutates one of
   those files, so the suite went red inside the round, at the stage that runs every unit test,
@@ -708,14 +725,14 @@ bullet at a time and without a rewrite.
   rather than by hand, and a helper that is not a suite, such as `test/fake_vscode.js`, defines no
   test of its own, since Node 18 loads every file under `test/`.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
-  (ctest `fort_lint`, target `fort-lint`) holds `std/*.ft`, `std/linux/*.ft` and
+  (target `lint`) holds `std/*.ft`, `std/<target>/*.ft` and
   `src/fort/*.ft` to the identifier conventions of D1.4 and to 100 columns;
   it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
-  second tokenizer cannot drift from the language. `cross-target` (`test/cross_target_test.sh`)
-  lints the `std/<other>/*.ft` of the target the compiler does not build for under a temporary
-  root of that target and emits one module for it that `opt` verifies, on both hosts (T-144); one
-  root declares one libc, so the compiler's own root cannot hold them.
+  second tokenizer cannot drift from the language. `lint` passes `--target`, so each host lints
+  its own `std/<target>/*.ft` under its own root: one root declares one libc, and the other
+  target's modules are linted on the other host (the `cross-target` test that linted them under an
+  assembled root was removed on 2026-09-26).
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
   has. `agents/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the

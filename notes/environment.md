@@ -148,8 +148,9 @@ without a rewrite.
   A gate is reused only on the same source SHA with the same `build/` outputs; a doubt means a
   rerun (the identity record of T-148 and its darwin form of T-147 were retired on 2026-09-25).
 - **Every `tools/vm` subcommand that drives `build/<preset>` holds its worktree, and a build is
-  stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `check`,
-  `check-lang`, `check-all`, `format`, `format-check`, `tidy`, `lines` and `gate`. **`run` and
+  stopped with TERM** (T-113). The perimeter is `configure`, `build`, `test`, `workflow`, `gate` and
+  every development target (each step, its `bootstrap0-` form and its `-all` form,
+  `notes/testing.md` 1). **`run` and
   `ssh` take no hold**: the first runs whatever it is given, and the second is an interactive
   shell that may sit open for hours. So a build started through `run` is the one way round the
   hold. One worktree
@@ -386,14 +387,10 @@ without a rewrite.
   `std/*.ft` and `std/<target>/*.ft` in `build/<preset>/std`, which is
   what the compiler reads as `--std-dir`; `FORT_TARGET_CC`, a clang (default `clang`) with
   `--target=${FORT_TARGET_TRIPLE}` (default `x86_64-linux-gnu`), is what the driver runs over the
-  emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` and
-  tidy cover them), `check` (ctest label `unit`, including `lang_lint` and `lang_selftest`),
-  `check-lang` (ctest label `lang`: the corpus, `test/fort`, `lang-json`, `fixpoint`,
-  `lsp-binary`, `cross-target` and `tty`), `check-all` (every test, what `test` runs too),
-  `gate` (the merge gate, `notes/testing.md` 1), `format` and `format-check` (clang-format
-  over `src`, `runtime`, `test`), `tidy` (`run-clang-tidy` over the same),
-  `fort-lint` (`tools/fort_lint.py`: the identifier conventions of D1.4 over `std/*.ft` and
-  `src/fort/*.ft`, read off `fort --index`; the ctests are `fort_lint` and `fort_lint_selftest`),
+  emitted module), `lang_ffi_helpers` (`test/lang/ffi/*.c` built natively so `-Werror` covers
+  them), the development targets (`format`, `format-check`, `lint`, `unit`,
+  `integration`, `check`, their `bootstrap0-` and `-all` forms, `notes/testing.md` 1), `gate` (the
+  merge gate, `notes/testing.md` 1),
   `agents/lines.py` (run by hand: test lines per source line, source being the compiler, `std/*.ft`
   and the runtime (D14.6, amended by T-076); `TARGET_RATIO` in that file holds the corpus
   target, which is above 2:1 since T-123, and is printed and never compared, so `--min RATIO`
@@ -464,11 +461,11 @@ without a rewrite.
 
 - **The `darwin` gate uses the Darwin host** (T-147, T-152). The host needs clang-format 18
   and clang-tidy 18 (`brew install llvm@18`, keg-only under `/opt/homebrew/opt/llvm@18/bin`,
-  where `CMakeLists.txt` looks first), because the gate runs `format-check` and `tidy` there as
+  where `CMakeLists.txt` looks first), because the gate runs `format-check` and `lint` there as
   on linux, and the lint configuration is clang 18's: clang-format 19 wraps one ternary of
   `bootstrap0/test/driver_test.c` differently and clang-tidy 19 adds checks the configuration
   does not name (measured 2026-09-25: 23 `readability-enum-initial-value` and 10
-  `readability-math-missing-parentheses` findings). The `tidy` target passes
+  `readability-math-missing-parentheses` findings). The lint targets pass
   `-clang-tidy-binary` (run-clang-tidy runs the `clang-tidy` of the PATH otherwise) and, on
   darwin, `-extra-arg=-isysroot <sdk>` (clang-tidy does not find the SDK headers as the darwin
   clang does). The three tool variables are `NO_CACHE`; a build directory configured before
@@ -510,7 +507,7 @@ without a rewrite.
   ```
 
   The darwin gate is the `gate` target of the `darwin` preset (`notes/testing.md` 1):
-  `format-check`, `tidy`, every test, then the `darwin-asan` and `darwin-ubsan` workflows. The
+  `check-all`, then the `darwin-asan` and `darwin-ubsan` workflows. The
   same tests register on both targets; the gate excludes no corpus fixture. `darwin-asan`
   selects Apple clang (`/usr/bin/clang`): the Homebrew clang 19 address sanitizer runtime hangs
   at exit on darwin 25 (measured 2026-09-25 on a five-line C program), and LeakSanitizer does
