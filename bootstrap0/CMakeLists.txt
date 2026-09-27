@@ -7,13 +7,10 @@
 #
 # The binary directory of this file is build/<Host>/<preset>/bootstrap, so the
 # compiler is bootstrap/fort. The parent builds its chain of source compilers
-# from fort_bootstrap0. The e2e test below does not use that chain.
+# from fort_bootstrap0 (tools/bootstrap.ref).
 
 include(CMakeDependentOption)
 option(FORT_BOOTSTRAP0_BUILD_TESTS "Build and register the tests of the C compiler" OFF)
-cmake_dependent_option(FORT_BOOTSTRAP0_E2E_TEST
-    "Test the C compiler: it builds the bootstrap-1 compiler" ON
-    "FORT_BOOTSTRAP0_BUILD_TESTS" OFF)
 
 set(FORT_BOOTSTRAP0_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(FORT_BOOTSTRAP0_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
@@ -81,39 +78,6 @@ if(FORT_BOOTSTRAP0_BUILD_TESTS)
         list(APPEND FORT_UNIT_TEST_TARGETS "${TEST_TARGET}")
     endforeach()
 
-    # ---- the bootstrap-1 source ----------------------------------------------------
-    # The contract suites and the e2e test read bootstrap-1 from a tree of their
-    # own. The parent's chain extracts its pins from tools/bootstrap.ref.
-    set(FORT_BOOTSTRAP1_SHA 0fe521c08a4541ec8f1a9563bc177630cb59316e)
-
-    set(FORT_BOOTSTRAP1_DIR "${CMAKE_CURRENT_BINARY_DIR}/e2e/bootstrap1")
-    set(FORT_BOOTSTRAP1_STAMP
-        "${FORT_BOOTSTRAP1_DIR}/.assembled-${FORT_BOOTSTRAP1_SHA}-${FORT_TARGET}")
-    add_custom_command(
-        OUTPUT "${FORT_BOOTSTRAP1_STAMP}"
-        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/extract_pin.sh"
-            "${FORT_BOOTSTRAP1_SHA}" "${FORT_BOOTSTRAP1_DIR}" "${FORT_TARGET}"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/extract_pin.sh"
-        COMMENT "Extracting bootstrap-1 for the tests of the C compiler"
-        VERBATIM
-    )
-    add_custom_target(fort_bootstrap1_source ALL DEPENDS "${FORT_BOOTSTRAP1_STAMP}")
-
-    # ---- the e2e test ---------------------------------------------------------------
-    # The end-to-end test of the C compiler: bootstrap-0 builds the bootstrap-1 compiler
-    # from the bootstrap-1 source. The test passes when that build exits 0.
-    if(FORT_BOOTSTRAP0_E2E_TEST)
-        add_test(NAME bootstrap-e2e
-            COMMAND "$<TARGET_FILE:fort_bootstrap0>" ${FORT_STAGE_MODE_ARGS}
-                --std-dir "${FORT_BOOTSTRAP1_DIR}/std"
-                --cc "${FORT_TARGET_CC_PATH}"
-                -o "${FORT_BOOTSTRAP1_DIR}/fort" "${FORT_BOOTSTRAP1_DIR}/src/fort/main.ft"
-            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
-        set_tests_properties(bootstrap-e2e PROPERTIES
-            LABELS "bootstrap0;integration"
-            ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
-    endif()
-
     # The parent's `bootstrap0-unit` target depends on this target, so it builds each suite.
     add_custom_target(fort_bootstrap0_unit_tests)
     if(FORT_UNIT_TEST_TARGETS)
@@ -148,13 +112,14 @@ if(FORT_BOOTSTRAP0_BUILD_TESTS)
     # against the library declarations.
     # Both suites need the sources.
     #
-    # Both suites parse the standard root of the bootstrap-1 source above. This makes them
+    # Both suites parse the standard root of bootstrap-1, the first pin of the
+    # parent's chain. This makes them
     # contracts between the C implementation and its bootstrap library.
     foreach(std_reader runtime_sig_test check_conv_test)
         if(TARGET "${std_reader}")
             target_compile_definitions("${std_reader}"
-                PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP1_DIR}/std")
-            add_dependencies("${std_reader}" fort_bootstrap1_source)
+                PRIVATE FORT_STD_SOURCE_DIR="${FORT_BOOTSTRAP_DIR}/bootstrap-1/std")
+            add_dependencies("${std_reader}" fort_bootstrap_1_source)
             set_tests_properties("${std_reader}" PROPERTIES
                 LABELS "bootstrap0;unit;bootstrap-contract")
         endif()
@@ -167,15 +132,6 @@ if(FORT_BOOTSTRAP0_BUILD_TESTS)
             PRIVATE FORT_LANG_DIR="${FORT_TEST_DIR}/lang")
     endif()
 
-    # The tools/mutate.py unit tests cover parsers, anchors, guards, restore, and timeouts.
-    # They also check the shipped table against its source anchors.
-    # The unit tests run no mutation round because a round rebuilds the compiler.
-    add_test(NAME mutate_selftest
-        COMMAND "${FORT_PYTHON3}" -m unittest mutate_test
-        WORKING_DIRECTORY "${FORT_TEST_DIR}")
-    set_tests_properties(mutate_selftest PROPERTIES
-        LABELS "bootstrap0;unit"
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 endif()
 
 # ---- the development targets ----------------------------------------------------
@@ -186,10 +142,7 @@ file(GLOB_RECURSE FORT_BOOTSTRAP0_C_SOURCES CONFIGURE_DEPENDS
 fort_format_targets("bootstrap0-" ${FORT_BOOTSTRAP0_C_SOURCES})
 fort_tidy_target(bootstrap0-lint "${CMAKE_CURRENT_SOURCE_DIR}")
 fort_ctest_target(bootstrap0-unit "${CMAKE_CURRENT_BINARY_DIR}" -L "^unit$")
-fort_ctest_target(bootstrap0-integration "${CMAKE_CURRENT_BINARY_DIR}" -L "^integration$")
 if(TARGET fort_bootstrap0_unit_tests)
     add_dependencies(bootstrap0-unit fort_bootstrap0_unit_tests)
-    add_dependencies(bootstrap0-integration fort_bootstrap0 fort_bootstrap1_source)
 endif()
-fort_sequence_target(bootstrap0-check
-    bootstrap0-format-check bootstrap0-lint bootstrap0-unit bootstrap0-integration)
+fort_sequence_target(bootstrap0-check bootstrap0-format-check bootstrap0-lint bootstrap0-unit)

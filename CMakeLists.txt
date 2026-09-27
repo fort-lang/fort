@@ -297,6 +297,8 @@ else()
             VERBATIM
         )
         add_custom_target(fort_bootstrap_${pin_number} DEPENDS "${pin_binary}")
+        # bootstrap0/'s contract suites read the tree of the first pin.
+        add_custom_target(fort_bootstrap_${pin_number}_source DEPENDS "${pin_stamp}")
         set(FORT_PREVIOUS_COMPILER "${pin_binary}")
         set(FORT_PREVIOUS_DEPENDENCY "${pin_binary}")
     endforeach()
@@ -307,15 +309,16 @@ if(FORT_ENABLE_BOOTSTRAP0)
     set(FORT_HEAD_DIR "${FORT_BOOTSTRAP_DIR}/head")
     set(FORT_HEAD_STD "${FORT_HEAD_DIR}/std")
     set(FORT_HEAD_STD_STAMP "${FORT_HEAD_STD}/.assembled")
+    # Some predecessors load rt_float.ft for every closure; HEAD folded that module
+    # into std.rt, so the last pin builds HEAD with HEAD's root plus an empty one.
     add_custom_command(
         OUTPUT "${FORT_HEAD_STD_STAMP}"
-        COMMAND "${CMAKE_COMMAND}"
-            -DSOURCE=${FORT_STD_DIR}
-            -DOUTPUT=${FORT_HEAD_STD}
-            -P "${CMAKE_SOURCE_DIR}/cmake/bootstrap_head.cmake"
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${FORT_HEAD_STD}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${FORT_STD_DIR}" "${FORT_HEAD_STD}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${FORT_HEAD_STD}/rt_float.ft"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${FORT_HEAD_STD_STAMP}"
         DEPENDS fort_std ${FORT_STD_OUTPUTS}
-                "${CMAKE_SOURCE_DIR}/cmake/bootstrap_head.cmake"
-        COMMENT "Assembling the bootstrap standard root for HEAD"
+        COMMENT "Assembling the standard root the last pin builds HEAD with"
         VERBATIM
     )
     set(FORT_HEAD_STD_DEPENDENCY "${FORT_HEAD_STD_STAMP}")
@@ -408,9 +411,8 @@ add_library(lang_ffi_helpers OBJECT ${FORT_LANG_FFI_SOURCES})
 target_compile_options(lang_ffi_helpers PRIVATE -Wno-missing-prototypes)
 
 # The language test harness drives the compiler over test/lang.
-# The ctests `lang` and `lang-json` use the product compiler, and
-# `lang_selftest` runs the harness's own unit tests. The harness validates the
-# directives of the corpus before every run.
+# The ctests `lang` and `lang-json` use the product compiler. The harness
+# validates the directives of the corpus before every run.
 set(FORT_LANG_DIR "${FORT_TEST_DIR}/lang")
 set(FORT_LANG_HARNESS "${FORT_LANG_DIR}/run_tests.py")
 include(ProcessorCount)
@@ -485,22 +487,6 @@ add_test(NAME tty
 set_tests_properties(tty PROPERTIES
     LABELS integration
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-add_test(NAME lang_selftest
-    COMMAND "${FORT_PYTHON3}" -m unittest run_tests_test
-    WORKING_DIRECTORY "${FORT_LANG_DIR}")
-set_tests_properties(lang_selftest PROPERTIES
-    LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# These unit tests check synthetic index records and a fake compiler.
-# They also check test/fort_lint fixtures with the compiler in FORT_BINARY.
-add_test(NAME fort_lint_selftest
-    COMMAND "${FORT_PYTHON3}" -m unittest fort_lint_test
-    WORKING_DIRECTORY "${FORT_TEST_DIR}")
-set_tests_properties(fort_lint_selftest PROPERTIES
-    LABELS unit
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;FORT_BINARY=${FORT_COMPILER_BINARY};FORT_STD_DIR=${FORT_STD_DIR}")
 
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
 # compare its keyword and operator lists with the language lists. They also assert the

@@ -27,7 +27,6 @@ STD_DIR = ROOT / "std"
 FORT_SRC_DIR = ROOT / "src" / "fort"
 LSP_SRC_DIR = ROOT / "src" / "lsp"
 FORT_TESTS_DIR = ROOT / "test" / "fort"
-FORT_LINT_DIR = ROOT / "test" / "fort_lint"
 TTY_DIR = ROOT / "test" / "tty"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
@@ -40,13 +39,12 @@ CORPUS_DIRS = (
     FORT_SRC_DIR,
     LSP_SRC_DIR,
     FORT_TESTS_DIR,
-    FORT_LINT_DIR,
     TTY_DIR,
 )
 # The number of files those directories hold. A floor cannot detect a directory
 # that the scan stopped using. When a `.ft` file changes this count, use the
 # number from the failure. bootstrap0/test/parser_recovery_test.c uses the same method.
-CORPUS_FILES = 709
+CORPUS_FILES = 706
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total.
 # A floor of 1 only proves that the directory exists.
@@ -61,7 +59,6 @@ CORPUS_MINIMUMS = {
     FORT_SRC_DIR: 20,
     LSP_SRC_DIR: 5,
     FORT_TESTS_DIR: 80,
-    FORT_LINT_DIR: 3,
     TTY_DIR: 2,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
@@ -783,10 +780,6 @@ class CorpusTest(unittest.TestCase):
         shared fixtures under support/, which rglob reaches."""
         paths = self.check_directory(FORT_TESTS_DIR)
         self.assertTrue(any(p.parent.name == "support" for p in paths), "support/ not walked")
-
-    def test_every_fort_lint_fixture_spells_correctly(self):
-        """Check that semantic lint fixtures remain lexically valid."""
-        self.check_directory(FORT_LINT_DIR)
 
     def test_every_terminal_program_spells_correctly(self):
         """Check the terminal test programs."""

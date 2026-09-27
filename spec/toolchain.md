@@ -1453,7 +1453,6 @@ test/
   <component>_test.c           one C suite per compiler component (lexer_test.c, ...)
   lang/
     run_tests.py               runs every language test below
-    run_tests_test.py          the harness's own unit tests
     xfail.txt                  tests the compiler cannot pass yet
     run/<area>/NNN_name.ft     compile, run, compare
     fail/<area>/NNN_name.ft    must not compile, with annotated errors

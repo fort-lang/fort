@@ -33,7 +33,7 @@ symbols, source files, platform APIs, and technical standards.
 
 Harness directives are not documentation. Keep their required syntax and position. Do not change
 fixed-position fixtures during a documentation sweep. These fixtures include `test/lang/**/*.ft`,
-`editors/vscode/test/fixtures/**`, `test/fort_lint/*.ft`,
+`editors/vscode/test/fixtures/**`,
 `test/highlight/scopes.ft`, and generated fixtures. A test pins a position in such a file:
 commit 332e5fa7 removed one comment line from the allocation-failure fixture (then under
 `test/darwin/`, now `run/errors/034`) and the Darwin gate exited 1 until T-183 repinned the test.

@@ -351,9 +351,9 @@ without a rewrite.
   only enlarges the text the substrings are sought in and every expectation still matches.
   Deleting the `drop_qemu_notice` call leaves the whole corpus green. The witness for a
   stripping rule is therefore a unit test that asserts the negative -- that a substring taken
-  from the stripped line is *not* found -- which is `run_tests_test.py`'s
-  `test_judge_run_qemu_notice_is_not_stderr` and `test_judge_run_signal_ignores_the_qemu_notice`;
-  a `run` test that merely passes witnesses nothing here (T-071's review).
+  from the stripped line is *not* found; a `run` test that merely passes witnesses nothing here
+  (T-071's review). The harness's unit tests that held it (`run_tests_test.py`) went on
+  2026-09-26.
 
 ## 5. The build
 
@@ -382,10 +382,10 @@ without a rewrite.
   builds for its own built target, `std.os.TARGET` of its standard root (D14.1).
   The last source compiler builds working-tree HEAD as `fort`.
 - `FORT_BOOTSTRAP0_BUILD_TESTS` (default OFF; every preset sets it ON) adds the C unit tests on
-  linux and on darwin. `FORT_BOOTSTRAP0_E2E_TEST` (default ON, and OFF when
-  `FORT_BOOTSTRAP0_BUILD_TESTS` is OFF) adds the ctest `bootstrap-e2e`: bootstrap-0 builds
-  bootstrap-1 in `build/<Host>/<preset>/bootstrap/e2e/bootstrap1`. That tree is not the tree of the
-  chain. The contract suites read its standard root, so it is extracted whenever the tests are on.
+  linux and on darwin. The contract suites read the standard root of the chain's first pin
+  (`build/<Host>/<preset>/bootstrap/bootstrap-1/std`). The chain's build of bootstrap-1 is the
+  end-to-end proof of the C compiler; the ctest `bootstrap-e2e` that built it a second time, in a
+  tree of its own, went on 2026-09-26.
 - External-stage1 mode builds only HEAD with `FORT_STAGE1_COMPILER`. It does not create C
   compiler or C unit-test targets.
   Both modes build `fort_std`, a copy of

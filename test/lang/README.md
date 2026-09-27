@@ -65,10 +65,8 @@ fn main(string@ args) i32 {
 path contains a filter) and prints one `PASS`, `FAIL`, `XFAIL`, `XPASS` or `ERROR` line per
 test plus a summary; `--lint` validates the directives without a compiler, `--list` lists the
 tests, `-v` shows the commands and outputs of failures and `--keep` keeps the temporary
-directories. From the VM, `tools/vm check-lang` runs it with the debug build. `xfail.txt` lists
+directories. From the VM, `tools/vm integration` runs it with the debug build. `xfail.txt` lists
 the tests the product compiler cannot pass yet. A listed test that passes fails the run.
-`python3 -m unittest run_tests_test` runs
-the harness's own tests.
 
 ## How a test is judged
 

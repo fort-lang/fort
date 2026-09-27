@@ -22,9 +22,10 @@ bullet at a time and without a rewrite.
   whose ctest runs over `build/<Host>/<preset>/bootstrap` and so sees bootstrap0's tests alone; and
   `<step>-all` runs the step for both components. The bootstrap0 tests carry the label
   `bootstrap0`, which the fort targets exclude (`ctest -L '^unit$' -LE '^bootstrap0$'`). Unit:
-  `test/fort` (`fort-modules`), `lang_selftest`, `fort_lint_selftest`, `highlight_selftest` and
-  `extension_selftest`; the 68 bootstrap0 C suites and `mutate_selftest`. Integration: the corpus
-  (`lang`, `lang-json`), `fixpoint`, `tty` and `lsp-binary`; `bootstrap-e2e`. On
+  `test/fort` (`fort-modules`), `highlight_selftest` and `extension_selftest`; the 68 bootstrap0 C
+  suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and `lsp-binary`;
+  bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit tests of the
+  tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26. On
   linux each target runs as `tools/vm <target>`.
 - The merge gate is the `gate` target of the `debug` preset (`ninja -C build/<Host>/debug gate` on
   both hosts): `check-all`, then the workflow -- configure, build, test -- of the `asan` and `ubsan`
@@ -184,8 +185,8 @@ bullet at a time and without a rewrite.
   single-file areas use; a `//! link:` path is relative to `test/lang`, so a multi-module test
   reaches `ffi/helpers.c` from `run/modules` like any other. The harness and its unit tests are
   Python 3.12, standard library only, wrapped at 100 columns (the host's
-  `ruff format --line-length 100` is the reference); `run_tests_test.py` scripts a fake `fort`
-  with `//@` lines, extend it rather than calling the real compiler.
+  `ruff format --line-length 100` is the reference); the harness has no unit tests of its own
+  since 2026-09-26.
   On voyager.local, `/bin/false` is absent. This made three inherited fixture tests error (T-143).
   Use `shutil.which("false")` for a fixture that runs on Mac and Linux.
   The host and slot-2 VM suites each pass 185 of 185 tests with this fixture.
@@ -549,22 +550,17 @@ bullet at a time and without a rewrite.
   one row. The `--check` option builds
   nothing and reports every anchor that no longer
   matches its file, which is the one way a table of textual anchors rots.
-  `test/mutate_test.py` (ctest `mutate_selftest`, 43 tests) holds the parts that fail silently:
-  the ctest failure parser, the anchor that must match once, the stale-binary guard, the restore,
-  the timeout verdict, the exit status and the round loop.
+  The runner has no unit tests since 2026-09-26 (`test/mutate_test.py` held its parser, anchors,
+  guards, restore and timeout verdict); run `--check` before a round.
   **Order the stages by cost and stop at the first red one.** In the emitter that is one `ninja`
   and `ctest -L unit -R '^(gen|driver|selfcheck|runtime_sig|types_abi|mem)[a-z_]*_test$'`, a
   median of 6 s over a 3 s to 19 s range, against 320 s to 420 s for a round that goes on to
   `ctest -L unit` and `ctest -L integration` (`lang` before 2026-09-26). 69 of 72 rounds stopped at
   the cheap stage.
-  **A test that reads a source must not judge a round that rewrites it.** `mutate_selftest`
-  asserts the table's anchors against the live `bootstrap0/src/gen*.c`. A round mutates one of
-  those files, so the suite went red inside the round, at the stage that runs every unit test,
-  and the row read `caught` when no test of the compiler had seen the mutation. All three
-  survivors reproduced wrongly. Three guards close it: the table's stage excludes the suite by
-  name (`ctest -L unit -E mutate_selftest`), the class that reads the sources skips when
-  `mutate.mutated_rows` finds a row the sources hold, and `--check` reads the text with the
-  applied row put back, so a second row on the same lines is not called stale.
+  **A test that reads a source must not judge a round that rewrites it.** The runner's own
+  selftest once asserted the table's anchors against the live `bootstrap0/src/gen*.c`, went red
+  inside a round and made a survivor read `caught`. `--check` reads the text with the applied row
+  put back, so a second row on the same lines is not called stale.
   **Measure a guard on every row, not on one.** The first version of the second and third guards
   asked whether the replacement text occurred exactly once, and the test proved them on 2 of the
   76 rows. They were dead for 3 rows whose replacement repeats text the file already had (D3.14,
@@ -573,9 +569,8 @@ bullet at a time and without a rewrite.
   the rule reads "`old` is absent and `new` is present". Any test that asserts something about a
   source file carries this trap; ask what it does while the file is broken on purpose, and ask it
   for every row rather than for a representative one.
-  **Couple the row count to the sources on purpose.**
-  `test_the_audit_covers_the_72_decisions_the_four_files_cite` goes red when those files gain or
-  lose a `Dn.m` citation. A ticket that adds one has three ways out. It adds a row and runs it
+  **Couple the row count to the sources on purpose.** A ticket that adds or removes a `Dn.m`
+  citation in the four files has three ways out. It adds a row and runs it
   (`python3 tools/mutate.py tools/mutations/emitter_bootstrap.json --only D6.14`). Or it adds a
   row that records why the rule needs no mutation. Or, if the citation sits on a line that
   implements no rule, it says so in the row and moves the citation. The coupling is what stops an
@@ -605,10 +600,8 @@ bullet at a time and without a rewrite.
   other work; the coordinator restored T-127's two files that way and `md5 -q` then read
   `bbde7b5ca321f3e1834837d6474ae5e0` and `9c18ea9291e8c35bb91cfcda822a6f8f`, which are main's
   (T-134).
-  `--check` needs no step of its own in the gate: `mutate_selftest` already runs `check_table`
-  over the shipped table and the live sources in
-  `test_check_reports_no_stale_anchor_against_the_sources`, and asserts `88 rows, 0 stale`
-  (T-134).
+  `--check` is not part of the gate since 2026-09-26; run it by hand (`88 rows, 0 stale` on
+  T-134's tree).
 
 - **An oracle is only an oracle where it derives its answer differently, so say
   for each half of one whether it is independent or shared.** T-064 swept every offset of a
@@ -634,7 +627,7 @@ bullet at a time and without a rewrite.
   `unit`, run from `test/`): it reads the D2.4 keyword lists and the D2.10 operator list out of
   `spec/decisions.md` and the same sets out of the grammar, so the two cannot drift. It reads them
   through `decisions.rule_of` (`test/decisions.py`), which returns the `rule` field of one entry,
-  and `test/fort_lint_test.py` reads the D20.3 kind list the same way (T-100): a test that opens the
+  (T-100): a test that opens the
   decision log calls that one parser rather than matching the entry shape itself, and it collapses
   the whitespace of the rule before it searches for a sentence, because the rule wraps at 100
   columns and a line break must not decide whether a test passes. That only
@@ -646,7 +639,7 @@ bullet at a time and without a rewrite.
   project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
   `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
-  `test/fort_lint` and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
+  and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
   ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
   writes it there, as it does for `CORPUS_FILES` in `bootstrap0/test/parser_recovery_test.c`.
   The other `.ft` files are listed in `EXCLUDED_DIRS`, each
