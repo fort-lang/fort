@@ -12,7 +12,8 @@ compiles. `--check-json` is a mode of its own: it runs `fort --check --json`
 over each fail test and compares JSON diagnostics with text diagnostics.
 A test with an `index.json` file is
 selected too, and its golden identifier index is held against the `"symbols"`
-of a `--index` run.
+of a `--index` run. A fail test holds the compiler's whole stderr in a golden
+file beside it, and `--bless` writes the goldens of the selected fail tests.
 
 Standard library only; Python 3.12.
 """
@@ -121,11 +122,26 @@ DOCUMENT_VERSION = 1
 # The golden identifier index of a test: the "symbols" of its `--index` run,
 # one record per line, beside its test.
 INDEX_NAME = "index.json"
+# The golden stderr of a fail test: `<stem>.stderr` beside a single-file test,
+# GOLDEN_DIR_NAME in the directory of a directory test.
+GOLDEN_SUFFIX = ".stderr"
+GOLDEN_DIR_NAME = "expected.stderr"
+# A golden spells the `--std-dir` prefix of a path as STD_MARK and the
+# absolute path of the corpus root as ROOT_MARK, because both differ between
+# machines. A module's identity is its real path, so a message about two
+# names for one file quotes the root in full.
+STD_MARK = b"<std>"
+ROOT_MARK = b"<root>"
 
 DIRECTIVE_RE = re.compile(r"^//! ([a-z][a-z-]*)(:(.*))?$")
 ANNOTATION_RE = re.compile(r"^(.*?\S)\s*//! error:(.*)$")
 DIAGNOSTIC_RE = re.compile(r"^(.+):(\d+):(\d+): error: (.*)$")
 REPORT_RE = re.compile(r"^(.+):(\d+):(\d+): (error|note): (.*)$")
+
+# A header line starts with its file path. Each line the compiler shows under
+# it starts with a space, and the two patterns above read header lines only.
+# No path of the corpus starts with a space, so the first byte decides.
+RENDERED_PREFIX = " "
 
 # The lexer reports a position because rejected bytes are not a token.
 # Thus, lexer diagnostic ranges can be empty. These are the messages of `fail` and `fail_text`
@@ -187,6 +203,7 @@ class Test:
     error_any: list = dataclasses.field(default_factory=list)
     problems: list = dataclasses.field(default_factory=list)
     golden_index: bool = False  # an index.json file contains its golden index
+    golden: bool = False  # a golden stderr file stands beside the test
     # The `-<os>` directives, by OS: a dict with keys among `stdout`, `exit`,
     # `abort`, `signal_name` and `stderr`. `select_target_os` applies one.
     variants: dict = dataclasses.field(default_factory=dict)
@@ -194,6 +211,13 @@ class Test:
     @property
     def multi(self):
         return not self.path.endswith(".ft")
+
+    @property
+    def golden_path(self):
+        """The path of the golden stderr of this test, relative to the corpus root."""
+        if self.multi:
+            return self.path + "/" + GOLDEN_DIR_NAME
+        return self.path[: -len(".ft")] + GOLDEN_SUFFIX
 
 
 @dataclasses.dataclass
@@ -514,9 +538,12 @@ def _discover_dir(root, directory, expected_kind, numbered, tests, problems):
     Directory tests (`<name>/main.ft`) exist only under `modules`.
     """
     names = []
+    goldens = []
     for entry in sorted(directory.iterdir()):
         rel = entry.relative_to(root).as_posix()
-        if entry.is_dir():
+        if entry.is_file() and entry.suffix == GOLDEN_SUFFIX:
+            goldens.append(entry)
+        elif entry.is_dir():
             if directory.name != "modules":
                 problems.append("%s: directory test outside modules" % rel)
             elif not (entry / "main.ft").is_file():
@@ -529,12 +556,15 @@ def _discover_dir(root, directory, expected_kind, numbered, tests, problems):
                 # The golden identifier index lives beside the test's
                 # sources, so it is the one file there that is not fort.
                 test.golden_index = (entry / INDEX_NAME).is_file()
+                test.golden = (entry / GOLDEN_DIR_NAME).is_file()
                 tests.append(test)
                 for extra in sorted(entry.rglob("*")):
                     if not extra.is_file() or extra.suffix == ".ft":
                         continue
                     if extra.parent == entry and extra.name == INDEX_NAME:
                         problems.extend(golden_index_problems(root, extra))
+                        continue
+                    if extra.parent == entry and extra.name == GOLDEN_DIR_NAME:
                         continue
                     problems.append("%s: unexpected file" % extra.relative_to(root).as_posix())
         elif entry.suffix == ".ft":
@@ -543,9 +573,14 @@ def _discover_dir(root, directory, expected_kind, numbered, tests, problems):
                 problems.append("%s: bad test name" % rel)
             else:
                 names.append(entry.stem)
-                tests.append(Test(rel, rel, expected_kind))
+                test = Test(rel, rel, expected_kind)
+                test.golden = entry.with_suffix(GOLDEN_SUFFIX).is_file()
+                tests.append(test)
         else:
             problems.append("%s: unexpected file" % rel)
+    for golden in goldens:
+        if not golden.with_suffix(".ft").is_file():
+            problems.append("%s: golden without a test" % golden.relative_to(root).as_posix())
     if numbered:
         problems.extend(numbering_problems(directory.relative_to(root).as_posix(), names))
 
@@ -657,6 +692,8 @@ def parse_diagnostics(stderr, root):
     """Return compiler error lines in order."""
     diagnostics = []
     for raw in stderr.decode("utf-8", errors="replace").split("\n"):
+        if raw.startswith(RENDERED_PREFIX):
+            continue
         match = DIAGNOSTIC_RE.match(raw)
         if match:
             file = _normalize_file(match.group(1), root)
@@ -674,6 +711,8 @@ def parse_reports(stderr, root):
     """
     reports = []
     for raw in stderr.decode("utf-8", errors="replace").split("\n"):
+        if raw.startswith(RENDERED_PREFIX):
+            continue
         match = REPORT_RE.match(raw)
         if match:
             reports.append(
@@ -774,8 +813,52 @@ def _stdout_problems(expected, actual):
     return ["stdout lacks the final newline"]
 
 
-def judge_fail(test, compile_proc, root=ROOT):
-    """Judge a fail test: exit 1 with only annotated diagnostics."""
+def normalize_stderr(stderr, std_dir, root=ROOT):
+    """The compiler's stderr as a golden holds it.
+
+    `<std-dir>/` becomes `<std>/` and `<corpus root>/` becomes `<root>/`.
+    """
+    if std_dir:
+        stderr = stderr.replace((std_dir.rstrip("/") + "/").encode(), STD_MARK + b"/")
+    resolved = str(Path(root).resolve()).rstrip("/") + "/"
+    return stderr.replace(resolved.encode(), ROOT_MARK + b"/")
+
+
+def golden_problems(test, stderr, root=ROOT):
+    """Compare the normalized `stderr` of a fail test with its golden, byte for byte.
+
+    A missing golden is a problem, so every fail test pins its whole stderr.
+    A difference names the first line that differs and shows both spellings.
+    """
+    path = root / test.golden_path
+    try:
+        want = path.read_bytes()
+    except FileNotFoundError:
+        return ["no golden %s (--bless writes it)" % test.golden_path]
+    except OSError as e:
+        return ["golden %s cannot be read: %s" % (test.golden_path, e)]
+    if want == stderr:
+        return []
+    want_lines = want.decode("utf-8", errors="backslashreplace").split("\n")
+    got_lines = stderr.decode("utf-8", errors="backslashreplace").split("\n")
+    for i in range(max(len(want_lines), len(got_lines))):
+        wanted = want_lines[i] if i < len(want_lines) else None
+        found = got_lines[i] if i < len(got_lines) else None
+        if wanted != found:
+            return [
+                "stderr differs from %s at line %d: expected %r, got %r"
+                % (test.golden_path, i + 1, wanted, found)
+            ]
+    return ["stderr differs from %s" % test.golden_path]
+
+
+def write_golden(test, stderr, root=ROOT):
+    """Write the normalized `stderr` of a fail test as its golden."""
+    (root / test.golden_path).write_bytes(stderr)
+
+
+def judge_fail(test, compile_proc, root=ROOT, std_dir=None):
+    """Judge a fail test: exit 1 with only annotated diagnostics and the golden stderr."""
     verdict, reason = judge_compile(compile_proc, False)
     if verdict:
         return verdict, reason
@@ -799,6 +882,8 @@ def judge_fail(test, compile_proc, root=ROOT):
         if (d.file, d.line) not in annotated and not any(s in d.message for s in test.error_any):
             problems.append("unannotated diagnostic %s:%d: %s" % (d.file, d.line, d.message))
     problems.extend(_stderr_problems(test.stderr, compile_proc.stderr))
+    normalized = normalize_stderr(compile_proc.stderr, std_dir, root)
+    problems.extend(golden_problems(test, normalized, root))
     if problems:
         return "FAIL", "; ".join(problems)
     return "PASS", ""
@@ -1232,6 +1317,7 @@ class Config:
     opt: str = DEFAULT_OPT
     verify_ir: bool = False
     check_json: bool = False
+    bless: bool = False
     runner: list = dataclasses.field(default_factory=list)
     timeout: float = DEFAULT_TIMEOUT
     keep: bool = False
@@ -1413,7 +1499,11 @@ def execute(config, test):
                 compile_command(config, test, prog), config.root, env, config.timeout
             )
             procs.append(proc)
-            verdict, reason = judge_fail(test, proc, config.root)
+            # A crash or a timeout is no verdict, so it writes no golden.
+            if config.bless and judge_compile(proc, False)[0] != "ERROR":
+                stderr = normalize_stderr(proc.stderr, config.std_dir, config.root)
+                write_golden(test, stderr, config.root)
+            verdict, reason = judge_fail(test, proc, config.root, config.std_dir)
             return Result(test, verdict, reason, procs, workdir)
         link_proc = None
         if test.links:
@@ -1499,6 +1589,11 @@ def parse_args(argv):
         action="store_true",
         help="instead of running the tests, hold the check document against the text form",
     )
+    parser.add_argument(
+        "--bless",
+        action="store_true",
+        help="write the golden stderr of each selected fail test from the compiler's output",
+    )
     parser.add_argument("--opt", default=DEFAULT_OPT, help="LLVM opt (default: %(default)s)")
     parser.add_argument(
         "--runner", default="", help="command that runs the programs, e.g. qemu-x86_64"
@@ -1546,6 +1641,8 @@ def load_corpus(root, args):
     for test in tests:
         load_test(root, test)
         problems.extend(test.problems)
+        if test.golden and test.kind == "run":
+            problems.append("%s: golden beside a %s test" % (test.golden_path, test.kind))
     xfail = []
     if not args.no_xfail:
         path = expectation_file(args.xfail, root / XFAIL_NAME)
@@ -1565,6 +1662,8 @@ def main(argv=None):
         if not any(test.path == path for test in selected):
             problems.append("--exclude-exact: '%s' matches no selected test" % path)
     selected = exclude_exact(selected, args.exclude_exact)
+    if args.bless and args.check_json:
+        problems.append("--bless: the goldens belong to the test run, not to --check-json")
     if args.check_json:
         # The document is compared on the tests that have something to compare:
         # each fail test, which has diagnostics, and each test with a golden index.
@@ -1601,6 +1700,7 @@ def main(argv=None):
         opt=args.opt,
         verify_ir=args.verify_ir,
         check_json=args.check_json,
+        bless=args.bless,
         runner=args.runner.split(),
         timeout=args.timeout,
         keep=args.keep,

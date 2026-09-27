@@ -319,7 +319,7 @@ D10.7 are undefined in every mode.
 
 ## 4. Diagnostics
 
-Compile-time diagnostics (D14.2) are written to stderr, one per line:
+Compile-time diagnostics (D14.2) are written to stderr. Each one starts with a header line:
 
 ```sh
 <file>:<line>:<col>: error: <message>
@@ -333,8 +333,32 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   counting as one column. A `note:` follows the `error:` it belongs to, with its own position.
 - A position is the start of a range (D20.4): the diagnostic is about the bytes from `<line>`
   and `<col>` to one past the last byte of the construct's last token, and every syntax-tree
-  node carries that range and the range of its name. The text form above prints the start only,
-  so an end never appears in a diagnostic line.
+  node carries that range and the range of its name. The header line prints the start only, so
+  an end never appears in a header line.
+- Under each header line the compiler writes the rendered lines of its range (D14.2). The first
+  is the source line where the range starts, the second is an underline, and each starts with
+  four spaces. The underline has `^` at `<col>` and `~` up to the end column, exclusive; an empty
+  range has the `^` alone. A range that ends on a later line is underlined to the end of its
+  first line, and its later lines are not shown. Before the `^`, the underline copies each tab of
+  the source line as a tab and writes a space for every other byte, so the `^` stands under its
+  byte at any tab width. Columns count bytes, so a multi-byte character before the range moves
+  the `^` one column right for each extra byte on a terminal that shows the character in one
+  column. The header line is exact either way. A column past the end of its line stands one past
+  the last byte of the line.
+- The empty range at 1:1 is no position in the file and shows no rendered line. A lexical error
+  at the first byte of a file has that range too, because the lexer reports a position and no
+  token there (a rejected byte is not a token), so it shows its header line alone:
+  `lex.ft:1:1: error: unexpected character '$'` has no line under it. A file the
+  compiler cannot read, and a line the file does not have, show no rendered line either; the
+  header line is written as before. The compiler reads the file through the same source it
+  compiled, so the rendered line is the text the diagnostic is about.
+- A rendered line starts with a space. A header line starts with its file path, and a path can
+  start with a space: `fort --check " sp.ft"` prints a header line that starts with one. For a
+  path that does not start with a space, a line that starts with a space is a rendered line and
+  a line that starts with any other byte is a header line. The test harness relies on that, and
+  no path of the test corpus starts with a space (7.3). A tool that reads the header lines only
+  never reads a source line that itself spells `x.ft:1:1: error: y` as a diagnostic.
+  `fort --check --json` writes no text form (section 4.1).
 - An error without a position in the file, such as a missing `main`, uses `1:1` (D14.2). The
   entry file's base name is not one of these: it need not be a valid module name at all (D9.1,
   `module-system.md` 2).
@@ -417,10 +441,26 @@ Compile-time diagnostics (D14.2) are written to stderr, one per line:
   a terminating statement are not diagnosed.
 
 ```sh
-main.ft:7:5: error: cannot assign to immutable 'x'
-main.ft:3:9: note: 'x' declared here
-util.ft:12:23: error: expected ';'
+main.ft:5:1: error: redeclaration of 'twice'
+    fn twice(i32 n) i32 {
+    ^~~~~~~~~~~~~~~~~~~~~
+main.ft:1:1: note: previous declaration of 'twice' here
+    fn twice(i32 n) i32 {
+    ^~~~~~~~~~~~~~~~~~~~~
+main.ft:11:5: error: cannot assign to immutable 'x'
+        x = 2;
+        ^
+main.ft:12:14: error: the initializer expects u8, not i32
+        u8 b = x + 1;
+                 ^~~
+util.ft:15:1: error: expected ';', found '}'
+    }
+    ^
 ```
+
+The range of a function declaration ends at the `}` of its body, on a later line, so its
+underline stops at the end of the header line. The third diagnostic stands at the `+`, because a
+binary expression anchors its range at its operator (D20.4), and its range ends after the `1`.
 
 Runtime diagnostics (D11.4) use the same position syntax, followed by `abort()`, so the shell
 reports status 134:
@@ -1456,8 +1496,10 @@ test/
     xfail.txt                  tests the compiler cannot pass yet
     run/<area>/NNN_name.ft     compile, run, compare
     fail/<area>/NNN_name.ft    must not compile, with annotated errors
+    fail/<area>/NNN_name.stderr the golden: the compiler's whole stderr for that test
     run/modules/<name>/main.ft multi-file run test; the directory is the root
     fail/modules/<name>/main.ft multi-file fail test, same rule
+    fail/modules/<name>/expected.stderr the golden of that multi-file fail test
     ffi/*.c                    C helpers for `link:` directives
     programs/*.ft              larger programs, treated as run tests
 ```
@@ -1512,6 +1554,16 @@ In a `fail` test every `//! error:` line must produce a diagnostic on that line 
 substring, and no unannotated diagnostic may occur; `//! error-any:` requires some diagnostic to
 contain the substring and is for errors without a useful line, such as circular imports.
 
+Every `fail` test also has a golden, which is not a directive (D14.5): `NNN_name.stderr` beside
+`NNN_name.ft`, or `expected.stderr` in the directory of a directory test. The golden holds the
+compiler's whole stderr for the test, the rendered lines of section 4 included, and the harness
+compares it byte for byte after two normalizations, because both directories differ between
+machines. The `--std-dir` prefix of a path becomes `<std>`. The absolute path of the corpus root
+becomes `<root>`: a test path is relative, because the compiler runs in `test/lang` (D14.4), but
+a module's identity is its real path, so a message about two names for one file quotes the root
+in full. The annotations stay: an `error:` says at the line what the test is about, and the
+golden pins the rendering.
+
 ### 7.3 What the harness does
 
 `test/lang/run_tests.py [options] [filter...]` (Python 3, standard library only) runs the
@@ -1537,6 +1589,7 @@ it removes the variable:
 |--------------|-----------------------------------------------------------------------------|
 | `run`        | `fort <flags> -o prog <test>` must exit 0; run `prog`; compare its output    |
 | `fail`       | `fort <flags> -o prog <test>` must exit 1 with only annotated errors        |
+| (golden)     | the compiler's stderr of a `fail` test must equal its golden (7.2)          |
 | `flags:`     | appended to the `fort` command line                                         |
 | `args:`      | appended to the program's command line                                      |
 | `link:`      | `fort -c`, then `cc -o prog prog.o <helpers>`                               |
@@ -1568,6 +1621,15 @@ exit status other than 0 or 1 (2 is a usage, toolchain or internal error, D14.1)
 a compiler timeout, a failure of the harness's own `link:` step and a program that cannot be started
 are `ERROR`, not a verdict about the test; a program that times out is a `FAIL`.
 
+The harness takes the lines that start with a byte other than a space as the header lines of
+section 4 and matches its patterns against those lines alone, so a rendered source line is never
+read as a diagnostic. That holds because no path of the corpus starts with a space. A `fail`
+test whose golden is missing is a `FAIL`, and a `FAIL` that names a golden names its first
+differing line with both spellings. `--bless` writes the golden of each
+selected `fail` test from the compiler's stderr, normalized as in 7.2, and then judges the test
+against it. A compiler step that is an `ERROR` writes no golden. A reviewer reads the diff of the
+goldens as part of the change. `--bless` does not combine with `--check-json`.
+
 One expectation file beside the harness lists path prefixes of tests (relative to `test/lang`,
 `#` comments allowed). `xfail.txt` names the tests the compiler cannot pass yet. A listed test
 that fails or errors is `XFAIL`, a listed test that passes is `XPASS` and fails the run, so the
@@ -1587,11 +1649,11 @@ malformed, duplicated or empty directive; a `signal:` naming none of the six sig
 two of `exit`, `abort` and `signal` together; a run-only directive in
 a `fail` test or `error`/`error-any` in a `run` test; a `link:` file that does not exist; a
 `//<` or `//|` not followed by a space or outside its block; a directive after the header or in
-a sibling module; a `fail` test with neither `error:` nor `error-any:`; an unknown area, a
-badly named test, a stray file, a directory test outside `modules`, and a gap or duplicate in
-the `NNN` numbering of an area; and an expectation-list entry that matches no test. A run
-performs the same checks first and stops when they fail, and fails when the filters select no
-test.
+a sibling module; a `fail` test with neither `error:` nor `error-any:`; a golden with no test
+beside it and a golden beside a `run` test; an unknown area, a badly named test, a stray file,
+a directory test outside `modules`, and a gap or duplicate in the `NNN` numbering of an area;
+and an expectation-list entry that matches no test. A run performs the same checks first and
+stops when they fail, and fails when the filters select no test.
 
 ### 7.4 Examples
 

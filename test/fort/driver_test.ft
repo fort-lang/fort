@@ -646,6 +646,9 @@ fn tokens_of_a_file_with_a_lexical_error_is_exit_one() void {
     string[3] mut argv = {"fort", "--tokens", "tokens_bad.ft"};
     assert(run(argv[0..3]) == EXIT_COMPILE_ERROR);
     assert(err_has("tokens_bad.ft:2:"));
+    // The dump shows the source line under the header line, as a build does.
+    assert(err_has("tokens_bad.ft:2:13: error: decimal literal may not start with '0'\n"));
+    assert(err_has("start with '0'\n        i32 x = 08;\n                ^\n"));
     // The dump is written either way, and it reaches the end of the file.
     assert(out_has("end of file"));
 }
@@ -671,6 +674,8 @@ fn ast_of_a_file_with_a_syntax_error_is_exit_one() void {
     assert(run(argv[0..3]) == EXIT_COMPILE_ERROR);
     assert(out_has("(module"));
     assert(err_has("tree_bad.ft:3:"));
+    // The dump shows the source line under the header line, as a build does.
+    assert(err_has("tree_bad.ft:3:1: error: expected ';', found '}'\n    }\n    ^\n"));
 }
 
 // Neither dump opens an import. It lexes or parses the
@@ -881,10 +886,18 @@ fn a_hundred_runs_answer_alike() void {
     }
     string own err = captured_err();
     defer del(err);
-    // The last run reports one error and one note. A one-segment path uses
-    // only the entry file's directory as a root. The result must not
-    // accumulate output from 100 runs.
-    assert(capture.line_count(err) == 2);
+    // The last run reports one error and one note, each with the source line
+    // and the underline of its range. A one-segment path uses only the entry
+    // file's directory as a root. The result must not accumulate output from
+    // 100 runs.
+    assert(capture.line_count(err) == 6);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "again.ft:1:1: error: module 'nothere' not found\n");
+    strbuf.append(&want, "    import nothere;\n    ^~~~~~~~~~~~~~~\n");
+    strbuf.append(&want, "again.ft:1:1: note: looked for nothere.ft\n");
+    strbuf.append(&want, "    import nothere;\n    ^~~~~~~~~~~~~~~\n");
+    assert(err == strbuf.view(&want));
 }
 
 fn main() i32 {

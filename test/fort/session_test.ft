@@ -1,17 +1,20 @@
 //! run
-//! flags: -I ../../src/fort
+//! flags: -I ../../src/fort -I support
 //! stdout:
 //| sources ok
 //| config ok
 //| files ok
+//| rendered ok
 //| ok
 /// Checks the session that owns analysis values and supplies source files to compiler modules.
 
+import capture;
 import containers;
 import diag;
 import session;
 import std.io;
 import std.str;
+import std.strbuf;
 
 // ---- the value ------------------------------------------------------------------
 
@@ -371,6 +374,122 @@ fn a_larger_file_arrives_whole() void {
     assert(text[9999] == cast(97 + 9999 % 26, char));
 }
 
+// ---- the rendered lines ---------------------------------------------------------
+
+// The lookup of the rendered lines answers what read_source answers: the
+// overlay first, then the disk, and false for a file nobody can read.
+fn the_lookup_reads_through_the_session() void {
+    assert(io.write_file("looked_up.ft", cast("on disk", u8@)));
+    session.session mut s = session.create();
+    defer session.free(&s);
+    session.set_source(&s, "overlay.ft", "in the editor");
+    string mut text = "";
+    assert(session.lookup_source(cast(&s, void mut*), "overlay.ft", &text));
+    assert(text == "in the editor");
+    assert(session.lookup_source(cast(&s, void mut*), "looked_up.ft", &text));
+    assert(text == "on disk");
+    // The file read for the lookup is remembered like any other read.
+    assert(session.has_source(&s, "looked_up.ft"));
+    text = "untouched";
+    assert(!session.lookup_source(cast(&s, void mut*), "never_there.ft", &text));
+    assert(text == "untouched");
+    assert(session.source_count(&s) == 2);
+}
+
+// The stderr of one error at 2:5-2:8 of `path` through a session that shows
+// sources when `shown` is true.
+fn reported(session.session mut* s, string path, bool shown) string own {
+    diag.set_text(session.diags(s), true);
+    if (shown) {
+        session.show_sources(s);
+    }
+    i32 saved = capture.begin(io.STDERR, "rendered.txt");
+    diag.error(session.diags(s), diag.loc_range(path, 2, 5, 2, 8), "bad");
+    capture.end(io.STDERR, saved);
+    return capture.text("rendered.txt");
+}
+
+// A session that shows sources renders the overlay, not the file on disk,
+// because the tree was built from the overlay.
+fn the_rendered_line_is_the_overlay() void {
+    assert(io.write_file("shown.ft", cast("fn f() void {\n    old line\n}\n", u8@)));
+    session.session mut s = session.create();
+    defer session.free(&s);
+    session.set_source(&s, "shown.ft", "fn f() void {\n    new line\n}\n");
+    string own got = reported(&s, "shown.ft", true);
+    defer del(got);
+    assert(got == "shown.ft:2:5: error: bad\n        new line\n        ^~~\n");
+}
+
+// A file the session does not hold yet is read from the disk and kept.
+fn the_rendered_line_is_read_from_the_disk() void {
+    assert(io.write_file("disk.ft", cast("fn f() void {\n    on disk\n}\n", u8@)));
+    session.session mut s = session.create();
+    defer session.free(&s);
+    string own got = reported(&s, "disk.ft", true);
+    defer del(got);
+    assert(got == "disk.ft:2:5: error: bad\n        on disk\n        ^~~\n");
+    assert(session.has_source(&s, "disk.ft"));
+}
+
+// A file that cannot be read shows the header line alone and counts as the
+// error it is.
+fn an_unreadable_file_shows_the_header_alone() void {
+    session.session mut s = session.create();
+    defer session.free(&s);
+    string own got = reported(&s, "not_on_disk.ft", true);
+    defer del(got);
+    assert(got == "not_on_disk.ft:2:5: error: bad\n");
+    assert(session.error_count(&s) == 1);
+    assert(session.source_count(&s) == 0);
+}
+
+// A session that does not show sources writes the header line alone and
+// reads nothing.
+fn without_show_sources_nothing_is_read() void {
+    assert(io.write_file("unread.ft", cast("fn f() void {\n    unread\n}\n", u8@)));
+    session.session mut s = session.create();
+    defer session.free(&s);
+    string own got = reported(&s, "unread.ft", false);
+    defer del(got);
+    assert(got == "unread.ft:2:5: error: bad\n");
+    assert(!session.has_source(&s, "unread.ft"));
+}
+
+// With the text off the sink asks no lookup, so a document analysed for a
+// client reads no file for the text form.
+fn with_the_text_off_nothing_is_read() void {
+    assert(io.write_file("quiet.ft", cast("fn f() void {\n    quiet\n}\n", u8@)));
+    session.session mut s = session.create();
+    defer session.free(&s);
+    session.show_sources(&s);
+    diag.set_text(session.diags(&s), false);
+    diag.error(session.diags(&s), diag.loc_range("quiet.ft", 2, 5, 2, 8), "bad");
+    assert(session.error_count(&s) == 1);
+    assert(!session.has_source(&s, "quiet.ft"));
+}
+
+// An error and its note in two files each show a line of their own file.
+fn a_note_shows_its_own_file() void {
+    session.session mut s = session.create();
+    defer session.free(&s);
+    session.set_source(&s, "one.ft", "fn a() void {\n    first\n}\n");
+    session.set_source(&s, "two.ft", "fn b() void {\n}\n");
+    diag.set_text(session.diags(&s), true);
+    session.show_sources(&s);
+    i32 saved = capture.begin(io.STDERR, "two_files.txt");
+    diag.error(session.diags(&s), diag.loc_range("one.ft", 2, 5, 2, 10), "here");
+    diag.note(session.diags(&s), diag.loc_range("two.ft", 1, 4, 1, 5), "and there");
+    capture.end(io.STDERR, saved);
+    string own got = capture.text("two_files.txt");
+    defer del(got);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "one.ft:2:5: error: here\n        first\n        ^~~~~\n");
+    strbuf.append(&want, "two.ft:1:4: note: and there\n    fn b() void {\n       ^\n");
+    assert(got == strbuf.view(&want));
+}
+
 fn main() i32 {
     a_fresh_session_is_empty();
     freeing_twice_is_a_no_op();
@@ -396,6 +515,14 @@ fn main() i32 {
     an_empty_file_reads_as_the_empty_string();
     a_larger_file_arrives_whole();
     println("files ok");
+    the_lookup_reads_through_the_session();
+    the_rendered_line_is_the_overlay();
+    the_rendered_line_is_read_from_the_disk();
+    an_unreadable_file_shows_the_header_alone();
+    without_show_sources_nothing_is_read();
+    with_the_text_off_nothing_is_read();
+    a_note_shows_its_own_file();
+    println("rendered ok");
     println("ok");
     return 0;
 }

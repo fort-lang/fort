@@ -1572,8 +1572,16 @@ Sections:
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.
-- rule: Diagnostics: `<file>:<line>:<col>: error: <message>` on stderr, one per line, optionally
-  followed by `note:` lines. Errors without a position in the file (a missing `main`) use `1:1`. A
+- rule: Diagnostics go to stderr. Each diagnostic starts with a header line,
+  `<file>:<line>:<col>: error: <message>`, and `note:` header lines can follow it. Errors without
+  a position in the file (a missing `main`) use `1:1`. Under each header line the compiler writes
+  as many rendered lines as the rendering needs, and each rendered line starts with a space. When
+  the file path does not start with a space, the first byte of a line tells a header line from a
+  rendered line. The rendered lines show the source line where the range of the diagnostic starts
+  (D20.4), then an underline: `^` at the start column and `~` up to the end column, exclusive. A
+  range that ends on a later line is underlined at least to the end of its first line, and its
+  later lines need not be shown. The empty range at 1:1 and a file the compiler cannot read show
+  no rendered line. A
   lexical error is reported and lexing resumes at the start of the next line, dropping the line it
   stands on with the tokens already lexed on it, so a file reports at most one lexical diagnostic
   per line and its token stream still covers the rest of the file and ends at the end of it; the
@@ -1614,6 +1622,9 @@ Sections:
   diagnostic with no recovery, and only the semantic errors of the first module that had any were
   reported. Amended 2026-09-10 with T-062: a lexical error stopped the compilation of the file
   after one diagnostic, the file was never parsed, and the cap of 20 counted syntax errors alone.
+  Amended 2026-09-27 (T-191): a diagnostic was its header line alone, "one per line", and no line
+  showed the source text or the range. The user accepted rendered lines under each header line,
+  with no limit on their count, on 2026-09-25.
 
 ### D14.3 The --cc command line
 - owner: `toolchain.md`.
@@ -1682,11 +1693,19 @@ Sections:
     must produce a diagnostic on that line containing the substring, and no unannotated
     diagnostic may occur; `//! error-any: <substring>` at the top for errors without a useful
     line (for example circular imports).
+  - every `fail` test has a golden, a file that holds the compiler's whole stderr for that test:
+    `<stem>.stderr` beside `<stem>.ft`, and `expected.stderr` in the directory of a directory
+    test. The stderr must equal the golden byte for byte after two normalizations: the
+    `--std-dir` prefix of a path becomes `<std>`, and the absolute path of the corpus root
+    becomes `<root>`. A missing golden fails the test. A golden without a `fail` test beside it
+    is a lint error.
 - history: Amended 2026-09-25: the `-<os>` target forms did not exist. Until then a run test
   whose outcome differs between the two targets ran on Linux alone, by an exclusion list in the
   darwin gate (4 fixtures: the trap signal, the errno numbers, the `sockaddr_in` family field
   and the import `$cfg(target_os)` selects). The same amendment lists `signal:` here; before it
   `toolchain.md` 7.2 alone named it.
+  Amended 2026-09-27 (T-191): a `fail` test had no golden, and nothing held the compiler's
+  stderr beyond the `error`, `error-any` and `stderr` substrings.
 
 ### D14.6 The test-to-source ratio
 - owner: `toolchain.md`.
@@ -2440,8 +2459,10 @@ language server to use them, while the server itself lands after the bootstrap f
   empty range where the construct it stands for begins. Extending a range moves its end to the later
   of the two ends and never moves its start, so extending it again with a token it already covers
   changes nothing and a node anchored at its operator never ends up with an end before its start. An
-  error without a position in the file is the empty range at 1:1 (D14.2). The text form of D14.2
-  prints the start only, so no diagnostic text changes.
+  error without a position in the file is the empty range at 1:1 (D14.2). The header line of the
+  text form of D14.2 prints the start only. The underline under it shows the range.
+- history: Amended 2026-09-27 (T-191): the text form printed the start only and showed nothing of
+  the range, so the ranges changed no diagnostic text.
 
 ### D20.5 The self-hosted compiler is re-entrant
 - owner: `toolchain.md` (1, 4).

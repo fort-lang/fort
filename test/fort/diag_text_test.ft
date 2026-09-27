@@ -1,25 +1,287 @@
 //! run
-//! flags: -I ../../src/fort
+//! flags: -I ../../src/fort -I support
 //! stderr: main.ft:1:1: error: first error
 //! stderr: main.ft:12:34: error: undefined name 'x'
 //! stderr: main.ft:12:34: note: declared here
 //! stderr: lib/util.ft:4294967295:4294967295: error: at the last position a u32 can hold
 //! stderr: :1:1: error: an error with no file
 //! stderr: main.ft:7:1: error:
+//! stderr: shown.ft:2:12: error: constant 300 does not fit u8
+//! stderr: u8 b = 300;
+//! stderr: ^~~
+//! stderr: shown.ft:2:5: note: the type is here
+//! stderr: ^~
 //! stdout:
+//| rendered ok
+//| sink ok
 //| ok
 /// Checks diagnostic text line by line. Errors and notes use fixed prefixes.
-/// The output keeps the message text and uses only the range start. The stderr
+/// The header line keeps the message text and uses only the range start. The
+/// lines under it show the source line and underline the range. The stderr
 /// directives in this test's header are those lines, so
 /// any change to the format fails here.
+import capture;
 import diag;
+import std.io;
+import std.strbuf;
 
 //
 // The lines are written as each diagnostic arrives, which is what a batch
 // driver wants. The records are kept whatever the text setting is, which is
 // what a server reads instead.
 
+// ---- the rendered lines -------------------------------------------------------
+
+// The lines diag.render appends for `l` in `source`, or "<none>" when it
+// appends nothing. The result tells a false answer from an empty buffer.
+fn rendered(string source, diag.loc l) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    bool shown = diag.render(&b, source, l);
+    assert(shown == (strbuf.view(&b).len > 0));
+    if (!shown) {
+        strbuf.append(&b, "<none>");
+    }
+    return strbuf.take(&b);
+}
+
+// Whether the lines diag.render appends for `l` in `source` are `want`.
+fn renders(string source, diag.loc l, string want) bool {
+    string own got = rendered(source, l);
+    defer del(got);
+    return got == want;
+}
+
+string SOURCE = "fn main() i32 {\n    i32 x = 1;\n    return x + 1;\n}\n";
+
+// A single-line range: `^` under the start column and `~` up to the end,
+// exclusive. Each line starts with four spaces, whatever the source line holds.
+fn a_range_on_one_line_is_underlined() void {
+    assert(renders(SOURCE, diag.loc_range("a.ft", 2, 9, 2, 10),
+                   "        i32 x = 1;\n            ^\n"));
+    assert(renders(SOURCE, diag.loc_range("a.ft", 3, 12, 3, 17),
+                   "        return x + 1;\n               ^~~~~\n"));
+    // A range at column 1 of an unindented line.
+    assert(renders(SOURCE, diag.loc_range("a.ft", 1, 1, 1, 3), "    fn main() i32 {\n    ^~\n"));
+    assert(renders(SOURCE, diag.loc_range("a.ft", 4, 1, 4, 2), "    }\n    ^\n"));
+}
+
+// An empty range away from 1:1 shows one `^` at its column.
+fn an_empty_range_shows_one_caret() void {
+    assert(renders(SOURCE, diag.loc_make("a.ft", 2, 5), "        i32 x = 1;\n        ^\n"));
+}
+
+// Before the `^`, a tab stays a tab and every other byte becomes a space, so
+// the caret stands under its byte at any tab width.
+fn a_tab_before_the_range_is_copied() void {
+    string src = "fn f() void {\n\tu8 b =\t300;\n}\n";
+    assert(renders(src, diag.loc_range("t.ft", 2, 9, 2, 12),
+                   "    \tu8 b =\t300;\n    \t      \t^~~\n"));
+    // A tab inside the range is one byte of the range, like any other.
+    assert(renders(src, diag.loc_range("t.ft", 2, 7, 2, 12),
+                   "    \tu8 b =\t300;\n    \t     ^~~~~\n"));
+}
+
+// A range that ends on a later line is underlined to the end of its first line.
+// The later lines are not shown.
+fn a_range_to_a_later_line_stops_at_its_first_line() void {
+    string src = "fn f() i32 {\n    return g(1,\n             2);\n}\n";
+    assert(renders(src, diag.loc_range("m.ft", 2, 12, 3, 16),
+                   "        return g(1,\n               ^~~~\n"));
+    // The end column belongs to the later line, so it does not cut the first line.
+    assert(renders(src, diag.loc_range("m.ft", 2, 12, 3, 3),
+                   "        return g(1,\n               ^~~~\n"));
+    // A range that starts at the end of its first line shows its `^` alone.
+    assert(renders(src, diag.loc_range("m.ft", 1, 13, 4, 2),
+                   "    fn f() i32 {\n                ^\n"));
+}
+
+// The empty range at 1:1 is no position in the file, so it shows no line. A
+// real range at 1:1 still shows one.
+fn the_empty_range_at_one_one_shows_nothing() void {
+    assert(renders(SOURCE, diag.loc_make("a.ft", 1, 1), "<none>"));
+    assert(renders(SOURCE, diag.loc_make("", 1, 1), "<none>"));
+    assert(renders("", diag.loc_make("a.ft", 1, 1), "<none>"));
+    // A lexical error at the first byte of a file has this range too, so it shows
+    // no line: a known limit of the text form.
+    assert(renders("$ fn main() i32 {\n", diag.loc_make("lex.ft", 1, 1), "<none>"));
+    assert(renders(SOURCE, diag.loc_range("a.ft", 1, 1, 1, 2), "    fn main() i32 {\n    ^\n"));
+    assert(diag.is_positionless(diag.loc_make("x.ft", 1, 1)));
+    assert(!diag.is_positionless(diag.loc_range("x.ft", 1, 1, 1, 2)));
+    assert(!diag.is_positionless(diag.loc_make("x.ft", 1, 2)));
+    assert(!diag.is_positionless(diag.loc_make("x.ft", 2, 1)));
+    assert(!diag.is_positionless(diag.loc_range("x.ft", 1, 1, 2, 1)));
+}
+
+// The last line of a file with no newline runs to the end of the file, and its
+// rendered line still ends with a newline.
+fn a_last_line_with_no_newline_is_shown_whole() void {
+    string src = "fn f() void {\n}";
+    assert(renders(src, diag.loc_range("n.ft", 2, 1, 2, 2), "    }\n    ^\n"));
+    assert(renders("x", diag.loc_range("n.ft", 1, 1, 1, 2), "    x\n    ^\n"));
+    // A position one past the last byte of the file.
+    assert(renders(src, diag.loc_make("n.ft", 2, 2), "    }\n     ^\n"));
+}
+
+// A position after the final newline stands on the empty last line; a line
+// past that is not in the file and shows nothing.
+fn a_line_past_the_end_shows_nothing() void {
+    assert(renders(SOURCE, diag.loc_make("a.ft", 5, 1), "    \n    ^\n"));
+    assert(renders(SOURCE, diag.loc_make("a.ft", 6, 1), "<none>"));
+    assert(renders(SOURCE, diag.loc_make("a.ft", 4294967295, 4294967295), "<none>"));
+    assert(renders("", diag.loc_make("a.ft", 2, 1), "<none>"));
+}
+
+// A column past the end of its line stands one past the last byte, and an end
+// past the line is cut at the line's end.
+fn a_column_past_the_line_is_cut() void {
+    assert(renders(SOURCE, diag.loc_make("a.ft", 4, 9), "    }\n     ^\n"));
+    assert(renders(SOURCE, diag.loc_range("a.ft", 4, 1, 4, 30), "    }\n    ^\n"));
+    assert(renders(SOURCE, diag.loc_range("a.ft", 2, 13, 2, 30),
+                   "        i32 x = 1;\n                ^~\n"));
+}
+
+// Line 0 and column 0 are no position; the renderer shows nothing rather than
+// wrap an unsigned subtraction.
+fn a_zero_position_shows_nothing() void {
+    assert(renders(SOURCE, diag.loc_make("a.ft", 0, 1), "<none>"));
+    assert(renders(SOURCE, diag.loc_make("a.ft", 2, 0), "<none>"));
+    // An end column of 0 on the start line underlines the start byte alone.
+    assert(renders(SOURCE, diag.loc_range("a.ft", 2, 5, 2, 0), "        i32 x = 1;\n        ^\n"));
+}
+
+// Columns count bytes: a two-byte character before the range widens the
+// underline by one byte.
+fn columns_count_bytes() void {
+    string src = "// \xc3\xa9 x\n";
+    assert(renders(src, diag.loc_range("u.ft", 1, 7, 1, 8), "    // \xc3\xa9 x\n          ^\n"));
+}
+
+// ---- the lines under a header line ------------------------------------------------
+
+// The files the lookup below answers for. Any other name is a file it cannot read.
+string SHOWN = "fn main() i32 {\n    u8 b = 300;\n    return 0;\n}\n";
+
+// A test lookup: counts its calls in the u64 behind `ctx` and answers
+// "shown.ft" with SHOWN.
+fn lookup(void mut* ctx, string path, string mut* out) bool {
+    u64 mut* calls = cast(ctx, u64 mut*);
+    *calls += 1;
+    if (path == "shown.ft") {
+        *out = SHOWN;
+        return true;
+    }
+    return false;
+}
+
+// The stderr of `report` with a lookup installed, and the lookup's call count.
+fn reported(u64 mut* calls) string own {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    diag.set_lookup(&s, lookup, cast(calls, void mut*));
+    i32 saved = capture.begin(io.STDERR, "err.txt");
+    diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
+    diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
+    // A file the lookup cannot read shows its header line alone.
+    diag.error(&s, diag.loc_range("gone.ft", 3, 5, 3, 6), "in a file nobody can read");
+    // The empty range at 1:1 shows its header line alone and asks no lookup.
+    diag.error(&s, diag.loc_make("shown.ft", 1, 1), "no main");
+    // A muted diagnostic writes nothing and asks no lookup.
+    diag.mute(&s);
+    diag.error(&s, diag.loc_range("shown.ft", 3, 5, 3, 11), "muted");
+    assert(diag.unmute(&s) == 1);
+    // With the text off, nothing is written and no lookup is asked.
+    diag.set_text(&s, false);
+    diag.error(&s, diag.loc_range("shown.ft", 3, 5, 3, 11), "not written");
+    capture.end(io.STDERR, saved);
+    return capture.text("err.txt");
+}
+
+// Each header line is followed by the lines of its range, in report order.
+fn the_sink_writes_the_lines_after_each_header() void {
+    u64 mut calls = 0;
+    string own got = reported(&calls);
+    defer del(got);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "shown.ft:2:12: error: constant 300 does not fit u8\n");
+    strbuf.append(&want, "        u8 b = 300;\n");
+    strbuf.append(&want, "               ^~~\n");
+    strbuf.append(&want, "shown.ft:2:5: note: the type is here\n");
+    strbuf.append(&want, "        u8 b = 300;\n");
+    strbuf.append(&want, "        ^~\n");
+    strbuf.append(&want, "gone.ft:3:5: error: in a file nobody can read\n");
+    strbuf.append(&want, "shown.ft:1:1: error: no main\n");
+    assert(got == strbuf.view(&want));
+    // shown.ft twice and gone.ft once. The 1:1 error, the muted error and the
+    // error with the text off ask nothing.
+    assert(calls == 3);
+    assert(capture.line_count(got) == 8);
+}
+
+// A file the lookup cannot read shows the header line alone.
+fn a_file_the_lookup_cannot_read_shows_the_header_alone() void {
+    u64 mut calls = 0;
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    diag.set_lookup(&s, lookup, cast(&calls, void mut*));
+    i32 saved = capture.begin(io.STDERR, "gone.txt");
+    // Line 1 is where an empty text has a line of its own, so a sink that
+    // rendered the empty text after a false answer would show it here.
+    diag.error(&s, diag.loc_range("gone.ft", 1, 5, 1, 7), "nothing to show");
+    capture.end(io.STDERR, saved);
+    string own got = capture.text("gone.txt");
+    defer del(got);
+    assert(got == "gone.ft:1:5: error: nothing to show\n");
+    assert(calls == 1);
+}
+
+// Without a lookup the sink writes the header lines alone.
+fn no_lookup_writes_the_header_alone() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    i32 saved = capture.begin(io.STDERR, "plain.txt");
+    diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
+    capture.end(io.STDERR, saved);
+    string own got = capture.text("plain.txt");
+    defer del(got);
+    assert(got == "shown.ft:2:12: error: constant 300 does not fit u8\n");
+}
+
+// The header lines of this test's header directives, with the lines under
+// them, on the real stderr.
+fn the_rendered_lines_reach_stderr() void {
+    u64 mut calls = 0;
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    diag.set_lookup(&s, lookup, cast(&calls, void mut*));
+    diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
+    diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
+    assert(calls == 2);
+}
+
 fn main() i32 {
+    a_range_on_one_line_is_underlined();
+    an_empty_range_shows_one_caret();
+    a_tab_before_the_range_is_copied();
+    a_range_to_a_later_line_stops_at_its_first_line();
+    the_empty_range_at_one_one_shows_nothing();
+    a_last_line_with_no_newline_is_shown_whole();
+    a_line_past_the_end_shows_nothing();
+    a_column_past_the_line_is_cut();
+    a_zero_position_shows_nothing();
+    columns_count_bytes();
+    println("rendered ok");
+    the_sink_writes_the_lines_after_each_header();
+    a_file_the_lookup_cannot_read_shows_the_header_alone();
+    no_lookup_writes_the_header_alone();
+    the_rendered_lines_reach_stderr();
+    println("sink ok");
+
     diag.sink mut s = diag.create();
     defer diag.free(&s);
     diag.set_text(&s, true);

@@ -208,6 +208,18 @@ came here.
   the freed block still held a NUL, so the document printed `"file":""` while the text form,
   written at report time, was right. `record_append` interns the name in the sink's own pool, and
   anything else a record must outlive its reporter for is copied the same way.
+- **The rendered lines under a header line come from a lookup the sink calls** (T-191). The sink
+  cannot import the session, because `session` imports `diag`, so `diag.set_lookup` stores a
+  `fn (void mut*, string, string mut*) bool` and a context pointer, and `session.show_sources`
+  installs `session.lookup_source` with the session itself as the context. The driver calls it
+  in `front_end`, `tokens_entry` and `ast_entry`, beside `diag.set_text`. The sink then holds a
+  pointer into the session, so the session must not move while its sink writes text; the driver
+  keeps it in one local for the whole run. `diag.report` writes the header line and its rendered
+  lines together as the diagnostic arrives, so the text order stays the report order that
+  `run_tests.py --check-json` holds against the document. The lookup reads through
+  `session.read_source`, the overlay first, so the rendered line is the text the tree was built
+  from. A sink with no lookup (`diag.create()`, a language server, a unit test) writes header
+  lines alone, and a sink with its text off never calls the lookup.
 - **A module's identity is its real path, and realpath of a relative path costs a getcwd.** On
   macOS getcwd walks the entries of every directory on the way up, so a `-S` round of
   `test/fort/driver_lifetime_closure_test.ft` spent 93% of its time there: 22 s for 4000 rounds

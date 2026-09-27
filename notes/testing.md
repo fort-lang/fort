@@ -171,8 +171,9 @@ bullet at a time and without a rewrite.
   fail test and ignores `xfail.txt`, since it judges the
   two forms of one run rather than the test. It also selects a test with an `index.json` beside
   it, runs that one with `--index` and holds its `"symbols"` against the file byte for byte
-  (D20.3): the golden is one record per line as `render_index` spells it, it is the one non-`.ft`
-  file a directory test may hold, and `--lint` checks its shape without a compiler, so a golden
+  (D20.3): the golden is one record per line as `render_index` spells it, it and
+  `expected.stderr` (the next bullet) are the two non-`.ft` files a directory test may hold, and
+  `--lint` checks its shape without a compiler, so a golden
   edited by hand into another spelling of the same records fails the lint rather than the run.
   Regenerate one with `fort --index` and `render_index`, never by hand. A compiler exit status
   other than 0 or 1 is an `ERROR`, which `xfail.txt` still covers. Discovery matches a test file's
@@ -190,6 +191,30 @@ bullet at a time and without a rewrite.
   On voyager.local, `/bin/false` is absent. This made three inherited fixture tests error (T-143).
   Use `shutil.which("false")` for a fixture that runs on Mac and Linux.
   The host and slot-2 VM suites each pass 185 of 185 tests with this fixture.
+- **Every `fail` test has a golden stderr** (T-191, D14.5). The golden rule: `NNN_name.stderr`
+  stands beside `NNN_name.ft`, and `expected.stderr` stands in the directory of a directory test. It
+  holds the compiler's whole stderr for the test: each header line and the rendered lines under it
+  (`spec/toolchain.md` 4). `judge_fail` compares it byte for byte after the other checks, a missing
+  golden is a `FAIL`, and the reason names the first line that differs. The normalization rule: the
+  harness replaces the `--std-dir` prefix of a path with `<std>` and the absolute path of the corpus
+  root with `<root>`, and changes nothing else. A test path is already relative to `test/lang`, but
+  `fail/modules/013_same_file` quotes a real path in its note (`both name <root>/fail/...`), and
+  before the second normalization its golden blessed on the Mac failed in the VM, where the root is
+  `/vagrant/.worktrees/...`. A golden that quotes a line of the standard library therefore changes
+  when that line moves: `fail/ffi/004` and `fail/ffi/006` quote `<std>/libc.ft`, whose lines are the
+  same in `std/linux` and `std/darwin` today. Both hosts gate every merge, so an edit to one copy of
+  `libc.ft` goes red on its own host; the coordinator accepted that coupling on T-191. The bless
+  rule: `run_tests.py --bless [filter...]` writes the goldens of the selected `fail` tests from the
+  compiler's output and then judges them; a compiler step that is an `ERROR` writes nothing. Bless
+  only the tests a change touches, and read `git diff -- '*.stderr'` before the commit, because the
+  diff of the goldens is the review of the new text. `--lint` rejects a golden with no `.ft` beside
+  it and a golden beside a `run` test. **Select the fail corpus as `fail/`, not `fail`**: a filter
+  is a substring of the path, and on 2026-09-27 `run_tests.py --list fail` printed 275 tests, 23 of
+  them run tests such as `run/errors/008_assert_failure.ft`, against 252 for `--list fail/`. The
+  harness matches its diagnostic patterns only against lines that start with a byte other than a
+  space, so a rendered source line that spells `x.ft:1:1: error: y` is never read as a diagnostic. A
+  path can start with a space (`fort --check " sp.ft"` prints such a header line), so a test file
+  name must not.
 - A directive lint gotcha: `run_tests.py --lint` rejects any line of a test whose text holds `//!`
   after code, so a comment inside a test that quotes a directive (`the //! stderr: lines`) fails
   the lint with `only '//! error:' may follow code on a line`. Say "the stderr directives in this
