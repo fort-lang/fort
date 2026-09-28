@@ -149,7 +149,8 @@ shebang.
 
 - **Markdown**: Line-wrap at 100 characters, including tables and code blocks. Check with
   `awk 'length > 100 {print FILENAME": "FNR}' <files>`. Code fences use `fort`, `c`, `sh`,
-  `llvm`, `json` or `ebnf` as the language tag.
+  `llvm`, `json`, `ebnf` or `fir` as the language tag. `fir` is the textual form of
+  `spec/fir.md` 13 (T-209).
 - **Language changes**: any change to the language is recorded in `spec/decisions.md` first
   (new decision number or amended decision with a note), then in the specification document that
   owns the topic, then in the tests under `test/lang/`. Specification text never contains "TBD",

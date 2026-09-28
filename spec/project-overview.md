@@ -40,6 +40,9 @@ Read them in this order. Two are normative and win over the rest.
 | `stdlib.md`          | The v1 standard library, module by module, with signatures.           |
 | `toolchain.md`       | The `fort` command, build modes, diagnostics, the runtime, code       |
 |                      | generation contract, test conventions.                                |
+| `fir.md`             | FIR, the representation between the checker and the LLVM IR text:    |
+|                      | its places, rvalues, checks, lowering, verifier, translator and       |
+|                      | migration (D19.8).                                                    |
 
 These five describe the implementation rather than the language, and every document above wins
 over them (D1.2). `README.md` indexes the whole directory.

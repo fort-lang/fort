@@ -30,6 +30,7 @@ The files below stand in `spec/`. Each one implements the decisions it cites and
 | `spec/module-system.md` | modules, imports, name resolution and the C foreign function interface |
 | `spec/stdlib.md` | the standard library |
 | `spec/toolchain.md` | the command line, the build pipeline, diagnostics, the runtime, codegen |
+| `spec/fir.md` | FIR, the representation between the checker and the LLVM IR text (D19.8) |
 
 ## Engineering knowledge
 

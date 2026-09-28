@@ -675,6 +675,12 @@ Sections:
   fields. `&&`, `||` and `?:` evaluate only what they need. For an assignment the target's address,
   including any index and its bounds check, is computed before the right-hand side; compound
   assignment computes the target once. Temporaries live until the end of the enclosing statement.
+  An aggregate literal reads every member before the destination changes, so `s = pair{s.b, s.a}`
+  swaps the two fields.
+- history: Amended 2026-09-28 (T-209): the rule said nothing about a literal that reads its own
+  destination, and the emitter wrote such a literal member by member, so `s = pair{s.b, s.a}`
+  gave `s.b, s.b`. The user ruled for the swap. The emitter keeps the old behavior until the FIR
+  migration replaces it (`fir.md` 12.5).
 
 ### D6.4 The cast form
 - owner: `core-language.md` (Expressions).
@@ -2193,19 +2199,22 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 ### D19.1 One textual LLVM IR module
 - owner: `toolchain.md` (6, the IR contract).
 - rule: The compiler emits one textual LLVM IR module (`.ll`, LLVM 18 syntax, opaque pointers) for
-  the whole program (D9.10), built by string appending in one forward pass, and hands it to clang
-  (D14.3). The compiler never links libLLVM or calls its C or C++ API: the bootstrap stays a
-  dependency-free C11 program and the self-hosted compiler needs no foreign bindings. The module
-  carries `target triple = "x86_64-unknown-linux-gnu"` for Linux or the selected
-  `arm64-apple-macosxM.m.p` for Mac. It carries no datalayout, module flags, comments or
-  `source_filename`. Clang derives the target layout from the selected triple.
-  Every emitted module must pass `opt -passes=verify`; the language-test harness
-  checks that (`run_tests.py --verify-ir`) and the emitter suites verify each module they emit.
-  The goldens of `bootstrap0/test/gen_module_test.c` are the reference for the form of a module
-  until the contract below says otherwise.
+  the whole program (D9.10), built by string appending, and hands it to clang (D14.3). The direct
+  path of the emitter appends in one forward pass over the checked tree. The translator of D19.8
+  scans a FIR function once to classify its locals and then appends in one forward pass over it. The
+  compiler never links libLLVM or calls its C or C++ API: the bootstrap stays a dependency-free C11
+  program and the self-hosted compiler needs no foreign bindings. The module carries `target triple
+  = "x86_64-unknown-linux-gnu"` for Linux or the selected `arm64-apple-macosxM.m.p` for Mac. It
+  carries no datalayout, module flags, comments or `source_filename`. Clang derives the target
+  layout from the selected triple. Every emitted module must pass `opt -passes=verify`; the
+  language-test harness checks that (`run_tests.py --verify-ir`) and the emitter suites verify each
+  module they emit. The goldens of `bootstrap0/test/gen_module_test.c` are the reference for the
+  form of a module until the contract below says otherwise.
 - history: Amended 2026-09-15 (T-140): Mac IR uses the selected Apple triple without a datalayout.
   Amended 2026-09-25 (the user): the hand-written samples under `test/ir/` and the pipeline test
   that ran them were retired; until then they were the reference for the form of a module.
+  Amended 2026-09-28 (T-209): the module was built "in one forward pass" over the checked tree
+  alone. D19.8 adds FIR, and the translator appends from it.
 
 ### D19.2 Type mapping
 - owner: `toolchain.md` (6, the IR contract).
@@ -2235,8 +2244,11 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   on a fort aggregate (its only `extractvalue` takes apart the `{iN, i1}` that an overflow intrinsic
   returns, D19.6). Copying an aggregate is `llvm.memcpy`, zeroing one is `llvm.memset` and reaching
   a field or element is `getelementptr`. This is D9.9's model spelled in IR, and it is what keeps
-  code generation one tree walk with a destination place per expression (D19.1).
-- history: Amended 2026-09-10: spans were called slices (D3.5).
+  code generation one tree walk with a destination place per expression (D19.1). The lowering of
+  D19.8 is that walk, and FIR keeps the same model: a FIR local of aggregate type is a place, and
+  an operand of aggregate type names a place.
+- history: Amended 2026-09-10: spans were called slices (D3.5). Amended 2026-09-28 (T-209): the
+  walk wrote LLVM text directly; D19.8 makes it write FIR.
 
 ### D19.4 Entry-block allocas and SSA discipline
 - owner: `toolchain.md` (6, the IR contract).
@@ -2371,6 +2383,32 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   `unreachable` alone is not a trap; LLVM can let control fall through it.
   The compiler therefore emits the call and not only the terminator (D11.4).
 - history: Amended 2026-09-15 (T-140): the trap signal now follows the selected target.
+
+### D19.8 FIR, the representation between the checker and the IR text
+- owner: `fir.md`.
+- rule: The compiler lowers each checked function body to FIR, verifies it, runs its passes over it,
+  and translates it to the LLVM IR text of `toolchain.md` 6 (`fir.md`). FIR follows the shape of
+  Rust's MIR: a control-flow graph of basic blocks for each function, whose statements read and
+  write places (a local or a global with projections for a field, an element or a dereference),
+  whose operands say whether they `copy` or `move`, and whose runtime checks are `check`
+  terminators. FIR holds fort types and is not in SSA form. The deferred statements are expanded on
+  each path that runs them, and every statement carries its source location. The lowering makes
+  every decision that depends on fort meaning and emits every runtime check. The build-mode pass
+  removes the checks the selected mode drops and rewrites the operations it changes, and the flow
+  analyses run before it, so an analysis gives one answer in every mode. The translator maps each
+  FIR construct to LLVM text, chooses the LLVM instruction from the fort types, and makes the
+  choices that depend on the target; it does not read the build mode. A feature of the language that
+  is not in the core of FIR lowers into it, so the translator and the analyses do not change for it;
+  a feature that needs a new projection or constant extends the core once. Until the migration of
+  `fir.md` 16 ends, the direct path of the emitter writes each function that the lowering does not
+  support.
+- rationale: two passes derived one fact from the tree four times, and each time nothing compared
+  the two answers: the parameter types of a runtime entry (T-072), lvalue-ness (T-193), whether a
+  body can fall off its end, and the expansion of deferred statements. One lowering derives each
+  fact once, and the translator and every flow analysis read the result. A fixed core with places
+  and explicit moves is also where the features D15 defers need the least change: the user
+  chose it over a model of the LLVM output on 2026-09-28, because the latter read like LLVM and
+  gave only checks of the emitter's own text.
 
 ## D20 Editor support
 

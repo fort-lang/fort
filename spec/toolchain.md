@@ -1883,7 +1883,10 @@ implementable; the design is to be planned in the implementation phase.
 - **Codegen.** One forward pass over the annotated AST appending text to a single LLVM IR
   module (D19.1, section 6), with no intermediate representation of its own, no libLLVM and no
   register allocation: locals are `alloca`s in the entry block, intermediates are SSA
-  temporaries, and deferred statements are expanded statically at each exit (D7.8).
+  temporaries, and deferred statements are expanded statically at each exit (D7.8). This is the
+  direct path of `fir.md`. D19.8 replaces it one function at a time: the lowering makes FIR from
+  the annotated AST, the verifier tests it, and the translator writes the text of section 6 from
+  it. The direct path goes when the migration of `fir.md` 16 ends.
 - **Memory.** Arenas per compilation; nothing is freed before exit.
 
 ## 9. Editor support

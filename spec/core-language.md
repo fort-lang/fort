@@ -578,7 +578,9 @@ Operands, call arguments, and struct and array literal fields are evaluated left
 call the callee expression is evaluated before its arguments. `&&`, `||` and `?:` evaluate only
 what they need. For an assignment the target's address, including any index and its bounds
 check, is computed before the right-hand side; a compound assignment computes the target once.
-Temporaries live until the end of the enclosing statement.
+Temporaries live until the end of the enclosing statement. An aggregate literal reads every member
+before the destination changes, so `s = pair{s.b, s.a}` swaps the two fields (D6.3, amended
+2026-09-28; T-211 holds the test, and the emitter keeps the old behavior until then).
 
 ### 5.5 Lvalues, `&`, `*` and `null` (D6.7, D5.8, D3.10, D3.11, D10.4, D10.5)
 
