@@ -8,7 +8,7 @@
 //| module ok
 //| ok
 /// Checks function definitions from src/fort/gen_stmt.ft. Cases cover
-/// signatures, entry allocas, implicit tails, `fort_entry`, named structs, and
+/// signatures, entry allocas, implicit tails, the C `main`, named structs, and
 /// complete module assembly.
 import ast;
 import check_env;
@@ -239,49 +239,58 @@ fn the_tail_of_a_body_that_falls_off_its_end() void {
     gen_env.expect_blocks(&e, got);
 }
 
-// ---- fort_entry ---------------------------------------------------------
+// ---- the C entry point ---------------------------------------------------
 
-fn fort_entry_calls_main_and_returns_its_status() void {
+// `@main` builds the argument span in its own frame and calls the program's
+// `main` directly. A `main` that takes no parameter gets no argument.
+fn the_c_main_calls_a_main_that_takes_no_argument() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(gen_env.open_module(&e, "fn main() i32 {\n    return 0;\n}\n"));
-    gen_stmt.gen_fort_entry(&e.g, gen_env.sym_main(&e, "main"));
-    string[5] mut want = {
-        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n",
+    gen_stmt.gen_main(&e.g, gen_env.sym_main(&e, "main"));
+    string[10] mut want = {
+        "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n",
         "entry:\n",
+        "  %args = alloca %fort.span, align 8\n",
+        "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n",
+        "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)\n",
         "  %t0 = call i32 @\"main.main\"()\n",
-        "  ret i32 %t0\n",
+        "  call void @\"std.rt.flush_all\"()\n",
+        "  %t1 = and i32 %t0, 255\n",
+        "  ret i32 %t1\n",
         "}\n",
     };
     string got = gen_env.funcs(&e);
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..10]));
     gen_env.expect_blocks(&e, got);
-    // The module defines the name from here on, so an `extern fn fort_entry`
-    // is not declared beside it.
-    assert(e.g.entry_defined);
 }
 
-// `fort_entry` copies the argument span into its own frame when `main`
-// declares the parameter, because `main` calls it.
-fn fort_entry_copies_the_argument_span_when_main_takes_one() void {
+// A `main` that takes the span gets `%args` itself. The span is the
+// caller-made copy of an aggregate argument, so the callee uses it in place,
+// and the text holds one `alloca` and no `memcpy`.
+fn the_c_main_passes_its_own_span_to_a_main_that_takes_one() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(gen_env.open_module(&e, "fn main(string@ args) i32 {\n    return 0;\n}\n"));
-    gen_stmt.gen_fort_entry(&e.g, gen_env.sym_main(&e, "main"));
-    string[7] mut want = {
-        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n",
+    gen_stmt.gen_main(&e.g, gen_env.sym_main(&e, "main"));
+    string[10] mut want = {
+        "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n",
         "entry:\n",
-        "  %args.0 = alloca %fort.span, align 8\n",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %args.0, ptr align 8 %args.in, i64 16,",
-        " i1 false)\n",
-        "  %t0 = call i32 @\"main.main\"(ptr %args.0)\n",
-        "  ret i32 %t0\n}\n",
+        "  %args = alloca %fort.span, align 8\n",
+        "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)\n",
+        "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)\n",
+        "  %t0 = call i32 @\"main.main\"(ptr %args)\n",
+        "  call void @\"std.rt.flush_all\"()\n",
+        "  %t1 = and i32 %t0, 255\n",
+        "  ret i32 %t1\n",
+        "}\n",
     };
     string got = gen_env.funcs(&e);
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..7]));
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..10]));
     gen_env.expect_blocks(&e, got);
+    assert(str.find(got, "memcpy") < 0);
 }
 
 // ---- the module -------------------------------------------------------
@@ -352,9 +361,9 @@ fn the_module_is_the_sections_of_item_one_in_order() void {
         "  ret i32 0\n",
         "}\n",
         "\n",
-        "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n",
+        "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n",
         "entry:\n",
-        "  %t0 = call i32 @\"main.main\"()\n  ret i32 %t0\n}\n",
+        "  %args = alloca %fort.span, align 8\n",
     };
     string got = gen_env.module_text(&e);
     string[2] mut tail = {
@@ -367,7 +376,8 @@ fn the_module_is_the_sections_of_item_one_in_order() void {
 }
 
 // A whole program, module by module, in the dependency order: the emitter
-// walks the closure and `fort_entry` is emitted in the entry module alone.
+// walks the closure and the C `main` is emitted in the entry module alone,
+// after every other definition.
 fn a_program_emits_every_module_of_the_closure() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -384,7 +394,7 @@ fn a_program_emits_every_module_of_the_closure() void {
     // imports.
     i64 helper_at = str.find(got, "define dso_local i64 @\"helper.one\"() #0 {\n");
     i64 main_at = str.find(got, "define dso_local i32 @\"main.main\"() #0 {\n");
-    i64 entry_at = str.find(got, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n");
+    i64 entry_at = str.find(got, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n");
     assert(helper_at >= 0 && main_at > helper_at && entry_at > main_at);
     gen_env.expect_blocks(&e, got);
 }
@@ -452,8 +462,8 @@ fn main() i32 {
     the_tail_of_a_body_that_falls_off_its_end();
     the_block_check_refuses_what_it_is_there_to_refuse();
     println("tails ok");
-    fort_entry_calls_main_and_returns_its_status();
-    fort_entry_copies_the_argument_span_when_main_takes_one();
+    the_c_main_calls_a_main_that_takes_no_argument();
+    the_c_main_passes_its_own_span_to_a_main_that_takes_one();
     println("entry ok");
     the_named_types_are_the_two_fixed_ones_then_every_struct();
     two_definitions_are_separated_by_one_blank_line();

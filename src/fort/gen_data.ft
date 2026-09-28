@@ -12,10 +12,6 @@ import types;
 // A Mac module uses its selected triple.
 string MODULE_HEADER = "target triple = \"x86_64-unknown-linux-gnu\"\n";
 
-// The program entry point the compiler emits in the entry module: the one C
-// name a fort program's own definitions occupy.
-string ENTRY_NAME = "fort_entry";
-
 // The text of one attribute group, at the fixed index gen.ft's
 // ATTR_* constants give; only the used ones are emitted. `mustprogress` is
 // deliberately absent everywhere: it would license the optimizer to delete a
@@ -524,16 +520,12 @@ fn gen_finish(gen.emitter mut* g) void {
     emit_data(g, &data);
     strbuf.str_buf mut externs = strbuf.create();
     defer strbuf.free(&externs);
-    // Writes `extern` C functions in first-use order. It skips a symbol that the module defines.
-    // One ELF symbol is one IR entity, so `declare` beside `define` would be a redefinition. The
-    // checker refuses such a declaration first, since the name is reserved, so this only keeps the
-    // invariant local to the emitter.
+    // Writes `extern` C functions in first-use order. The one C name the module defines is `main`,
+    // and the checker refuses an `extern` that declares it. So no `declare` stands beside a
+    // `define` of the same name.
     u64 mut i = 0;
     while (i < g->externs.len) {
-        ast.sym* s = gen.syms_at(&g->externs, i);
-        if (!g->entry_defined || s->name != ENTRY_NAME) {
-            emit_extern(g, &externs, s);
-        }
+        emit_extern(g, &externs, gen.syms_at(&g->externs, i));
         i += 1;
     }
     strbuf.str_buf mut intrinsics = strbuf.create();

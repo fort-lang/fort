@@ -361,11 +361,11 @@ came here.
   `TEST_RESULT_ERR`): a spawn that succeeds and a child that
   exits 127 otherwise reads as "the verifier rejected this IR", which blames the wrong thing.
   A duplicate the emitter stops writing is only a fix if something else refuses the program: `opt`
-  rejected a `declare` beside a `define` of `fort_entry`, and dropping the declaration to satisfy
-  it turned a hard compile error into a call through the declared type -- a SIGSEGV in the test
-  that declared a wrong signature (T-018's review). When a tool's rejection is the only thing
-  standing between a legal-looking program and wrong code, the front end takes the rejection over
-  before the emitter stops producing it.
+  rejected a `declare` beside a `define` of the entry function the compiler emitted, and dropping
+  the declaration to satisfy it turned a hard compile error into a call through the declared type
+  -- a SIGSEGV in the test that declared a wrong signature (T-018's review). When a tool's
+  rejection is the only thing standing between a legal-looking program and wrong code, the front
+  end takes the rejection over before the emitter stops producing it.
   **`opt -passes=verify` does not reject a call whose argument types disagree with its callee's
   `declare`.** Opaque pointers make a call site's type independent of its callee's, so
   `call void @"std.rt.fail_div_zero"(ptr @.file.0, i32 4, i32 14)` against a definition taking
@@ -649,6 +649,8 @@ library (T-160).
      both supported hosts. Each pin is an ancestor of HEAD. A shallow clone that lacks one pin
      cannot bootstrap.
   5. **The C compiler has one production job.** It builds `bootstrap-1`.
+     The pinned compilers still emit `fort_entry` and reserve its name (T-212), so a source that
+     the chain builds (`src/fort`, `std/`) must not declare `extern fn fort_entry`.
 
   **The C compiler stays frozen against general language work** (T-046, T-160). Change it only to
   fix a specified C defect or to keep the native C-to-bootstrap-1 edge working on a supported host.
@@ -842,9 +844,10 @@ library (T-160).
     fort modules can express (D9.5). `src/fort/gen.ft` is therefore gen.c's primitives together
     with gen_data.c's private data, name spelling and runtime calls -- what the checks of D19.6
     need -- `gen_expr.ft` sits above it, and gen.c's function definitions (`gen_function`,
-    `gen_fort_entry`, `gen_module`, `gen_program`) belong with the statements and the module
+    `gen_main`, `gen_module`, `gen_program`) belong with the statements and the module
     assembly they call. Every function keeps its C name, so the two emitters are still read side
-    by side name by name.
+    by side name by name. The one exception since T-212 is gen.c's `gen_fort_entry`, which the fort
+    emitter no longer has: the emitted `main` calls the program's `main` directly.
 
 **The fort compiler can implement language forms that the C compiler does not implement.**
 Product tests hold these forms directly. The project does not maintain C-to-fort parity (T-160).

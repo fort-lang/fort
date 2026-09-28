@@ -83,10 +83,10 @@ Each process/agent MUST explore the relevant portions of the codebase as indicat
 hand.
 
 #### Worktree Isolation
-Each Codex implementor MUST work in a separate git worktree and associated branch. Create the
-worktree as a directory (`fort-<name>`) in `.worktrees`, and prefix the branch name with `bug/`,
-`feat/`, etc. as you see appropriate. The coordinator deletes the worktree once the change is merged
-into the target branch.
+Each implementor MUST work in its own worktree `.worktrees/fort-<name>` on a branch prefixed
+`bug/`, `feat/`, etc. The coordinator deletes the worktree once the change is merged. Every
+worktree shares one stash list, so never run a bare `git stash` or `git stash pop`: a pop applies
+another branch's entry. Set work aside with a WIP commit instead (T-212).
 
 #### Change Implementation Loop
 Always implement a change in small incremental commits. A commit MUST be composed of a

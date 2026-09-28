@@ -1042,49 +1042,6 @@ fn gen_function(gen.emitter mut* g, ast.node* fn_node) void {
     function_end(g);
 }
 
-// ---- fort_entry ---------------------------------------------------------
-
-fn gen_fort_entry(gen.emitter mut* g, ast.sym* main_sym) void {
-    function_begin(g);
-    gen.gen_use_attr(g, gen.ATTR_FN);
-    definition_begin(g);
-    // a C name, unquoted. The span arrives by pointer
-    strbuf.append(&g->funcs, "define dso_local i32 @fort_entry(ptr %args.in) #0 {\n");
-    // The module defines the name from this point. It does not also declare `extern fn fort_entry`.
-    // Two C declarations share one ELF symbol, but an IR `declare` beside `define` is a
-    // redefinition.
-    g->entry_defined = true;
-    gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
-    if (main_sym->ty->params.len == 1) {
-        // It copies the span into its own frame when `main` declares the
-        // parameter, because its caller is the `main`.
-        gen.gen_val mut slot = gen.gen_val{};
-        slot.ty = "ptr";
-        slot.val = "%args.0";
-        strbuf.append(&g->allocas, "  %args.0 = alloca ");
-        strbuf.append(&g->allocas, gen.SPAN_TYPE);
-        strbuf.append(&g->allocas, ", align ");
-        strbuf.append_u64(&g->allocas, gen.SPAN_ALIGN);
-        strbuf.push(&g->allocas, '\n');
-        gen.gen_val mut incoming = gen.gen_val{};
-        incoming.ty = "ptr";
-        incoming.val = "%args.in";
-        gen.gen_memcpy(g, slot, gen.SPAN_ALIGN, incoming, gen.SPAN_ALIGN, gen.SPAN_SIZE);
-        gen.gen_args_add(&args, slot);
-    }
-    gen.gen_val r = gen.gen_temp(g, "i32");
-    strbuf.append(&g->body, "call i32 ");
-    strbuf.append(&g->body, gen.gen_symbol_ref(g, main_sym));
-    strbuf.push(&g->body, '(');
-    strbuf.append(&g->body, gen.gen_args_text(&args));
-    strbuf.append(&g->body, ")\n");
-    strbuf.append(&g->body, "  ret i32 ");
-    strbuf.append(&g->body, r.val);
-    strbuf.push(&g->body, '\n');
-    function_end(g);
-}
-
 // ---- main ---------------------------------------------------------------
 
 // The byte the process status keeps, which is `status & 0xFF`.
@@ -1092,10 +1049,10 @@ u64 STATUS_MASK = 255;
 
 // `@main` is the C entry point the start-up code calls, so it takes C's `argc` and `argv` and
 // returns C's `int`. It is a definition of this module like any other and carries `dso_local` and
-// `#0`. Calls `std.rt.args_init`, then `std.rt.args`. The second call builds the span for
-// `fort_entry`. It then calls `std.rt.flush_all` and returns the low status byte. `args_init` runs
-// first, since `args` hands out what it built.
-fn gen_main(gen.emitter mut* g) void {
+// `#0`. Calls `std.rt.args_init`, then `std.rt.args`, which builds the span in this frame. It then
+// calls the program's `main`, then `std.rt.flush_all`, and returns the low status byte.
+// `args_init` runs first, since `args` hands out what it built.
+fn gen_main(gen.emitter mut* g, ast.sym* main_sym) void {
     function_begin(g);
     gen.gen_use_attr(g, gen.ATTR_FN);
     definition_begin(g);
@@ -1119,8 +1076,19 @@ fn gen_main(gen.emitter mut* g) void {
     gen.gen_args_add_ext(&args_args, span, "sret(%fort.span)");
     gen.gen_call_rt(g, runtime_sig.rt_entry.rt_args, &args_args);
     gen.gen_args_free(&args_args);
+    // The program's `main` takes the span at `%args` when it declares the parameter. The span is
+    // the caller-made copy of an aggregate argument, so the callee uses it in place.
+    gen.gen_args mut main_args = gen.gen_args_init();
+    if (main_sym->ty->params.len == 1) {
+        gen.gen_args_add(&main_args, span);
+    }
     gen.gen_val status = gen.gen_temp(g, "i32");
-    strbuf.append(&g->body, "call i32 @fort_entry(ptr %args)\n");
+    strbuf.append(&g->body, "call i32 ");
+    strbuf.append(&g->body, gen.gen_symbol_ref(g, main_sym));
+    strbuf.push(&g->body, '(');
+    strbuf.append(&g->body, gen.gen_args_text(&main_args));
+    strbuf.append(&g->body, ")\n");
+    gen.gen_args_free(&main_args);
     gen.gen_args mut flush_args = gen.gen_args_init();
     gen.gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);
     gen.gen_args_free(&flush_args);
@@ -1255,7 +1223,7 @@ fn find_main_node(ast.node* decl) ast.node* {
     return null;
 }
 
-// Emits closure modules in dependency order, then emits `fort_entry`.
+// Emits closure modules in dependency order, then emits the C `main`.
 // Uses annotations from `ck`. Returns false after an unsupported construct.
 // bootstrap0/src/gen.c stores the module set in the emitter beside the checker;
 // nothing ever reads it back, so it stays a parameter here.
@@ -1276,9 +1244,8 @@ fn gen_program(gen.emitter mut* g, check.checker* ck, modules.module_set* set) b
     if (entry != null && entry->ast != null) {
         ast.node* main_decl = find_main(entry->ast);
         if (main_decl != null) {
-            // the only unmangled definitions, in the entry module
-            gen_fort_entry(g, main_decl->sym);
-            gen_main(g);
+            // the only unmangled definition, in the entry module
+            gen_main(g, main_decl->sym);
         }
     }
     gen_data.gen_finish(g);

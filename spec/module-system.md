@@ -193,7 +193,7 @@ other (`stdlib.md` 3).
 | function in module `a.b`        | `a.b.name`                   | `std.io.close`         |
 | constant or global in `a.b`     | `a.b.NAME`                   | `main.TABLE`           |
 | `main` of the entry module      | `<entry>.main`               | `main.main`            |
-| program entry, compiler-emitted | `fort_entry` and `main`      | `fort_entry`, `main`   |
+| program entry, compiler-emitted | `main`                       | `main`                 |
 | runtime function in `std.rt`    | `std.rt.<name>`              | `std.rt.print_i64`     |
 | `extern fn`                     | the declared name, unmangled | `write`                |
 | struct, enum, import binding    | none                         |                        |
@@ -207,10 +207,10 @@ The entry module is the one whose path need not be a segment (section 2, D9.1), 
 from its base name for exactly this reason: it is the one character the splitting reads. A
 double-underscore scheme is not injective (`a__b` is also one identifier). Fort symbols never
 collide with C symbols because C identifiers cannot contain `.`; the only undotted symbols the
-compiler emits are the `fort_entry` and `main` of D11.6 and `extern` names. Both are reserved for
-those definitions: an `extern` declaring either name is an error (section 13), because nothing
-can check a declared signature against a definition the compiler writes itself, and a mismatch
-would otherwise be a silent call through the wrong type (D9.7). The reserved `main` is the C
+compiler emits are the `main` of D11.6 and `extern` names. `main` is reserved for that
+definition: an `extern` declaring the name is an error (section 13), because nothing can check a
+declared signature against a definition the compiler writes itself, and a mismatch would
+otherwise be a silent call through the wrong type (D9.7). The reserved `main` is the C
 entry point and not the entry module's `fn i32 main`, whose symbol is `<entry>.main`. The runtime
 is fort, so the compiler reaches it by the dotted names of this table (D13.1) and the standard
 library reaches it with an `import` like any other module.
@@ -540,17 +540,16 @@ The entry module must define `fn main() i32` or `fn main(string@ args) i32` (D8.
 returning `void` or taking other parameters is an error. `main` in any other module is an ordinary
 function.
 
-Start-up (D11.6): the compiler emits `main(argc, argv)` in the entry module, beside `fort_entry`
-and by the same rule (D9.7). That `main` calls `std.rt.args_init`, which builds a `string@` of
-`argc` strings whose bytes are the `argv` entries, each NUL-terminated, then `fort_entry` with
-that span, then `std.rt.flush_all` (D11.5), and returns `status & 0xFF`. `fort_entry` is
-generated in the entry module too: it receives the span by hidden pointer (section 9) and calls
-`<entry>.main`, copying the span into its own frame and passing that copy when `main` declares
-the parameter, and taking neither the copy nor an argument when it does not (`toolchain.md` 6
-item 22). `args[0]` is the program name. The runtime keeps the span for the life of the process
-and hands it out through `std.rt.args()` (`stdlib.md` 3), so that `sys.args()` works in modules
-whose `main` takes no parameter. `sys.exit` (D13.2) is the other normal exit; a runtime error
-aborts (D11.4).
+Start-up (D11.6): the compiler emits `main(argc, argv)` in the entry module (D9.7). That `main`
+calls `std.rt.args_init`, which builds a `string@` of `argc` strings whose bytes are the `argv`
+entries, each NUL-terminated, then `std.rt.args`, which writes that span into the frame of the
+emitted `main`. The emitted `main` then calls `<entry>.main`: with the span by hidden pointer
+(section 9) when `main` declares the parameter, and with no argument when it does not. That span is
+the caller-made copy, so no second copy exists. It then calls `std.rt.flush_all` (D11.5) and returns
+`status & 0xFF` (`toolchain.md` 6 item 22). `args[0]` is the program name. The runtime keeps the
+span for the life of the process and hands it out through `std.rt.args()` (`stdlib.md` 3), so that
+`sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other
+normal exit; a runtime error aborts (D11.4).
 
 ## 12. Worked examples
 
@@ -770,7 +769,6 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | local reusing an enclosing local    | `'i' shadows an enclosing local` (or `a parameter`)     |
 | same extern, different signatures   | `conflicting declarations of extern 'write'`            |
 | same extern, variable mark differs   | `conflicting declarations of extern 'printf'`           |
-| `extern` declaring `fort_entry`     | `'fort_entry' is reserved: the compiler emits it`       |
 | `extern` declaring `main`           | `'main' is reserved: the compiler emits it`             |
 | same extern, `own` differs (D17.1)  | `conflicting declarations of extern 'free'`             |
 | import after a declaration          | `an import comes before every declaration`              |

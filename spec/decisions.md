@@ -1015,14 +1015,13 @@ Sections:
   argument needs every segment of a module path to hold no dot, which is why the entry file's base
   name, the one segment that need not be an identifier, may hold none either (D9.1). The runtime is
   ordinary fort and its symbols are mangled like every other module's (`std.rt.print_i64`, D13.1).
-  The compiler emits two unmangled definitions, both in the entry module: `fort_entry` and `main`
-  (D11.6). `extern` names are unmangled. A name is quoted in LLVM IR when LLVM's unquoted identifier
+  The compiler emits one unmangled definition, in the entry module: `main` (D11.6). `extern` names
+  are unmangled. A name is quoted in LLVM IR when LLVM's unquoted identifier
   syntax does not admit it (`@"std.io.read_file"`), and a `"`, a `\` or any byte outside the
   printable range within it is written `\XX`; that is spelling only, since LLVM reads `\XX` back to
   the byte, so the IR name keeps its identity unchanged.
   Mach-O adds one leading `_` to each external object symbol; the IR name does not contain it.
-  `fort_entry` and `main`
-  are reserved: the compiler emits their definitions (D11.6), so an `extern` declaring either name
+  `main` is reserved: the compiler emits its definition (D11.6), so an `extern` declaring the name
   is an error and not a second declaration of it -- nothing can check a declared signature against a
   definition the compiler writes itself, and a mismatch is otherwise a silent call through the wrong
   type. The reserved `main` is the C entry point and not the entry module's `fn i32 main`, whose
@@ -1044,6 +1043,9 @@ Sections:
   amended), and `main` joined `fort_entry` as a name the compiler emits and an `extern` may not
   declare (D11.6).
   Amended 2026-09-15 (T-140): Mac uses Mach-O stubs and the same fort symbol names.
+  Amended 2026-09-28 (T-212): the compiler also emitted `fort_entry` in the entry module, and that
+  name was reserved as well. The emitted `main` now calls the entry module's `main` itself
+  (D11.6), so the compiler emits one unmangled definition and `fort_entry` is an ordinary C name.
 
 ### D9.8 Extern declarations
 - owner: `module-system.md`.
@@ -1151,10 +1153,10 @@ Sections:
   In LLVM IR an aggregate argument is a
   plain `ptr` parameter, never `byval`, and an aggregate result is a leading `ptr sret(%T)`
   parameter on a function returning `void`; a span or `string` stays one hidden pointer and is never
-  split into two scalars, so `fort_entry` takes the argument span as one `ptr` (D11.6) by this rule
-  and by no exception to it. `bool`, `char`, `u8` and `u16` parameters and results carry `zeroext`,
-  `i8` and `i16` carry `signext`, and nothing wider carries an extension attribute, in fort and
-  extern signatures alike (D9.8).
+  split into two scalars, so the entry module's `main` takes the argument span as one `ptr` (D11.6)
+  by this rule and by no exception to it. `bool`, `char`, `u8` and `u16` parameters and results
+  carry `zeroext`, `i8` and `i16` carry `signext`, and nothing wider carries an extension
+  attribute, in fort and extern signatures alike (D9.8).
   The definition and every call mark the result pointer `sret(%T)` on both targets.
   System V passes it in the first integer register; Apple arm64 puts it in `x8`.
   A plain Mac call pointer would take `x0` and would break a return with scalar parameters.
@@ -1167,6 +1169,9 @@ Sections:
   Amended 2026-09-15 (T-140): Apple arm64 calls need call-site `sret` to use `x8`.
   Amended 2026-09-17: before this date a Linux call passed the result pointer as a plain `ptr`.
   From that date the call marked it `sret(%T)` on both targets, as the definition did.
+  Amended 2026-09-28 (T-212): the rule named the compiler-emitted `fort_entry` as the function
+  that took the argument span as one `ptr`. The compiler no longer emits it (D11.6 as amended),
+  and the entry module's `main` takes the span by the same rule.
 
 ### D9.10 Whole-program compilation
 - owner: `module-system.md`.
@@ -1355,13 +1360,15 @@ Sections:
 
 ### D11.6 Process start
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
-- rule: Process start: the compiler emits `main(argc, argv)` in the entry module, beside
-  `fort_entry` and by the same rule (D9.7). That `main` calls `std.rt.args_init(argc, argv)`, which
-  builds the `string@` of arguments from `argv`, then `fort_entry(args)`, then `std.rt.flush_all()`,
-  and returns `status & 0xFF`. `fort_entry` is unchanged: it takes the argument span by pointer,
-  which is D9.9's internal convention for an aggregate parameter, and calls the entry module's
-  `main` (D8.6). `toolchain.md` 5 fixes the runtime entry points and `toolchain.md` 6 the two
-  definitions the compiler writes.
+- rule: Process start: the compiler emits `main(argc, argv)` in the entry module (D9.7). That
+  `main` calls `std.rt.args_init(argc, argv)`, which builds the `string@` of arguments from `argv`,
+  then `std.rt.args()`, which writes that span into the frame of the emitted `main`. It then calls
+  the entry module's `main` (D8.6): with the span when that `main` declares the parameter, and with
+  no argument when it does not. It then calls `std.rt.flush_all()` and returns `status & 0xFF`.
+  The span goes by pointer, which is D9.9's internal convention for an aggregate parameter. The
+  span in the frame of the emitted `main` is the caller-made copy of that convention, so no second
+  copy exists. `toolchain.md` 5 fixes the runtime entry points and `toolchain.md` 6 the definition
+  the compiler writes.
 - history: Amended 2026-09-10: the prototype took a `const struct fort_slice*` and the failure was
   `fort_rt_fail_slice`, while spans were called slices (D3.5). Amended 2026-09-11 (T-088): the C
   runtime owned `main(argc, argv)` and called `fort_entry` from C, which made `fort_entry` the one
@@ -1369,6 +1376,11 @@ Sections:
   (D13.1 as amended) the compiler emits `main` itself, so that exception is gone and the only C ABI
   surface left in a program the compiler builds is `main`, which the C start-up code calls with C
   types.
+  Amended 2026-09-28 (T-212): the compiler also emitted `fort_entry` beside `main`. The emitted
+  `main` called `fort_entry(args)`, and `fort_entry` copied the span into its own frame when the
+  entry module's `main` declared the parameter, then called that `main`. The T-088 amendment left
+  `fort_entry` unchanged and gave no reason for it. The emitted `main` now calls the entry
+  module's `main` itself and passes its own span, which D9.9 already makes the caller-made copy.
 
 ### D11.7 How the print family writes a value
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).

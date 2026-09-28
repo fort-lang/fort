@@ -3,7 +3,7 @@
 //! stdout:
 //| ok
 /// Checks external signatures, repeated C symbol declarations, runtime
-/// entries, and the reserved entry point.
+/// entries, and the reserved C name `main`.
 import ast;
 import check;
 import check_env;
@@ -70,16 +70,6 @@ fn a_function_pointer_parameter_is_legal_when_its_own_signature_is() void {
     defer check_env.close(&f);
     assert(!one_module(&f, "extern fn run(fn (string) i32 cb) void;\n"));
     assert(check_env.said(&f, "extern signature cannot use type"));
-}
-
-fn the_entry_point_symbol_is_reserved() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    // The compiler emits `fort_entry` itself, so an extern declaring it is a
-    // signature nothing can be held against.
-    assert(!one_module(&e, "extern fn fort_entry() i32;\n"));
-    assert(check_env.said(&e, "'fort_entry' is reserved: the compiler emits it"));
 }
 
 fn an_extern_function_is_not_a_value() void {
@@ -253,6 +243,16 @@ fn a_fort_rt_name_is_an_ordinary_extern_declaration() void {
     assert(check_env.errors(&e) == 0);
 }
 
+// The compiler emits one C name, `main`, and reserves no other. The name
+// below is an ordinary C function that the program links against.
+fn a_c_name_other_than_main_is_an_ordinary_extern_declaration() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(one_module(&e, "extern fn fort_entry(i32 a, i32 b) i64;\n"));
+    assert(check_env.errors(&e) == 0);
+}
+
 fn the_main_symbol_is_reserved() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -260,15 +260,16 @@ fn the_main_symbol_is_reserved() void {
     // The compiler emits `main(argc, argv)` in the entry module, so an
     // `extern` declaring the name is a signature nothing can check against
     // that definition.
-    assert(!one_module(&e, "extern fn main(i32 argc, char* mut* argv) i32;\n"));
+    // The source defines no fort `main`, so the reservation is the one error.
+    assert(!check_env.check_src(&e, "extern fn main(i32 argc, char* mut* argv) i32;\n"));
     assert(check_env.said(&e, "'main' is reserved: the compiler emits it"));
+    assert(check_env.errors(&e) == 1);
 }
 
 fn main() i32 {
     an_extern_signature_uses_scalars_and_pointers_only();
     an_extern_result_is_held_to_the_same_rule();
     a_function_pointer_parameter_is_legal_when_its_own_signature_is();
-    the_entry_point_symbol_is_reserved();
     an_extern_function_is_not_a_value();
     two_identical_declarations_agree();
     variable_tail_marks_and_fixed_types_agree_across_modules();
@@ -281,6 +282,7 @@ fn main() i32 {
     a_difference_that_names_a_struct_carries_the_wrapper_note();
     a_difference_between_two_scalars_carries_no_wrapper_note();
     a_fort_rt_name_is_an_ordinary_extern_declaration();
+    a_c_name_other_than_main_is_an_ordinary_extern_declaration();
     the_main_symbol_is_reserved();
     println("ok");
     return 0;

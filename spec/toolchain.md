@@ -636,10 +636,11 @@ fn flush_all() void;
 // Process (D11.6, D8.6). The compiler emits `main(argc, argv)` in the entry
 // module (section 6 item 22): it calls `args_init`, which builds the argument
 // span from `argv` (one string per argument, NUL-terminated, since it is the
-// `argv` byte sequence itself), then the `fort_entry` it emits beside it, then
-// `flush_all`, and returns `status & 0xFF`. The span lives for the whole process
-// and `args()` hands it out for `sys.args()`. `exit` flushes every buffer and
-// ends the process with `status & 0xFF`; `sys.exit` is a call to it.
+// `argv` byte sequence itself), then `args`, then the entry module's `main`,
+// then `flush_all`, and returns `status & 0xFF`. The span lives for
+// the whole process and `args()` hands it out for `sys.args()`. `exit`
+// flushes every buffer and ends the process with `status & 0xFF`;
+// `sys.exit` is a call to it.
 fn args_init(i32 argc, char* mut* argv) void;
 fn args() string@;
 fn exit(i32 status) noreturn;
@@ -817,13 +818,13 @@ to the emitter's text is a change here.
 4. **Symbols, linkage, visibility** (D9.7). The dotted names of D9.7 are quoted:
    `@"main.add"`, `@"std.io.read_file"`, `@"main.LIMIT"`; quoting is uniform and does not change
    the fort symbol name, which is `main.add`.
-   C names (`extern` declarations, and the `fort_entry` and
-   `main` the compiler emits) are unquoted; the runtime is fort, so `@"std.rt.print_i64"` is
-   quoted like every other dotted name (D9.7). Fort functions, constants and globals are
-   `dso_local` with the default external linkage (D9.6), so fort-to-fort calls are direct, a call
-   into the runtime among them, and fort data is addressed PC-relative; `extern` symbols carry no
-   `dso_local` and go through the procedure linkage and global offset tables. Private data
-   (`@.str.N`, `@.file.N`, `@.enum.<path.name>`) is `private unnamed_addr`.
+   C names (`extern` declarations, and the `main` the compiler emits) are unquoted; the runtime
+   is fort, so `@"std.rt.print_i64"` is quoted like every other dotted name (D9.7). Fort
+   functions, constants and globals are `dso_local` with the default external linkage (D9.6), so
+   fort-to-fort calls are direct, a call into the runtime among them, and fort data is addressed
+   PC-relative; `extern` symbols carry no `dso_local` and go through the procedure linkage and
+   global offset tables. Private data (`@.str.N`, `@.file.N`, `@.enum.<path.name>`) is
+   `private unnamed_addr`.
 
    A name LLVM's unquoted identifiers (`[-a-zA-Z$._][-a-zA-Z$._0-9]*`) do not admit is quoted
    too, which only an entry module's can be, since every other module path is identifiers
@@ -832,11 +833,10 @@ to the emitter's text is a change here.
    every byte outside the printable range are written as the `\XX` hex pair of item 5, which
    LLVM reads back to the byte. Mach-O adds a leading `_` to the external object symbol.
    That prefix stays outside the IR name and keeps the name mapping injective (D9.7).
-   One target symbol is one IR entity: `fort_entry` and
-   `main` are reserved, so the checker refuses an `extern` that declares either (D9.7,
-   module-system.md 13) and the emitter declares no name it defines, which leaves the two
-   definitions of item 22 alone. A runtime entry point is a fort definition in the module like any
-   other, so nothing declares it either (item 8).
+   One target symbol is one IR entity: `main` is reserved, so the checker refuses an `extern` that
+   declares it (D9.7, module-system.md 13) and the emitter declares no name it defines, which
+   leaves the definition of item 22 alone. A runtime entry point is a fort definition in the
+   module like any other, so nothing declares it either (item 8).
 
 5. **Data emission.** Private data follows the function definitions, `@.file.N` constants before
    `@.str.N` before `@.enum.*` (D19.5):
@@ -882,10 +882,11 @@ to the emitter's text is a change here.
    arrives in `rdi` on Linux; the callee echoes it in `rax`.
    Both targets mark `sret(%T)` on the definition and at the call site.
    Apple arm64 then puts the result destination in `x8`, not `x0` (D9.9).
-   A span or `string` is one hidden pointer and is never split into two scalars, so
-   `fort_entry`'s C prototype stays literally true (D11.6). `bool`, `char`, `u8` and `u16`
-   parameters and results carry `zeroext` and `i8` and `i16` carry `signext`, in fort and extern
-   signatures alike, so an extern-legal signature is a valid C callback by construction (D9.9).
+   A span or `string` is one hidden pointer and is never split into two scalars, so the entry
+   module's `main` takes the argument span as one `ptr` (D9.9, D11.6). `bool`, `char`, `u8` and
+   `u16` parameters and results carry `zeroext` and `i8` and `i16` carry `signext`, in fort and
+   extern signatures alike, so an extern-legal signature is a valid C callback by construction
+   (D9.9).
    Every fort definition is `define dso_local <ret> @"m.f"(...) #0`, where `#0` is
    `{ nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }` on both targets (D10.8).
    `nounwind` stands because fort has
@@ -986,9 +987,7 @@ to the emitter's text is a change here.
     A scalar parameter arrives as `%<name>.in` and is stored into its slot immediately. An
     aggregate parameter is not copied again: its place is the caller-made copy the incoming
     `ptr` designates (item 7), which the callee may write to, since D8.2's by-value rule is
-    satisfied by the caller's copy. `fort_entry` is the exception, because its caller is the C
-    runtime rather than fort code, which is why item 22 copies the argument span. Control flow
-    is explicit blocks: `if`, `while`,
+    satisfied by the caller's copy. Control flow is explicit blocks: `if`, `while`,
     `for`, `break` and `continue` become `br`; a fort `switch` on an integer, `char` or enum
     becomes an LLVM `switch` with one case per label and a default block: the `default` clause
     wherever it stands, the continuation when there is none, and, for an enum switch with no
@@ -1201,25 +1200,13 @@ to the emitter's text is a change here.
     and not as a `%struct.` of its own (item 2). A table is emitted only for an enum
     some `print` of that type reaches.
 
-22. **`fort_entry` and `main`** (D11.6, D8.6). Both are emitted in the entry module and are the
-    only unmangled definitions in it (D9.7). `fort_entry` receives the argument span
-    by hidden pointer, copies it into its own frame when `main` declares the parameter, and
-    returns what `main` returns. The examples below show Linux IR:
-
-    ```llvm
-    define dso_local i32 @fort_entry(ptr %args.in) #0 {
-    entry:
-      %args.0 = alloca %fort.span, align 8
-      call void @llvm.memcpy.p0.p0.i64(ptr align 8 %args.0, ptr align 8 %args.in, i64 16, i1 false)
-      %t0 = call i32 @"main.main"(ptr %args.0)
-      ret i32 %t0
-    }
-    ```
-
-    When `main` takes no parameter there is no `alloca` and no copy, only the call and the
-    `ret` (the second example below). `@main` is the C entry point the start-up code calls, so it
+22. **`main`** (D11.6, D8.6). The compiler emits it in the entry module, and it is the only
+    unmangled definition there (D9.7). `@main` is the C entry point the start-up code calls, so it
     takes C's `argc` and `argv` and returns C's `int`; it is a definition of this module like any
-    other and carries `dso_local` and `#0` (item 4, item 7):
+    other and carries `dso_local` and `#0` (item 4, item 7). It calls the entry module's `main`
+    directly. When that `main` declares the parameter, `@main` passes `ptr %args`, the span it
+    built in its own frame. That span is the caller-made copy of item 7, so the callee uses it in
+    place and no second copy exists (item 10). The examples below show Linux IR:
 
     ```llvm
     define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
@@ -1227,7 +1214,23 @@ to the emitter's text is a change here.
       %args = alloca %fort.span, align 8
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
       call void @"std.rt.args"(ptr sret(%fort.span) %args)
-      %t0 = call i32 @fort_entry(ptr %args)
+      %t0 = call i32 @"main.main"(ptr %args)
+      call void @"std.rt.flush_all"()
+      %t1 = and i32 %t0, 255
+      ret i32 %t1
+    }
+    ```
+
+    When the entry module's `main` takes no parameter, the call passes no argument and the rest
+    is the same:
+
+    ```llvm
+    define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
+    entry:
+      %args = alloca %fort.span, align 8
+      call void @"std.rt.args_init"(i32 %argc, ptr %argv)
+      call void @"std.rt.args"(ptr sret(%fort.span) %args)
+      %t0 = call i32 @"main.main"()
       call void @"std.rt.flush_all"()
       %t1 = and i32 %t0, 255
       ret i32 %t1
@@ -1323,18 +1326,12 @@ entry:
   ret i32 0
 }
 
-define dso_local i32 @fort_entry(ptr %args.in) #0 {
-entry:
-  %t0 = call i32 @"main.main"()
-  ret i32 %t0
-}
-
 define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
 entry:
   %args = alloca %fort.span, align 8
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
   call void @"std.rt.args"(ptr sret(%fort.span) %args)
-  %t0 = call i32 @fort_entry(ptr %args)
+  %t0 = call i32 @"main.main"()
   call void @"std.rt.flush_all"()
   %t1 = and i32 %t0, 255
   ret i32 %t1
@@ -1352,7 +1349,7 @@ The module the compiler emits for that program differs from this one in one way,
 the size: it also holds every definition of `std.rt` and of `std.libc`, because every closure
 holds the runtime (D9.10, D13.1). The five definitions above stand for them, over the C library's
 `write`, so that the example is small enough to read and links on its own. Every
-other byte is what the compiler writes: `main.main`, `fort_entry` and the `main` of item 22, the
+other byte is what the compiler writes: `main.main` and the `main` of item 22, the
 quoted dotted names of item 4, the private data of item 5 and the attribute group of item 7.
 
 ### 6.2 A program with a check
@@ -1438,18 +1435,12 @@ L1:
   unreachable
 }
 
-define dso_local i32 @fort_entry(ptr %args.in) #0 {
-entry:
-  %t0 = call i32 @"abort.main"()
-  ret i32 %t0
-}
-
 define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
 entry:
   %args = alloca %fort.span, align 8
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
   call void @"std.rt.args"(ptr sret(%fort.span) %args)
-  %t0 = call i32 @fort_entry(ptr %args)
+  %t0 = call i32 @"abort.main"()
   call void @"std.rt.flush_all"()
   %t1 = and i32 %t0, 255
   ret i32 %t1
