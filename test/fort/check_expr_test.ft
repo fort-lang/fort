@@ -488,6 +488,133 @@ fn a_universe_function_is_callable_and_nothing_else() void {
     assert(check_env.said(&e, "'move' cannot be used as a value"));
 }
 
+// ---- the lvalue and move marks ----------------------------------------------------
+
+// The node of `kind`, and of `name` when it is not empty, in the `i`-th statement of
+// `probe`. The caller checks that statement first.
+fn probe_node(check_env.env mut* e, u64 i, ast.ast_kind kind, string name) ast.node mut* {
+    ast.node mut* n = check_env.node_find(check_env.body_expr(e, "probe", i), kind, name);
+    if (n == null) {
+        panic("check_expr_test.probe_node: no such node");
+    }
+    return n;
+}
+
+// Checks each statement of `probe` in order. The count is the number of statements.
+fn probe_all(check_env.env mut* e, u64 count) void {
+    u64 mut i = 0;
+    while (i < count) {
+        check_env.probe_stmt(e, "probe", i);
+        i += 1;
+    }
+}
+
+fn the_five_place_forms_carry_the_lvalue_mark() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fn probe() void {\n");
+    strbuf.append(&b, "    s_str(text);\n");
+    strbuf.append(&b, "    s_i32(nums[1]);\n");
+    strbuf.append(&b, "    s_i32(p.x);\n");
+    strbuf.append(&b, "    s_i32(pp->x);\n");
+    strbuf.append(&b, "    s_i32(*q);\n");
+    strbuf.append(&b, "}\n");
+    assert(open_probe2(&e, strbuf.view(&b), "point mut* pp = &p;\n"));
+    probe_all(&e, 5);
+    assert(check_env.errors(&e) == 0);
+    // D6.7: a name, an index, a field, an arrow and a dereference designate
+    // storage. The emitter reads the mark to decide whether `del` empties.
+    assert(check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_ident, "text"), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(&e, 1, ast.ast_kind.k_index, ""), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(&e, 2, ast.ast_kind.k_field, "x"), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(&e, 3, ast.ast_kind.k_arrow, "x"), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(&e, 4, ast.ast_kind.k_unary, ""), check.ANN_LVALUE));
+    // The call that holds a place is not a place.
+    assert(!check_env.has_ann(check_env.body_expr(&e, "probe", 0), check.ANN_LVALUE));
+}
+
+fn the_five_rvalue_forms_carry_no_lvalue_mark() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fn probe() void {\n");
+    strbuf.append(&b, "    del(new(point));\n");
+    strbuf.append(&b, "    s_i32(one());\n");
+    strbuf.append(&b, "    del(cast(raw, i32 mut* own));\n");
+    strbuf.append(&b, "    s_i32(7);\n");
+    strbuf.append(&b, "    s_point(&p);\n");
+    strbuf.append(&b, "}\n");
+    strbuf.str_buf mut x = strbuf.create();
+    defer strbuf.free(&x);
+    // A `mut` global is not a constant, so the cast does not fold to `null`.
+    strbuf.append(&x, "i32 mut* mut raw = null;\n");
+    strbuf.append(&x, "fn one() i32 {\n    return 1;\n}\n");
+    strbuf.append(&x, "fn s_point(point* v) void {\n    return;\n}\n");
+    assert(open_probe2(&e, strbuf.view(&b), strbuf.view(&x)));
+    probe_all(&e, 5);
+    assert(check_env.errors(&e) == 0);
+    // D17.5 names the own rvalues. `del` of one of them only frees (D17.9).
+    assert(!check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_new, ""), check.ANN_LVALUE));
+    ast.node* call = ast.ast_child(check_env.body_expr(&e, "probe", 1), 0);
+    assert(call->kind == ast.ast_kind.k_call);
+    assert(!check_env.has_ann(call, check.ANN_LVALUE));
+    assert(!check_env.has_ann(probe_node(&e, 2, ast.ast_kind.k_cast, ""), check.ANN_LVALUE));
+    assert(!check_env.has_ann(probe_node(&e, 3, ast.ast_kind.k_int, ""), check.ANN_LVALUE));
+    // `&p` needs an lvalue operand and is not one itself.
+    ast.node* addr = probe_node(&e, 4, ast.ast_kind.k_unary, "");
+    assert(!check_env.has_ann(addr, check.ANN_LVALUE));
+    assert(check_env.has_ann(addr->a, check.ANN_LVALUE));
+}
+
+fn an_index_or_field_of_an_rvalue_and_a_function_name_are_not_lvalues() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut x = strbuf.create();
+    defer strbuf.free(&x);
+    strbuf.append(&x, "fn three() i32[3] {\n    return nums;\n}\n");
+    strbuf.append(&x, "fn mk() point {\n    return point{1, 2};\n}\n");
+    assert(open_lines(&e, "    s_i32(three()[0]);\n", "    s_i32(mk().x);\n", "", "",
+                      strbuf.view(&x)));
+    probe_all(&e, 2);
+    assert(check_env.errors(&e) == 0);
+    // D6.7: a field of an rvalue struct is a copy, as an index of one is.
+    assert(!check_env.has_ann(probe_node(&e, 1, ast.ast_kind.k_field, "x"), check.ANN_LVALUE));
+    // D6.7: an index of an rvalue array yields a copy. The kind of the node
+    // alone does not say this, so the emitter reads the mark and not the kind.
+    assert(!check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_index, ""), check.ANN_LVALUE));
+    // A function is not storage.
+    assert(!check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_ident, "three"), check.ANN_LVALUE));
+}
+
+fn a_call_of_move_carries_the_move_mark_and_no_other_call_does() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_lines(&e, "    del(move(owned));\n", "    del(owned);\n", "    s_i32(one());\n",
+                      "", "point mut* own mut owned = null;\nfn one() i32 {\n    return 1;\n}\n"));
+    probe_all(&e, 3);
+    assert(check_env.errors(&e) == 0);
+    // The emitter reads the mark and not the name of the callee.
+    ast.node* moved = ast.ast_child(check_env.body_expr(&e, "probe", 0), 0);
+    assert(moved->kind == ast.ast_kind.k_call);
+    assert(check_env.has_ann(moved, check.ANN_MOVE));
+    // D17.5: `move(...)` is an rvalue. Its operand is the lvalue it empties.
+    assert(!check_env.has_ann(moved, check.ANN_LVALUE));
+    assert(check_env.has_ann(ast.ast_child(moved, 0), check.ANN_LVALUE));
+    // `del` and an ordinary call are not `move`.
+    assert(!check_env.has_ann(check_env.body_expr(&e, "probe", 0), check.ANN_MOVE));
+    assert(!check_env.has_ann(check_env.body_expr(&e, "probe", 1), check.ANN_MOVE));
+    ast.node* ordinary = check_env.body_expr(&e, "probe", 2);
+    assert(!check_env.has_ann(ordinary, check.ANN_MOVE));
+    assert(!check_env.has_ann(ast.ast_child(ordinary, 0), check.ANN_MOVE));
+}
+
 // ---- qualified names ---------------------------------------------------------------
 
 fn a_declaration_of_an_imported_module_is_reached_through_its_name() void {
@@ -726,6 +853,10 @@ fn main() i32 {
     the_print_family_takes_printable_arguments();
     assert_and_panic_take_one_argument_each();
     a_universe_function_is_callable_and_nothing_else();
+    the_five_place_forms_carry_the_lvalue_mark();
+    the_five_rvalue_forms_carry_no_lvalue_mark();
+    an_index_or_field_of_an_rvalue_and_a_function_name_are_not_lvalues();
+    a_call_of_move_carries_the_move_mark_and_no_other_call_does();
     a_declaration_of_an_imported_module_is_reached_through_its_name();
     a_name_a_module_does_not_declare_is_reported_with_the_module();
     a_conditional_takes_a_bool_condition_and_two_arms_of_one_type();

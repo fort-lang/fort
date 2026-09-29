@@ -33,14 +33,18 @@ u32 ANN_RESOLVED = 16;
 // enum, which is what a terminating switch needs.
 u32 ANN_EXHAUSTIVE = 32;
 /// k_return: `return x` of an `own` local or parameter is an implicit `move`,
-/// so the emitter empties the operand after reading it.
+/// so the emitter empties the operand after reading it. k_call: the call is a
+/// call of the builtin `move`, so the emitter reads and then empties its operand.
 u32 ANN_MOVE = 64;
+/// The expression is an lvalue (D6.7): it designates storage. The emitter reads
+/// this bit to decide whether `del` empties its operand (D17.9).
+u32 ANN_LVALUE = 128;
 // One past the highest annotation bit. A new highest bit doubles this
 // sentinel. ANN_ALL then includes each bit that check_module clears.
 // No other code clears `ann`. A missed bit would survive the next check.
 // check_own_test.ft compares this sentinel with the highest declared bit.
 // It also verifies that a second check clears the bits.
-u32 ANN_END = 128;
+u32 ANN_END = 256;
 u32 ANN_ALL = ANN_END - 1;
 
 // ---- the limits of one declaration -------------------------------------------------
@@ -3014,6 +3018,8 @@ fn check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* ou
         return;
     }
     if (is_builtin(s, "move")) {
+        // The emitter reads this bit, not the name of the callee.
+        n->ann |= ANN_MOVE;
         if (!check_arity(ck, n, s->name, 1)) {
             return;
         }
@@ -3536,6 +3542,9 @@ fn check_expr(checker mut* ck, ast.node mut* n, expr mut* out) void {
     n->ty = out->ty;
     if (out->untyped) {
         n->ann |= ANN_UNTYPED;
+    }
+    if (out->lvalue) {
+        n->ann |= ANN_LVALUE;
     }
     if (out->value.kind != consts.cval_kind.cv_none && (n->ann & ANN_CONST) == 0) {
         set_value(ck, n, out->value);

@@ -20,7 +20,8 @@ fact, the two answers can differ, and no test compares them. The project has met
   call site that the emitter writes gives them again. In T-072, a call passed `i32` where the
   callee takes `i64`, and `opt` accepted it.
 - **Whether an expression is an lvalue.** The checker derives it (D6.7), and `is_place_expr` in
-  the emitter derives it again. T-193 removes the second rule.
+  the emitter derived it again until T-193 removed the second rule: the checker now writes
+  `ANN_LVALUE`, and the emitter reads it.
 - **Whether a body can fall off its end.** `check_terminates` derives it (D8.4), and the emitter's
   `terminated` flag derives it again. The emitter writes `unreachable` because `check_terminates`
   says that the body terminates, so a disagreement is undefined behavior at run time.
@@ -380,9 +381,8 @@ From the checker:
 - `node.sym`: the symbol of every name: a local, global, function, extern, field or enum member.
 - `ANN_CONST` and `check_node_value`: a folded constant becomes a `const` operand.
 - The `is_noreturn` mark of a callee's fort function type (D8.5).
-- `ANN_MOVE`: the implicit move of `return x` (D17.5).
-- `ANN_LVALUE`: whether an expression designates a place. The bit does not exist yet: T-193 adds
-  it, and the lowering depends on T-193.
+- `ANN_MOVE`: the implicit move of `return x` (D17.5), and a call of the builtin `move`.
+- `ANN_LVALUE`: whether an expression designates a place (D6.7). T-193 added it.
 - `FLAG_SELECT_THEN`: the selected branch of a statement `$if` (D21.2).
 
 From the parser: the kind of each node, its children, its `op` and its `name`; `FLAG_DEFAULT`,

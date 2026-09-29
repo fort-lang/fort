@@ -259,20 +259,6 @@ fn gen_panic(gen.emitter mut* g, ast.node* n) void {
 
 // ---- new and del ---------------------------------------------------------
 
-// Returns whether `n` designates storage, which controls whether `del` empties it. An `own` rvalue
-// has no storage to clear. Examples include `new(...)`, call results, and adopting casts.
-fn is_place_expr(ast.node* n) bool {
-    switch (n->kind) {
-    case ast.ast_kind.k_ident, ast.ast_kind.k_index, ast.ast_kind.k_field,
-         ast.ast_kind.k_arrow:
-        return true;
-    case ast.ast_kind.k_unary:
-        return op_of(n) == lexer.tok_kind.star;
-    default:
-        return false;
-    }
-}
-
 // Emits `del(x)`. It loads the pointer, using field 0 for a span or string, then calls
 // `std.rt.free`. It clears lvalues with a null store or 16-byte `llvm.memset`. A null operand is a
 // no-op in the runtime, so `del(null)` and `del` of a zero span need no test of their own. The
@@ -288,7 +274,9 @@ fn gen_del(gen.emitter mut* g, ast.node* n) void {
     if (bad_type(t)) {
         return;
     }
-    bool lvalue = is_place_expr(arg);
+    // The checker marks an lvalue (D6.7). An `own` rvalue, such as `new(...)`, a call result or an
+    // adopting cast, has no storage to empty.
+    bool lvalue = (arg->ann & check.ANN_LVALUE) != 0;
     bool header = gen.gen_is_aggregate(t);
     gen.gen_place mut place = gen.gen_place{};
     place.addr = gen.gen_literal(g, "ptr", "null");
@@ -385,16 +373,6 @@ fn gen_new_span(gen.emitter mut* g, ast.node* n, gen.gen_place dst) void {
     }
     gen.gen_val p = alloc_call(g, n, n->ty->elem, count);
     gen.gen_span_init(g, dst.addr, p, count);
-}
-
-// Whether `n` is a call of the `move` builtin, the one universe function with
-// a value, which every expression path lowers itself.
-fn gen_is_move(ast.node* n) bool {
-    ast.sym* mut s = null;
-    if (n->kind == ast.ast_kind.k_call && n->a != null) {
-        s = n->a->sym;
-    }
-    return s != null && s->kind == ast.sym_kind.s_builtin && s->name == "move";
 }
 
 // Emits `move(lv)`. It first reads the operand into an emitter temporary. It then zeros the operand
@@ -1624,7 +1602,7 @@ fn gen_expr_value(gen.emitter mut* g, ast.node* n) gen.gen_val {
         return gen_cast(g, n);
     case ast.ast_kind.k_call:
         // the one universe function with a value
-        if (gen_is_move(n)) {
+        if ((n->ann & check.ANN_MOVE) != 0) {
             return gen_move(g, n, null);
         }
         if (gen_builtin_call(g, n)) {
@@ -1756,7 +1734,7 @@ fn gen_expr_into(gen.emitter mut* g, ast.node* n, gen.gen_place dst) void {
         gen.gen_span_init(g, dst.addr, ptr, len);
         return;
     case ast.ast_kind.k_call:
-        if (gen_is_move(n)) {
+        if ((n->ann & check.ANN_MOVE) != 0) {
             // A span, a `string` or an owning aggregate is copied into the
             // destination and the operand is then zeroed.
             gen_move(g, n, &dst);

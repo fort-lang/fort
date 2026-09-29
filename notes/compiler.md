@@ -344,11 +344,16 @@ came here.
   assertion failing. The attribute is not decorative -- on a return it licenses eliding the
   `movzbl` -- and it stops being invisible the moment a lowering compares or widens the narrow
   result instead of truncating it straight to `i1`.
-  **The emitter decides lvalue-ness syntactically.** The checker computes `expr_t.lvalue` (D6.7)
-  and writes no bit for it on the node, so `is_place_expr` in `gen_expr.c` re-derives it from the
-  node kind for the one question that needs it, whether `del` empties its operand (D17.9). A new
-  expression form that designates storage is added there as well as to `gen_expr_place`, or `del`
-  of it silently frees without emptying.
+  **The emitter reads lvalue-ness from the checker.** `check_expr` in `src/fort/check.ft` sets
+  `ANN_LVALUE` on each node whose `expr.lvalue` is true (D6.7). `gen_del` in
+  `src/fort/gen_expr.ft` reads that bit to decide whether `del` empties its operand (D17.9). The
+  checker also sets `ANN_MOVE` on a call of the builtin `move`, and the emitter reads that bit and
+  not the name of the callee. A new place form changes the checker's lvalue rule and
+  `gen_expr_place`, and nothing else. The bit and the kind of the node differ for `e[i]` on an
+  rvalue array `e`, for `e.f` on an rvalue `e` (D6.7) and for a function name. The emitted IR
+  stays the same, because the checker refuses `del` of each of the three forms. Before T-193,
+  `is_place_expr` derived the answer from the kind of the node. bootstrap-0 keeps that rule in
+  `gen_expr.c`, because the freeze (section 8) leaves the C unchanged.
   Two C declarations of one name are one ELF symbol, so anything the module emits once -- an
   `extern` declaration above all -- deduplicates by the C name and never by `sym_t*`: two modules
   declaring the same function are two symbols, and a second `declare` is a redefinition `opt`
