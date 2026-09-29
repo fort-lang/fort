@@ -334,7 +334,9 @@ fn casts_among_pointers_and_u64() void {
     defer types_env.free(&e);
     assert(castable(&e, "point*", "node*")); // any pointer to any pointer
     // the source already carries the `mut` the target keeps
-    assert(castable(&e, "node mut* own", "node mut*")); // adopts
+    // The matrix admits an added `own`, and check_cast refuses it (D3.14,
+    // types_cast_own_test.ft). The matrix alone is under test here.
+    assert(castable(&e, "node mut* own", "node mut*"));
     assert(castable(&e, "node*", "node mut* own"));     // lends
     assert(castable(&e, "void*", "node*"));
     assert(castable(&e, "node*", "void*"));
@@ -401,7 +403,7 @@ fn casts_within_the_string_family() void {
     assert(castable(&e, "string", "u8 mut@"));
     assert(castable(&e, "u8@", "u8 mut@"));
     assert(castable(&e, "char mut@", "u8 mut@"));
-    // Adoption and lending are both casts.
+    // The matrix admits an added `own` and a lent one (check_cast refuses the added one).
     assert(castable(&e, "string own", "u8 mut@ own"));
     assert(castable(&e, "string", "u8 mut@ own"));
     assert(castable(&e, "string own", "string"));
@@ -437,8 +439,9 @@ fn a_span_cast_never_launders_a_signature_or_an_owner() void {
     assert(!types.type_cast_allowed(takes_node, takes_mut));
     assert(!types.type_same_shape(of_node, of_mut));
     assert(types.type_cast_allowed(of_node, of_node));
-    // A span of function pointers can cast when its outer marks differ. The
-    // cast can remove `own`, but it cannot add `mut`.
+    // The matrix admits a span of function pointers whose outer marks differ.
+    // It admits a changed `own`, which check_cast refuses when it is added
+    // (D3.14), and it refuses an added `mut`.
     assert(types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, false), of_node));
     assert(!types.type_cast_allowed(types.type_span(&e.tt, takes_node, true, true), of_node));
     assert(types.type_cast_allowed(of_node, types.type_span(&e.tt, takes_node, false, true)));
@@ -662,14 +665,16 @@ fn lending_combines_with_dropping_mutability() void {
     assert(!assignable(&e, "string@ own", "string@"));
 }
 
-// Adoption is a cast, at any level, where the implicit drop refuses.
-fn casts_may_add_own_at_any_reference() void {
+// The matrix admits a changed `own` at any level, where the implicit drop
+// refuses. check_cast then refuses an added `own` (D3.14), which
+// types_cast_own_test.ft tests. The matrix still refuses an added `mut`.
+fn the_matrix_admits_own_at_any_reference() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    // Adoption adds the `own` alone: every `mut` of the target stands in the
-    // source. `cast(libc.malloc(n), u8 mut* own)` compiles because `malloc`
-    // answers `void mut* own`.
+    // Each target below changes the `own` alone: every `mut` of the target
+    // stands in the source. `cast(libc.malloc(n), u8 mut* own)` compiles because
+    // `malloc` answers `void mut* own`, so the cast carries the `own`.
     assert(castable(&e, "u8 mut@ own", "u8 mut@"));
     assert(castable(&e, "u8 mut@ own mut*", "u8 mut@ mut*"));
     assert(castable(&e, "node mut* own mut@ own", "node mut* mut@"));
@@ -891,7 +896,7 @@ fn main() i32 {
     mutability_drops_along_a_three_level_chain();
     conversions_through_a_fixed_array_follow_the_element();
     lending_combines_with_dropping_mutability();
-    casts_may_add_own_at_any_reference();
+    the_matrix_admits_own_at_any_reference();
     println("further ok");
     every_scalar_pair_follows_the_d3_14_matrix();
     every_implicit_conversion_is_also_a_cast();
