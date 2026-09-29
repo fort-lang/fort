@@ -171,10 +171,10 @@ fn drop(node* own@ view, node* own mut@ slots, node mut* n) void {
 ```
 
 Allocations carry no header: `new` is `calloc` and `del` is `free`, so memory from C `malloc`
-may be released with `del` once it is adopted, and memory from `new` may be released with
-`free` (D10.3). `own` in an `extern` signature is erased and records the C side's convention
-(D17.13); adoption is a `cast` that adds `own`, the same unsafe escape as a cast that adds
-`mut` (D17.3):
+may be released with `del`, and memory from `new` may be released with `free` (D10.3). `own` in
+an `extern` signature is erased and records the C side's convention (D17.13). A cast never adds
+`own`, as it never adds `mut` (D3.14), so C memory has an owner only where its `extern` says
+`own` (D17.3):
 
 ```fort
 extern fn malloc(u64 n) void mut* own;   // storage of no type the caller may write (D17.13)
@@ -189,16 +189,15 @@ free(cast(move(q), void* own));      // also fine: the move empties q
 
 ### 2.3 Ownership: `own`, `move` and lending
 
-Whether a reference is responsible for its allocation is part of its type. `T* own`,
-`void* own`, `T@ own` and `string own` designate the start of a live allocation from `new`, or
-adopted from C, on which `del` is meaningful; `T*`, `T@`, `void*` and `string` without `own`
-are views, which may be read and written through as their mutability allows but never freed
-(D17.1). `own` is part of type identity and is erased at run time (section 2.5). It marks one
-level only: an `own` follows the `*` or `@` whose reference it marks as owning, the outermost
-one being the reference the binding holds, and it precedes the `mut` of the same position, so
+Whether a reference is responsible for its allocation is part of its type. `T* own`, `void* own`,
+`T@ own` and `string own` designate the start of a live allocation from `new`, or from a C function
+whose `extern` result says `own`, on which `del` is meaningful; `T*`, `T@`, `void*` and `string`
+without `own` are views, which may be read and written through as their mutability allows but never
+freed (D17.1). `own` is part of type identity and is erased at run time (section 2.5). It marks one
+level only: an `own` follows the `*` or `@` whose reference it marks as owning, the outermost one
+being the reference the binding holds, and it precedes the `mut` of the same position, so
 `node mut* own p` reads "owned pointer to a writable node" (D17.2; `type-system.md` has the
-placement rules and the identity rules). Two rules
-shape every idiom in this document:
+placement rules and the identity rules). Two rules shape every idiom in this document:
 
 - **Transfer is written `move`.** An `own` lvalue is copied into another `own` place (a
   declaration's initializer, an assignment, an `own` parameter, an `own` field or element of a
@@ -226,16 +225,16 @@ struct node {
 }
 
 fn value_of(node* n) i32 { return n->value; }   // borrows: any node* or node* own fits
-fn adopt(node mut* own n) void { del(n); }      // takes ownership: the caller must not del
+fn consume(node mut* own n) void { del(n); }    // takes ownership: the caller must not del
 
 node mut* own a = new(node);         // an own rvalue lands in an own place
 node* v = a;                         // lends: v is a view of the same node (D17.4)
 node mut* own b = a;                 // error: copying an own lvalue requires move(a) (D17.5)
 node mut* own c = move(a);           // a == null afterwards; c owns the node
 i32 x = value_of(c);                 // lends for the call
-adopt(c);                            // error: passing an own lvalue requires move(c) (D17.5)
-adopt(move(c));                      // c == null; adopt is now responsible for the node
-adopt(new(node));                    // an rvalue passes as it is
+consume(c);                          // error: passing an own lvalue requires move(c) (D17.5)
+consume(move(c));                    // c == null; consume is now responsible for the node
+consume(new(node));                  // an rvalue passes as it is
 node mut* leak = new(node);          // error: owning temporary would leak (D17.8)
 value_of(new(node));                 // error: owning temporary would leak (D17.8)
 node mut* own z = move(a);           // a was already null: z == null (D17.6)
@@ -447,12 +446,12 @@ l = list{};                          // not checked: an aggregate assignment (D1
 ```
 
 What is not tracked, exactly as in C (D10.7, D17.14): a view, or a copy of an `own` value made
-before a `move` or `del`, that is used after the allocation was freed; an `own` value that is
-never freed (a leak); two `own` references to one allocation made through `cast`; and `del` of
-adopted memory that is not the start of an allocation. The first and last are undefined
-behavior (section 8); a leak is merely a leak. The compile-time (linear) check that would make
-leaks and use after `move` errors is deferred (D15); `move` and `del` zero what they take so
-that those mistakes surface as `null` dereferences rather than as writes to freed memory.
+before a `move` or `del`, that is used after the allocation was freed; an `own` value that is never
+freed (a leak); and `del` of an `extern` result that is not the start of an allocation. The first
+and last are undefined behavior (section 8); a leak is merely a leak. The compile-time (linear)
+check that would make leaks and use after `move` errors is deferred (D15); `move` and `del` zero
+what they take so that those mistakes surface as `null` dereferences rather than as writes to freed
+memory.
 
 ## 3. Pointers
 
@@ -466,7 +465,7 @@ result owns what it points to (D17.3):
 | `&e`            | `T*`, level 1 per D5.8               | no: a view of `e`                    |
 | `new(T)`        | `T mut* own`                         | yes                                  |
 | `s.ptr`         | `T*` with `s`'s element mutability   | no: a view of `s`                    |
-| `cast(e, T*)`   | as written                           | as written; adding `own` is adoption |
+| `cast(e, T*)`   | as written                           | as written; a cast never adds `own`  |
 | a function name | its function type                    | never: `own` on it is an error       |
 | a call          | the declared result type             | as declared                          |
 
@@ -588,8 +587,8 @@ a span (or string) of the same elements with `ptr` advanced by `lo` elements and
 `hi - lo`; omitted bounds are `0` and `len` (D6.9). The check `0 <= lo <= hi <= len` is against
 the operand's own `len`, not the original allocation, so a span can only shrink. The result's
 element mutability is that of the operand's elements (D6.9). The result is always a view, even
-`a[..]` of an `own` span or `string own` (D17.3): it cannot be `del`ed (D17.9), and it enters
-an `own` place only through the adoption `cast` (D17.3), which is meant for memory from C.
+`a[..]` of an `own` span or `string own` (D17.3): it cannot be `del`ed (D17.9), and it never
+enters an `own` place, because a cast never adds `own` (D3.14).
 
 ```fort
 i32 mut@ own a = new(i32, 6);        // {p, 6}
@@ -707,33 +706,36 @@ extern fn sum(i32@ xs) void;        // error: spans cannot cross an extern bound
 position carries no `mut` on a result, which has no binding (D5.5).
 Memory received from C is used through `p[lo..hi]` (section 3.1) and released with `del` or the
 C library's own function, whichever the C side documents; `new`/`del` and `malloc`/`free` are
-interchangeable (D10.3). Adoption, a `cast` that adds `own` to a pointer or span, is how
-memory from C enters the `own` discipline (D17.3, D3.14); handing an `own` value to a C
-function that frees it is a `move` into its `own` parameter. Declare a C result `own` when the
-pointer itself will be `del`ed, and plain when it will be adopted as a span, so that exactly
-one `own` value exists per allocation (D17.14). `del` of adopted memory that does not start an
-allocation is undefined (D10.7).
+interchangeable (D10.3). Memory from C enters the `own` discipline only through an `extern`
+whose result says `own` (D17.3, D17.13), because a cast never adds `own` (D3.14). Handing an
+`own` value to a C function that frees it is a `move` into its `own` parameter. Declare a C
+result `own` when the caller frees it, and plain when C keeps it. A span over an `own` result is
+a view (`p[0..n]`), so the pointer stays the one `own` value of the allocation (D17.14). A C
+function whose result is owned on some calls only is declared in its borrowing form, and a fort
+function allocates the buffer (D17.13; `stdlib.md` 2.2 declares `realpath` so). `del` of an
+`extern` result that does not start an allocation is undefined (D10.7).
 
 ```fort
 extern fn malloc(u64 n) void mut* own;
 extern fn free(void* own p) void;
-extern fn read_line(u64 mut* len) char mut*;   // C documents: the caller frees with free()
+extern fn read_line(u64 mut* len) char mut* own;   // C documents: the caller frees with free()
 
 u8 mut* own raw = cast(malloc(64), u8 mut* own);   // own rvalue to own type; not zeroed
 u8 mut@ bytes = raw[0..64];                    // a view for filling
 free(cast(move(raw), void* own));              // or del(raw); raw == null either way
 u64 mut n = 0;
-char mut* line = read_line(&n);                // a view until adopted
-char mut@ own text = cast(line[0..n], char mut@ own);   // adopted as an own span
-del(text);                                     // frees what C allocated
-char mut@ own mid = cast(line[1..n], char mut@ own);
-del(mid);                                      // undefined: not the start of an allocation (D10.7)
+char mut* own line = read_line(&n);            // the extern says own: the caller frees
+char mut@ text = line[0..n];                   // a view of the line
+char mut@ own copy = cast(text, char mut@ own);   // error: a cast never adds own (D3.14)
+char mut@ own mid = cast(line[1..n], char mut@ own);   // error: the same rule
+del(line);                                     // frees what C allocated
 u8 mut@ own b = new(u8, 64);
-free(cast(b.ptr, void* own));                  // adopts a view: b is now a second owner (D17.14)
+free(cast(b.ptr, void* own));                  // error: a cast never adds own to the view b.ptr
 ```
 
-The last line is legal and dangerous: after it `b` still looks live, so `del(b)` would free
-twice and an assignment to `b` would trap on the overwrite check. Free `own` spans with `del`.
+The refused lines are shapes that a cast accepted before 2026-09-29 (D3.14). The last one made a
+second owner: `b` still looked live after it, so a `del(b)` would free twice and an assignment to
+`b` would trap on the overwrite check. Free `own` spans with `del`.
 
 ## 5. Fixed arrays and structs
 
@@ -905,10 +907,9 @@ a diagnosed error (D10.7). None of these is detected.
 | Undefined behavior                             | Example                                    |
 |------------------------------------------------|--------------------------------------------|
 | a view or stale copy used after the free       | `i32@ v = a; del(a); i32 x = v[0];`       |
-| `del` of adopted memory not starting an allocation | `i32 x = 1; del(cast(&x, i32* own));`  |
+| `del` of an `extern` result not at the start   | `del(p)` for a C `own` result inside a block |
 | dereferencing `null`                           | `node* q = null; i32 v = q->value;`        |
 | dereferencing a dangling pointer               | `fn f() i32* { i32 x = 1; return &x; }`    |
-| writing read-only memory through a cast that added `mut` | `cast("abc", u8 mut@)[0] = 'x';` |
 | `p[lo..hi]` beyond the object                  | `i32 one = 0; i32@ s = (&one)[0..4];`     |
 | calling a null function pointer                | `fn () void f = null; f();`                 |
 | data races                                     | two threads from `extern` writing one `g`  |
@@ -919,10 +920,10 @@ Returning or storing a span of a local array is the span form of the dangling-po
 after `del` or `move` through the emptied reference itself is not in the list: it dereferences
 `null` or indexes a zero-length span, a segfault or a bounds error (D17.9); double `del`
 through one reference is a no-op (D17.9), and through two copies it is the first row. `del` of
-a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error (D17.9), so only
-the adoption `cast` can turn such a value into the second row (D17.3). Not undefined and not
-detected: an `own` value that is never freed, and two `own` references to one allocation made
-through `cast` (D17.14).
+a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error (D17.9), and no
+cast adds `own` to such a value (D3.14). So the second row needs an `extern` that says `own` of
+a result that does not start an allocation. Not undefined and not detected: an `own` value that
+is never freed (D17.14).
 
 Explicitly not undefined: there is no strict-aliasing rule. Reading an object through a pointer
 to another type of the same size is defined and yields the bit pattern (D10.7):
@@ -1098,8 +1099,8 @@ Allocate the bytes, fill them, and `cast` the moved span to `string own` (D3.14,
 cast's result is `own` because its target says so, and an `own` lvalue cast to an `own` target
 must be moved (D17.5), which empties the buffer so that the characters have exactly one owner
 (D17.14); the caller frees the result with `del`. Allocate the exact length: a prefix such
-as `buf[..n]` is a view, and a view becomes a `string own` only through the adoption `cast`,
-which is meant for memory from C (D17.3).
+as `buf[..n]` is a view, and a view never becomes a `string own`, because a cast never adds
+`own` (D3.14).
 
 ```fort
 fn repeat(char c, u64 n) string own {

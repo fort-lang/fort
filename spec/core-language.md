@@ -303,14 +303,14 @@ fn f(i32 n) void {
 
 ### 3.9 Ownership (D17.1-D17.8, D17.11, D17.14)
 
-A pointer, `void*`, span or `string` type may be qualified `own`. An `own` reference designates
-the start of a live heap allocation, obtained from `new` (5.10) or adopted with `cast` (5.9),
-that `del` (8.2) may free. `own` is part of the type, so `node* own` and `node*` are different
-types (`type-system.md` section 8), and it is erased at run time. `own` on a non-reference type
-or on a function-pointer type is an error; a struct or fixed array that contains an `own`
-reference by value is an owning aggregate (below). Ownership is a typing discipline, not a
-linear check: whether every allocation is freed exactly once is not tracked (D17.14, D15), and
-the idiom is `defer del(x);` (6.6).
+A pointer, `void*`, span or `string` type may be qualified `own`. An `own` reference designates the
+start of a live heap allocation, obtained from `new` (5.10) or answered by an `extern` whose
+signature says `own` (D17.13), that `del` (8.2) may free. `own` is part of the type, so `node* own`
+and `node*` are different types (`type-system.md` section 8), and it is erased at run time. `own` on
+a non-reference type or on a function-pointer type is an error; a struct or fixed array that
+contains an `own` reference by value is an owning aggregate (below). Ownership is a typing
+discipline, not a linear check: whether every allocation is freed exactly once is not tracked
+(D17.14, D15), and the idiom is `defer del(x);` (6.6).
 
 **Placement (D17.2).** An `own` follows a `*` or an `@` and marks the reference that suffix
 introduces as owning its target; `string`, a reference without a suffix, takes it directly
@@ -727,25 +727,25 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   other cast that adds `mut`. A `mut` in the outermost position of a cast target is an error, a
   cast result having no binding (`cast(s, u8@ mut)`); the markers a target does carry name the
   levels behind its indirections;
-- adding `own` to any reference of a pointer or span type: adoption of memory that came from C
-  (`cast(p, u8 mut* own)` for a `u8 mut* p` returned by an extern that does not say `own`,
-  `cast(line[0..n], char mut@ own)`), which is the one unsafe mark a cast adds; a later `del` of
-  adopted memory that is not the start of an allocation is undefined behavior (D10.7);
+- carrying `own` to a target that says `own` at the same levels as the source: a cast never
+  adds `own`, from any source (D3.14). `cast(p, u8 mut* own)` for a `u8 mut* p` is an error,
+  and so is `cast(line[0..n], char mut@ own)`, because a span expression is a view. C memory is
+  owned only where its `extern` says `own` (D17.13);
 - dropping `own` at any level: a no-op wherever 3.9 already converts, and the escape where the
   monotone rule of 3.9 refuses the implicit form (`node mut* own mut@ own` to `node mut* mut@`).
 
-Forbidden: integer to `bool`; any other span-to-span cast (the element type of a span never
-changes, because `len` counts elements); pointer to span; struct or array casts. An untyped
-constant operand first takes its default type (D4.5) and then converts with the semantics above,
-so `cast(0x80000000, i32)` is `-2147483648` and `cast(-1, u32)` is `4294967295`. `null` is not
-a valid operand, because it has no type of its own (D10.5). There is no strict aliasing:
-reading an object through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`,
-is defined. The result of a cast is `own` exactly when its target type says `own` (D3.14): an
-`own` source cast to a non-`own` target lends, so the result is a view; a non-`own` source cast
-to an `own` target adopts; and an `own` lvalue cast to an `own` target is a copy into an `own`
+Forbidden: integer to `bool`; any other span-to-span cast (the element type of a span never changes,
+because `len` counts elements); pointer to span; struct or array casts. An untyped constant operand
+first takes its default type (D4.5) and then converts with the semantics above, so
+`cast(0x80000000, i32)` is `-2147483648` and `cast(-1, u32)` is `4294967295`. `null` is not a valid
+operand, because it has no type of its own (D10.5). There is no strict aliasing: reading an object
+through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`, is defined. The result of
+a cast is `own` exactly when its target type says `own` (D3.14): an `own` source cast to a non-`own`
+target lends, so the result is a view; a non-`own` source cast to an `own` target is an error,
+because a cast never adds `own`; and an `own` lvalue cast to an `own` target is a copy into an `own`
 place, which must be written `cast(move(x), ...)` (D17.5), so that the bytes keep one owner. A
-`cast` to an `own` type yields an `own` rvalue, which must land (3.9), and a cast that drops
-`own` from an `own` rvalue is refused (D17.8).
+`cast` to an `own` type yields an `own` rvalue, which must land (3.9), and a cast that drops `own`
+from an `own` rvalue is refused (D17.8).
 
 ```fort
 bool b = cast(1, bool);            // error: cannot cast integer to bool; write '1 != 0'
@@ -756,12 +756,13 @@ i32 mut* w = cast(cp, i32 mut*);   // error unless cp is a mut pointer: no cast 
 i32 c = cast('a', i32) - '0';      // 49
 u8 t = cast(300, u8);              // 44: 300 is i32, then truncated
 u8 mut* own m = cast(libc.malloc(64), u8 mut* own);   // ok: own rvalue to own type; del(m) frees
-u8 mut* own a2 = cast(c_alloc(64), u8 mut* own);      // ok: adopts; u8 mut* c_alloc(u64) is C
+u8 mut* own a2 = cast(c_alloc(64), u8 mut* own);      // ok: extern fn c_alloc(u64) void mut* own
+u8 mut* own a3 = cast(c_view(64), u8 mut* own);       // error: extern fn c_view(u64) void mut*
 string own s1 = cast(move(buf), string own);          // ok: the target says own; 'buf' is emptied
 string own s2 = cast(buf, string own);                // error: copying own lvalue 'buf' needs move
 string s5 = cast(buf, string);                        // ok: lends a view; 'buf' still owns it
 string s3 = cast(new(u8, 4), string);                 // error: owning temporary would leak
-string own s4 = cast("abc", string own);              // compiles; del(s4) is undefined behavior
+string own s4 = cast("abc", string own);              // error: a cast never adds own (D3.14)
 ```
 
 ### 5.10 `sizeof` and `new` (D3.15, D10.2, D17.3, D17.8)
@@ -1345,8 +1346,8 @@ string are no-ops, so `del(buf); del(buf);` frees once and a use after `del` der
 or
 array is an error. A view, a sub-span, a `.ptr`, a stack address, a literal and a `string` that
 is not `own` are compile errors, because none of them has an `own` type. Allocations have no
-header, so `new`/`del` and C `malloc`/`free` are interchangeable, and C memory is adopted with
-`cast` (5.9).
+header, so `new`/`del` and C `malloc`/`free` are interchangeable, and C memory is owned when its
+`extern` says `own` (D17.13).
 
 `move(lv)` takes an lvalue of owning type, an `own` reference or an owning aggregate, yields its
 value and leaves the zero value behind (D17.6); the mutability rules are those of `del`. It is

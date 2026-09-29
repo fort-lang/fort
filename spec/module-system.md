@@ -262,9 +262,9 @@ a `stat mut* buf` parameter is exactly a C `struct stat *`.
 declaration names the same C function with or without it, and it records the C side's
 convention on the fort side: `void mut* own malloc(u64 n)` says the caller must free the result
 and may write the storage (D3.11), so the cast in
-`u8 mut* own p = cast(malloc(n), u8 mut* own);` types the owned block, its target saying `own`
-(D3.14), and a plain `u8 mut* p = malloc(n);` is refused as a leaking temporary (D17.8);
-`free(void* own p)` says the callee frees, so an `own` lvalue is passed as
+`u8 mut* own p = cast(malloc(n), u8 mut* own);` types the owned block, its target and its
+source saying `own` (D3.14), and a plain `u8 mut* p = malloc(n);` is refused as a leaking
+temporary (D17.8); `free(void* own p)` says the callee frees, so an `own` lvalue is passed as
 `free(cast(move(p), void* own))` and is `null` afterwards (D17.5). A C function that stores or
 frees nothing takes plain `T*`. Because `own` is part of type identity (D17.1), two modules that
 declare one C symbol with and without it have conflicting declarations (D9.8, section 13):
@@ -307,7 +307,7 @@ extern fn malloc(u64 n) void mut* own;
 extern fn free(void* own p) void;
 extern fn strdup(char* s) char mut* own;        // C documents: the caller frees
 
-char mut* own copy = strdup("abc".ptr);         // adopted through the declared own result
+char mut* own copy = strdup("abc".ptr);         // owned through the declared own result
 char mut* alias = copy;                         // lends (D17.4)
 free(cast(move(copy), void* own));              // copy == null afterwards; alias dangles
 char mut* leak = strdup("abc".ptr);             // error: owning temporary would leak (D17.8)
@@ -412,31 +412,38 @@ span or read from a file is not. A C function expecting a terminator gets a copy
 `char mut@ own tmp = new(char, s.len + 1);` under a `defer del(tmp);`, copy the characters, and
 pass `tmp.ptr`; the last element is already `'\0'` (D10.2). Memory received from C as `T*`
 becomes a span with `p[0..n]` (D6.9), unchecked and borrowed; a `char*` becomes a `string`
-with `cast(p[0..n], string)` (D3.14). When C hands the memory over for good, the span is
-adopted with a `cast` that adds `own`, `cast(p[0..n], u8 mut@ own)`, and is then freed with
-`del` (D17.3); memory from `new` may likewise be freed by C `free` and memory from `malloc` by
-`del` (D10.3). There is no strict-aliasing rule (D10.7): memory may be read through any
-pointer type reached by `cast`. A fort wrapper around a C function that fills a buffer and
-reports its length takes the out-parameter shape `u8 mut@ own mut* out`, a borrowed pointer to
-an `own` slot (D3.6, D13.5, D17.2), and stores the adopted span through it, since `.ptr` and
-`.len` are never assignable (D6.7); the caller initializes the slot to `{}` so that the store
-passes the overwrite check (D17.11).
+with `cast(p[0..n], string)` (D3.14). When C hands the memory over for good, its `extern`
+declares the result `own` (D17.13). The pointer is then the owner, `p[0..n]` is a view of it,
+and `del(p)` frees it (D17.3); memory from `new` may likewise be freed by C `free` and memory
+from `malloc` by `del` (D10.3). A span expression is always a view and a cast never adds `own`
+(D3.14), so no cast turns C's block into an `own` span. There is no strict-aliasing rule
+(D10.7): memory may be read through any pointer type reached by `cast`. A fort wrapper around a
+C function that fills a buffer and reports its length takes the out-parameter shape
+`u8 mut@ own mut* out`, a borrowed pointer to an `own` slot (D3.6, D13.5, D17.2). It copies the
+bytes into a span from `new`, frees C's block, and moves the span into the slot, since `.ptr`
+and `.len` are never assignable (D6.7); the caller initializes the slot to `{}` so that the
+store passes the overwrite check (D17.11).
 
 ```fort
-extern fn c_read_all(u64 mut* n) u8 mut*;       // C documents: the caller frees
+extern fn c_read_all(u64 mut* n) u8 mut* own;   // C documents: the caller frees
 
 fn read_all(u8 mut@ own mut* out) bool {
     u64 mut n = 0;
-    u8 mut* p = c_read_all(&n);
+    u8 mut* own p = c_read_all(&n);
     if (p == null) { return false; }
-    *out = cast(p[0..n], u8 mut@ own);          // adopt; the caller dels *out
+    u8 mut@ own bytes = new(u8, n);
+    mem.copy(bytes, p[0..n]);                   // p[0..n] is a view of C's block
+    del(p);                                     // new/del and malloc/free interchange (D10.3)
+    *out = move(bytes);                         // the caller dels *out
     return true;
 }
 
 fn wrong(u8 mut@ own mut* out) void {
     u64 mut n = 0;
-    u8 mut* p = c_read_all(&n);
+    u8 mut* own p = c_read_all(&n);
     *out = p[0..n];                             // error: a view cannot be stored in an own slot
+    *out = cast(p[0..n], u8 mut@ own);          // error: a cast never adds own (D3.14)
+    del(p);
 }
 ```
 

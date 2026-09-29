@@ -491,7 +491,7 @@ node* own n = new(node);
 node* m = n;
 bool e5 = n == m;                    // ok: own is dropped from n for the comparison
 bool e6 = n == null;                 // ok
-node* own k = m;                     // error: node* own is not node*; cast adopts, or move
+node* own k = m;                     // error: node* own is not node*, and no cast adds own
 ```
 
 ## 7. Mutability
@@ -800,17 +800,16 @@ n.next->value = 1;                   // ok: level 1 of the field type is mutable
 
 ### 8.1 The `own` qualifier
 
-A pointer, `void*`, span or `string` type may be qualified `own` (D17.1): `T* own`,
-`void* own`, `T@ own`, `string own`. The qualifier states that the reference designates the
-start of a live allocation obtained from `new`, or adopted with `cast` (section 9.2), and that
-`del` on it is meaningful (`core-language.md` 8.2). It changes nothing at run time: an `own`
-type has the size, alignment, layout, zero value and calling convention of the unqualified type,
-and the mark is erased in generated code. It is part of type identity (section 6):
-`node* own` and `node*` are different types, and so are `fn (node* own) void` and
-`fn (node*) void`. `own` on a scalar, a struct, a fixed array or a function-pointer type is an
-error; a struct or array that contains an `own` reference is an owning aggregate instead
-(section 8.5). Ownership is a typing discipline, not a linear check: a use after `move`, two
-owners made with `cast`, and a leak are not diagnosed (D17.14, D15).
+A pointer, `void*`, span or `string` type may be qualified `own` (D17.1): `T* own`, `void* own`,
+`T@ own`, `string own`. The qualifier states that the reference designates the start of a live
+allocation obtained from `new`, or answered by an `extern` whose signature says `own` (D17.13), and
+that `del` on it is meaningful (`core-language.md` 8.2). It changes nothing at run time: an `own`
+type has the size, alignment, layout, zero value and calling convention of the unqualified type, and
+the mark is erased in generated code. It is part of type identity (section 6): `node* own` and
+`node*` are different types, and so are `fn (node* own) void` and `fn (node*) void`. `own` on a
+scalar, a struct, a fixed array or a function-pointer type is an error; a struct or array that
+contains an `own` reference is an owning aggregate instead (section 8.5). Ownership is a typing
+discipline, not a linear check: a use after `move` and a leak are not diagnosed (D17.14, D15).
 
 ```fort
 node mut* own n = new(node);         // an owned node
@@ -819,7 +818,7 @@ point own p = {};                    // error: own on a struct; qualify a field 
 i32[4] own arr = {};                 // error: own on a fixed array
 fn (i32) i32 own f = inc;            // error: an own marks a reference (D17.2)
 node* b = n;                         // ok: lends (section 8.4)
-node* own c = b;                     // error: cannot add own implicitly; cast adopts
+node* own c = b;                     // error: cannot add own, and no cast adds it (D3.14)
 ```
 
 ### 8.2 Placement and levels
@@ -873,17 +872,16 @@ i32 own w = 1;                       // error: own on a non-reference type
 ### 8.3 Producers and views
 
 `new(T)` yields `T mut* own`, `new(T, n)` yields `T mut@ own`, `new(T[K], n)` yields
-`T[K] mut@ own`, and standard-library functions that allocate return `own` (D17.3, D13.5).
-`cast` may add `own` to a reference, adopting memory (section 9.2). Everything else yields a
-view: a span expression, `.ptr`, `&`, literals and the runtime's `args` never produce an `own`
-reference,
-although the `own` marks inside the element or pointee type survive. An `own` rvalue must land
-in an `own` place (a declaration, an assignment target, an `own` parameter, an `own` field or
-element of a literal, a `return`) or be freed with `del`; anything else is the error "owning
-temporary would leak", because nothing could free it afterwards (D17.8): converting or casting it
-to a non-`own` type, taking a span of it or taking its `.ptr`, accessing a field of an owning
-aggregate
-rvalue (section 8.5), and discarding it as an expression statement.
+`T[K] mut@ own`, and standard-library functions that allocate return `own` (D17.3, D13.5). An
+`extern` whose result says `own` yields an `own` value (D17.13), and a `cast` carries the `own` of
+its operand and never adds one (section 9.2). Everything else yields a view: a span expression,
+`.ptr`, `&`, literals and the runtime's `args` never produce an `own` reference, although the `own`
+marks inside the element or pointee type survive. An `own` rvalue must land in an `own` place (a
+declaration, an assignment target, an `own` parameter, an `own` field or element of a literal, a
+`return`) or be freed with `del`; anything else is the error "owning temporary would leak", because
+nothing could free it afterwards (D17.8): converting or casting it to a non-`own` type, taking a
+span of it or taking its `.ptr`, accessing a field of an owning aggregate rvalue (section 8.5), and
+discarding it as an expression statement.
 
 | Expression                                     | Type                                   |
 |------------------------------------------------|----------------------------------------|
@@ -935,15 +933,16 @@ section 7.4: `own` may be dropped from a reference only if, in the target type, 
 outside it is `own` and every level between the binding and the storage holding that reference
 is immutable. The first condition keeps a container from being freed while its elements are
 owned by nobody; the second closes the `T** -> const T**` hole for ownership, where a borrowed
-value could be stored, through the copy, into a slot the source still sees as owned. Adding
-`own` requires `cast` (section 9.2), which is also the escape from the monotone rule.
+value could be stored, through the copy, into a slot the source still sees as owned. A `cast`
+is the escape from the monotone rule for a drop (section 9.2). Nothing adds `own`: a cast refuses
+it too (D3.14).
 
 | Conversion                                        | Result | Reason                          |
 |---------------------------------------------------|--------|---------------------------------|
 | `u8 mut@ own` to `u8 mut@`                        | ok     | drops the outer own             |
 | `u8 mut@ own` to `u8@`                            | ok     | drops the own and level 1        |
 | `node* own` to `node*`                            | ok     | drops the outer own             |
-| `node*` to `node* own`                            | error  | adds own; adoption needs cast   |
+| `node*` to `node* own`                            | error  | adds own; a cast refuses it too |
 | `node mut* own mut@ own` to `node mut* own mut@`  | ok     | drops the outer own only        |
 | `node mut* own mut@ own` to `node*@`              | ok     | drops both; target level 1 fixed|
 | `node mut* own mut@ own` to `node* own@ own`      | ok     | keeps both own marks            |
@@ -1072,8 +1071,8 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | enum                | enum, `bool`, float      | error (go through an integer)                 |
 | `bool`              | float, `char`, enum      | error                                         |
 | float               | `bool`, `char`, enum     | error                                         |
-| `T*`                | `U*`, any `own`          | reinterpret the address; may add `own`        |
-| `T*`, `void*`       | `void*`, `U*`            | reinterpret the address; may add `own`        |
+| `T*`                | `U*`                     | reinterpret the address; carries or drops own |
+| `T*`, `void*`       | `void*`, `U*`            | reinterpret the address; carries or drops own |
 | `T mut*`            | any target above         | the same, and the `mut` may be dropped        |
 | any pointer         | a target that adds `mut` | error: a cast never adds `mut`                |
 | `T*`, `void*`       | `u64`                    | the address as an integer                     |
@@ -1090,7 +1089,7 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | `char@`, `u8@`      | `char mut@`, `u8 mut@`   | error: a cast never adds `mut`                |
 | `T mut@`            | `T@`                     | drop mutability at every level                |
 | `T@`                | `T mut@`                 | error: a cast never adds `mut`                |
-| `T@`, `T*`, string family | the same with `own` added at any reference | adoption; no check   |
+| any reference       | a target that adds `own` | error: a cast never adds `own`                |
 | `own` reference     | same, `own` dropped at any level | lends; refused on an `own` rvalue     |
 | `own` rvalue        | any `own` target above   | transfer: the result is `own`                 |
 | `own` lvalue        | any `own` target above   | error unless `cast(move(x), T)` (D17.5)       |
@@ -1116,16 +1115,20 @@ so `cast(s, u8@ mut)` does not compile; the markers a target does carry name the
 its indirections (D3.14). `null` is not a valid cast
 operand, because it has no type of its own (D10.5).
 
+**A cast never adds `own`, from any source.** The target marks a level `own` only where the
+source marks the level at the same depth `own` too. Where the source has no reference at that
+depth -- an integer, the `void` behind a `void*`, or a pointee type the cast reinterprets -- the
+target marks no `own` at that depth or below it. So `cast(p, i32* own)` fails for an `i32* p`,
+and C memory is owned only where its `extern` says `own` (D3.14, D17.13). A view never becomes
+an owner, so no cast makes a second owner of an allocation.
+
 Ownership in casts (D3.14, D17.3, D17.12): the result of a cast is `own` exactly when its target
-type says `own`. A cast may add `own` to any reference of a pointer or span type, adopting
-memory that came from C, which is the one unsafe mark a cast adds (a later `del` of adopted
-memory that is not the start of an allocation is undefined behavior, D10.7); it may drop `own` at
-any level, including where the implicit drop of section 8.4 refuses, and then lends: the result is a
+type says `own`, and the source then says `own` at the same levels. A cast may drop `own` at any
+level, including where the implicit drop of section 8.4 refuses, and then lends: the result is a
 view and the source keeps ownership. An `own` rvalue cast to an `own` target transfers. An `own`
-lvalue cast to an `own` target is a copy into an `own` place and must be written
-`cast(move(x), T)` (D17.5), which empties `x`. A `cast` to an `own` type yields an `own` rvalue,
-which must land (section 8.3), and a cast that drops `own` from an `own` rvalue is refused
-(D17.8).
+lvalue cast to an `own` target is a copy into an `own` place and must be written `cast(move(x), T)`
+(D17.5), which empties `x`. A `cast` to an `own` type yields an `own` rvalue, which must land
+(section 8.3), and a cast that drops `own` from an `own` rvalue is refused (D17.8).
 
 ```fort
 i64 w = cast(cast(-1, i8), i64);     // -1: sign-extended because i8 is signed
@@ -1153,14 +1156,14 @@ i8@ sb = cast(ro, i8@);                 // error: element type of a span never c
 i32@ q = cast(p, i32@);                 // error: no cast from pointer to span
 point pt = cast(r, point);           // error: no struct casts
 u8 mut* own m = cast(libc.malloc(64), u8 mut* own);    // own rvalue to own type; del(m) frees it
-u8 mut@ own got = cast(p2[0..n], u8 mut@ own);         // adopts C memory at a u8 mut* p2
+u8 mut@ own got = cast(p2[0..n], u8 mut@ own);         // error: a span expression is a view
 node mut* own mut@ own kids = new(node mut* own, 8);   // owned slots (section 8.3)
 node mut* mut@ esc = cast(kids, node mut* mut@);       // ok: drops own where 8.4 refuses
 string own t = cast(move(buf), string own);            // the target says own; buf is emptied
 string own t2 = cast(buf, string own);                 // error: copying own lvalue 'buf' needs move
 string t5 = cast(buf, string);                         // ok: lends; buf still owns the bytes
 string t3 = cast(new(u8, 4), string);                  // error: owning temporary would leak
-string own t4 = cast("abc", string own);               // compiles; del(t4) is undefined
+string own t4 = cast("abc", string own);               // error: a cast never adds own
 ```
 
 ## 10. Untyped constants and constant expressions

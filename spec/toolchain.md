@@ -601,8 +601,8 @@ struct enum_member { i32 value; char* name; }
 // result is `void mut* own`, the type `libc.calloc` answers with: storage of no
 // type that the caller owns and may write (D3.11, `stdlib.md` 2.2). `alloc`
 // carries that mark out rather than dropping it, so a caller that reaches this
-// entry point directly casts to a typed pointer to write through it -- which
-// adoption does anyway (D3.14, D17.3) -- and the cast adds no `mut`. `free`
+// entry point directly casts to a typed `own` pointer to write through it, and
+// the cast carries the `own` and adds no `mut` (D3.14, D17.3). `free`
 // takes `void* own`, which every result of `alloc` reaches by the monotone drop
 // of D5.4. The mark reaches no instruction, no signature and no size: every
 // pointer is one machine word, so the IR form of item 7 is `ptr` either way

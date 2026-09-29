@@ -84,10 +84,9 @@ library follows:
 - **`del` before storing.** Code that replaces owned storage writes `del(old)` before the store,
   `del(b->data); b->data = move(bigger);`, because storing over a live `own` lvalue is a runtime
   error in checked builds (D17.11).
-- Nothing in the library allocates without saying so in its entry, and the library stays clear
-  of what D17.14 leaves untracked: it never makes two `own` copies of one allocation through
-  `cast`, and it applies a cast between `string` and the byte spans (D3.14) only to a view
-  (`buf[..]`) or to the `own` rvalue that `move` yields (`cast(move(buf), string own)`, D17.12).
+- Nothing in the library allocates without saying so in its entry. The library applies a cast
+  between `string` and the byte spans (D3.14) only to a view (`buf[..]`) or to the `own` rvalue
+  that `move` yields (`cast(move(buf), string own)`, D17.12). A cast never adds `own` (D3.14).
 
 ### 1.4 Talking to C
 
@@ -95,7 +94,9 @@ library follows:
   and `.len`: `libc.write(fd, buf.ptr, buf.len)` for a `u8@ buf`. A fixed array has no `.ptr`
   (D3.4); span it first: `arr[..].ptr`. `.ptr` is a view (D17.3), so C never receives
   ownership this way; `own` in an `extern` signature is erased and documents C's convention
-  (D17.13), as `libc.malloc` and `libc.free` show.
+  (D17.13), as `libc.malloc` and `libc.free` show. A C function whose result is owned on some
+  calls only has its borrowing declaration and a fort function that allocates the buffer:
+  `libc.realpath` and `os.real_path` (2.2, 2.14, D17.13).
 - NUL termination. These strings carry a `0` after their last character: literals (D3.7), the
   elements of `sys.args()` (D8.6), the result of `sys.env`, and the C string at the `.ptr` of a
   `str.to_cstr` result. Owned strings from `str.dup`, `str.concat` and `strbuf.take` do not: a
@@ -114,8 +115,8 @@ library follows:
   or `u8 mut*` where C would drop the `const`, so a `u8` span's `.ptr` crosses with no cast and
   the type system refuses a buffer the caller may not write (2.2). A buffer of no fixed type is
   `void*`, or `void mut*` where C writes it (D3.11); reaching either takes a `cast`, so the
-  caller decides what C may write into. Handing C a pointer into read-only memory is undefined
-  (D10.7).
+  caller decides what C may write into. An `extern` that hides a C write behind a buffer
+  without `mut` lies about C, and no rule inside fort reaches it (D3.14).
 
 ### 1.5 Naming
 
@@ -326,8 +327,8 @@ the `mut` on the way (D5.4), which is what `sys.errno()` does. Both are
 here because the runtime is a module of this library and imports `std.libc` like any other
 (D13.1); no other module calls them.
 `u8 mut* own p = cast(libc.malloc(n), u8 mut* own);` types the block, the cast's result being
-`own` because its target says so (D3.14; `p` is `null` when C is out of memory, where `new`
-would trap, D10.2), `p[0..n]` is a
+`own` because its target says so and the `malloc` result says so too (D3.14; `p` is `null` when
+C is out of memory, where `new` would trap, D10.2), `p[0..n]` is a
 `u8 mut@` view of it (D6.9), and `del(p)` releases it; so does
 `libc.free(cast(move(p), void* own))`, where the `own` lvalue must be moved into the `own`
 parameter (D6.11) and is left `null` (D17.6). `memcpy`, `memmove` and `memset` return their
@@ -1239,7 +1240,7 @@ fn exit(i32 status) noreturn;
 
 Three properties of the runtime the library also depends on: `del` frees by the pointer alone,
 with no header and no length check (D10.3, D17.9, used by 1.3); `own` changes no bits, so a
-value produced by `new` and one adopted from `malloc` are released the same way (D17.1, D17.3);
+value produced by `new` and one from `malloc` are released the same way (D17.1, D17.3);
 and `new(T, n)` returns zeroed storage (D10.2), which is why fresh `str_buf`, `vec` and `strmap`
 slots read as zero and why a fresh `own` slot passes the overwrite check (D17.11).
 
