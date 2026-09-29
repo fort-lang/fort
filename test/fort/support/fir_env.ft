@@ -210,6 +210,24 @@ fn leak_slot(u64 round) u64 {
     return 3;
 }
 
+// Whether the address of a buffer is a view of the heap on this target. On macOS it is not: the
+// allocator serves a block from a per-CPU magazine, and the address sanitizer holds freed blocks
+// in quarantine, so two rounds give a buffer addresses far apart with nothing leaked (heap.ft).
+// There the system view counts every live byte, so it holds every leak alone.
+$if ($cfg(target_os) == "macos") {
+    bool ADDRESS_IS_A_VIEW = false;
+} else {
+    bool ADDRESS_IS_A_VIEW = true;
+}
+
+// `moved` for the address of one buffer: 0 on a target where an address is no view.
+fn address_moved(u64[3] samples) u64 {
+    if (!ADDRESS_IS_A_VIEW) {
+        return 0;
+    }
+    return moved(samples);
+}
+
 // The smaller of the distances from the early sample to the last two. The allocator alternates
 // between two positions from one round to the next, so one late round is in step with the early
 // one when nothing leaks.
