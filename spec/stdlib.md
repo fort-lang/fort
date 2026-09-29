@@ -144,7 +144,7 @@ import binding's name for a local even though D7.9 permits it.
 | `std.math`      | none                                        | float bit casts, abs, min, max   |
 | `std.sort`      | `libc`                                      | an array sorted in place         |
 | `std.net`       | `libc`, `str`, `sys`                        | a TCP listener and a connection  |
-| `std.os`        | `libc`, `str`, `strbuf`                     | target triple, running binary    |
+| `std.os`        | `libc`, `str`, `strbuf`                     | triple, binary path, real path   |
 
 `std.libc`, `std.net` and `std.os` have one source for each target: `std/linux/` and
 `std/darwin/`. The other modules are the same on both targets and stand in `std/`.
@@ -266,8 +266,13 @@ extern fn __errno_location() i32 mut*;
 // fcntl(2), readlink(2) and realpath(3). fcntl takes a variable tail in C, and this declaration
 // keeps it on both targets (D9.8).
 extern fn fcntl(i32 fd, i32 cmd, ...) i32;
-extern fn readlink(char* path, char* buf, u64 size) i64;
-extern fn realpath(char* path, char* resolved) char* own;
+extern fn readlink(char* path, char mut* buf, u64 size) i64;
+// Pass a buffer of PATH_MAX bytes as `resolved`. The result is that buffer, or null with errno set.
+// A null buffer makes C allocate a result that fort cannot free, so use `os.real_path` instead.
+extern fn realpath(char* path, char mut* resolved) char*;
+
+// The size of the buffer that realpath(3) writes, the terminating zero included.
+u64 PATH_MAX = 4096;                         // 1024 in std/darwin/libc.ft
 
 // <string.h>, <stdlib.h>, <unistd.h>, <sys/stat.h>, <sys/wait.h>: what the compiler and its
 // tests call. `mode_t` crosses as u32 on both targets: one signature serves both roots.
@@ -334,6 +339,11 @@ a pointer to each of two of them; `std.sort` wraps it and is what a caller uses 
 Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
+`readlink` and `realpath` write into the caller's buffer, so the buffer is `char mut*`.
+`realpath` returns that buffer, a view. With a null buffer C allocates the result and the caller
+must free it, but one symbol has one signature (D9.8) and a cast never adds `own` (D3.14), so
+fort code cannot free that result. `std.os.real_path` is the owning form: it allocates a buffer
+of `PATH_MAX` bytes with `new` and passes it (2.14, D17.13).
 Direct use looks like `libc.write(fd, cast(s.ptr, u8*), s.len) == cast(s.len, i64)`, which
 writes a string to a descriptor, bypassing the runtime's buffers; the `cast` is there because a
 `string` carries `char*` and not `u8*`, and `libc.read(fd, buf.ptr, buf.len)` on a `u8 mut@`
@@ -1178,19 +1188,26 @@ The per-target facts of the standard library (D13.2). Each target has its own so
 sources declare the same names. `TARGET` is the target triple of the standard root. A compiler
 built with that root stores it as its built target (D14.1). `exe_path` gives the path of the
 running binary: Linux reads the symbolic link `/proc/self/exe` with `libc.readlink`. Mac calls
-dyld's `_NSGetExecutablePath` and resolves the answer with `libc.realpath` when the file still
+dyld's `_NSGetExecutablePath` and resolves the answer with `real_path` when the file still
 exists at that path. `_NSGetExecutablePath` is not a C library function, so `std/darwin/os.ft`
-declares it, and `std.libc` does not.
+declares it, and `std.libc` does not. `real_path` gives the canonical form of a path with
+`libc.realpath`: an absolute path with symbolic links, `.` and `..` resolved.
 
 ```fort
 string TARGET = "x86_64-linux-gnu";          // std/linux/os.ft
 string TARGET = "arm64-apple-macosx11.0.0";  // std/darwin/os.ft
 
 fn exe_path(strbuf.str_buf mut* out) bool;
+fn real_path(string path, strbuf.str_buf mut* out) bool;
 ```
 
 `exe_path` appends the path to `out` and returns true. It returns false and leaves `out`
 unchanged when the system cannot give the path. The caller owns `out`.
+`real_path` appends the canonical form of `path` to `out` and returns true. It returns false and
+leaves `out` unchanged when `realpath(3)` fails; `sys.errno()` then gives the reason. It
+allocates the buffer of `libc.PATH_MAX` bytes that `realpath` writes, with `new`, and frees it
+before it returns. This is the owning form of `realpath` that D17.13 describes: the `std.libc`
+declaration takes a buffer and returns a view of it.
 
 ## 3. The runtime surface the library relies on
 

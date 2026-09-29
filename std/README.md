@@ -11,8 +11,8 @@ of the library calls),
 `int_vec` and the non-generic container pattern), `std.strmap` (the open-addressing table),
 `std.io` (descriptors, whole files and streams), `std.math` (the integer limits, the float
 bit casts and the per-type `abs`, `min` and `max`), `std.net` (a TCP listener and a TCP
-connection, IPv4 only) and `std.os` (the target triple and the path of the running binary) are
-written.
+connection, IPv4 only) and `std.os` (the target triple, the path of the running binary and the
+canonical form of a path) are written.
 
 `std.libc`, `std.net` and `std.os` have one source for each target, in `std/linux/` and
 `std/darwin/`. The other modules stand in `std/` and serve both targets.

@@ -1,4 +1,5 @@
 /// Gives the target of this standard library and the path of the running binary on Mac arm64.
+/// It also gives the canonical form of a path.
 
 import std.libc;
 import std.str;
@@ -16,7 +17,7 @@ extern fn _NSGetExecutablePath(char mut* buf, u32 mut* size) i32;
 u64 EXE_PATH_FIRST_CAP = 256;
 u64 EXE_PATH_MAX_CAP = 65536;
 
-// Appends the path of the running binary to `out` and returns true. realpath resolves the dyld
+// Appends the path of the running binary to `out` and returns true. real_path resolves the dyld
 // path when the file still exists at that path. Returns false and leaves `out` unchanged when
 // the system cannot give the path.
 fn exe_path(strbuf.str_buf mut* out) bool {
@@ -26,13 +27,9 @@ fn exe_path(strbuf.str_buf mut* out) bool {
         char mut@ own buf = new(char, cast(cap, u64));
         defer del(buf);
         if (_NSGetExecutablePath(buf.ptr, &cap) == 0) {
-            char* own canonical = libc.realpath(buf.ptr, null);
-            if (canonical != null) {
-                strbuf.append(out, str.from_cstr(canonical));
-                libc.free(cast(move(canonical), void* own));
-                return true;
+            if (!real_path(str.from_cstr(buf.ptr), out)) {
+                strbuf.append(out, str.from_cstr(buf.ptr));
             }
-            strbuf.append(out, str.from_cstr(buf.ptr));
             return true;
         }
         if (cap <= allocated || cast(cap, u64) > EXE_PATH_MAX_CAP) {
@@ -40,4 +37,17 @@ fn exe_path(strbuf.str_buf mut* out) bool {
         }
     }
     return false;
+}
+
+/// Appends the canonical form of path to out. Returns false when realpath(3) fails.
+fn real_path(string path, strbuf.str_buf mut* out) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    char mut@ own buf = new(char, libc.PATH_MAX);
+    defer del(buf);
+    if (libc.realpath(c_path.ptr, buf.ptr) == null) {
+        return false;
+    }
+    strbuf.append(out, str.from_cstr(buf.ptr));
+    return true;
 }
