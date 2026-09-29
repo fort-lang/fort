@@ -36,6 +36,8 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--index`           | fill the document's identifier index (D20.3)               | off        |
 | `--tokens`          | write the entry file's tokens to stdout and stop (D14.1)   | off        |
 | `--ast`             | write the entry file's tree to stdout and stop (D14.1)     | off        |
+| `--fir`             | write the program's FIR to stdout and stop (D14.1)         | off        |
+| `--fir-after=<pass>` | write the FIR after `<pass>` and stop (D14.1)              | none       |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -52,7 +54,8 @@ file (D14.1). Options and the entry file may appear in any order.
   An IR mode may select either target form with `--target`.
   An unsupported form exits 2 before the compiler creates output.
 - The selected target supplies the three configuration values of D21.1. `--target` therefore
-  remains active under `--check`. `--tokens` and `--ast` do not evaluate configuration values.
+  remains active under `--check` and `--fir`. `--tokens` and `--ast` do not evaluate
+  configuration values.
 - The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.ll` (D14.1),
   where `<entry>` is the entry file's base name without `.ft`, placed in the current directory as
   `cc` does.
@@ -150,6 +153,19 @@ file (D14.1). Options and the entry file may appear in any order.
   ```
 
   Compiler unit tests hold this format.
+- `--fir` runs steps 0 to 3 of section 2 over the closure of a program and stops there. It
+  writes the FIR module of the program to stdout in the textual form of `spec/fir.md` 13 and
+  exits 0 (D14.1). It writes no IR and no file and runs no `--cc`, so `-o`, `-S`, `-c`, `-l`,
+  `--cc` and `-Xcc` are unused. It takes the target rule of `--check`: any target form that the
+  compiler accepts, and no link restriction. The entry module must define `main`, as in a build.
+  A compile error prints its diagnostics, writes no FIR and exits 1. `--fir` is a usage error
+  together with `--tokens`, `--ast`, `--check`, `--json` or `--index`, which write another text
+  or stop at another pass. `--fir-after=<pass>` is one argument. It implies `--fir` and writes
+  the FIR at a named point of `spec/fir.md` 11: `lower`, the output of the lowering, or
+  `build-mode`, the output of the build-mode pass. Any other name, the empty name and `verify`
+  included, is a usage error. The last `--fir-after` wins. Until a pass exists, its name writes
+  the module that `--fir` writes. Until the lowering exists, that module holds no function, so
+  the text is empty.
 - In the fort compiler's `--ast` form, a C extern with `...` prints a bare `...` last in its
   `(params ...)` group. The mark is not a `(param ...)` child.
   A fixed extern prints no mark, and a fort definition cannot print this mark (D8.3, D9.8).
@@ -176,11 +192,13 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 with 2; `--help` prints that line and then the table above, and exits 0.
 
 These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
-Sixteen report a command line the compiler cannot use and then print the usage line:
+Eighteen report a command line the compiler cannot use and then print the usage line:
 `missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
 `unknown option '<opt>'`, `no entry file`, `--json requires --check` (D20.2),
 `--tokens does not combine with --check, --json or --index`,
 `--ast does not combine with --tokens, --check, --json or --index`,
+`--fir does not combine with --tokens, --ast, --check, --json or --index`,
+`unknown --fir-after pass '<name>'`,
 `invalid --cfg assignment '<entry>'`, `invalid --cfg key '<key>'`, `empty --cfg list entry`,
 `duplicate --cfg key '<key>'`, and `cannot override compiler configuration key '<key>'`,
 `unsupported target '<triple>'`, `--std-dir is required for cross-target -S`,
@@ -210,6 +228,7 @@ fort --check lib/util.ft                      # check that module and its import
 fort --check --json main.ft                   # one JSON document on stdout, for an editor
 fort --index main.ft                          # the same document with the identifier index
 fort --tokens main.ft                         # one line per token of that file, nothing else
+fort --fir main.ft                            # the FIR of the program, nothing else
 FORT_STD_DIR=/opt/fort/std fort main.ft
 ```
 
@@ -220,9 +239,9 @@ temporary directory for the intermediate IR file (D19.1).
 
 Compilation is whole-program (D9.10):
 
-0. In an IR mode or under `--check`, select the built target or the explicit `--target` (D14.1).
-   Reject an unsupported target form with status 2 before step 1.
-   Under `--check`, the selected target supplies the configuration values of D21.1.
+0. In an IR mode or under `--check` or `--fir`, select the built target or the explicit
+   `--target` (D14.1). Reject an unsupported target form with status 2 before step 1.
+   Under `--check` or `--fir`, the selected target supplies the configuration values of D21.1.
    A non-built `-S` target requires an explicit `--std-dir` before step 4.
    A non-built `-c` or link target exits 2 before step 4 unless `-S` also appears.
 1. Read the entry file and derive its module path and root (exit 2 if unreadable, 1 if the base

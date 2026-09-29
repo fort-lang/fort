@@ -1549,7 +1549,14 @@ Sections:
   its tokens to stdout; it resolves no import and parses nothing, and combining it with `--check`,
   `--json` or `--index` is a usage error), `--ast` (lex and parse the entry file alone and write its
   syntax tree to stdout as one S-expression; it resolves no import and checks nothing, and combining
-  it with `--tokens`, `--check`, `--json` or `--index` is a usage error), `--help`, `--version`.
+  it with `--tokens`, `--check`, `--json` or `--index` is a usage error), `--fir` (check the
+  closure of a program and write its FIR to stdout in the textual form of `spec/fir.md` 13, then
+  stop before the emitter; it writes no file and takes the target rule of `--check`, and combining
+  it with `--tokens`, `--ast`, `--check`, `--json` or `--index` is a usage error),
+  `--fir-after=<pass>` (implies `--fir` and writes the FIR at the named point of `spec/fir.md`
+  11; the names are `lower`, the output of the lowering, and `build-mode`, the output of the
+  build-mode pass, and any other name is a usage error; until a pass exists, its name writes the
+  module that `--fir` writes), `--help`, `--version`.
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
   A Linux x86-64 compiler stores `x86_64-linux-gnu` as its built target.
@@ -1587,6 +1594,10 @@ Sections:
   this date the build read the host version with `sw_vers -productVersion`. On the same date the
   built target moved from the compiler's `platform` module to `std.os.TARGET` (D13.2), and the
   default `--cc` became `clang` on both targets (D14.3).
+  Amended 2026-09-29 (T-221): `--fir` and `--fir-after=<pass>` did not exist. They are the
+  observation point of FIR (`spec/fir.md` 17.1, open question 1), as `--ast` is of the parser.
+  `--fir-after` names only the two points where FIR changes. `verify` is not a name, because
+  the verifier changes nothing and runs twice (T-221 review, finding 3).
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.

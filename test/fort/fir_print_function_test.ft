@@ -1,0 +1,530 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| 11 kinds
+//| ok
+/// Checks the textual form of FIR statements, terminators, blocks, functions and modules
+/// (spec/fir.md 7, 8, 9.7 and 13), with the worked example of section 13 built by hand.
+import ast;
+import consts;
+import diag;
+import fir;
+import fir_env;
+import fir_print;
+import prim;
+import std.strbuf;
+import types;
+
+// The location of the example's source, `t.ft`, at `line`:`col`.
+fn at(u32 line, u32 col) diag.loc {
+    return fir_env.at(line, col);
+}
+
+fn copy(u32 n) fir.operand {
+    return fir.operand_copy(fir.place_local(n));
+}
+
+fn i32_const(fir_env.env mut* e, i64 v) fir.operand {
+    return fir.operand_const(fir.const_int(fir_env.i32_ty(e), consts.cv_from_i64(v)));
+}
+
+// `p = value` at `where`, with the statement index `index`.
+fn assign(fir.func mut* f, u32 b, fir.place p, fir.rvalue value, diag.loc where, u32 index)
+    void {
+    fir.block_append(f, b, fir.stmt_assign(p, value, where, index));
+}
+
+// `del(move p)` at `where`, expanded at the exit `exit_loc`.
+fn del_at_exit(fir.func mut* f, u32 b, fir.place p, diag.loc where, diag.loc exit_loc, u32 index)
+    void {
+    fir.statement mut s = fir.stmt_del(p, where, index);
+    s.exit_loc = exit_loc;
+    fir.block_append(f, b, s);
+}
+
+// ---- the worked example of spec/fir.md 13 ----------------------------------------------------
+
+// The text of the example in spec/fir.md 13. The example has one comment after the `let` of
+// `_3`, which the printer does not write, so this text omits it.
+u64 EXAMPLE_LINES = 29;
+
+string[EXAMPLE_LINES] EXAMPLE = {
+    "fn main.f(_1 (c): bool) -> i32 {",
+    "    let _0: i32;",
+    "    let _2 (p): i32 mut* own #2:18;",
+    "    let _3: i32 mut* own #2:22;",
+    "",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own #2:18 s0;",
+    "        live(_2) #2:18 s1;",
+    "        _3 = alloc<i32>(const u64 1) #2:22 s1;",
+    "        check(overwrite: _2) -> bb1 #2:18 s1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _3 #2:18 s1;",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3] #4:5 s3;",
+    "    }",
+    "    bb2: {",
+    "        _0 = const i32 1 #5:16 s4;",
+    "        del(move _2) #3:11 exit 5:9 s5;",
+    "        dead(_2) #5:9 s4;",
+    "        return #5:9 s4;",
+    "    }",
+    "    bb3: {",
+    "        (*_2) = const i32 7 #7:8 s6;",
+    "        _0 = copy (*_2) #8:12 s7;",
+    "        del(move _2) #3:11 exit 8:5 s8;",
+    "        dead(_2) #8:5 s7;",
+    "        return #8:5 s7;",
+    "    }",
+    "}",
+};
+
+// Builds the FIR of the example program of spec/fir.md 13 through the constructors. `p` is the
+// symbol of the named local `p`, which the caller keeps alive while the function lives.
+fn build_example(fir_env.env mut* e, ast.sym* p) fir.func {
+    fir.func mut f = fir_env.func_of(e, "f");
+    types.node* i32t = fir_env.i32_ty(e);
+    types.node* owner = types.type_ptr(fir_env.tt(e), i32t, true, true);
+    u32 pl = fir.local_add(&f, owner, fir.local_kind.lk_named, p, at(2, 18));
+    u32 tmp = fir.local_add(&f, owner, fir.local_kind.lk_temp, null, at(2, 22));
+    fir.place pp = fir.place_local(pl);
+    u32 bb1 = fir.block_new(&f);
+    u32 bb2 = fir.block_new(&f);
+    u32 bb3 = fir.block_new(&f);
+    // bb0: the zeroing of the entry block, the declaration of `p` and the check of the write.
+    fir.operand zero = fir.operand_const(fir.const_zero(owner));
+    assign(&f, 0, pp, fir.rvalue_use(&f, zero), at(2, 18), 0);
+    fir.block_append(&f, 0, fir.stmt_live(pl, at(2, 18), 1));
+    fir.operand one = fir.operand_const(fir.const_int(fir_env.u64_ty(e), consts.cv_from_u64(1)));
+    assign(&f, 0, fir.place_local(tmp), fir.rvalue_alloc(&f, i32t, one), at(2, 22), 1);
+    fir.block_set_terminator(&f, 0, fir.term_check_overwrite(pp, bb1, at(2, 18), 1));
+    // bb1: the write and the `if`.
+    assign(&f, bb1, pp, fir.rvalue_use(&f, fir.operand_move(fir.place_local(tmp))), at(2, 18),
+           1);
+    u32 arms = fir.arm_push(&f, consts.cv_from_bool(true), bb2);
+    fir.block_set_terminator(&f, bb1, fir.term_switch(copy(1), arms, 1, bb3, at(4, 5), 3));
+    // bb2: `return 1;` with the deferred `del(p)` expanded before it.
+    assign(&f, bb2, fir.place_local(0), fir.rvalue_use(&f, i32_const(e, 1)), at(5, 16), 4);
+    del_at_exit(&f, bb2, pp, at(3, 11), at(5, 9), 5);
+    fir.block_append(&f, bb2, fir.stmt_dead(pl, at(5, 9), 4));
+    fir.block_set_terminator(&f, bb2, fir.term_return(at(5, 9), 4));
+    // bb3: `*p = 7; return *p;` with the second expansion.
+    fir.place target = fir.place_deref(&f, pp);
+    assign(&f, bb3, target, fir.rvalue_use(&f, i32_const(e, 7)), at(7, 8), 6);
+    assign(&f, bb3, fir.place_local(0), fir.rvalue_use(&f, fir.operand_copy(target)), at(8, 12),
+           7);
+    del_at_exit(&f, bb3, pp, at(3, 11), at(8, 5), 8);
+    fir.block_append(&f, bb3, fir.stmt_dead(pl, at(8, 5), 7));
+    fir.block_set_terminator(&f, bb3, fir.term_return(at(8, 5), 7));
+    return f;
+}
+
+fn the_worked_example_prints_byte_for_byte() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    ast.sym mut p = ast.sym{};
+    p.name = "p";
+    fir.func mut f = build_example(&e, &p);
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir_print.print_function(&f, &b);
+    expect_lines(&b, EXAMPLE[..]);
+}
+
+// Holds the text in `b` against `want`, one line of `want` for each line of the text, each with
+// its newline.
+fn expect_lines(strbuf.str_buf mut* b, string@ want) void {
+    strbuf.str_buf mut all = strbuf.create();
+    defer strbuf.free(&all);
+    append_lines(&all, want);
+    fir_env.expect_text(b, strbuf.view(&all));
+}
+
+// Appends each of `lines` and a newline after it.
+fn append_lines(strbuf.str_buf mut* out, string@ lines) void {
+    for (string line : lines) {
+        strbuf.append(out, line);
+        strbuf.push(out, '\n');
+    }
+}
+
+// The text of `fn nothing() void` with one `return` at 1:1.
+string[7] NOTHING = {
+    "fn main.nothing() -> void {",
+    "    let _0: void;",
+    "",
+    "    bb0: {",
+    "        return #1:1 s0;",
+    "    }",
+    "}",
+};
+
+// ---- statements ---------------------------------------------------------------------------
+
+fn a_statement_prints_its_location_and_index() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir.statement mut s = fir.stmt_live(1, at(3, 4), 2);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "live(_1) #3:4 s2;");
+    s = fir.stmt_dead(2, at(10, 1), 0);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "dead(_2) #10:1 s0;");
+    // The statement index can pass 9 and the location can have many digits.
+    s = fir.stmt_assign(fir.place_local(0), fir.rvalue_use(&f, copy(1)), at(1234, 56), 4000000000);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "_0 = copy _1 #1234:56 s4000000000;");
+    // A `del` with an exit prints the exit between the location and the index.
+    s = fir.stmt_del(fir.place_local(1), at(3, 11), 5);
+    s.exit_loc = at(5, 9);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "del(move _1) #3:11 exit 5:9 s5;");
+    // A `del` of a projected place.
+    fir.place held = fir.place_field(&f, fir.place_local(1), 0);
+    s = fir.stmt_del(held, at(2, 2), 1);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "del(move _1.0) #2:2 s1;");
+}
+
+// The grammar rule `location` begins with the position, so a statement with the empty location
+// prints no `#`, no exit and no index.
+fn the_empty_location_prints_nothing() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    diag.loc none = diag.loc{};
+    fir.statement mut s = fir.stmt_live(1, none, 7);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "live(_1);");
+    s.exit_loc = at(5, 9);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "live(_1);");
+    fir.terminator t = fir.term_return(none, 3);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "return;");
+    // A location at column 0 of a real line is not empty.
+    s = fir.stmt_dead(1, diag.loc_make("t.ft", 2, 0), 1);
+    fir_print.print_statement(&f, &s, &b);
+    fir_env.expect_text(&b, "dead(_1) #2:0 s1;");
+    // A terminator with an exit prints it as a statement does.
+    fir.terminator mut u = fir.term_goto(3, at(4, 4), 9);
+    u.exit_loc = at(6, 1);
+    fir_print.print_terminator(&f, &u, &b);
+    fir_env.expect_text(&b, "goto bb3 #4:4 exit 6:1 s9;");
+}
+
+// ---- terminators --------------------------------------------------------------------------
+
+fn each_terminator_prints_its_spelling() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir.terminator mut t = fir.term_goto(12, at(1, 2), 3);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "goto bb12 #1:2 s3;");
+    t = fir.term_return(at(1, 2), 3);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "return #1:2 s3;");
+    t = fir.term_trap(at(1, 2), 3);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "trap #1:2 s3;");
+    t = fir.term_unreachable(at(1, 2), 0);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "unreachable #1:2 s0;");
+    // A check with a condition and no reported operand.
+    u32 none = cast(f.ops.len, u32);
+    t = fir.term_check(copy(1), fir.check_kind.chk_overflow, none, 0, 2, at(3, 9), 4);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "check(copy _1, overflow) -> bb2 #3:9 s4;");
+    // A check with two reported operands.
+    u32 first = fir.operand_push(&f, copy(1));
+    fir.operand_push(&f, copy(2));
+    t = fir.term_check(copy(0), fir.check_kind.chk_bounds, first, 2, 5, at(3, 9), 4);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "check(copy _0, bounds, copy _1, copy _2) -> bb5 #3:9 s4;");
+    // The check of an overwrite names its place.
+    fir.place held = fir.place_field(&f, fir.place_local(1), 0);
+    t = fir.term_check_overwrite(held, 1, at(2, 18), 1);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "check(overwrite: _1.0) -> bb1 #2:18 s1;");
+}
+
+fn a_fail_prints_its_kind_and_operands() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u32 first = fir.operand_push(&f, copy(2));
+    fir.operand_push(&f, fir.operand_const(fir.const_bytes("color")));
+    fir.terminator mut t = fir.term_fail(fir.check_kind.chk_enum, first, 2, at(4, 1), 3);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "fail(enum, copy _2, const bytes \"color\") #4:1 s3;");
+    u32 none = cast(f.ops.len, u32);
+    t = fir.term_fail(fir.check_kind.chk_div_zero, none, 0, at(4, 1), 3);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "fail(div_zero) #4:1 s3;");
+}
+
+// The name of each check kind. The switch names every member and has no default, so a new
+// member does not compile until it has a name here.
+fn kind_text(fir.check_kind kind) string {
+    switch (kind) {
+    case fir.check_kind.chk_overflow:
+        return "fail(overflow);";
+    case fir.check_kind.chk_shift:
+        return "fail(shift);";
+    case fir.check_kind.chk_div_zero:
+        return "fail(div_zero);";
+    case fir.check_kind.chk_div_overflow:
+        return "fail(div_overflow);";
+    case fir.check_kind.chk_bounds:
+        return "fail(bounds);";
+    case fir.check_kind.chk_span:
+        return "fail(span);";
+    case fir.check_kind.chk_alloc_count:
+        return "fail(alloc_count);";
+    case fir.check_kind.chk_overwrite:
+        return "fail(overwrite);";
+    case fir.check_kind.chk_enum:
+        return "fail(enum);";
+    case fir.check_kind.chk_user:
+        return "fail(user);";
+    case fir.check_kind.chk_panic:
+        return "fail(panic);";
+    }
+}
+
+fn every_check_kind_prints_its_name() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u32 none = cast(f.ops.len, u32);
+    u32 last = cast(fir.check_kind.chk_panic, u32);
+    u32 mut k = 0;
+    while (k <= last) {
+        fir.check_kind kind = cast(k, fir.check_kind);
+        fir.terminator t = fir.term_fail(kind, none, 0, diag.loc{}, 0);
+        fir_print.print_terminator(&f, &t, &b);
+        fir_env.expect_text(&b, kind_text(kind));
+        assert(fir_print.check_name(kind).len > 0);
+        k += 1;
+    }
+    println(k, " kinds");
+}
+
+// A switch prints each arm as a constant of the type of its operand, then `otherwise`.
+fn a_switch_prints_its_arms_in_order() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // Three arms over the `i32` parameter, one of them negative.
+    u32 first = fir.arm_push(&f, consts.cv_from_i64(1), 1);
+    fir.arm_push(&f, consts.cv_from_i64(2), 2);
+    fir.arm_push(&f, consts.cv_from_i64(-3), 3);
+    // The empty location keeps the line short; the other switches below have a location.
+    fir.terminator mut t = fir.term_switch(copy(1), first, 3, 4, diag.loc{}, 2);
+    fir_print.print_terminator(&f, &t, &b);
+    string three = "switch(copy _1) -> [i32 1: bb1, i32 2: bb2, i32 -3: bb3, otherwise: bb4];";
+    fir_env.expect_text(&b, three);
+    // An enum operand prints the enum type in each arm.
+    u32 c = fir.local_add(&f, fir_env.ty(&e, "color"), fir.local_kind.lk_temp, null, at(1, 1));
+    u32 two = fir.arm_push(&f, consts.cv_from_u64(0), 5);
+    fir.arm_push(&f, consts.cv_from_u64(1), 6);
+    t = fir.term_switch(copy(c), two, 2, 7, at(3, 5), 2);
+    fir_print.print_terminator(&f, &t, &b);
+    string colors = "switch(copy _3) -> [color 0: bb5, color 1: bb6, otherwise: bb7] #3:5 s2;";
+    fir_env.expect_text(&b, colors);
+    // A `char` arm prints its code point, and a constant operand has the type of the constant.
+    u32 ch = fir.arm_push(&f, consts.cv_from_char(97), 1);
+    fir.operand letter = fir.operand_const(fir.const_int(fir_env.char_ty(&e),
+                                                         consts.cv_from_char(98)));
+    t = fir.term_switch(letter, ch, 1, 2, at(3, 5), 2);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "switch(const char 98) -> [char 97: bb1, otherwise: bb2] #3:5 s2;");
+    // A switch with no arm names only `otherwise`.
+    t = fir.term_switch(copy(1), cast(f.arms.len, u32), 0, 9, at(3, 5), 2);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "switch(copy _1) -> [otherwise: bb9] #3:5 s2;");
+    // A boolean switch prints `false` as well as `true`.
+    u32 flag = fir.local_add(&f, fir_env.bool_ty(&e), fir.local_kind.lk_temp, null, at(1, 1));
+    u32 no = fir.arm_push(&f, consts.cv_from_bool(false), 1);
+    t = fir.term_switch(copy(flag), no, 1, 2, at(3, 5), 2);
+    fir_print.print_terminator(&f, &t, &b);
+    fir_env.expect_text(&b, "switch(copy _4) -> [false: bb1, otherwise: bb2] #3:5 s2;");
+}
+
+// ---- blocks and functions -------------------------------------------------------------------
+
+fn a_block_indents_its_lines() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // A block with no terminator yet prints no terminator line.
+    fir_print.print_block(&f, 0, &b);
+    fir_env.expect_text(&b, "    bb0: {\n    }\n");
+    fir.block_append(&f, 0, fir.stmt_live(1, at(1, 1), 1));
+    fir_print.print_block(&f, 0, &b);
+    fir_env.expect_text(&b, "    bb0: {\n        live(_1) #1:1 s1;\n    }\n");
+    // A block that holds only a terminator.
+    u32 next = fir.block_new(&f);
+    fir.block_set_terminator(&f, next, fir.term_trap(at(2, 1), 2));
+    fir_print.print_block(&f, next, &b);
+    fir_env.expect_text(&b, "    bb1: {\n        trap #2:1 s2;\n    }\n");
+}
+
+// A `let` omits the name of a temporary and the location when it is empty. A parameter prints
+// in the header and not as a `let`.
+fn a_let_prints_what_the_local_has() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    ast.sym mut named = ast.sym{};
+    named.name = "total";
+    diag.loc none = diag.loc{};
+    fir.local_add(&f, fir_env.ty(&e, "pair"), fir.local_kind.lk_temp, null, none);
+    fir.local_add(&f, fir_env.i64_ty(&e), fir.local_kind.lk_named, &named, none);
+    fir.local_add(&f, fir_env.u64_ty(&e), fir.local_kind.lk_named, &named, at(9, 3));
+    fir.block_set_terminator(&f, 0, fir.term_return(at(2, 5), 1));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir_print.print_function(&f, &b);
+    string[10] want = {
+        "fn main.add(_1 (x): i32, _2 (y): i64) -> u64 {",
+        "    let _0: u64;",
+        "    let _3: pair;",
+        "    let _4 (total): i64;",
+        "    let _5 (total): u64 #9:3;",
+        "",
+        "    bb0: {",
+        "        return #2:5 s1;",
+        "    }",
+        "}",
+    };
+    expect_lines(&b, want[..]);
+}
+
+// A function with no parameter has empty parentheses, a `void` function has `_0` of type
+// `void`, and a `noreturn` function names `noreturn` in its header.
+fn a_header_prints_the_function_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir.func mut nothing = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&nothing);
+    fir.block_set_terminator(&nothing, 0, fir.term_return(at(1, 1), 0));
+    fir_print.print_function(&nothing, &b);
+    expect_lines(&b, NOTHING[..]);
+    fir.func mut stop = fir_env.func_of(&e, "stop");
+    defer fir.func_free(&stop);
+    fir.block_set_terminator(&stop, 0, fir.term_trap(at(2, 5), 1));
+    fir_print.print_function(&stop, &b);
+    string[7] want_stop = {
+        "fn main.stop() -> noreturn {",
+        "    let _0: void;",
+        "",
+        "    bb0: {",
+        "        trap #2:5 s1;",
+        "    }",
+        "}",
+    };
+    expect_lines(&b, want_stop[..]);
+    // An aggregate parameter and result.
+    fir.func mut keep = fir_env.func_of(&e, "keep");
+    defer fir.func_free(&keep);
+    fir_print.print_function(&keep, &b);
+    string[6] want_keep = {
+        "fn main.keep(_1 (h): holder) -> holder {",
+        "    let _0: holder;",
+        "",
+        "    bb0: {",
+        "    }",
+        "}",
+    };
+    expect_lines(&b, want_keep[..]);
+}
+
+// ---- modules ------------------------------------------------------------------------------
+
+fn a_module_separates_its_functions_by_a_blank_line() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    // A module with no function prints nothing.
+    fir_print.print_module(&m, &b);
+    fir_env.expect_text(&b, "");
+    fir.func mut first = fir_env.func_of(&e, "nothing");
+    fir.block_set_terminator(&first, 0, fir.term_return(at(1, 1), 0));
+    fir.module_add_function(&m, move(first));
+    // One function prints as print_function prints it.
+    fir_print.print_module(&m, &b);
+    expect_lines(&b, NOTHING[..]);
+    ast.sym mut p = ast.sym{};
+    p.name = "p";
+    fir.module_add_function(&m, build_example(&e, &p));
+    // The globals and externs have no textual form, so the module does not print them.
+    fir.module_add_global(&m, fir.global{fir_env.sym(&e, "LIMIT"), fir_env.i32_ty(&e),
+                                         consts.cv_from_i64(7), null});
+    fir.module_use_extern(&m, fir_env.sym(&e, "puts"));
+    fir_print.print_module(&m, &b);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    append_lines(&want, NOTHING[..]);
+    strbuf.push(&want, '\n');
+    append_lines(&want, EXAMPLE[..]);
+    fir_env.expect_text(&b, strbuf.view(&want));
+}
+
+fn main() i32 {
+    the_worked_example_prints_byte_for_byte();
+    a_statement_prints_its_location_and_index();
+    the_empty_location_prints_nothing();
+    each_terminator_prints_its_spelling();
+    a_fail_prints_its_kind_and_operands();
+    every_check_kind_prints_its_name();
+    a_switch_prints_its_arms_in_order();
+    a_block_indents_its_lines();
+    a_let_prints_what_the_local_has();
+    a_header_prints_the_function_type();
+    a_module_separates_its_functions_by_a_blank_line();
+    println("ok");
+    return 0;
+}

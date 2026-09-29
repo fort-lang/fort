@@ -6,6 +6,8 @@ import check_stmt;
 import consts;
 import containers;
 import diag;
+import fir;
+import fir_print;
 import gen;
 import gen_stmt;
 import index;
@@ -33,6 +35,13 @@ string USAGE = "usage: fort [options] entry.ft";
 
 // The version printed by --version.
 string VERSION = "0.1.0";
+
+// The option that names the point at which --fir prints, and the names it accepts: the two
+// points where FIR changes (spec/fir.md 11, 17.1). Until the passes exist, each name prints the
+// same module.
+string FIR_AFTER_PREFIX = "--fir-after=";
+u64 FIR_PASS_COUNT = 2;
+string[FIR_PASS_COUNT] FIR_PASSES = {"lower", "build-mode"};
 
 // The exit statuses: usage, toolchain and internal errors share 2.
 i32 EXIT_OK = 0;
@@ -76,6 +85,8 @@ struct options {
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
     bool ast; // --ast: the entry file's syntax tree on stdout
+    bool fir; // --fir, or --fir-after: the program's FIR on stdout
+    string fir_after; // the pass of --fir-after, empty without it
     containers.str_vec includes; // -I roots, searched in command-line order
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
@@ -121,6 +132,8 @@ fn help() void {
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
     println("  --ast              write the entry file's syntax tree to stdout and stop");
+    println("  --fir              write the program's FIR to stdout and stop");
+    println("  --fir-after=<pass> write the FIR after <pass>: lower or build-mode");
     println("  --help             print this help and exit");
     println("  --version          print the compiler version and exit");
 }
@@ -248,7 +261,7 @@ fn parse_cfg(options mut* opts, string list) bool {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check,
-// --check, --json, --index, --tokens and --ast, each of which sets one flag.
+// --check, --json, --index, --tokens, --ast and --fir, each of which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -273,6 +286,9 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--ast") {
         // --ast implies nothing and combines with nothing either
         opts->ast = true;
+    } else if (arg == "--fir") {
+        // --fir runs the front end and stops before the emitter
+        opts->fir = true;
     } else {
         return false;
     }
@@ -323,6 +339,21 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     return true;
 }
 
+// Parses `--fir-after=<pass>`, which implies --fir. A name that FIR_PASSES does not hold
+// is a usage error. The last --fir-after wins, as the last -o does.
+fn parse_fir_after(options mut* opts, string arg) bool {
+    string pass = arg[FIR_AFTER_PREFIX.len..];
+    for (string known : FIR_PASSES) {
+        if (pass == known) {
+            opts->fir = true;
+            opts->fir_after = pass;
+            return true;
+        }
+    }
+    usage_error_arg("unknown --fir-after pass", pass);
+    return false;
+}
+
 // Parses args[1..] into *opts, which options_create has prepared. --help and
 // --version print to stdout. A usage error prints `fort: error: <message>`
 // and the usage line to stderr.
@@ -346,6 +377,10 @@ fn parse(options mut* opts, string@ args) i32 {
             return PARSE_DONE;
         } else if (is_link_option(arg)) {
             containers.str_push(&opts->libs, arg);
+        } else if (str.starts_with(arg, FIR_AFTER_PREFIX)) {
+            if (!parse_fir_after(opts, arg)) {
+                return PARSE_ERROR;
+            }
         } else if (!parse_flag(opts, arg)) {
             bool mut ok = true;
             if (!parse_valued(opts, args, &i, &ok)) {
@@ -370,6 +405,11 @@ fn parse(options mut* opts, string@ args) i32 {
     if (opts->ast && (opts->tokens || opts->check || opts->json || opts->index)) {
         // --ast stops before the checker
         usage_error("--ast does not combine with --tokens, --check, --json or --index");
+        return PARSE_ERROR;
+    }
+    if (opts->fir && (opts->tokens || opts->ast || opts->check || opts->json)) {
+        // --fir writes its own text to stdout after the checker; --index sets --check
+        usage_error("--fir does not combine with --tokens, --ast, --check, --json or --index");
         return PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
@@ -1075,13 +1115,29 @@ fn check_document(session.session mut* s, options* opts, analysis mut* an,
     write_document(s, &files, &ix);
 }
 
-// Runs the front end, then the available build or check passes.
+// --fir writes the FIR module of a checked program to stdout, with one print. The lowering
+// does not exist yet (T-236), so the module holds no function and the text is empty.
+// `opts->fir_after` names a pass that does not exist yet either, so every name prints this
+// module.
+fn fir_entry() i32 {
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    fir_print.print_module(&m, &text);
+    print(strbuf.view(&text));
+    return EXIT_OK;
+}
+
+// Runs the front end, then the available build or check passes. --check and --fir write no
+// file, so they take any target form that the compiler accepts, as a check does.
 fn compile_entry(options* opts, string program) i32 {
-    if (opts->check && !target_form(opts->target)) {
+    bool front_only = opts->check || opts->fir;
+    if (front_only && !target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
         return EXIT_USAGE;
     }
-    if (!opts->check && !target_allowed(opts)) {
+    if (!front_only && !target_allowed(opts)) {
         return EXIT_USAGE;
     }
     containers.pool mut p = containers.pool_create();
@@ -1109,6 +1165,10 @@ fn compile_entry(options* opts, string program) i32 {
     if (opts->check) {
         // --check stops after the front end, no module emitted
         return EXIT_OK;
+    }
+    if (opts->fir) {
+        // --fir stops before the emitter
+        return fir_entry();
     }
     string mut out_path = opts->output;
     if (!opts->have_output) {

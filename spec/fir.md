@@ -273,8 +273,12 @@ value (D17.5, rule V6). A `copy` of an owning place lends it (D17.4).
   `bool` (item 15).
 - `cast<T>(a)`: the conversion of D3.14; `T` (item 12).
 - `addr(p)`: the address of `p`, which is `&lv`; a pointer to the type of `p` (item 3).
+  `addr mut(p)` gives a `mut` pointer, as the checker typed the `&`.
 - `slice(p, lo, hi)`: the span `p[lo..hi]` of a fixed array, a span or a `string` at `p`, a view
-  of the elements (D6.9, D17.3); the span type of `p`, or `string` (item 16).
+  of the elements (D6.9, D17.3); the span type of `p`, or `string` (item 16). `slice mut(p, lo,
+  hi)` of a fixed array gives a `mut` span. `mut` appears only on a slice of a fixed-array
+  place. A slice of a span place or a `string` place keeps the `mut` of that place, and a
+  `string` place gives a `string`.
 - `slice_ptr(a, lo, hi)`: the span `a[lo..hi]` of the pointer `a`, with no check (D6.9).
 - `alloc<T>(n)`: `std.rt.alloc` of `n` elements of `T`, where `n` has type `u64`; `T mut* own`
   (item 17).
@@ -687,6 +691,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
 4. The verifier again.
 5. The translator (section 12).
 
+FIR changes at two points of this order, and `--fir-after=<pass>` (D14.1) names them: `lower`
+is the output of the lowering (section 9), and `build-mode` is the output of step 3.
+
 Two passes can come later and need no change to FIR: a **check elimination** pass that proves a
 `check` false and replaces it by `goto`, such as the bounds check of `a[i]` inside
 `for (i = 0; i < 4; i++)`; and an **interpreter** that runs FIR at compile time, for the
@@ -824,14 +831,17 @@ meets a further difference lists it here or removes it (16.2).
 The textual form is what `--fir` prints (open question 1) and what a FIR test reads. One parser
 reads it, so a test can write a function by hand, run one pass, and compare the result with an
 expected text. A comment starts with `//` and ends at the line. A location `#line:col` is
-optional after a `let`, a statement or a terminator; a hand-written function without one has
-the location 1:1. A statement index `s<N>` may follow the location of a statement or a
-terminator; without one, the translator treats every temporary as a `%tmp` slot. A `let` may
-carry the name of a named local in parentheses.
+optional after a `let`, a statement or a terminator. A `let`, a statement or a terminator
+without a location has the empty location, and the printer writes no location for the empty
+location, so a printed function reads back as it was. A statement index `s<N>` may follow the
+location of a statement or a terminator; without one, the translator treats every temporary as
+a `%tmp` slot. A `let` may carry the name of a named local in parentheses, and a parameter may
+carry its name in the same way.
 
 ```ebnf
-function    = "fn" name "(" [ param { "," param } ] ")" "->" type "{" { local } { block } "}" ;
-param       = local_ref ":" type ;
+function    = "fn" name "(" [ param { "," param } ] ")" "->" ( type | "noreturn" ) "{" { local }
+              { block } "}" ;
+param       = local_ref [ "(" identifier ")" ] ":" type ;
 local       = "let" local_ref [ "(" identifier ")" ] ":" type [ position ] ";" ;
 block       = block_ref ":" "{" { statement } terminator "}" ;
 statement   = ( assign | "del" "(" "move" place ")" | "live" "(" local_ref ")"
@@ -847,8 +857,8 @@ fail        = "fail" "(" kind { "," operand } ")" ;
 rvalue      = operand
             | opname "(" [ operand { "," operand } ] ")"
             | "cast" "<" type ">" "(" operand ")"
-            | "addr" "(" place ")"
-            | "slice" "(" place "," operand "," operand ")"
+            | "addr" [ "mut" ] "(" place ")"
+            | "slice" [ "mut" ] "(" place "," operand "," operand ")"
             | "slice_ptr" "(" operand "," operand "," operand ")"
             | "alloc" "<" type ">" "(" operand ")"
             | "aggregate" type "(" [ operand { "," operand } ] ")"
@@ -859,16 +869,19 @@ place       = ( local_ref | "global" name | "(" "*" place ")" ) { projection } ;
 projection  = "." integer | "[" local_ref "]" ;
 constant    = type integer | "true" | "false" | "null" type | "zero" type | string
             | "bytes" string | "enum_table" name | "fn" name ;
-location    = position [ "exit" position ] [ "s" integer ] ;
-position    = "#" integer ":" integer ;
+location    = position [ "exit" line_col ] [ "s" integer ] ;
+position    = "#" line_col ;
+line_col    = integer ":" integer ;
 integer     = [ "-" ] ( dec_digit { dec_digit } | "0x" hex_digit { hex_digit } ) ;
 local_ref   = "_" integer ;
 block_ref   = "bb" integer ;
 ```
 
 `type` is a fort type in the spelling of `type_to_str`. `opname` is one of the rvalue names of
-section 6. `kind` is one of the kinds of section 8. `name` is a dotted symbol name of D9.7.
-`identifier`, `string`, `dec_digit` and `hex_digit` are those of `grammar.md` 1.
+section 6. A `mut` after `addr` gives the result a `mut` pointer, and a `mut` after `slice`, which
+appears only on a slice of a fixed-array place, gives a `mut` span (section 6). `kind` is one of the
+kinds of section 8. `name` is a dotted symbol name of D9.7. `identifier`, `string`, `dec_digit` and
+`hex_digit` are those of `grammar.md` 1.
 
 This program:
 
@@ -887,7 +900,7 @@ fn f(bool c) i32 {
 has this FIR after the lowering, before the build-mode pass:
 
 ```fir
-fn main.f(_1: bool) -> i32 {
+fn main.f(_1 (c): bool) -> i32 {
     let _0: i32;
     let _2 (p): i32 mut* own #2:18;
     let _3: i32 mut* own #2:22;           // the value of new(i32)

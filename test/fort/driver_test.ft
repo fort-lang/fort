@@ -7,6 +7,7 @@
 //| help ok
 //| statuses ok
 //| dumps ok
+//| fir ok
 //| front end ok
 //| std dir ok
 //| reentrancy ok
@@ -111,6 +112,8 @@ fn every_flag_sets_its_own_option() void {
     assert(!opts.index);
     assert(!opts.tokens);
     assert(!opts.ast);
+    assert(!opts.fir);
+    assert(opts.fir_after.len == 0);
 }
 
 // --index implies --check and --json, so it is the whole command line an
@@ -330,9 +333,12 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 21);
+    assert(capture.line_count(out) == 23);
     assert(str.find(out, "  --cfg <list>       set key=value pairs; repeatable\n") >= 0);
     assert(str.find(out, "  --help             print this help and exit\n") >= 0);
+    assert(str.find(out, "  --fir              write the program's FIR to stdout and stop\n") >= 0);
+    string after = "  --fir-after=<pass> write the FIR after <pass>: lower or build-mode\n";
+    assert(str.find(out, after) >= 0);
     // --help answers whatever follows it, and nothing else runs.
     assert(captured_err_is_empty());
 }
@@ -902,6 +908,141 @@ fn a_hundred_runs_answer_alike() void {
     assert(err == strbuf.view(&want));
 }
 
+// ---- the FIR of a program ------------------------------------------------------
+
+// --fir sets its own flag and nothing else. --fir-after=<pass> implies --fir and keeps the
+// name of the pass; each of the two names of spec/fir.md 11 parses.
+fn fir_and_fir_after_parse() void {
+    string[3] mut plain = {"fort", "--fir", "entry.ft"};
+    driver.options mut a = driver.options_create();
+    defer driver.options_free(&a);
+    assert(driver.parse(&a, plain[0..3]) == driver.PARSE_OK);
+    assert(a.fir);
+    assert(a.fir_after.len == 0);
+    assert(!a.check && !a.json && !a.index && !a.tokens && !a.ast && !a.emit_ir);
+    string[2] mut names = {"--fir-after=lower", "--fir-after=build-mode"};
+    string[2] mut passes = {"lower", "build-mode"};
+    u64 mut i = 0;
+    while (i < 2) {
+        string[3] mut argv = {"fort", names[i], "entry.ft"};
+        driver.options mut b = driver.options_create();
+        assert(driver.parse(&b, argv[0..3]) == driver.PARSE_OK);
+        assert(b.fir);
+        assert(b.fir_after == passes[i]);
+        driver.options_free(&b);
+        i += 1;
+    }
+    // The last --fir-after wins, as the last -o does.
+    string[4] mut twice = {"fort", "--fir-after=build-mode", "--fir-after=lower", "entry.ft"};
+    driver.options mut c = driver.options_create();
+    defer driver.options_free(&c);
+    assert(driver.parse(&c, twice[0..4]) == driver.PARSE_OK);
+    assert(c.fir_after == "lower");
+}
+
+// A name that spec/fir.md 11 does not give is a usage error, and so is the empty name. The
+// verifier changes nothing, so `verify` is not a name.
+// The option without `=` is not --fir-after, so it is an unknown option.
+fn an_unknown_fir_pass_is_a_usage_error() void {
+    string[3] mut bogus = {"fort", "--fir-after=bogus", "entry.ft"};
+    assert(run(bogus[0..3]) == EXIT_USAGE);
+    string own err = captured_err();
+    defer del(err);
+    string want = "fort: error: unknown --fir-after pass 'bogus'\nusage: fort [options] entry.ft\n";
+    assert(err == want);
+    string[3] mut verify = {"fort", "--fir-after=verify", "entry.ft"};
+    assert(run(verify[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown --fir-after pass 'verify'\n"));
+    string[3] mut empty = {"fort", "--fir-after=", "entry.ft"};
+    assert(run(empty[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown --fir-after pass ''\n"));
+    // The names are case-sensitive and whole.
+    string[3] mut upper = {"fort", "--fir-after=Lower", "entry.ft"};
+    assert(run(upper[0..3]) == EXIT_USAGE);
+    assert(err_has("unknown --fir-after pass 'Lower'"));
+    string[3] mut longer = {"fort", "--fir-after=lowering", "entry.ft"};
+    assert(run(longer[0..3]) == EXIT_USAGE);
+    assert(err_has("unknown --fir-after pass 'lowering'"));
+    string[3] mut bare = {"fort", "--fir-after", "entry.ft"};
+    assert(run(bare[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown option '--fir-after'\n"));
+    // --fir takes no value.
+    string[3] mut valued = {"fort", "--fir=lower", "entry.ft"};
+    assert(run(valued[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown option '--fir=lower'\n"));
+}
+
+// --fir writes its own text to stdout, so it does not combine with a dump or with the check
+// mode.
+fn fir_combines_with_no_other_mode() void {
+    string message = "--fir does not combine with --tokens, --ast, --check, --json or --index";
+    string[4] mut check = {"fort", "--fir", "--check", "entry.ft"};
+    assert(run(check[0..4]) == EXIT_USAGE);
+    assert(err_has(message));
+    string[4] mut ast = {"fort", "--ast", "--fir-after=lower", "entry.ft"};
+    assert(run(ast[0..4]) == EXIT_USAGE);
+    assert(err_has(message));
+    string[4] mut tokens = {"fort", "--fir", "--tokens", "entry.ft"};
+    assert(run(tokens[0..4]) == EXIT_USAGE);
+    assert(err_has(message));
+    string[4] mut index = {"fort", "--index", "--fir", "entry.ft"};
+    assert(run(index[0..4]) == EXIT_USAGE);
+    assert(err_has(message));
+    string[4] mut json = {"fort", "--fir", "--json", "entry.ft"};
+    assert(run(json[0..4]) == EXIT_USAGE);
+    assert(err_has(message));
+}
+
+// --fir on a clean program checks the closure, prints the FIR module and exits 0. The lowering
+// does not exist yet, so the module has no function and the text is empty. Nothing is emitted:
+// the output that -o names does not exist after the run.
+fn fir_of_a_clean_program_exits_zero() void {
+    write_file("fir_clean.ft", "fn main() i32 {\n    return 0;\n}\n");
+    string[5] mut argv = {"fort", "--fir", "fir_clean.ft", "-o", "fir_clean.out"};
+    assert(run(argv[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    assert(out == "");
+    strbuf.str_buf mut file = strbuf.create();
+    defer strbuf.free(&file);
+    assert(!io.read_file("fir_clean.out", &file));
+    // Each pass name prints the same module until the passes exist.
+    string[3] mut after = {"fort", "--fir-after=build-mode", "fir_clean.ft"};
+    assert(run(after[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own again = captured_out();
+    defer del(again);
+    assert(again == out);
+    // A --cc that cannot run changes nothing, because --fir stops before it.
+    string[5] mut cc = {"fort", "--fir", "--cc", "./nosuchcc", "fir_clean.ft"};
+    assert(run(cc[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    // --fir takes the target rule of --check: a form the compiler does not accept is exit 2.
+    string[5] mut target = {"fort", "--fir", "--target", "t", "fir_clean.ft"};
+    assert(run(target[0..5]) == EXIT_USAGE);
+    assert(err_has("unsupported target 't'"));
+    // The other target is no link error, because --fir writes no file.
+    string[5] mut foreign = {"fort", "--fir", "--target", other_target(), "fir_clean.ft"};
+    assert(run(foreign[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    // --fir compiles a program, so the entry module must define `main`.
+    write_file("fir_no_main.ft", "fn helper() i32 {\n    return 0;\n}\n");
+    string[3] mut no_main = {"fort", "--fir", "fir_no_main.ft"};
+    assert(run(no_main[0..3]) == EXIT_COMPILE_ERROR);
+}
+
+// --fir on a program with a type error prints the diagnostic, exits 1 and writes no FIR.
+fn fir_of_a_program_with_a_type_error_exits_one() void {
+    write_file("fir_bad.ft", "fn main() i32 {\n    return true;\n}\n");
+    string[3] mut argv = {"fort", "--fir", "fir_bad.ft"};
+    assert(run(argv[0..3]) == EXIT_COMPILE_ERROR);
+    assert(err_has("fir_bad.ft:2:12: error: "));
+    string own out = captured_out();
+    defer del(out);
+    assert(out == "");
+}
+
 fn main() i32 {
     write_runtime();
     every_flag_sets_its_own_option();
@@ -948,6 +1089,12 @@ fn main() i32 {
     neither_dump_opens_an_import();
     a_dump_of_an_unreadable_file_is_exit_two();
     println("dumps ok");
+    fir_and_fir_after_parse();
+    an_unknown_fir_pass_is_a_usage_error();
+    fir_combines_with_no_other_mode();
+    fir_of_a_clean_program_exits_zero();
+    fir_of_a_program_with_a_type_error_exits_one();
+    println("fir ok");
     the_front_end_walks_the_closure();
     an_include_root_is_searched();
     the_current_directory_is_not_a_search_root();

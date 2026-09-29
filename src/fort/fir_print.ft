@@ -1,0 +1,604 @@
+/// Writes the textual form of FIR (spec/fir.md 13): a type, a place, an operand, a constant, an
+/// rvalue, a statement, a terminator, a block, a function and a module. `fort --fir` prints it,
+/// and a FIR test compares it with an expected text.
+//
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: every function writes into the buffer that the caller gives it.
+import ast;
+import consts;
+import diag;
+import fir;
+import std.strbuf;
+import types;
+
+// The bytes that a quoted text writes as they are. Every other byte is `\xHH`.
+u64 PRINTABLE_LOW = 32;
+u64 PRINTABLE_HIGH = 126;
+string HEX_DIGITS = "0123456789ABCDEF";
+u64 HEX_RADIX = 16;
+
+// The hex digits of a float constant: the 64 bits of its `double`, four bits for each digit.
+u64 FLOAT_DIGITS = 16;
+u64 NIBBLE_BITS = 4;
+u64 NIBBLE_MASK = 15;
+
+// The indentation of a `let` and a block, and of a statement and a terminator.
+string OUTER = "    ";
+string INNER = "        ";
+
+// ---- names --------------------------------------------------------------------------
+
+/// The name of an rvalue kind in the textual form: `add`, `cast`, `call` and so on (spec/fir.md
+/// 6). `rv_use` has no name, because the operand stands alone.
+fn rvalue_name(fir.rvalue_kind kind) string {
+    switch (kind) {
+    case fir.rvalue_kind.rv_use:
+        return "";
+    case fir.rvalue_kind.rv_add:
+        return "add";
+    case fir.rvalue_kind.rv_sub:
+        return "sub";
+    case fir.rvalue_kind.rv_mul:
+        return "mul";
+    case fir.rvalue_kind.rv_add_overflows:
+        return "add_overflows";
+    case fir.rvalue_kind.rv_sub_overflows:
+        return "sub_overflows";
+    case fir.rvalue_kind.rv_mul_overflows:
+        return "mul_overflows";
+    case fir.rvalue_kind.rv_div:
+        return "div";
+    case fir.rvalue_kind.rv_rem:
+        return "rem";
+    case fir.rvalue_kind.rv_and:
+        return "and";
+    case fir.rvalue_kind.rv_or:
+        return "or";
+    case fir.rvalue_kind.rv_xor:
+        return "xor";
+    case fir.rvalue_kind.rv_not:
+        return "not";
+    case fir.rvalue_kind.rv_shl:
+        return "shl";
+    case fir.rvalue_kind.rv_shr:
+        return "shr";
+    case fir.rvalue_kind.rv_fadd:
+        return "fadd";
+    case fir.rvalue_kind.rv_fsub:
+        return "fsub";
+    case fir.rvalue_kind.rv_fmul:
+        return "fmul";
+    case fir.rvalue_kind.rv_fdiv:
+        return "fdiv";
+    case fir.rvalue_kind.rv_fneg:
+        return "fneg";
+    case fir.rvalue_kind.rv_eq:
+        return "eq";
+    case fir.rvalue_kind.rv_ne:
+        return "ne";
+    case fir.rvalue_kind.rv_lt:
+        return "lt";
+    case fir.rvalue_kind.rv_le:
+        return "le";
+    case fir.rvalue_kind.rv_gt:
+        return "gt";
+    case fir.rvalue_kind.rv_ge:
+        return "ge";
+    case fir.rvalue_kind.rv_cast:
+        return "cast";
+    case fir.rvalue_kind.rv_addr:
+        return "addr";
+    case fir.rvalue_kind.rv_slice:
+        return "slice";
+    case fir.rvalue_kind.rv_slice_ptr:
+        return "slice_ptr";
+    case fir.rvalue_kind.rv_alloc:
+        return "alloc";
+    case fir.rvalue_kind.rv_aggregate:
+        return "aggregate";
+    case fir.rvalue_kind.rv_call:
+        return "call";
+    }
+}
+
+/// The name of a check kind in the textual form: `overflow`, `bounds` and so on (spec/fir.md 8).
+fn check_name(fir.check_kind kind) string {
+    switch (kind) {
+    case fir.check_kind.chk_overflow:
+        return "overflow";
+    case fir.check_kind.chk_shift:
+        return "shift";
+    case fir.check_kind.chk_div_zero:
+        return "div_zero";
+    case fir.check_kind.chk_div_overflow:
+        return "div_overflow";
+    case fir.check_kind.chk_bounds:
+        return "bounds";
+    case fir.check_kind.chk_span:
+        return "span";
+    case fir.check_kind.chk_alloc_count:
+        return "alloc_count";
+    case fir.check_kind.chk_overwrite:
+        return "overwrite";
+    case fir.check_kind.chk_enum:
+        return "enum";
+    case fir.check_kind.chk_user:
+        return "user";
+    case fir.check_kind.chk_panic:
+        return "panic";
+    }
+}
+
+// ---- types, places, operands and constants ------------------------------------------------
+
+/// Writes the spelling of `t` that the checker uses (`types.type_to_str`).
+fn print_type(types.node* t, strbuf.str_buf mut* out) void {
+    types.type_to_str(t, out);
+}
+
+// Writes the dotted name of D9.7: the module path, a dot and the declaration name. An `extern
+// fn` keeps its C name. gen.gen_symbol gives the same name.
+fn print_symbol(ast.sym* s, strbuf.str_buf mut* out) void {
+    if (s->kind != ast.sym_kind.s_extern_fn && s->owner != null
+        && s->owner->kind == ast.sym_kind.s_module) {
+        strbuf.append(out, s->owner->name);
+        strbuf.push(out, '.');
+    }
+    strbuf.append(out, s->name);
+}
+
+// Writes `_n`.
+fn print_local_ref(u32 n, strbuf.str_buf mut* out) void {
+    strbuf.push(out, '_');
+    strbuf.append_u64(out, cast(n, u64));
+}
+
+// Writes `bbN`.
+fn print_block_ref(u32 b, strbuf.str_buf mut* out) void {
+    strbuf.append(out, "bb");
+    strbuf.append_u64(out, cast(b, u64));
+}
+
+/// Writes a place: its base, `_n` or `global m.NAME`, and then its projections, `.k` and `[_i]`.
+/// A `deref` wraps all that comes before it, so `(*_3).0` is field 0 of the value that `_3`
+/// points to, and `(*_3.0)` is the value that field 0 of `_3` points to.
+// Each deref opens a `(*` before the base and closes it at its own position.
+fn print_place(fir.func* f, fir.place p, strbuf.str_buf mut* out) void {
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        if (fir.place_projection(f, p, i).kind == fir.proj_kind.pj_deref) {
+            strbuf.append(out, "(*");
+        }
+        i += 1;
+    }
+    if (p.base == fir.base_kind.bk_global) {
+        strbuf.append(out, "global ");
+        print_symbol(p.global, out);
+    } else {
+        print_local_ref(p.local, out);
+    }
+    i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        switch (pj.kind) {
+        case fir.proj_kind.pj_deref:
+            strbuf.push(out, ')');
+        case fir.proj_kind.pj_field:
+            strbuf.push(out, '.');
+            strbuf.append_u64(out, cast(pj.field, u64));
+        case fir.proj_kind.pj_index:
+            strbuf.push(out, '[');
+            print_local_ref(pj.index, out);
+            strbuf.push(out, ']');
+        }
+        i += 1;
+    }
+}
+
+// Writes an integer value in decimal, with `-` before a negative value. A `char` value writes
+// its code point.
+fn print_int(consts.cval v, strbuf.str_buf mut* out) void {
+    if (v.neg) {
+        strbuf.push(out, '-');
+    }
+    strbuf.append_u64(out, v.mag);
+}
+
+// Writes `true` or `false`.
+fn print_bool(consts.cval v, strbuf.str_buf mut* out) void {
+    if (v.mag != 0) {
+        strbuf.append(out, "true");
+    } else {
+        strbuf.append(out, "false");
+    }
+}
+
+// Writes `0x` and the 16 uppercase hex digits of `bits` (D19.5).
+fn print_hex64(u64 bits, strbuf.str_buf mut* out) void {
+    strbuf.append(out, "0x");
+    u64 mut i = FLOAT_DIGITS;
+    while (i > 0) {
+        i -= 1;
+        strbuf.push(out, HEX_DIGITS[(bits >> (i * NIBBLE_BITS)) & NIBBLE_MASK]);
+    }
+}
+
+// Writes `text` between double quotes. A `"` and a `\` take a `\` before them, and every byte
+// outside 32 to 126 is `\xHH`, as ast.sexp_quoted writes it.
+fn print_quoted(string text, strbuf.str_buf mut* out) void {
+    strbuf.push(out, '"');
+    for (char c : text) {
+        u64 byte = cast(c, u64);
+        if (c == '"' || c == '\\') {
+            strbuf.push(out, '\\');
+            strbuf.push(out, c);
+        } else if (byte < PRINTABLE_LOW || byte > PRINTABLE_HIGH) {
+            strbuf.append(out, "\\x");
+            strbuf.push(out, HEX_DIGITS[byte / HEX_RADIX]);
+            strbuf.push(out, HEX_DIGITS[byte % HEX_RADIX]);
+        } else {
+            strbuf.push(out, c);
+        }
+    }
+    strbuf.push(out, '"');
+}
+
+/// Writes a constant as the grammar rule `constant` spells it: `i32 -1`, `true`, `f64 0x...`,
+/// `null T`, `zero T`, `"..."`, `bytes "..."`, `enum_table m.E` or `fn m.f`. An operand writes
+/// `const` before it; a switch arm does not.
+fn print_constant(fir.constant c, strbuf.str_buf mut* out) void {
+    switch (c.kind) {
+    case fir.const_kind.ck_int:
+        print_type(c.ty, out);
+        strbuf.push(out, ' ');
+        print_int(c.value, out);
+    case fir.const_kind.ck_bool:
+        print_bool(c.value, out);
+    case fir.const_kind.ck_float:
+        print_type(c.ty, out);
+        strbuf.push(out, ' ');
+        print_hex64(consts.cv_float_bits(c.value), out);
+    case fir.const_kind.ck_null:
+        strbuf.append(out, "null ");
+        print_type(c.ty, out);
+    case fir.const_kind.ck_zero:
+        strbuf.append(out, "zero ");
+        print_type(c.ty, out);
+    case fir.const_kind.ck_string:
+        print_quoted(c.text, out);
+    case fir.const_kind.ck_bytes:
+        strbuf.append(out, "bytes ");
+        print_quoted(c.text, out);
+    case fir.const_kind.ck_enum_table:
+        strbuf.append(out, "enum_table ");
+        print_symbol(c.sym, out);
+    case fir.const_kind.ck_fn:
+        strbuf.append(out, "fn ");
+        print_symbol(c.sym, out);
+    }
+}
+
+/// Writes an operand: `copy p`, `move p` or `const c`.
+fn print_operand(fir.func* f, fir.operand o, strbuf.str_buf mut* out) void {
+    switch (o.kind) {
+    case fir.operand_kind.ok_copy:
+        strbuf.append(out, "copy ");
+        print_place(f, o.place, out);
+    case fir.operand_kind.ok_move:
+        strbuf.append(out, "move ");
+        print_place(f, o.place, out);
+    case fir.operand_kind.ok_const:
+        strbuf.append(out, "const ");
+        print_constant(o.value, out);
+    }
+}
+
+// Writes the operands `first` to `first + len - 1` of the operand vector, separated by `, `.
+fn print_operand_list(fir.func* f, u32 first, u32 len, strbuf.str_buf mut* out) void {
+    u32 mut i = 0;
+    while (i < len) {
+        if (i > 0) {
+            strbuf.append(out, ", ");
+        }
+        print_operand(f, fir.operand_at(f, first + i), out);
+        i += 1;
+    }
+}
+
+// ---- rvalues ------------------------------------------------------------------------------
+
+/// Writes an rvalue as the grammar rule `rvalue` spells it (spec/fir.md 6, 13). An `rv_use` is
+/// its operand alone, and every other form begins with its name: `add(a, b)`, `cast<T>(a)`,
+/// `addr(p)` or `addr mut(p)`, `slice(p, lo, hi)` or `slice mut(p, lo, hi)`, `alloc<T>(n)`,
+/// `aggregate T(a, ...)`, and `call fn m.f(...)`, `call extern name(...)` or
+/// `call <operand>(...)`.
+fn print_rvalue(fir.func* f, fir.rvalue r, strbuf.str_buf mut* out) void {
+    if (r.kind == fir.rvalue_kind.rv_use) {
+        print_operand(f, fir.rvalue_operand(f, r, 0), out);
+        return;
+    }
+    strbuf.append(out, rvalue_name(r.kind));
+    bool takes_place = r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice;
+    if (takes_place && r.is_mut) {
+        strbuf.append(out, " mut");
+    }
+    if (r.kind == fir.rvalue_kind.rv_cast || r.kind == fir.rvalue_kind.rv_alloc) {
+        strbuf.push(out, '<');
+        print_type(r.ty, out);
+        strbuf.push(out, '>');
+    } else if (r.kind == fir.rvalue_kind.rv_aggregate) {
+        strbuf.push(out, ' ');
+        print_type(r.ty, out);
+    } else if (r.kind == fir.rvalue_kind.rv_call) {
+        strbuf.push(out, ' ');
+        print_callee(f, r, out);
+    }
+    strbuf.push(out, '(');
+    if (takes_place) {
+        print_place(f, r.place, out);
+        if (r.ops_len > 0) {
+            strbuf.append(out, ", ");
+        }
+    }
+    print_operand_list(f, r.ops_first, r.ops_len, out);
+    strbuf.push(out, ')');
+}
+
+// Writes what a call names: `fn m.f`, `extern name` or the operand of function type.
+fn print_callee(fir.func* f, fir.rvalue r, strbuf.str_buf mut* out) void {
+    switch (r.callee) {
+    case fir.callee_kind.cl_fn:
+        strbuf.append(out, "fn ");
+        print_symbol(r.callee_sym, out);
+    case fir.callee_kind.cl_extern:
+        strbuf.append(out, "extern ");
+        print_symbol(r.callee_sym, out);
+    case fir.callee_kind.cl_value:
+        print_operand(f, r.callee_op, out);
+    }
+}
+
+// ---- locations, statements and terminators -------------------------------------------------
+
+/// Whether `at` is the empty location, which the textual form omits: a location with no line.
+fn location_empty(diag.loc at) bool {
+    return at.line == 0;
+}
+
+// Writes `line:col`.
+fn print_line_col(diag.loc at, strbuf.str_buf mut* out) void {
+    strbuf.append_u64(out, cast(at.line, u64));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.col, u64));
+}
+
+/// Writes the location of a statement or a terminator with a space before it: ` #l:c`, then
+/// ` exit l:c` when `exit_loc` is not empty, then ` sN`. The grammar rule `location` begins with
+/// the position, so an empty `at` writes nothing, the exit and the index included.
+fn print_location(diag.loc at, diag.loc exit_loc, u32 index, strbuf.str_buf mut* out) void {
+    if (location_empty(at)) {
+        return;
+    }
+    strbuf.append(out, " #");
+    print_line_col(at, out);
+    if (!location_empty(exit_loc)) {
+        strbuf.append(out, " exit ");
+        print_line_col(exit_loc, out);
+    }
+    strbuf.append(out, " s");
+    strbuf.append_u64(out, cast(index, u64));
+}
+
+/// Writes a statement and its `;`, with no indentation and no newline: `p = rvalue`,
+/// `del(move p)`, `live(_n)` or `dead(_n)`, then the location.
+fn print_statement(fir.func* f, fir.statement* s, strbuf.str_buf mut* out) void {
+    switch (s->kind) {
+    case fir.stmt_kind.st_assign:
+        print_place(f, s->place, out);
+        strbuf.append(out, " = ");
+        print_rvalue(f, s->value, out);
+    case fir.stmt_kind.st_del:
+        strbuf.append(out, "del(move ");
+        print_place(f, s->place, out);
+        strbuf.push(out, ')');
+    case fir.stmt_kind.st_live:
+        strbuf.append(out, "live(");
+        print_local_ref(s->local, out);
+        strbuf.push(out, ')');
+    case fir.stmt_kind.st_dead:
+        strbuf.append(out, "dead(");
+        print_local_ref(s->local, out);
+        strbuf.push(out, ')');
+    }
+    print_location(s->loc, s->exit_loc, s->stmt, out);
+    strbuf.push(out, ';');
+}
+
+// Writes the value of a switch arm as a constant of the type `ty` of the switch operand: `true`
+// or `false` for a boolean, else the type and the integer.
+fn print_arm_value(types.node* ty, consts.cval v, strbuf.str_buf mut* out) void {
+    if (v.kind == consts.cval_kind.cv_bool) {
+        print_bool(v, out);
+        return;
+    }
+    print_type(ty, out);
+    strbuf.push(out, ' ');
+    print_int(v, out);
+}
+
+// Writes `switch(a) -> [c1: bb1, ..., otherwise: bbM]`.
+fn print_switch(fir.func* f, fir.terminator* t, strbuf.str_buf mut* out) void {
+    strbuf.append(out, "switch(");
+    print_operand(f, t->cond, out);
+    strbuf.append(out, ") -> [");
+    types.node* ty = fir.operand_type(f, t->cond);
+    u32 mut i = 0;
+    while (i < t->arms_len) {
+        fir.arm a = fir.term_arm(f, t, i);
+        print_arm_value(ty, a.value, out);
+        strbuf.append(out, ": ");
+        print_block_ref(a.target, out);
+        strbuf.append(out, ", ");
+        i += 1;
+    }
+    strbuf.append(out, "otherwise: ");
+    print_block_ref(t->otherwise, out);
+    strbuf.push(out, ']');
+}
+
+// Writes `, a` for each operand that a `check` or a `fail` reports.
+fn print_reported(fir.func* f, fir.terminator* t, strbuf.str_buf mut* out) void {
+    u32 mut i = 0;
+    while (i < t->args_len) {
+        strbuf.append(out, ", ");
+        print_operand(f, fir.operand_at(f, t->args_first + i), out);
+        i += 1;
+    }
+}
+
+/// Writes a terminator and its `;`, with no indentation and no newline: `goto bbN`, a `switch`,
+/// `return`, `check(f, kind, args) -> bbN`, `check(overwrite: p) -> bbN`, `fail(kind, args)`,
+/// `trap` or `unreachable`, then the location.
+fn print_terminator(fir.func* f, fir.terminator* t, strbuf.str_buf mut* out) void {
+    switch (t->kind) {
+    case fir.term_kind.tk_goto:
+        strbuf.append(out, "goto ");
+        print_block_ref(t->target, out);
+    case fir.term_kind.tk_switch:
+        print_switch(f, t, out);
+    case fir.term_kind.tk_return:
+        strbuf.append(out, "return");
+    case fir.term_kind.tk_check:
+        strbuf.append(out, "check(");
+        print_operand(f, t->cond, out);
+        strbuf.append(out, ", ");
+        strbuf.append(out, check_name(t->check));
+        print_reported(f, t, out);
+        strbuf.append(out, ") -> ");
+        print_block_ref(t->target, out);
+    case fir.term_kind.tk_check_overwrite:
+        strbuf.append(out, "check(overwrite: ");
+        print_place(f, t->place, out);
+        strbuf.append(out, ") -> ");
+        print_block_ref(t->target, out);
+    case fir.term_kind.tk_fail:
+        strbuf.append(out, "fail(");
+        strbuf.append(out, check_name(t->check));
+        print_reported(f, t, out);
+        strbuf.push(out, ')');
+    case fir.term_kind.tk_trap:
+        strbuf.append(out, "trap");
+    case fir.term_kind.tk_unreachable:
+        strbuf.append(out, "unreachable");
+    }
+    print_location(t->loc, t->exit_loc, t->stmt, out);
+    strbuf.push(out, ';');
+}
+
+// ---- blocks, functions and modules -----------------------------------------------------------
+
+/// Writes block `b`: `    bbN: {`, each statement and the terminator on a line of its own with
+/// eight spaces before it, and `    }`. A block with no terminator yet writes no terminator line.
+fn print_block(fir.func* f, u32 b, strbuf.str_buf mut* out) void {
+    strbuf.append(out, OUTER);
+    print_block_ref(b, out);
+    strbuf.append(out, ": {\n");
+    u32 mut i = 0;
+    while (i < fir.block_statement_count(f, b)) {
+        strbuf.append(out, INNER);
+        print_statement(f, fir.block_statement(f, b, i), out);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    fir.block* blk = fir.block_at(f, b);
+    if (blk->terminated) {
+        strbuf.append(out, INNER);
+        print_terminator(f, &blk->term, out);
+        strbuf.push(out, '\n');
+    }
+    strbuf.append(out, OUTER);
+    strbuf.append(out, "}\n");
+}
+
+// Writes `_n`, then ` (name)` when the local has a symbol, then `: T`.
+fn print_local_decl(fir.local* l, strbuf.str_buf mut* out) void {
+    print_local_ref(l->number, out);
+    if (l->sym != null) {
+        strbuf.append(out, " (");
+        strbuf.append(out, l->sym->name);
+        strbuf.push(out, ')');
+    }
+    strbuf.append(out, ": ");
+    print_type(l->ty, out);
+}
+
+// Writes `fn m.f(_1 (a): T, ...) -> R {`. A `noreturn` function writes `-> noreturn`, which its
+// function type records, where its `_0` has the type `void`.
+fn print_header(fir.func* f, strbuf.str_buf mut* out) void {
+    strbuf.append(out, "fn ");
+    print_symbol(f->sym, out);
+    strbuf.push(out, '(');
+    bool mut first = true;
+    u32 mut n = 0;
+    while (n < fir.local_count(f)) {
+        fir.local* l = fir.local_at(f, n);
+        if (l->kind == fir.local_kind.lk_param) {
+            if (!first) {
+                strbuf.append(out, ", ");
+            }
+            first = false;
+            print_local_decl(l, out);
+        }
+        n += 1;
+    }
+    strbuf.append(out, ") -> ");
+    if (f->ty->is_noreturn) {
+        strbuf.append(out, "noreturn");
+    } else {
+        print_type(f->ty->elem, out);
+    }
+    strbuf.append(out, " {\n");
+}
+
+/// Writes a function: the header, one `let` for each local that is not a parameter, a blank
+/// line, the blocks in number order, and `}`. A `let` is `let _n (name): T #l:c;`; a local with
+/// no symbol omits ` (name)`, and one with the empty location omits ` #l:c`.
+fn print_function(fir.func* f, strbuf.str_buf mut* out) void {
+    print_header(f, out);
+    u32 mut n = 0;
+    while (n < fir.local_count(f)) {
+        fir.local* l = fir.local_at(f, n);
+        if (l->kind != fir.local_kind.lk_param) {
+            strbuf.append(out, OUTER);
+            strbuf.append(out, "let ");
+            print_local_decl(l, out);
+            if (!location_empty(l->loc)) {
+                strbuf.append(out, " #");
+                print_line_col(l->loc, out);
+            }
+            strbuf.append(out, ";\n");
+        }
+        n += 1;
+    }
+    strbuf.push(out, '\n');
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        print_block(f, b, out);
+        b += 1;
+    }
+    strbuf.append(out, "}\n");
+}
+
+/// Writes the functions of `m` in order, with a blank line between two functions. The textual
+/// form has no rule for a global or an extern, so the module writes neither, and a module with
+/// no function writes nothing.
+fn print_module(fir.module* m, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    while (i < fir.module_function_count(m)) {
+        if (i > 0) {
+            strbuf.push(out, '\n');
+        }
+        print_function(fir.module_function_at(m, i), out);
+        i += 1;
+    }
+}
