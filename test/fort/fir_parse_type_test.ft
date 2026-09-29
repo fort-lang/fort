@@ -1,0 +1,252 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| 45 types
+//| ok
+/// Checks that the FIR parser resolves a type spelling to the node that the checker gives the
+/// same text in the prelude (spec/fir.md 13, 16.3; grammar.md 4), and the diagnostic of a spelling
+/// that does not resolve.
+import check_env;
+import diag;
+import fir;
+import fir_parse;
+import std.strbuf;
+import types;
+
+// One type of each form of grammar.md 4 that a struct field can have: the primitive types,
+// `string`, `void*`, function types, named types of the prelude and of an import, the reference
+// suffixes with `own` and `mut`, and the fixed arrays around them.
+u64 TYPE_COUNT = 45;
+
+string[TYPE_COUNT] TYPES = {
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "f32",
+    "f64",
+    "bool",
+    "char",
+    "string",
+    "string own",
+    "void*",
+    "void mut*",
+    "fn (i32, i64) u64",
+    "fn () void",
+    "fn (u8@) noreturn",
+    "fn (i32) i32*",
+    "point",
+    "color",
+    "other.thing",
+    "i32*",
+    "i32 mut*",
+    "i32* own",
+    "i32 mut* own",
+    "i32* mut*",
+    "point* own",
+    "i32@",
+    "i32 mut@",
+    "i32@ own",
+    "u8@@",
+    "u8@*",
+    "point*@",
+    "i32[4]",
+    "i32[3][4]",
+    "point*[16]",
+    "i32@[4]",
+    "i32[4]*",
+    "i32[4]@",
+    "i32[4] mut*",
+    "i32[N]",
+    "other.thing*",
+    "fn (point, color) string",
+};
+
+// The prelude: a struct `probe` whose field `mK` has type K of TYPES, the declarations that the
+// named types name, and the `main` of an entry module.
+fn prelude_text(strbuf.str_buf mut* b) void {
+    strbuf.append(b, "import other;\n");
+    strbuf.append(b, "u64 N = 4;\n");
+    strbuf.append(b, "struct point {\n    i32 x;\n}\n");
+    strbuf.append(b, "enum color {\n    red,\n}\n");
+    strbuf.append(b, "struct probe {\n");
+    u64 mut i = 0;
+    while (i < TYPE_COUNT) {
+        strbuf.append(b, "    ");
+        strbuf.append(b, TYPES[i]);
+        strbuf.append(b, " m");
+        strbuf.append_u64(b, i);
+        strbuf.append(b, ";\n");
+        i += 1;
+    }
+    strbuf.append(b, "}\n");
+    strbuf.append(b, check_env.src_main());
+}
+
+// A checked prelude and a parser whose names resolve against it.
+struct env {
+    check_env.env c;
+    fir_parse.fir_parser p;
+    strbuf.str_buf buf;
+}
+
+fn open(env mut* e) void {
+    check_env.open(&e->c);
+    check_env.add(&e->c, "other.ft", "struct thing {\n    i32 v;\n}\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    prelude_text(&b);
+    if (!check_env.check_src(&e->c, strbuf.view(&b))) {
+        u64 mut i = 0;
+        while (i < check_env.reports(&e->c)) {
+            eprintln(check_env.report_text(&e->c, i));
+            i += 1;
+        }
+        panic("fir_parse_type_test.open: the prelude does not check");
+    }
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
+    e->p = fir_parse.parser_create(&e->c.m.s, "t.fir", "", pre);
+}
+
+fn close(env mut* e) void {
+    fir_parse.parser_free(&e->p);
+    strbuf.free(&e->buf);
+    check_env.close(&e->c);
+}
+
+fn parse(env mut* e, string text) types.node* {
+    return fir_parse.parse_type_text(&e->p, text, diag.loc_make("t.fir", 7, 12));
+}
+
+// The type of field `mK` of `probe`, as the checker resolved TYPES[K].
+fn field(env* e, u64 k) types.node* {
+    return fir.struct_field_type(check_env.sym_main(&e->c, "probe")->ty, cast(k, u32));
+}
+
+fn spelling(env mut* e, types.node* t) string {
+    strbuf.clear(&e->buf);
+    types.type_to_str(t, &e->buf);
+    return strbuf.view(&e->buf);
+}
+
+fn every_form_resolves_to_the_checkers_node() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    u64 mut i = 0;
+    while (i < TYPE_COUNT) {
+        types.node* want = field(&e, i);
+        types.node* got = parse(&e, TYPES[i]);
+        if (got != want) {
+            eprintln("fir_parse_type_test: <", TYPES[i], "> gives another node");
+            panic("fir_parse_type_test: a spelling does not resolve to the checker's node");
+        }
+        i += 1;
+    }
+    assert(check_env.errors(&e.c) == 0);
+    println(i, " types");
+}
+
+// The spelling of the printer resolves back to the same node, except for a named type of another
+// module: the printer writes its bare name, which resolves in the prelude's scope alone.
+fn the_printers_spelling_resolves_back() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    u64 mut i = 0;
+    u64 mut foreign = 0;
+    while (i < TYPE_COUNT) {
+        types.node* want = field(&e, i);
+        string text = spelling(&e, want);
+        if (text == "thing" || text == "thing*") {
+            foreign += 1;
+        } else if (parse(&e, text) != want) {
+            eprintln("fir_parse_type_test: <", text, "> gives another node");
+            panic("fir_parse_type_test: a printed spelling does not resolve back");
+        }
+        i += 1;
+    }
+    assert(foreign == 2);
+    assert(check_env.errors(&e.c) == 0);
+    assert(parse(&e, "thing") == null);
+    assert(check_env.errors(&e.c) == 1);
+    assert(check_env.report_text(&e.c, 0) == "7:12: unknown type 'thing'");
+}
+
+fn the_prelude_names_its_own_nodes() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    assert(parse(&e, "point") == check_env.sym_main(&e.c, "point")->ty);
+    assert(parse(&e, "color") == check_env.sym_main(&e.c, "color")->ty);
+    assert(parse(&e, "void") == types.type_void(&e.c.ck.types));
+    types.node* pt = check_env.sym_main(&e.c, "point")->ty;
+    assert(parse(&e, "point mut* own") == types.type_ptr(&e.c.ck.types, pt, true, true));
+    assert(check_env.errors(&e.c) == 0);
+}
+
+fn an_unknown_name_is_one_diagnostic_at_the_position() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    assert(parse(&e, "nosuch") == null);
+    assert(check_env.errors(&e.c) == 1);
+    assert(check_env.report_text(&e.c, 0) == "7:12: unknown type 'nosuch'");
+    assert(check_env.report_file(&e.c, 0) == "t.fir");
+    // A name deeper in the spelling reports at its own column.
+    assert(parse(&e, "fn (i32) nosuch*") == null);
+    assert(check_env.errors(&e.c) == 2);
+    assert(check_env.report_text(&e.c, 1) == "7:21: unknown type 'nosuch'");
+}
+
+fn a_malformed_spelling_is_one_diagnostic() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // A FIR type has no binding, so its outermost position takes no `mut`.
+    assert(parse(&e, "i32 mut") == null);
+    assert(check_env.errors(&e.c) == 1);
+    assert(check_env.report_text(&e.c, 0)
+           == "7:12: a FIR type has no binding: remove the outermost 'mut'");
+    // Text after a whole type.
+    assert(parse(&e, "i32 i32") == null);
+    assert(check_env.errors(&e.c) == 2);
+    assert(check_env.report_text(&e.c, 1) == "7:16: expected the end of the type");
+    // No type at all.
+    assert(parse(&e, "") == null);
+    assert(check_env.errors(&e.c) == 3);
+    // A marker the checker refuses.
+    assert(parse(&e, "i32 own") == null);
+    assert(check_env.errors(&e.c) == 4);
+}
+
+// An enum table has the type `enum_member*` as the prelude spells it, and this prelude declares
+// no `enum_member`.
+fn an_enum_table_needs_enum_member_in_the_prelude() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e.c, "main"), &e.c.ck};
+    fir_parse.fir_parser mut p =
+        fir_parse.parser_create(&e.c.m.s, "t.fir", "enum_table main.color", pre);
+    defer fir_parse.parser_free(&p);
+    fir.constant mut c = fir.constant{};
+    assert(!fir_parse.parse_constant(&p, &c));
+    assert(check_env.errors(&e.c) == 1);
+    assert(check_env.report_text(&e.c, 0) == "1:1: unknown type 'enum_member'");
+}
+
+fn main() i32 {
+    every_form_resolves_to_the_checkers_node();
+    the_printers_spelling_resolves_back();
+    the_prelude_names_its_own_nodes();
+    an_unknown_name_is_one_diagnostic_at_the_position();
+    a_malformed_spelling_is_one_diagnostic();
+    an_enum_table_needs_enum_member_in_the_prelude();
+    println("ok");
+    return 0;
+}

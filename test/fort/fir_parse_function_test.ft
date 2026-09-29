@@ -1,0 +1,790 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+/// Checks that the FIR parser reads statements, terminators, blocks, functions and modules
+/// (spec/fir.md 7, 8, 9.7 and 13): the worked example and a loop parse and print back byte for
+/// byte, and each malformed function is one diagnostic that names its line.
+import ast;
+import fir;
+import fir_env;
+import fir_parse;
+import fir_print;
+import std.strbuf;
+
+// The worked example of spec/fir.md 13 as the printer writes it, without the comment of the
+// `let` of `_3`.
+u64 EXAMPLE_LINES = 29;
+
+string[EXAMPLE_LINES] EXAMPLE = {
+    "fn main.f(_1 (c): bool) -> i32 {",
+    "    let _0: i32;",
+    "    let _2 (p): i32 mut* own #2:18;",
+    "    let _3: i32 mut* own #2:22;",
+    "",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own #2:18 s0;",
+    "        live(_2) #2:18 s1;",
+    "        _3 = alloc<i32>(const u64 1) #2:22 s1;",
+    "        check(overwrite: _2) -> bb1 #2:18 s1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _3 #2:18 s1;",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3] #4:5 s3;",
+    "    }",
+    "    bb2: {",
+    "        _0 = const i32 1 #5:16 s4;",
+    "        del(move _2) #3:11 exit 5:9 s5;",
+    "        dead(_2) #5:9 s4;",
+    "        return #5:9 s4;",
+    "    }",
+    "    bb3: {",
+    "        (*_2) = const i32 7 #7:8 s6;",
+    "        _0 = copy (*_2) #8:12 s7;",
+    "        del(move _2) #3:11 exit 8:5 s8;",
+    "        dead(_2) #8:5 s7;",
+    "        return #8:5 s7;",
+    "    }",
+    "}",
+};
+
+// The line of the example with the comment that spec/fir.md 13 gives it.
+string COMMENTED = "    let _3: i32 mut* own #2:22;           // the value of new(i32)";
+
+// A loop over a span that sums its elements, in the printer's form: the second round trip. The
+// function `sum` is not in the prelude, so the parser gives it a new symbol of `main`.
+u64 SUM_LINES = 40;
+
+string[SUM_LINES] SUM = {
+    "fn main.sum(_1 (items): i32@) -> i64 {",
+    "    let _0: i64;",
+    "    let _2 (total): i64 #2:5;",
+    "    let _3 (i): u64 #3:5;",
+    "    let _4: bool #3:5;",
+    "    let _5: i64 #4:9;",
+    "    let _6: bool #4:9;",
+    "",
+    "    bb0: {",
+    "        _2 = const zero i64 #2:5 s0;",
+    "        _3 = const zero u64 #3:5 s0;",
+    "        live(_2) #2:5 s1;",
+    "        _2 = const i64 0 #2:5 s1;",
+    "        live(_3) #3:5 s2;",
+    "        _3 = const u64 0 #3:5 s2;",
+    "        goto bb1 #3:5 s2;",
+    "    }",
+    "    bb1: {",
+    "        _4 = lt(copy _3, copy _1.1) #3:5 s2;",
+    "        switch(copy _4) -> [true: bb2, otherwise: bb4] #3:5 s2;",
+    "    }",
+    "    bb2: {",
+    "        _5 = cast<i64>(copy _1[_3]) #4:18 s3;",
+    "        _6 = add_overflows(copy _2, copy _5) #4:9 s3;",
+    "        check(copy _6, overflow) -> bb3 #4:9 s3;",
+    "    }",
+    "    bb3: {",
+    "        _2 = add(copy _2, copy _5) #4:9 s3;",
+    "        _3 = add(copy _3, const u64 1) #3:5 s2;",
+    "        goto bb1 #3:5 s2;",
+    "    }",
+    "    bb4: {",
+    "        dead(_3) #3:5 s2;",
+    "        _0 = copy _2 #6:12 s4;",
+    "        dead(_2) #6:5 s4;",
+    "        return #6:5 s4;",
+    "    }",
+    "    bb5: {",
+    "        fail(bounds, const i64 0, const u64 0) #4:18 s3;",
+    "    }",
+};
+
+fn join(string@ lines, strbuf.str_buf mut* out) void {
+    for (string line : lines) {
+        strbuf.append(out, line);
+        strbuf.push(out, '\n');
+    }
+}
+
+// The last line of SUM, which the array cannot hold with the rest.
+fn sum_text(strbuf.str_buf mut* out) void {
+    join(SUM[..], out);
+    strbuf.append(out, "}\n");
+}
+
+// Parses `text` against the fixture into *m and returns the count of new errors.
+fn parse(fir_env.env mut* e, string text, fir.module mut* m) u64 {
+    u64 before = fir_env.errors(e);
+    *m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, fir_env.prelude(e));
+    return fir_env.errors(e) - before;
+}
+
+// Holds that `text` parses without a diagnostic and prints as `want`.
+fn prints_as(fir_env.env mut* e, string text, string want) void {
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(e, text, &m) == 0);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir_print.print_module(&m, &b);
+    fir_env.expect_text(&b, want);
+}
+
+// Holds that `text` gives exactly one diagnostic, `want`.
+fn one_diagnostic(fir_env.env mut* e, string text, string want) void {
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    u64 before = fir_env.errors(e);
+    u64 count = parse(e, text, &m);
+    if (count != 1) {
+        eprintln("fir_parse_function_test: ", count, " diagnostics for <", text, ">");
+        panic("fir_parse_function_test.one_diagnostic: not one diagnostic");
+    }
+    fir_env.said(e, before, want);
+}
+
+// ---- the two round trips -------------------------------------------------------------------
+
+fn the_worked_example_round_trips_byte_for_byte() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    join(EXAMPLE[..], &want);
+    prints_as(&e, strbuf.view(&want), strbuf.view(&want));
+    // With the comment of spec/fir.md 13, the text is the same but for the comment.
+    strbuf.str_buf mut commented = strbuf.create();
+    defer strbuf.free(&commented);
+    join(EXAMPLE[0..3], &commented);
+    strbuf.append(&commented, COMMENTED);
+    strbuf.push(&commented, '\n');
+    join(EXAMPLE[4..EXAMPLE_LINES], &commented);
+    prints_as(&e, strbuf.view(&commented), strbuf.view(&want));
+}
+
+fn the_worked_example_has_the_prelude_symbols() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    join(EXAMPLE[..], &text);
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, strbuf.view(&text), &m) == 0);
+    assert(fir.module_function_count(&m) == 1);
+    fir.func* f = fir.module_function_at(&m, 0);
+    assert(f->sym == fir_env.sym(&e, "f") && f->ty == fir_env.ty(&e, "f"));
+    assert(fir.local_count(f) == 4 && fir.block_count(f) == 4);
+    // `_1` is the parameter `c` of the prelude, with its symbol.
+    fir.local* c = fir.local_at(f, 1);
+    assert(c->kind == fir.local_kind.lk_param && c->sym != null && c->sym->name == "c");
+    // `_2` is named and has no symbol; `_3` is a temporary.
+    fir.local* p = fir.local_at(f, 2);
+    assert(p->kind == fir.local_kind.lk_named && p->sym == null && p->name == "p");
+    assert(p->loc.line == 2 && p->loc.col == 18);
+    fir.local* t = fir.local_at(f, 3);
+    assert(t->kind == fir.local_kind.lk_temp && t->name == "");
+    // The `del` of bb2 carries its location, its exit and its index.
+    fir.statement* d = fir.block_statement(f, 2, 1);
+    assert(d->kind == fir.stmt_kind.st_del && d->loc.line == 3 && d->loc.col == 11);
+    assert(d->exit_loc.line == 5 && d->exit_loc.col == 9 && d->stmt == 5);
+    // The switch of bb1 has one arm and goes to bb3 otherwise.
+    fir.block* b1 = fir.block_at(f, 1);
+    assert(b1->term.kind == fir.term_kind.tk_switch && b1->term.arms_len == 1);
+    assert(b1->term.otherwise == 3 && fir.term_arm(f, &b1->term, 0).target == 2);
+}
+
+fn a_loop_round_trips_byte_for_byte() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    sum_text(&text);
+    prints_as(&e, strbuf.view(&text), strbuf.view(&text));
+    // The new symbol of `sum` belongs to the prelude module.
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    // A second parse finds the symbol that the first one made, with the same type.
+    assert(parse(&e, strbuf.view(&text), &m) == 0);
+    fir.func* f = fir.module_function_at(&m, 0);
+    assert(f->sym->kind == ast.sym_kind.s_fn && f->sym->name == "sum");
+    assert(f->sym->owner->kind == ast.sym_kind.s_module && f->sym->owner->name == "main");
+    assert(f->sym->node == null);
+    fir.local* items = fir.local_at(f, 1);
+    assert(items->sym == null && items->name == "items");
+}
+
+// ---- functions, modules and names ----------------------------------------------------------
+
+// Joins `lines` into `b`, each with its newline, and returns the text.
+fn text_of(strbuf.str_buf mut* b, string@ lines) string {
+    strbuf.clear(b);
+    join(lines, b);
+    return strbuf.view(b);
+}
+
+// Two functions: a call to a function that a later header gives, and two calls of externs.
+u64 TWO_LINES = 20;
+
+string[TWO_LINES] TWO = {
+    "fn main.first() -> i32 {",
+    "    let _0: i32;",
+    "",
+    "    bb0: {",
+    "        _0 = call fn main.second(const i32 2) #1:1 s1;",
+    "        return;",
+    "    }",
+    "}",
+    "",
+    "fn main.second(_1: i32) -> i32 {",
+    "    let _0: i32;",
+    "    let _2: i64;",
+    "",
+    "    bb0: {",
+    "        _0 = call extern abs(copy _1);",
+    "        _2 = call extern labs(const i64 1);",
+    "        _0 = call extern abs(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+fn a_module_of_two_functions_round_trips() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&b, TWO[..]);
+    prints_as(&e, text, text);
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, text, &m) == 0);
+    assert(fir.module_function_count(&m) == 2);
+    // The call of the first function names the symbol of the second.
+    fir.func* first = fir.module_function_at(&m, 0);
+    fir.func* second = fir.module_function_at(&m, 1);
+    assert(fir.block_statement(first, 0, 0)->value.callee_sym == second->sym);
+    // The externs, each once, in first-use order.
+    assert(fir.module_extern_count(&m) == 2);
+    assert(fir.module_extern_at(&m, 0) == fir_env.sym(&e, "abs"));
+    assert(fir.module_extern_at(&m, 1) == fir_env.sym(&e, "labs"));
+    // `_1` has no name and no symbol.
+    fir.local* one = fir.local_at(second, 1);
+    assert(one->kind == fir.local_kind.lk_param && one->sym == null && one->name == "");
+    assert(m.main == null && fir.module_global_count(&m) == 0);
+}
+
+u64 STOP_LINES = 7;
+
+string[STOP_LINES] STOP = {
+    "fn main.stop() -> noreturn {",
+    "    let _0: void;",
+    "",
+    "    bb0: {",
+    "        trap #2:5 s1;",
+    "    }",
+    "}",
+};
+
+fn a_noreturn_function_round_trips() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&b, STOP[..]);
+    prints_as(&e, text, text);
+}
+
+// A parameter and a `let` of function type: the parameter list of the type is part of its
+// spelling, and the `,` and `)` after the spelling end it.
+u64 APPLY_LINES = 11;
+
+string[APPLY_LINES] APPLY = {
+    "fn main.apply(_1 (cb): fn (i32) i32, _2: i32) -> i32 {",
+    "    let _0: i32;",
+    "    let _3: fn (i32, i64) u64;",
+    "",
+    "    bb0: {",
+    "        _3 = const fn main.add;",
+    "        _0 = call copy _1(copy _2);",
+    "        _3 = cast<fn (i32, i64) u64>(copy _3);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+fn a_function_type_round_trips() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&b, APPLY[..]);
+    prints_as(&e, text, text);
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, text, &m) == 0);
+    fir.func* f = fir.module_function_at(&m, 0);
+    assert(fir.local_at(f, 3)->ty == fir_env.ty(&e, "add"));
+}
+
+// No `let _0`, a location with no index, a location over two lines with no index, and a name on
+// a `let`; and the text that the printer writes for it.
+u64 DEFAULTS_LINES = 10;
+
+string[DEFAULTS_LINES] DEFAULTS = {
+    "fn main.nothing() -> void {",
+    "    let _1 (x): i32 #3:4;",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        live(_1) #3:4;",
+    "        dead(_1)",
+    "            #9:1 exit 2:2;",
+    "        unreachable #4:1;",
+    "    }",
+    "}",
+};
+
+u64 DEFAULTS_OUT_LINES = 11;
+
+string[DEFAULTS_OUT_LINES] DEFAULTS_OUT = {
+    "fn main.nothing() -> void {",
+    "    let _0: void;",
+    "    let _1 (x): i32 #3:4;",
+    "    let _2: i32;",
+    "",
+    "    bb0: {",
+    "        live(_1) #3:4 s0;",
+    "        dead(_1) #9:1 exit 2:2 s0;",
+    "        unreachable #4:1 s0;",
+    "    }",
+    "}",
+};
+
+fn a_let_and_a_location_take_their_defaults() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut w = strbuf.create();
+    defer strbuf.free(&w);
+    string text = text_of(&b, DEFAULTS[..]);
+    prints_as(&e, text, text_of(&w, DEFAULTS_OUT[..]));
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, text, &m) == 0);
+    fir.func* f = fir.module_function_at(&m, 0);
+    assert(fir.local_at(f, 1)->kind == fir.local_kind.lk_named);
+    assert(fir.local_at(f, 2)->kind == fir.local_kind.lk_temp);
+    assert(fir.block_statement(f, 0, 0)->stmt == 0);
+    assert(fir.block_at(f, 0)->term.stmt == 0);
+}
+
+// ---- one diagnostic for each malformed function --------------------------------------------
+
+// The text of a function `() -> void` whose block holds `item` before its `return`; `item`
+// stands on line 5 from column 9.
+fn with_item(strbuf.str_buf mut* b, string item) string {
+    strbuf.clear(b);
+    strbuf.append(b, "fn main.nothing() -> void {\n    let _0: void;\n\n    bb0: {\n        ");
+    strbuf.append(b, item);
+    strbuf.append(b, "\n        return;\n    }\n}\n");
+    return strbuf.view(b);
+}
+
+// The text of a function `() -> void` whose one block ends in `term`, on line 5 from column 9.
+fn with_terminator(strbuf.str_buf mut* b, string term) string {
+    strbuf.clear(b);
+    strbuf.append(b, "fn main.nothing() -> void {\n    let _0: void;\n\n    bb0: {\n        ");
+    strbuf.append(b, term);
+    strbuf.append(b, "\n    }\n}\n");
+    return strbuf.view(b);
+}
+
+// The text of a function with the header `header` and one block that returns.
+fn with_header(strbuf.str_buf mut* b, string header) string {
+    strbuf.clear(b);
+    strbuf.append(b, header);
+    strbuf.append(b, " {\n    bb0: {\n        return;\n    }\n}\n");
+    return strbuf.view(b);
+}
+
+// The text of a function `() -> void` with the `let` lines `lets` from line 2 and one block.
+fn with_lets(strbuf.str_buf mut* b, string lets) string {
+    strbuf.clear(b);
+    strbuf.append(b, "fn main.nothing() -> void {\n");
+    strbuf.append(b, lets);
+    strbuf.append(b, "\n    bb0: {\n        return;\n    }\n}\n");
+    return strbuf.view(b);
+}
+
+// A statement or a terminator without a location has the empty location.
+fn no_location_is_the_empty_location() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = with_lets(&b, "    let _0: void;\n");
+    prints_as(&e, text, text);
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, text, &m) == 0);
+    fir.terminator* t = &fir.block_at(fir.module_function_at(&m, 0), 0)->term;
+    assert(t->loc.line == 0 && t->exit_loc.line == 0 && t->stmt == 0);
+}
+
+fn the_three_errors_of_a_function() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // A signature that names a type the prelude does not have.
+    one_diagnostic(&e, with_header(&b, "fn main.g(_1: nosuch) -> i32"),
+                   "1:15: unknown type 'nosuch'");
+    // A block that names an unknown `bbN`.
+    one_diagnostic(&e, with_terminator(&b, "goto bb7;"), "5:14: unknown block 'bb7'");
+    // A statement without `;` names its own line, and the next line still reads.
+    one_diagnostic(&e, with_item(&b, "live(_0) #2:2 s1"), "5:25: expected ';'");
+}
+
+fn a_missing_semicolon_keeps_the_rest_of_the_block() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, with_item(&b, "live(_0)"), &m) == 1);
+    fir_env.said(&e, 0, "5:17: expected ';'");
+    fir.func* f = fir.module_function_at(&m, 0);
+    assert(fir.block_statement_count(f, 0) == 1 && fir.block_at(f, 0)->terminated);
+    // On one line, the rest of the line is skipped with no second diagnostic.
+    fir.module mut n = fir.module{};
+    defer fir.module_free(&n);
+    assert(parse(&e, with_item(&b, "live(_0) live(_0); live(_0);"), &n) == 1);
+    fir_env.said(&e, 1, "5:17: expected ';'");
+}
+
+u64 BAD_LET_COUNT = 9;
+
+// Each text is the `let` lines of a function, and the diagnostic it gives.
+string[BAD_LET_COUNT] BAD_LETS = {
+    "    let _2: i32;\n",
+    "    let _1: i32;\n    let _1: i32;\n",
+    "    let _1: i32;\n    let _0: void;\n",
+    "    let _0: i32;\n",
+    "    let _0 (r): void;\n",
+    "    let _1: nosuch;\n",
+    "    let _1: i32 #0:4;\n",
+    "    let _1: i32 #2:3 s4;\n",
+    "    let _1 (a.b): i32;\n",
+};
+
+string[BAD_LET_COUNT] BAD_LET_SAYS = {
+    "2:9: local '_2' is out of order: expected '_1'",
+    "3:9: local '_1' is declared twice",
+    "3:9: the 'let' of '_0' comes first",
+    "2:9: the return place '_0' has the type 'void'",
+    "2:13: the return place '_0' has no name",
+    "2:13: unknown type 'nosuch'",
+    "2:18: a line and a column count from 1",
+    "2:21: expected ';'",
+    "2:13: 'a.b' is no identifier",
+};
+
+fn the_order_of_locals_and_blocks() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < BAD_LET_COUNT) {
+        one_diagnostic(&e, with_lets(&b, BAD_LETS[i]), BAD_LET_SAYS[i]);
+        i += 1;
+    }
+    strbuf.clear(&b);
+    strbuf.append(&b, "fn main.nothing() -> void {\n    bb1: {\n        return;\n    }\n}\n");
+    one_diagnostic(&e, strbuf.view(&b), "2:5: block 'bb1' is out of order: expected 'bb0'");
+    strbuf.clear(&b);
+    strbuf.append(&b, "fn main.nothing() -> void {\n    let _0: void;\n}\n");
+    one_diagnostic(&e, strbuf.view(&b), "3:1: a function has the entry block 'bb0'");
+}
+
+fn the_shape_of_a_block() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    one_diagnostic(&e, with_item(&b, "return;"),
+                   "6:9: a statement follows the terminator of 'bb0'");
+    strbuf.clear(&b);
+    strbuf.append(&b, "fn main.nothing() -> void {\n    bb0: {\n        live(_0);\n    }\n}\n");
+    one_diagnostic(&e, strbuf.view(&b), "4:5: block 'bb0' has no terminator");
+    one_diagnostic(&e, with_item(&b, "jump bb0;"),
+                   "5:9: expected a statement or a terminator, found 'jump'");
+    one_diagnostic(&e, with_item(&b, "_0 := copy _0;"), "5:12: expected '=', found ':'");
+    one_diagnostic(&e, with_item(&b, "del(copy _0);"), "5:13: expected 'move', found 'copy'");
+    one_diagnostic(&e, with_item(&b, "live(_9);"), "5:14: unknown local '_9'");
+    one_diagnostic(&e, with_item(&b, "live(_0) #1:1 exit 0:1;"),
+                   "5:28: a line and a column count from 1");
+    // An `s` that no number follows is no statement index.
+    one_diagnostic(&e, with_item(&b, "live(_0) #1:1 sx;"), "5:22: expected ';'");
+    one_diagnostic(&e, with_item(&b, "live(_0) #4294967296:1;"),
+                   "5:19: a line does not fit u32");
+    one_diagnostic(&e, with_item(&b, "live(_0) #1;"), "5:20: expected ':', found ';'");
+}
+
+// Every terminator form, with a check that reports operands and one that reports none.
+u64 TERMINATORS_LINES = 18;
+
+string[TERMINATORS_LINES] TERMINATORS = {
+    "fn main.nothing() -> void {",
+    "    let _0: void;",
+    "    let _1: i32;",
+    "",
+    "    bb0: {",
+    "        switch(copy _1) -> [i32 1: bb1, i32 -2: bb2, otherwise: bb3];",
+    "    }",
+    "    bb1: {",
+    "        check(const true, bounds, const i64 1, const u64 2) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(const false, overflow) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        fail(panic, const \"m\");",
+    "    }",
+    "    bb4: {",
+    "        goto bb0;",
+};
+
+u64 BAD_TERMINATOR_COUNT = 6;
+
+string[BAD_TERMINATOR_COUNT] BAD_TERMINATORS = {
+    "switch(copy _0) -> [otherwise: bb0, bb1];",
+    "switch(copy _0) -> [zero i32: bb0, otherwise: bb0];",
+    "check(const true, sideways) -> bb0;",
+    "check(overwrite: _0) bb0;",
+    "fail(user, const i32 1;",
+    "goto _0;",
+};
+
+string[BAD_TERMINATOR_COUNT] BAD_TERMINATOR_SAYS = {
+    "5:43: expected ']', found ','",
+    "5:29: a switch arm is a bool, an integer, a char or an enum constant",
+    "5:27: expected a check kind, found 'sideways'",
+    "5:30: expected '->', found 'bb0'",
+    "5:31: expected ',' or ')', found ';'",
+    "5:14: expected a block 'bbN', found '_0'",
+};
+
+fn the_terminators_and_their_errors() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    text_of(&b, TERMINATORS[..]);
+    strbuf.append(&b, "    }\n}\n");
+    prints_as(&e, strbuf.view(&b), strbuf.view(&b));
+    u64 mut i = 0;
+    while (i < BAD_TERMINATOR_COUNT) {
+        one_diagnostic(&e, with_item(&b, BAD_TERMINATORS[i]), BAD_TERMINATOR_SAYS[i]);
+        i += 1;
+    }
+    // A later block may define a target, so an unknown one is reported at the end of the
+    // function, once for each reference.
+    one_diagnostic(&e, with_terminator(&b, "switch(copy _0) -> [true: bb9, otherwise: bb0];"),
+                   "5:35: unknown block 'bb9'");
+}
+
+u64 BAD_HEADER_COUNT = 9;
+
+string[BAD_HEADER_COUNT] BAD_HEADERS = {
+    "fn main.f(_1: i32) -> i32",
+    "fn main.f(_1 (d): bool) -> i32",
+    "fn other.g() -> void",
+    "fn main.g(_2: i32) -> void",
+    "fn main.g(_1: void) -> void",
+    "fn main.g() i32",
+    "fn main.g() -> i32 mut",
+    "fn () -> void",
+    "fn main.g(_1 (while): i32) -> void",
+};
+
+string[BAD_HEADER_COUNT] BAD_HEADER_SAYS = {
+    "1:4: 'main.f' has the type 'fn (bool) i32' in the prelude",
+    "1:15: parameter '_1' is named 'c' in the prelude",
+    "1:4: a function that the prelude does not declare is 'main'.<name>",
+    "1:11: parameter '_2' is out of order: expected '_1'",
+    "1:15: a parameter has a type other than 'void'",
+    "1:13: expected '->', found 'i32'",
+    "1:16: a FIR type has no binding: remove the outermost 'mut'",
+    "1:4: expected a function name, found '('",
+    "1:15: 'while' is no identifier",
+};
+
+fn the_errors_of_a_header() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < BAD_HEADER_COUNT) {
+        one_diagnostic(&e, with_header(&b, BAD_HEADERS[i]), BAD_HEADER_SAYS[i]);
+        i += 1;
+    }
+    // A function defined twice.
+    string once = with_header(&b, "fn main.nothing() -> void");
+    strbuf.str_buf mut twice = strbuf.create();
+    defer strbuf.free(&twice);
+    strbuf.append(&twice, once);
+    strbuf.append(&twice, once);
+    one_diagnostic(&e, strbuf.view(&twice), "6:4: function 'main.nothing' is defined twice");
+    // Text that is no function, before a function.
+    strbuf.clear(&twice);
+    strbuf.append(&twice, "let _1: i32;\n");
+    strbuf.append(&twice, with_header(&b, "fn main.nothing() -> void"));
+    one_diagnostic(&e, strbuf.view(&twice), "1:1: expected 'fn', found 'let'");
+    one_diagnostic(&e, "fn main.nothing() -> void;\n", "1:26: expected '{', found ';'");
+}
+
+// A text that ends early, and a `}` that is missing, give one diagnostic at the place where the
+// text stops being a function. A later block header is no unknown block.
+u64 CUT_COUNT = 6;
+
+string[CUT_COUNT] CUTS = {
+    "fn main.g() -> void {\nbb0: {\ngoto bb1;\nbb1: {\nreturn;\n}\n}\n",
+    "fn main.g() -> void {\nbb0: {\nreturn;\n}\nfn main.h() -> void {\nbb0: {\nreturn;\n}\n}\n",
+    "fn main.g() -> void {\nbb0: {\nreturn;\n",
+    "fn main.g() -> void {\nbb0: {\n_0 = copy",
+    "fn main.g(_1: i32",
+    "fn main.g() -> void {\nlet _1: i32;\nbb0: {\nreturn;\n}\nfn\n",
+};
+
+string[CUT_COUNT] CUT_SAYS = {
+    "4:1: expected '}', found 'bb1'",
+    "5:1: expected a block or '}', found 'fn'",
+    "4:1: expected '}', found the end of the text",
+    "3:10: expected a place, found the end of the text",
+    "1:18: expected ',' or ')', found the end of the text",
+    "6:1: expected a block or '}', found 'fn'",
+};
+
+fn a_cut_text_is_one_diagnostic() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    u64 mut i = 0;
+    while (i < CUT_COUNT) {
+        one_diagnostic(&e, CUTS[i], CUT_SAYS[i]);
+        i += 1;
+    }
+}
+
+// A malformed token is the one diagnostic of the text: the parser reads no function after it.
+fn a_tokenizer_error_is_the_one_diagnostic() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    one_diagnostic(&e, with_item(&b, "_0 = const u64 18446744073709551616;"),
+                   "5:24: the integer does not fit u64");
+    one_diagnostic(&e, with_item(&b, "_0 = const i32 0x;"), "5:24: '0x' needs a hex digit");
+    one_diagnostic(&e, with_item(&b, "_0 = const \"abc;"), "5:20: unterminated string literal");
+    one_diagnostic(&e, with_item(&b, "_0 = $;"), "5:14: unexpected character '$'");
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, with_item(&b, "live(_0) ?;"), &m) == 1);
+    assert(fir.module_function_count(&m) == 0);
+}
+
+// A header takes as many parameters as a fort function type, and one more is an error.
+fn a_header_takes_at_most_128_parameters() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut h = strbuf.create();
+    defer strbuf.free(&h);
+    strbuf.append(&h, "fn main.many(");
+    u64 mut i = 1;
+    while (i <= fir_parse.MAX_PARAMS) {
+        if (i > 1) {
+            strbuf.append(&h, ", ");
+        }
+        strbuf.append(&h, "_");
+        strbuf.append_u64(&h, i);
+        strbuf.append(&h, ": i32");
+        i += 1;
+    }
+    u64 open_at = h.len;
+    strbuf.append(&h, ") -> void");
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, with_header(&b, strbuf.view(&h)), &m) == 0);
+    assert(fir.local_count(fir.module_function_at(&m, 0)) == 129);
+    // One more: `_129` stands where the `)` stood.
+    strbuf.truncate(&h, open_at);
+    strbuf.append(&h, ", _129: i32) -> void");
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "1:");
+    strbuf.append_u64(&want, open_at + 3);
+    strbuf.append(&want, ": too many parameters");
+    one_diagnostic(&e, with_header(&b, strbuf.view(&h)), strbuf.view(&want));
+}
+
+// A malformed function is skipped whole, so the next one still parses.
+fn an_error_leaves_the_next_function() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut both = strbuf.create();
+    defer strbuf.free(&both);
+    strbuf.append(&both, with_header(&b, "fn main.g(_1: nosuch) -> void"));
+    strbuf.append(&both, with_header(&b, "fn main.nothing() -> void"));
+    fir.module mut m = fir.module{};
+    defer fir.module_free(&m);
+    assert(parse(&e, strbuf.view(&both), &m) == 1);
+    assert(fir.module_function_count(&m) == 1);
+    assert(fir.module_function_at(&m, 0)->sym == fir_env.sym(&e, "nothing"));
+}
+
+fn main() i32 {
+    the_worked_example_round_trips_byte_for_byte();
+    the_worked_example_has_the_prelude_symbols();
+    a_loop_round_trips_byte_for_byte();
+    a_module_of_two_functions_round_trips();
+    a_noreturn_function_round_trips();
+    a_function_type_round_trips();
+    a_let_and_a_location_take_their_defaults();
+    no_location_is_the_empty_location();
+    the_three_errors_of_a_function();
+    a_missing_semicolon_keeps_the_rest_of_the_block();
+    the_order_of_locals_and_blocks();
+    the_shape_of_a_block();
+    the_terminators_and_their_errors();
+    the_errors_of_a_header();
+    an_error_leaves_the_next_function();
+    a_cut_text_is_one_diagnostic();
+    a_tokenizer_error_is_the_one_diagnostic();
+    a_header_takes_at_most_128_parameters();
+    println("ok");
+    return 0;
+}

@@ -1,0 +1,2139 @@
+/// Reads the textual form of FIR (spec/fir.md 13) into a `fir.module`. A tokenizer turns the text
+/// into tokens, a recursive-descent parser reads them, and each type spelling and each symbol name
+/// resolves against a checked prelude module. A FIR test and `fort --fir-test` read their input
+/// through this module.
+//
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: the tokens, the syntax arena of the type spellings and the message buffer are
+// fields of the parser, and parser_free releases them.
+import ast;
+import check;
+import consts;
+import containers;
+import diag;
+import fir;
+import fir_print;
+import lexer;
+import modules;
+import parser;
+import prim;
+import scope;
+import session;
+import std.str;
+import std.strbuf;
+import types;
+
+u64 DEC_RADIX = 10;
+u64 HEX_RADIX = 16;
+u64 U32_MAX = 4294967295;
+u64 CHAR_MAX = 255;
+
+// The parameters of one function header, as check.ft limits the members of a function type.
+u64 MAX_PARAMS = 128;
+
+// ---- tokens -----------------------------------------------------------------------------
+
+/// The kinds of token of the textual form. `ft_at` is the `@` of a span type.
+enum ftok_kind {
+    ft_local,
+    ft_block,
+    ft_int,
+    ft_string,
+    ft_ident,
+    ft_hash,
+    ft_arrow,
+    ft_lt,
+    ft_gt,
+    ft_lparen,
+    ft_rparen,
+    ft_lbracket,
+    ft_rbracket,
+    ft_lbrace,
+    ft_rbrace,
+    ft_colon,
+    ft_semicolon,
+    ft_comma,
+    ft_assign,
+    ft_dot,
+    ft_star,
+    ft_at,
+    ft_eof,
+}
+
+/// One token. `text` is the spelling of the token in the source, or the decoded bytes of a string.
+/// `value` is the number of a local or a block, or the magnitude of an integer, and `negative`
+/// says that a `-` stands before the digits of an integer. `off` and `len` give the bytes of the
+/// token in the source.
+struct ftok {
+    ftok_kind kind;
+    string text;
+    u64 value;
+    bool negative;
+    u32 line;
+    u32 col;
+    u64 off;
+    u64 len;
+}
+
+// `items[..len]` holds the tokens in source order. The last one is `ft_eof`.
+struct ftok_vec {
+    ftok mut@ own items;
+    u64 len;
+}
+
+fn ftok_push(ftok_vec mut* v, ftok t) void {
+    if (v->len >= v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir_parse.ftok_push: capacity overflow");
+        ftok mut@ own bigger = new(ftok, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = t;
+    v->len += 1;
+}
+
+/// Returns token `i`. The function panics when `i` is at or past the count.
+fn ftok_at(ftok_vec* v, u64 i) ftok {
+    if (i >= v->len) {
+        panic("fir_parse.ftok_at: index out of range");
+    }
+    return v->items[i];
+}
+
+fn ftok_free(ftok_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+// Reports an error at `at` while the file has diagnostics left, as lexer.fail does.
+fn report(session.session mut* s, diag.loc at, string msg) void {
+    diag.sink mut* diags = session.diags(s);
+    if (diag.budget_left(diags)) {
+        diag.error(diags, at, msg);
+    }
+}
+
+// ---- the tokenizer ------------------------------------------------------------------------
+
+// The state of one tokenizer run: the next byte and its position.
+struct scanner {
+    session.session mut* sess;
+    string file;
+    string src;
+    u64 pos;
+    u32 line;
+    u32 col;
+    ftok_vec mut* out;
+    strbuf.str_buf msg;
+    bool clean;
+}
+
+// The byte `ahead` bytes after the next one, or -1 past the end.
+fn peek(scanner* sc, u64 ahead) i64 {
+    u64 at = sc->pos + ahead;
+    if (at >= sc->src.len) {
+        return -1;
+    }
+    return lexer.byte_of(sc->src[at]);
+}
+
+// Consumes the next byte, which exists. A newline starts the next line; every other byte is one
+// column.
+fn advance(scanner mut* sc) void {
+    if (sc->src[sc->pos] == '\n') {
+        sc->line += 1;
+        sc->col = 1;
+    } else {
+        sc->col += 1;
+    }
+    sc->pos += 1;
+}
+
+fn here(scanner* sc) diag.loc {
+    return diag.loc_make(sc->file, sc->line, sc->col);
+}
+
+fn scan_fail(scanner mut* sc, diag.loc at, string text) bool {
+    sc->clean = false;
+    report(sc->sess, at, text);
+    return false;
+}
+
+// A token of `kind` from `start`, whose position is `line`:`col`, to the next byte.
+fn scan_token(scanner* sc, ftok_kind kind, u64 start, u32 line, u32 col) ftok {
+    return ftok{kind, sc->src[start..sc->pos], 0, false, line, col, start, sc->pos - start};
+}
+
+// Skips blanks and `//` comments.
+fn skip_blanks(scanner mut* sc) void {
+    while (true) {
+        i64 c = peek(sc, 0);
+        if (c == lexer.BYTE_SPACE || c == lexer.BYTE_TAB || c == lexer.BYTE_LF
+            || c == lexer.BYTE_CR) {
+            advance(sc);
+        } else if (c == lexer.byte_of('/') && peek(sc, 1) == lexer.byte_of('/')) {
+            while (peek(sc, 0) >= 0 && peek(sc, 0) != lexer.BYTE_LF) {
+                advance(sc);
+            }
+        } else {
+            return;
+        }
+    }
+}
+
+// The count of decimal digits from `ahead` bytes after the next one.
+fn digits_at(scanner* sc, u64 ahead) u64 {
+    u64 mut n = 0;
+    while (lexer.is_dec_digit(peek(sc, ahead + n))) {
+        n += 1;
+    }
+    return n;
+}
+
+// Reads the digits of an integer at the next byte into *value: `0x` and hex digits, or decimal
+// digits. False after a diagnostic: `0x` with no hex digit, or a value past u64.
+fn scan_digits(scanner mut* sc, u64 mut* value) bool {
+    diag.loc at = here(sc);
+    u64 mut radix = DEC_RADIX;
+    if (peek(sc, 0) == lexer.byte_of('0') && peek(sc, 1) == lexer.byte_of('x')) {
+        radix = HEX_RADIX;
+        advance(sc);
+        advance(sc);
+    }
+    u64 mut v = 0;
+    u64 mut count = 0;
+    bool mut overflow = false;
+    while (true) {
+        i64 d = lexer.digit_value(peek(sc, 0), cast(radix, i64));
+        if (d < 0) {
+            break;
+        }
+        u64 digit = cast(d, u64);
+        if (v > (containers.U64_MAX - digit) / radix) {
+            overflow = true;
+        } else {
+            v = v * radix + digit;
+        }
+        count += 1;
+        advance(sc);
+    }
+    if (count == 0) {
+        return scan_fail(sc, at, "'0x' needs a hex digit");
+    }
+    if (overflow) {
+        return scan_fail(sc, at, "the integer does not fit u64");
+    }
+    *value = v;
+    return true;
+}
+
+// Reads `_n` or `bbN` when `prefix` bytes and then only decimal digits stand at the next byte, and
+// else an identifier. An identifier is a letter or `_` and then letters, digits and `_`; a `.`
+// continues it when a letter or `_` follows, so `m.NAME` is one token and `m.NAME.1` is three.
+fn scan_word(scanner mut* sc) bool {
+    u64 start = sc->pos;
+    u32 line = sc->line;
+    u32 col = sc->col;
+    u64 mut prefix = 0;
+    ftok_kind mut kind = ftok_kind.ft_ident;
+    if (peek(sc, 0) == lexer.byte_of('_')) {
+        prefix = 1;
+        kind = ftok_kind.ft_local;
+    } else if (peek(sc, 0) == lexer.byte_of('b') && peek(sc, 1) == lexer.byte_of('b')) {
+        prefix = 2;
+        kind = ftok_kind.ft_block;
+    }
+    if (prefix > 0) {
+        u64 n = digits_at(sc, prefix);
+        if (n > 0 && !lexer.is_ident_byte(peek(sc, prefix + n))) {
+            u64 mut i = 0;
+            while (i < prefix) {
+                advance(sc);
+                i += 1;
+            }
+            u64 mut value = 0;
+            if (!scan_digits(sc, &value)) {
+                return false;
+            }
+            ftok mut t = scan_token(sc, kind, start, line, col);
+            t.value = value;
+            ftok_push(sc->out, t);
+            return true;
+        }
+    }
+    while (true) {
+        i64 c = peek(sc, 0);
+        if (lexer.is_ident_byte(c)) {
+            advance(sc);
+        } else if (c == lexer.byte_of('.') && lexer.is_letter(peek(sc, 1))) {
+            advance(sc);
+        } else {
+            break;
+        }
+    }
+    ftok_push(sc->out, scan_token(sc, ftok_kind.ft_ident, start, line, col));
+    return true;
+}
+
+// Reads an integer, with the `-` before it when there is one.
+fn scan_int(scanner mut* sc) bool {
+    u64 start = sc->pos;
+    u32 line = sc->line;
+    u32 col = sc->col;
+    bool negative = peek(sc, 0) == lexer.byte_of('-');
+    if (negative) {
+        advance(sc);
+    }
+    u64 mut value = 0;
+    if (!scan_digits(sc, &value)) {
+        return false;
+    }
+    ftok mut t = scan_token(sc, ftok_kind.ft_int, start, line, col);
+    t.value = value;
+    t.negative = negative;
+    ftok_push(sc->out, t);
+    return true;
+}
+
+// Reads a string with the escapes of a fort string literal, through the lexer's own reader, so
+// that the decoded bytes live in the session's pool.
+fn scan_string(scanner mut* sc) bool {
+    u64 start = sc->pos;
+    u32 line = sc->line;
+    u32 col = sc->col;
+    lexer.tok_vec mut one = lexer.tokvec_create();
+    defer lexer.tokvec_free(&one);
+    lexer.lexer mut lx = lexer.lexer{
+        .sess = sc->sess,
+        .file = sc->file,
+        .src = sc->src,
+        .pos = sc->pos,
+        .line = sc->line,
+        .col = sc->col,
+        .out = &one,
+        .buf = strbuf.create(),
+        .msg = strbuf.create(),
+    };
+    defer strbuf.free(&lx.buf);
+    defer strbuf.free(&lx.msg);
+    if (!lexer.lex_string(&lx)) {
+        sc->clean = false;
+        // the rest of the line holds no token that the string did not end
+        while (peek(sc, 0) >= 0 && peek(sc, 0) != lexer.BYTE_LF) {
+            advance(sc);
+        }
+        return false;
+    }
+    sc->pos = lx.pos;
+    sc->line = lx.line;
+    sc->col = lx.col;
+    ftok mut t = scan_token(sc, ftok_kind.ft_string, start, line, col);
+    t.text = lexer.tokvec_at(&one, 0).text;
+    ftok_push(sc->out, t);
+    return true;
+}
+
+// The kind of the one-byte punctuation `c`, or `ft_eof` when `c` is none.
+fn punctuation(i64 c) ftok_kind {
+    if (c == lexer.byte_of('#')) {
+        return ftok_kind.ft_hash;
+    } else if (c == lexer.byte_of('<')) {
+        return ftok_kind.ft_lt;
+    } else if (c == lexer.byte_of('>')) {
+        return ftok_kind.ft_gt;
+    } else if (c == lexer.byte_of('(')) {
+        return ftok_kind.ft_lparen;
+    } else if (c == lexer.byte_of(')')) {
+        return ftok_kind.ft_rparen;
+    } else if (c == lexer.byte_of('[')) {
+        return ftok_kind.ft_lbracket;
+    } else if (c == lexer.byte_of(']')) {
+        return ftok_kind.ft_rbracket;
+    } else if (c == lexer.byte_of('{')) {
+        return ftok_kind.ft_lbrace;
+    } else if (c == lexer.byte_of('}')) {
+        return ftok_kind.ft_rbrace;
+    } else if (c == lexer.byte_of(':')) {
+        return ftok_kind.ft_colon;
+    } else if (c == lexer.byte_of(';')) {
+        return ftok_kind.ft_semicolon;
+    } else if (c == lexer.byte_of(',')) {
+        return ftok_kind.ft_comma;
+    } else if (c == lexer.byte_of('=')) {
+        return ftok_kind.ft_assign;
+    } else if (c == lexer.byte_of('.')) {
+        return ftok_kind.ft_dot;
+    } else if (c == lexer.byte_of('*')) {
+        return ftok_kind.ft_star;
+    } else if (c == lexer.byte_of('@')) {
+        return ftok_kind.ft_at;
+    }
+    return ftok_kind.ft_eof;
+}
+
+// Reports the byte at the next position, which starts no token, and consumes it.
+fn scan_illegal(scanner mut* sc) void {
+    diag.loc at = here(sc);
+    i64 c = peek(sc, 0);
+    strbuf.clear(&sc->msg);
+    if (lexer.is_non_ascii(c)) {
+        strbuf.append(&sc->msg, "non-ASCII byte outside a string or a comment");
+    } else if (lexer.is_printable(c)) {
+        strbuf.append(&sc->msg, "unexpected character '");
+        strbuf.push(&sc->msg, sc->src[sc->pos]);
+        strbuf.push(&sc->msg, '\'');
+    } else {
+        strbuf.append(&sc->msg, "unexpected byte 0x");
+        strbuf.push(&sc->msg, lexer.HEX_DIGITS[cast(c, u64) / HEX_RADIX]);
+        strbuf.push(&sc->msg, lexer.HEX_DIGITS[cast(c, u64) % HEX_RADIX]);
+    }
+    scan_fail(sc, at, strbuf.view(&sc->msg));
+    advance(sc);
+}
+
+// Reads the token at the next byte, which is no blank.
+fn scan_one(scanner mut* sc) void {
+    i64 c = peek(sc, 0);
+    if (lexer.is_letter(c)) {
+        scan_word(sc);
+    } else if (lexer.is_dec_digit(c)) {
+        scan_int(sc);
+    } else if (c == lexer.byte_of('-') && lexer.is_dec_digit(peek(sc, 1))) {
+        scan_int(sc);
+    } else if (c == lexer.byte_of('-') && peek(sc, 1) == lexer.byte_of('>')) {
+        u64 start = sc->pos;
+        u32 line = sc->line;
+        u32 col = sc->col;
+        advance(sc);
+        advance(sc);
+        ftok_push(sc->out, scan_token(sc, ftok_kind.ft_arrow, start, line, col));
+    } else if (c == lexer.byte_of('"')) {
+        scan_string(sc);
+    } else {
+        ftok_kind kind = punctuation(c);
+        if (kind == ftok_kind.ft_eof) {
+            scan_illegal(sc);
+            return;
+        }
+        u64 start = sc->pos;
+        u32 line = sc->line;
+        u32 col = sc->col;
+        advance(sc);
+        ftok_push(sc->out, scan_token(sc, kind, start, line, col));
+    }
+}
+
+/// Appends the tokens of `src` to `out`, then `ft_eof`. A byte that starts no token is one
+/// diagnostic, and the tokenizer continues at the next byte; a malformed integer or string is one
+/// diagnostic too. Returns true when no diagnostic was reported.
+fn tokenize(session.session mut* s, string file, string src, ftok_vec mut* out) bool {
+    scanner mut sc = scanner{s, file, src, 0, 1, 1, out, strbuf.create(), true};
+    defer strbuf.free(&sc.msg);
+    // the tokens of one file share the diagnostics of that file, as the lexer's do
+    diag.begin_file(session.diags(s));
+    while (true) {
+        skip_blanks(&sc);
+        if (sc.pos >= src.len) {
+            ftok_push(out, scan_token(&sc, ftok_kind.ft_eof, sc.pos, sc.line, sc.col));
+            return sc.clean;
+        }
+        scan_one(&sc);
+    }
+}
+
+// ---- the parser ---------------------------------------------------------------------------
+
+/// The checked module that the type spellings and the symbol names of a text resolve against,
+/// and the checker that checked it.
+struct prelude {
+    modules.module* module;
+    check.checker mut* ck;
+}
+
+/// The state of one parse: the tokens of the text and the cursor over them.
+struct fir_parser {
+    session.session mut* sess;
+    string file;
+    string src;
+    prelude pre;
+    ftok_vec toks;
+    bool clean; // the tokenizer reported no diagnostic
+    u64 pos;
+    ast.arena arena; // the syntax trees of the type spellings
+    strbuf.str_buf msg;
+    ref_vec refs; // the block references of the function being read
+    bool end_reported; // a diagnostic stands at the end of the text
+}
+
+// A reference to block `target` at `at`, which the parser checks once the function has all its
+// blocks.
+struct block_ref {
+    u32 target;
+    diag.loc at;
+}
+
+struct ref_vec {
+    block_ref mut@ own items;
+    u64 len;
+}
+
+fn ref_push(ref_vec mut* v, block_ref r) void {
+    if (v->len >= v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir_parse.ref_push: capacity overflow");
+        block_ref mut@ own bigger = new(block_ref, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = r;
+    v->len += 1;
+}
+
+/// Tokenizes `src`, the text of `file`, and makes a parser over the tokens. The diagnostics of
+/// the tokenizer go to `s`.
+fn parser_create(session.session mut* s, string file, string src, prelude pre) fir_parser {
+    fir_parser mut p = fir_parser{.sess = s, .src = src, .pre = pre};
+    p.file = containers.pool_intern(session.pool(s), file);
+    p.clean = tokenize(s, p.file, src, &p.toks);
+    return p;
+}
+
+fn parser_free(fir_parser mut* p) void {
+    ftok_free(&p->toks);
+    del(p->refs.items);
+    p->refs.len = 0;
+    ast.ast_arena_free(&p->arena);
+    strbuf.free(&p->msg);
+}
+
+/// Whether the cursor stands at the end of the text.
+fn at_end(fir_parser* p) bool {
+    return cur(p).kind == ftok_kind.ft_eof;
+}
+
+fn cur(fir_parser* p) ftok {
+    return ftok_at(&p->toks, p->pos);
+}
+
+fn kind(fir_parser* p) ftok_kind {
+    return cur(p).kind;
+}
+
+// Consumes the current token. The end of the text is never consumed.
+fn bump(fir_parser mut* p) void {
+    if (kind(p) != ftok_kind.ft_eof) {
+        p->pos += 1;
+    }
+}
+
+// Whether the current token is the identifier `word`.
+fn at_word(fir_parser* p, string word) bool {
+    ftok t = cur(p);
+    return t.kind == ftok_kind.ft_ident && t.text == word;
+}
+
+fn tok_loc(fir_parser* p, ftok t) diag.loc {
+    return diag.loc_range(p->file, t.line, t.col, t.line, t.col + cast(t.len, u32));
+}
+
+fn here_loc(fir_parser* p) diag.loc {
+    return tok_loc(p, cur(p));
+}
+
+// The position right after the token before the cursor, where a missing `;` belongs.
+fn after_previous(fir_parser* p) diag.loc {
+    if (p->pos == 0) {
+        return here_loc(p);
+    }
+    ftok t = ftok_at(&p->toks, p->pos - 1);
+    u32 end = t.col + cast(t.len, u32);
+    return diag.loc_make(p->file, t.line, end);
+}
+
+// ---- messages ----
+
+fn msg_begin(fir_parser mut* p) void {
+    strbuf.clear(&p->msg);
+}
+
+fn msg_str(fir_parser mut* p, string text) void {
+    strbuf.append(&p->msg, text);
+}
+
+fn msg_u64(fir_parser mut* p, u64 v) void {
+    strbuf.append_u64(&p->msg, v);
+}
+
+fn msg_quote(fir_parser mut* p, string text) void {
+    strbuf.push(&p->msg, '\'');
+    strbuf.append(&p->msg, text);
+    strbuf.push(&p->msg, '\'');
+}
+
+fn msg_type(fir_parser mut* p, types.node* t) void {
+    strbuf.push(&p->msg, '\'');
+    types.type_to_str(t, &p->msg);
+    strbuf.push(&p->msg, '\'');
+}
+
+// Reports the message built so far at `at`; always false, so that a reader returns it. The end
+// of the text takes one diagnostic, so a truncated text reports once and not at each reader
+// that the end stops.
+fn fail_msg(fir_parser mut* p, diag.loc at) bool {
+    ftok last = ftok_at(&p->toks, p->toks.len - 1);
+    if (at.line == last.line && at.col == last.col) {
+        if (p->end_reported) {
+            return false;
+        }
+        p->end_reported = true;
+    }
+    report(p->sess, at, strbuf.view(&p->msg));
+    return false;
+}
+
+fn fail_at(fir_parser mut* p, diag.loc at, string text) bool {
+    msg_begin(p);
+    msg_str(p, text);
+    return fail_msg(p, at);
+}
+
+// Reports `expected <what>` and the token that stands at the cursor instead.
+fn fail_expected(fir_parser mut* p, string what) bool {
+    msg_begin(p);
+    msg_str(p, "expected ");
+    msg_str(p, what);
+    ftok t = cur(p);
+    if (t.kind == ftok_kind.ft_eof) {
+        msg_str(p, ", found the end of the text");
+    } else {
+        msg_str(p, ", found ");
+        msg_quote(p, p->src[t.off..t.off + t.len]);
+    }
+    return fail_msg(p, here_loc(p));
+}
+
+// Consumes a token of `k`, or reports `expected <what>`.
+fn expect(fir_parser mut* p, ftok_kind k, string what) bool {
+    if (kind(p) != k) {
+        return fail_expected(p, what);
+    }
+    bump(p);
+    return true;
+}
+
+// Consumes the identifier `word`, or reports that it is missing.
+fn expect_word(fir_parser mut* p, string word) bool {
+    if (!at_word(p, word)) {
+        msg_begin(p);
+        msg_quote(p, word);
+        string what = containers.pool_intern(session.pool(p->sess), strbuf.view(&p->msg));
+        return fail_expected(p, what);
+    }
+    bump(p);
+    return true;
+}
+
+// ---- numbers, locals, blocks and names ----
+
+// Reads an integer token that is not negative and fits u32 into *out. `what` names it in a
+// diagnostic.
+fn take_u32(fir_parser mut* p, string what, u32 mut* out) bool {
+    ftok t = cur(p);
+    if (t.kind != ftok_kind.ft_int) {
+        return fail_expected(p, what);
+    }
+    if (t.negative || t.value > U32_MAX) {
+        msg_begin(p);
+        msg_str(p, what);
+        msg_str(p, " does not fit u32");
+        return fail_msg(p, tok_loc(p, t));
+    }
+    bump(p);
+    *out = cast(t.value, u32);
+    return true;
+}
+
+// Reads `_n` into *out, whether the local exists or not.
+fn take_local_number(fir_parser mut* p, u32 mut* out) bool {
+    ftok t = cur(p);
+    if (t.kind != ftok_kind.ft_local) {
+        return fail_expected(p, "a local '_n'");
+    }
+    if (t.value > U32_MAX) {
+        return fail_at(p, tok_loc(p, t), "a local number does not fit u32");
+    }
+    bump(p);
+    *out = cast(t.value, u32);
+    return true;
+}
+
+// Reads `_n` of a local of `f` into *out.
+fn take_local(fir_parser mut* p, fir.func* f, u32 mut* out) bool {
+    ftok t = cur(p);
+    if (!take_local_number(p, out)) {
+        return false;
+    }
+    if (*out >= fir.local_count(f)) {
+        msg_begin(p);
+        msg_str(p, "unknown local ");
+        msg_quote(p, t.text);
+        return fail_msg(p, tok_loc(p, t));
+    }
+    return true;
+}
+
+// Reads `bbN` into *out. A later block may define it, so the parser records the reference and
+// check_block_refs checks it when the function has all its blocks.
+fn take_block(fir_parser mut* p, u32 mut* out) bool {
+    ftok t = cur(p);
+    if (t.kind != ftok_kind.ft_block) {
+        return fail_expected(p, "a block 'bbN'");
+    }
+    if (t.value > U32_MAX) {
+        return fail_at(p, tok_loc(p, t), "a block number does not fit u32");
+    }
+    bump(p);
+    *out = cast(t.value, u32);
+    ref_push(&p->refs, block_ref{*out, tok_loc(p, t)});
+    return true;
+}
+
+// Reports each recorded reference to a block that `f` does not have.
+fn check_block_refs(fir_parser mut* p, fir.func* f) bool {
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (i < p->refs.len) {
+        block_ref r = p->refs.items[i];
+        if (r.target >= fir.block_count(f)) {
+            msg_begin(p);
+            msg_str(p, "unknown block 'bb");
+            msg_u64(p, cast(r.target, u64));
+            msg_str(p, "'");
+            ok = fail_msg(p, r.at);
+        }
+        i += 1;
+    }
+    return ok;
+}
+
+// Reads the name of a local or a parameter, an identifier of grammar.md 1: no `.` and no
+// keyword, into *out and its position into *at.
+fn take_local_name(fir_parser mut* p, string mut* out, diag.loc mut* at) bool {
+    if (!take_name(p, "a name", out, at)) {
+        return false;
+    }
+    bool keyword = lexer.keyword_kind(*out) != lexer.tok_kind.ident;
+    if (str.index_of(*out, '.') >= 0 || keyword || lexer.is_reserved_word(*out)) {
+        msg_begin(p);
+        msg_quote(p, *out);
+        msg_str(p, " is no identifier");
+        return fail_msg(p, *at);
+    }
+    return true;
+}
+
+// Reads an identifier into *out and its position into *at.
+fn take_name(fir_parser mut* p, string what, string mut* out, diag.loc mut* at) bool {
+    ftok t = cur(p);
+    if (t.kind != ftok_kind.ft_ident) {
+        return fail_expected(p, what);
+    }
+    bump(p);
+    *out = t.text;
+    *at = tok_loc(p, t);
+    return true;
+}
+
+// Whether `s` is the symbol that fir_print.print_symbol spells `name`. `owner` and `decl` are the
+// parts of `name` before and after its last dot. An `extern fn` goes by its C name alone.
+fn symbol_matches(ast.sym* s, string name, string owner, string decl) bool {
+    if (s->kind == ast.sym_kind.s_extern_fn) {
+        return s->name == name;
+    }
+    return s->name == decl && s->owner != null && s->owner->kind == ast.sym_kind.s_module
+        && s->owner->name == owner;
+}
+
+/// The symbol of kind `kind` or `other` that the dotted name `name` of D9.7 names, from the
+/// checker's symbols, or null when there is none.
+fn find_symbol(check.checker* ck, string name, ast.sym_kind kind, ast.sym_kind other) ast.sym* {
+    i64 dot = str.last_index_of(name, '.');
+    string mut owner = "";
+    string mut decl = name;
+    if (dot >= 0) {
+        owner = name[0..cast(dot, u64)];
+        decl = name[cast(dot, u64) + 1..name.len];
+    }
+    u64 mut i = 0;
+    while (i < check.check_sym_count(ck)) {
+        ast.sym* s = check.check_sym_at(ck, i);
+        if ((s->kind == kind || s->kind == other) && symbol_matches(s, name, owner, decl)) {
+            return s;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// Reads a name and resolves it to a symbol of kind `kind` or `other`. `what` names the kind in
+// the diagnostic of an unknown name.
+fn take_symbol(fir_parser mut* p, string what, ast.sym_kind kind, ast.sym_kind other,
+               ast.sym* mut* out) bool {
+    string mut name = "";
+    diag.loc mut at = diag.loc{};
+    if (!take_name(p, "a name", &name, &at)) {
+        return false;
+    }
+    ast.sym* s = find_symbol(p->pre.ck, name, kind, other);
+    if (s == null) {
+        msg_begin(p);
+        msg_str(p, "unknown ");
+        msg_str(p, what);
+        msg_str(p, " ");
+        msg_quote(p, name);
+        return fail_msg(p, at);
+    }
+    *out = s;
+    return true;
+}
+
+// ---- types ----
+
+// The index one past the last token of the type spelling at the cursor. A spelling holds
+// identifiers, `*`, `@`, the `[N]` of an array and the parameter list after `fn`. It ends at the
+// first other token outside brackets: the delimiter that the grammar allows after a type, which
+// is `;`, `#`, `,`, `)`, `>`, `(`, `{`, `:` or the integer of a constant.
+fn type_end(fir_parser* p) u64 {
+    u64 mut i = p->pos;
+    u64 mut depth = 0;
+    while (true) {
+        ftok t = ftok_at(&p->toks, i);
+        ftok_kind k = t.kind;
+        if (k == ftok_kind.ft_eof) {
+            return i;
+        }
+        if (depth > 0) {
+            if (k == ftok_kind.ft_semicolon || k == ftok_kind.ft_hash || k == ftok_kind.ft_lbrace
+                || k == ftok_kind.ft_rbrace) {
+                return i;
+            }
+            if (k == ftok_kind.ft_lparen || k == ftok_kind.ft_lbracket) {
+                depth += 1;
+            } else if (k == ftok_kind.ft_rparen || k == ftok_kind.ft_rbracket) {
+                depth -= 1;
+            }
+        } else if (k == ftok_kind.ft_lbracket) {
+            depth += 1;
+        } else if (k == ftok_kind.ft_lparen) {
+            // only the parameter list of a function type opens a parenthesis
+            if (i == p->pos) {
+                return i;
+            }
+            ftok before = ftok_at(&p->toks, i - 1);
+            if (before.kind != ftok_kind.ft_ident || before.text != "fn") {
+                return i;
+            }
+            depth += 1;
+        } else if (k != ftok_kind.ft_ident && k != ftok_kind.ft_star && k != ftok_kind.ft_at) {
+            return i;
+        }
+        i += 1;
+    }
+}
+
+/// Resolves the type spelling `text`, whose first byte stands at `at`, to the node of the
+/// checker's type table: the fort lexer and parser read it, and the checker resolves it in the
+/// scope of the prelude module. A named struct or enum therefore resolves as the prelude module
+/// sees it. Null after a diagnostic. A type with a `mut` in its outermost position is an error,
+/// because a FIR type has no binding.
+fn parse_type_text(fir_parser mut* p, string text, diag.loc at) types.node* {
+    u64 before = session.error_count(p->sess);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    defer lexer.tokvec_free(&toks);
+    lexer.lexer mut lx = lexer.lexer{
+        .sess = p->sess,
+        .file = p->file,
+        .src = text,
+        .line = at.line,
+        .col = at.col,
+        .out = &toks,
+        .buf = strbuf.create(),
+        .msg = strbuf.create(),
+    };
+    bool lexed = lexer.lex_all(&lx);
+    strbuf.free(&lx.buf);
+    strbuf.free(&lx.msg);
+    if (!lexed) {
+        return null;
+    }
+    parser.parser mut pp = parser.parser{
+        .sess = p->sess,
+        .file = p->file,
+        .toks = &toks,
+        .ntoks = lexer.tokvec_count(&toks),
+        .arena = &p->arena,
+        .last = diag.loc_make(p->file, 0, 0),
+        .msg = strbuf.create(),
+    };
+    ast.node mut* n = parser.parse_type(&pp, false);
+    bool rest = parser.kind(&pp) != lexer.tok_kind.eof;
+    diag.loc rest_at = parser.here(&pp);
+    strbuf.free(&pp.msg);
+    if (n == null) {
+        if (session.error_count(p->sess) == before) {
+            fail_at(p, at, "expected a type");
+        }
+        return null;
+    }
+    if (rest) {
+        fail_at(p, rest_at, "expected the end of the type");
+        return null;
+    }
+    check.checker mut* ck = p->pre.ck;
+    modules.module* saved_module = ck->module;
+    scope.scope mut* saved_scope = ck->scope;
+    ck->module = p->pre.module;
+    ck->scope = null;
+    check.written_type w = check.check_type(ck, n, check.type_pos.pos_binding);
+    ck->module = saved_module;
+    ck->scope = saved_scope;
+    if (check.check_poisoned(w.ty)) {
+        if (session.error_count(p->sess) == before) {
+            fail_at(p, at, "the type does not resolve in the prelude");
+        }
+        return null;
+    }
+    if (w.mut0) {
+        fail_at(p, at, "a FIR type has no binding: remove the outermost 'mut'");
+        return null;
+    }
+    return w.ty;
+}
+
+// Reads the type spelling at the cursor into *out.
+fn take_type(fir_parser mut* p, types.node* mut* out) bool {
+    u64 end = type_end(p);
+    if (end == p->pos) {
+        return fail_expected(p, "a type");
+    }
+    ftok first = cur(p);
+    ftok last = ftok_at(&p->toks, end - 1);
+    string text = p->src[first.off..last.off + last.len];
+    types.node* t = parse_type_text(p, text, diag.loc_make(p->file, first.line, first.col));
+    p->pos = end;
+    if (t == null) {
+        return false;
+    }
+    *out = t;
+    return true;
+}
+
+// ---- places, operands and constants ----
+
+// Whether the cursor stands at the start of a place.
+fn at_place(fir_parser* p) bool {
+    ftok_kind k = kind(p);
+    return k == ftok_kind.ft_local || k == ftok_kind.ft_lparen || at_word(p, "global");
+}
+
+/// Reads a place of `f`: `_n`, `global m.NAME` or `(*p)`, then its projections `.k` and `[_i]`.
+fn parse_place(fir_parser mut* p, fir.func mut* f, fir.place mut* out) bool {
+    fir.place mut q = fir.place{};
+    if (kind(p) == ftok_kind.ft_lparen) {
+        bump(p);
+        if (!expect(p, ftok_kind.ft_star, "'*'")) {
+            return false;
+        }
+        fir.place mut inner = fir.place{};
+        if (!parse_place(p, f, &inner) || !expect(p, ftok_kind.ft_rparen, "')'")) {
+            return false;
+        }
+        q = fir.place_deref(f, inner);
+    } else if (at_word(p, "global")) {
+        bump(p);
+        ast.sym* mut g = null;
+        if (!take_symbol(p, "global", ast.sym_kind.s_global, ast.sym_kind.s_const, &g)) {
+            return false;
+        }
+        q = fir.place_global(g);
+    } else if (kind(p) == ftok_kind.ft_local) {
+        u32 mut n = 0;
+        if (!take_local(p, f, &n)) {
+            return false;
+        }
+        q = fir.place_local(n);
+    } else {
+        return fail_expected(p, "a place");
+    }
+    while (true) {
+        if (kind(p) == ftok_kind.ft_dot) {
+            bump(p);
+            u32 mut field = 0;
+            if (!take_u32(p, "a field number", &field)) {
+                return false;
+            }
+            q = fir.place_field(f, q, field);
+        } else if (kind(p) == ftok_kind.ft_lbracket) {
+            bump(p);
+            u32 mut index = 0;
+            if (!take_local(p, f, &index) || !expect(p, ftok_kind.ft_rbracket, "']'")) {
+                return false;
+            }
+            q = fir.place_index(f, q, index);
+        } else {
+            *out = q;
+            return true;
+        }
+    }
+}
+
+// Reads the integer after the type `ty` of a constant: an integer, a `char` or an enum value that
+// fits its type, or the bits of the `double` of a float.
+fn parse_typed_integer(fir_parser mut* p, types.node* ty, fir.constant mut* out) bool {
+    ftok t = cur(p);
+    if (t.kind != ftok_kind.ft_int) {
+        return fail_expected(p, "an integer after the type");
+    }
+    diag.loc at = tok_loc(p, t);
+    bump(p);
+    consts.cval v = consts.int_make(t.negative, t.value);
+    bool is_prim = ty->kind == types.type_kind.k_prim;
+    if (is_prim && prim.prim_is_float(ty->prim)) {
+        if (t.negative) {
+            return fail_at(p, at, "a float constant is the bits of its double, with no sign");
+        }
+        *out = fir.const_float(ty, consts.cv_from_float(t.value));
+        return true;
+    }
+    if (is_prim && ty->prim == prim.prim_kind.prim_char) {
+        if (t.negative || t.value > CHAR_MAX) {
+            return fail_at(p, at, "a char constant is a code point from 0 to 255");
+        }
+        *out = fir.const_int(ty, consts.cv_from_char(t.value));
+        return true;
+    }
+    prim.prim_kind mut range = prim.prim_kind.prim_i32;
+    if (is_prim && prim.prim_is_integer(ty->prim)) {
+        range = ty->prim;
+    } else if (ty->kind != types.type_kind.k_enum) {
+        msg_begin(p);
+        msg_str(p, "an integer constant has an integer, char, enum or float type, not ");
+        msg_type(p, ty);
+        return fail_msg(p, at);
+    }
+    if (!consts.int_fits(v, range)) {
+        msg_begin(p);
+        msg_str(p, "constant ");
+        msg_quote(p, t.text);
+        msg_str(p, " does not fit ");
+        msg_type(p, ty);
+        return fail_msg(p, at);
+    }
+    *out = fir.const_int(ty, v);
+    return true;
+}
+
+// The type of an enum table, `enum_member*`, as the prelude module spells it.
+fn enum_table_type(fir_parser mut* p, diag.loc at) types.node* {
+    return parse_type_text(p, "enum_member*", at);
+}
+
+/// Reads a constant as the grammar rule `constant` spells it, with no `const` before it: `i32 -1`,
+/// `true`, `f64 0x...`, `null T`, `zero T`, a string, `bytes "..."`, `enum_table m.E` or `fn m.f`.
+fn parse_constant(fir_parser mut* p, fir.constant mut* out) bool {
+    ftok t = cur(p);
+    if (t.kind == ftok_kind.ft_string) {
+        bump(p);
+        *out = fir.const_string(t.text);
+        return true;
+    }
+    if (t.kind != ftok_kind.ft_ident) {
+        return fail_expected(p, "a constant");
+    }
+    types.node* mut ty = null;
+    if (t.text == "true" || t.text == "false") {
+        bump(p);
+        *out = fir.const_bool(t.text == "true");
+    } else if (t.text == "null") {
+        bump(p);
+        if (!take_type(p, &ty)) {
+            return false;
+        }
+        *out = fir.const_null(ty);
+    } else if (t.text == "zero") {
+        bump(p);
+        if (!take_type(p, &ty)) {
+            return false;
+        }
+        *out = fir.const_zero(ty);
+    } else if (t.text == "bytes") {
+        bump(p);
+        ftok text = cur(p);
+        if (!expect(p, ftok_kind.ft_string, "a string")) {
+            return false;
+        }
+        *out = fir.const_bytes(text.text);
+    } else if (t.text == "enum_table") {
+        bump(p);
+        ast.sym* mut e = null;
+        if (!take_symbol(p, "enum", ast.sym_kind.s_enum, ast.sym_kind.s_enum, &e)) {
+            return false;
+        }
+        ty = enum_table_type(p, tok_loc(p, t));
+        if (ty == null) {
+            return false;
+        }
+        *out = fir.const_enum_table(e, ty);
+    } else if (t.text == "fn") {
+        bump(p);
+        ast.sym* mut s = null;
+        if (!take_symbol(p, "function", ast.sym_kind.s_fn, ast.sym_kind.s_fn, &s)) {
+            return false;
+        }
+        *out = fir.const_fn(s);
+    } else {
+        if (!take_type(p, &ty)) {
+            return false;
+        }
+        return parse_typed_integer(p, ty, out);
+    }
+    return true;
+}
+
+/// Reads an operand of `f`: `copy p`, `move p` or `const c`.
+fn parse_operand(fir_parser mut* p, fir.func mut* f, fir.operand mut* out) bool {
+    fir.place mut q = fir.place{};
+    if (at_word(p, "copy")) {
+        bump(p);
+        if (!parse_place(p, f, &q)) {
+            return false;
+        }
+        *out = fir.operand_copy(q);
+        return true;
+    }
+    if (at_word(p, "move")) {
+        bump(p);
+        if (!parse_place(p, f, &q)) {
+            return false;
+        }
+        *out = fir.operand_move(q);
+        return true;
+    }
+    if (at_word(p, "const")) {
+        bump(p);
+        fir.constant mut c = fir.constant{};
+        if (!parse_constant(p, &c)) {
+            return false;
+        }
+        *out = fir.operand_const(c);
+        return true;
+    }
+    return fail_expected(p, "an operand: 'copy', 'move' or 'const'");
+}
+
+// ---- rvalues ----
+
+// Reads `(a, ...)` and appends each operand to the operand vector of `f`. *first is the position
+// of the first operand and *count their count.
+fn parse_operand_list(fir_parser mut* p, fir.func mut* f, u32 mut* first, u32 mut* count) bool {
+    if (!expect(p, ftok_kind.ft_lparen, "'('")) {
+        return false;
+    }
+    *first = cast(f->ops.len, u32);
+    *count = 0;
+    if (kind(p) == ftok_kind.ft_rparen) {
+        bump(p);
+        return true;
+    }
+    while (true) {
+        fir.operand mut o = fir.operand{};
+        if (!parse_operand(p, f, &o)) {
+            return false;
+        }
+        fir.operand_push(f, o);
+        *count += 1;
+        if (kind(p) != ftok_kind.ft_comma) {
+            return expect(p, ftok_kind.ft_rparen, "',' or ')'");
+        }
+        bump(p);
+    }
+}
+
+// Reads `, a` into *out.
+fn parse_next_operand(fir_parser mut* p, fir.func mut* f, fir.operand mut* out) bool {
+    return expect(p, ftok_kind.ft_comma, "','") && parse_operand(p, f, out);
+}
+
+// The rvalue kind whose name is `name`, as fir_print.rvalue_name spells it, in *out.
+fn rvalue_kind_of(string name, fir.rvalue_kind mut* out) bool {
+    u32 last = cast(fir.rvalue_kind.rv_call, u32);
+    u32 mut k = 1;
+    while (k <= last) {
+        fir.rvalue_kind rk = cast(k, fir.rvalue_kind);
+        if (fir_print.rvalue_name(rk) == name) {
+            *out = rk;
+            return true;
+        }
+        k += 1;
+    }
+    return false;
+}
+
+// Reads the operands of an arithmetic, overflow, bitwise, shift, float or comparison rvalue:
+// two, or one for `not` and `fneg`.
+fn parse_opname(fir_parser mut* p, fir.func mut* f, fir.rvalue_kind rk, diag.loc at,
+                fir.rvalue mut* out) bool {
+    fir.operand mut a = fir.operand{};
+    fir.operand mut b = fir.operand{};
+    if (!expect(p, ftok_kind.ft_lparen, "'('") || !parse_operand(p, f, &a)) {
+        return false;
+    }
+    bool binary = fir.rvalue_is_binary(rk);
+    if (binary && !parse_next_operand(p, f, &b)) {
+        return false;
+    }
+    if (kind(p) == ftok_kind.ft_comma) {
+        msg_begin(p);
+        msg_quote(p, fir_print.rvalue_name(rk));
+        if (binary) {
+            msg_str(p, " takes two operands");
+        } else {
+            msg_str(p, " takes one operand");
+        }
+        return fail_msg(p, at);
+    }
+    if (!expect(p, ftok_kind.ft_rparen, "')'")) {
+        return false;
+    }
+    if (binary) {
+        *out = fir.rvalue_binary(f, rk, a, b);
+    } else {
+        *out = fir.rvalue_unary(f, rk, a);
+    }
+    return true;
+}
+
+// Reads `<T>` into *out.
+fn parse_angle_type(fir_parser mut* p, types.node* mut* out) bool {
+    return expect(p, ftok_kind.ft_lt, "'<'") && take_type(p, out)
+        && expect(p, ftok_kind.ft_gt, "'>'");
+}
+
+// Reads `(a)` into *out.
+fn parse_one_operand(fir_parser mut* p, fir.func mut* f, fir.operand mut* out) bool {
+    return expect(p, ftok_kind.ft_lparen, "'('") && parse_operand(p, f, out)
+        && expect(p, ftok_kind.ft_rparen, "')'");
+}
+
+// Consumes the `mut` after `addr` or `slice` and says whether it was there.
+fn take_mut(fir_parser mut* p) bool {
+    if (at_word(p, "mut")) {
+        bump(p);
+        return true;
+    }
+    return false;
+}
+
+// Reads `addr [mut](p)` after the name.
+fn parse_addr(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
+    bool is_mut = take_mut(p);
+    fir.place mut q = fir.place{};
+    if (!expect(p, ftok_kind.ft_lparen, "'('") || !parse_place(p, f, &q)
+        || !expect(p, ftok_kind.ft_rparen, "')'")) {
+        return false;
+    }
+    *out = fir.rvalue_addr(f, q, is_mut);
+    return true;
+}
+
+// Reads `slice [mut](p, lo, hi)` after the name.
+fn parse_slice(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
+    bool is_mut = take_mut(p);
+    fir.place mut q = fir.place{};
+    fir.operand mut lo = fir.operand{};
+    fir.operand mut hi = fir.operand{};
+    if (!expect(p, ftok_kind.ft_lparen, "'('") || !parse_place(p, f, &q)
+        || !parse_next_operand(p, f, &lo) || !parse_next_operand(p, f, &hi)
+        || !expect(p, ftok_kind.ft_rparen, "')'")) {
+        return false;
+    }
+    *out = fir.rvalue_slice(f, q, lo, hi, is_mut);
+    return true;
+}
+
+// Reads `slice_ptr(a, lo, hi)` after the name.
+fn parse_slice_ptr(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
+    fir.operand mut a = fir.operand{};
+    fir.operand mut lo = fir.operand{};
+    fir.operand mut hi = fir.operand{};
+    if (!expect(p, ftok_kind.ft_lparen, "'('") || !parse_operand(p, f, &a)
+        || !parse_next_operand(p, f, &lo) || !parse_next_operand(p, f, &hi)
+        || !expect(p, ftok_kind.ft_rparen, "')'")) {
+        return false;
+    }
+    *out = fir.rvalue_slice_ptr(f, a, lo, hi);
+    return true;
+}
+
+// Reads `call C(a, ...)` after the name: `fn m.f`, `extern name` or an operand of function type.
+fn parse_call(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
+    ast.sym* mut s = null;
+    fir.operand mut callee = fir.operand{};
+    fir.callee_kind mut ck = fir.callee_kind.cl_value;
+    if (at_word(p, "fn")) {
+        bump(p);
+        ck = fir.callee_kind.cl_fn;
+        if (!take_symbol(p, "function", ast.sym_kind.s_fn, ast.sym_kind.s_fn, &s)) {
+            return false;
+        }
+    } else if (at_word(p, "extern")) {
+        bump(p);
+        ck = fir.callee_kind.cl_extern;
+        if (!take_symbol(p, "extern", ast.sym_kind.s_extern_fn, ast.sym_kind.s_extern_fn, &s)) {
+            return false;
+        }
+    } else if (!parse_operand(p, f, &callee)) {
+        return false;
+    }
+    u32 mut first = 0;
+    u32 mut count = 0;
+    if (!parse_operand_list(p, f, &first, &count)) {
+        return false;
+    }
+    switch (ck) {
+    case fir.callee_kind.cl_fn:
+        *out = fir.rvalue_call_fn(s, first, count);
+    case fir.callee_kind.cl_extern:
+        *out = fir.rvalue_call_extern(s, first, count);
+    case fir.callee_kind.cl_value:
+        *out = fir.rvalue_call_value(callee, first, count);
+    }
+    return true;
+}
+
+/// Reads an rvalue of `f` as the grammar rule `rvalue` spells it: an operand, an rvalue name of
+/// section 6 with its operands, `cast<T>(a)`, `addr [mut](p)`, `slice [mut](p, lo, hi)`,
+/// `slice_ptr(a, lo, hi)`, `alloc<T>(n)`, `aggregate T(a, ...)` or `call C(a, ...)`.
+fn parse_rvalue(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
+    ftok t = cur(p);
+    if (at_word(p, "copy") || at_word(p, "move") || at_word(p, "const")) {
+        fir.operand mut a = fir.operand{};
+        if (!parse_operand(p, f, &a)) {
+            return false;
+        }
+        *out = fir.rvalue_use(f, a);
+        return true;
+    }
+    fir.rvalue_kind mut rk = fir.rvalue_kind.rv_use;
+    if (t.kind != ftok_kind.ft_ident || !rvalue_kind_of(t.text, &rk)) {
+        return fail_expected(p, "an rvalue");
+    }
+    bump(p);
+    types.node* mut ty = null;
+    fir.operand mut a = fir.operand{};
+    u32 mut first = 0;
+    u32 mut count = 0;
+    switch (rk) {
+    case fir.rvalue_kind.rv_cast:
+        if (!parse_angle_type(p, &ty) || !parse_one_operand(p, f, &a)) {
+            return false;
+        }
+        *out = fir.rvalue_cast(f, ty, a);
+    case fir.rvalue_kind.rv_addr:
+        return parse_addr(p, f, out);
+    case fir.rvalue_kind.rv_slice:
+        return parse_slice(p, f, out);
+    case fir.rvalue_kind.rv_slice_ptr:
+        return parse_slice_ptr(p, f, out);
+    case fir.rvalue_kind.rv_alloc:
+        if (!parse_angle_type(p, &ty) || !parse_one_operand(p, f, &a)) {
+            return false;
+        }
+        *out = fir.rvalue_alloc(f, ty, a);
+    case fir.rvalue_kind.rv_aggregate:
+        if (!take_type(p, &ty) || !parse_operand_list(p, f, &first, &count)) {
+            return false;
+        }
+        *out = fir.rvalue_aggregate_new(ty, first, count);
+    case fir.rvalue_kind.rv_call:
+        return parse_call(p, f, out);
+    default:
+        return parse_opname(p, f, rk, tok_loc(p, t), out);
+    }
+    return true;
+}
+
+// ---- locations, statements and terminators ----
+
+// Reads `l:c` into *out, each a number from 1.
+fn parse_line_col(fir_parser mut* p, diag.loc mut* out) bool {
+    ftok first = cur(p);
+    u32 mut line = 0;
+    u32 mut col = 0;
+    if (!take_u32(p, "a line", &line) || !expect(p, ftok_kind.ft_colon, "':'")
+        || !take_u32(p, "a column", &col)) {
+        return false;
+    }
+    if (line == 0 || col == 0) {
+        return fail_at(p, tok_loc(p, first), "a line and a column count from 1");
+    }
+    *out = diag.loc_make(p->file, line, col);
+    return true;
+}
+
+// Whether `t` is `sN`, the statement index of a location, and its value in *out.
+fn statement_index(ftok t, u32 mut* out) bool {
+    if (t.kind != ftok_kind.ft_ident || t.text.len < 2 || t.text[0] != 's') {
+        return false;
+    }
+    u64 mut v = 0;
+    if (!str.parse_u64(t.text[1..t.text.len], DEC_RADIX, &v) || v > U32_MAX) {
+        return false;
+    }
+    *out = cast(v, u32);
+    return true;
+}
+
+/// Reads the optional location of a `let`, a statement or a terminator: `#l:c`, and when `full`
+/// is set, `exit l:c` and `sN` after it. An absent location is the empty location, with the
+/// empty exit and the statement index 0.
+fn parse_location(fir_parser mut* p, bool full, diag.loc mut* at, diag.loc mut* exit_at,
+                  u32 mut* index) bool {
+    *at = diag.loc{};
+    *exit_at = diag.loc{};
+    *index = 0;
+    if (kind(p) != ftok_kind.ft_hash) {
+        return true;
+    }
+    bump(p);
+    if (!parse_line_col(p, at)) {
+        return false;
+    }
+    if (!full) {
+        return true;
+    }
+    if (at_word(p, "exit")) {
+        bump(p);
+        if (!parse_line_col(p, exit_at)) {
+            return false;
+        }
+    }
+    if (statement_index(cur(p), index)) {
+        bump(p);
+    }
+    return true;
+}
+
+/// Reads a statement of `f` with its location: `p = rvalue`, `del(move p)`, `live(_n)` or
+/// `dead(_n)`. The `;` after it is the caller's.
+fn parse_statement(fir_parser mut* p, fir.func mut* f, fir.statement mut* out) bool {
+    fir.place mut q = fir.place{};
+    u32 mut n = 0;
+    if (at_word(p, "del")) {
+        bump(p);
+        if (!expect(p, ftok_kind.ft_lparen, "'('") || !expect_word(p, "move")
+            || !parse_place(p, f, &q) || !expect(p, ftok_kind.ft_rparen, "')'")) {
+            return false;
+        }
+        *out = fir.stmt_del(q, diag.loc{}, 0);
+    } else if (at_word(p, "live") || at_word(p, "dead")) {
+        bool live = at_word(p, "live");
+        bump(p);
+        if (!expect(p, ftok_kind.ft_lparen, "'('") || !take_local(p, f, &n)
+            || !expect(p, ftok_kind.ft_rparen, "')'")) {
+            return false;
+        }
+        if (live) {
+            *out = fir.stmt_live(n, diag.loc{}, 0);
+        } else {
+            *out = fir.stmt_dead(n, diag.loc{}, 0);
+        }
+    } else if (at_place(p)) {
+        fir.rvalue mut r = fir.rvalue{};
+        if (!parse_place(p, f, &q) || !expect(p, ftok_kind.ft_assign, "'='")
+            || !parse_rvalue(p, f, &r)) {
+            return false;
+        }
+        *out = fir.stmt_assign(q, r, diag.loc{}, 0);
+    } else {
+        return fail_expected(p, "a statement or a terminator");
+    }
+    return parse_location(p, true, &out->loc, &out->exit_loc, &out->stmt);
+}
+
+// The check kind whose name is `name`, as fir_print.check_name spells it, in *out.
+fn check_kind_of(string name, fir.check_kind mut* out) bool {
+    u32 last = cast(fir.check_kind.chk_panic, u32);
+    u32 mut k = 0;
+    while (k <= last) {
+        fir.check_kind ck = cast(k, fir.check_kind);
+        if (fir_print.check_name(ck) == name) {
+            *out = ck;
+            return true;
+        }
+        k += 1;
+    }
+    return false;
+}
+
+// Reads a check kind into *out.
+fn take_check_kind(fir_parser mut* p, fir.check_kind mut* out) bool {
+    ftok t = cur(p);
+    if (t.kind != ftok_kind.ft_ident || !check_kind_of(t.text, out)) {
+        return fail_expected(p, "a check kind");
+    }
+    bump(p);
+    return true;
+}
+
+// Reads `, a` for each operand that a `check` or a `fail` reports, and the `)` after them. The
+// operands go to the operand vector of `f`.
+fn parse_reported(fir_parser mut* p, fir.func mut* f, u32 mut* first, u32 mut* count) bool {
+    *first = cast(f->ops.len, u32);
+    *count = 0;
+    while (kind(p) == ftok_kind.ft_comma) {
+        bump(p);
+        fir.operand mut o = fir.operand{};
+        if (!parse_operand(p, f, &o)) {
+            return false;
+        }
+        fir.operand_push(f, o);
+        *count += 1;
+    }
+    return expect(p, ftok_kind.ft_rparen, "',' or ')'");
+}
+
+// Reads the value of a switch arm: `true`, `false` or a typed integer.
+fn parse_arm_value(fir_parser mut* p, consts.cval mut* out) bool {
+    diag.loc at = here_loc(p);
+    fir.constant mut c = fir.constant{};
+    if (!parse_constant(p, &c)) {
+        return false;
+    }
+    if (c.kind != fir.const_kind.ck_int && c.kind != fir.const_kind.ck_bool) {
+        return fail_at(p, at, "a switch arm is a bool, an integer, a char or an enum constant");
+    }
+    *out = c.value;
+    return true;
+}
+
+// Reads `switch(a) -> [c: bbN, ..., otherwise: bbM]` after the name.
+fn parse_switch(fir_parser mut* p, fir.func mut* f, fir.terminator mut* out) bool {
+    fir.operand mut a = fir.operand{};
+    if (!parse_one_operand(p, f, &a) || !expect(p, ftok_kind.ft_arrow, "'->'")
+        || !expect(p, ftok_kind.ft_lbracket, "'['")) {
+        return false;
+    }
+    u32 first = cast(f->arms.len, u32);
+    u32 mut count = 0;
+    while (!at_word(p, "otherwise")) {
+        consts.cval mut v = consts.cv_none();
+        u32 mut target = 0;
+        if (!parse_arm_value(p, &v) || !expect(p, ftok_kind.ft_colon, "':'")
+            || !take_block(p, &target) || !expect(p, ftok_kind.ft_comma, "','")) {
+            return false;
+        }
+        fir.arm_push(f, v, target);
+        count += 1;
+    }
+    bump(p);
+    u32 mut otherwise = 0;
+    if (!expect(p, ftok_kind.ft_colon, "':'") || !take_block(p, &otherwise)
+        || !expect(p, ftok_kind.ft_rbracket, "']'")) {
+        return false;
+    }
+    *out = fir.term_switch(a, first, count, otherwise, diag.loc{}, 0);
+    return true;
+}
+
+// Reads `check(f, kind, args) -> bbN` or `check(overwrite: p) -> bbN` after the name.
+fn parse_check(fir_parser mut* p, fir.func mut* f, fir.terminator mut* out) bool {
+    if (!expect(p, ftok_kind.ft_lparen, "'('")) {
+        return false;
+    }
+    u32 mut target = 0;
+    bool overwrite = at_word(p, "overwrite")
+        && ftok_at(&p->toks, p->pos + 1).kind == ftok_kind.ft_colon;
+    if (overwrite) {
+        bump(p);
+        bump(p);
+        fir.place mut q = fir.place{};
+        if (!parse_place(p, f, &q) || !expect(p, ftok_kind.ft_rparen, "')'")
+            || !expect(p, ftok_kind.ft_arrow, "'->'") || !take_block(p, &target)) {
+            return false;
+        }
+        *out = fir.term_check_overwrite(q, target, diag.loc{}, 0);
+        return true;
+    }
+    fir.operand mut cond = fir.operand{};
+    fir.check_kind mut ck = fir.check_kind.chk_overflow;
+    u32 mut first = 0;
+    u32 mut count = 0;
+    if (!parse_operand(p, f, &cond) || !expect(p, ftok_kind.ft_comma, "','")
+        || !take_check_kind(p, &ck) || !parse_reported(p, f, &first, &count)
+        || !expect(p, ftok_kind.ft_arrow, "'->'") || !take_block(p, &target)) {
+        return false;
+    }
+    *out = fir.term_check(cond, ck, first, count, target, diag.loc{}, 0);
+    return true;
+}
+
+// Reads `fail(kind, args)` after the name.
+fn parse_fail(fir_parser mut* p, fir.func mut* f, fir.terminator mut* out) bool {
+    fir.check_kind mut ck = fir.check_kind.chk_overflow;
+    u32 mut first = 0;
+    u32 mut count = 0;
+    if (!expect(p, ftok_kind.ft_lparen, "'('") || !take_check_kind(p, &ck)
+        || !parse_reported(p, f, &first, &count)) {
+        return false;
+    }
+    *out = fir.term_fail(ck, first, count, diag.loc{}, 0);
+    return true;
+}
+
+// Whether the cursor stands at the name of a terminator.
+fn at_terminator(fir_parser* p) bool {
+    return at_word(p, "goto") || at_word(p, "switch") || at_word(p, "return")
+        || at_word(p, "check") || at_word(p, "fail") || at_word(p, "trap")
+        || at_word(p, "unreachable");
+}
+
+/// Reads a terminator of `f` with its location: `goto bbN`, a `switch`, `return`, a `check`, a
+/// `fail`, `trap` or `unreachable`. The `;` after it is the caller's.
+fn parse_terminator(fir_parser mut* p, fir.func mut* f, fir.terminator mut* out) bool {
+    ftok t = cur(p);
+    bump(p);
+    bool mut ok = true;
+    if (t.text == "goto") {
+        u32 mut target = 0;
+        ok = take_block(p, &target);
+        *out = fir.term_goto(target, diag.loc{}, 0);
+    } else if (t.text == "switch") {
+        ok = parse_switch(p, f, out);
+    } else if (t.text == "return") {
+        *out = fir.term_return(diag.loc{}, 0);
+    } else if (t.text == "check") {
+        ok = parse_check(p, f, out);
+    } else if (t.text == "fail") {
+        ok = parse_fail(p, f, out);
+    } else if (t.text == "trap") {
+        *out = fir.term_trap(diag.loc{}, 0);
+    } else {
+        *out = fir.term_unreachable(diag.loc{}, 0);
+    }
+    return ok && parse_location(p, true, &out->loc, &out->exit_loc, &out->stmt);
+}
+
+// ---- blocks and functions ----
+
+// Skips to the next `;`, which it consumes, or to the next `}`, which it leaves: the recovery
+// point after a malformed statement, terminator or `let`.
+fn recover(fir_parser mut* p) void {
+    while (true) {
+        ftok_kind k = kind(p);
+        if (k == ftok_kind.ft_eof || k == ftok_kind.ft_rbrace) {
+            return;
+        }
+        bump(p);
+        if (k == ftok_kind.ft_semicolon) {
+            return;
+        }
+    }
+}
+
+// Reads the `;` that ends an item. A missing `;` is one diagnostic at the end of the item. When
+// the next token stands on a later line, the parser reads it as the start of the next item;
+// else the item is malformed, and the caller recovers.
+fn end_item(fir_parser mut* p, bool mut* resync) bool {
+    *resync = false;
+    if (kind(p) == ftok_kind.ft_semicolon) {
+        bump(p);
+        return true;
+    }
+    diag.loc at = after_previous(p);
+    fail_at(p, at, "expected ';'");
+    *resync = cur(p).line == at.line || at_end(p);
+    return false;
+}
+
+// Reads one statement or the terminator of block `b` and its `;`.
+fn parse_item(fir_parser mut* p, fir.func mut* f, u32 b) bool {
+    bool mut resync = false;
+    bool mut ok = true;
+    if (at_terminator(p)) {
+        fir.terminator mut t = fir.terminator{};
+        if (!parse_terminator(p, f, &t)) {
+            recover(p);
+            return false;
+        }
+        fir.block_set_terminator(f, b, t);
+        ok = end_item(p, &resync);
+    } else {
+        fir.statement mut s = fir.statement{};
+        if (!parse_statement(p, f, &s)) {
+            recover(p);
+            return false;
+        }
+        fir.block_append(f, b, s);
+        ok = end_item(p, &resync);
+    }
+    if (resync) {
+        recover(p);
+    }
+    return ok;
+}
+
+// Reads block `b`: `bbN: {`, its statements, its terminator and `}`. False when the function
+// cannot continue: a block out of order, or the end of the text.
+fn parse_block(fir_parser mut* p, fir.func mut* f, u32 b, bool mut* ok) bool {
+    ftok t = cur(p);
+    if (t.value != cast(b, u64)) {
+        msg_begin(p);
+        msg_str(p, "block ");
+        msg_quote(p, t.text);
+        msg_str(p, " is out of order: expected 'bb");
+        msg_u64(p, cast(b, u64));
+        msg_str(p, "'");
+        return fail_msg(p, tok_loc(p, t));
+    }
+    bump(p);
+    if (!expect(p, ftok_kind.ft_colon, "':'") || !expect(p, ftok_kind.ft_lbrace, "'{'")) {
+        return false;
+    }
+    while (true) {
+        ftok_kind k = kind(p);
+        if (k == ftok_kind.ft_rbrace) {
+            if (!fir.block_at(f, b)->terminated) {
+                msg_begin(p);
+                msg_str(p, "block ");
+                msg_quote(p, t.text);
+                msg_str(p, " has no terminator");
+                *ok = fail_msg(p, here_loc(p));
+            }
+            bump(p);
+            return true;
+        }
+        bool header = k == ftok_kind.ft_block
+            && ftok_at(&p->toks, p->pos + 1).kind == ftok_kind.ft_colon;
+        if (k == ftok_kind.ft_eof || header || at_word(p, "fn")) {
+            // the `}` of the block is missing: the next block, the next function or the end
+            return fail_expected(p, "'}'");
+        }
+        if (fir.block_at(f, b)->terminated) {
+            msg_begin(p);
+            msg_str(p, "a statement follows the terminator of ");
+            msg_quote(p, t.text);
+            *ok = fail_msg(p, here_loc(p));
+            while (kind(p) != ftok_kind.ft_rbrace && !at_end(p)) {
+                bump(p);
+            }
+        } else if (!parse_item(p, f, b)) {
+            *ok = false;
+        }
+    }
+}
+
+// Reads `let _n [(name)]: T [#l:c]` and adds the local to `f`. `lets` counts the `let` lines
+// before this one. `_0` exists already: its `let` comes first and states its type.
+fn parse_let(fir_parser mut* p, fir.func mut* f, u32 lets) bool {
+    bump(p);
+    ftok t = cur(p);
+    u32 mut n = 0;
+    if (!take_local_number(p, &n)) {
+        return false;
+    }
+    string mut name = "";
+    diag.loc mut name_at = diag.loc{};
+    if (kind(p) == ftok_kind.ft_lparen) {
+        bump(p);
+        if (!take_local_name(p, &name, &name_at) || !expect(p, ftok_kind.ft_rparen, "')'")) {
+            return false;
+        }
+    }
+    types.node* mut ty = null;
+    diag.loc mut at = diag.loc{};
+    diag.loc mut exit_at = diag.loc{};
+    u32 mut index = 0;
+    if (!expect(p, ftok_kind.ft_colon, "':'") || !take_type(p, &ty)
+        || !parse_location(p, false, &at, &exit_at, &index)) {
+        return false;
+    }
+    u32 next = fir.local_count(f);
+    if (n == 0) {
+        if (lets > 0) {
+            return fail_at(p, tok_loc(p, t), "the 'let' of '_0' comes first");
+        }
+        if (name.len > 0) {
+            return fail_at(p, name_at, "the return place '_0' has no name");
+        }
+        types.node* want = fir.local_at(f, 0)->ty;
+        if (ty != want) {
+            msg_begin(p);
+            msg_str(p, "the return place '_0' has the type ");
+            msg_type(p, want);
+            return fail_msg(p, tok_loc(p, t));
+        }
+        fir.local_mut(f, 0)->loc = at;
+        return true;
+    }
+    if (n != next) {
+        msg_begin(p);
+        if (n < next) {
+            msg_str(p, "local ");
+            msg_quote(p, t.text);
+            msg_str(p, " is declared twice");
+        } else {
+            msg_str(p, "local ");
+            msg_quote(p, t.text);
+            msg_str(p, " is out of order: expected '_");
+            msg_u64(p, cast(next, u64));
+            msg_str(p, "'");
+        }
+        return fail_msg(p, tok_loc(p, t));
+    }
+    fir.local_kind mut lk = fir.local_kind.lk_temp;
+    if (name.len > 0) {
+        lk = fir.local_kind.lk_named;
+    }
+    fir.local_add(f, ty, lk, null, at);
+    fir.local_mut(f, n)->name = containers.pool_intern(session.pool(p->sess), name);
+    return true;
+}
+
+// Reads the body of `f` from its `{`: the `let` lines, the blocks and the `}`.
+fn parse_body(fir_parser mut* p, fir.func mut* f) bool {
+    if (!expect(p, ftok_kind.ft_lbrace, "'{'")) {
+        return false;
+    }
+    bool mut ok = true;
+    u32 mut lets = 0;
+    bool mut resync = false;
+    while (at_word(p, "let")) {
+        if (!parse_let(p, f, lets)) {
+            ok = false;
+            recover(p);
+        } else if (!end_item(p, &resync)) {
+            ok = false;
+            if (resync) {
+                recover(p);
+            }
+        }
+        lets += 1;
+    }
+    if (kind(p) == ftok_kind.ft_rbrace) {
+        return fail_at(p, here_loc(p), "a function has the entry block 'bb0'");
+    }
+    p->refs.len = 0;
+    u32 mut b = 0;
+    while (kind(p) == ftok_kind.ft_block) {
+        if (b > 0) {
+            fir.block_new(f);
+        }
+        if (!parse_block(p, f, b, &ok)) {
+            return false;
+        }
+        b += 1;
+    }
+    if (b == 0) {
+        return fail_expected(p, "the block 'bb0'");
+    }
+    if (!expect(p, ftok_kind.ft_rbrace, "a block or '}'")) {
+        return false;
+    }
+    return check_block_refs(p, f) && ok;
+}
+
+// The header of a function: its name and the position of the name, the symbol and the type that
+// it names, and the name of each parameter.
+struct header {
+    string name;
+    diag.loc at;
+    ast.sym* sym;
+    types.node* ty;
+    u32 count;
+    string[MAX_PARAMS] names;
+    diag.loc[MAX_PARAMS] name_at;
+}
+
+// Reads one parameter `_n [(name)]: T`, where `_n` must be the next one.
+fn parse_param(fir_parser mut* p, header mut* h, types.node* mut* ty) bool {
+    ftok t = cur(p);
+    u32 mut n = 0;
+    if (!take_local_number(p, &n)) {
+        return false;
+    }
+    if (n != h->count + 1) {
+        msg_begin(p);
+        msg_str(p, "parameter ");
+        msg_quote(p, t.text);
+        msg_str(p, " is out of order: expected '_");
+        msg_u64(p, cast(h->count + 1, u64));
+        msg_str(p, "'");
+        return fail_msg(p, tok_loc(p, t));
+    }
+    if (cast(h->count, u64) >= MAX_PARAMS) {
+        return fail_at(p, tok_loc(p, t), "too many parameters");
+    }
+    string mut name = "";
+    diag.loc mut name_at = tok_loc(p, t);
+    if (kind(p) == ftok_kind.ft_lparen) {
+        bump(p);
+        if (!take_local_name(p, &name, &name_at) || !expect(p, ftok_kind.ft_rparen, "')'")) {
+            return false;
+        }
+    }
+    if (!expect(p, ftok_kind.ft_colon, "':'")) {
+        return false;
+    }
+    diag.loc type_at = here_loc(p);
+    if (!take_type(p, ty)) {
+        return false;
+    }
+    if ((*ty)->kind == types.type_kind.k_void) {
+        return fail_at(p, type_at, "a parameter has a type other than 'void'");
+    }
+    h->names[cast(h->count, u64)] = name;
+    h->name_at[cast(h->count, u64)] = name_at;
+    h->count += 1;
+    return true;
+}
+
+// Gives the function `name` of the header its symbol: the prelude's function of that name, whose
+// type must be the header's, or a new symbol of the prelude module.
+fn resolve_function(fir_parser mut* p, string name, diag.loc at, header mut* h) bool {
+    ast.sym* s = find_symbol(p->pre.ck, name, ast.sym_kind.s_fn, ast.sym_kind.s_fn);
+    if (s != null) {
+        if (s->ty != h->ty) {
+            msg_begin(p);
+            msg_quote(p, name);
+            msg_str(p, " has the type ");
+            msg_type(p, s->ty);
+            msg_str(p, " in the prelude");
+            return fail_msg(p, at);
+        }
+        h->sym = s;
+        return true;
+    }
+    modules.module* m = p->pre.module;
+    i64 dot = str.last_index_of(name, '.');
+    if (dot < 0 || name[0..cast(dot, u64)] != m->path) {
+        msg_begin(p);
+        msg_str(p, "a function that the prelude does not declare is ");
+        msg_quote(p, m->path);
+        msg_str(p, ".<name>");
+        return fail_msg(p, at);
+    }
+    string decl = containers.pool_intern(session.pool(p->sess),
+                                         name[cast(dot, u64) + 1..name.len]);
+    ast.sym mut* made = check.check_sym_new(p->pre.ck, ast.sym_kind.s_fn, decl, null, m->ast->sym);
+    made->decl = at;
+    made->ty = h->ty;
+    h->sym = made;
+    return true;
+}
+
+// Reads `fn name(params) -> T` into *h. The `{` after it is the body's.
+fn parse_header(fir_parser mut* p, header mut* h) bool {
+    *h = header{};
+    if (!expect_word(p, "fn") || !take_name(p, "a function name", &h->name, &h->at)
+        || !expect(p, ftok_kind.ft_lparen, "'('")) {
+        return false;
+    }
+    types.node*[MAX_PARAMS] mut params = {};
+    if (kind(p) != ftok_kind.ft_rparen) {
+        while (true) {
+            types.node* mut ty = null;
+            if (!parse_param(p, h, &ty)) {
+                return false;
+            }
+            params[cast(h->count - 1, u64)] = ty;
+            if (kind(p) != ftok_kind.ft_comma) {
+                break;
+            }
+            bump(p);
+        }
+    }
+    if (!expect(p, ftok_kind.ft_rparen, "',' or ')'") || !expect(p, ftok_kind.ft_arrow, "'->'")) {
+        return false;
+    }
+    types.table mut* tt = &p->pre.ck->types;
+    types.node* mut ret = types.type_void(tt);
+    bool no_return = at_word(p, "noreturn");
+    if (no_return) {
+        bump(p);
+    } else if (!take_type(p, &ret)) {
+        return false;
+    }
+    h->ty = types.type_fn(tt, ret, params[0..cast(h->count, u64)], no_return);
+    return resolve_function(p, h->name, h->at, h);
+}
+
+// Makes the function of the header `h`, with the name of each parameter that has no symbol. A
+// name that differs from the name of the parameter's symbol is an error.
+fn function_of(fir_parser mut* p, header* h, fir.func mut* out) bool {
+    *out = fir.func_new(&p->pre.ck->types, h->sym, h->ty);
+    u32 mut i = 0;
+    while (i < h->count) {
+        string name = h->names[cast(i, u64)];
+        fir.local mut* l = fir.local_mut(out, i + 1);
+        if (l->sym == null) {
+            l->name = containers.pool_intern(session.pool(p->sess), name);
+        } else if (name.len > 0 && name != l->sym->name) {
+            msg_begin(p);
+            msg_str(p, "parameter '_");
+            msg_u64(p, cast(i + 1, u64));
+            msg_str(p, "' is named ");
+            msg_quote(p, l->sym->name);
+            msg_str(p, " in the prelude");
+            return fail_msg(p, h->name_at[cast(i, u64)]);
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Whether a function of `m` has the symbol `s`.
+fn defined(fir.module* m, ast.sym* s) bool {
+    u64 mut i = 0;
+    while (i < fir.module_function_count(m)) {
+        if (fir.module_function_at(m, i)->sym == s) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Skips from the cursor past the `}` that closes the next `{` outside braces.
+fn skip_function(fir_parser mut* p) void {
+    u64 mut depth = 0;
+    while (!at_end(p)) {
+        ftok_kind k = kind(p);
+        bump(p);
+        if (k == ftok_kind.ft_lbrace) {
+            depth += 1;
+        } else if (k == ftok_kind.ft_rbrace && depth > 0) {
+            depth -= 1;
+            if (depth == 0) {
+                return;
+            }
+        }
+    }
+}
+
+// The positions of the bodies of the functions of a module, in module order.
+struct pos_vec {
+    u64 mut@ own items;
+    u64 len;
+}
+
+fn pos_push(pos_vec mut* v, u64 at) void {
+    if (v->len >= v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir_parse.pos_push: capacity overflow");
+        u64 mut@ own bigger = new(u64, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = at;
+    v->len += 1;
+}
+
+// The first pass: reads each header, adds its function to `m` and records where its body starts,
+// so that a call names a function that a later header gives.
+fn read_headers(fir_parser mut* p, fir.module mut* m, pos_vec mut* bodies) void {
+    while (!at_end(p)) {
+        if (!at_word(p, "fn")) {
+            fail_expected(p, "'fn'");
+            while (!at_end(p) && !at_word(p, "fn")) {
+                bump(p);
+            }
+            continue;
+        }
+        header mut h = header{};
+        if (parse_header(p, &h)) {
+            if (defined(m, h.sym)) {
+                msg_begin(p);
+                msg_str(p, "function ");
+                msg_quote(p, h.name);
+                msg_str(p, " is defined twice");
+                fail_msg(p, h.at);
+            } else if (kind(p) != ftok_kind.ft_lbrace) {
+                fail_expected(p, "'{'");
+            } else {
+                fir.func mut f = fir.func{};
+                if (function_of(p, &h, &f)) {
+                    pos_push(bodies, p->pos);
+                    fir.module_add_function(m, move(f));
+                } else {
+                    fir.func_free(&f);
+                }
+            }
+        }
+        skip_function(p);
+    }
+}
+
+// Records each `extern fn` that a call names, in first-use order: the functions in order, the
+// blocks and the statements of each in order.
+fn collect_externs(fir.module mut* m) void {
+    u64 mut i = 0;
+    while (i < fir.module_function_count(m)) {
+        fir.func* f = fir.module_function_at(m, i);
+        u32 mut b = 0;
+        while (b < fir.block_count(f)) {
+            u32 mut k = 0;
+            while (k < fir.block_statement_count(f, b)) {
+                fir.statement* s = fir.block_statement(f, b, k);
+                if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call
+                    && s->value.callee == fir.callee_kind.cl_extern) {
+                    fir.module_use_extern(m, s->value.callee_sym);
+                }
+                k += 1;
+            }
+            b += 1;
+        }
+        i += 1;
+    }
+}
+
+/// Parses `text`, the textual form of `file`, into a module whose type spellings and symbol
+/// names resolve against `pre`. The functions keep the text's order. A function that the prelude
+/// does not declare gets a new symbol of the prelude module, which the checker of `pre` owns, so
+/// a call can name it. The module holds no global and no `main`, because the textual form has no
+/// rule for them. The diagnostics go to `s`. After a diagnostic of the tokenizer the parser reads
+/// nothing, so the module is empty. When the session counts a new error, the module is incomplete
+/// and serves module_free alone.
+fn parse_module(session.session mut* s, string file, string text, prelude pre) fir.module {
+    fir_parser mut p = parser_create(s, file, text, pre);
+    defer parser_free(&p);
+    fir.module mut m = fir.module_new();
+    if (!p.clean) {
+        // a malformed token is its one diagnostic, and no function is read
+        return m;
+    }
+    pos_vec mut bodies = pos_vec{};
+    defer del(bodies.items);
+    read_headers(&p, &m, &bodies);
+    u64 mut i = 0;
+    while (i < bodies.len) {
+        p.pos = bodies.items[i];
+        parse_body(&p, &m.funcs.items[i]);
+        i += 1;
+    }
+    collect_externs(&m);
+    return m;
+}

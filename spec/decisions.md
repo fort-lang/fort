@@ -1556,7 +1556,12 @@ Sections:
   `--fir-after=<pass>` (implies `--fir` and writes the FIR at the named point of `spec/fir.md`
   11; the names are `lower`, the output of the lowering, and `build-mode`, the output of the
   build-mode pass, and any other name is a usage error; until a pass exists, its name writes the
-  module that `--fir` writes), `--help`, `--version`.
+  module that `--fir` writes), `--fir-test` (read the entry file as a FIR test of `spec/fir.md`
+  16.3: check its prelude as the module `main`, parse its FIR text against that module, run the
+  pass that its `//! pass:` directive names, and write the module to stdout in the textual form
+  of `spec/fir.md` 13; a pass that does not exist yet is an error with status 2, and combining it
+  with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or `--fir-after` is a usage
+  error), `--help`, `--version`.
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
   A Linux x86-64 compiler stores `x86_64-linux-gnu` as its built target.
@@ -1598,6 +1603,8 @@ Sections:
   observation point of FIR (`spec/fir.md` 17.1, open question 1), as `--ast` is of the parser.
   `--fir-after` names only the two points where FIR changes. `verify` is not a name, because
   the verifier changes nothing and runs twice (T-221 review, finding 3).
+  Amended 2026-09-29 (T-224): `--fir-test` did not exist. It is the driver of the harness of
+  `test/fir/` (`spec/fir.md` 16.3), as `--check` is the driver of the check mode.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.

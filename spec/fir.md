@@ -834,13 +834,13 @@ expected text. A comment starts with `//` and ends at the line. A location `#lin
 optional after a `let`, a statement or a terminator. A `let`, a statement or a terminator
 without a location has the empty location, and the printer writes no location for the empty
 location, so a printed function reads back as it was. A statement index `s<N>` may follow the
-location of a statement or a terminator; without one, the translator treats every temporary as
-a `%tmp` slot. A `let` may carry the name of a named local in parentheses, and a parameter may
-carry its name in the same way.
+location of a statement or a terminator; a missing statement index is index 0, so a test of the
+translator writes the indices. A `let` may carry the name of a named local in parentheses, and a
+parameter may carry its name in the same way.
 
 ```ebnf
 function    = "fn" name "(" [ param { "," param } ] ")" "->" ( type | "noreturn" ) "{" { local }
-              { block } "}" ;
+              block { block } "}" ;
 param       = local_ref [ "(" identifier ")" ] ":" type ;
 local       = "let" local_ref [ "(" identifier ")" ] ":" type [ position ] ";" ;
 block       = block_ref ":" "{" { statement } terminator "}" ;
@@ -869,19 +869,22 @@ place       = ( local_ref | "global" name | "(" "*" place ")" ) { projection } ;
 projection  = "." integer | "[" local_ref "]" ;
 constant    = type integer | "true" | "false" | "null" type | "zero" type | string
             | "bytes" string | "enum_table" name | "fn" name ;
-location    = position [ "exit" line_col ] [ "s" integer ] ;
+location    = position [ "exit" line_col ] [ "s" dec_digit { dec_digit } ] ;
 position    = "#" line_col ;
 line_col    = integer ":" integer ;
 integer     = [ "-" ] ( dec_digit { dec_digit } | "0x" hex_digit { hex_digit } ) ;
-local_ref   = "_" integer ;
-block_ref   = "bb" integer ;
+local_ref   = "_" dec_digit { dec_digit } ;
+block_ref   = "bb" dec_digit { dec_digit } ;
 ```
 
-`type` is a fort type in the spelling of `type_to_str`. `opname` is one of the rvalue names of
-section 6. A `mut` after `addr` gives the result a `mut` pointer, and a `mut` after `slice`, which
-appears only on a slice of a fixed-array place, gives a `mut` span (section 6). `kind` is one of the
-kinds of section 8. `name` is a dotted symbol name of D9.7. `identifier`, `string`, `dec_digit` and
-`hex_digit` are those of `grammar.md` 1.
+`type` is a fort type in the spelling of `type_to_str`. The parser resolves a type spelling in
+the scope of the prelude module of a FIR test alone, because `type_to_str` writes the bare name
+of a struct or an enum: a FIR test declares its named types in its prelude, and the parser does
+not read back the `--fir` text of a program whose modules reuse a name. `opname` is one of the
+rvalue names of section 6. A `mut` after `addr` gives the result a `mut` pointer, and a `mut`
+after `slice`, which appears only on a slice of a fixed-array place, gives a `mut` span (section
+6). `kind` is one of the kinds of section 8. `name` is a dotted symbol name of D9.7. `identifier`,
+`string`, `dec_digit` and `hex_digit` are those of `grammar.md` 1.
 
 This program:
 
@@ -1038,7 +1041,9 @@ The compiler moves to FIR one function at a time.
    any of the three (`notes/compiler.md` 6). The run corpus and the `fixpoint` ctest stay the
    witnesses of behavior.
 3. **FIR tests.** A test under `test/fir/` holds a function in the textual form of section 13,
-   the pass to run, and the expected text after it. The harness parses the input, runs the pass,
+   the pass to run, and the expected text after it. An optional prelude of fort declarations
+   gives the types and the symbols that the text names; `fort --fir-test` checks it as the
+   module `main` (D14.1). The harness parses the input, runs the pass,
    prints the result and compares. The verifier's rules, the build-mode pass and each analysis
    get their tests in this form, one file for each rule or each rewrite.
 4. **The gen suites.** The suites `test/fort/gen_*_test.ft` hold emitted text. A suite that tests

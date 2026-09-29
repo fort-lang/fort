@@ -1,0 +1,434 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| 94 spellings
+//| ok
+/// Checks that the FIR parser reads places, operands, constants and rvalues (spec/fir.md 5.5, 5.6,
+/// 6 and 13): each spelling that fir_print_value_test pins parses and prints back as it was, each
+/// symbol name resolves, and a malformed text is one diagnostic.
+import consts;
+import fir;
+import fir_env;
+import fir_parse;
+import fir_print;
+import prim;
+import std.strbuf;
+import types;
+
+// The function of fir_print_value_test: `fn add(i32 x, i64 y) u64` with the locals the spellings
+// name. `_1` is `x` and `_2` is `y`.
+struct fixture {
+    fir.func f;
+}
+
+fn temp(fir.func mut* f, types.node* ty) void {
+    fir.local_add(f, ty, fir.local_kind.lk_temp, null, fir_env.at(1, 1));
+}
+
+fn make(fir_env.env mut* e) fixture {
+    fixture mut x = fixture{};
+    x.f = fir_env.func_of(e, "add");
+    types.table mut* tt = fir_env.tt(e);
+    types.node* pair = fir_env.ty(e, "pair");
+    types.node* pair_ptr = types.type_ptr(tt, pair, false, true);
+    // _3 to _13, in the order of fir_print_value_test
+    temp(&x.f, pair);
+    temp(&x.f, pair_ptr);
+    temp(&x.f, types.type_array(tt, fir_env.i32_ty(e), 4));
+    temp(&x.f, fir_env.u64_ty(e));
+    temp(&x.f, types.type_string(tt, false));
+    temp(&x.f, types.type_span(tt, fir_env.i32_ty(e), false, true));
+    temp(&x.f, fir_env.ty(e, "add"));
+    temp(&x.f, fir_env.prim_ty(e, prim.prim_kind.prim_f64));
+    temp(&x.f, types.type_ptr(tt, pair_ptr, false, false));
+    temp(&x.f, fir_env.ty(e, "holder"));
+    temp(&x.f, types.type_ptr(tt, fir_env.i32_ty(e), false, false));
+    return x;
+}
+
+// ---- the spellings of fir_print_value_test ---------------------------------------------------
+
+u64 TYPE_COUNT = 4;
+
+string[TYPE_COUNT] TYPES = {"i32", "i32 mut* own", "pair@", "fn (i32, i64) u64"};
+
+u64 PLACE_COUNT = 13;
+
+string[PLACE_COUNT] PLACES = {
+    "_1",
+    "_0",
+    "global main.LIMIT",
+    "_3.1",
+    "_5[_6]",
+    "_8[_6]",
+    "global main.origin.1",
+    "(*_4)",
+    "(*_4).0",
+    "(*_12.0)",
+    "(*(*_11))",
+    "(*(*_11)).1",
+    "(*_4).0[_6]",
+};
+
+u64 OPERAND_COUNT = 4;
+
+string[OPERAND_COUNT] OPERANDS = {"copy _1", "move _12.0", "const i32 -1", "const true"};
+
+u64 CONSTANT_COUNT = 25;
+
+string[CONSTANT_COUNT] CONSTANTS = {
+    "i32 -1",
+    "i32 0",
+    "u8 255",
+    "u64 18446744073709551615",
+    "i64 -9223372036854775808",
+    "char 65",
+    "color 1",
+    "true",
+    "false",
+    "f64 0x3FF8000000000000",
+    "f32 0x0000000000000001",
+    "f64 0xFEDCBA9876543210",
+    "null pair mut*",
+    "zero pair",
+    "zero i32 mut* own",
+    "\"hello\"",
+    "\"\"",
+    "\"a\\\"b\\\\c\"",
+    "\"\\x0A\\x09\\x0D\\x00\"",
+    "\"\\x1F ~\\x7F\\x80\\xFF\"",
+    "bytes \"hi\"",
+    "bytes \"a\\\"\\x0A\"",
+    "enum_table main.color",
+    "fn main.add",
+    "fn main.stop",
+};
+
+// One rvalue of each kind, in the order of fir.rvalue_kind.
+u64 RVALUE_COUNT = 33;
+
+string[RVALUE_COUNT] RVALUES = {
+    "copy _1",
+    "add(copy _1, copy _2)",
+    "sub(copy _1, copy _2)",
+    "mul(copy _1, copy _2)",
+    "add_overflows(copy _1, copy _2)",
+    "sub_overflows(copy _1, copy _2)",
+    "mul_overflows(copy _1, copy _2)",
+    "div(copy _1, copy _2)",
+    "rem(copy _1, copy _2)",
+    "and(copy _1, copy _2)",
+    "or(copy _1, copy _2)",
+    "xor(copy _1, copy _2)",
+    "not(copy _1)",
+    "shl(copy _1, copy _1)",
+    "shr(copy _1, copy _1)",
+    "fadd(copy _10, copy _10)",
+    "fsub(copy _10, copy _10)",
+    "fmul(copy _10, copy _10)",
+    "fdiv(copy _10, copy _10)",
+    "fneg(copy _10)",
+    "eq(copy _1, copy _2)",
+    "ne(copy _1, copy _2)",
+    "lt(copy _1, copy _2)",
+    "le(copy _1, copy _2)",
+    "gt(copy _1, copy _2)",
+    "ge(copy _1, copy _2)",
+    "cast<i64>(copy _1)",
+    "addr(_3.1)",
+    "slice(_5, const u64 0, copy _6)",
+    "slice_ptr(copy _13, const u64 1, copy _6)",
+    "alloc<pair>(const u64 3)",
+    "aggregate pair(copy _1, copy _6)",
+    "call fn main.add(copy _1, copy _2)",
+};
+
+// The callees, the edge forms and the `mut` marks of fir_print_value_test. Its one text that
+// joins two printers, `<copy _2|false`, is no spelling of one form, so the list omits it.
+u64 EDGE_COUNT = 15;
+
+string[EDGE_COUNT] EDGES = {
+    "call extern puts(const bytes \"hi\")",
+    "call copy _9(copy _1, copy _2)",
+    "call fn main.nothing()",
+    "call const fn main.make()",
+    "aggregate pair()",
+    "const zero pair",
+    "move _3",
+    "addr((*_4))",
+    "slice(_7, copy _6, copy _6)",
+    "cast<i32 mut@>(copy _8)",
+    "alloc<i32 mut* own>(copy _6)",
+    "addr mut(_3.1)",
+    "addr mut((*_4))",
+    "slice mut(_5, const u64 0, copy _6)",
+    "slice_ptr(copy _13, copy _6, copy _6)",
+};
+
+// ---- the round trip -----------------------------------------------------------------------
+
+enum form {
+    fm_type,
+    fm_place,
+    fm_operand,
+    fm_constant,
+    fm_rvalue,
+}
+
+// Parses `text` as one `fm` of the fixture's function and prints the result into `b`. False when
+// the parse reports a diagnostic or leaves text behind. *kind is the kind of a parsed rvalue.
+fn parse_print(fir_env.env mut* e, fixture mut* x, form fm, string text, strbuf.str_buf mut* b,
+               fir.rvalue_kind mut* kind) bool {
+    fir_parse.fir_parser mut p = fir_env.parser(e, text);
+    defer fir_parse.parser_free(&p);
+    bool mut ok = false;
+    switch (fm) {
+    case form.fm_type:
+        types.node* t = fir_parse.parse_type_text(&p, text, fir_env.at(1, 1));
+        ok = t != null;
+        if (ok) {
+            fir_print.print_type(t, b);
+        }
+        return ok;
+    case form.fm_place:
+        fir.place mut q = fir.place{};
+        ok = fir_parse.parse_place(&p, &x->f, &q);
+        if (ok) {
+            fir_print.print_place(&x->f, q, b);
+        }
+    case form.fm_operand:
+        fir.operand mut o = fir.operand{};
+        ok = fir_parse.parse_operand(&p, &x->f, &o);
+        if (ok) {
+            fir_print.print_operand(&x->f, o, b);
+        }
+    case form.fm_constant:
+        fir.constant mut c = fir.constant{};
+        ok = fir_parse.parse_constant(&p, &c);
+        if (ok) {
+            fir_print.print_constant(c, b);
+        }
+    case form.fm_rvalue:
+        fir.rvalue mut r = fir.rvalue{};
+        ok = fir_parse.parse_rvalue(&p, &x->f, &r);
+        if (ok) {
+            fir_print.print_rvalue(&x->f, r, b);
+            *kind = r.kind;
+        }
+    }
+    return ok && fir_parse.at_end(&p);
+}
+
+// Holds that `text` parses as `fm` and prints back as it was.
+fn round(fir_env.env mut* e, fixture mut* x, form fm, string text) fir.rvalue_kind {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir.rvalue_kind mut kind = fir.rvalue_kind.rv_use;
+    if (!parse_print(e, x, fm, text, &b, &kind)) {
+        eprintln("fir_parse_value_test: <", text, "> does not parse");
+        panic("fir_parse_value_test.round: a spelling does not parse");
+    }
+    fir_env.expect_text(&b, text);
+    return kind;
+}
+
+// Holds that `text` does not parse as `fm` and gives the one diagnostic `want`.
+fn bad(fir_env.env mut* e, fixture mut* x, form fm, string text, string want) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 before = fir_env.errors(e);
+    fir.rvalue_kind mut kind = fir.rvalue_kind.rv_use;
+    assert(!parse_print(e, x, fm, text, &b, &kind));
+    if (fir_env.errors(e) != before + 1) {
+        eprintln("fir_parse_value_test: <", text, "> gives ", fir_env.errors(e) - before,
+                 " diagnostics");
+        panic("fir_parse_value_test.bad: not one diagnostic");
+    }
+    fir_env.said(e, before, want);
+}
+
+fn every_pinned_spelling_round_trips() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fixture mut x = make(&e);
+    defer fir.func_free(&x.f);
+    u64 mut n = 0;
+    for (string text : TYPES) {
+        round(&e, &x, form.fm_type, text);
+        n += 1;
+    }
+    for (string text : PLACES) {
+        round(&e, &x, form.fm_place, text);
+        n += 1;
+    }
+    for (string text : OPERANDS) {
+        round(&e, &x, form.fm_operand, text);
+        n += 1;
+    }
+    for (string text : CONSTANTS) {
+        round(&e, &x, form.fm_constant, text);
+        n += 1;
+    }
+    u32 mut k = 0;
+    for (string text : RVALUES) {
+        // the list names every kind once, in the order of the enum
+        assert(round(&e, &x, form.fm_rvalue, text) == cast(k, fir.rvalue_kind));
+        k += 1;
+        n += 1;
+    }
+    assert(k == cast(fir.rvalue_kind.rv_call, u32) + 1);
+    for (string text : EDGES) {
+        round(&e, &x, form.fm_rvalue, text);
+        n += 1;
+    }
+    assert(fir_env.errors(&e) == 0);
+    println(n, " spellings");
+}
+
+// ---- what a parse gives --------------------------------------------------------------------
+
+fn parse_constant(fir_env.env mut* e, string text) fir.constant {
+    fir_parse.fir_parser mut p = fir_env.parser(e, text);
+    defer fir_parse.parser_free(&p);
+    fir.constant mut c = fir.constant{};
+    assert(fir_parse.parse_constant(&p, &c));
+    return c;
+}
+
+fn constants_carry_their_type_and_value() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.constant minus = parse_constant(&e, "i32 -1");
+    assert(minus.kind == fir.const_kind.ck_int && minus.ty == fir_env.i32_ty(&e));
+    assert(consts.cv_eq(minus.value, consts.cv_from_i64(-1)));
+    fir.constant ch = parse_constant(&e, "char 65");
+    assert(ch.value.kind == consts.cval_kind.cv_char && ch.value.mag == 65);
+    fir.constant member = parse_constant(&e, "color 1");
+    assert(member.ty == fir_env.ty(&e, "color"));
+    fir.constant real = parse_constant(&e, "f64 0x3FF8000000000000");
+    assert(real.kind == fir.const_kind.ck_float);
+    assert(consts.cv_float_bits(real.value) == 4609434218613702656);
+    fir.constant yes = parse_constant(&e, "true");
+    assert(yes.kind == fir.const_kind.ck_bool && yes.value.mag == 1);
+    fir.constant text = parse_constant(&e, "\"a\\x0A\"");
+    assert(text.kind == fir.const_kind.ck_string && text.text == "a\n");
+    fir.constant bytes = parse_constant(&e, "bytes \"hi\"");
+    assert(bytes.kind == fir.const_kind.ck_bytes && bytes.text == "hi");
+    fir.constant nothing = parse_constant(&e, "null i32*");
+    assert(nothing.kind == fir.const_kind.ck_null);
+    assert(nothing.ty == types.type_ptr(fir_env.tt(&e), fir_env.i32_ty(&e), false, false));
+    fir.constant empty = parse_constant(&e, "zero pair");
+    assert(empty.kind == fir.const_kind.ck_zero && empty.ty == fir_env.ty(&e, "pair"));
+    // A float constant written in decimal holds the same bits.
+    fir.constant decimal = parse_constant(&e, "f64 4609434218613702656");
+    assert(consts.cv_float_bits(decimal.value) == 4609434218613702656);
+    assert(fir_env.errors(&e) == 0);
+}
+
+// Each symbol name resolves to the checker's symbol of the fixture.
+fn symbol_names_resolve() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fixture mut x = make(&e);
+    defer fir.func_free(&x.f);
+    fir.constant table = parse_constant(&e, "enum_table main.color");
+    assert(table.sym == fir_env.sym(&e, "color"));
+    types.node* member = fir_env.ty(&e, "enum_member");
+    assert(table.ty == types.type_ptr(fir_env.tt(&e), member, false, false));
+    fir.constant add = parse_constant(&e, "fn main.add");
+    assert(add.kind == fir.const_kind.ck_fn && add.sym == fir_env.sym(&e, "add"));
+    fir_parse.fir_parser mut p = fir_env.parser(&e, "global main.LIMIT global main.total");
+    defer fir_parse.parser_free(&p);
+    fir.place mut q = fir.place{};
+    assert(fir_parse.parse_place(&p, &x.f, &q));
+    assert(q.base == fir.base_kind.bk_global && q.global == fir_env.sym(&e, "LIMIT"));
+    assert(fir_parse.parse_place(&p, &x.f, &q));
+    assert(q.global == fir_env.sym(&e, "total"));
+    fir_parse.fir_parser mut c = fir_env.parser(&e, "call extern labs(const i64 1)");
+    defer fir_parse.parser_free(&c);
+    fir.rvalue mut r = fir.rvalue{};
+    assert(fir_parse.parse_rvalue(&c, &x.f, &r));
+    assert(r.callee == fir.callee_kind.cl_extern && r.callee_sym == fir_env.sym(&e, "labs"));
+    assert(fir_env.errors(&e) == 0);
+}
+
+fn an_unknown_symbol_is_one_diagnostic() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fixture mut x = make(&e);
+    defer fir.func_free(&x.f);
+    bad(&e, &x, form.fm_place, "global main.NOPE", "1:8: unknown global 'main.NOPE'");
+    // A name of another kind, and a name without its module, are no global.
+    bad(&e, &x, form.fm_place, "global main.add", "1:8: unknown global 'main.add'");
+    bad(&e, &x, form.fm_place, "global LIMIT", "1:8: unknown global 'LIMIT'");
+    bad(&e, &x, form.fm_constant, "fn main.nope", "1:4: unknown function 'main.nope'");
+    bad(&e, &x, form.fm_constant, "fn main.LIMIT", "1:4: unknown function 'main.LIMIT'");
+    bad(&e, &x, form.fm_rvalue, "call extern nope()", "1:13: unknown extern 'nope'");
+    // An extern goes by its C name alone.
+    bad(&e, &x, form.fm_rvalue, "call extern main.puts()", "1:13: unknown extern 'main.puts'");
+    bad(&e, &x, form.fm_constant, "enum_table main.pair", "1:12: unknown enum 'main.pair'");
+    bad(&e, &x, form.fm_rvalue, "call fn other.add()", "1:9: unknown function 'other.add'");
+}
+
+fn malformed_text_is_one_diagnostic() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fixture mut x = make(&e);
+    defer fir.func_free(&x.f);
+    // The three cases of the ticket: a missing `)`, `copy` without a place, `cast` without `<`.
+    bad(&e, &x, form.fm_rvalue, "add(copy _1, copy _2",
+        "1:21: expected ')', found the end of the text");
+    bad(&e, &x, form.fm_operand, "copy", "1:5: expected a place, found the end of the text");
+    bad(&e, &x, form.fm_rvalue, "cast i32(copy _1)", "1:6: expected '<', found 'i32'");
+    // The count of operands.
+    bad(&e, &x, form.fm_rvalue, "add(copy _1)", "1:12: expected ',', found ')'");
+    bad(&e, &x, form.fm_rvalue, "not(copy _1, copy _2)", "1:1: 'not' takes one operand");
+    bad(&e, &x, form.fm_rvalue, "slice(_5, const u64 0)", "1:22: expected ',', found ')'");
+    bad(&e, &x, form.fm_rvalue, "call fn main.add(copy _1",
+        "1:25: expected ',' or ')', found the end of the text");
+    bad(&e, &x, form.fm_rvalue, "bogus(copy _1)", "1:1: expected an rvalue, found 'bogus'");
+    bad(&e, &x, form.fm_rvalue, "add(copy _1, copy _2, copy _1)", "1:1: 'add' takes two operands");
+    bad(&e, &x, form.fm_rvalue, "call extern 7()", "1:13: expected a name, found '7'");
+    bad(&e, &x, form.fm_rvalue, "addr mut _1", "1:10: expected '(', found '_1'");
+    // Places.
+    bad(&e, &x, form.fm_place, "_99", "1:1: unknown local '_99'");
+    bad(&e, &x, form.fm_place, "(_1)", "1:2: expected '*', found '_1'");
+    bad(&e, &x, form.fm_place, "_5[_6", "1:6: expected ']', found the end of the text");
+    bad(&e, &x, form.fm_place, "_3.-1", "1:4: a field number does not fit u32");
+    bad(&e, &x, form.fm_place, "bb1", "1:1: expected a place, found 'bb1'");
+    bad(&e, &x, form.fm_place, "_4294967296", "1:1: a local number does not fit u32");
+    bad(&e, &x, form.fm_place, "global 5", "1:8: expected a name, found '5'");
+    // Constants.
+    bad(&e, &x, form.fm_constant, "u8 256", "1:4: constant '256' does not fit 'u8'");
+    bad(&e, &x, form.fm_constant, "i8 -129", "1:4: constant '-129' does not fit 'i8'");
+    bad(&e, &x, form.fm_constant, "color 2147483648",
+        "1:7: constant '2147483648' does not fit 'color'");
+    bad(&e, &x, form.fm_constant, "char 256",
+        "1:6: a char constant is a code point from 0 to 255");
+    bad(&e, &x, form.fm_constant, "f64 -1",
+        "1:5: a float constant is the bits of its double, with no sign");
+    bad(&e, &x, form.fm_constant, "bool 1",
+        "1:6: an integer constant has an integer, char, enum or float type, not 'bool'");
+    bad(&e, &x, form.fm_constant, "i32",
+        "1:4: expected an integer after the type, found the end of the text");
+    bad(&e, &x, form.fm_constant, "bytes 1", "1:7: expected a string, found '1'");
+    bad(&e, &x, form.fm_constant, "zero nosuch", "1:6: unknown type 'nosuch'");
+    bad(&e, &x, form.fm_constant, ";", "1:1: expected a constant, found ';'");
+    bad(&e, &x, form.fm_operand, "take _1",
+        "1:1: expected an operand: 'copy', 'move' or 'const', found 'take'");
+}
+
+fn main() i32 {
+    every_pinned_spelling_round_trips();
+    constants_carry_their_type_and_value();
+    symbol_names_resolve();
+    an_unknown_symbol_is_one_diagnostic();
+    malformed_text_is_one_diagnostic();
+    println("ok");
+    return 0;
+}

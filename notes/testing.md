@@ -22,11 +22,11 @@ bullet at a time and without a rewrite.
   whose ctest runs over `build/<Host>/<preset>/bootstrap` and so sees bootstrap0's tests alone; and
   `<step>-all` runs the step for both components. The bootstrap0 tests carry the label
   `bootstrap0`, which the fort targets exclude (`ctest -L '^unit$' -LE '^bootstrap0$'`). Unit:
-  `test/fort` (`fort-modules`), `highlight_selftest` and `extension_selftest`; the 68 bootstrap0 C
-  suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and `lsp-binary`;
-  bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit tests of the
-  tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26. On
-  linux each target runs as `tools/vm <target>`.
+  `test/fort` (`fort-modules`), `test/fir` (`fir`), `highlight_selftest` and `extension_selftest`;
+  the 68 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and
+  `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit
+  tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
+  On linux each target runs as `tools/vm <target>`.
 - The merge gate is the `gate` target of the `debug` preset (`ninja -C build/<Host>/debug gate` on
   both hosts): `check-all`, then the workflow -- configure, build, test -- of the `asan` and `ubsan`
   presets. On darwin run `cmake --preset debug && cmake --build --preset debug --target gate`;
@@ -382,6 +382,9 @@ bullet at a time and without a rewrite.
   early one whatever the period, while a leak moves all of them. Two late samples were the rule
   until T-038 measured a period of **eight** over the emitter's round and read 26512 with nothing
   leaking; the window has to cover the cycle, and sixteen covers every period seen so far.
+  On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
+  per-CPU magazine, so `address_moved` in `test/fort/support/fir_env.ft` answers 0 there and a
+  probe reads the system view only (T-256).
   **A round large enough to witness a big release makes the block view useless**, which is the
   other half of the same measurement: a round that allocates a hundred kilobytes and gives it all
   back leaves free chunks of every size, so the 32-byte probe lands wherever one starts and ranged
@@ -444,6 +447,19 @@ bullet at a time and without a rewrite.
   **Product compiler scope.** The `lang` test uses `xfail.txt`. It runs the complete product
   corpus with the current standard library (T-160).
 
+- **`test/fir` holds the FIR tests**, one `.fir` file each, in the format that `test/fir/README.md`
+  gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: `//! pass:
+  <name>`, an optional `//! prelude:` block of fort declarations, and one outcome, `//! expect:`
+  with its `//|` lines, `//! error: <text>` or `//! panic: <text>`. The FIR text of the function
+  follows the header, and the FIR parser reads the header as comments. `test/fir/run_tests.py` runs
+  `fort --fir-test <file>` from `test/fir` for each file: the compiler checks the prelude as the
+  module `main`, parses the text against it, runs the pass and writes the module. The harness
+  compares stdout with the `expect:` block and shows a unified diff for a difference; `--bless`
+  rewrites the block. Exit 2 from the compiler is an `ERROR`, and the passes `verify` and
+  `build-mode` give it until they exist. The ctest `fir` is a unit test and runs the compiler
+  natively, with the environment of the sanitizer presets. Name a test
+  `test/fir/<pass>/NNN_name.fir`. `agents/lines.py` counts no `.fir` file as a test line, and
+  `test/highlight_test.py` counts no `.fir` file either (T-224).
 - **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
   when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
   holds only the program, and `check_env` sandboxes get an empty runtime. Write

@@ -333,12 +333,14 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 23);
+    assert(capture.line_count(out) == 24);
     assert(str.find(out, "  --cfg <list>       set key=value pairs; repeatable\n") >= 0);
     assert(str.find(out, "  --help             print this help and exit\n") >= 0);
     assert(str.find(out, "  --fir              write the program's FIR to stdout and stop\n") >= 0);
     string after = "  --fir-after=<pass> write the FIR after <pass>: lower or build-mode\n";
     assert(str.find(out, after) >= 0);
+    string test = "  --fir-test         read a .fir test, run its pass and write the FIR\n";
+    assert(str.find(out, test) >= 0);
     // --help answers whatever follows it, and nothing else runs.
     assert(captured_err_is_empty());
 }
@@ -1043,6 +1045,161 @@ fn fir_of_a_program_with_a_type_error_exits_one() void {
     assert(out == "");
 }
 
+// ---- --fir-test ----------------------------------------------------------------------------
+
+// --fir-test sets its own flag, and the `.fir` file is the entry.
+fn fir_test_parses_as_a_flag() void {
+    string[3] mut argv = {"fort", "--fir-test", "t.fir"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[0..3]) == driver.PARSE_OK);
+    assert(opts.fir_test && !opts.fir && !opts.check);
+    assert(opts.entry == "t.fir");
+}
+
+// --fir-test reads a file that no other mode reads, so it combines with no other mode.
+fn fir_test_combines_with_no_other_mode() void {
+    string message =
+        "--fir-test does not combine with --tokens, --ast, --check, --json, --index or --fir";
+    string[5] mut others = {"--fir", "--fir-after=lower", "--check", "--tokens", "--ast"};
+    for (string other : others) {
+        string[4] mut argv = {"fort", "--fir-test", other, "t.fir"};
+        assert(run(argv[0..4]) == EXIT_USAGE);
+        assert(err_has(message));
+    }
+    string[4] mut index = {"fort", "--index", "--fir-test", "t.fir"};
+    assert(run(index[0..4]) == EXIT_USAGE);
+    assert(err_has(message));
+}
+
+// Writes `t.fir`: the directive `pass`, a prelude whose struct `pair` has a field of type
+// `field`, and the function `main.f` whose block holds `item` on line 8 from column 9 and then
+// `return`. The source spells each `/` of a header marker as `\x2F`, so that the directive lint
+// of the corpus does not read the text as a directive of this test.
+fn write_fir_test(string pass, string field, string item) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "\x2F/! pass: ");
+    strbuf.append(&b, pass);
+    strbuf.append(&b, "\n\x2F/! prelude:\n\x2F/| struct pair {\n\x2F/|     ");
+    strbuf.append(&b, field);
+    strbuf.append(&b, " a;\n\x2F/| }\nfn main.f(_1 (x): pair) -> i32 {\n    bb0: {\n        ");
+    strbuf.append(&b, item);
+    strbuf.append(&b, "\n        return;\n    }\n}\n");
+    write_file("t.fir", strbuf.view(&b));
+}
+
+u64 FIR_TEST_OUT_LINES = 8;
+
+// What `fort --fir-test t.fir` writes for the pass `none` and the item `_0 = copy _1.0 #3:4;`.
+string[FIR_TEST_OUT_LINES] FIR_TEST_OUT = {
+    "fn main.f(_1 (x): pair) -> i32 {",
+    "    let _0: i32;",
+    "",
+    "    bb0: {",
+    "        _0 = copy _1.0 #3:4 s0;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The pass `none` writes the module that the file holds, in the printer's form, and exits 0.
+// The prelude need not define `main`.
+fn fir_test_of_the_pass_none_writes_the_module() void {
+    write_fir_test("none", "i32", "_0 = copy _1.0 #3:4;");
+    string[3] mut argv = {"fort", "--fir-test", "t.fir"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    for (string line : FIR_TEST_OUT) {
+        strbuf.append(&want, line);
+        strbuf.push(&want, '\n');
+    }
+    assert(out == strbuf.view(&want));
+}
+
+// A `.fir` file with CRLF line ends reads as one with LF line ends: the directives drop the
+// carriage return, and the parser and the checker read it as a blank.
+fn fir_test_reads_crlf_line_ends() void {
+    write_fir_test("none", "i32", "_0 = copy _1.0 #3:4;");
+    strbuf.str_buf mut lf = strbuf.create();
+    defer strbuf.free(&lf);
+    assert(io.read_file("t.fir", &lf));
+    strbuf.str_buf mut crlf = strbuf.create();
+    defer strbuf.free(&crlf);
+    for (char c : strbuf.view(&lf)) {
+        if (c == '\n') {
+            strbuf.push(&crlf, '\r');
+        }
+        strbuf.push(&crlf, c);
+    }
+    write_file("t.fir", strbuf.view(&crlf));
+    string[3] mut argv = {"fort", "--fir-test", "t.fir"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(out_has("        _0 = copy _1.0 #3:4 s0;\n"));
+}
+
+u64 FIR_TEST_BAD_PASS_COUNT = 5;
+
+// A pass that does not exist yet, an unknown pass and an argument of `none`.
+string[FIR_TEST_BAD_PASS_COUNT] FIR_TEST_BAD_PASSES = {
+    "verify",
+    "build-mode --release",
+    "build-mode --no-bounds-check",
+    "bogus",
+    "none --release",
+};
+
+string[FIR_TEST_BAD_PASS_COUNT] FIR_TEST_BAD_PASS_SAYS = {
+    "fort: error: the pass 'verify' does not exist yet\n",
+    "fort: error: the pass 'build-mode' does not exist yet\n",
+    "fort: error: the pass 'build-mode' does not exist yet\n",
+    "fort: error: unknown pass 'bogus'\n",
+    "fort: error: the pass 'none' takes no argument\n",
+};
+
+// A pass that does not run is an error of the harness: exit 2, and no text.
+fn fir_test_of_a_pass_that_does_not_run_is_exit_two() void {
+    string[3] mut argv = {"fort", "--fir-test", "t.fir"};
+    u64 mut i = 0;
+    while (i < FIR_TEST_BAD_PASS_COUNT) {
+        write_fir_test(FIR_TEST_BAD_PASSES[i], "i32", "return;");
+        assert(run(argv[0..3]) == EXIT_USAGE);
+        string own err = captured_err();
+        defer del(err);
+        assert(err == FIR_TEST_BAD_PASS_SAYS[i]);
+        assert(!out_has("fn "));
+        i += 1;
+    }
+    write_file("t.fir", "fn main.f() -> void {\n    bb0: {\n        return;\n    }\n}\n");
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: the .fir test has no '\x2F/! pass:' directive\n"));
+    string[3] mut missing = {"fort", "--fir-test", "missing.fir"};
+    assert(run(missing[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot read 'missing.fir'"));
+    string[5] mut target = {"fort", "--fir-test", "--target", "t", "t.fir"};
+    assert(run(target[0..5]) == EXIT_USAGE);
+    assert(err_has("unsupported target 't'"));
+}
+
+// A diagnostic of the prelude or of the FIR text is exit 1 with no text. A diagnostic of the
+// prelude names the line and the column of the `.fir` file.
+fn fir_test_of_a_malformed_file_is_exit_one() void {
+    string[3] mut argv = {"fort", "--fir-test", "t.fir"};
+    write_fir_test("none", "nosuch", "return;");
+    assert(run(argv[0..3]) == EXIT_COMPILE_ERROR);
+    assert(err_has("t.fir:4:9: error: unknown type 'nosuch'\n"));
+    assert(!out_has("fn "));
+    write_fir_test("none", "i32", "_0 = copy _7;");
+    assert(run(argv[0..3]) == EXIT_COMPILE_ERROR);
+    assert(err_has("t.fir:8:19: error: unknown local '_7'\n"));
+    assert(!out_has("fn "));
+}
+
 fn main() i32 {
     write_runtime();
     every_flag_sets_its_own_option();
@@ -1094,6 +1251,12 @@ fn main() i32 {
     fir_combines_with_no_other_mode();
     fir_of_a_clean_program_exits_zero();
     fir_of_a_program_with_a_type_error_exits_one();
+    fir_test_parses_as_a_flag();
+    fir_test_combines_with_no_other_mode();
+    fir_test_of_the_pass_none_writes_the_module();
+    fir_test_reads_crlf_line_ends();
+    fir_test_of_a_pass_that_does_not_run_is_exit_two();
+    fir_test_of_a_malformed_file_is_exit_one();
     println("fir ok");
     the_front_end_walks_the_closure();
     an_include_root_is_searched();

@@ -38,6 +38,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--ast`             | write the entry file's tree to stdout and stop (D14.1)     | off        |
 | `--fir`             | write the program's FIR to stdout and stop (D14.1)         | off        |
 | `--fir-after=<pass>` | write the FIR after `<pass>` and stop (D14.1)              | none       |
+| `--fir-test`        | run the pass of a FIR test and write the FIR (D14.1)       | off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -166,6 +167,17 @@ file (D14.1). Options and the entry file may appear in any order.
   included, is a usage error. The last `--fir-after` wins. Until a pass exists, its name writes
   the module that `--fir` writes. Until the lowering exists, that module holds no function, so
   the text is empty.
+- `--fir-test` reads the entry file as a FIR test of `spec/fir.md` 16.3, whose header
+  `test/fir/README.md` describes. It checks the lines of the `//! prelude:` block as the module
+  `main` through steps 0 to 3 of section 2, with no entry rule, so the prelude need not define
+  `main`. A diagnostic of the prelude names the line and the column of the test file. The
+  compiler then parses the FIR text of the file against that module, runs the pass that the
+  `//! pass:` directive names, writes the module to stdout in the textual form of
+  `spec/fir.md` 13 and exits 0 (D14.1). A diagnostic of the prelude or of the FIR text writes no
+  FIR and exits 1. The pass `none` runs nothing. `verify` and `build-mode` do not exist yet,
+  and a test that names one of them exits 2. `--fir-test` takes the target rule of `--check`
+  and is a usage error together with `--tokens`, `--ast`, `--check`, `--json`, `--index`,
+  `--fir` or `--fir-after`.
 - In the fort compiler's `--ast` form, a C extern with `...` prints a bare `...` last in its
   `(params ...)` group. The mark is not a `(param ...)` child.
   A fixed extern prints no mark, and a fort definition cannot print this mark (D8.3, D9.8).
@@ -192,13 +204,14 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 with 2; `--help` prints that line and then the table above, and exits 0.
 
 These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
-Eighteen report a command line the compiler cannot use and then print the usage line:
+Nineteen report a command line the compiler cannot use and then print the usage line:
 `missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
 `unknown option '<opt>'`, `no entry file`, `--json requires --check` (D20.2),
 `--tokens does not combine with --check, --json or --index`,
 `--ast does not combine with --tokens, --check, --json or --index`,
 `--fir does not combine with --tokens, --ast, --check, --json or --index`,
 `unknown --fir-after pass '<name>'`,
+`--fir-test does not combine with --tokens, --ast, --check, --json, --index or --fir`,
 `invalid --cfg assignment '<entry>'`, `invalid --cfg key '<key>'`, `empty --cfg list entry`,
 `duplicate --cfg key '<key>'`, and `cannot override compiler configuration key '<key>'`,
 `unsupported target '<triple>'`, `--std-dir is required for cross-target -S`,
@@ -211,8 +224,10 @@ failed, with the system's error text as `<reason>`: `cannot read '<file>': <reas
 file), `cannot write '<file>': <reason>` (the LLVM IR module), `cannot create a temporary directory
 in '<dir>': <reason>` (`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reason>` (`--cc` could
 not be started). Two report the outcome of `--cc`: `cc failed with status <n>` and `cc failed with
-signal <n>`. The last two are the compiler's own failures: `internal error: <what>` and `out of
-memory`.
+signal <n>`. Four report a FIR test that `--fir-test` cannot run: `the .fir test has no '//!
+pass:' directive`, `the pass '<name>' does not exist yet`, `unknown pass '<name>'` and `the pass
+'none' takes no argument`. The last two are the compiler's own failures: `internal error: <what>`
+and `out of memory`.
 
 ```sh
 fort main.ft -o main                          # build ./main in checked mode

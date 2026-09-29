@@ -37,14 +37,16 @@ enum local_kind {
     lk_temp, // a temporary of the lowering
 }
 
-/// One local. `number` is its identity. `sym` is null for `lk_return` and `lk_temp`; the name of a
-/// named local or a parameter is `sym->name`.
+/// One local. `number` is its identity. `sym` is null for `lk_return` and `lk_temp`. `name` is the
+/// name of a named local or a parameter that has no symbol, as the FIR parser reads it; local_name
+/// gives the name that the textual form writes.
 struct local {
     u32 number;
     types.node* ty;
     local_kind kind;
     ast.sym* sym;
     diag.loc loc;
+    string name;
 }
 
 // `items[..len]` holds the locals in number order. `items.len` is the capacity.
@@ -126,7 +128,7 @@ fn local_add(func mut* f, types.node* ty, local_kind kind, ast.sym* s, diag.loc 
     }
     locals_reserve(&f->locals);
     u32 n = cast(f->locals.len, u32);
-    f->locals.items[f->locals.len] = local{n, ty, kind, s, at};
+    f->locals.items[f->locals.len] = local{n, ty, kind, s, at, ""};
     f->locals.len += 1;
     return n;
 }
@@ -138,6 +140,24 @@ fn local_at(func* f, u32 n) local* {
         panic("fir.local_at: index out of range");
     }
     return &f->locals.items[cast(n, u64)];
+}
+
+/// Returns local `n` for a change of its name or its location. The function panics when `n` is at
+/// or past the count. A later local_add can move the locals, so the pointer is valid until then.
+fn local_mut(func mut* f, u32 n) local mut* {
+    if (cast(n, u64) >= f->locals.len) {
+        panic("fir.local_mut: index out of range");
+    }
+    return &f->locals.items[cast(n, u64)];
+}
+
+/// The name of a local in the textual form: the name of its symbol when it has one, else its
+/// `name`, which is empty for `_0` and a temporary.
+fn local_name(local* l) string {
+    if (l->sym != null) {
+        return l->sym->name;
+    }
+    return l->name;
 }
 
 fn local_count(func* f) u32 {

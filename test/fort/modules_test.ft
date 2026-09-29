@@ -16,6 +16,7 @@ import diag;
 import modules;
 import modules_env;
 import scope;
+import session;
 import std.str;
 import std.strbuf;
 
@@ -54,6 +55,48 @@ fn the_entry_directory_is_the_first_search_root() void {
     assert(modules_env.load(&e, "src/app.ft"));
     assert(modules_env.ordered(&e, 0) == "util");
     assert(modules_env.ordered(&e, 1) == "app");
+}
+
+// load_named gives the entry module the path it is told, whatever the base name of its file is.
+fn a_named_entry_takes_the_path_it_is_given() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "cases/007.fir", "import util;\n");
+    modules_env.add(&e, "cases/util.ft", modules_env.src_add());
+    string own path = modules_env.in_sandbox(&e, "cases/007.fir");
+    defer del(path);
+    assert(modules.load_named(&e.s, &e.set, "main", path));
+    assert(modules.count(&e.set) == 2);
+    assert(modules_env.ordered(&e, 0) == "util");
+    assert(modules_env.ordered(&e, 1) == "main");
+    assert(modules.entry(&e.set) == modules.at(&e.set, 1));
+    assert(modules.find(&e.set, "main") == modules.at(&e.set, 1));
+    assert(modules.find(&e.set, "007") == null);
+}
+
+// The file of a named entry is read through the session, so a text that set_source installed
+// stands in for a file that is not on the disk.
+fn a_named_entry_reads_the_text_of_the_session() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    string own path = modules_env.in_sandbox(&e, "t.fir");
+    defer del(path);
+    session.set_source(&e.s, path, "struct point {\n    i32 x;\n}\n");
+    assert(modules.load_named(&e.s, &e.set, "main", path));
+    assert(modules_env.ordered(&e, 0) == "main");
+    assert(modules.at(&e.set, 0)->file == path);
+    assert(modules_env.errors(&e) == 0);
+}
+
+fn a_named_entry_that_does_not_open_is_reported() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    string own path = modules_env.in_sandbox(&e, "missing.fir");
+    defer del(path);
+    assert(!modules.load_named(&e.s, &e.set, "main", path));
+    assert(modules_env.errors(&e) == 1);
+    assert(modules_env.said(&e, "cannot read"));
+    assert(modules.count(&e.set) == 0);
 }
 
 // An entry base name must be a module path segment. Test corpus names such as
@@ -790,6 +833,9 @@ fn main() i32 {
     the_entry_module_path_is_its_base_name();
     an_entry_file_in_a_directory_keeps_only_its_base_name();
     the_entry_directory_is_the_first_search_root();
+    a_named_entry_takes_the_path_it_is_given();
+    a_named_entry_reads_the_text_of_the_session();
+    a_named_entry_that_does_not_open_is_reported();
     an_entry_base_name_that_is_no_identifier_is_taken_as_it_is();
     a_dotted_entry_base_name_is_rejected();
     a_dotted_entry_is_reported_at_the_start_of_the_file();

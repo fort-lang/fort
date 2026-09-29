@@ -447,6 +447,18 @@ set_tests_properties(fort-modules PROPERTIES
     LABELS unit
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
+# The FIR tests: test/fir/<pass>/<x>.fir holds a function in the textual form of
+# spec/fir.md 13, the pass to run and the expected text. `fort --fir-test` parses
+# the file, runs the pass and writes the module; test/fir/run_tests.py compares it.
+# The compiler runs natively, so the sanitizer presets instrument it.
+add_test(NAME fir
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fir/run_tests.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}")
+set_tests_properties(fir PROPERTIES
+    LABELS unit
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # The product language test uses the current compiler and standard library.
 # It verifies each module that the compiler emits.
 set(FORT_LANG_COMMAND

@@ -1,0 +1,338 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| 23 kinds
+//| ok
+/// Checks the tokenizer of the FIR textual form (spec/fir.md 13): one token for each form of the
+/// lexical rules, the positions of the tokens, and one diagnostic for each malformed token.
+import diag;
+import fir_parse;
+import session;
+import std.str;
+import std.strbuf;
+
+// The tokens of one text and the session that took their diagnostics.
+struct run {
+    session.session s;
+    fir_parse.ftok_vec toks;
+    bool clean;
+}
+
+fn scan(run mut* r, string text) void {
+    r->s = session.create();
+    r->toks = fir_parse.ftok_vec{};
+    r->clean = fir_parse.tokenize(&r->s, "t.fir", text, &r->toks);
+}
+
+fn finish(run mut* r) void {
+    fir_parse.ftok_free(&r->toks);
+    session.free(&r->s);
+}
+
+fn tok(run* r, u64 i) fir_parse.ftok {
+    return fir_parse.ftok_at(&r->toks, i);
+}
+
+fn errors(run* r) u64 {
+    return session.error_count(&r->s);
+}
+
+// Holds diagnostic `i` against its position and a part of its message.
+fn said_at(run mut* r, u64 i, u32 line, u32 col, string part) void {
+    diag.record d = diag.record_at(session.diags(&r->s), i);
+    if (d.loc.line != line || d.loc.col != col || str.find(d.msg, part) < 0) {
+        eprintln("fir_token_test: got ", d.loc.line, ":", d.loc.col, ": ", d.msg);
+        panic("fir_token_test.said_at: a diagnostic differs");
+    }
+}
+
+// Holds token `i` against its kind and its spelling.
+fn is(run* r, u64 i, fir_parse.ftok_kind kind, string text) void {
+    fir_parse.ftok t = tok(r, i);
+    if (t.kind != kind || t.text != text) {
+        eprintln("fir_token_test: token ", i, " is <", t.text, ">");
+        panic("fir_token_test.is: a token differs");
+    }
+}
+
+// ---- the worked example -------------------------------------------------------------------
+
+// The worked example of spec/fir.md 13, with its comment.
+u64 EXAMPLE_LINES = 29;
+
+string[EXAMPLE_LINES] EXAMPLE = {
+    "fn main.f(_1 (c): bool) -> i32 {",
+    "    let _0: i32;",
+    "    let _2 (p): i32 mut* own #2:18;",
+    "    let _3: i32 mut* own #2:22;           // the value of new(i32)",
+    "",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own #2:18 s0;",
+    "        live(_2) #2:18 s1;",
+    "        _3 = alloc<i32>(const u64 1) #2:22 s1;",
+    "        check(overwrite: _2) -> bb1 #2:18 s1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _3 #2:18 s1;",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3] #4:5 s3;",
+    "    }",
+    "    bb2: {",
+    "        _0 = const i32 1 #5:16 s4;",
+    "        del(move _2) #3:11 exit 5:9 s5;",
+    "        dead(_2) #5:9 s4;",
+    "        return #5:9 s4;",
+    "    }",
+    "    bb3: {",
+    "        (*_2) = const i32 7 #7:8 s6;",
+    "        _0 = copy (*_2) #8:12 s7;",
+    "        del(move _2) #3:11 exit 8:5 s8;",
+    "        dead(_2) #8:5 s7;",
+    "        return #8:5 s7;",
+    "    }",
+    "}",
+};
+
+// The token count of the example, line by line: the header, the three `let` lines, and then the
+// blocks, each with its `bbN: {`, its statements, its terminator and its `}`; the last `}` and the
+// end of the text close it.
+u64 EXAMPLE_TOKENS = 13 + 5 + 15 + 12 + (3 + 14 + 10 + 17 + 14 + 1) + (3 + 10 + 21 + 1)
+    + (3 + 11 + 15 + 10 + 7 + 1) + (3 + 14 + 13 + 15 + 10 + 7 + 1) + 1 + 1;
+
+fn the_worked_example_tokenizes_without_a_diagnostic() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : EXAMPLE) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    run mut r = run{};
+    scan(&r, strbuf.view(&b));
+    defer finish(&r);
+    assert(r.clean);
+    assert(errors(&r) == 0);
+    assert(r.toks.len == EXAMPLE_TOKENS);
+    // The header: `fn`, the dotted name, the parameter and its name.
+    is(&r, 0, fir_parse.ftok_kind.ft_ident, "fn");
+    is(&r, 1, fir_parse.ftok_kind.ft_ident, "main.f");
+    is(&r, 2, fir_parse.ftok_kind.ft_lparen, "(");
+    is(&r, 3, fir_parse.ftok_kind.ft_local, "_1");
+    is(&r, 10, fir_parse.ftok_kind.ft_arrow, "->");
+    // The comment after the `let` of `_3` gives no token: `;` and then `bb0`.
+    is(&r, 44, fir_parse.ftok_kind.ft_semicolon, ";");
+    is(&r, 45, fir_parse.ftok_kind.ft_block, "bb0");
+    assert(tok(&r, 45).line == 6 && tok(&r, 45).col == 5);
+    is(&r, r.toks.len - 1, fir_parse.ftok_kind.ft_eof, "");
+    assert(tok(&r, r.toks.len - 1).line == 30 && tok(&r, r.toks.len - 1).col == 1);
+}
+
+// ---- one token of each kind ----------------------------------------------------------------
+
+fn every_kind_has_a_spelling() void {
+    run mut r = run{};
+    scan(&r, "_7 bb3 42 \"s\" m.x # -> < > ( ) [ ] { } : ; , = . * @");
+    defer finish(&r);
+    assert(r.clean);
+    u32 last = cast(fir_parse.ftok_kind.ft_eof, u32);
+    assert(r.toks.len == cast(last, u64) + 1);
+    u32 mut k = 0;
+    while (k <= last) {
+        assert(tok(&r, cast(k, u64)).kind == cast(k, fir_parse.ftok_kind));
+        k += 1;
+    }
+    println(k, " kinds");
+    assert(tok(&r, 0).value == 7);
+    assert(tok(&r, 1).value == 3);
+    assert(tok(&r, 2).value == 42 && !tok(&r, 2).negative);
+    assert(tok(&r, 3).text == "s");
+}
+
+fn integers_carry_a_sign_and_a_radix() void {
+    run mut r = run{};
+    scan(&r, "-1 0x10 0 18446744073709551615 0xFEDCBA9876543210 -9223372036854775808");
+    defer finish(&r);
+    assert(r.clean);
+    assert(r.toks.len == 7);
+    is(&r, 0, fir_parse.ftok_kind.ft_int, "-1");
+    assert(tok(&r, 0).negative && tok(&r, 0).value == 1);
+    is(&r, 1, fir_parse.ftok_kind.ft_int, "0x10");
+    assert(!tok(&r, 1).negative && tok(&r, 1).value == 16);
+    assert(tok(&r, 2).value == 0);
+    assert(tok(&r, 3).value == 18446744073709551615);
+    assert(tok(&r, 4).value == 18364758544493064720);
+    assert(tok(&r, 5).negative && tok(&r, 5).value == 9223372036854775808);
+}
+
+fn locals_blocks_and_positions() void {
+    run mut r = run{};
+    scan(&r, "_12 bb3 #2:18 _12.0 _3[_4]");
+    defer finish(&r);
+    assert(r.clean);
+    is(&r, 0, fir_parse.ftok_kind.ft_local, "_12");
+    assert(tok(&r, 0).value == 12);
+    is(&r, 1, fir_parse.ftok_kind.ft_block, "bb3");
+    assert(tok(&r, 1).value == 3);
+    is(&r, 2, fir_parse.ftok_kind.ft_hash, "#");
+    is(&r, 3, fir_parse.ftok_kind.ft_int, "2");
+    is(&r, 4, fir_parse.ftok_kind.ft_colon, ":");
+    is(&r, 5, fir_parse.ftok_kind.ft_int, "18");
+    // A projection after a local: `.` and the field number.
+    is(&r, 6, fir_parse.ftok_kind.ft_local, "_12");
+    is(&r, 7, fir_parse.ftok_kind.ft_dot, ".");
+    is(&r, 8, fir_parse.ftok_kind.ft_int, "0");
+    is(&r, 9, fir_parse.ftok_kind.ft_local, "_3");
+    is(&r, 10, fir_parse.ftok_kind.ft_lbracket, "[");
+    is(&r, 11, fir_parse.ftok_kind.ft_local, "_4");
+    is(&r, 12, fir_parse.ftok_kind.ft_rbracket, "]");
+    // The columns count bytes from 1.
+    assert(tok(&r, 1).line == 1 && tok(&r, 1).col == 5);
+    assert(tok(&r, 2).col == 9 && tok(&r, 5).col == 12);
+}
+
+// A word that is more than `_` or `bb` and digits is an identifier.
+fn words_that_are_no_local_or_block() void {
+    run mut r = run{};
+    scan(&r, "_x _1a bb bbq bb2x s5 exit std.rt.enum_member* global main.origin.1 main.");
+    defer finish(&r);
+    assert(r.clean);
+    is(&r, 0, fir_parse.ftok_kind.ft_ident, "_x");
+    is(&r, 1, fir_parse.ftok_kind.ft_ident, "_1a");
+    is(&r, 2, fir_parse.ftok_kind.ft_ident, "bb");
+    is(&r, 3, fir_parse.ftok_kind.ft_ident, "bbq");
+    is(&r, 4, fir_parse.ftok_kind.ft_ident, "bb2x");
+    is(&r, 5, fir_parse.ftok_kind.ft_ident, "s5");
+    is(&r, 6, fir_parse.ftok_kind.ft_ident, "exit");
+    // A dotted name is one token, and a `.` before a digit ends it.
+    is(&r, 7, fir_parse.ftok_kind.ft_ident, "std.rt.enum_member");
+    is(&r, 8, fir_parse.ftok_kind.ft_star, "*");
+    is(&r, 9, fir_parse.ftok_kind.ft_ident, "global");
+    is(&r, 10, fir_parse.ftok_kind.ft_ident, "main.origin");
+    is(&r, 11, fir_parse.ftok_kind.ft_dot, ".");
+    is(&r, 12, fir_parse.ftok_kind.ft_int, "1");
+    is(&r, 13, fir_parse.ftok_kind.ft_ident, "main");
+    is(&r, 14, fir_parse.ftok_kind.ft_dot, ".");
+}
+
+// The two-byte forms: `->`, `//`, `0x` and the keyword `exit` of a location.
+fn two_byte_forms() void {
+    run mut r = run{};
+    scan(&r, "a->b // c -> d\n#3:11 exit 5:9 s5 0x0");
+    defer finish(&r);
+    assert(r.clean);
+    is(&r, 0, fir_parse.ftok_kind.ft_ident, "a");
+    is(&r, 1, fir_parse.ftok_kind.ft_arrow, "->");
+    assert(tok(&r, 1).len == 2);
+    is(&r, 2, fir_parse.ftok_kind.ft_ident, "b");
+    // The comment runs to the end of the line.
+    is(&r, 3, fir_parse.ftok_kind.ft_hash, "#");
+    assert(tok(&r, 3).line == 2 && tok(&r, 3).col == 1);
+    is(&r, 7, fir_parse.ftok_kind.ft_ident, "exit");
+    is(&r, 11, fir_parse.ftok_kind.ft_ident, "s5");
+    is(&r, 12, fir_parse.ftok_kind.ft_int, "0x0");
+    assert(tok(&r, 12).value == 0);
+    is(&r, 13, fir_parse.ftok_kind.ft_eof, "");
+}
+
+fn a_string_decodes_its_escapes() void {
+    run mut r = run{};
+    scan(&r, "\"a\\nb\" \"\\x41\\\"\\\\\" \"\"");
+    defer finish(&r);
+    assert(r.clean);
+    is(&r, 0, fir_parse.ftok_kind.ft_string, "a\nb");
+    assert(tok(&r, 0).len == 6);
+    is(&r, 1, fir_parse.ftok_kind.ft_string, "A\"\\");
+    is(&r, 2, fir_parse.ftok_kind.ft_string, "");
+    assert(tok(&r, 2).col == 19);
+}
+
+// ---- diagnostics ----------------------------------------------------------------------------
+
+fn an_illegal_byte_is_one_diagnostic_and_the_run_continues() void {
+    run mut r = run{};
+    scan(&r, "_1 $ _2\n  ?");
+    defer finish(&r);
+    assert(!r.clean);
+    assert(errors(&r) == 2);
+    said_at(&r, 0, 1, 4, "unexpected character '$'");
+    said_at(&r, 1, 2, 3, "unexpected character '?'");
+    assert(r.toks.len == 3);
+    is(&r, 0, fir_parse.ftok_kind.ft_local, "_1");
+    is(&r, 1, fir_parse.ftok_kind.ft_local, "_2");
+    is(&r, 2, fir_parse.ftok_kind.ft_eof, "");
+}
+
+fn a_control_byte_and_a_non_ascii_byte_name_themselves() void {
+    run mut r = run{};
+    scan(&r, "a\x01b \xC3\xA9");
+    defer finish(&r);
+    assert(errors(&r) == 3);
+    said_at(&r, 0, 1, 2, "unexpected byte 0x01");
+    said_at(&r, 1, 1, 5, "non-ASCII byte");
+    said_at(&r, 2, 1, 6, "non-ASCII byte");
+    is(&r, 0, fir_parse.ftok_kind.ft_ident, "a");
+    is(&r, 1, fir_parse.ftok_kind.ft_ident, "b");
+}
+
+// A `-` that begins no integer and no arrow, and a lone `/`, are illegal bytes.
+fn a_dash_and_a_slash_alone() void {
+    run mut r = run{};
+    scan(&r, "- x / y");
+    defer finish(&r);
+    assert(errors(&r) == 2);
+    said_at(&r, 0, 1, 1, "unexpected character '-'");
+    said_at(&r, 1, 1, 5, "unexpected character '/'");
+    assert(r.toks.len == 3);
+}
+
+fn malformed_integers() void {
+    run mut r = run{};
+    scan(&r, "0x 18446744073709551616 7");
+    defer finish(&r);
+    assert(errors(&r) == 2);
+    said_at(&r, 0, 1, 1, "'0x' needs a hex digit");
+    said_at(&r, 1, 1, 4, "does not fit u64");
+    // The digits of the integer that does not fit are consumed with it.
+    assert(r.toks.len == 2);
+    is(&r, 0, fir_parse.ftok_kind.ft_int, "7");
+}
+
+// A malformed string is the lexer's one diagnostic, and the tokenizer resumes on the next line.
+fn a_malformed_string_skips_its_line() void {
+    run mut r = run{};
+    scan(&r, "a \"open\nb \"\\q\" c\nd");
+    defer finish(&r);
+    assert(errors(&r) == 2);
+    said_at(&r, 0, 1, 3, "unterminated string literal");
+    said_at(&r, 1, 2, 4, "unknown escape");
+    assert(r.toks.len == 4);
+    is(&r, 0, fir_parse.ftok_kind.ft_ident, "a");
+    is(&r, 1, fir_parse.ftok_kind.ft_ident, "b");
+    is(&r, 2, fir_parse.ftok_kind.ft_ident, "d");
+    assert(tok(&r, 2).line == 3);
+}
+
+fn an_empty_text_is_the_end_alone() void {
+    run mut r = run{};
+    scan(&r, "  // only a comment");
+    defer finish(&r);
+    assert(r.clean && r.toks.len == 1);
+    is(&r, 0, fir_parse.ftok_kind.ft_eof, "");
+    assert(tok(&r, 0).col == 20);
+}
+
+fn main() i32 {
+    the_worked_example_tokenizes_without_a_diagnostic();
+    every_kind_has_a_spelling();
+    integers_carry_a_sign_and_a_radix();
+    locals_blocks_and_positions();
+    words_that_are_no_local_or_block();
+    two_byte_forms();
+    a_string_decodes_its_escapes();
+    an_illegal_byte_is_one_diagnostic_and_the_run_continues();
+    a_control_byte_and_a_non_ascii_byte_name_themselves();
+    a_dash_and_a_slash_alone();
+    malformed_integers();
+    a_malformed_string_skips_its_line();
+    an_empty_text_is_the_end_alone();
+    println("ok");
+    return 0;
+}

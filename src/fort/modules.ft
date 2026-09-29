@@ -1151,7 +1151,6 @@ fn entry_already_read(module_set mut* set, string real) module mut* {
 /// Reads `entry_file` and its import closure.
 /// Returns false after a read, parse, selection, or import diagnostic.
 fn load(session.session mut* s, module_set mut* set, string entry_file) bool {
-    u64 before = session.error_count(s);
     string file = containers.pool_intern(&set->pool, entry_file);
     // the entry file's directory is a root, the current one never
     set->entry_dir = containers.pool_intern(&set->pool, directory_of(file));
@@ -1170,6 +1169,16 @@ fn load(session.session mut* s, module_set mut* set, string entry_file) bool {
         error_entry_name_separator(s, set, file_start(file), base);
         return false;
     }
+    return load_named(s, set, base, file);
+}
+
+/// Reads `entry_file` as the entry module `path`, whatever the base name of the file is, and its
+/// import closure. `fort --fir-test` reads the prelude of a `.fir` file as the module `main`.
+/// Returns false after a read, parse, selection, or import diagnostic.
+fn load_named(session.session mut* s, module_set mut* set, string path, string entry_file) bool {
+    u64 before = session.error_count(s);
+    string file = containers.pool_intern(&set->pool, entry_file);
+    set->entry_dir = containers.pool_intern(&set->pool, directory_of(file));
     if (!load_runtime(s, set)) {
         return false;
     }
@@ -1178,7 +1187,8 @@ fn load(session.session mut* s, module_set mut* set, string entry_file) bool {
         twin->entry = true;
         return session.error_count(s) == before;
     }
-    if (load_module(s, set, base, file, file_start(file), true) == null) {
+    string named = containers.pool_intern(&set->pool, path);
+    if (load_module(s, set, named, file, file_start(file), true) == null) {
         return false;
     }
     return session.error_count(s) == before;
