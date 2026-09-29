@@ -455,11 +455,20 @@ bullet at a time and without a rewrite.
   `fort --fir-test <file>` from `test/fir` for each file: the compiler checks the prelude as the
   module `main`, parses the text against it, runs the pass and writes the module. The harness
   compares stdout with the `expect:` block and shows a unified diff for a difference; `--bless`
-  rewrites the block. Exit 2 from the compiler is an `ERROR`, and the passes `verify` and
-  `build-mode` give it until they exist. The ctest `fir` is a unit test and runs the compiler
+  rewrites the block. Exit 2 from the compiler is an `ERROR`, and the pass `build-mode` gives it
+  until it exists. The ctest `fir` is a unit test and runs the compiler
   natively, with the environment of the sanitizer presets. Name a test
   `test/fir/<pass>/NNN_name.fir`. `agents/lines.py` counts no `.fir` file as a test line, and
   `test/highlight_test.py` counts no `.fir` file either (T-224).
+  **The pass `verify` ends the compiler with SIGABRT at the first violation**, which `//! panic:`
+  matches, so each red case of a rule is a file of its own, `test/fir/verify/vNN_name.fir`. Two
+  violations have no text: the grammar gives every block a terminator (V1), and the parser
+  refuses a block that the function does not have (V2). Their `.fir` files hold the parser's
+  diagnostic, and `test/fort/fir_verify_v01_panic_test.ft` and `fir_verify_v02_panic_test.ft`
+  build the violation with the constructors. `test/fort/fir_verify_test.ft` reaches every clause
+  in one program through `fir_verify.find_violation`, which returns the violation and does not
+  panic. It parses each case against a prelude and a sandbox `std/rt.ft` that declares the eleven
+  runtime entries, because a `check_env` sandbox has an empty runtime (T-229).
 - **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
   when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
   holds only the program, and `check_env` sandboxes get an empty runtime. Write

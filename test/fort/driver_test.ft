@@ -1121,6 +1121,24 @@ fn fir_test_of_the_pass_none_writes_the_module() void {
     assert(out == strbuf.view(&want));
 }
 
+// The pass `verify` runs the verifier on each function. A function that breaks no rule is written
+// as the pass `none` writes it, and the verifier writes nothing about it.
+fn fir_test_of_the_pass_verify_writes_a_function_that_keeps_the_rules() void {
+    write_fir_test("verify", "i32", "_0 = copy _1.0 #3:4;");
+    string[3] mut argv = {"fort", "--fir-test", "t.fir"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    for (string line : FIR_TEST_OUT) {
+        strbuf.append(&want, line);
+        strbuf.push(&want, '\n');
+    }
+    assert(out == strbuf.view(&want));
+}
+
 // A `.fir` file with CRLF line ends reads as one with LF line ends: the directives drop the
 // carriage return, and the parser and the checker read it as a blank.
 fn fir_test_reads_crlf_line_ends() void {
@@ -1143,23 +1161,25 @@ fn fir_test_reads_crlf_line_ends() void {
     assert(out_has("        _0 = copy _1.0 #3:4 s0;\n"));
 }
 
-u64 FIR_TEST_BAD_PASS_COUNT = 5;
+u64 FIR_TEST_BAD_PASS_COUNT = 6;
 
-// A pass that does not exist yet, an unknown pass and an argument of `none`.
+// A pass that does not exist yet, an unknown pass, and an argument of `none` or `verify`.
 string[FIR_TEST_BAD_PASS_COUNT] FIR_TEST_BAD_PASSES = {
-    "verify",
     "build-mode --release",
     "build-mode --no-bounds-check",
     "bogus",
+    "verifier",
     "none --release",
+    "verify --release",
 };
 
 string[FIR_TEST_BAD_PASS_COUNT] FIR_TEST_BAD_PASS_SAYS = {
-    "fort: error: the pass 'verify' does not exist yet\n",
     "fort: error: the pass 'build-mode' does not exist yet\n",
     "fort: error: the pass 'build-mode' does not exist yet\n",
     "fort: error: unknown pass 'bogus'\n",
+    "fort: error: unknown pass 'verifier'\n",
     "fort: error: the pass 'none' takes no argument\n",
+    "fort: error: the pass 'verify' takes no argument\n",
 };
 
 // A pass that does not run is an error of the harness: exit 2, and no text.
@@ -1255,6 +1275,7 @@ fn main() i32 {
     fir_test_combines_with_no_other_mode();
     fir_test_of_the_pass_none_writes_the_module();
     fir_test_reads_crlf_line_ends();
+    fir_test_of_the_pass_verify_writes_a_function_that_keeps_the_rules();
     fir_test_of_a_pass_that_does_not_run_is_exit_two();
     fir_test_of_a_malformed_file_is_exit_one();
     println("fir ok");

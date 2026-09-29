@@ -319,17 +319,39 @@ fn base_type(func* f, place p) types.node* {
     return local_at(f, p.local)->ty;
 }
 
-// The declared type of field `k` of the struct type `t`. The checker writes the type of each
-// field into its declaration node, in declaration order.
-fn struct_field_type(types.node* t, u32 k) types.node* {
+// The declaration of the struct type `t`. The function panics when the type has none, because
+// the checker gives every struct type its declaration.
+fn struct_decl(types.node* t) ast.node* {
     ast.sym* s = cast(t->decl, ast.sym*);
     if (s == null || s->node == null) {
         panic("fir.place_type: a struct with no declaration");
     }
+    return s->node;
+}
+
+/// The count of the fields of the struct type `t`.
+fn struct_field_count(types.node* t) u32 {
+    ast.node* decl = struct_decl(t);
+    u32 mut count = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        if (ast.ast_child(decl, i)->kind == ast.ast_kind.k_field_decl) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+// The declared type of field `k` of the struct type `t`, or null when the struct has fewer
+// fields. The checker writes the type of each field into its declaration node, in declaration
+// order.
+fn struct_field_type(types.node* t, u32 k) types.node* {
+    ast.node* decl = struct_decl(t);
     u32 mut at = 0;
     u64 mut i = 0;
-    while (i < ast.ast_len(s->node)) {
-        ast.node* field = ast.ast_child(s->node, i);
+    while (i < ast.ast_len(decl)) {
+        ast.node* field = ast.ast_child(decl, i);
         if (field->kind == ast.ast_kind.k_field_decl) {
             if (at == k) {
                 return field->ty;
@@ -338,29 +360,45 @@ fn struct_field_type(types.node* t, u32 k) types.node* {
         }
         i += 1;
     }
-    panic("fir.place_type: no such field");
+    return null;
 }
 
-// The type that projection `pj` gives when it applies to a place of type `t`. For a span `E@` or
-// a `string`, field 0 is the pointer and field 1 the length. The `mut` and `own` of a span and the
-// `own` of a `string` carry over to field 0.
-fn apply_projection(func* f, types.node* t, projection pj) types.node* {
+/// Why a projection does not apply to a type (spec/fir.md 5.5).
+enum proj_fault {
+    pf_none,
+    pf_deref, // a deref of a type that is not a pointer
+    pf_field_kind, // a field of a type with no fields
+    pf_field_struct, // a field number past the fields of a struct
+    pf_field_span, // a field number past the two fields of a span or a `string`
+    pf_index, // an index of a type with no elements
+}
+
+/// The type that projection `pj` gives when it applies to a place of type `t`, or null with the
+/// reason in *fault. For a span `E@` or a `string`, field 0 is the pointer and field 1 the
+/// length. The `mut` and `own` of a span and the `own` of a `string` carry over to field 0.
+fn projection_type(func* f, types.node* t, projection pj, proj_fault mut* fault) types.node* {
+    *fault = proj_fault.pf_none;
     switch (pj.kind) {
     case proj_kind.pj_deref:
-        if (t->kind != types.type_kind.k_ptr) {
-            panic("fir.place_type: a deref of a non-pointer");
+        if (t->kind == types.type_kind.k_ptr) {
+            return t->elem;
         }
-        return t->elem;
+        *fault = proj_fault.pf_deref;
     case proj_kind.pj_field:
         if (t->kind == types.type_kind.k_struct) {
-            return struct_field_type(t, pj.field);
+            types.node* field = struct_field_type(t, pj.field);
+            if (field == null) {
+                *fault = proj_fault.pf_field_struct;
+            }
+            return field;
         }
         if (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string) {
             if (pj.field == 1) {
                 return types.type_prim(f->tt, prim.prim_kind.prim_u64);
             }
             if (pj.field != 0) {
-                panic("fir.place_type: a span or string has two fields");
+                *fault = proj_fault.pf_field_span;
+                return null;
             }
             if (t->kind == types.type_kind.k_string) {
                 types.node* c = types.type_prim(f->tt, prim.prim_kind.prim_char);
@@ -368,7 +406,7 @@ fn apply_projection(func* f, types.node* t, projection pj) types.node* {
             }
             return types.type_ptr(f->tt, t->elem, t->is_own, t->is_mut);
         }
-        panic("fir.place_type: a field of a type with no fields");
+        *fault = proj_fault.pf_field_kind;
     case proj_kind.pj_index:
         if (t->kind == types.type_kind.k_array || t->kind == types.type_kind.k_span) {
             return t->elem;
@@ -376,6 +414,28 @@ fn apply_projection(func* f, types.node* t, projection pj) types.node* {
         if (t->kind == types.type_kind.k_string) {
             return types.type_prim(f->tt, prim.prim_kind.prim_char);
         }
+        *fault = proj_fault.pf_index;
+    }
+    return null;
+}
+
+// The type that projection `pj` gives when it applies to a place of type `t`, as
+// projection_type gives it. The function panics when the projection does not apply.
+fn apply_projection(func* f, types.node* t, projection pj) types.node* {
+    proj_fault mut fault = proj_fault.pf_none;
+    types.node* out = projection_type(f, t, pj, &fault);
+    switch (fault) {
+    case proj_fault.pf_none:
+        return out;
+    case proj_fault.pf_deref:
+        panic("fir.place_type: a deref of a non-pointer");
+    case proj_fault.pf_field_kind:
+        panic("fir.place_type: a field of a type with no fields");
+    case proj_fault.pf_field_struct:
+        panic("fir.place_type: no such field");
+    case proj_fault.pf_field_span:
+        panic("fir.place_type: a span or string has two fields");
+    case proj_fault.pf_index:
         panic("fir.place_type: an index of a type with no elements");
     }
 }
@@ -918,10 +978,16 @@ fn rvalue_owns(func* f, rvalue r) bool {
     }
 }
 
+/// Whether a value of type `t` is an aggregate: a struct, a fixed array, a span or a `string`.
+/// Nothing holds an aggregate as a value, so an operand of this type is a place.
+fn type_aggregate(types.node* t) bool {
+    return gen.gen_is_aggregate(t);
+}
+
 /// Whether the result of `r` is an aggregate, which only the right side of an assignment into a
 /// place of that type can hold.
 fn rvalue_aggregate(func* f, rvalue r) bool {
-    return gen.gen_is_aggregate(rvalue_type(f, r));
+    return type_aggregate(rvalue_type(f, r));
 }
 
 // ---- statements ------------------------------------------------------------------------

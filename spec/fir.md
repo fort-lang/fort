@@ -207,11 +207,13 @@ A place is a base followed by zero or more projections:
 | index | `p[_i]` | a place of fixed-array, span or `string` type | element `_i`; `_i` is a local |
 
 For a span `E@` or a `string`, field 0 is the pointer, of type `E*` or `char*`, and field 1 is
-the length, of type `u64`. `mut` and `own` of the span carry over to field 0. The `.ptr` and
-`.len` of the source are these fields (D6.10). An index is a local of type `u64` and never an
-expression: the lowering copies an index expression into a temporary first, so that a place holds
-no computation and an analysis can compare two places by their parts. The comparison has three
-answers, not two:
+the length, of type `u64`. `mut` and `own` of the span carry over to field 0, so that an
+`aggregate` builds an owning span from an owning pointer. A `copy` of field 0 reads the `.ptr` of
+the source, which is a view (D17.3): it lends, and a `cast` of it to an owning type adopts. The
+`.ptr` and `.len` of the source are these fields (D6.10). An index is a local of type `u64` and
+never an expression: the lowering copies an index expression into a temporary first, so that a
+place holds no computation and an analysis can compare two places by their parts. The comparison
+has three answers, not two:
 - two places are **equal** when they have the same base and the same projections, index locals
   included, no statement assigns an index local between the two uses, and neither place contains
   a `deref` or an index on a span or a `string`. A place that reads memory to find its storage is
@@ -239,8 +241,10 @@ follows from its base and its projections. The address of a place is the rvalue 
 | constant | `const c` | a constant (below) |
 
 `move` is legal on a place of an owning type. `copy` is legal on any place. An assignment into a
-place of an owning type takes a `move` operand, a constant, or an rvalue that produces an owning
-value (D17.5, rule V6). A `copy` of an owning place lends it (D17.4).
+place of an owning type takes a `move` operand, the constant `null T` or `zero T`, or an rvalue
+that produces an owning value (D17.5, rule V6). A `string` or `bytes` constant is a view of
+private data and owns nothing, so it fills no owning place (D17.3, D17.9). A `copy` of an owning
+place lends it (D17.4).
 
 | constant | spelling | type |
 |---|---|---|
@@ -281,7 +285,7 @@ value (D17.5, rule V6). A `copy` of an owning place lends it (D17.4).
   `string` place gives a `string`.
 - `slice_ptr(a, lo, hi)`: the span `a[lo..hi]` of the pointer `a`, with no check (D6.9).
 - `alloc<T>(n)`: `std.rt.alloc` of `n` elements of `T`, where `n` has type `u64`; `T mut* own`
-  (item 17).
+  (item 17). `T` is neither `void` nor a span (D10.2).
 - `aggregate T(a, ...)`: a struct literal with every field in declaration order, an array
   literal with every element, or a span or `string` header with its pointer and its length; `T`
   (item 3).
@@ -457,12 +461,17 @@ temporary `_t = rvalue` for an operation. An aggregate expression writes into th
 waits for it. A place expression gives a place. The rules below write a nested rvalue, such as
 `not(and(...))`, as shorthand for one temporary for each inner rvalue, and a bare `"..."` as
 shorthand for `const bytes "..."`. An owning value in a temporary enters an owning place,
-parameter, field, element or cast as `move _t` (D17.5).
+parameter, field, element or cast as `move _t` (D17.5). Every temporary that holds a `copy` of an
+owning place takes the lent type of that place: its type with `own` removed at every level
+(D17.4, rule V6). So `u8 mut* own[2]` gives `u8 mut*[2]`. The one exception is the temporary of
+`return` in 9.6 step 1, which takes the type of `_0`.
 
 **The materialization rule** (principle 4). The lowering lowers the operands of one rvalue or call
 left to right. When an operand is `copy p` or `move p` and a later operand of the same rvalue or
 call contains a writer, the lowering writes `_t = copy p` or `_t = move p` at that point and passes
-`copy _t` or `move _t` instead. The same holds for the callee operand of an indirect call. Example:
+`copy _t` or `move _t` instead. For `_t = copy p`, `_t` takes the lent type of `p` as above,
+for a parameter and for an operand of an rvalue alike. The same holds for the callee operand of
+an indirect call. Example:
 `G + bump()` lowers to `_1 = copy global G`, `_2 = call fn m.bump()`, `_3 = add(copy _1, copy _2)`,
 so `G` is read before `bump` runs.
 
@@ -556,12 +565,12 @@ the deferred statement and the location of the exit that expanded it (principle 
 `return e`:
 
 1. `e` into `_0`, except for an aggregate result when a deferred statement is open at this
-   `return`: then `e` into a temporary `_t`, because `_0` of an aggregate type is the caller's
-   storage (item 7) and the deferred code must not change the result (D7.8). A scalar `_0` is
-   private to the function. For `ANN_MOVE`, the operand is `move _x` (D17.5), so the deferred
-   code sees the zero value (D7.8).
+   `return`: then `e` into a temporary `_t` of the type of `_0`, because `_0` of an aggregate
+   type is the caller's storage (item 7) and the deferred code must not change the result
+   (D7.8). A scalar `_0` is private to the function. For `ANN_MOVE`, the operand is `move _x`
+   (D17.5), so the deferred code sees the zero value (D7.8).
 2. The unwind of 9.5.
-3. `_0 = move _t` for a temporary of an owning type, and `_0 = copy _t` for another temporary.
+3. `_0 = move _t` when `_0` owns, and `_0 = copy _t` when it does not.
 4. `return`.
 
 At the end of the body, when the last block has no terminator, the fall-off rule of 9.5 first
@@ -613,19 +622,33 @@ statement index.
 - **V3**: every place is well formed: a `deref` projection applies to a pointer type, a `field`
   projection to a struct, span or `string` with that field, an `index` projection to a fixed
   array, a span or a `string`, and the index of an `index` projection is a local of type `u64`
-  (5.5).
+  (5.5). No statement writes a place that names a global constant and reaches no memory through
+  an address: the place of an assignment, of a `del` or of a `move` operand (5.5, D7.10, D5.9,
+  D17.6).
+  No statement writes `_0` of type `void` (5.3).
 - **V4**: the two sides of an assignment agree in type, where two fort types agree when they are
   equal after `mut` and `own` are removed (D5.4, D17.4), except that a `cast` to an aggregate
   type agrees with its destination by the rule of D3.14; the operands of each rvalue have the
   types section 6 requires; the operand of `switch` and of `check` has the type section 8
-  requires.
+  requires. No two arms of one `switch` have one value, because an LLVM `switch` takes each case
+  value once (12.4). A `check` of the kind `overwrite` has the place form `check(overwrite: p)`
+  and not the operand form (section 8). `addr` takes a place whose type is not `void`, which has
+  no storage (5.3). `alloc` takes a type that is neither `void` nor a span (D10.2).
 - **V5**: `move` applies only to a place of an owning type (5.6); `del` takes a `move` operand
   whose type is an `own` reference (D17.9).
-- **V6**: an assignment into a place of an owning type, an argument for a parameter of an owning
-  type, and a member of an `aggregate` for a field or element of an owning type take a `move`
-  operand, a constant, or an `alloc`, `aggregate`, `cast` or `call` rvalue (D17.5). A `copy` of an
-  owning place never flows into a place, a parameter, a field or an element of an owning type
-  (D17.4).
+- **V6**: an assignment into a place of an owning type takes a `move` operand, `null T`, `zero T` or
+  an `alloc` (D17.5). It also takes an `aggregate`, `cast` or `call` rvalue whose type owns. An
+  argument for a parameter of an owning type takes a `move` operand, `null T` or `zero T`. So does a
+  member of an `aggregate` for a field or element of an owning type. A `string` or `bytes` constant
+  is a view and fills none of these (D17.3, D17.9). A `copy` of an owning place never flows into a
+  place, a parameter, a field or an element of an owning type (D17.4). A `cast` to an owning type
+  never takes a `copy` of an owning place (D3.14). The cast rule has one exception: a `copy` of
+  field 0 of a span or a `string` reads a view (5.5, D17.3). An owning value lands only where
+  something owns it (D17.8). These positions own: a place, a parameter, a field or an element of an
+  owning type. The operand of a `cast` to an owning type owns too, and so does a `del`. An rvalue
+  that produces an owning value fills no place that does not own. A `move` operand stands in no
+  other position. Examples are an operand of `eq`, an argument for a parameter that does not own,
+  and an operand of a terminator.
 - **V7**: every `call` has the argument count of its callee's fort type, or at least that count
   for a variadic extern, and every argument agrees with its parameter as V4 defines agreement
   (items 7, 8). The reported operands of a `check` and a `fail` agree with the parameters of the
@@ -871,7 +894,7 @@ constant    = type integer | "true" | "false" | "null" type | "zero" type | stri
             | "bytes" string | "enum_table" name | "fn" name ;
 location    = position [ "exit" line_col ] [ "s" dec_digit { dec_digit } ] ;
 position    = "#" line_col ;
-line_col    = integer ":" integer ;
+line_col    = dec_digit { dec_digit } ":" dec_digit { dec_digit } ;
 integer     = [ "-" ] ( dec_digit { dec_digit } | "0x" hex_digit { hex_digit } ) ;
 local_ref   = "_" dec_digit { dec_digit } ;
 block_ref   = "bb" dec_digit { dec_digit } ;

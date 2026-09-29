@@ -1,0 +1,1057 @@
+/// Tests the rules V1 to V8 and V10 of spec/fir.md 10 on one FIR function. A violation is an
+/// internal error of the pass that made the function, so `verify` ends the program with a panic
+/// that names the rule, the function, the block and the statement.
+//
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state. The rules run in number order, and each rule walks the whole function: the
+// blocks in order, and in each block the statements in order and then the terminator. The first
+// violation stops the walk. So a rule reads what the rules before it guarantee: V2 reads the
+// terminator that V1 found, V4 reads the place types that V3 found well formed, and V6 and V7
+// read the rvalue types and the callee types that V4 found well formed.
+import ast;
+import check;
+import consts;
+import fir;
+import fir_print;
+import prim;
+import std.strbuf;
+import types;
+
+// The rules that this module tests. V9 and V11 to V13 are flow rules of another module.
+u32 RULE_V1 = 1;
+u32 RULE_V2 = 2;
+u32 RULE_V3 = 3;
+u32 RULE_V4 = 4;
+u32 RULE_V5 = 5;
+u32 RULE_V6 = 6;
+u32 RULE_V7 = 7;
+u32 RULE_V8 = 8;
+u32 RULE_V10 = 10;
+
+// The count of the check kinds, chk_overflow to chk_panic.
+u64 CHECK_KINDS = 11;
+
+// A runtime entry takes a file, a line and a column after the operands that a check reports.
+u64 LOCATION_PARAMS = 3;
+
+// The module that holds the runtime entries.
+string RUNTIME_MODULE = "std.rt";
+
+// ---- the clauses, one text for each ----------------------------------------------------------
+
+string V1_NO_TERMINATOR = "the block has no terminator";
+string V2_NO_BLOCK = "a terminator names no block of the function";
+string V2_ENTRY = "a terminator names the entry block";
+string V3_NO_LOCAL = "a place names no local of the function";
+string V3_DEREF = "a deref of a type that is not a pointer";
+string V3_FIELD = "a field that its type does not have";
+string V3_INDEX = "an index of a type with no elements";
+string V3_INDEX_LOCAL = "an index that is not a local of type u64";
+string V3_CONSTANT = "a write into a global constant";
+string V3_VOID_RETURN = "a write into a void return place";
+string V4_ARITY = "an rvalue with the wrong count of operands";
+string V4_ASSIGN = "the two sides of an assignment do not agree";
+string V4_OPERANDS = "the two operands of an operation do not agree";
+string V4_SHIFT_COUNT = "a shift count of another type than the value";
+string V4_INTEGER = "an integer operation on another type";
+string V4_BITWISE = "a bitwise operation on another type";
+string V4_FLOAT = "a float operation on another type";
+string V4_EQUALITY = "an equality of an aggregate or void";
+string V4_ORDERING = "an ordering of a type with no order";
+string V4_CAST = "a cast that D3.14 refuses";
+string V4_SLICE = "a slice of a type with no elements";
+string V4_SLICE_MUT = "a slice mut of a span or a string";
+string V4_SLICE_BOUND = "a slice bound that is not a u64";
+string V4_SLICE_PTR = "a slice_ptr of a value that is not a pointer";
+string V4_SLICE_PTR_BOUND = "a slice_ptr bound that is not an integer";
+string V4_ALLOC_COUNT = "an alloc count that is not a u64";
+string V4_ALLOC_VOID = "an alloc of void";
+string V4_ALLOC_SPAN = "an alloc of a span";
+string V4_ADDR_VOID = "an addr of a place of type void";
+string V4_AGGREGATE = "an aggregate of a type with no members";
+string V4_MEMBER_COUNT = "an aggregate with the wrong count of members";
+string V4_MEMBER = "an aggregate member that does not agree";
+string V4_CALLEE = "a call of a value that is not a function";
+string V4_SWITCH = "a switch on a type that a switch does not take";
+string V4_ARM = "a switch arm of another type";
+string V4_ARM_TWICE = "two switch arms with one value";
+string V4_CHECK_FORM = "an overwrite check in the operand form";
+string V4_CONDITION = "a check condition that is not a bool";
+string V4_OVERWRITE = "an overwrite check of another type";
+string V5_MOVE = "a move of a place whose type does not own";
+string V5_DEL = "a del of a place that is not an own reference";
+string V6_PLACE = "an owning place takes a copy or a view";
+string V6_CAST = "a cast copies an owning place";
+string V6_ARGUMENT = "an owning parameter takes a copy or a view";
+string V6_MEMBER = "an owning member takes a copy or a view";
+string V6_LANDS_PLACE = "an owning value in a place that does not own";
+string V6_LANDS_OPERAND = "a move where no owning position takes it";
+string V7_ARGUMENTS = "a call with the wrong count of arguments";
+string V7_ARGUMENT = "an argument does not agree with its parameter";
+string V7_AGGREGATE = "an aggregate argument that is not a place";
+string V7_NO_ENTRY = "a kind with no runtime entry";
+string V7_ENTRY = "a runtime entry that does not fit its kind";
+string V7_REPORTED_COUNT = "the wrong count of reported operands";
+string V7_REPORTED = "a reported operand that does not agree";
+string V8_LAST = "a noreturn call is not the last statement";
+string V8_TRAP = "a noreturn call with no trap after it";
+string V10_LOCAL = "live or dead of a local that is not named";
+
+// ---- the runtime entries ---------------------------------------------------------------------
+
+/// The runtime entry of each check kind, as the checker checked it in `std.rt`, in the order of
+/// `fir.check_kind`. An entry that the closure does not hold is null, and V7 reports a `check` or
+/// a `fail` of that kind.
+struct runtime {
+    ast.sym*[CHECK_KINDS] entry;
+}
+
+/// Finds the runtime entry of each check kind among the symbols of `ck`: the function of the
+/// module `std.rt` whose name `fir.check_entry` gives.
+fn runtime_of(check.checker* ck) runtime {
+    runtime mut rt = runtime{};
+    u64 mut i = 0;
+    while (i < check.check_sym_count(ck)) {
+        ast.sym* s = check.check_sym_at(ck, i);
+        if (s->kind == ast.sym_kind.s_fn && s->owner != null
+            && s->owner->kind == ast.sym_kind.s_module && s->owner->name == RUNTIME_MODULE) {
+            u64 mut k = 0;
+            while (k < CHECK_KINDS) {
+                if (s->name == fir.check_entry(cast(k, fir.check_kind))) {
+                    rt.entry[k] = s;
+                }
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    return rt;
+}
+
+// ---- agreement and the type classes ------------------------------------------------------
+
+/// Whether the fort types `a` and `b` agree: they are equal after `mut` and `own` are removed at
+/// every storage level. A function type agrees only with an equal one, because the
+/// marks of its parameters and of its result belong to its identity and to no storage level.
+/// Every rule of this module that compares two types calls this function.
+fn types_agree(types.node* a, types.node* b) bool {
+    return types.type_same_shape(a, b);
+}
+
+fn is_prim(types.node* t, prim.prim_kind k) bool {
+    return t->kind == types.type_kind.k_prim && t->prim == k;
+}
+
+fn is_u64(types.node* t) bool {
+    return is_prim(t, prim.prim_kind.prim_u64);
+}
+
+fn is_bool(types.node* t) bool {
+    return is_prim(t, prim.prim_kind.prim_bool);
+}
+
+fn is_char(types.node* t) bool {
+    return is_prim(t, prim.prim_kind.prim_char);
+}
+
+// An `own` pointer, `void* own`, `own` span or `string own`.
+fn own_reference(types.node* t) bool {
+    return types.type_is_reference(t) && t->is_own;
+}
+
+// A type whose values `eq` and `ne` compare: an integer, a float, a `bool`, a `char`, an enum, a
+// pointer, `void*` or a function.
+fn comparable(types.node* t) bool {
+    return types.type_is_scalar(t) || t->kind == types.type_kind.k_ptr
+        || t->kind == types.type_kind.k_voidptr || t->kind == types.type_kind.k_fn;
+}
+
+// A type that `lt` and its kin order: an integer, a float or a `char`.
+fn ordered(types.node* t) bool {
+    return types.type_is_int(t) || types.type_is_float(t) || is_char(t);
+}
+
+// A type that a `switch` takes: a `bool`, an integer, a `char` or an enum.
+fn switchable(types.node* t) bool {
+    return is_bool(t) || types.type_is_int(t) || is_char(t) || t->kind == types.type_kind.k_enum;
+}
+
+// Whether the arm value `v` is a constant of the switch operand type `t`: `true` or `false` for a
+// `bool`, a code point for a `char`, and an integer in the range of an integer type or of the
+// underlying type of an enum. An arm holds a value and no type, so its kind and its range are
+// what V4 can test.
+fn arm_fits(types.node* t, consts.cval v) bool {
+    if (is_bool(t)) {
+        return v.kind == consts.cval_kind.cv_bool;
+    }
+    if (is_char(t)) {
+        return v.kind == consts.cval_kind.cv_char;
+    }
+    if (v.kind != consts.cval_kind.cv_int) {
+        return false;
+    }
+    if (t->kind == types.type_kind.k_enum) {
+        return consts.int_fits(v, check.enum_underlying());
+    }
+    return consts.int_fits(v, t->prim);
+}
+
+// ---- the walk ------------------------------------------------------------------------------
+
+/// The first violation that the verifier finds. `rule` is the number of the rule and `what` the
+/// clause that the function breaks. `position` counts the statements of the block `block` from
+/// 0, and the terminator stands at the position after the last statement. `stmt` is the
+/// statement index of that statement or terminator, and `has_stmt` is false when the position
+/// holds nothing, which is the case of a missing terminator.
+struct violation {
+    u32 rule;
+    string what;
+    u32 block;
+    u32 position;
+    bool has_stmt;
+    u32 stmt;
+}
+
+// The state of one walk: the function, the runtime entries, and the first violation.
+struct walk {
+    fir.func* f;
+    runtime* rt;
+    violation v;
+}
+
+// Records the violation of `rule` at item `position` of block `b` and returns false, so that a
+// rule returns what this returns.
+fn fail(walk mut* w, u32 rule, string what, u32 b, u32 position) bool {
+    violation mut v = violation{rule, what, b, position, false, 0};
+    fir.block* bl = fir.block_at(w->f, b);
+    if (cast(position, u64) < bl->statements.len) {
+        v.has_stmt = true;
+        v.stmt = fir.block_statement(w->f, b, position)->stmt;
+    } else if (bl->terminated) {
+        v.has_stmt = true;
+        v.stmt = bl->term.stmt;
+    }
+    w->v = v;
+    return false;
+}
+
+// Operand `i` that terminator `t` reads, in *out: the operand of a `switch`, the condition and
+// then the reported operands of a `check`, and the reported operands of a `fail`. False when `i`
+// is at or past the count.
+fn term_operand(fir.func* f, fir.terminator* t, u32 i, fir.operand mut* out) bool {
+    bool has_cond = t->kind == fir.term_kind.tk_switch || t->kind == fir.term_kind.tk_check;
+    if (has_cond && i == 0) {
+        *out = t->cond;
+        return true;
+    }
+    if (t->kind != fir.term_kind.tk_check && t->kind != fir.term_kind.tk_fail) {
+        return false;
+    }
+    u32 mut at = i;
+    if (has_cond) {
+        at -= 1;
+    }
+    if (at >= t->args_len) {
+        return false;
+    }
+    *out = fir.operand_at(f, t->args_first + at);
+    return true;
+}
+
+// Whether `r` is a call of a function whose type is `noreturn`.
+fn calls_noreturn(fir.func* f, fir.statement* s) bool {
+    return s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call
+        && fir.callee_type(f, s->value)->is_noreturn;
+}
+
+// ---- V1 and V2 -----------------------------------------------------------------------------
+
+fn v1_terminator(walk mut* w, u32 b, u32 position) bool {
+    if (!fir.block_at(w->f, b)->terminated) {
+        return fail(w, RULE_V1, V1_NO_TERMINATOR, b, position);
+    }
+    return true;
+}
+
+fn v2_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
+    u32 mut i = 0;
+    u32 mut target = 0;
+    while (fir.term_targets(w->f, t, i, &target)) {
+        if (target >= fir.block_count(w->f)) {
+            return fail(w, RULE_V2, V2_NO_BLOCK, b, position);
+        }
+        if (target == 0) {
+            return fail(w, RULE_V2, V2_ENTRY, b, position);
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// ---- V3 ------------------------------------------------------------------------------------
+
+// The clause of V3 that a projection fault breaks.
+fn fault_text(fir.proj_fault fault) string {
+    switch (fault) {
+    case fir.proj_fault.pf_none:
+        return "";
+    case fir.proj_fault.pf_deref:
+        return V3_DEREF;
+    case fir.proj_fault.pf_field_kind, fir.proj_fault.pf_field_struct,
+        fir.proj_fault.pf_field_span:
+        return V3_FIELD;
+    case fir.proj_fault.pf_index:
+        return V3_INDEX;
+    }
+}
+
+// Whether local `n` exists and has the type `u64`.
+fn u64_local(fir.func* f, u32 n) bool {
+    return n < fir.local_count(f) && is_u64(fir.local_at(f, n)->ty);
+}
+
+/// The clause of V3 that the place `p` of `f` breaks, or the empty text when it is well formed:
+/// its base is a local of the function or a global, each projection applies to the type before
+/// it, and the index of each index projection is a local of type `u64`.
+fn place_fault(fir.func* f, fir.place p) string {
+    types.node* mut t = null;
+    if (p.base == fir.base_kind.bk_global) {
+        t = p.global->ty;
+    } else if (p.local < fir.local_count(f)) {
+        t = fir.local_at(f, p.local)->ty;
+    } else {
+        return V3_NO_LOCAL;
+    }
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        fir.proj_fault mut fault = fir.proj_fault.pf_none;
+        t = fir.projection_type(f, t, pj, &fault);
+        if (fault != fir.proj_fault.pf_none) {
+            return fault_text(fault);
+        }
+        if (pj.kind == fir.proj_kind.pj_index && !u64_local(f, pj.index)) {
+            return V3_INDEX_LOCAL;
+        }
+        i += 1;
+    }
+    return "";
+}
+
+/// The clause of V3 that a write into the well formed place `p` of `f` breaks, or the empty text.
+/// A global constant lives in read-only memory up to its first indirection, so a place that
+/// names one and reaches no memory through an address takes no write. `_0` of type `void` holds
+/// nothing, so it takes no write either.
+fn write_fault(fir.func* f, fir.place p) string {
+    if (p.base == fir.base_kind.bk_global) {
+        if (p.global->kind == ast.sym_kind.s_const && !fir.place_indirect(f, p)) {
+            return V3_CONSTANT;
+        }
+        return "";
+    }
+    if (p.local == 0 && fir.local_at(f, 0)->ty->kind == types.type_kind.k_void) {
+        return V3_VOID_RETURN;
+    }
+    return "";
+}
+
+// V3 for one place of an item, which `writes` when the item stores into it or empties it.
+fn v3_place(walk mut* w, fir.place p, bool writes, u32 b, u32 position) bool {
+    string mut what = place_fault(w->f, p);
+    if (what.len == 0 && writes) {
+        what = write_fault(w->f, p);
+    }
+    if (what.len > 0) {
+        return fail(w, RULE_V3, what, b, position);
+    }
+    return true;
+}
+
+// V3 for each operand of an item: the place of a `copy`, and the place of a `move`, which the
+// move empties.
+fn v3_operand(walk mut* w, fir.operand o, u32 b, u32 position) bool {
+    if (o.kind == fir.operand_kind.ok_const) {
+        return true;
+    }
+    return v3_place(w, o.place, o.kind == fir.operand_kind.ok_move, b, position);
+}
+
+// The places of a statement: the place that an assignment writes, the place of an `addr` or a
+// `slice`, and the place of each operand that the statement reads, the place of a `del` among
+// them as a `move`.
+fn v3_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
+    if (s->kind == fir.stmt_kind.st_assign) {
+        fir.rvalue r = s->value;
+        if (!v3_place(w, s->place, true, b, i)) {
+            return false;
+        }
+        bool has_place = r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice;
+        if (has_place && !v3_place(w, r.place, false, b, i)) {
+            return false;
+        }
+    }
+    u32 mut k = 0;
+    fir.operand mut o = fir.operand{};
+    while (fir.stmt_reads(w->f, s, k, &o)) {
+        if (!v3_operand(w, o, b, i)) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
+fn v3_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
+    if (t->kind == fir.term_kind.tk_check_overwrite) {
+        return v3_place(w, t->place, false, b, position);
+    }
+    u32 mut k = 0;
+    fir.operand mut o = fir.operand{};
+    while (term_operand(w->f, t, k, &o)) {
+        if (!v3_operand(w, o, b, position)) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
+// ---- V4 ------------------------------------------------------------------------------------
+
+// The count of the operands of an rvalue of `kind`, or -1 for `aggregate` and `call`, whose count
+// V4 and V7 test against a type.
+fn form_arity(fir.rvalue_kind kind) i64 {
+    if (fir.rvalue_is_binary(kind)) {
+        return 2;
+    }
+    switch (kind) {
+    case fir.rvalue_kind.rv_addr:
+        return 0;
+    case fir.rvalue_kind.rv_slice:
+        return 2;
+    case fir.rvalue_kind.rv_slice_ptr:
+        return 3;
+    case fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
+        return -1;
+    default:
+        // rv_use, rv_not, rv_fneg, rv_cast and rv_alloc
+        return 1;
+    }
+}
+
+fn operand_ty(fir.func* f, fir.rvalue r, u32 i) types.node* {
+    return fir.operand_type(f, fir.rvalue_operand(f, r, i));
+}
+
+// The clause of a binary rvalue whose first operand has a type that suits the form when
+// `kind_ok` is set: `what` when it does not, and V4_OPERANDS when the second operand does not
+// agree with the first.
+fn pair_fault(fir.func* f, fir.rvalue r, bool kind_ok, string what) string {
+    if (!kind_ok) {
+        return what;
+    }
+    if (!types_agree(operand_ty(f, r, 0), operand_ty(f, r, 1))) {
+        return V4_OPERANDS;
+    }
+    return "";
+}
+
+// The type of member `k` of an aggregate of type `t`: element `k` of a fixed array, else field
+// `k` of a struct, a span or a `string`.
+fn member_type(fir.func* f, types.node* t, u32 k) types.node* {
+    if (t->kind == types.type_kind.k_array) {
+        return t->elem;
+    }
+    fir.proj_fault mut fault = fir.proj_fault.pf_none;
+    fir.projection pj = fir.projection{fir.proj_kind.pj_field, k, 0};
+    return fir.projection_type(f, t, pj, &fault);
+}
+
+// V4 for `aggregate T(a, ...)`: `T` is a struct, a fixed array, a span or a `string`, the rvalue
+// has one member for each field or element, and each member agrees with its field or element.
+fn aggregate_fault(fir.func* f, fir.rvalue r) string {
+    types.node* t = r.ty;
+    u64 mut count = 2;
+    if (t->kind == types.type_kind.k_struct) {
+        count = cast(fir.struct_field_count(t), u64);
+    } else if (t->kind == types.type_kind.k_array) {
+        count = t->len;
+    } else if (t->kind != types.type_kind.k_span && t->kind != types.type_kind.k_string) {
+        return V4_AGGREGATE;
+    }
+    if (cast(r.ops_len, u64) != count) {
+        return V4_MEMBER_COUNT;
+    }
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        if (!types_agree(member_type(f, t, k), operand_ty(f, r, k))) {
+            return V4_MEMBER;
+        }
+        k += 1;
+    }
+    return "";
+}
+
+// V4 for `slice(p, lo, hi)`: `p` is a fixed array, a span or a `string`, `mut` stands only on a
+// slice of a fixed array, and the bounds are `u64`.
+fn slice_fault(fir.func* f, fir.rvalue r) string {
+    types.node* t = fir.place_type(f, r.place);
+    bool array = t->kind == types.type_kind.k_array;
+    if (!array && t->kind != types.type_kind.k_span && t->kind != types.type_kind.k_string) {
+        return V4_SLICE;
+    }
+    if (r.is_mut && !array) {
+        return V4_SLICE_MUT;
+    }
+    if (!is_u64(operand_ty(f, r, 0)) || !is_u64(operand_ty(f, r, 1))) {
+        return V4_SLICE_BOUND;
+    }
+    return "";
+}
+
+// V4 for `slice_ptr(a, lo, hi)`: `a` is a pointer and the bounds are integers of any type.
+fn slice_ptr_fault(fir.func* f, fir.rvalue r) string {
+    if (operand_ty(f, r, 0)->kind != types.type_kind.k_ptr) {
+        return V4_SLICE_PTR;
+    }
+    if (!types.type_is_int(operand_ty(f, r, 1)) || !types.type_is_int(operand_ty(f, r, 2))) {
+        return V4_SLICE_PTR_BOUND;
+    }
+    return "";
+}
+
+/// The clause of V4 that the operands of `r` break, or the empty text when they have the types
+/// that spec/fir.md 6 requires. The count and the arguments of a `call` are V7's.
+fn rvalue_fault(fir.func* f, fir.rvalue r) string {
+    i64 arity = form_arity(r.kind);
+    if (arity >= 0 && cast(r.ops_len, i64) != arity) {
+        return V4_ARITY;
+    }
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_use:
+        return "";
+    case fir.rvalue_kind.rv_addr:
+        // `void` has no storage, so it has no address
+        if (fir.place_type(f, r.place)->kind == types.type_kind.k_void) {
+            return V4_ADDR_VOID;
+        }
+        return "";
+    case fir.rvalue_kind.rv_add, fir.rvalue_kind.rv_sub, fir.rvalue_kind.rv_mul,
+        fir.rvalue_kind.rv_add_overflows, fir.rvalue_kind.rv_sub_overflows,
+        fir.rvalue_kind.rv_mul_overflows, fir.rvalue_kind.rv_div, fir.rvalue_kind.rv_rem:
+        return pair_fault(f, r, types.type_is_int(operand_ty(f, r, 0)), V4_INTEGER);
+    case fir.rvalue_kind.rv_and, fir.rvalue_kind.rv_or, fir.rvalue_kind.rv_xor:
+        types.node* bits = operand_ty(f, r, 0);
+        return pair_fault(f, r, types.type_is_int(bits) || is_bool(bits), V4_BITWISE);
+    case fir.rvalue_kind.rv_not:
+        types.node* one = operand_ty(f, r, 0);
+        if (!types.type_is_int(one) && !is_bool(one)) {
+            return V4_BITWISE;
+        }
+        return "";
+    case fir.rvalue_kind.rv_shl, fir.rvalue_kind.rv_shr:
+        types.node* value = operand_ty(f, r, 0);
+        if (!types.type_is_int(value)) {
+            return V4_INTEGER;
+        }
+        if (!types_agree(value, operand_ty(f, r, 1))) {
+            return V4_SHIFT_COUNT;
+        }
+        return "";
+    case fir.rvalue_kind.rv_fadd, fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul,
+        fir.rvalue_kind.rv_fdiv:
+        return pair_fault(f, r, types.type_is_float(operand_ty(f, r, 0)), V4_FLOAT);
+    case fir.rvalue_kind.rv_fneg:
+        if (!types.type_is_float(operand_ty(f, r, 0))) {
+            return V4_FLOAT;
+        }
+        return "";
+    case fir.rvalue_kind.rv_eq, fir.rvalue_kind.rv_ne:
+        return pair_fault(f, r, comparable(operand_ty(f, r, 0)), V4_EQUALITY);
+    case fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt,
+        fir.rvalue_kind.rv_ge:
+        return pair_fault(f, r, ordered(operand_ty(f, r, 0)), V4_ORDERING);
+    case fir.rvalue_kind.rv_cast:
+        if (!types.type_cast_allowed(r.ty, operand_ty(f, r, 0))) {
+            return V4_CAST;
+        }
+        return "";
+    case fir.rvalue_kind.rv_slice:
+        return slice_fault(f, r);
+    case fir.rvalue_kind.rv_slice_ptr:
+        return slice_ptr_fault(f, r);
+    case fir.rvalue_kind.rv_alloc:
+        if (r.ty->kind == types.type_kind.k_void) {
+            return V4_ALLOC_VOID;
+        }
+        if (r.ty->kind == types.type_kind.k_span) {
+            return V4_ALLOC_SPAN;
+        }
+        if (!is_u64(operand_ty(f, r, 0))) {
+            return V4_ALLOC_COUNT;
+        }
+        return "";
+    case fir.rvalue_kind.rv_aggregate:
+        return aggregate_fault(f, r);
+    case fir.rvalue_kind.rv_call:
+        bool value = r.callee == fir.callee_kind.cl_value;
+        if (value && fir.operand_type(f, r.callee_op)->kind != types.type_kind.k_fn) {
+            return V4_CALLEE;
+        }
+        return "";
+    }
+}
+
+fn v4_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return true;
+    }
+    string what = rvalue_fault(w->f, s->value);
+    if (what.len > 0) {
+        return fail(w, RULE_V4, what, b, i);
+    }
+    types.node* dst = fir.place_type(w->f, s->place);
+    if (!types_agree(dst, fir.rvalue_type(w->f, s->value))) {
+        return fail(w, RULE_V4, V4_ASSIGN, b, i);
+    }
+    return true;
+}
+
+// Whether an arm of the switch `t` before arm `k` has the value `value`. An LLVM `switch` takes
+// each value once.
+fn arm_repeats(fir.func* f, fir.terminator* t, u32 k, consts.cval value) bool {
+    u32 mut j = 0;
+    while (j < k) {
+        if (consts.cv_eq(fir.term_arm(f, t, j).value, value)) {
+            return true;
+        }
+        j += 1;
+    }
+    return false;
+}
+
+// V4 for a terminator. A `check` of the kind `overwrite` has the place form alone, because its
+// condition is the null test of the place.
+fn v4_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
+    switch (t->kind) {
+    case fir.term_kind.tk_switch:
+        types.node* ty = fir.operand_type(w->f, t->cond);
+        if (!switchable(ty)) {
+            return fail(w, RULE_V4, V4_SWITCH, b, position);
+        }
+        u32 mut k = 0;
+        while (k < t->arms_len) {
+            consts.cval value = fir.term_arm(w->f, t, k).value;
+            if (!arm_fits(ty, value)) {
+                return fail(w, RULE_V4, V4_ARM, b, position);
+            }
+            if (arm_repeats(w->f, t, k, value)) {
+                return fail(w, RULE_V4, V4_ARM_TWICE, b, position);
+            }
+            k += 1;
+        }
+    case fir.term_kind.tk_check:
+        if (t->check == fir.check_kind.chk_overwrite) {
+            return fail(w, RULE_V4, V4_CHECK_FORM, b, position);
+        }
+        if (!is_bool(fir.operand_type(w->f, t->cond))) {
+            return fail(w, RULE_V4, V4_CONDITION, b, position);
+        }
+    case fir.term_kind.tk_check_overwrite:
+        if (!own_reference(fir.place_type(w->f, t->place))) {
+            return fail(w, RULE_V4, V4_OVERWRITE, b, position);
+        }
+    case fir.term_kind.tk_goto, fir.term_kind.tk_return, fir.term_kind.tk_fail,
+        fir.term_kind.tk_trap, fir.term_kind.tk_unreachable:
+        return true;
+    }
+    return true;
+}
+
+// ---- V5 ------------------------------------------------------------------------------------
+
+// V5 for one operand: a `move` names a place whose type owns.
+fn v5_operand(walk mut* w, fir.operand o, u32 b, u32 position) bool {
+    if (o.kind == fir.operand_kind.ok_move && !fir.type_owning(fir.place_type(w->f, o.place))) {
+        return fail(w, RULE_V5, V5_MOVE, b, position);
+    }
+    return true;
+}
+
+fn v5_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
+    if (s->kind == fir.stmt_kind.st_del) {
+        if (!own_reference(fir.place_type(w->f, s->place))) {
+            return fail(w, RULE_V5, V5_DEL, b, i);
+        }
+        return true;
+    }
+    u32 mut k = 0;
+    fir.operand mut o = fir.operand{};
+    while (fir.stmt_reads(w->f, s, k, &o)) {
+        if (!v5_operand(w, o, b, i)) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
+fn v5_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
+    u32 mut k = 0;
+    fir.operand mut o = fir.operand{};
+    while (term_operand(w->f, t, k, &o)) {
+        if (!v5_operand(w, o, b, position)) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
+// ---- V6 ------------------------------------------------------------------------------------
+
+// Whether the place `p` is field 0 of a span or a `string`. The field carries the `own` of its
+// span, so that an `aggregate` builds an owning span from an owning pointer, but a copy of it
+// reads the `.ptr` of the source, which is a view. Field 1, the length, owns nothing, so the test
+// needs no field number.
+fn span_pointer(fir.func* f, fir.place p) bool {
+    if (p.proj_len == 0) {
+        return false;
+    }
+    fir.projection last = fir.place_projection(f, p, p.proj_len - 1);
+    if (last.kind != fir.proj_kind.pj_field) {
+        return false;
+    }
+    fir.place mut header = p;
+    header.proj_len -= 1;
+    types.type_kind k = fir.place_type(f, header)->kind;
+    return k == types.type_kind.k_span || k == types.type_kind.k_string;
+}
+
+// Whether `o` is a `copy` of a place whose type owns and that is no view: field 0 of a span or a
+// `string` is a view, whatever `own` its type carries.
+fn copies_owning(fir.func* f, fir.operand o) bool {
+    if (o.kind != fir.operand_kind.ok_copy || span_pointer(f, o.place)) {
+        return false;
+    }
+    return fir.type_owning(fir.place_type(f, o.place));
+}
+
+// Whether `o` fills an owning position: a `move`, or the constant `null T` or `zero T`. A
+// `string` or `bytes` constant is a view of private data and owns nothing.
+fn fills_owning(fir.operand o) bool {
+    if (o.kind == fir.operand_kind.ok_move) {
+        return true;
+    }
+    return o.kind == fir.operand_kind.ok_const && (o.value.kind == fir.const_kind.ck_null
+                                                   || o.value.kind == fir.const_kind.ck_zero);
+}
+
+// Whether the position of operand `k` of `r` owns what it takes: an argument for a parameter
+// whose type owns, a member for a field or element whose type owns, or the operand of a `cast`
+// to a type that owns. The operand of an `rv_use` takes the position of the destination, which
+// the caller tests. Every other operand is read and never kept.
+fn position_owns(fir.func* f, fir.rvalue r, u32 k) bool {
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_use:
+        return true;
+    case fir.rvalue_kind.rv_cast:
+        return fir.type_owning(r.ty);
+    case fir.rvalue_kind.rv_aggregate:
+        return fir.type_owning(member_type(f, r.ty, k));
+    case fir.rvalue_kind.rv_call:
+        types.node* ft = fir.callee_type(f, r);
+        return cast(k, u64) < ft->params.len && fir.type_owning(ft->params[cast(k, u64)]);
+    default:
+        return false;
+    }
+}
+
+// V6 for the operands of `r`. A `cast` to a type that owns does not take a copy of an owning
+// place, because the place and the result would then own one allocation. An owning parameter,
+// field or element takes a `move`, `null` or `zero`. A `move` stands only in a position that
+// owns, because an owning value lands only where something owns it.
+fn v6_rvalue(walk mut* w, fir.rvalue r, u32 b, u32 i) bool {
+    bool adopts = r.kind == fir.rvalue_kind.rv_cast && fir.type_owning(r.ty);
+    if (adopts && copies_owning(w->f, fir.rvalue_operand(w->f, r, 0))) {
+        return fail(w, RULE_V6, V6_CAST, b, i);
+    }
+    bool keeps = r.kind == fir.rvalue_kind.rv_call || r.kind == fir.rvalue_kind.rv_aggregate;
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(w->f, r, k);
+        bool owns = position_owns(w->f, r, k);
+        if (owns && keeps && !fills_owning(o)) {
+            if (r.kind == fir.rvalue_kind.rv_call) {
+                return fail(w, RULE_V6, V6_ARGUMENT, b, i);
+            }
+            return fail(w, RULE_V6, V6_MEMBER, b, i);
+        }
+        if (!owns && o.kind == fir.operand_kind.ok_move) {
+            return fail(w, RULE_V6, V6_LANDS_OPERAND, b, i);
+        }
+        k += 1;
+    }
+    return true;
+}
+
+// V6 for an assignment. A place whose type owns takes `null`, `zero` or an rvalue that produces
+// an owning value: a `move`, an `alloc`, or an `aggregate`, a `cast` or a `call` whose type
+// owns. A place that does not own takes no owning value, which nothing would then free.
+fn v6_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return true;
+    }
+    fir.rvalue r = s->value;
+    if (!v6_rvalue(w, r, b, i)) {
+        return false;
+    }
+    bool produces = fir.rvalue_owns(w->f, r);
+    if (fir.type_owning(fir.place_type(w->f, s->place))) {
+        bool empty = r.kind == fir.rvalue_kind.rv_use
+            && fills_owning(fir.rvalue_operand(w->f, r, 0));
+        if (!empty && !produces) {
+            return fail(w, RULE_V6, V6_PLACE, b, i);
+        }
+    } else if (produces) {
+        return fail(w, RULE_V6, V6_LANDS_PLACE, b, i);
+    }
+    return true;
+}
+
+// V6 for a terminator: no position of a `switch`, a `check` or a `fail` owns what it reads, so
+// none takes a `move`.
+fn v6_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
+    u32 mut k = 0;
+    fir.operand mut o = fir.operand{};
+    while (term_operand(w->f, t, k, &o)) {
+        if (o.kind == fir.operand_kind.ok_move) {
+            return fail(w, RULE_V6, V6_LANDS_OPERAND, b, position);
+        }
+        k += 1;
+    }
+    return true;
+}
+
+// ---- V7 ------------------------------------------------------------------------------------
+
+// Whether the call `r` names an `extern fn` that declares a C variable tail.
+fn variadic(fir.rvalue r) bool {
+    if (r.callee != fir.callee_kind.cl_extern || r.callee_sym->node == null) {
+        return false;
+    }
+    return (r.callee_sym->node->flags & ast.FLAG_VARIADIC) != 0;
+}
+
+fn v7_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
+    if (s->kind != fir.stmt_kind.st_assign || s->value.kind != fir.rvalue_kind.rv_call) {
+        return true;
+    }
+    fir.rvalue r = s->value;
+    types.node* ft = fir.callee_type(w->f, r);
+    u64 count = ft->params.len;
+    u64 given = cast(r.ops_len, u64);
+    if (given < count || (given > count && !variadic(r))) {
+        return fail(w, RULE_V7, V7_ARGUMENTS, b, i);
+    }
+    u32 mut k = 0;
+    while (cast(k, u64) < count) {
+        fir.operand arg = fir.rvalue_operand(w->f, r, k);
+        types.node* param = ft->params[cast(k, u64)];
+        if (!types_agree(param, fir.operand_type(w->f, arg))) {
+            return fail(w, RULE_V7, V7_ARGUMENT, b, i);
+        }
+        if (fir.type_aggregate(param) && arg.kind == fir.operand_kind.ok_const) {
+            return fail(w, RULE_V7, V7_AGGREGATE, b, i);
+        }
+        k += 1;
+    }
+    return true;
+}
+
+// V7 for a `check`, a `fail` or a `check(overwrite: p)`: the runtime entry of its kind exists
+// and takes the operands that fir.check_reported gives, then the file, the line and the column,
+// and the reported operands agree with those parameters.
+fn v7_reported(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
+    ast.sym* entry = w->rt->entry[cast(t->check, u64)];
+    if (entry == null) {
+        return fail(w, RULE_V7, V7_NO_ENTRY, b, position);
+    }
+    u32 count = fir.check_reported_count(t->check);
+    types.node* ft = entry->ty;
+    if (ft->params.len != cast(count, u64) + LOCATION_PARAMS) {
+        return fail(w, RULE_V7, V7_ENTRY, b, position);
+    }
+    u32 mut k = 0;
+    while (k < count) {
+        types.node* want = fir.check_reported(t->check, k, w->f->tt);
+        if (!types_agree(ft->params[cast(k, u64)], want)) {
+            return fail(w, RULE_V7, V7_ENTRY, b, position);
+        }
+        k += 1;
+    }
+    if (t->args_len != count) {
+        return fail(w, RULE_V7, V7_REPORTED_COUNT, b, position);
+    }
+    k = 0;
+    while (k < count) {
+        fir.operand arg = fir.operand_at(w->f, t->args_first + k);
+        if (!types_agree(ft->params[cast(k, u64)], fir.operand_type(w->f, arg))) {
+            return fail(w, RULE_V7, V7_REPORTED, b, position);
+        }
+        k += 1;
+    }
+    return true;
+}
+
+fn v7_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
+    if (t->kind == fir.term_kind.tk_check || t->kind == fir.term_kind.tk_fail
+        || t->kind == fir.term_kind.tk_check_overwrite) {
+        return v7_reported(w, t, b, position);
+    }
+    return true;
+}
+
+// ---- V8 and V10 ----------------------------------------------------------------------------
+
+fn v8_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
+    if (!calls_noreturn(w->f, s)) {
+        return true;
+    }
+    if (i + 1 != fir.block_statement_count(w->f, b)) {
+        return fail(w, RULE_V8, V8_LAST, b, i);
+    }
+    if (fir.block_at(w->f, b)->term.kind != fir.term_kind.tk_trap) {
+        return fail(w, RULE_V8, V8_TRAP, b, i);
+    }
+    return true;
+}
+
+fn v10_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
+    if (s->kind != fir.stmt_kind.st_live && s->kind != fir.stmt_kind.st_dead) {
+        return true;
+    }
+    bool named = s->local < fir.local_count(w->f)
+        && fir.local_at(w->f, s->local)->kind == fir.local_kind.lk_named;
+    if (!named) {
+        return fail(w, RULE_V10, V10_LOCAL, b, i);
+    }
+    return true;
+}
+
+// ---- the rules in order --------------------------------------------------------------------
+
+// Tests `rule` on statement `i` of block `b`.
+fn test_statement(walk mut* w, u32 rule, u32 b, u32 i) bool {
+    fir.statement* s = fir.block_statement(w->f, b, i);
+    if (rule == RULE_V3) {
+        return v3_statement(w, s, b, i);
+    } else if (rule == RULE_V4) {
+        return v4_statement(w, s, b, i);
+    } else if (rule == RULE_V5) {
+        return v5_statement(w, s, b, i);
+    } else if (rule == RULE_V6) {
+        return v6_statement(w, s, b, i);
+    } else if (rule == RULE_V7) {
+        return v7_statement(w, s, b, i);
+    } else if (rule == RULE_V8) {
+        return v8_statement(w, s, b, i);
+    } else if (rule == RULE_V10) {
+        return v10_statement(w, s, b, i);
+    }
+    return true;
+}
+
+// Tests `rule` on the terminator of block `b`, which stands at `position`. V1 runs first, so
+// every later rule finds a terminator.
+fn test_terminator(walk mut* w, u32 rule, u32 b, u32 position) bool {
+    if (rule == RULE_V1) {
+        return v1_terminator(w, b, position);
+    }
+    fir.terminator* t = &fir.block_at(w->f, b)->term;
+    if (rule == RULE_V2) {
+        return v2_terminator(w, t, b, position);
+    } else if (rule == RULE_V3) {
+        return v3_terminator(w, t, b, position);
+    } else if (rule == RULE_V4) {
+        return v4_terminator(w, t, b, position);
+    } else if (rule == RULE_V5) {
+        return v5_terminator(w, t, b, position);
+    } else if (rule == RULE_V6) {
+        return v6_terminator(w, t, b, position);
+    } else if (rule == RULE_V7) {
+        return v7_terminator(w, t, b, position);
+    }
+    return true;
+}
+
+// Tests `rule` on every statement and every terminator of the function, in block order.
+fn test_rule(walk mut* w, u32 rule) bool {
+    u32 n = fir.block_count(w->f);
+    u32 mut b = 0;
+    while (b < n) {
+        u32 count = fir.block_statement_count(w->f, b);
+        u32 mut i = 0;
+        while (i < count) {
+            if (!test_statement(w, rule, b, i)) {
+                return false;
+            }
+            i += 1;
+        }
+        if (!test_terminator(w, rule, b, count)) {
+            return false;
+        }
+        b += 1;
+    }
+    return true;
+}
+
+/// Tests the rules V1 to V8 and V10 on `f`, in number order, and returns true with the first
+/// violation in *out when `f` breaks one. `rt` gives the runtime entries that V7 reads.
+fn find_violation(fir.func* f, runtime* rt, violation mut* out) bool {
+    walk mut w = walk{.f = f, .rt = rt};
+    bool ok = test_rule(&w, RULE_V1) && test_rule(&w, RULE_V2) && test_rule(&w, RULE_V3)
+        && test_rule(&w, RULE_V4) && test_rule(&w, RULE_V5) && test_rule(&w, RULE_V6)
+        && test_rule(&w, RULE_V7) && test_rule(&w, RULE_V8) && test_rule(&w, RULE_V10);
+    if (!ok) {
+        *out = w.v;
+    }
+    return !ok;
+}
+
+/// Writes the text of the violation `v` of `f`: `fir.verify: V<n> <what>: <function> bb<k>
+/// statement <i>`, then ` (s<N>)` with the statement index when the position holds a statement
+/// or a terminator.
+fn violation_text(fir.func* f, violation* v, strbuf.str_buf mut* out) void {
+    strbuf.append(out, "fir.verify: V");
+    strbuf.append_u64(out, cast(v->rule, u64));
+    strbuf.push(out, ' ');
+    strbuf.append(out, v->what);
+    strbuf.append(out, ": ");
+    if (f->sym == null) {
+        strbuf.append(out, "<no symbol>");
+    } else {
+        fir_print.print_symbol(f->sym, out);
+    }
+    strbuf.append(out, " bb");
+    strbuf.append_u64(out, cast(v->block, u64));
+    strbuf.append(out, " statement ");
+    strbuf.append_u64(out, cast(v->position, u64));
+    if (v->has_stmt) {
+        strbuf.append(out, " (s");
+        strbuf.append_u64(out, cast(v->stmt, u64));
+        strbuf.push(out, ')');
+    }
+}
+
+/// Tests `f` as find_violation does and ends the program with a panic that gives the text of the
+/// first violation: a violation is an internal error of the pass that made `f`.
+fn verify(fir.func* f, runtime* rt) void {
+    violation mut v = violation{};
+    if (!find_violation(f, rt, &v)) {
+        return;
+    }
+    strbuf.str_buf mut text = strbuf.create();
+    violation_text(f, &v, &text);
+    panic(strbuf.view(&text));
+}

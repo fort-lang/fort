@@ -473,7 +473,7 @@ fn a_missing_semicolon_keeps_the_rest_of_the_block() void {
     fir_env.said(&e, 1, "5:17: expected ';'");
 }
 
-u64 BAD_LET_COUNT = 9;
+u64 BAD_LET_COUNT = 10;
 
 // Each text is the `let` lines of a function, and the diagnostic it gives.
 string[BAD_LET_COUNT] BAD_LETS = {
@@ -486,6 +486,7 @@ string[BAD_LET_COUNT] BAD_LETS = {
     "    let _1: i32 #0:4;\n",
     "    let _1: i32 #2:3 s4;\n",
     "    let _1 (a.b): i32;\n",
+    "    let _1 (match): i32;\n",
 };
 
 string[BAD_LET_COUNT] BAD_LET_SAYS = {
@@ -498,6 +499,7 @@ string[BAD_LET_COUNT] BAD_LET_SAYS = {
     "2:18: a line and a column count from 1",
     "2:21: expected ';'",
     "2:13: 'a.b' is no identifier",
+    "2:13: 'match' is no identifier",
 };
 
 fn the_order_of_locals_and_blocks() void {
@@ -542,6 +544,13 @@ fn the_shape_of_a_block() void {
     one_diagnostic(&e, with_item(&b, "live(_0) #4294967296:1;"),
                    "5:19: a line does not fit u32");
     one_diagnostic(&e, with_item(&b, "live(_0) #1;"), "5:20: expected ':', found ';'");
+    // a line and a column are decimal digits: no `0x` and no sign
+    one_diagnostic(&e, with_item(&b, "live(_0) #0x5:1;"),
+                   "5:19: a line is written in decimal digits");
+    one_diagnostic(&e, with_item(&b, "live(_0) #5:0x1;"),
+                   "5:21: a column is written in decimal digits");
+    one_diagnostic(&e, with_item(&b, "live(_0) #1:1 exit -1:2;"),
+                   "5:28: a line is written in decimal digits");
 }
 
 // Every terminator form, with a check that reports operands and one that reports none.
@@ -606,9 +615,13 @@ fn the_terminators_and_their_errors() void {
     // function, once for each reference.
     one_diagnostic(&e, with_terminator(&b, "switch(copy _0) -> [true: bb9, otherwise: bb0];"),
                    "5:35: unknown block 'bb9'");
+    // A terminator that fails takes its references with it: its diagnostic is the only one.
+    one_diagnostic(&e, with_terminator(&b, "goto bb9 return;"), "5:17: expected ';'");
+    one_diagnostic(&e, with_item(&b, "switch(copy _0) -> [true: bb9, zero i32: bb0];"),
+                   "5:40: a switch arm is a bool, an integer, a char or an enum constant");
 }
 
-u64 BAD_HEADER_COUNT = 9;
+u64 BAD_HEADER_COUNT = 10;
 
 string[BAD_HEADER_COUNT] BAD_HEADERS = {
     "fn main.f(_1: i32) -> i32",
@@ -620,6 +633,7 @@ string[BAD_HEADER_COUNT] BAD_HEADERS = {
     "fn main.g() -> i32 mut",
     "fn () -> void",
     "fn main.g(_1 (while): i32) -> void",
+    "fn main.g(_1 (type): i32) -> void",
 };
 
 string[BAD_HEADER_COUNT] BAD_HEADER_SAYS = {
@@ -632,6 +646,7 @@ string[BAD_HEADER_COUNT] BAD_HEADER_SAYS = {
     "1:16: a FIR type has no binding: remove the outermost 'mut'",
     "1:4: expected a function name, found '('",
     "1:15: 'while' is no identifier",
+    "1:15: 'type' is no identifier",
 };
 
 fn the_errors_of_a_header() void {
@@ -662,7 +677,7 @@ fn the_errors_of_a_header() void {
 
 // A text that ends early, and a `}` that is missing, give one diagnostic at the place where the
 // text stops being a function. A later block header is no unknown block.
-u64 CUT_COUNT = 6;
+u64 CUT_COUNT = 7;
 
 string[CUT_COUNT] CUTS = {
     "fn main.g() -> void {\nbb0: {\ngoto bb1;\nbb1: {\nreturn;\n}\n}\n",
@@ -671,6 +686,7 @@ string[CUT_COUNT] CUTS = {
     "fn main.g() -> void {\nbb0: {\n_0 = copy",
     "fn main.g(_1: i32",
     "fn main.g() -> void {\nlet _1: i32;\nbb0: {\nreturn;\n}\nfn\n",
+    "fn main.g() -> void {\nbb0: {\nreturn;\nfn main.h() -> void {\nbb0: {\nreturn;\n}\n}\n",
 };
 
 string[CUT_COUNT] CUT_SAYS = {
@@ -680,6 +696,7 @@ string[CUT_COUNT] CUT_SAYS = {
     "3:10: expected a place, found the end of the text",
     "1:18: expected ',' or ')', found the end of the text",
     "6:1: expected a block or '}', found 'fn'",
+    "4:1: expected '}', found 'fn'",
 };
 
 fn a_cut_text_is_one_diagnostic() void {

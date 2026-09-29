@@ -9,6 +9,7 @@ import diag;
 import fir;
 import fir_parse;
 import fir_print;
+import fir_verify;
 import gen;
 import gen_stmt;
 import index;
@@ -45,11 +46,12 @@ u64 FIR_PASS_COUNT = 2;
 string[FIR_PASS_COUNT] FIR_PASSES = {"lower", "build-mode"};
 
 // The passes that the `//! pass:` directive of a `.fir` test names (spec/fir.md 16.3). `none`
-// runs nothing. The verifier and the build-mode pass do not exist yet, so a test that names one
-// of them is an error of the harness, exit 2, until the pass exists.
+// runs nothing, and `verify` runs the verifier on each function. The build-mode pass does not
+// exist yet, so a test that names it is an error of the harness, exit 2, until the pass exists.
 string FIR_TEST_NONE = "none";
-u64 FIR_TEST_LATER_COUNT = 2;
-string[FIR_TEST_LATER_COUNT] FIR_TEST_LATER = {"verify", "build-mode"};
+string FIR_TEST_VERIFY = "verify";
+u64 FIR_TEST_LATER_COUNT = 1;
+string[FIR_TEST_LATER_COUNT] FIR_TEST_LATER = {"build-mode"};
 
 // The usage error of --fir-test beside another mode. --fir-after sets --fir.
 string FIR_TEST_ALONE =
@@ -1218,10 +1220,11 @@ fn read_fir_test(string text, fir_test mut* t) void {
     }
 }
 
-// Checks the pass that the test names. EXIT_OK when the pass runs, else EXIT_USAGE after an
-// error: no directive, a pass that does not exist yet, an unknown pass, or `none` with an
-// argument.
-fn fir_test_pass(fir_test* t) i32 {
+// Checks the pass that the test names and sets *verify for the pass `verify`. EXIT_OK when the
+// pass runs, else EXIT_USAGE after an error: no directive, a pass that does not exist yet, an
+// unknown pass, or `none` or `verify` with an argument.
+fn fir_test_pass(fir_test* t, bool mut* verify) i32 {
+    *verify = false;
     if (!t->have_pass) {
         error("the .fir test has no '//! pass:' directive");
         return EXIT_USAGE;
@@ -1231,11 +1234,12 @@ fn fir_test_pass(fir_test* t) i32 {
     if (space >= 0) {
         name = t->pass[0..cast(space, u64)];
     }
-    if (name == FIR_TEST_NONE) {
+    if (name == FIR_TEST_NONE || name == FIR_TEST_VERIFY) {
         if (space >= 0) {
-            error("the pass 'none' takes no argument");
+            eprintln("fort: error: the pass '", name, "' takes no argument");
             return EXIT_USAGE;
         }
+        *verify = name == FIR_TEST_VERIFY;
         return EXIT_OK;
     }
     for (string later : FIR_TEST_LATER) {
@@ -1252,7 +1256,8 @@ fn fir_test_pass(fir_test* t) i32 {
 // module `main` through the front end, parses the FIR text against it, runs the pass that the
 // test names and writes the module to stdout in one print. The harness compares the text. A
 // diagnostic of the prelude or of the FIR text is exit 1 with no text; an unreadable file and a
-// pass that does not run are exit 2.
+// pass that does not run are exit 2. The pass `verify` ends the compiler with a panic at the first
+// violation of a rule, and writes no text then.
 fn fir_test_entry(options* opts, string program) i32 {
     if (!target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
@@ -1269,7 +1274,8 @@ fn fir_test_entry(options* opts, string program) i32 {
     fir_test mut t = fir_test{};
     defer strbuf.free(&t.prelude);
     read_fir_test(text, &t);
-    i32 pass = fir_test_pass(&t);
+    bool mut verify = false;
+    i32 pass = fir_test_pass(&t, &verify);
     if (pass != EXIT_OK) {
         return pass;
     }
@@ -1299,6 +1305,15 @@ fn fir_test_entry(options* opts, string program) i32 {
     defer fir.module_free(&m);
     if (session.error_count(&s) > 0) {
         return EXIT_COMPILE_ERROR;
+    }
+    if (verify) {
+        // a violation ends the compiler with a panic that names the rule
+        fir_verify.runtime rt = fir_verify.runtime_of(&an.ck);
+        u64 mut k = 0;
+        while (k < fir.module_function_count(&m)) {
+            fir_verify.verify(fir.module_function_at(&m, k), &rt);
+            k += 1;
+        }
     }
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);

@@ -174,10 +174,11 @@ file (D14.1). Options and the entry file may appear in any order.
   compiler then parses the FIR text of the file against that module, runs the pass that the
   `//! pass:` directive names, writes the module to stdout in the textual form of
   `spec/fir.md` 13 and exits 0 (D14.1). A diagnostic of the prelude or of the FIR text writes no
-  FIR and exits 1. The pass `none` runs nothing. `verify` and `build-mode` do not exist yet,
-  and a test that names one of them exits 2. `--fir-test` takes the target rule of `--check`
-  and is a usage error together with `--tokens`, `--ast`, `--check`, `--json`, `--index`,
-  `--fir` or `--fir-after`.
+  FIR and exits 1. The pass `none` runs nothing. The pass `verify` runs the verifier of
+  `spec/fir.md` 10 on each function, and the first violation ends the compiler with a panic.
+  `build-mode` does not exist yet, and a test that names it exits 2. `--fir-test` takes the
+  target rule of `--check` and is a usage error together with `--tokens`, `--ast`, `--check`,
+  `--json`, `--index`, `--fir` or `--fir-after`.
 - In the fort compiler's `--ast` form, a C extern with `...` prints a bare `...` last in its
   `(params ...)` group. The mark is not a `(param ...)` child.
   A fixed extern prints no mark, and a fort definition cannot print this mark (D8.3, D9.8).
@@ -226,7 +227,7 @@ in '<dir>': <reason>` (`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reaso
 not be started). Two report the outcome of `--cc`: `cc failed with status <n>` and `cc failed with
 signal <n>`. Four report a FIR test that `--fir-test` cannot run: `the .fir test has no '//!
 pass:' directive`, `the pass '<name>' does not exist yet`, `unknown pass '<name>'` and `the pass
-'none' takes no argument`. The last two are the compiler's own failures: `internal error: <what>`
+'<name>' takes no argument`. The last two are the compiler's own failures: `internal error: <what>`
 and `out of memory`.
 
 ```sh

@@ -1,0 +1,31 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir.verify: V1 the block has no terminator: main.nothing bb1 statement 1
+//! stdout:
+//| bb0 keeps the rules
+/// Checks that fir_verify.verify ends the program on a block with no terminator, the violation of
+/// V1. The textual form cannot hold such a block, because its grammar gives every block a
+/// terminator, so the constructors build it (test/fir/verify/v01_no_terminator.fir).
+import fir;
+import fir_env;
+import fir_verify;
+
+fn main() i32 {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir_verify.runtime rt = fir_verify.runtime{};
+    fir.func mut g = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&g);
+    fir.block_set_terminator(&g, 0, fir.term_return(fir_env.at(1, 1), 1));
+    fir_verify.verify(&g, &rt);
+    println("bb0 keeps the rules");
+    u32 b = fir.block_new(&f);
+    fir.block_set_terminator(&f, 0, fir.term_goto(b, fir_env.at(1, 1), 1));
+    fir.block_append(&f, b, fir.stmt_live(0, fir_env.at(2, 1), 2));
+    fir_verify.verify(&f, &rt);
+    return 0;
+}

@@ -22,10 +22,12 @@ bare `//|` gives an empty line.
 A test states exactly one of `expect:`, `error:` and `panic:`. `panic:` is for a rule of the
 verifier, which ends the compiler with a panic.
 
-The passes: `none` runs nothing, so the test holds the parser and the printer. `verify`,
-`build-mode --release` and `build-mode --no-bounds-check` are the names of the verifier and of
-the build-mode pass. These passes do not exist yet: the compiler exits 2 for them, and the
-harness reports an `ERROR`.
+The passes: `none` runs nothing, so the test holds the parser and the printer. `verify` runs the
+verifier of `spec/fir.md` 10 on each function in text order. A module whose functions keep every
+rule is written as `none` writes it. The first violation ends the compiler with a panic that
+names the rule, the function, the block and the statement. `build-mode --release` and
+`build-mode --no-bounds-check` are the names of the build-mode pass. This pass does not exist
+yet: the compiler exits 2 for it, and the harness reports an `ERROR`.
 
 The prelude keeps the lines and the columns of the file. The compiler replaces the `//|` of each
 prelude line with three spaces and blanks every other line, so a diagnostic of the prelude names
@@ -42,6 +44,8 @@ The names of the FIR text resolve against the prelude:
   prelude.
 
 Put a test in `test/fir/<pass>/NNN_name.fir`, where `<pass>` is the first word of its `pass:`.
+A test of the verifier names its rule instead of a number: `verify/vNN_name.fir` breaks rule
+`VNN`, and `verify/green_name.fir` keeps every rule.
 
 ## Running
 

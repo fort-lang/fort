@@ -1,0 +1,1618 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| agreement ok
+//| runtime ok
+//| text ok
+//| V1 V2 ok
+//| V3 ok
+//| V4 ok
+//| V5 V6 ok
+//| V7 ok
+//| V8 V10 ok
+/// Checks the FIR verifier: `types_agree`, the runtime entries, the text of a violation, and for
+/// each clause of the rules V1 to V8 and V10 a function that breaks it and a function on the edge
+/// that keeps it. A case parses a FIR text against a checked prelude and a sandbox runtime.
+import ast;
+import check_env;
+import consts;
+import diag;
+import fir;
+import fir_parse;
+import fir_verify;
+import modules_env;
+import prim;
+import std.strbuf;
+import types;
+
+// ---- the environment ---------------------------------------------------------------------
+
+u64 FIXTURE_LINES = 76;
+
+// The prelude: the module `main`. `fail_enum` has the name of a runtime entry in another module.
+string[FIXTURE_LINES] FIXTURE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct holder {",
+    "    u8 mut* own p;",
+    "    u64 n;",
+    "}",
+    "struct enum_member {",
+    "    i32 value;",
+    "    char* name;",
+    "}",
+    "enum color {",
+    "    red,",
+    "    green,",
+    "}",
+    "i32 LIMIT = 7;",
+    "pair mut origin = pair{1, 2};",
+    "i32 mut total = 0;",
+    "i32 mut* TARGET = &total;",
+    "pair ORIGIN = pair{3, 4};",
+    "u8 mut* own KEPT = null;",
+    "string NAME = \"abc\";",
+    "extern fn puts(char* s) i32;",
+    "extern fn printf(char* format, ...) i32;",
+    "fn nothing() void {",
+    "}",
+    "fn f(bool c) i32 {",
+    "    return 0;",
+    "}",
+    "fn add(i32 x, i64 y) u64 {",
+    "    return 0;",
+    "}",
+    "fn stop() noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn grab() u8 mut* own {",
+    "    return new(u8);",
+    "}",
+    "fn peek() u8 mut* {",
+    "    return null;",
+    "}",
+    "fn take(u8 mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn look(u8 mut* p) void {",
+    "}",
+    "struct text_box {",
+    "    char* own p;",
+    "}",
+    "fn take_text(char* own p) void {",
+    "    del(p);",
+    "}",
+    "fn keep(holder h) holder {",
+    "    return h;",
+    "}",
+    "fn show(pair p) void {",
+    "}",
+    "fn fail_enum() void {",
+    "}",
+    "fn t1(i32 a, u64 n, bool c) void {",
+    "}",
+    "fn t2(u8 mut* own p) void {",
+    "}",
+    "fn t3(pair p) pair {",
+    "    return p;",
+    "}",
+    "fn t4(holder h) void {",
+    "}",
+    "fn t5() i32 {",
+    "    return 0;",
+    "}",
+    "fn t6() u8 mut* own {",
+    "    return null;",
+    "}",
+};
+
+// The reported parameters of the sandbox's fail_bounds, as std/rt.ft declares them.
+string BOUNDS = "i64 index, u64 len, ";
+
+// Appends the runtime entry `name`, which takes `params` and then the file, the line and the
+// column. A loop that never ends is the body of a `noreturn` function.
+fn entry(strbuf.str_buf mut* b, string name, string params) void {
+    strbuf.append(b, "fn ");
+    strbuf.append(b, name);
+    strbuf.push(b, '(');
+    strbuf.append(b, params);
+    strbuf.append(b, "char* file, u32 line, u32 col) noreturn {\n    while (true) {\n    }\n}\n");
+}
+
+// The runtime entries that the sandbox declares, and the reported parameters of each.
+u64 ENTRY_COUNT = 11;
+
+string[ENTRY_COUNT] ENTRY_NAMES = {
+    "fail_overflow",
+    "fail_shift",
+    "fail_div_zero",
+    "fail_div_overflow",
+    "fail_bounds",
+    "fail_span",
+    "fail_alloc_count",
+    "fail_overwrite",
+    "fail_enum",
+    "assert_fail",
+    "panic",
+};
+
+string[ENTRY_COUNT] ENTRY_PARAMS = {
+    "",
+    "i64 count, char* type_name, ",
+    "",
+    "",
+    "",
+    "i64 lo, i64 hi, u64 len, ",
+    "i64 n, ",
+    "",
+    "i64 v, char* type_name, ",
+    "char* text, ",
+    "char* ptr, u64 len, ",
+};
+
+// The sandbox's std/rt.ft: the eleven runtime entries of the check kinds. `bounds` gives the
+// reported parameters of fail_bounds. The entry `other` is a global of the module and no
+// function when `as_global` is set, and it is not there at all otherwise.
+fn runtime_text(strbuf.str_buf mut* b, string bounds, string other, bool as_global) void {
+    u64 mut i = 0;
+    while (i < ENTRY_COUNT) {
+        string name = ENTRY_NAMES[i];
+        if (name == other) {
+            if (as_global) {
+                strbuf.append(b, "i32 ");
+                strbuf.append(b, name);
+                strbuf.append(b, " = 0;\n");
+            }
+        } else if (name == "fail_bounds") {
+            entry(b, name, bounds);
+        } else {
+            entry(b, name, ENTRY_PARAMS[i]);
+        }
+        i += 1;
+    }
+}
+
+// The checked prelude, the runtime entries, and the buffer of the text of one case. It must stay
+// at the address that open filled, because the checker points into itself.
+struct env {
+    check_env.env c;
+    fir_verify.runtime rt;
+    strbuf.str_buf text;
+}
+
+fn open_with(env mut* e, string bounds, string other, bool as_global) void {
+    check_env.open(&e->c);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    runtime_text(&b, bounds, other, as_global);
+    check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    strbuf.clear(&b);
+    for (string line : FIXTURE) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    if (!check_env.check_decls(&e->c, strbuf.view(&b))) {
+        eprintln(check_env.report_text(&e->c, 0));
+        panic("fir_verify_test.open: the prelude does not check");
+    }
+    e->rt = fir_verify.runtime_of(&e->c.ck);
+    e->text = strbuf.create();
+}
+
+fn open(env mut* e) void {
+    open_with(e, BOUNDS, "", false);
+}
+
+fn close(env mut* e) void {
+    strbuf.free(&e->text);
+    check_env.close(&e->c);
+}
+
+fn tt(env mut* e) types.table mut* {
+    return &e->c.ck.types;
+}
+
+fn prim_ty(env mut* e, prim.prim_kind k) types.node* {
+    return types.type_prim(tt(e), k);
+}
+
+// The type of the prelude declaration `name`.
+fn ty(env mut* e, string name) types.node* {
+    return check_env.sym_main(&e->c, name)->ty;
+}
+
+// The FIR function of the prelude function `name`, with no statement and no terminator.
+fn func_of(env mut* e, string name) fir.func {
+    ast.sym* s = check_env.sym_main(&e->c, name);
+    return fir.func_new(tt(e), s, s->ty);
+}
+
+fn at(u32 line, u32 col) diag.loc {
+    return diag.loc_make("t.ft", line, col);
+}
+
+// ---- the cases -------------------------------------------------------------------------------
+
+// The header of most cases: the prelude's `fn nothing() void`.
+string NOTHING = "fn main.nothing() -> void";
+
+// The header of a case that writes `_0` or reads a parameter: the prelude's `fn f(bool c) i32`.
+string F = "fn main.f(_1 (c): bool) -> i32";
+
+// Parses the function `header` with the `let` lines `lets` and the blocks `blocks`, and returns
+// whether the verifier finds a violation, which it writes to *v. The textual form needs no line
+// break, so a case writes its `let` lines on one line and its blocks on another. The text must
+// parse with no diagnostic.
+fn verdict(env mut* e, string header, string lets, string blocks,
+           fir_verify.violation mut* v) bool {
+    strbuf.clear(&e->text);
+    strbuf.append(&e->text, header);
+    strbuf.append(&e->text, " {\n");
+    strbuf.append(&e->text, lets);
+    strbuf.append(&e->text, "\n");
+    strbuf.append(&e->text, blocks);
+    strbuf.append(&e->text, "\n}\n");
+    string text = strbuf.view(&e->text);
+    u64 before = check_env.errors(&e->c);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
+    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    defer fir.module_free(&m);
+    if (check_env.errors(&e->c) != before) {
+        eprintln("fir_verify_test: ", check_env.report_text(&e->c, before), " in");
+        eprintln(text);
+        panic("fir_verify_test.verdict: a text does not parse");
+    }
+    return fir_verify.find_violation(fir.module_function_at(&m, 0), &e->rt, v);
+}
+
+// Holds that the verdict on a function is the violation of `rule` with the clause `what` at item
+// `position` of block `block`.
+fn expect_red(env mut* e, bool found, fir_verify.violation* v, u32 rule, string what, u32 block,
+              u32 position) void {
+    if (found && v->rule == rule && v->what == what && v->block == block
+        && v->position == position) {
+        return;
+    }
+    eprintln("fir_verify_test: expected V", rule, " <", what, "> at bb", block, " ", position);
+    if (found) {
+        eprintln("  got V", v->rule, " <", v->what, "> at bb", v->block, " ", v->position);
+    } else {
+        eprintln("  got no violation");
+    }
+    eprintln(strbuf.view(&e->text));
+    panic("fir_verify_test.expect_red: the verdict differs");
+}
+
+// Holds that the function `header` with `lets` and `blocks` breaks `rule` with the clause `what`
+// at item `position` of block `block`.
+fn red_in(env mut* e, string header, string lets, string blocks, u32 rule, string what,
+          u32 block, u32 position) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    bool found = verdict(e, header, lets, blocks, &v);
+    expect_red(e, found, &v, rule, what, block, position);
+}
+
+// The same for the prelude's `nothing`.
+fn red(env mut* e, string lets, string blocks, u32 rule, string what, u32 block,
+       u32 position) void {
+    red_in(e, NOTHING, lets, blocks, rule, what, block, position);
+}
+
+// Holds that the function `header` with `lets` and `blocks` breaks no rule.
+fn green_in(env mut* e, string header, string lets, string blocks) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (verdict(e, header, lets, blocks, &v)) {
+        eprintln("fir_verify_test: expected no violation, got V", v.rule, " <", v.what, "> at bb",
+                 v.block, " ", v.position);
+        eprintln(strbuf.view(&e->text));
+        panic("fir_verify_test.green: the verifier refuses a function");
+    }
+}
+
+fn green(env mut* e, string lets, string blocks) void {
+    green_in(e, NOTHING, lets, blocks);
+}
+
+// Holds the verdict on a function that the constructors built.
+fn red_func(env mut* e, fir.func* f, u32 rule, string what, u32 block, u32 position) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    strbuf.clear(&e->text);
+    bool found = fir_verify.find_violation(f, &e->rt, &v);
+    expect_red(e, found, &v, rule, what, block, position);
+}
+
+fn green_func(env mut* e, fir.func* f) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    assert(!fir_verify.find_violation(f, &e->rt, &v));
+}
+
+// ---- agreement -------------------------------------------------------------------------------
+
+fn types_agree_after_mut_and_own_are_removed() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    types.node* i32t = prim_ty(&e, prim.prim_kind.prim_i32);
+    types.node* u8t = prim_ty(&e, prim.prim_kind.prim_u8);
+    // the four pairs of the criterion
+    types.node* owning = types.type_ptr(tt(&e), i32t, true, true);
+    assert(fir_verify.types_agree(owning, types.type_ptr(tt(&e), i32t, false, false)));
+    types.node* span = types.type_span(tt(&e), u8t, false, false);
+    assert(!fir_verify.types_agree(span, types.type_ptr(tt(&e), u8t, false, false)));
+    types.node* i8t = prim_ty(&e, prim.prim_kind.prim_i8);
+    assert(!fir_verify.types_agree(prim_ty(&e, prim.prim_kind.prim_bool), i8t));
+    assert(fir_verify.types_agree(ty(&e, "pair"), ty(&e, "pair")));
+    // every storage level, and both directions
+    types.node* inner = types.type_ptr(tt(&e), u8t, true, true);
+    types.node* deep = types.type_span(tt(&e), inner, true, true);
+    types.node* bare = types.type_span(tt(&e), types.type_ptr(tt(&e), u8t, false, false), false,
+                                       false);
+    assert(fir_verify.types_agree(deep, bare) && fir_verify.types_agree(bare, deep));
+    assert(fir_verify.types_agree(types.type_string(tt(&e), true), types.type_string(tt(&e),
+                                                                                     false)));
+    types.node* cells = types.type_array(tt(&e), inner, 4);
+    assert(fir_verify.types_agree(cells, types.type_array(tt(&e), inner, 4)));
+    assert(!fir_verify.types_agree(cells, types.type_array(tt(&e), inner, 5)));
+    // nominal types, and the element under the marks
+    assert(!fir_verify.types_agree(ty(&e, "pair"), ty(&e, "holder")));
+    assert(!fir_verify.types_agree(types.type_ptr(tt(&e), i32t, false, false),
+                                   types.type_ptr(tt(&e), u8t, false, false)));
+    assert(!fir_verify.types_agree(i32t, prim_ty(&e, prim.prim_kind.prim_u32)));
+    // a function type keeps the marks of its parameters: they are no storage level
+    types.node*[1] mut_param = {types.type_ptr(tt(&e), u8t, false, true)};
+    types.node*[1] param = {types.type_ptr(tt(&e), u8t, false, false)};
+    types.node* void_t = types.type_void(tt(&e));
+    types.node* writes = types.type_fn(tt(&e), void_t, mut_param[..], false);
+    types.node* reads = types.type_fn(tt(&e), void_t, param[..], false);
+    assert(!fir_verify.types_agree(writes, reads));
+    assert(fir_verify.types_agree(writes, types.type_fn(tt(&e), void_t, mut_param[..], false)));
+    assert(!fir_verify.types_agree(writes, types.type_fn(tt(&e), void_t, mut_param[..], true)));
+}
+
+// ---- the runtime entries ---------------------------------------------------------------------
+
+fn every_check_kind_finds_its_runtime_entry() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    u64 mut k = 0;
+    while (k < fir_verify.CHECK_KINDS) {
+        ast.sym* s = e.rt.entry[k];
+        assert(s != null && s->kind == ast.sym_kind.s_fn);
+        assert(s->name == fir.check_entry(cast(k, fir.check_kind)));
+        assert(s->owner->name == "std.rt");
+        k += 1;
+    }
+    // CHECK_KINDS counts every member of fir.check_kind
+    assert(fir_verify.CHECK_KINDS == cast(fir.check_kind.chk_panic, u64) + 1);
+}
+
+fn a_missing_entry_stays_null() void {
+    env mut e = env{};
+    open_with(&e, BOUNDS, "fail_enum", false);
+    defer close(&e);
+    // main.fail_enum has the name and is in another module
+    assert(check_env.sym_main(&e.c, "fail_enum") != null);
+    assert(e.rt.entry[cast(fir.check_kind.chk_enum, u64)] == null);
+    assert(e.rt.entry[cast(fir.check_kind.chk_bounds, u64)] != null);
+    assert(e.rt.entry[cast(fir.check_kind.chk_panic, u64)] != null);
+    // a global of std.rt with the name of an entry is no entry
+    env mut g = env{};
+    open_with(&g, BOUNDS, "fail_overflow", true);
+    defer close(&g);
+    assert(g.rt.entry[cast(fir.check_kind.chk_overflow, u64)] == null);
+    assert(g.rt.entry[cast(fir.check_kind.chk_shift, u64)] != null);
+}
+
+// ---- the text of a violation -----------------------------------------------------------------
+
+fn text_of(fir.func* f, fir_verify.violation* v, strbuf.str_buf mut* b) string {
+    strbuf.clear(b);
+    fir_verify.violation_text(f, v, b);
+    return strbuf.view(b);
+}
+
+fn the_text_names_the_rule_the_function_the_block_and_the_statement() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir.func mut f = func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir.block_new(&f);
+    fir.block_set_terminator(&f, 0, fir.term_goto(1, at(1, 1), 3));
+    fir.block_append(&f, 1, fir.stmt_live(0, at(2, 1), 7));
+    fir_verify.violation mut v = fir_verify.violation{};
+    // bb1 has a statement and no terminator: the position after the statement holds nothing
+    assert(fir_verify.find_violation(&f, &e.rt, &v));
+    assert(v.rule == 1 && v.block == 1 && v.position == 1 && !v.has_stmt);
+    assert(text_of(&f, &v, &b)
+           == "fir.verify: V1 the block has no terminator: main.nothing bb1 statement 1");
+    // a statement gives its statement index
+    fir.block_set_terminator(&f, 1, fir.term_return(at(3, 1), 9));
+    assert(fir_verify.find_violation(&f, &e.rt, &v));
+    assert(v.rule == 10 && v.block == 1 && v.position == 0 && v.has_stmt && v.stmt == 7);
+    string mut want = "fir.verify: V10 live or dead of a local that is not named: ";
+    string mut got = text_of(&f, &v, &b);
+    assert(got[0..want.len] == want);
+    assert(got[want.len..got.len] == "main.nothing bb1 statement 0 (s7)");
+    // a terminator gives the statement index of the terminator
+    fir.func mut g = func_of(&e, "nothing");
+    defer fir.func_free(&g);
+    fir.block_set_terminator(&g, 0, fir.term_goto(0, at(1, 1), 4));
+    assert(fir_verify.find_violation(&g, &e.rt, &v));
+    assert(v.rule == 2 && v.position == 0 && v.has_stmt && v.stmt == 4);
+    got = text_of(&g, &v, &b);
+    want = "fir.verify: V2 a terminator names the entry block: ";
+    assert(got[0..want.len] == want);
+    assert(got[want.len..got.len] == "main.nothing bb0 statement 0 (s4)");
+    // a function with no symbol
+    fir.func mut h = fir.func_new(tt(&e), null, ty(&e, "nothing"));
+    defer fir.func_free(&h);
+    assert(fir_verify.find_violation(&h, &e.rt, &v));
+    assert(text_of(&h, &v, &b)
+           == "fir.verify: V1 the block has no terminator: <no symbol> bb0 statement 0");
+}
+
+// ---- V1 and V2 -------------------------------------------------------------------------------
+
+fn v1_every_block_has_a_terminator() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // the text cannot hold a block with no terminator, so the constructors build it
+    fir.func mut f = func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir.block_new(&f);
+    fir.block_new(&f);
+    fir.block_set_terminator(&f, 0, fir.term_goto(1, at(1, 1), 1));
+    fir.block_set_terminator(&f, 1, fir.term_goto(2, at(1, 1), 1));
+    // the last block has none
+    red_func(&e, &f, 1, fir_verify.V1_NO_TERMINATOR, 2, 0);
+    fir.block_set_terminator(&f, 2, fir.term_return(at(1, 1), 1));
+    green_func(&e, &f);
+    // V1 comes before V2, though bb0 breaks V2 and only bb1 breaks V1
+    fir.func mut g = func_of(&e, "nothing");
+    defer fir.func_free(&g);
+    fir.block_new(&g);
+    fir.block_set_terminator(&g, 0, fir.term_goto(0, at(1, 1), 1));
+    red_func(&e, &g, 1, fir_verify.V1_NO_TERMINATOR, 1, 0);
+    // the first block may be the one with no terminator
+    fir.func mut h = func_of(&e, "nothing");
+    defer fir.func_free(&h);
+    red_func(&e, &h, 1, fir_verify.V1_NO_TERMINATOR, 0, 0);
+}
+
+fn v2_names_no_block_past_the_last() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // the parser refuses an unknown block, so the constructors build these
+    fir.func mut f = func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir.block_new(&f);
+    fir.block_set_terminator(&f, 1, fir.term_return(at(1, 1), 1));
+    fir.block_set_terminator(&f, 0, fir.term_goto(2, at(1, 1), 1));
+    red_func(&e, &f, 2, fir_verify.V2_NO_BLOCK, 0, 0);
+    // the last block is a block of the function
+    fir.func mut g = func_of(&e, "nothing");
+    defer fir.func_free(&g);
+    fir.block_new(&g);
+    fir.block_set_terminator(&g, 1, fir.term_return(at(1, 1), 1));
+    fir.block_set_terminator(&g, 0, fir.term_goto(1, at(1, 1), 1));
+    green_func(&e, &g);
+    // an arm and the otherwise block of a switch, and the continuation of a check
+    fir.func mut s = func_of(&e, "nothing");
+    defer fir.func_free(&s);
+    fir.block_new(&s);
+    fir.block_set_terminator(&s, 1, fir.term_return(at(1, 1), 1));
+    u32 first = fir.arm_push(&s, consts.cv_from_bool(true), 1);
+    fir.arm_push(&s, consts.cv_from_bool(false), 2);
+    fir.operand cond = fir.operand_const(fir.const_bool(true));
+    fir.block_set_terminator(&s, 0, fir.term_switch(cond, first, 2, 1, at(1, 1), 1));
+    red_func(&e, &s, 2, fir_verify.V2_NO_BLOCK, 0, 0);
+    fir.func mut o = func_of(&e, "nothing");
+    defer fir.func_free(&o);
+    fir.block_new(&o);
+    fir.block_set_terminator(&o, 1, fir.term_return(at(1, 1), 1));
+    fir.block_set_terminator(&o, 0, fir.term_switch(cond, 0, 0, 7, at(1, 1), 1));
+    red_func(&e, &o, 2, fir_verify.V2_NO_BLOCK, 0, 0);
+    fir.func mut c = func_of(&e, "nothing");
+    defer fir.func_free(&c);
+    fir.block_new(&c);
+    fir.block_set_terminator(&c, 0, fir.term_goto(1, at(1, 1), 1));
+    fir.block_set_terminator(&c, 1, fir.term_check(cond, fir.check_kind.chk_overflow, 0, 0, 2,
+                                                   at(1, 1), 1));
+    red_func(&e, &c, 2, fir_verify.V2_NO_BLOCK, 1, 0);
+}
+
+fn v2_names_no_entry_block() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string cond = "let _1: bool; let _2: u8 mut* own;";
+    red(&e, "", "bb0: { goto bb1; } bb1: { goto bb0; }", 2, fir_verify.V2_ENTRY, 1, 0);
+    red(&e, cond, "bb0: { switch(copy _1) -> [true: bb0, otherwise: bb1]; } bb1: { return; }", 2,
+        fir_verify.V2_ENTRY, 0, 0);
+    red(&e, cond, "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb0]; } bb1: { return; }", 2,
+        fir_verify.V2_ENTRY, 0, 0);
+    red(&e, cond, "bb0: { goto bb1; } bb1: { check(copy _1, overflow) -> bb0; }", 2,
+        fir_verify.V2_ENTRY, 1, 0);
+    red(&e, cond, "bb0: { goto bb1; } bb1: { check(overwrite: _2) -> bb0; }", 2,
+        fir_verify.V2_ENTRY, 1, 0);
+    // a later arm, after one that names a real block
+    // The parser reads no line break, so a case may begin its blocks in its `let` text.
+    string first = "let _1: bool; bb0: { switch(copy _1) ->";
+    red(&e, first, "[true: bb1, false: bb0, otherwise: bb1]; } bb1: { return; }", 2,
+        fir_verify.V2_ENTRY, 0, 0);
+    // the edges: bb1, the last block, a switch with no arm, and the terminators that name none
+    string bare = "bb0: { switch(copy _1) -> [otherwise: bb1]; } bb1: { goto bb2; } bb2: { trap; }";
+    green(&e, cond, bare);
+    green(&e, "", "bb0: { goto bb2; } bb1: { unreachable; } bb2: { goto bb1; }");
+    green(&e, "", "bb0: { fail(overflow); }");
+}
+
+// ---- V3 --------------------------------------------------------------------------------------
+
+fn v3_each_projection_applies_to_the_type_before_it() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // a deref of a type that is not a pointer: an integer, `void*` and a function
+    red(&e, "let _1: i32; let _2: i32;", "bb0: { _2 = copy (*_1); return; }", 3,
+        fir_verify.V3_DEREF, 0, 0);
+    red(&e, "let _1: void*; let _2: i32;", "bb0: { _2 = copy (*_1); return; }", 3,
+        fir_verify.V3_DEREF, 0, 0);
+    red(&e, "let _1: fn (i32, i64) u64; let _2: i32;", "bb0: { _2 = copy (*_1); return; }", 3,
+        fir_verify.V3_DEREF, 0, 0);
+    // a field of a type with no fields, and a field number past the fields
+    red(&e, "let _1: i32; let _2: i32;", "bb0: { _2 = copy _1.0; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    red(&e, "let _1: pair; let _2: i32;", "bb0: { _2 = copy _1.2; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    red(&e, "let _1: i32@; let _2: u64;", "bb0: { _2 = copy _1.2; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    red(&e, "let _1: string; let _2: u64;", "bb0: { _2 = copy _1.2; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    red(&e, "let _1: i32[4]; let _2: i32;", "bb0: { _2 = copy _1.0; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    red(&e, "let _1: pair*; let _2: i32;", "bb0: { _2 = copy _1.0; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    // an index of a type with no elements
+    red(&e, "let _1: i32*; let _2: u64; let _3: i32;", "bb0: { _3 = copy _1[_2]; return; }", 3,
+        fir_verify.V3_INDEX, 0, 0);
+    red(&e, "let _1: i32; let _2: u64; let _3: i32;", "bb0: { _3 = copy _1[_2]; return; }", 3,
+        fir_verify.V3_INDEX, 0, 0);
+    red(&e, "let _1: pair; let _2: u64; let _3: i32;", "bb0: { _3 = copy _1[_2]; return; }", 3,
+        fir_verify.V3_INDEX, 0, 0);
+    // an index local that is not u64
+    red(&e, "let _1: i32[4]; let _2: i32; let _3: i32;", "bb0: { _3 = copy _1[_2]; return; }",
+        3, fir_verify.V3_INDEX_LOCAL, 0, 0);
+    red(&e, "let _1: i32[4]; let _2: u32; let _3: i32;", "bb0: { _3 = copy _1[_2]; return; }",
+        3, fir_verify.V3_INDEX_LOCAL, 0, 0);
+    red(&e, "let _1: i32@; let _2: i64; let _3: i32;", "bb0: { _3 = copy _1[_2]; return; }", 3,
+        fir_verify.V3_INDEX_LOCAL, 0, 0);
+    // a later projection, after a deref and after a field that apply
+    red(&e, "let _1: holder; let _2: u8;", "bb0: { _2 = copy (*_1.0).0; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    red(&e, "let _1: pair*; let _2: i32;", "bb0: { _2 = copy (*(*_1)); return; }", 3,
+        fir_verify.V3_DEREF, 0, 0);
+    red(&e, "let _1: i32; let _2: i32; bb0: {", "_2 = copy global main.LIMIT.0; return; }", 3,
+        fir_verify.V3_FIELD, 0, 0);
+    // the edges: every projection on the type it applies to
+    string edges = "let _1: pair*; let _2: string own; let _3: u64; let _4: i32@; let _5: i32[4];";
+    string more = "let _6: holder; let _7: i32; let _8: char*; let _9: char; let _10: u8;";
+    strbuf.str_buf mut lets = strbuf.create();
+    defer strbuf.free(&lets);
+    strbuf.append(&lets, edges);
+    strbuf.append(&lets, more);
+    strbuf.append(&lets, " bb0: { _7 = copy (*_1).0; _8 = copy _2.0; _3 = copy _2.1;");
+    strbuf.append(&lets, " _9 = copy _2[_3]; _7 = copy _4[_3]; _7 = copy _5[_3];");
+    green(&e, strbuf.view(&lets), "_10 = copy (*_6.0); _7 = copy global main.origin.0; return; }");
+    green(&e, "let _1: i32;", "bb0: { _1 = copy global main.LIMIT; return; }");
+}
+
+fn v3_tests_every_place_of_a_statement_and_a_terminator() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string int = "let _1: i32; let _2: i32*; let _3: bool; let _4: u64;";
+    // the place an assignment writes
+    red(&e, int, "bb0: { (*_1) = const i32 1; return; }", 3, fir_verify.V3_DEREF, 0, 0);
+    // the second operand of an rvalue
+    red(&e, int, "bb0: { _1 = add(copy _1, copy (*_1)); return; }", 3, fir_verify.V3_DEREF, 0, 0);
+    // the place of `addr` and of `slice`
+    red(&e, int, "bb0: { _2 = addr((*_1)); return; }", 3, fir_verify.V3_DEREF, 0, 0);
+    red(&e, "let _1: i32; let _2: i32@; bb0: {",
+        "_2 = slice((*_1), const u64 0, const u64 0); return; }", 3, fir_verify.V3_DEREF, 0, 0);
+    // the callee of a call through a value
+    red(&e, int, "bb0: { _1 = call copy (*_1)(); return; }", 3, fir_verify.V3_DEREF, 0, 0);
+    // the place of a `del`
+    red(&e, int, "bb0: { del(move (*_1)); return; }", 3, fir_verify.V3_DEREF, 0, 0);
+    // the operand of a switch, the condition and a reported operand of a check, a reported
+    // operand of a fail, and the place of an overwrite check
+    red(&e, int, "bb0: { switch(copy (*_1)) -> [otherwise: bb1]; } bb1: { return; }", 3,
+        fir_verify.V3_DEREF, 0, 0);
+    red(&e, int, "bb0: { check(copy (*_1), overflow) -> bb1; } bb1: { return; }", 3,
+        fir_verify.V3_DEREF, 0, 0);
+    red(&e, int, "bb0: { check(copy _3, bounds, copy (*_1), copy _4) -> bb1; } bb1: { return; }",
+        3, fir_verify.V3_DEREF, 0, 0);
+    red(&e, int, "bb0: { fail(bounds, copy _1, copy (*_1)); }", 3, fir_verify.V3_DEREF, 0, 0);
+    red(&e, int, "bb0: { check(overwrite: (*_1)) -> bb1; } bb1: { return; }", 3,
+        fir_verify.V3_DEREF, 0, 0);
+    // the position counts the statements before it, in a later block
+    red(&e, int, "bb0: { goto bb1; } bb1: { _1 = const i32 1; _1 = copy _1.0; return; }", 3,
+        fir_verify.V3_FIELD, 1, 1);
+}
+
+fn v3_names_a_local_of_the_function() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // the parser refuses an unknown local, so the constructors build these
+    fir.func mut f = func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    u32 one = fir.local_add(&f, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
+                            null, at(1, 1));
+    fir.rvalue r = fir.rvalue_use(&f, fir.operand_copy(fir.place_local(2)));
+    fir.block_append(&f, 0, fir.stmt_assign(fir.place_local(one), r, at(1, 1), 1));
+    fir.block_set_terminator(&f, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, &f, 3, fir_verify.V3_NO_LOCAL, 0, 0);
+    // the last local is a local of the function
+    fir.func mut g = func_of(&e, "nothing");
+    defer fir.func_free(&g);
+    u32 two = fir.local_add(&g, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
+                            null, at(1, 1));
+    fir.rvalue s = fir.rvalue_use(&g, fir.operand_copy(fir.place_local(two)));
+    fir.block_append(&g, 0, fir.stmt_assign(fir.place_local(two), s, at(1, 1), 1));
+    fir.block_set_terminator(&g, 0, fir.term_return(at(1, 1), 1));
+    green_func(&e, &g);
+    // an index local past the last local
+    fir.func mut h = func_of(&e, "nothing");
+    defer fir.func_free(&h);
+    types.node* cells = types.type_array(tt(&e), prim_ty(&e, prim.prim_kind.prim_i32), 4);
+    u32 arr = fir.local_add(&h, cells, fir.local_kind.lk_temp, null, at(1, 1));
+    u32 dst = fir.local_add(&h, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
+                            null, at(1, 1));
+    fir.place elem = fir.place_index(&h, fir.place_local(arr), 3);
+    fir.rvalue t = fir.rvalue_use(&h, fir.operand_copy(elem));
+    fir.block_append(&h, 0, fir.stmt_assign(fir.place_local(dst), t, at(1, 1), 1));
+    fir.block_set_terminator(&h, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, &h, 3, fir_verify.V3_INDEX_LOCAL, 0, 0);
+}
+
+fn v3_no_statement_writes_a_global_constant() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: i32; let _2: u8 mut* own; let _3: i32*; let _4: u64; let _5: char;";
+    // an assignment, a field of a constant, a move, a del, and a move in a terminator
+    red(&e, lets, "bb0: { global main.LIMIT = const i32 1; return; }", 3, fir_verify.V3_CONSTANT,
+        0, 0);
+    red(&e, lets, "bb0: { global main.ORIGIN.0 = const i32 1; return; }", 3,
+        fir_verify.V3_CONSTANT, 0, 0);
+    red(&e, lets, "bb0: { _2 = move global main.KEPT; return; }", 3, fir_verify.V3_CONSTANT, 0,
+        0);
+    red(&e, lets, "bb0: { del(move global main.KEPT); return; }", 3, fir_verify.V3_CONSTANT, 0,
+        0);
+    red(&e, lets, "bb0: { switch(move global main.LIMIT) -> [otherwise: bb1]; } bb1: { trap; }", 3,
+        fir_verify.V3_CONSTANT, 0, 0);
+    red(&e, lets, "bb0: { _1 = call fn main.t5(); global main.LIMIT = copy _1; return; }", 3,
+        fir_verify.V3_CONSTANT, 0, 1);
+    // a writable global, a read, an address, and the storage behind the first indirection
+    green(&e, lets, "bb0: { global main.total = const i32 1; return; }");
+    green(&e, lets, "bb0: { global main.origin.0 = copy _1; return; }");
+    green(&e, lets, "bb0: { _1 = copy global main.LIMIT; _1 = copy global main.ORIGIN.0; trap; }");
+    green(&e, lets, "bb0: { _3 = addr(global main.LIMIT); return; }");
+    green(&e, lets, "bb0: { (*global main.TARGET) = const i32 1; return; }");
+    green(&e, lets, "bb0: { _4 = const u64 0; _5 = copy global main.NAME[_4]; return; }");
+    green(&e, lets, "bb0: { check(overwrite: global main.KEPT) -> bb1; } bb1: { return; }");
+}
+
+fn v3_no_statement_writes_a_void_return_place() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: void; let _2: i32;";
+    red(&e, lets, "bb0: { _0 = call fn main.nothing(); return; }", 3,
+        fir_verify.V3_VOID_RETURN, 0, 0);
+    red(&e, lets, "bb0: { _2 = const i32 1; _0 = copy _1; return; }", 3,
+        fir_verify.V3_VOID_RETURN, 0, 1);
+    red(&e, lets, "bb0: { _1 = move _0; return; }", 3, fir_verify.V3_VOID_RETURN, 0, 0);
+    red(&e, lets, "bb0: { del(move _0); return; }", 3, fir_verify.V3_VOID_RETURN, 0, 0);
+    // a `void` temporary takes the write, `_0` of another type takes it, and a read of `_0` passes
+    green(&e, lets, "bb0: { _1 = call fn main.nothing(); _1 = copy _0; return; }");
+    green_in(&e, F, "let _2: void;", "bb0: { _0 = call fn main.t5(); return; }");
+}
+
+// ---- V4 --------------------------------------------------------------------------------------
+
+fn v4_the_two_sides_of_an_assignment_agree() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    red(&e, "let _1: i32; let _2: i64;", "bb0: { _1 = copy _2; return; }", 4,
+        fir_verify.V4_ASSIGN, 0, 0);
+    red(&e, "let _1: i32*; let _2: u8*;", "bb0: { _1 = copy _2; return; }", 4,
+        fir_verify.V4_ASSIGN, 0, 0);
+    red(&e, "let _1: i32; let _2: bool;", "bb0: { _2 = const true; _1 = copy _2; return; }", 4,
+        fir_verify.V4_ASSIGN, 0, 1);
+    red_in(&e, F, "let _2: i64;", "bb0: { _0 = copy _2; return; }", 4, fir_verify.V4_ASSIGN, 0, 0);
+    red(&e, "let _1: i32;", "bb0: { _1 = const u8 1; return; }", 4, fir_verify.V4_ASSIGN, 0, 0);
+    red(&e, "let _1: u64;", "bb0: { _1 = eq(const i32 1, const i32 2); return; }", 4,
+        fir_verify.V4_ASSIGN, 0, 0);
+    // `mut` and `own` differ at a level and the two sides still agree
+    green(&e, "let _1: i32*; let _2: i32 mut*;", "bb0: { _1 = copy _2; return; }");
+    green(&e, "let _1: u8*; let _2: u8 mut* own;", "bb0: { _1 = copy _2; return; }");
+    green(&e, "let _1: u8 mut* mut@; let _2: u8* mut@ own;", "bb0: { _1 = copy _2; return; }");
+    green_in(&e, F, "", "bb0: { _0 = const i32 1; return; }");
+    // a call of a `void` function writes a `void` temporary
+    green(&e, "let _1: void;", "bb0: { _1 = call fn main.nothing(); return; }");
+}
+
+fn v4_integer_forms_take_integers_of_one_type() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string ints = "let _1: i32; let _2: u32; let _3: f64; let _4: bool; let _5: char; let _6: u8*;";
+    red(&e, ints, "bb0: { _1 = add(copy _1, copy _2); return; }", 4, fir_verify.V4_OPERANDS, 0,
+        0);
+    red(&e, ints, "bb0: { _4 = mul_overflows(copy _1, const i64 1); return; }", 4,
+        fir_verify.V4_OPERANDS, 0, 0);
+    red(&e, ints, "bb0: { _3 = add(copy _3, copy _3); return; }", 4, fir_verify.V4_INTEGER, 0, 0);
+    red(&e, ints, "bb0: { _4 = div(copy _4, copy _4); return; }", 4, fir_verify.V4_INTEGER, 0, 0);
+    red(&e, ints, "bb0: { _4 = sub_overflows(copy _5, copy _5); return; }", 4,
+        fir_verify.V4_INTEGER, 0, 0);
+    red(&e, ints, "bb0: { _6 = rem(copy _6, copy _6); return; }", 4, fir_verify.V4_INTEGER, 0, 0);
+    red(&e, ints, "bb0: { _1 = sub(const i8 1, const i8 1); return; }", 4, fir_verify.V4_ASSIGN,
+        0, 0);
+    green(&e, ints, "bb0: { _1 = add(copy _1, const i32 1); _1 = sub(copy _1, copy _1); return; }");
+    green(&e, ints, "bb0: { _4 = add_overflows(copy _1, copy _1); return; }");
+    green(&e, ints, "bb0: { _2 = mul(copy _2, copy _2); _2 = div(copy _2, copy _2); return; }");
+    green(&e, ints, "bb0: { _1 = rem(copy _1, copy _1); return; }");
+    green(&e, ints, "bb0: { _4 = sub_overflows(copy _2, copy _2); return; }");
+}
+
+fn v4_bitwise_shift_and_float_forms() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string ops = "let _1: i32; let _2: i64; let _3: f64; let _4: bool; let _5: char; let _6: f32;";
+    // `and`, `or` and `xor` take integers or `bool`s, and `not` one of either
+    red(&e, ops, "bb0: { _3 = xor(copy _3, copy _3); return; }", 4, fir_verify.V4_BITWISE, 0, 0);
+    red(&e, ops, "bb0: { _5 = and(copy _5, copy _5); return; }", 4, fir_verify.V4_BITWISE, 0, 0);
+    red(&e, ops, "bb0: { _1 = or(copy _1, copy _4); return; }", 4, fir_verify.V4_OPERANDS, 0, 0);
+    red(&e, ops, "bb0: { _3 = not(copy _3); return; }", 4, fir_verify.V4_BITWISE, 0, 0);
+    red(&e, ops, "bb0: { _5 = not(copy _5); return; }", 4, fir_verify.V4_BITWISE, 0, 0);
+    green(&e, ops, "bb0: { _4 = and(copy _4, const true); _4 = or(copy _4, copy _4); return; }");
+    green(&e, ops, "bb0: { _4 = xor(copy _4, copy _4); _1 = xor(copy _1, const i32 3); return; }");
+    green(&e, ops, "bb0: { _4 = not(copy _4); _2 = not(copy _2); return; }");
+    green(&e, ops, "bb0: { _1 = and(copy _1, copy _1); return; }");
+    // a shift takes an integer, and its count has the type of the value
+    red(&e, ops, "bb0: { _1 = shl(copy _1, copy _2); return; }", 4, fir_verify.V4_SHIFT_COUNT, 0,
+        0);
+    red(&e, ops, "bb0: { _4 = shr(copy _4, copy _4); return; }", 4, fir_verify.V4_INTEGER, 0, 0);
+    green(&e, ops, "bb0: { _1 = shl(copy _1, copy _1); _2 = shr(copy _2, const i64 3); return; }");
+    // the float forms take floats of one type
+    red(&e, ops, "bb0: { _1 = fadd(copy _1, copy _1); return; }", 4, fir_verify.V4_FLOAT, 0, 0);
+    red(&e, ops, "bb0: { _3 = fdiv(copy _3, copy _6); return; }", 4, fir_verify.V4_OPERANDS, 0, 0);
+    red(&e, ops, "bb0: { _1 = fneg(copy _1); return; }", 4, fir_verify.V4_FLOAT, 0, 0);
+    green(&e, ops, "bb0: { _3 = fsub(copy _3, copy _3); _6 = fmul(copy _6, copy _6); return; }");
+    green(&e, ops, "bb0: { _3 = fneg(copy _3); _6 = fdiv(copy _6, copy _6); return; }");
+}
+
+fn v4_comparisons_take_scalars_and_order_numbers() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string cmp = "let _1: bool; let _2: pair; let _3: string; let _4: i32@; let _5: u8*;";
+    string more = "let _6: color; let _7: char; let _8: fn (i32, i64) u64; let _9: void*;";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, cmp);
+    strbuf.append(&b, more);
+    string lets = strbuf.view(&b);
+    // `eq` and `ne` compare scalars and pointers, not aggregates
+    red(&e, lets, "bb0: { _1 = eq(copy _2, copy _2); return; }", 4, fir_verify.V4_EQUALITY, 0, 0);
+    red(&e, lets, "bb0: { _1 = ne(copy _3, copy _3); return; }", 4, fir_verify.V4_EQUALITY, 0, 0);
+    red(&e, lets, "bb0: { _1 = eq(copy _4, copy _4); return; }", 4, fir_verify.V4_EQUALITY, 0, 0);
+    red(&e, lets, "bb0: { _1 = eq(const i32 1, const i64 1); return; }", 4,
+        fir_verify.V4_OPERANDS, 0, 0);
+    green(&e, lets, "bb0: { _1 = eq(copy _5, const null u8*); return; }");
+    green(&e, lets, "bb0: { _1 = ne(copy _6, copy _6); return; }");
+    green(&e, lets, "bb0: { _1 = eq(copy _1, const true); _1 = eq(copy _8, copy _8); return; }");
+    green(&e, lets, "bb0: { _1 = ne(copy _9, copy _9); _1 = eq(copy _7, const char 65); return; }");
+    // `mut` and `own` of the two operands differ, and they still agree
+    green(&e, "let _1: bool; let _2: u8 mut* own; let _3: u8*;",
+          "bb0: { _1 = eq(copy _2, copy _3); return; }");
+    // `lt` and its kin order integers, floats and `char`s (D6.2)
+    red(&e, lets, "bb0: { _1 = lt(copy _1, copy _1); return; }", 4, fir_verify.V4_ORDERING, 0, 0);
+    red(&e, lets, "bb0: { _1 = le(copy _5, copy _5); return; }", 4, fir_verify.V4_ORDERING, 0, 0);
+    red(&e, lets, "bb0: { _1 = gt(copy _6, copy _6); return; }", 4, fir_verify.V4_ORDERING, 0, 0);
+    red(&e, lets, "bb0: { _1 = ge(const u8 1, const u16 1); return; }", 4,
+        fir_verify.V4_OPERANDS, 0, 0);
+    green(&e, lets, "bb0: { _1 = lt(copy _7, copy _7); return; }");
+    green(&e, lets, "bb0: { _1 = ge(const f64 0x0, const f64 0x3FF0000000000000); return; }");
+    green(&e, lets, "bb0: { _1 = le(const u64 1, const u64 2); return; }");
+    green(&e, lets, "bb0: { _1 = gt(const i8 1, const i8 2); return; }");
+}
+
+fn v4_casts_follow_d3_14() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string casts = "let _1: i32; let _2: pair; let _3: bool; let _4: u8*; let _5: u8 mut*;";
+    string views = "let _6: string; let _7: u8@; let _8: color; let _9: i64; let _10: char;";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, casts);
+    strbuf.append(&b, views);
+    string lets = strbuf.view(&b);
+    // an aggregate target that the operand does not reach, `bool` from an integer, a `mut` added
+    red(&e, lets, "bb0: { _2 = cast<pair>(copy _1); return; }", 4, fir_verify.V4_CAST, 0, 0);
+    red(&e, lets, "bb0: { _3 = cast<bool>(copy _1); return; }", 4, fir_verify.V4_CAST, 0, 0);
+    red(&e, lets, "bb0: { _5 = cast<u8 mut*>(copy _4); return; }", 4, fir_verify.V4_CAST, 0, 0);
+    red(&e, lets, "bb0: { _7 = cast<u8@>(copy _4); return; }", 4, fir_verify.V4_CAST, 0, 0);
+    // the operand casts, and the destination still agrees with the target
+    red(&e, lets, "bb0: { _9 = cast<i32>(copy _1); return; }", 4, fir_verify.V4_ASSIGN, 0, 0);
+    green(&e, lets, "bb0: { _6 = cast<string>(copy _7); _7 = cast<u8@>(copy _6); return; }");
+    green(&e, lets, "bb0: { _9 = cast<i64>(copy _8); _10 = cast<char>(copy _1); return; }");
+    green(&e, lets, "bb0: { _4 = cast<u8*>(copy _5); _8 = cast<color>(const i32 1); return; }");
+    green(&e, lets, "bb0: { _2 = cast<pair>(copy _2); _1 = cast<i32>(copy _3); return; }");
+}
+
+fn v4_slices_and_allocations() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string arrs = "let _1: i32*; let _2: i32@; let _3: i32 mut@; let _4: string; let _5: i32[4];";
+    string nums = "let _6: u64; let _7: i64; let _8: i32; let _9: bool; let _10: void*;";
+    string more = "let _11: u8; let _12: u8 mut* own; let _13: i32 mut*;";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, arrs);
+    strbuf.append(&b, nums);
+    strbuf.append(&b, more);
+    string lets = strbuf.view(&b);
+    // a slice takes a fixed array, a span or a string, and u64 bounds
+    red(&e, lets, "bb0: { _2 = slice(_1, copy _6, copy _6); return; }", 4, fir_verify.V4_SLICE, 0,
+        0);
+    red(&e, lets, "bb0: { _2 = slice(_8, copy _6, copy _6); return; }", 4, fir_verify.V4_SLICE, 0,
+        0);
+    red(&e, lets, "bb0: { _2 = slice(_5, copy _7, copy _6); return; }", 4,
+        fir_verify.V4_SLICE_BOUND, 0, 0);
+    red(&e, lets, "bb0: { _2 = slice(_5, copy _6, copy _8); return; }", 4,
+        fir_verify.V4_SLICE_BOUND, 0, 0);
+    // `slice mut` stands only on a fixed array
+    red(&e, lets, "bb0: { _3 = slice mut(_3, copy _6, copy _6); return; }", 4,
+        fir_verify.V4_SLICE_MUT, 0, 0);
+    red(&e, lets, "bb0: { _4 = slice mut(_4, copy _6, copy _6); return; }", 4,
+        fir_verify.V4_SLICE_MUT, 0, 0);
+    green(&e, lets, "bb0: { _3 = slice mut(_5, const u64 0, const u64 4); return; }");
+    green(&e, lets, "bb0: { _2 = slice(_5, copy _6, copy _6); return; }");
+    green(&e, lets, "bb0: { _3 = slice(_3, copy _6, copy _6); return; }");
+    green(&e, lets, "bb0: { _4 = slice(_4, const u64 0, copy _6); return; }");
+    // a slice_ptr takes a pointer, and integer bounds of any type
+    red(&e, lets, "bb0: { _2 = slice_ptr(copy _10, copy _6, copy _6); return; }", 4,
+        fir_verify.V4_SLICE_PTR, 0, 0);
+    red(&e, lets, "bb0: { _2 = slice_ptr(copy _2, copy _6, copy _6); return; }", 4,
+        fir_verify.V4_SLICE_PTR, 0, 0);
+    red(&e, lets, "bb0: { _2 = slice_ptr(copy _1, copy _9, copy _6); return; }", 4,
+        fir_verify.V4_SLICE_PTR_BOUND, 0, 0);
+    red(&e, lets, "bb0: { _2 = slice_ptr(copy _1, copy _6, copy _9); return; }", 4,
+        fir_verify.V4_SLICE_PTR_BOUND, 0, 0);
+    green(&e, lets, "bb0: { _2 = slice_ptr(copy _1, copy _8, copy _11); return; }");
+    green(&e, lets, "bb0: { _3 = slice_ptr(copy _13, copy _6, copy _7); return; }");
+    // an alloc counts in u64
+    red(&e, lets, "bb0: { _12 = alloc<u8>(copy _7); return; }", 4, fir_verify.V4_ALLOC_COUNT, 0,
+        0);
+    red(&e, lets, "bb0: { _12 = alloc<u8>(const i32 1); return; }", 4, fir_verify.V4_ALLOC_COUNT,
+        0, 0);
+    red(&e, lets, "bb0: { _12 = alloc<i32>(copy _6); return; }", 4, fir_verify.V4_ASSIGN, 0, 0);
+    green(&e, lets, "bb0: { _12 = alloc<u8>(copy _6); del(move _12); return; }");
+}
+
+fn v4_aggregates_fill_every_field_or_element() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string aggs = "let _1: i32; let _2: pair; let _3: i32[4]; let _4: string; let _5: u8*;";
+    string more = "let _6: i32@; let _7: i32*; let _8: u8 mut@ own; let _9: u8 mut* own;";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, aggs);
+    strbuf.append(&b, more);
+    string lets = strbuf.view(&b);
+    red(&e, lets, "bb0: { _1 = aggregate i32(const i32 1); return; }", 4,
+        fir_verify.V4_AGGREGATE, 0, 0);
+    red(&e, lets, "bb0: { _2 = aggregate pair(const i32 1); return; }", 4,
+        fir_verify.V4_MEMBER_COUNT, 0, 0);
+    red(&e, lets, "bb0: { _4 = aggregate string(copy _5); return; }", 4,
+        fir_verify.V4_MEMBER_COUNT, 0, 0);
+    red(&e, "let _1: i32[2];", "bb0: { _1 = aggregate i32[2](const i32 1); return; }", 4,
+        fir_verify.V4_MEMBER_COUNT, 0, 0);
+    red(&e, "let _1: i32[2]; bb0: { _1 = aggregate i32[2](",
+        "const i32 1, const i32 2, const i32 3); return; }", 4, fir_verify.V4_MEMBER_COUNT, 0, 0);
+    red(&e, lets, "bb0: { _2 = aggregate pair(const i64 1, const u64 2); return; }", 4,
+        fir_verify.V4_MEMBER, 0, 0);
+    red(&e, lets, "bb0: { _2 = aggregate pair(const i32 1, const i32 2); return; }", 4,
+        fir_verify.V4_MEMBER, 0, 0);
+    red(&e, lets, "bb0: { _4 = aggregate string(copy _5, const u64 1); return; }", 4,
+        fir_verify.V4_MEMBER, 0, 0);
+    red(&e, lets, "bb0: { _6 = aggregate i32@(copy _7, const i32 1); return; }", 4,
+        fir_verify.V4_MEMBER, 0, 0);
+    green(&e, lets, "bb0: { _2 = aggregate pair(const i32 1, const u64 2); return; }");
+    green(&e, lets, "bb0: { _4 = aggregate string(const bytes \"a\", const u64 1); return; }");
+    green(&e, lets, "bb0: { _6 = aggregate i32@(copy _7, const u64 1); return; }");
+    green(&e, lets, "bb0: { _8 = aggregate u8 mut@ own(move _9, const u64 1); return; }");
+    green(&e, "let _1: i32[2]; bb0: {",
+          "_1 = aggregate i32[2](const i32 1, const i32 2); return; }");
+}
+
+fn v4_calls_switches_and_checks() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // a call through a value takes an operand of function type
+    red(&e, "let _1: i32; let _2: i32;", "bb0: { _2 = call copy _1(); return; }", 4,
+        fir_verify.V4_CALLEE, 0, 0);
+    red(&e, "let _1: u8*; let _2: i32;", "bb0: { _2 = call copy _1(); return; }", 4,
+        fir_verify.V4_CALLEE, 0, 0);
+    green(&e, "let _1: fn (i32, i64) u64; let _2: u64; bb0: {",
+          "_2 = call copy _1(const i32 1, const i64 2); return; }");
+    string sw = "let _1: i32; let _2: bool; let _3: u8; let _4: i8; let _5: char; let _6: color;";
+    string more = "let _7: f64; let _8: u8*; let _9: pair; let _10: u64; bb0: { switch(copy";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, sw);
+    strbuf.append(&b, more);
+    string lets = strbuf.view(&b);
+    // Each case below continues `switch(copy` and ends bb0; bb1 returns.
+    // a switch takes a `bool`, an integer, a `char` or an enum
+    red(&e, lets, "_7) -> [otherwise: bb1]; } bb1: { return; }", 4, fir_verify.V4_SWITCH, 0, 0);
+    red(&e, lets, "_8) -> [otherwise: bb1]; } bb1: { return; }", 4, fir_verify.V4_SWITCH, 0, 0);
+    red(&e, lets, "_9) -> [otherwise: bb1]; } bb1: { return; }", 4, fir_verify.V4_SWITCH, 0, 0);
+    // every arm is a constant of the type of the operand
+    red(&e, lets, "_1) -> [true: bb1, otherwise: bb1]; } bb1: { return; }", 4, fir_verify.V4_ARM,
+        0, 0);
+    red(&e, lets, "_2) -> [i32 1: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    red(&e, lets, "_3) -> [i32 256: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    red(&e, lets, "_4) -> [i32 -129: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    red(&e, lets, "_5) -> [u8 65: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    red(&e, lets, "_1) -> [char 65: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    red(&e, lets, "_6) -> [i64 2147483648: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    red(&e, lets, "_10) -> [i64 -1: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    red(&e, lets, "_1) -> [i32 1: bb1, false: bb1, otherwise: bb1]; } bb1: { return; }", 4,
+        fir_verify.V4_ARM, 0, 0);
+    // the edges of each range
+    green(&e, lets, "_3) -> [i32 255: bb1, u8 0: bb1, otherwise: bb1]; } bb1: { return; }");
+    green(&e, lets, "_4) -> [i32 -128: bb1, i32 127: bb1, otherwise: bb1]; } bb1: { return; }");
+    green(&e, lets, "_5) -> [char 0: bb1, char 255: bb1, otherwise: bb1]; } bb1: { return; }");
+    green(&e, lets, "_6) -> [color 1: bb1, otherwise: bb1]; } bb1: { return; }");
+    green(&e, lets, "_6) -> [i32 -2147483648: bb1, otherwise: bb1]; } bb1: { return; }");
+    green(&e, lets, "_10) -> [u64 18446744073709551615: bb1, otherwise: bb1]; } bb1: { trap; }");
+    green(&e, lets, "_2) -> [true: bb1, false: bb1, otherwise: bb1]; } bb1: { return; }");
+    // a check takes a `bool` condition
+    string ck = "let _1: i32; let _2: bool; bb0: {";
+    red(&e, ck, "check(copy _1, overflow) -> bb1; } bb1: { return; }", 4, fir_verify.V4_CONDITION,
+        0, 0);
+    red(&e, ck, "check(copy _1, user, const bytes \"c\") -> bb1; } bb1: { return; }", 4,
+        fir_verify.V4_CONDITION, 0, 0);
+    green(&e, ck, "check(copy _2, user, const bytes \"c\") -> bb1; } bb1: { return; }");
+    green(&e, ck, "check(const false, div_zero) -> bb1; } bb1: { return; }");
+    // an overwrite check takes a place of an own reference type
+    string ow = "let _1: u8*; let _2: holder; let _3: string own; let _4: u8 mut@ own;";
+    string ow_more = "let _5: void* own; let _6: u8 mut* own; bb0: { check(overwrite: ";
+    strbuf.clear(&b);
+    strbuf.append(&b, ow);
+    strbuf.append(&b, ow_more);
+    string place = strbuf.view(&b);
+    red(&e, place, "_1) -> bb1; } bb1: { return; }", 4, fir_verify.V4_OVERWRITE, 0, 0);
+    red(&e, place, "_2) -> bb1; } bb1: { return; }", 4, fir_verify.V4_OVERWRITE, 0, 0);
+    green(&e, place, "_3) -> bb1; } bb1: { check(overwrite: _4) -> bb2; } bb2: { return; }");
+    green(&e, place, "_5) -> bb1; } bb1: { check(overwrite: _6) -> bb2; } bb2: { return; }");
+}
+
+// An rvalue whose count of operands differs from its form, which only a pass that builds the
+// record by hand can make.
+fn v4_an_rvalue_has_the_count_of_its_form() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func mut f = func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    types.node* i32t = prim_ty(&e, prim.prim_kind.prim_i32);
+    u32 one = fir.local_add(&f, i32t, fir.local_kind.lk_temp, null, at(1, 1));
+    u32 first = fir.operand_push(&f, fir.operand_copy(fir.place_local(one)));
+    fir.rvalue add = fir.rvalue{.kind = fir.rvalue_kind.rv_add, .ops_first = first, .ops_len = 1};
+    fir.block_append(&f, 0, fir.stmt_assign(fir.place_local(one), add, at(1, 1), 1));
+    fir.block_set_terminator(&f, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, &f, 4, fir_verify.V4_ARITY, 0, 0);
+    fir.func mut g = func_of(&e, "nothing");
+    defer fir.func_free(&g);
+    types.node* ptr = types.type_ptr(tt(&e), i32t, false, false);
+    u32 two = fir.local_add(&g, ptr, fir.local_kind.lk_temp, null, at(1, 1));
+    u32 next = fir.operand_push(&g, fir.operand_copy(fir.place_local(two)));
+    fir.rvalue addr = fir.rvalue{
+        .kind = fir.rvalue_kind.rv_addr,
+        .ops_first = next,
+        .ops_len = 1,
+        .place = fir.place_local(two),
+    };
+    fir.block_append(&g, 0, fir.stmt_assign(fir.place_local(two), addr, at(1, 1), 1));
+    fir.block_set_terminator(&g, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, &g, 4, fir_verify.V4_ARITY, 0, 0);
+}
+
+fn v4_a_switch_names_each_value_once() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: i32; let _2: bool; let _3: u8; let _4: char; let _5: color; bb0: {";
+    string ret = " bb1: { return; }";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[7] twice = {
+        "switch(copy _1) -> [i32 1: bb1, i32 1: bb1, otherwise: bb1]; }",
+        "switch(copy _1) -> [i32 1: bb1, i32 2: bb1, i32 1: bb1, otherwise: bb1]; }",
+        "switch(copy _1) -> [i32 0: bb1, i32 -0: bb1, otherwise: bb1]; }",
+        "switch(copy _2) -> [true: bb1, true: bb1, otherwise: bb1]; }",
+        "switch(copy _3) -> [u8 5: bb1, i32 5: bb1, otherwise: bb1]; }",
+        "switch(copy _4) -> [char 65: bb1, char 65: bb1, otherwise: bb1]; }",
+        "switch(copy _5) -> [color 1: bb1, color 1: bb1, otherwise: bb1]; }",
+    };
+    for (string arms : twice) {
+        strbuf.clear(&b);
+        strbuf.append(&b, arms);
+        strbuf.append(&b, ret);
+        red(&e, lets, strbuf.view(&b), 4, fir_verify.V4_ARM_TWICE, 0, 0);
+    }
+    string[4] once = {
+        "switch(copy _1) -> [i32 1: bb1, i32 -1: bb1, otherwise: bb1]; }",
+        "switch(copy _2) -> [true: bb1, false: bb1, otherwise: bb1]; }",
+        "switch(copy _4) -> [char 0: bb1, char 255: bb1, otherwise: bb1]; }",
+        "switch(copy _5) -> [color 0: bb1, color 1: bb1, otherwise: bb1]; }",
+    };
+    for (string arms : once) {
+        strbuf.clear(&b);
+        strbuf.append(&b, arms);
+        strbuf.append(&b, ret);
+        green(&e, lets, strbuf.view(&b));
+    }
+}
+
+fn v4_an_overwrite_check_names_its_place() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: bool; let _2: u8 mut* own; let _3: i32; bb0: {";
+    red(&e, lets, "check(copy _1, overwrite) -> bb1; } bb1: { return; }", 4,
+        fir_verify.V4_CHECK_FORM, 0, 0);
+    red(&e, lets, "check(copy _3, overwrite) -> bb1; } bb1: { return; }", 4,
+        fir_verify.V4_CHECK_FORM, 0, 0);
+    red(&e, lets, "goto bb1; } bb1: { check(const false, overwrite) -> bb2; } bb2: { return; }",
+        4, fir_verify.V4_CHECK_FORM, 1, 0);
+    // the place form, a check of another kind, and a fail of the kind
+    green(&e, lets, "check(overwrite: _2) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(copy _1, overflow) -> bb1; } bb1: { return; }");
+    green(&e, lets, "fail(overwrite); }");
+    // the constructors give the same record as the text
+    fir.func mut f = func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir.block_new(&f);
+    fir.block_set_terminator(&f, 1, fir.term_return(at(1, 1), 1));
+    fir.operand cond = fir.operand_const(fir.const_bool(false));
+    fir.terminator t = fir.term_check(cond, fir.check_kind.chk_overwrite, 0, 0, 1, at(1, 1), 1);
+    fir.block_set_terminator(&f, 0, t);
+    red_func(&e, &f, 4, fir_verify.V4_CHECK_FORM, 0, 0);
+}
+
+// `void` has no storage and no size: no address of it, and no allocation of it.
+fn v4_no_address_and_no_allocation_of_void() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: void; let _2: i32*; let _3: void* mut* own; let _4: void*; bb0: {";
+    red(&e, lets, "_2 = addr(_1); return; }", 4, fir_verify.V4_ADDR_VOID, 0, 0);
+    red(&e, lets, "_2 = addr(_0); return; }", 4, fir_verify.V4_ADDR_VOID, 0, 0);
+    red(&e, lets, "_3 = alloc<void>(const u64 1); return; }", 4, fir_verify.V4_ALLOC_VOID, 0, 0);
+    red(&e, lets, "_3 = alloc<void>(const i32 1); return; }", 4, fir_verify.V4_ALLOC_VOID, 0, 0);
+    green(&e, lets, "_3 = alloc<void*>(const u64 1); del(move _3); return; }");
+    // `new(T@)` is an error (D10.2), and a fixed array is not a span
+    red(&e, "let _1: u8@ mut* own; bb0: {", "_1 = alloc<u8@>(const u64 1); return; }", 4,
+        fir_verify.V4_ALLOC_SPAN, 0, 0);
+    red(&e, "let _1: string@ mut* own; bb0: {", "_1 = alloc<string@>(const u64 2); return; }",
+        4, fir_verify.V4_ALLOC_SPAN, 0, 0);
+    green(&e, "let _1: u8[4] mut* own; bb0: {", "_1 = alloc<u8[4]>(const u64 1); return; }");
+    green(&e, "let _1: void*; let _2: void**; bb0: {", "_2 = addr(_1); return; }");
+}
+
+// ---- V5 and V6 -------------------------------------------------------------------------------
+
+fn v5_move_and_del_take_owning_places() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string mv = "let _1: i32; let _2: i32; let _3: u8*; let _4: pair; let _5: holder;";
+    string more = "let _6: holder; let _7: u8 mut* own; let _8: u8 mut* own; let _9: bool;";
+    string rest = "let _10: i64; let _11: u64;";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, mv);
+    strbuf.append(&b, more);
+    strbuf.append(&b, rest);
+    string lets = strbuf.view(&b);
+    red(&e, lets, "bb0: { _2 = move _1; return; }", 5, fir_verify.V5_MOVE, 0, 0);
+    red(&e, lets, "bb0: { _3 = move _3; return; }", 5, fir_verify.V5_MOVE, 0, 0);
+    red(&e, lets, "bb0: { _4 = move _4; return; }", 5, fir_verify.V5_MOVE, 0, 0);
+    green(&e, lets, "bb0: { _6 = move _5; _8 = move _7; return; }");
+    // a move in each position that reads an operand
+    red(&e, lets, "bb0: { _11 = call fn main.add(move _1, copy _10); return; }", 5,
+        fir_verify.V5_MOVE, 0, 0);
+    red(&e, lets, "bb0: { switch(move _9) -> [otherwise: bb1]; } bb1: { return; }", 5,
+        fir_verify.V5_MOVE, 0, 0);
+    red(&e, lets, "bb0: { check(move _9, overflow) -> bb1; } bb1: { return; }", 5,
+        fir_verify.V5_MOVE, 0, 0);
+    red(&e, lets, "bb0: { check(copy _9, bounds, move _10, copy _11) -> bb1; } bb1: { return; }",
+        5, fir_verify.V5_MOVE, 0, 0);
+    red(&e, lets, "bb0: { fail(bounds, copy _10, move _11); }", 5, fir_verify.V5_MOVE, 0, 0);
+    red(&e, "let _1: fn (i32, i64) u64; let _2: u64; bb0: {",
+        "_2 = call move _1(const i32 1, const i64 2); return; }", 5, fir_verify.V5_MOVE, 0, 0);
+    // a del names an own reference, not an owning aggregate
+    red(&e, lets, "bb0: { del(move _5); return; }", 5, fir_verify.V5_DEL, 0, 0);
+    red(&e, lets, "bb0: { del(move _3); return; }", 5, fir_verify.V5_DEL, 0, 0);
+    red(&e, lets, "bb0: { del(move _1); return; }", 5, fir_verify.V5_DEL, 0, 0);
+    red(&e, "let _1: u8 mut* own[2]; let _2: u64;", "bb0: { del(move _1); return; }", 5,
+        fir_verify.V5_DEL, 0, 0);
+    string dels = "let _1: string own; let _2: u8 mut@ own; let _3: void* own;";
+    green(&e, dels, "bb0: { del(move _1); del(move _2); del(move _3); return; }");
+    green(&e, "let _1: u8 mut* own mut*;", "bb0: { del(move (*_1)); return; }");
+    green(&e, "let _1: u8 mut* own[2]; let _2: u64;", "bb0: { del(move _1[_2]); return; }");
+}
+
+fn v6_an_owning_place_takes_a_move_a_constant_or_an_owning_rvalue() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string owning = "let _1: u8 mut* own; let _2: u8 mut* own; let _3: u8 mut*; let _4: holder;";
+    string more = "let _5: holder; let _6: i32 mut* own; let _7: i32; let _8: u8 mut@ own;";
+    string rest = "let _9: string own; let _10: u64;";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, owning);
+    strbuf.append(&b, more);
+    strbuf.append(&b, rest);
+    string lets = strbuf.view(&b);
+    red(&e, lets, "bb0: { _1 = copy _2; return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "bb0: { _1 = copy _3; return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "bb0: { _4 = copy _5; return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "bb0: { _6 = addr mut(_7); return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "bb0: { _8 = slice_ptr(copy _3, copy _10, copy _10); return; }", 6,
+        fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "bb0: { _1 = cast<u8 mut*>(copy _3); return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "bb0: { _1 = call fn main.peek(); return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    // a cast into an owning place does not copy an owning place (D17.5)
+    red(&e, lets, "bb0: { _9 = cast<string own>(copy _8); return; }", 6, fir_verify.V6_CAST, 0,
+        0);
+    // the forms that give an owning place its value
+    green(&e, lets, "bb0: { _9 = cast<string own>(move _8); _1 = move _2; return; }");
+    green(&e, lets, "bb0: { _1 = const null u8 mut* own; _4 = const zero holder; return; }");
+    green(&e, lets, "bb0: { _1 = alloc<u8>(const u64 1); _2 = call fn main.grab(); return; }");
+    green(&e, lets, "bb0: { _4 = aggregate holder(move _1, const u64 0); return; }");
+    // a cast of a view to an owning type adopts it (D3.14)
+    green(&e, lets, "bb0: { _1 = cast<u8 mut* own>(copy _3); return; }");
+    // a place that does not own takes a copy of an owning place: a lend
+    green(&e, lets, "bb0: { _3 = copy _1; _3 = copy _4.0; return; }");
+}
+
+fn v6_owning_parameters_and_members_take_a_move_or_a_constant() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string owning = "let _1: u8 mut* own; let _2: u8 mut* own; let _3: u8 mut*; let _4: holder;";
+    string more = "let _5: holder; let _6: fn (u8 mut* own) void; let _7: u8 mut@ own;";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, owning);
+    strbuf.append(&b, more);
+    strbuf.append(&b, "let _8: void;");
+    string lets = strbuf.view(&b);
+    red(&e, lets, "bb0: { _8 = call fn main.take(copy _1); return; }", 6, fir_verify.V6_ARGUMENT,
+        0, 0);
+    red(&e, lets, "bb0: { _8 = call fn main.take(copy _3); return; }", 6, fir_verify.V6_ARGUMENT,
+        0, 0);
+    red(&e, lets, "bb0: { _4 = call fn main.keep(copy _5); return; }", 6, fir_verify.V6_ARGUMENT,
+        0, 0);
+    red(&e, lets, "bb0: { _8 = call copy _6(copy _1); return; }", 6, fir_verify.V6_ARGUMENT, 0,
+        0);
+    green(&e, lets, "bb0: { _8 = call fn main.take(move _1); return; }");
+    green(&e, lets, "bb0: { _4 = call fn main.keep(move _5); return; }");
+    green(&e, lets, "bb0: { _8 = call fn main.take(const null u8 mut* own); return; }");
+    // a parameter that does not own takes a lend
+    green(&e, lets, "bb0: { _8 = call fn main.look(copy _1); return; }");
+    green(&e, lets, "bb0: { _8 = call copy _6(move _2); return; }");
+    red(&e, lets, "bb0: { _4 = aggregate holder(copy _1, const u64 0); return; }", 6,
+        fir_verify.V6_MEMBER, 0, 0);
+    red(&e, lets, "bb0: { _7 = aggregate u8 mut@ own(copy _1, const u64 1); return; }", 6,
+        fir_verify.V6_MEMBER, 0, 0);
+    red(&e, "let _1: u8 mut* own[2]; let _2: u8 mut* own; let _3: u8 mut* own; bb0: {",
+        "_1 = aggregate u8 mut* own[2](move _2, copy _3); return; }", 6, fir_verify.V6_MEMBER, 0,
+        0);
+    green(&e, lets, "bb0: { _4 = aggregate holder(const null u8 mut* own, const u64 0); return; }");
+    green(&e, lets, "bb0: { _7 = aggregate u8 mut@ own(move _1, const u64 1); return; }");
+}
+
+// A `string` or `bytes` constant is a view of private data: only `null T` and `zero T` fill an
+// owning place, parameter or member.
+fn v6_a_literal_fills_no_owning_position() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: string own; let _2: char* own; let _3: void; let _4: text_box; bb0: {";
+    red(&e, lets, "_1 = const \"abc\"; return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "_2 = const bytes \"abc\"; return; }", 6, fir_verify.V6_PLACE, 0, 0);
+    red(&e, lets, "_3 = call fn main.take_text(const bytes \"x\"); return; }", 6,
+        fir_verify.V6_ARGUMENT, 0, 0);
+    red(&e, lets, "_4 = aggregate text_box(const bytes \"x\"); return; }", 6,
+        fir_verify.V6_MEMBER, 0, 0);
+    red(&e, "let _1: enum_member* own;", "bb0: { _1 = const enum_table main.color; return; }", 6,
+        fir_verify.V6_PLACE, 0, 0);
+    green(&e, lets, "_1 = const zero string own; _2 = const null char* own; return; }");
+    green(&e, lets, "_3 = call fn main.take_text(const null char* own); return; }");
+    green(&e, lets, "_4 = aggregate text_box(const zero char* own); return; }");
+    green(&e, "let _1: string; let _2: char*;",
+          "bb0: { _1 = const \"abc\"; _2 = const bytes \"abc\"; return; }");
+}
+
+// An owning value lands only where something owns it (D17.8).
+fn v6_an_owning_value_lands_in_an_owning_position() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string owning = "let _1: u8 mut* own; let _2: u8 mut*; let _3: bool; let _4: void;";
+    string more = "let _5: u8 mut* own[2]; let _6: u8 mut*[2]; let _7: u8@; let _8: u8 mut@ own;";
+    string rest = "let _9: string own; let _10: i32; let _11: char*; let _12: u64; bb0: {";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, owning);
+    strbuf.append(&b, more);
+    strbuf.append(&b, rest);
+    string lets = strbuf.view(&b);
+    // an owning value into a place that does not own: a move, an alloc, a call, a cast, an
+    // aggregate
+    red(&e, lets, "_2 = move _1; return; }", 6, fir_verify.V6_LANDS_PLACE, 0, 0);
+    red(&e, lets, "_2 = alloc<u8>(const u64 1); return; }", 6, fir_verify.V6_LANDS_PLACE, 0, 0);
+    red(&e, lets, "_2 = call fn main.grab(); return; }", 6, fir_verify.V6_LANDS_PLACE, 0, 0);
+    red(&e, lets, "_7 = cast<u8@ own>(move _8); return; }", 6, fir_verify.V6_LANDS_PLACE, 0, 0);
+    red(&e, lets, "_6 = aggregate u8 mut* own[2](move _1, const null u8 mut* own); return; }", 6,
+        fir_verify.V6_LANDS_PLACE, 0, 0);
+    // a move where no owning position takes it
+    red(&e, lets, "_3 = eq(move _1, const null u8 mut* own); return; }", 6,
+        fir_verify.V6_LANDS_OPERAND, 0, 0);
+    red(&e, lets, "_4 = call fn main.look(move _1); return; }", 6, fir_verify.V6_LANDS_OPERAND, 0,
+        0);
+    red(&e, lets, "_2 = cast<u8 mut*>(move _1); return; }", 6, fir_verify.V6_LANDS_OPERAND, 0, 0);
+    red(&e, lets, "_7 = slice_ptr(move _1, copy _12, copy _12); return; }", 6,
+        fir_verify.V6_LANDS_OPERAND, 0, 0);
+    red(&e, lets, "_10 = call extern printf(copy _11, move _1); return; }", 6,
+        fir_verify.V6_LANDS_OPERAND, 0, 0);
+    red(&e, lets, "_6 = aggregate u8 mut*[2](move _1, copy _2); return; }", 6,
+        fir_verify.V6_LANDS_OPERAND, 0, 0);
+    red(&e, lets, "fail(panic, move _9.0, copy _9.1); }", 6, fir_verify.V6_LANDS_OPERAND, 0, 0);
+    red(&e, lets, "goto bb1; } bb1: { check(copy _3, user, move _9.0) -> bb2; } bb2: { return; }",
+        6, fir_verify.V6_LANDS_OPERAND, 1, 0);
+    // the positions that own: a del, an owning place, an own parameter, an owning member, a cast
+    green(&e, lets, "_1 = call fn main.grab(); del(move _1); return; }");
+    green(&e, lets, "_4 = call fn main.take(move _1); _1 = alloc<u8>(const u64 1); return; }");
+    green(&e, lets, "_5 = aggregate u8 mut* own[2](move _1, const null u8 mut* own); return; }");
+    green(&e, lets, "_9 = cast<string own>(move _8); _2 = copy _1; return; }");
+    green_in(&e, "fn main.t6() -> u8 mut* own", "let _1: u8 mut* own;",
+             "bb0: { _1 = call fn main.grab(); _0 = move _1; return; }");
+}
+
+// A cast to an owning type does not take a copy of an owning place, whatever place it fills.
+fn v6_a_cast_to_own_copies_no_owning_place() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: u8 mut@ own; let _2: u8@; let _3: string own; let _4: u8 mut*; bb0: {";
+    red(&e, lets, "_2 = cast<u8@ own>(copy _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, lets, "_3 = cast<string own>(copy _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    // field 0 of a struct is the struct's own storage, and an element of a span owns
+    red(&e, "let _1: holder; let _2: u8 mut* own; bb0: {",
+        "_2 = cast<u8 mut* own>(copy _1.0); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, "let _1: u8 mut* own mut@; let _2: u64; let _3: u8 mut* own; bb0: {",
+        "_3 = cast<u8 mut* own>(copy _1[_2]); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    // a lend to a type that does not own, and an adoption of a view
+    green(&e, lets, "_2 = cast<u8@>(copy _1); return; }");
+    // field 0 of a span or a `string` is the `.ptr` of the source, a view (D17.3)
+    green(&e, "let _1: u8 mut@ own; let _2: u8 mut* own; bb0: {",
+          "_2 = cast<u8 mut* own>(copy _1.0); return; }");
+    green(&e, "let _1: string own; let _2: char* own; bb0: {",
+          "_2 = cast<char* own>(copy _1.0); return; }");
+    green(&e, "let _1: u8 mut*; let _2: u8 mut* own; bb0: {",
+          "_2 = cast<u8 mut* own>(copy _1); del(move _2); return; }");
+}
+
+// ---- V7 --------------------------------------------------------------------------------------
+
+fn v7_a_call_matches_its_callee() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string call = "let _1: i32; let _2: i64; let _3: u64; let _4: char*; let _5: f64;";
+    string more = "let _6: pair; let _7: fn (i32, i64) u64; let _8: void; bb0: {";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, call);
+    strbuf.append(&b, more);
+    string lets = strbuf.view(&b);
+    // the count of a fort call, an extern call, a call through a value and a variadic extern
+    red(&e, lets, "_3 = call fn main.add(copy _1); return; }", 7, fir_verify.V7_ARGUMENTS, 0, 0);
+    red(&e, lets, "_3 = call fn main.add(copy _1, copy _2, copy _2); return; }", 7,
+        fir_verify.V7_ARGUMENTS, 0, 0);
+    red(&e, lets, "_1 = call extern puts(copy _4, copy _4); return; }", 7,
+        fir_verify.V7_ARGUMENTS, 0, 0);
+    red(&e, lets, "_1 = call extern puts(); return; }", 7, fir_verify.V7_ARGUMENTS, 0, 0);
+    red(&e, lets, "_3 = call copy _7(copy _1); return; }", 7, fir_verify.V7_ARGUMENTS, 0, 0);
+    red(&e, lets, "_1 = call extern printf(); return; }", 7, fir_verify.V7_ARGUMENTS, 0, 0);
+    green(&e, lets, "_1 = call extern printf(copy _4); return; }");
+    green(&e, lets, "_1 = call extern printf(copy _4, copy _1, copy _5, copy _4); return; }");
+    green(&e, lets, "_3 = call copy _7(copy _1, copy _2); return; }");
+    green(&e, lets, "_1 = call extern puts(copy _4); return; }");
+    // each argument agrees with its parameter
+    red(&e, lets, "_3 = call fn main.add(copy _1, copy _1); return; }", 7,
+        fir_verify.V7_ARGUMENT, 0, 0);
+    red(&e, lets, "_3 = call fn main.add(copy _2, copy _2); return; }", 7,
+        fir_verify.V7_ARGUMENT, 0, 0);
+    red(&e, lets, "_1 = call extern printf(copy _1); return; }", 7, fir_verify.V7_ARGUMENT, 0, 0);
+    red(&e, lets, "_3 = call copy _7(copy _2, copy _2); return; }", 7, fir_verify.V7_ARGUMENT, 0,
+        0);
+    // an aggregate argument is a place and not a constant
+    red(&e, lets, "_8 = call fn main.show(const zero pair); return; }", 7,
+        fir_verify.V7_AGGREGATE, 0, 0);
+    green(&e, lets, "_8 = call fn main.show(copy _6); _6 = call fn main.t3(copy _6); return; }");
+}
+
+fn v7_a_check_reports_what_its_runtime_entry_takes() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string ck = "let _1: bool; let _2: i64; let _3: u64; let _4: char*; let _5: i32;";
+    string more = "let _6: string own; let _7: u8 mut* own; bb0: {";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, ck);
+    strbuf.append(&b, more);
+    string lets = strbuf.view(&b);
+    // every kind with the operands of its entry
+    green(&e, lets, "check(copy _1, overflow) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(copy _1, div_zero) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(copy _1, shift, copy _2, const bytes \"i32\") -> bb1; } bb1: { trap; }");
+    green(&e, lets, "check(copy _1, div_overflow) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(copy _1, bounds, copy _2, copy _3) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(copy _1, span, copy _2, copy _2, copy _3) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(copy _1, alloc_count, copy _2) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(overwrite: _7) -> bb1; } bb1: { return; }");
+    green(&e, lets, "check(copy _1, enum, copy _2, const bytes \"red\") -> bb1; } bb1: { trap; }");
+    green(&e, lets, "check(copy _1, user, const bytes \"x > 0\") -> bb1; } bb1: { return; }");
+    green(&e, lets, "fail(panic, copy _6.0, copy _6.1); }");
+    // the count of the reported operands
+    red(&e, lets, "check(copy _1, bounds, copy _2) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_REPORTED_COUNT, 0, 0);
+    red(&e, lets, "check(copy _1, overflow, copy _2) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_REPORTED_COUNT, 0, 0);
+    red(&e, lets, "fail(panic); }", 7, fir_verify.V7_REPORTED_COUNT, 0, 0);
+    // each reported operand agrees with its parameter
+    red(&e, lets, "check(copy _1, bounds, copy _3, copy _3) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_REPORTED, 0, 0);
+    red(&e, lets, "check(copy _1, span, copy _2, copy _2, copy _2) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_REPORTED, 0, 0);
+    red(&e, lets, "fail(user, const i32 1); }", 7, fir_verify.V7_REPORTED, 0, 0);
+    red(&e, lets, "fail(shift, copy _5, const bytes \"i32\"); }", 7, fir_verify.V7_REPORTED, 0, 0);
+}
+
+fn v7_a_runtime_entry_matches_its_kind() void {
+    // a closure whose runtime has no fail_enum, and one with no fail_overwrite
+    env mut e = env{};
+    open_with(&e, BOUNDS, "fail_enum", false);
+    defer close(&e);
+    string lets = "let _1: bool; let _2: i64; let _3: u64; bb0: {";
+    red(&e, lets, "fail(enum, copy _2, const bytes \"color\"); }", 7, fir_verify.V7_NO_ENTRY, 0,
+        0);
+    red(&e, lets, "check(copy _1, enum, copy _2, const bytes \"c\") -> bb1; } bb1: { return; }",
+        7, fir_verify.V7_NO_ENTRY, 0, 0);
+    green(&e, lets, "check(copy _1, bounds, copy _2, copy _3) -> bb1; } bb1: { return; }");
+    env mut o = env{};
+    open_with(&o, BOUNDS, "fail_overwrite", false);
+    defer close(&o);
+    red(&o, "let _1: u8 mut* own; bb0: {", "check(overwrite: _1) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_NO_ENTRY, 0, 0);
+    red(&o, lets, "fail(overflow, copy _2); }", 7, fir_verify.V7_REPORTED_COUNT, 0, 0);
+    // an entry that takes another type than the table gives, even with operands of that type
+    env mut u = env{};
+    open_with(&u, "u64 index, u64 len, ", "", false);
+    defer close(&u);
+    red(&u, lets, "check(copy _1, bounds, copy _2, copy _3) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_ENTRY, 0, 0);
+    red(&u, lets, "check(copy _1, bounds, copy _3, copy _3) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_ENTRY, 0, 0);
+    green(&u, lets, "check(copy _1, span, copy _2, copy _2, copy _3) -> bb1; } bb1: { return; }");
+    // an entry that takes one parameter more, and one less
+    env mut w = env{};
+    open_with(&w, "i64 index, u64 len, u64 extra, ", "", false);
+    defer close(&w);
+    red(&w, lets, "check(copy _1, bounds, copy _2, copy _3) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_ENTRY, 0, 0);
+    env mut n = env{};
+    open_with(&n, "i64 index, ", "", false);
+    defer close(&n);
+    red(&n, lets, "check(copy _1, bounds, copy _2, copy _3) -> bb1; } bb1: { return; }", 7,
+        fir_verify.V7_ENTRY, 0, 0);
+}
+
+// Each check kind with one reported operand of another type, and with one operand too many. The
+// lets of every case: _1 bool, _2 i64, _3 u64, _4 char*, _5 i32 and _6 u8 mut* own.
+u64 KIND_COUNT = 11;
+
+string[KIND_COUNT] KIND_WRONG = {
+    "check(copy _1, overflow, copy _2) -> bb1; } bb1: { return; }",
+    "check(copy _1, shift, copy _2, copy _3) -> bb1; } bb1: { return; }",
+    "check(copy _1, div_zero, copy _4) -> bb1; } bb1: { return; }",
+    "fail(div_overflow, copy _2); }",
+    "check(copy _1, bounds, copy _2, copy _2) -> bb1; } bb1: { return; }",
+    "check(copy _1, span, copy _3, copy _2, copy _3) -> bb1; } bb1: { return; }",
+    "fail(alloc_count, copy _5); }",
+    "fail(overwrite, copy _4); }",
+    "check(copy _1, enum, copy _4, copy _4) -> bb1; } bb1: { return; }",
+    "check(copy _1, user, copy _2) -> bb1; } bb1: { return; }",
+    "fail(panic, copy _4, copy _2); }",
+};
+
+// Whether KIND_WRONG breaks the count of the operands (true) or the type of one (false).
+bool[KIND_COUNT] KIND_WRONG_COUNT = {
+    true,
+    false,
+    true,
+    true,
+    false,
+    false,
+    false,
+    true,
+    false,
+    false,
+    false,
+};
+
+fn v7_every_kind_holds_its_operands_against_its_entry() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: bool; let _2: i64; let _3: u64; let _4: char*; let _5: i32; bb0: {";
+    u64 mut i = 0;
+    while (i < KIND_COUNT) {
+        string mut what = fir_verify.V7_REPORTED;
+        if (KIND_WRONG_COUNT[i]) {
+            what = fir_verify.V7_REPORTED_COUNT;
+        }
+        red(&e, lets, KIND_WRONG[i], 7, what, 0, 0);
+        i += 1;
+    }
+}
+
+// ---- V8 and V10 ------------------------------------------------------------------------------
+
+fn v8_a_noreturn_call_ends_its_block_in_trap() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: i32; let _2: fn () noreturn; let _3: void;";
+    red(&e, lets, "bb0: { _3 = call fn main.stop(); _1 = const i32 1; trap; }", 8,
+        fir_verify.V8_LAST, 0, 0);
+    red(&e, lets, "bb0: { _3 = call fn main.stop(); return; }", 8, fir_verify.V8_TRAP, 0, 0);
+    red(&e, lets, "bb0: { _3 = call fn main.stop(); unreachable; }", 8, fir_verify.V8_TRAP, 0, 0);
+    red(&e, lets, "bb0: { _3 = call copy _2(); goto bb1; } bb1: { return; }", 8,
+        fir_verify.V8_TRAP, 0, 0);
+    red(&e, "let _1: fn () noreturn; let _2: void; bb0: { goto bb1; }",
+        "bb1: { _2 = call fn main.stop(); _2 = call copy _1(); trap; }", 8, fir_verify.V8_LAST, 1,
+        0);
+    green(&e, lets, "bb0: { _3 = call fn main.stop(); trap; }");
+    green(&e, lets, "bb0: { _1 = const i32 1; _3 = call copy _2(); trap; }");
+    green(&e, lets, "bb0: { _3 = call fn main.nothing(); _1 = const i32 1; trap; }");
+}
+
+fn v10_live_and_dead_name_a_named_local() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    red(&e, "let _1: i32;", "bb0: { live(_1); return; }", 10, fir_verify.V10_LOCAL, 0, 0);
+    red_in(&e, F, "", "bb0: { dead(_1); unreachable; }", 10, fir_verify.V10_LOCAL, 0, 0);
+    red(&e, "", "bb0: { live(_0); return; }", 10, fir_verify.V10_LOCAL, 0, 0);
+    red(&e, "let _1 (x): i32; let _2: i32;", "bb0: { live(_1); dead(_2); return; }", 10,
+        fir_verify.V10_LOCAL, 0, 1);
+    green(&e, "let _1 (x): i32;", "bb0: { live(_1); dead(_1); return; }");
+    // the parser refuses an unknown local, so the constructors build this one
+    fir.func mut f = func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir.block_append(&f, 0, fir.stmt_live(1, at(1, 1), 1));
+    fir.block_set_terminator(&f, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, &f, 10, fir_verify.V10_LOCAL, 0, 0);
+}
+
+// ---- the order of the rules ------------------------------------------------------------------
+
+fn the_lowest_rule_wins_over_an_earlier_block() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    red(&e, "let _1: i32;", "bb0: { _1 = copy _1.0; goto bb1; } bb1: { goto bb0; }", 2,
+        fir_verify.V2_ENTRY, 1, 0);
+    red(&e, "let _1: i32; let _2: i64; bb0: { _1 = copy _2; goto bb1; }",
+        "bb1: { _1 = copy _1.0; return; }", 3, fir_verify.V3_FIELD, 1, 0);
+    red(&e, "let _1: i32; let _2: i64;", "bb0: { _1 = move _1; _1 = copy _2; return; }", 4,
+        fir_verify.V4_ASSIGN, 0, 1);
+    red(&e, "let _1: i32; let _2: void;", "bb0: { live(_1); _2 = call fn main.stop(); return; }", 8,
+        fir_verify.V8_TRAP, 0, 1);
+}
+
+fn main() i32 {
+    types_agree_after_mut_and_own_are_removed();
+    println("agreement ok");
+    every_check_kind_finds_its_runtime_entry();
+    a_missing_entry_stays_null();
+    println("runtime ok");
+    the_text_names_the_rule_the_function_the_block_and_the_statement();
+    println("text ok");
+    v1_every_block_has_a_terminator();
+    v2_names_no_block_past_the_last();
+    v2_names_no_entry_block();
+    println("V1 V2 ok");
+    v3_each_projection_applies_to_the_type_before_it();
+    v3_tests_every_place_of_a_statement_and_a_terminator();
+    v3_names_a_local_of_the_function();
+    v3_no_statement_writes_a_global_constant();
+    v3_no_statement_writes_a_void_return_place();
+    println("V3 ok");
+    v4_the_two_sides_of_an_assignment_agree();
+    v4_integer_forms_take_integers_of_one_type();
+    v4_bitwise_shift_and_float_forms();
+    v4_comparisons_take_scalars_and_order_numbers();
+    v4_casts_follow_d3_14();
+    v4_slices_and_allocations();
+    v4_aggregates_fill_every_field_or_element();
+    v4_calls_switches_and_checks();
+    v4_an_rvalue_has_the_count_of_its_form();
+    v4_a_switch_names_each_value_once();
+    v4_an_overwrite_check_names_its_place();
+    v4_no_address_and_no_allocation_of_void();
+    println("V4 ok");
+    v5_move_and_del_take_owning_places();
+    v6_an_owning_place_takes_a_move_a_constant_or_an_owning_rvalue();
+    v6_owning_parameters_and_members_take_a_move_or_a_constant();
+    v6_a_literal_fills_no_owning_position();
+    v6_an_owning_value_lands_in_an_owning_position();
+    v6_a_cast_to_own_copies_no_owning_place();
+    println("V5 V6 ok");
+    v7_a_call_matches_its_callee();
+    v7_a_check_reports_what_its_runtime_entry_takes();
+    v7_a_runtime_entry_matches_its_kind();
+    v7_every_kind_holds_its_operands_against_its_entry();
+    println("V7 ok");
+    v8_a_noreturn_call_ends_its_block_in_trap();
+    v10_live_and_dead_name_a_named_local();
+    the_lowest_rule_wins_over_an_earlier_block();
+    println("V8 V10 ok");
+    return 0;
+}

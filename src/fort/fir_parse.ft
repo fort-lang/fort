@@ -1374,13 +1374,37 @@ fn parse_rvalue(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
 
 // ---- locations, statements and terminators ----
 
+// Whether the integer token `t` is decimal digits alone, with no sign and no `0x`. The text of a
+// negative integer holds its `-`.
+fn decimal(ftok t) bool {
+    for (char c : t.text) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Reads a line or a column into *out: decimal digits that fit u32, as the grammar rule `line_col`
+// of spec/fir.md 13 writes them. `what` names it in a diagnostic.
+fn take_line_part(fir_parser mut* p, string what, u32 mut* out) bool {
+    ftok t = cur(p);
+    if (t.kind == ftok_kind.ft_int && !decimal(t)) {
+        msg_begin(p);
+        msg_str(p, what);
+        msg_str(p, " is written in decimal digits");
+        return fail_msg(p, tok_loc(p, t));
+    }
+    return take_u32(p, what, out);
+}
+
 // Reads `l:c` into *out, each a number from 1.
 fn parse_line_col(fir_parser mut* p, diag.loc mut* out) bool {
     ftok first = cur(p);
     u32 mut line = 0;
     u32 mut col = 0;
-    if (!take_u32(p, "a line", &line) || !expect(p, ftok_kind.ft_colon, "':'")
-        || !take_u32(p, "a column", &col)) {
+    if (!take_line_part(p, "a line", &line) || !expect(p, ftok_kind.ft_colon, "':'")
+        || !take_line_part(p, "a column", &col)) {
         return false;
     }
     if (line == 0 || col == 0) {
@@ -1665,26 +1689,33 @@ fn end_item(fir_parser mut* p, bool mut* resync) bool {
     return false;
 }
 
-// Reads one statement or the terminator of block `b` and its `;`.
+// Reads one statement or the terminator of block `b` and its `;`. An item that fails drops the
+// block references that it recorded, so that its one diagnostic is the only one it gives.
 fn parse_item(fir_parser mut* p, fir.func mut* f, u32 b) bool {
+    u64 refs = p->refs.len;
     bool mut resync = false;
     bool mut ok = true;
     if (at_terminator(p)) {
         fir.terminator mut t = fir.terminator{};
-        if (!parse_terminator(p, f, &t)) {
-            recover(p);
-            return false;
+        ok = parse_terminator(p, f, &t);
+        if (ok) {
+            fir.block_set_terminator(f, b, t);
+            ok = end_item(p, &resync);
+        } else {
+            resync = true;
         }
-        fir.block_set_terminator(f, b, t);
-        ok = end_item(p, &resync);
     } else {
         fir.statement mut s = fir.statement{};
-        if (!parse_statement(p, f, &s)) {
-            recover(p);
-            return false;
+        ok = parse_statement(p, f, &s);
+        if (ok) {
+            fir.block_append(f, b, s);
+            ok = end_item(p, &resync);
+        } else {
+            resync = true;
         }
-        fir.block_append(f, b, s);
-        ok = end_item(p, &resync);
+    }
+    if (!ok) {
+        p->refs.len = refs;
     }
     if (resync) {
         recover(p);
