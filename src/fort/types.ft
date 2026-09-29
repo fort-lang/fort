@@ -706,8 +706,9 @@ fn own_orphaned(node* dst, node* src, bool outer_own) bool {
 
 // Applies the span row of the cast matrix. Spans must have the same element
 // type. Their marks can differ only by dropped mutability at any level.
-// Ownership marks can change at any reference. Function parameter and result
-// marks are part of element identity. Thus,
+// The matrix lets ownership marks change at any reference, and `check_cast`
+// refuses an added `own` (D3.14). Function parameter and result marks are part
+// of element identity. Thus,
 // A span of `fn (node mut*) void` does not cast to a span of `fn (node*) void`.
 // The drop alone is this row's work. `type_cast_adds_mut` already refused every
 // span whose marks add one.
@@ -767,6 +768,60 @@ fn type_cast_adds_mut(node* dst, node* src) bool {
         return marks_mut(dst->elem);
     }
     return type_cast_adds_mut(dst->elem, src->elem);
+}
+
+// Whether `t` marks any level `own`, at this position or below it. A fixed
+// array adds no level of its own.
+fn marks_own(node* t) bool {
+    if (t->kind == type_kind.k_array) {
+        return marks_own(t->elem);
+    }
+    if (!type_is_reference(t)) {
+        return false;
+    }
+    if (t->is_own) {
+        return true;
+    }
+    if (t->elem == null) {
+        // `string`: no level behind it
+        return false;
+    }
+    return marks_own(t->elem);
+}
+
+/// Tests whether a cast from `src` to `dst` adds `own` at any level (D3.14).
+/// A destination can mark a level `own` only when the source marks that level `own`.
+/// A destination cannot add `own` levels where the source has no matching level.
+/// The matrix of `type_cast_allowed` admits such a cast; `check_cast` refuses it.
+fn type_cast_adds_own(node* dst, node* src) bool {
+    if (dst->kind == type_kind.k_array) {
+        // the array adds no level, so the two chains stay in step
+        if (src->kind == type_kind.k_array) {
+            return type_cast_adds_own(dst->elem, src->elem);
+        }
+        return marks_own(dst);
+    }
+    if (!type_is_reference(dst)) {
+        // No level of the target stands here, so nothing can be added to it.
+        return false;
+    }
+    if (!type_is_reference(src)) {
+        // The source has no level at this depth: an integer, a `void`, a
+        // struct or a function pointer owns nothing.
+        return marks_own(dst);
+    }
+    if (dst->is_own && !src->is_own) {
+        return true;
+    }
+    if (dst->elem == null) {
+        // The target is a `string`: no level behind it.
+        return false;
+    }
+    if (src->elem == null) {
+        // The source is a `string`, behind which no level stands.
+        return marks_own(dst->elem);
+    }
+    return type_cast_adds_own(dst->elem, src->elem);
 }
 
 // `t` with every `mut` cleared, at every level a mark stands on. A function

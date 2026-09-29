@@ -1,0 +1,41 @@
+//! fail
+// A cast never adds `own`, from any source (D3.14). Ownership enters a program
+// through `new` and through an `extern` signature that says `own` (D17.3,
+// D17.13), so a view, an address and a pointer that C keeps give no owner.
+// Every refused line below keeps the `mut` of its source, so the `own` is the
+// reason. The last lines carry or drop the mark, which a cast may do.
+struct node {
+    i32 v;
+}
+
+// C keeps this storage and frees it itself: the result does not say `own`.
+extern fn shared_block() void mut*;
+
+fn main() i32 {
+    i32 v = 1;
+    i32* p = &v;
+    i32* own a = cast(p, i32* own); //! error: cannot cast i32* to i32* own: a cast never adds 'own'
+    u8[2] bytes = {1, 2};
+    u8@ view = bytes[..];
+    u8@ own b = cast(view, u8@ own); //! error: cannot cast u8@ to u8@ own: a cast never adds 'own'
+    u64 bits = cast(p, u64);
+    void* own c = cast(bits, void* own); //! error: cannot cast u64 to void* own: a cast never adds 'own'
+    u8 mut* own d = cast(shared_block(), u8 mut* own); //! error: cannot cast void mut* to u8 mut* own: a cast never adds 'own'
+    // The span owns its slots, and the cast would make each slot own its node.
+    node* mut@ own slots = new(node*, 2);
+    node* own mut@ own e = cast(move(slots), node* own mut@ own); //! error: cannot cast node* mut@ own to node* own mut@ own: a cast never adds 'own'
+    string s = "ab";
+    string own f = cast(s, string own); //! error: cannot cast string to string own: a cast never adds 'own'
+    // The target need not own its outermost level for the rule to apply.
+    node n = node{3};
+    node* np = &n;
+    node** pp = &np;
+    node* own* g = cast(pp, node* own*); //! error: cannot cast node** to node* own*: a cast never adds 'own'
+    // A cast carries the `own` of its operand, or drops it and lends a view.
+    void mut* own block = cast(new(i32), void mut* own);
+    i32 mut* own back = cast(move(block), i32 mut* own);
+    i32* seen = cast(back, i32*);
+    println(*a, b.len, c == null, d == null, e.len, f.len, *g == null, *seen);
+    del(back);
+    return 0;
+}
