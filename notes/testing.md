@@ -496,6 +496,18 @@ bullet at a time and without a rewrite.
   terminating statement (D8.4, D8.5): an empty body is `a noreturn function must end in a
   terminating statement`, and `while (true) { }` is the shortest one that asks for no intrinsic of
   its own.
+- **`tools/ir_snapshot.sh <fort> <std-dir> <out-dir>` writes the `-S` output of the run
+  tests of `run_tests.py --list run/`** in three modes: `default`, `release` and `nobounds`
+  (T-192). `<std-dir>` is the staged `build/<Host>/debug/std`, not `std/`, which the compiler
+  refuses. A ticket that must not change the emitted IR uses it as its identity check (T-193).
+  Take one snapshot with `main` and one with the branch, then run `diff -r`; an empty diff is the
+  evidence.
+  The FIR migration compares the two paths with `llvm-diff` over two snapshots instead
+  (`spec/fir.md` 16.2). Give both snapshots the same
+  `<std-dir>` path, because every module holds the paths of the standard modules. A test that the
+  compiler refuses goes into `<out-dir>/skipped.txt`. Measured on T-192: two snapshots of one
+  compiler gave an empty `diff -r` on both hosts, and a mutant that wrote `align 2` for each
+  `align 1` store in `gen_store` changed 1278 of 1278 modules.
 
 ## 7. What a test cannot see
 
