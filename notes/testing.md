@@ -444,6 +444,13 @@ bullet at a time and without a rewrite.
   **Product compiler scope.** The `lang` test uses `xfail.txt`. It runs the complete product
   corpus with the current standard library (T-160).
 
+- **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
+  when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
+  holds only the program, and `check_env` sandboxes get an empty runtime. Write
+  `import std.rt;` and bind the entry to a local whose declared type spells the whole signature:
+  `fn (i64, u64, char*, u32, u32) noreturn bounds = rt.fail_bounds;`. A declaration that differs
+  is a compile error, and the run then holds the module's table against the same spelling.
+  `test/fort/fir_terminator_test.ft` holds its eleven check rows this way (T-213).
 - **A test that drives a program over a pipe must size the script against the pipe, which holds
   64 KiB.** Nothing drains the pipe while the program under test reads it, so a script above the
   capacity blocks the writer -- the test itself -- and the run dies at `run_tests.py`'s 60 s

@@ -1,0 +1,31 @@
+//! run
+//! flags: -I ../../src/fort
+//! abort
+//! stderr: panic: fir.term_arm: the switch is not in this function
+//! stdout:
+//| ready
+/// Checks that fir.term_arm refuses a switch whose arms another function holds.
+import consts;
+import diag;
+import fir;
+import prim;
+import types;
+
+fn main() i32 {
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node*[2] params = {i32t, i32t};
+    types.node* fnty = types.type_fn(&tt, i32t, params[..], false);
+    fir.func mut f = fir.func_new(&tt, null, fnty);
+    defer fir.func_free(&f);
+    fir.func mut g = fir.func_new(&tt, null, fnty);
+    defer fir.func_free(&g);
+    u32 first = fir.arm_push(&g, consts.cv_from_u64(1), 0);
+    fir.operand a = fir.operand_copy(fir.place_local(1));
+    fir.terminator t = fir.term_switch(a, first, 1, 0, diag.loc{}, 1);
+    assert(fir.term_arm(&g, &t, 0).target == 0);
+    println("ready");
+    fir.term_arm(&f, &t, 0);
+    return 0;
+}

@@ -1,0 +1,192 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+/// Checks FIR operands and constants: the type of each operand form and each constant kind, and
+/// which operand moves.
+import consts;
+import fir;
+import fir_env;
+import prim;
+import types;
+
+fn a_copy_has_the_type_of_its_place() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.operand o = fir.operand_copy(fir.place_local(1));
+    fir_env.expect(&e, fir.operand_type(&f, o), "i32");
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_copy(fir.place_local(2))), "i64");
+}
+
+fn a_move_has_the_type_of_its_place() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    // `fn keep(holder h) holder`: `_1.0` is the owning field of the parameter.
+    fir.func mut f = fir_env.func_of(&e, "keep");
+    defer fir.func_free(&f);
+    fir.place held = fir.place_field(&f, fir.place_local(1), 0);
+    fir.operand o = fir.operand_move(held);
+    fir_env.expect(&e, fir.operand_type(&f, o), "u8 mut* own");
+    // A move of a whole owning aggregate.
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_move(fir.place_local(1))), "holder");
+}
+
+fn an_integer_constant_has_its_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.constant c = fir.const_int(fir_env.i32_ty(&e), consts.cv_from_i64(-1));
+    assert(c.kind == fir.const_kind.ck_int);
+    fir.operand o = fir.operand_const(c);
+    fir_env.expect(&e, fir.operand_type(&f, o), "i32");
+    i64 mut v = 0;
+    assert(consts.cv_to_i64(o.value.value, &v) && v == -1);
+    // A `char` and an enum constant are integer constants of their own types.
+    fir.constant ch = fir.const_int(fir_env.char_ty(&e), consts.cv_from_char(65));
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(ch)), "char");
+    fir.constant red = fir.const_int(fir_env.ty(&e, "color"), consts.cv_from_i64(0));
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(red)), "color");
+}
+
+fn a_boolean_constant_is_a_bool() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.constant t = fir.const_bool(true);
+    assert(t.kind == fir.const_kind.ck_bool);
+    assert(t.value.kind == consts.cval_kind.cv_bool && t.value.mag == 1);
+    assert(fir.const_bool(false).value.mag == 0);
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(t)), "bool");
+}
+
+fn a_float_constant_keeps_its_bits() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    // 1.5 as a double.
+    u64 bits = 0x3FF8000000000000;
+    types.node* f64t = fir_env.prim_ty(&e, prim.prim_kind.prim_f64);
+    fir.constant c = fir.const_float(f64t, consts.cv_from_float(bits));
+    assert(c.kind == fir.const_kind.ck_float);
+    assert(consts.cv_is_float(c.value));
+    assert(consts.cv_float_bits(c.value) == bits);
+    fir.operand o = fir.operand_const(c);
+    assert(consts.cv_float_bits(o.value.value) == bits);
+    fir_env.expect(&e, fir.operand_type(&f, o), "f64");
+}
+
+fn a_null_constant_has_its_pointer_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    types.node* ptr = types.type_ptr(fir_env.tt(&e), fir_env.ty(&e, "pair"), true, true);
+    fir.constant c = fir.const_null(ptr);
+    assert(c.kind == fir.const_kind.ck_null);
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(c)), "pair mut* own");
+}
+
+fn a_zero_constant_has_any_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.constant c = fir.const_zero(fir_env.ty(&e, "outer"));
+    assert(c.kind == fir.const_kind.ck_zero);
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(c)), "outer");
+    fir.constant n = fir.const_zero(fir_env.u64_ty(&e));
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(n)), "u64");
+}
+
+fn a_string_constant_is_a_string() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.constant c = fir.const_string("hi\n");
+    assert(c.kind == fir.const_kind.ck_string);
+    assert(c.text == "hi\n");
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(c)), "string");
+}
+
+fn a_bytes_constant_is_a_char_pointer() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.constant c = fir.const_bytes("i32");
+    assert(c.kind == fir.const_kind.ck_bytes);
+    assert(c.text == "i32");
+    types.node* t = fir.operand_type(&f, fir.operand_const(c));
+    fir_env.expect(&e, t, "char*");
+    // No `mut` and no `own`: the interned `char*`.
+    assert(t == fir_env.char_ptr(&e));
+}
+
+fn an_enum_table_has_the_member_pointer_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    types.node* member = fir_env.ty(&e, "enum_member");
+    types.node* ptr = types.type_ptr(fir_env.tt(&e), member, false, false);
+    fir.constant c = fir.const_enum_table(fir_env.sym(&e, "color"), ptr);
+    assert(c.kind == fir.const_kind.ck_enum_table);
+    assert(c.sym == fir_env.sym(&e, "color"));
+    fir_env.expect(&e, fir.operand_type(&f, fir.operand_const(c)), "enum_member*");
+}
+
+fn a_function_constant_has_the_function_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir.constant c = fir.const_fn(fir_env.sym(&e, "add"));
+    assert(c.kind == fir.const_kind.ck_fn);
+    types.node* t = fir.operand_type(&f, fir.operand_const(c));
+    assert(t == fir_env.ty(&e, "add"));
+    fir_env.expect(&e, t, "fn (i32, i64) u64");
+}
+
+fn only_a_move_operand_moves() void {
+    fir.place p = fir.place_local(1);
+    assert(fir.operand_moves(fir.operand_move(p)));
+    assert(!fir.operand_moves(fir.operand_copy(p)));
+    assert(!fir.operand_moves(fir.operand_const(fir.const_bool(true))));
+    assert(fir.operand_copy(p).kind == fir.operand_kind.ok_copy);
+    assert(fir.operand_move(p).kind == fir.operand_kind.ok_move);
+    assert(fir.operand_move(p).place.local == 1);
+}
+
+fn main() i32 {
+    a_copy_has_the_type_of_its_place();
+    a_move_has_the_type_of_its_place();
+    an_integer_constant_has_its_type();
+    a_boolean_constant_is_a_bool();
+    a_float_constant_keeps_its_bits();
+    a_null_constant_has_its_pointer_type();
+    a_zero_constant_has_any_type();
+    a_string_constant_is_a_string();
+    a_bytes_constant_is_a_char_pointer();
+    an_enum_table_has_the_member_pointer_type();
+    a_function_constant_has_the_function_type();
+    only_a_move_operand_moves();
+    println("ok");
+    return 0;
+}

@@ -1,0 +1,211 @@
+/// Provides the shared environment of the FIR suites: a checked fixture module whose symbols and
+/// types the suites build functions from, and the checker's type table.
+//
+// The checker gives each fixture a real symbol, a real function type and, for a struct, field
+// declarations with their types. That is what fir.place_type walks, so the suites use it and do
+// not build symbols by hand.
+import ast;
+import check_env;
+import consts;
+import diag;
+import fir;
+import heap;
+import prim;
+import std.strbuf;
+import types;
+
+// The count of the fixture lines.
+u64 FIXTURE_LINES = 47;
+
+// The fixture declarations, one line each. check_env.check_decls appends main.
+string[FIXTURE_LINES] FIXTURE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct holder {",
+    "    u8 mut* own p;",
+    "    u64 n;",
+    "}",
+    "struct outer {",
+    "    pair inner;",
+    "    i32[4] cells;",
+    "}",
+    "struct viewer {",
+    "    i32@ items;",
+    "    string text;",
+    "}",
+    "struct enum_member {",
+    "    i32 value;",
+    "    char* name;",
+    "}",
+    "enum color {",
+    "    red,",
+    "    green,",
+    "}",
+    "i32 LIMIT = 7;",
+    "i32 mut total = 0;",
+    "pair mut origin = pair{1, 2};",
+    "extern fn puts(char* s) i32;",
+    "extern fn labs(i64 v) i64;",
+    "extern fn abs(i32 v) i32;",
+    "fn add(i32 x, i64 y) u64 {",
+    "    return 0;",
+    "}",
+    "fn nothing() void {",
+    "}",
+    "fn stop() noreturn {",
+    "    panic(\"stop\");",
+    "}",
+    "fn make() pair {",
+    "    return pair{1, 2};",
+    "}",
+    "fn grab() u8 mut* own {",
+    "    return new(u8);",
+    "}",
+    "fn keep(holder h) holder {",
+    "    return h;",
+    "}",
+};
+
+// The checked fixture. It must stay at the address that open filled, because the checker points
+// into itself.
+struct env {
+    check_env.env c;
+    strbuf.str_buf buf;
+}
+
+fn open(env mut* e) void {
+    check_env.open(&e->c);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : FIXTURE) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    if (!check_env.check_decls(&e->c, strbuf.view(&b))) {
+        panic("fir_env.open: the fixture does not check");
+    }
+}
+
+fn close(env mut* e) void {
+    strbuf.free(&e->buf);
+    check_env.close(&e->c);
+}
+
+fn tt(env mut* e) types.table mut* {
+    return &e->c.ck.types;
+}
+
+// The symbol of the fixture declaration `name`. The function panics when there is none.
+fn sym(env* e, string name) ast.sym* {
+    ast.sym* s = check_env.sym_main(&e->c, name);
+    if (s == null) {
+        panic("fir_env.sym: no such fixture declaration");
+    }
+    return s;
+}
+
+// The type of the fixture declaration `name`: a function type, a struct or an enum type.
+fn ty(env* e, string name) types.node* {
+    return sym(e, name)->ty;
+}
+
+fn prim_ty(env mut* e, prim.prim_kind k) types.node* {
+    return types.type_prim(tt(e), k);
+}
+
+fn i32_ty(env mut* e) types.node* {
+    return prim_ty(e, prim.prim_kind.prim_i32);
+}
+
+fn i64_ty(env mut* e) types.node* {
+    return prim_ty(e, prim.prim_kind.prim_i64);
+}
+
+fn u64_ty(env mut* e) types.node* {
+    return prim_ty(e, prim.prim_kind.prim_u64);
+}
+
+fn bool_ty(env mut* e) types.node* {
+    return prim_ty(e, prim.prim_kind.prim_bool);
+}
+
+fn char_ty(env mut* e) types.node* {
+    return prim_ty(e, prim.prim_kind.prim_char);
+}
+
+// `char*`, the type of a `bytes` constant and of a text that a check reports.
+fn char_ptr(env mut* e) types.node* {
+    return types.type_ptr(tt(e), char_ty(e), false, false);
+}
+
+// The FIR function of the fixture function `name`.
+fn func_of(env mut* e, string name) fir.func {
+    ast.sym* s = sym(e, name);
+    return fir.func_new(tt(e), s, s->ty);
+}
+
+// The spelling of `t`, valid until the next call.
+fn text(env mut* e, types.node* t) string {
+    strbuf.clear(&e->buf);
+    if (t == null) {
+        strbuf.append(&e->buf, "<null>");
+    } else {
+        types.type_to_str(t, &e->buf);
+    }
+    return strbuf.view(&e->buf);
+}
+
+// Holds the spelling of `t` against `want`.
+fn expect(env mut* e, types.node* t, string want) void {
+    string got = text(e, t);
+    if (got != want) {
+        eprintln("fir_env: expected <", want, ">, got <", got, ">");
+        panic("fir_env.expect: a type differs");
+    }
+}
+
+// An integer value for a switch arm.
+fn int_value(u64 v) consts.cval {
+    return consts.cv_from_u64(v);
+}
+
+fn at(u32 line, u32 col) diag.loc {
+    return diag.loc_make("t.ft", line, col);
+}
+
+// ---- leak probes ------------------------------------------------------------------
+
+// The rounds of a probe, the round it samples early, and how far a sample may move.
+u64 LEAK_ROUNDS = 200;
+u64 LEAK_EARLY = 100;
+u64 LEAK_BOUND = 8192;
+
+// The slot that round `round` samples into: 0 for the early round, 1 and 2 for the last two
+// rounds, and 3 for a round that samples nothing.
+fn leak_slot(u64 round) u64 {
+    if (round == LEAK_EARLY) {
+        return 0;
+    }
+    if (round == LEAK_ROUNDS - 2) {
+        return 1;
+    }
+    if (round == LEAK_ROUNDS - 1) {
+        return 2;
+    }
+    return 3;
+}
+
+// The smaller of the distances from the early sample to the last two. The allocator alternates
+// between two positions from one round to the next, so one late round is in step with the early
+// one when nothing leaks.
+fn moved(u64[3] samples) u64 {
+    assert(samples[0] != 0 && samples[1] != 0 && samples[2] != 0);
+    u64 one = heap.distance(samples[1], samples[0]);
+    u64 other = heap.distance(samples[2], samples[0]);
+    if (one < other) {
+        return one;
+    }
+    return other;
+}

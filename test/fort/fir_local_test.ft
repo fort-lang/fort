@@ -1,0 +1,208 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+/// Checks the locals of a FIR function: their numbers, kinds, types and symbols, and their release.
+import ast;
+import diag;
+import fir;
+import fir_env;
+import heap;
+import types;
+
+fn the_return_local_has_the_result_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.local* r = fir.local_at(&f, 0);
+    assert(r->number == 0);
+    assert(r->kind == fir.local_kind.lk_return);
+    assert(r->sym == null);
+    fir_env.expect(&e, r->ty, "u64");
+    // A struct result is a place like any other local.
+    fir.func mut g = fir_env.func_of(&e, "make");
+    defer fir.func_free(&g);
+    fir_env.expect(&e, fir.local_at(&g, 0)->ty, "pair");
+}
+
+fn the_function_keeps_its_symbol_and_type() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    assert(f.sym == fir_env.sym(&e, "add"));
+    assert(f.ty == fir_env.ty(&e, "add"));
+    assert(f.tt == fir_env.tt(&e));
+}
+
+fn the_parameters_are_one_to_n_in_order() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    // `fn add(i32 x, i64 y) u64`: _0, then x as _1 and y as _2.
+    assert(fir.local_count(&f) == 3);
+    fir.local* x = fir.local_at(&f, 1);
+    assert(x->number == 1);
+    assert(x->kind == fir.local_kind.lk_param);
+    fir_env.expect(&e, x->ty, "i32");
+    assert(x->sym != null && x->sym->name == "x");
+    assert(x->sym->kind == ast.sym_kind.s_param);
+    fir.local* y = fir.local_at(&f, 2);
+    assert(y->number == 2);
+    assert(y->kind == fir.local_kind.lk_param);
+    fir_env.expect(&e, y->ty, "i64");
+    assert(y->sym != null && y->sym->name == "y");
+}
+
+fn a_function_with_no_parameter_has_only_the_return_local() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "make");
+    defer fir.func_free(&f);
+    assert(fir.local_count(&f) == 1);
+}
+
+fn a_void_function_has_a_void_return_local() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    fir.local* r = fir.local_at(&f, 0);
+    assert(r->ty->kind == types.type_kind.k_void);
+    assert(r->kind == fir.local_kind.lk_return);
+    // A noreturn function has a void result as well.
+    fir.func mut g = fir_env.func_of(&e, "stop");
+    defer fir.func_free(&g);
+    assert(fir.local_at(&g, 0)->ty->kind == types.type_kind.k_void);
+    assert(fir.local_count(&g) == 1);
+}
+
+fn named_and_temporary_locals_take_the_next_numbers() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    ast.sym* named = fir_env.sym(&e, "total");
+    u32 n = fir.local_add(&f, fir_env.i32_ty(&e), fir.local_kind.lk_named, named,
+                          fir_env.at(4, 9));
+    assert(n == 3);
+    u32 t = fir.local_add(&f, fir_env.bool_ty(&e), fir.local_kind.lk_temp, null,
+                          fir_env.at(5, 2));
+    assert(t == 4);
+    assert(fir.local_count(&f) == 5);
+    assert(fir.local_at(&f, 3)->kind == fir.local_kind.lk_named);
+    assert(fir.local_at(&f, 4)->kind == fir.local_kind.lk_temp);
+    assert(fir.local_at(&f, 4)->sym == null);
+}
+
+fn local_at_returns_what_local_add_stored() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    ast.sym* named = fir_env.sym(&e, "total");
+    types.node* ty = fir_env.i64_ty(&e);
+    u32 n = fir.local_add(&f, ty, fir.local_kind.lk_named, named, fir_env.at(7, 3));
+    fir.local* l = fir.local_at(&f, n);
+    assert(l->number == n);
+    assert(l->ty == ty);
+    assert(l->kind == fir.local_kind.lk_named);
+    assert(l->sym == named);
+    assert(l->loc.file == "t.ft");
+    assert(l->loc.line == 7 && l->loc.col == 3);
+    // The locals of func_new carry the empty range.
+    assert(fir.local_at(&f, 0)->loc.line == 0);
+    assert(fir.local_at(&f, 0)->loc.file.len == 0);
+}
+
+fn locals_keep_their_values_while_the_vector_grows() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    u32 mut i = 1;
+    while (i <= 1000) {
+        diag.loc here = fir_env.at(i, 1);
+        assert(fir.local_add(&f, fir_env.u64_ty(&e), fir.local_kind.lk_temp, null, here) == i);
+        i += 1;
+    }
+    assert(fir.local_count(&f) == 1001);
+    i = 1;
+    while (i <= 1000) {
+        fir.local* l = fir.local_at(&f, i);
+        assert(l->number == i);
+        assert(l->loc.line == i);
+        i += 1;
+    }
+}
+
+fn func_free_empties_the_function() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    fir.func_free(&f);
+    assert(fir.local_count(&f) == 0);
+    // A second release has no effect.
+    fir.func_free(&f);
+    assert(fir.local_count(&f) == 0);
+}
+
+// A function with a thousand locals, made and freed two hundred times, leaves the heap where it
+// was. The locals vector reaches 1024 slots, about 64 KB. The address of that block and the
+// program break both stay where the early round left them when func_free releases it; deleting
+// `del(f->locals.items)` in func_free turns this test red.
+fn a_thousand_locals_leave_the_heap_where_it_was() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    ast.sym* s = fir_env.sym(&e, "add");
+    types.node* ty = fir_env.u64_ty(&e);
+    u64[3] mut break_at = {};
+    u64[3] mut locals_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        fir.func mut f = fir.func_new(fir_env.tt(&e), s, s->ty);
+        u32 mut i = 0;
+        while (i < 1000) {
+            fir.local_add(&f, ty, fir.local_kind.lk_temp, null, fir_env.at(1, 1));
+            i += 1;
+        }
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            locals_at[slot] = cast(f.locals.items.ptr, u64);
+        }
+        fir.func_free(&f);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(locals_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    the_return_local_has_the_result_type();
+    the_function_keeps_its_symbol_and_type();
+    the_parameters_are_one_to_n_in_order();
+    a_function_with_no_parameter_has_only_the_return_local();
+    a_void_function_has_a_void_return_local();
+    named_and_temporary_locals_take_the_next_numbers();
+    local_at_returns_what_local_add_stored();
+    locals_keep_their_values_while_the_vector_grows();
+    func_free_empties_the_function();
+    a_thousand_locals_leave_the_heap_where_it_was();
+    println("ok");
+    return 0;
+}

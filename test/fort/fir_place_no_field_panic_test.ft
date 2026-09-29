@@ -1,0 +1,39 @@
+//! run
+//! flags: -I ../../src/fort
+//! abort
+//! stderr: panic: fir.place_type: no such field
+//! stdout:
+//| ready
+/// Checks that fir.place_type refuses a field number past the fields of a struct.
+import ast;
+import diag;
+import fir;
+import prim;
+import types;
+
+fn main() i32 {
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node*[2] params = {i32t, i32t};
+    types.node* fnty = types.type_fn(&tt, i32t, params[..], false);
+    fir.func mut f = fir.func_new(&tt, null, fnty);
+    defer fir.func_free(&f);
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    diag.loc here = diag.loc_make("t.ft", 1, 1);
+    ast.node mut* decl = ast.ast_new(&ar, ast.ast_kind.k_struct_decl, here);
+    ast.node mut* field = ast.ast_new(&ar, ast.ast_kind.k_field_decl, here);
+    field->ty = i32t;
+    ast.ast_push(decl, field);
+    ast.sym mut s = ast.sym{};
+    s.kind = ast.sym_kind.s_struct;
+    s.node = decl;
+    types.node* one = types.type_struct(&tt, "one", cast(&s, void mut*));
+    u32 n = fir.local_add(&f, one, fir.local_kind.lk_temp, null, here);
+    assert(fir.place_type(&f, fir.place_field(&f, fir.place_local(n), 0)) == i32t);
+    fir.place p = fir.place_field(&f, fir.place_local(n), 1);
+    println("ready");
+    fir.place_type(&f, p);
+    return 0;
+}

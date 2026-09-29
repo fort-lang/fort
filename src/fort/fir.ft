@@ -1,0 +1,1808 @@
+/// Holds the data model of FIR, the representation between the checker and LLVM, and the queries
+/// on it that the verifier, the analyses and the translator share.
+//
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: every vector is a field of a function or of the module, and the caller frees it
+// with func_free or module_free.
+import ast;
+import consts;
+import containers;
+import diag;
+import gen;
+import prim;
+import types;
+
+// The count of locals, blocks and vector slots stays below this, so a number fits a u32.
+u64 U32_LIMIT = 4294967295;
+
+// The capacity that a full vector of `cap` slots grows to: VEC_MIN_CAP, then twice the capacity.
+// `who` is the panic message for a capacity that doubling would overflow.
+fn grown_capacity(u64 cap, string who) u64 {
+    if (cap < containers.VEC_MIN_CAP) {
+        return containers.VEC_MIN_CAP;
+    }
+    if (cap > containers.U64_MAX / 2) {
+        panic(who);
+    }
+    return cap * 2;
+}
+
+// ---- locals ---------------------------------------------------------------------
+
+/// The role of a local.
+enum local_kind {
+    lk_return, // `_0`, the return place
+    lk_param,
+    lk_named, // a named local of the body
+    lk_temp, // a temporary of the lowering
+}
+
+/// One local. `number` is its identity. `sym` is null for `lk_return` and `lk_temp`; the name of a
+/// named local or a parameter is `sym->name`.
+struct local {
+    u32 number;
+    types.node* ty;
+    local_kind kind;
+    ast.sym* sym;
+    diag.loc loc;
+}
+
+// `items[..len]` holds the locals in number order. `items.len` is the capacity.
+struct local_vec {
+    local mut@ own items;
+    u64 len;
+}
+
+/// One function. `tt` is the checker's type table, which the type queries of this module intern
+/// into; it outlives the function.
+struct func {
+    ast.sym* sym;
+    types.node* ty;
+    types.table mut* tt;
+    local_vec locals;
+    projection_vec projs;
+    operand_vec ops;
+    arm_vec arms;
+    block_vec blocks;
+}
+
+// Ensures room for one more local, growing as grown_capacity says.
+fn locals_reserve(local_vec mut* v) void {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 cap = grown_capacity(v->items.len, "fir.locals_reserve: capacity overflow");
+    local mut@ own bigger = new(local, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+/// Makes the function of `s` with the function type `ty`. It adds `_0` with the result type of
+/// `ty`, which is `void` for a `void` or `noreturn` function, and one parameter local for each
+/// parameter, in declaration order. The locations of these locals are the empty range. It also
+/// adds the entry block `bb0`, with no statement and no terminator.
+fn func_new(types.table mut* tt, ast.sym* s, types.node* ty) func {
+    if (ty == null || ty->kind != types.type_kind.k_fn) {
+        panic("fir.func_new: not a function type");
+    }
+    func mut f = func{};
+    f.sym = s;
+    f.ty = ty;
+    f.tt = tt;
+    diag.loc none = diag.loc{};
+    // type_fn stores `void` as the result of a `noreturn` function
+    local_add(&f, ty->elem, local_kind.lk_return, null, none);
+    u64 mut i = 0;
+    while (i < ty->params.len) {
+        local_add(&f, ty->params[i], local_kind.lk_param, param_sym(s, i), none);
+        i += 1;
+    }
+    // bb0, the entry block
+    block_new(&f);
+    return f;
+}
+
+// The symbol of parameter `i` of the function `s`, or null when the declaration is not there.
+fn param_sym(ast.sym* s, u64 i) ast.sym* {
+    if (s == null || s->node == null || i >= ast.ast_len(s->node)) {
+        return null;
+    }
+    ast.node* p = ast.ast_child(s->node, i);
+    if (p->kind != ast.ast_kind.k_param) {
+        return null;
+    }
+    return p->sym;
+}
+
+/// Appends a local and returns its number.
+fn local_add(func mut* f, types.node* ty, local_kind kind, ast.sym* s, diag.loc at) u32 {
+    if (f->locals.len >= U32_LIMIT) {
+        panic("fir.local_add: too many locals");
+    }
+    locals_reserve(&f->locals);
+    u32 n = cast(f->locals.len, u32);
+    f->locals.items[f->locals.len] = local{n, ty, kind, s, at};
+    f->locals.len += 1;
+    return n;
+}
+
+/// Returns local `n`. The function panics when `n` is at or past the count. A later local_add can
+/// move the locals, so the pointer is valid until then.
+fn local_at(func* f, u32 n) local* {
+    if (cast(n, u64) >= f->locals.len) {
+        panic("fir.local_at: index out of range");
+    }
+    return &f->locals.items[cast(n, u64)];
+}
+
+fn local_count(func* f) u32 {
+    return cast(f->locals.len, u32);
+}
+
+/// Releases every vector of the function and leaves it empty.
+fn func_free(func mut* f) void {
+    del(f->locals.items);
+    f->locals.len = 0;
+    del(f->projs.items);
+    f->projs.len = 0;
+    del(f->ops.items);
+    f->ops.len = 0;
+    del(f->arms.items);
+    f->arms.len = 0;
+    u64 mut i = 0;
+    while (i < f->blocks.len) {
+        del(f->blocks.items[i].statements.items);
+        f->blocks.items[i].statements.len = 0;
+        i += 1;
+    }
+    del(f->blocks.items);
+    f->blocks.len = 0;
+}
+
+// ---- places ---------------------------------------------------------------------
+
+enum proj_kind {
+    pj_deref,
+    pj_field,
+    pj_index,
+}
+
+/// One projection. `field` is the declaration index of a field. `index` is the number of the
+/// local that holds the index of an element.
+struct projection {
+    proj_kind kind;
+    u32 field;
+    u32 index;
+}
+
+// `items[..len]` holds the projections of every place of one function.
+struct projection_vec {
+    projection mut@ own items;
+    u64 len;
+}
+
+enum base_kind {
+    bk_local,
+    bk_global,
+}
+
+/// A base followed by projections. `local` names the base of `bk_local` and `global` the base of
+/// `bk_global`. The projections are entries `proj_first` to `proj_first + proj_len - 1` of the
+/// function's projection vector, so a place is a value that holds no allocation.
+struct place {
+    base_kind base;
+    u32 local;
+    ast.sym* global;
+    u32 proj_first;
+    u32 proj_len;
+}
+
+/// The three answers of a place comparison.
+enum place_rel {
+    pc_equal,
+    pc_disjoint,
+    pc_may_overlap,
+}
+
+// Ensures room for one more projection, as locals_reserve does for a local.
+fn projs_reserve(projection_vec mut* v) void {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 cap = grown_capacity(v->items.len, "fir.projs_reserve: capacity overflow");
+    projection mut@ own bigger = new(projection, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+// Appends one projection and returns its position in the vector.
+fn projs_push(func mut* f, projection pj) u32 {
+    if (f->projs.len >= U32_LIMIT) {
+        panic("fir.projs_push: too many projections");
+    }
+    projs_reserve(&f->projs);
+    u32 at = cast(f->projs.len, u32);
+    f->projs.items[f->projs.len] = pj;
+    f->projs.len += 1;
+    return at;
+}
+
+/// The place of local `n`, with no projection.
+fn place_local(u32 n) place {
+    return place{.base = base_kind.bk_local, .local = n};
+}
+
+/// The place of the module-level constant or global `g`, with no projection.
+fn place_global(ast.sym* g) place {
+    return place{.base = base_kind.bk_global, .global = g};
+}
+
+/// Returns `p` followed by `pj`. The function copies the projections of `p` to the end of the
+/// vector, so `p` itself stays as it was.
+fn place_project(func mut* f, place p, projection pj) place {
+    place mut q = p;
+    q.proj_first = cast(f->projs.len, u32);
+    q.proj_len = 0;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        projs_push(f, place_projection(f, p, i));
+        q.proj_len += 1;
+        i += 1;
+    }
+    projs_push(f, pj);
+    q.proj_len += 1;
+    return q;
+}
+
+/// `(*p)`.
+fn place_deref(func mut* f, place p) place {
+    return place_project(f, p, projection{proj_kind.pj_deref, 0, 0});
+}
+
+/// `p.k`, where `k` is the declaration index of the field.
+fn place_field(func mut* f, place p, u32 k) place {
+    return place_project(f, p, projection{proj_kind.pj_field, k, 0});
+}
+
+/// `p[_i]`, where `i` is the number of the index local.
+fn place_index(func mut* f, place p, u32 i) place {
+    return place_project(f, p, projection{proj_kind.pj_index, 0, i});
+}
+
+/// Returns projection `i` of `p`. The function panics when `i` is at or past the count.
+fn place_projection(func* f, place p, u32 i) projection {
+    if (i >= p.proj_len) {
+        panic("fir.place_projection: index out of range");
+    }
+    u64 at = cast(p.proj_first, u64) + cast(i, u64);
+    if (at >= f->projs.len) {
+        panic("fir.place_projection: the place is not in this function");
+    }
+    return f->projs.items[at];
+}
+
+// The type of the base of `p`.
+fn base_type(func* f, place p) types.node* {
+    if (p.base == base_kind.bk_global) {
+        return p.global->ty;
+    }
+    return local_at(f, p.local)->ty;
+}
+
+// The declared type of field `k` of the struct type `t`. The checker writes the type of each
+// field into its declaration node, in declaration order.
+fn struct_field_type(types.node* t, u32 k) types.node* {
+    ast.sym* s = cast(t->decl, ast.sym*);
+    if (s == null || s->node == null) {
+        panic("fir.place_type: a struct with no declaration");
+    }
+    u32 mut at = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(s->node)) {
+        ast.node* field = ast.ast_child(s->node, i);
+        if (field->kind == ast.ast_kind.k_field_decl) {
+            if (at == k) {
+                return field->ty;
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    panic("fir.place_type: no such field");
+}
+
+// The type that projection `pj` gives when it applies to a place of type `t`. For a span `E@` or
+// a `string`, field 0 is the pointer and field 1 the length. The `mut` and `own` of a span and the
+// `own` of a `string` carry over to field 0.
+fn apply_projection(func* f, types.node* t, projection pj) types.node* {
+    switch (pj.kind) {
+    case proj_kind.pj_deref:
+        if (t->kind != types.type_kind.k_ptr) {
+            panic("fir.place_type: a deref of a non-pointer");
+        }
+        return t->elem;
+    case proj_kind.pj_field:
+        if (t->kind == types.type_kind.k_struct) {
+            return struct_field_type(t, pj.field);
+        }
+        if (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string) {
+            if (pj.field == 1) {
+                return types.type_prim(f->tt, prim.prim_kind.prim_u64);
+            }
+            if (pj.field != 0) {
+                panic("fir.place_type: a span or string has two fields");
+            }
+            if (t->kind == types.type_kind.k_string) {
+                types.node* c = types.type_prim(f->tt, prim.prim_kind.prim_char);
+                return types.type_ptr(f->tt, c, t->is_own, false);
+            }
+            return types.type_ptr(f->tt, t->elem, t->is_own, t->is_mut);
+        }
+        panic("fir.place_type: a field of a type with no fields");
+    case proj_kind.pj_index:
+        if (t->kind == types.type_kind.k_array || t->kind == types.type_kind.k_span) {
+            return t->elem;
+        }
+        if (t->kind == types.type_kind.k_string) {
+            return types.type_prim(f->tt, prim.prim_kind.prim_char);
+        }
+        panic("fir.place_type: an index of a type with no elements");
+    }
+}
+
+/// The type of a place: the type of its base with each projection applied in order.
+fn place_type(func* f, place p) types.node* {
+    types.node* mut t = base_type(f, p);
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        t = apply_projection(f, t, place_projection(f, p, i));
+        i += 1;
+    }
+    return t;
+}
+
+// Whether the place reads memory to find its storage: it holds a `deref`, or an index that
+// applies to a span or a `string`, which reads the pointer field first.
+fn place_indirect(func* f, place p) bool {
+    types.node* mut t = base_type(f, p);
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        projection pj = place_projection(f, p, i);
+        if (pj.kind == proj_kind.pj_deref) {
+            return true;
+        }
+        if (pj.kind == proj_kind.pj_index
+            && (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string)) {
+            return true;
+        }
+        t = apply_projection(f, t, pj);
+        i += 1;
+    }
+    return false;
+}
+
+/// Whether the place designates fixed storage: its base is a local, no projection is a `deref`,
+/// and no index applies to a span or a `string`.
+fn place_fixed(func* f, place p) bool {
+    return p.base == base_kind.bk_local && !place_indirect(f, p);
+}
+
+// Whether two places have the same base.
+fn same_base(place a, place b) bool {
+    if (a.base != b.base) {
+        return false;
+    }
+    if (a.base == base_kind.bk_global) {
+        return a.global == b.global;
+    }
+    return a.local == b.local;
+}
+
+/// Compares two places by their parts. Equal: the same base and the same projections, index
+/// locals included. Disjoint: two different local bases, or the same base and two different field
+/// numbers at one position. Every other pair may overlap, and so does every pair where a place
+/// holds a `deref` or an index on a span or a `string`.
+// The equal rule also asks that no statement assigns an index local between the two uses. This
+// function sees two places and no statement, so the analysis that compares two uses checks that.
+fn place_compare(func* f, place a, place b) place_rel {
+    if (place_indirect(f, a) || place_indirect(f, b)) {
+        return place_rel.pc_may_overlap;
+    }
+    if (a.base == base_kind.bk_local && b.base == base_kind.bk_local && a.local != b.local) {
+        return place_rel.pc_disjoint;
+    }
+    if (!same_base(a, b)) {
+        return place_rel.pc_may_overlap;
+    }
+    u32 mut i = 0;
+    bool mut same = a.proj_len == b.proj_len;
+    while (i < a.proj_len && i < b.proj_len) {
+        projection x = place_projection(f, a, i);
+        projection y = place_projection(f, b, i);
+        if (x.kind == proj_kind.pj_field && y.kind == proj_kind.pj_field && x.field != y.field) {
+            return place_rel.pc_disjoint;
+        }
+        if (x.kind != y.kind || x.field != y.field || x.index != y.index) {
+            same = false;
+        }
+        i += 1;
+    }
+    if (same) {
+        return place_rel.pc_equal;
+    }
+    return place_rel.pc_may_overlap;
+}
+
+// ---- operands and constants ---------------------------------------------------------
+
+enum const_kind {
+    ck_int,
+    ck_bool,
+    ck_float,
+    ck_null,
+    ck_zero,
+    ck_string,
+    ck_bytes,
+    ck_enum_table,
+    ck_fn,
+}
+
+/// A constant. `value` carries an integer, a boolean or the bits of a float. `text` carries the
+/// bytes of a string or a `bytes` constant. `sym` carries the enum of an enum table or the
+/// function of a function constant. `ty` is the type of an integer, a float, a `null`, a `zero`
+/// and an enum table; operand_type gives the type of the other kinds.
+struct constant {
+    const_kind kind;
+    types.node* ty;
+    consts.cval value;
+    string text;
+    ast.sym* sym;
+}
+
+enum operand_kind {
+    ok_copy,
+    ok_move,
+    ok_const,
+}
+
+/// An operand. `place` serves a copy and a move, `value` a constant.
+struct operand {
+    operand_kind kind;
+    place place;
+    constant value;
+}
+
+/// An integer constant of the integer, `char` or enum type `ty`.
+fn const_int(types.node* ty, consts.cval v) constant {
+    return constant{.kind = const_kind.ck_int, .ty = ty, .value = v};
+}
+
+fn const_bool(bool b) constant {
+    return constant{.kind = const_kind.ck_bool, .value = consts.cv_from_bool(b)};
+}
+
+/// A float constant of type `ty`. `v` holds the bit pattern of its `double`.
+fn const_float(types.node* ty, consts.cval v) constant {
+    return constant{.kind = const_kind.ck_float, .ty = ty, .value = v};
+}
+
+/// `null` of the pointer type `ty`.
+fn const_null(types.node* ty) constant {
+    return constant{.kind = const_kind.ck_null, .ty = ty, .value = consts.cv_null()};
+}
+
+/// The zero value of any type `ty`.
+fn const_zero(types.node* ty) constant {
+    return constant{.kind = const_kind.ck_zero, .ty = ty};
+}
+
+/// A `string` constant. `text` holds its bytes.
+fn const_string(string text) constant {
+    return constant{.kind = const_kind.ck_string, .text = text};
+}
+
+/// A `bytes` constant: the address of a private NUL-terminated copy of `text`.
+fn const_bytes(string text) constant {
+    return constant{.kind = const_kind.ck_bytes, .text = text};
+}
+
+/// The member table of the enum `e`. `ty` is `std.rt.enum_member*` from the checker's table.
+fn const_enum_table(ast.sym* e, types.node* ty) constant {
+    return constant{.kind = const_kind.ck_enum_table, .sym = e, .ty = ty};
+}
+
+/// The fort function `s` as a value.
+fn const_fn(ast.sym* s) constant {
+    return constant{.kind = const_kind.ck_fn, .sym = s};
+}
+
+fn operand_copy(place p) operand {
+    return operand{.kind = operand_kind.ok_copy, .place = p};
+}
+
+fn operand_move(place p) operand {
+    return operand{.kind = operand_kind.ok_move, .place = p};
+}
+
+fn operand_const(constant c) operand {
+    return operand{.kind = operand_kind.ok_const, .value = c};
+}
+
+/// Whether the operand is a `move`.
+fn operand_moves(operand o) bool {
+    return o.kind == operand_kind.ok_move;
+}
+
+// The type of a constant.
+fn const_type(func* f, constant c) types.node* {
+    switch (c.kind) {
+    case const_kind.ck_int, const_kind.ck_float, const_kind.ck_null, const_kind.ck_zero,
+        const_kind.ck_enum_table:
+        return c.ty;
+    case const_kind.ck_bool:
+        return types.type_prim(f->tt, prim.prim_kind.prim_bool);
+    case const_kind.ck_string:
+        return types.type_string(f->tt, false);
+    case const_kind.ck_bytes:
+        types.node* ch = types.type_prim(f->tt, prim.prim_kind.prim_char);
+        return types.type_ptr(f->tt, ch, false, false);
+    case const_kind.ck_fn:
+        return c.sym->ty;
+    }
+}
+
+/// The type of an operand: the type of the place of a copy or a move, else of the constant.
+fn operand_type(func* f, operand o) types.node* {
+    if (o.kind == operand_kind.ok_const) {
+        return const_type(f, o.value);
+    }
+    return place_type(f, o.place);
+}
+
+// ---- rvalues ---------------------------------------------------------------------------
+
+/// One member for each rvalue form.
+enum rvalue_kind {
+    rv_use,
+    rv_add,
+    rv_sub,
+    rv_mul,
+    rv_add_overflows,
+    rv_sub_overflows,
+    rv_mul_overflows,
+    rv_div,
+    rv_rem,
+    rv_and,
+    rv_or,
+    rv_xor,
+    rv_not,
+    rv_shl,
+    rv_shr,
+    rv_fadd,
+    rv_fsub,
+    rv_fmul,
+    rv_fdiv,
+    rv_fneg,
+    rv_eq,
+    rv_ne,
+    rv_lt,
+    rv_le,
+    rv_gt,
+    rv_ge,
+    rv_cast,
+    rv_addr,
+    rv_slice,
+    rv_slice_ptr,
+    rv_alloc,
+    rv_aggregate,
+    rv_call,
+}
+
+/// What a call names: a fort function, an `extern fn`, or an operand of function type.
+enum callee_kind {
+    cl_fn,
+    cl_extern,
+    cl_value,
+}
+
+/// An rvalue. Its operands are entries `ops_first` to `ops_first + ops_len - 1` of the function's
+/// operand vector. `ty` is the target of a `cast`, the element type of an `alloc` and the type of
+/// an `aggregate`. `place` serves `addr` and `slice`. `is_mut` says whether `addr` and the `slice`
+/// of a fixed array give a `mut` reference. `callee`, `callee_sym` and `callee_op` serve `call`.
+struct rvalue {
+    rvalue_kind kind;
+    u32 ops_first;
+    u32 ops_len;
+    types.node* ty;
+    place place;
+    bool is_mut;
+    callee_kind callee;
+    ast.sym* callee_sym;
+    operand callee_op;
+}
+
+// `items[..len]` holds the operands of every rvalue and terminator of one function.
+struct operand_vec {
+    operand mut@ own items;
+    u64 len;
+}
+
+// Ensures room for one more operand, as locals_reserve does for a local.
+fn ops_reserve(operand_vec mut* v) void {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 cap = grown_capacity(v->items.len, "fir.ops_reserve: capacity overflow");
+    operand mut@ own bigger = new(operand, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+/// Appends an operand to the function's operand vector and returns its position. The operands of
+/// one rvalue or terminator stand next to each other, so a caller pushes them in order and passes
+/// the position of the first.
+fn operand_push(func mut* f, operand o) u32 {
+    if (f->ops.len >= U32_LIMIT) {
+        panic("fir.operand_push: too many operands");
+    }
+    ops_reserve(&f->ops);
+    u32 at = cast(f->ops.len, u32);
+    f->ops.items[f->ops.len] = o;
+    f->ops.len += 1;
+    return at;
+}
+
+/// Returns operand `i` of the function's operand vector.
+fn operand_at(func* f, u32 i) operand {
+    if (cast(i, u64) >= f->ops.len) {
+        panic("fir.operand_at: index out of range");
+    }
+    return f->ops.items[cast(i, u64)];
+}
+
+/// Returns operand `i` of `r`. The function panics when `i` is at or past the count.
+fn rvalue_operand(func* f, rvalue r, u32 i) operand {
+    if (i >= r.ops_len) {
+        panic("fir.rvalue_operand: index out of range");
+    }
+    return operand_at(f, r.ops_first + i);
+}
+
+// An rvalue of `kind` whose operands start at the next free position of the vector.
+fn rvalue_start(func mut* f, rvalue_kind kind) rvalue {
+    return rvalue{.kind = kind, .ops_first = cast(f->ops.len, u32)};
+}
+
+// Appends `o` to the operands of `r`, which must be the last operands of the vector.
+fn rvalue_push(func mut* f, rvalue mut* r, operand o) void {
+    operand_push(f, o);
+    r->ops_len += 1;
+}
+
+// Whether `kind` takes two operands.
+fn rvalue_is_binary(rvalue_kind kind) bool {
+    switch (kind) {
+    case rvalue_kind.rv_add, rvalue_kind.rv_sub, rvalue_kind.rv_mul,
+        rvalue_kind.rv_add_overflows, rvalue_kind.rv_sub_overflows, rvalue_kind.rv_mul_overflows,
+        rvalue_kind.rv_div, rvalue_kind.rv_rem, rvalue_kind.rv_and, rvalue_kind.rv_or,
+        rvalue_kind.rv_xor, rvalue_kind.rv_shl, rvalue_kind.rv_shr, rvalue_kind.rv_fadd,
+        rvalue_kind.rv_fsub, rvalue_kind.rv_fmul, rvalue_kind.rv_fdiv, rvalue_kind.rv_eq,
+        rvalue_kind.rv_ne, rvalue_kind.rv_lt, rvalue_kind.rv_le, rvalue_kind.rv_gt,
+        rvalue_kind.rv_ge:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// The operand itself.
+fn rvalue_use(func mut* f, operand a) rvalue {
+    rvalue mut r = rvalue_start(f, rvalue_kind.rv_use);
+    rvalue_push(f, &r, a);
+    return r;
+}
+
+/// An arithmetic, overflow, bitwise, shift, float or comparison rvalue of two operands. The
+/// function panics when `kind` takes another number of operands.
+fn rvalue_binary(func mut* f, rvalue_kind kind, operand a, operand b) rvalue {
+    if (!rvalue_is_binary(kind)) {
+        panic("fir.rvalue_binary: not a binary rvalue");
+    }
+    rvalue mut r = rvalue_start(f, kind);
+    rvalue_push(f, &r, a);
+    rvalue_push(f, &r, b);
+    return r;
+}
+
+/// `not(a)` or `fneg(a)`. The function panics for another kind.
+fn rvalue_unary(func mut* f, rvalue_kind kind, operand a) rvalue {
+    if (kind != rvalue_kind.rv_not && kind != rvalue_kind.rv_fneg) {
+        panic("fir.rvalue_unary: not a unary rvalue");
+    }
+    rvalue mut r = rvalue_start(f, kind);
+    rvalue_push(f, &r, a);
+    return r;
+}
+
+/// `cast<ty>(a)`.
+fn rvalue_cast(func mut* f, types.node* ty, operand a) rvalue {
+    rvalue mut r = rvalue_start(f, rvalue_kind.rv_cast);
+    r.ty = ty;
+    rvalue_push(f, &r, a);
+    return r;
+}
+
+/// `addr(p)`. `is_mut` says whether the pointer is `mut`, as the checker typed the `&`.
+fn rvalue_addr(func mut* f, place p, bool is_mut) rvalue {
+    rvalue mut r = rvalue_start(f, rvalue_kind.rv_addr);
+    r.place = p;
+    r.is_mut = is_mut;
+    return r;
+}
+
+/// `slice(p, lo, hi)`. `is_mut` says whether the span of a fixed array is `mut`; a span place
+/// gives its own `mut`, and a `string` place gives a `string`.
+fn rvalue_slice(func mut* f, place p, operand lo, operand hi, bool is_mut) rvalue {
+    rvalue mut r = rvalue_start(f, rvalue_kind.rv_slice);
+    r.place = p;
+    r.is_mut = is_mut;
+    rvalue_push(f, &r, lo);
+    rvalue_push(f, &r, hi);
+    return r;
+}
+
+/// `slice_ptr(a, lo, hi)`.
+fn rvalue_slice_ptr(func mut* f, operand a, operand lo, operand hi) rvalue {
+    rvalue mut r = rvalue_start(f, rvalue_kind.rv_slice_ptr);
+    rvalue_push(f, &r, a);
+    rvalue_push(f, &r, lo);
+    rvalue_push(f, &r, hi);
+    return r;
+}
+
+/// `alloc<ty>(n)`.
+fn rvalue_alloc(func mut* f, types.node* ty, operand n) rvalue {
+    rvalue mut r = rvalue_start(f, rvalue_kind.rv_alloc);
+    r.ty = ty;
+    rvalue_push(f, &r, n);
+    return r;
+}
+
+/// `aggregate ty(...)` over the `len` operands that operand_push placed from `first`.
+// rvalue_aggregate is the query of the result, so the constructor takes this name.
+fn rvalue_aggregate_new(types.node* ty, u32 first, u32 len) rvalue {
+    return rvalue{.kind = rvalue_kind.rv_aggregate, .ty = ty, .ops_first = first, .ops_len = len};
+}
+
+// A call with the arguments `first` to `first + len - 1`.
+fn rvalue_call(callee_kind callee, u32 first, u32 len) rvalue {
+    return rvalue{
+        .kind = rvalue_kind.rv_call,
+        .ops_first = first,
+        .ops_len = len,
+        .callee = callee,
+    };
+}
+
+/// A call of the fort function `s`.
+fn rvalue_call_fn(ast.sym* s, u32 first, u32 len) rvalue {
+    rvalue mut r = rvalue_call(callee_kind.cl_fn, first, len);
+    r.callee_sym = s;
+    return r;
+}
+
+/// A call of the `extern fn` `s`.
+fn rvalue_call_extern(ast.sym* s, u32 first, u32 len) rvalue {
+    rvalue mut r = rvalue_call(callee_kind.cl_extern, first, len);
+    r.callee_sym = s;
+    return r;
+}
+
+/// A call through the operand `callee` of function type.
+fn rvalue_call_value(operand callee, u32 first, u32 len) rvalue {
+    rvalue mut r = rvalue_call(callee_kind.cl_value, first, len);
+    r.callee_op = callee;
+    return r;
+}
+
+// The function type that a call names.
+fn callee_type(func* f, rvalue r) types.node* {
+    if (r.callee == callee_kind.cl_value) {
+        return operand_type(f, r.callee_op);
+    }
+    return r.callee_sym->ty;
+}
+
+/// The type of the result of `r`. A `noreturn` callee gives `void`.
+fn rvalue_type(func* f, rvalue r) types.node* {
+    switch (r.kind) {
+    case rvalue_kind.rv_use, rvalue_kind.rv_add, rvalue_kind.rv_sub, rvalue_kind.rv_mul,
+        rvalue_kind.rv_div, rvalue_kind.rv_rem, rvalue_kind.rv_and, rvalue_kind.rv_or,
+        rvalue_kind.rv_xor, rvalue_kind.rv_not, rvalue_kind.rv_shl, rvalue_kind.rv_shr,
+        rvalue_kind.rv_fadd, rvalue_kind.rv_fsub, rvalue_kind.rv_fmul, rvalue_kind.rv_fdiv,
+        rvalue_kind.rv_fneg:
+        return operand_type(f, rvalue_operand(f, r, 0));
+    case rvalue_kind.rv_add_overflows, rvalue_kind.rv_sub_overflows,
+        rvalue_kind.rv_mul_overflows, rvalue_kind.rv_eq, rvalue_kind.rv_ne, rvalue_kind.rv_lt,
+        rvalue_kind.rv_le, rvalue_kind.rv_gt, rvalue_kind.rv_ge:
+        return types.type_prim(f->tt, prim.prim_kind.prim_bool);
+    case rvalue_kind.rv_cast, rvalue_kind.rv_aggregate:
+        return r.ty;
+    case rvalue_kind.rv_addr:
+        return types.type_ptr(f->tt, place_type(f, r.place), false, r.is_mut);
+    case rvalue_kind.rv_slice:
+        return slice_type(f, place_type(f, r.place), r.is_mut);
+    case rvalue_kind.rv_slice_ptr:
+        types.node* ptr = operand_type(f, rvalue_operand(f, r, 0));
+        if (ptr->kind != types.type_kind.k_ptr) {
+            panic("fir.rvalue_type: slice_ptr of a non-pointer");
+        }
+        return types.type_span(f->tt, ptr->elem, false, ptr->is_mut);
+    case rvalue_kind.rv_alloc:
+        return types.type_ptr(f->tt, r.ty, true, true);
+    case rvalue_kind.rv_call:
+        return callee_type(f, r)->elem;
+    }
+}
+
+// The type of a slice of a place of type `t`: a view, so it drops `own`.
+fn slice_type(func* f, types.node* t, bool is_mut) types.node* {
+    switch (t->kind) {
+    case types.type_kind.k_array:
+        return types.type_span(f->tt, t->elem, false, is_mut);
+    case types.type_kind.k_span:
+        return types.type_span(f->tt, t->elem, false, t->is_mut);
+    case types.type_kind.k_string:
+        return types.type_string(f->tt, false);
+    default:
+        panic("fir.rvalue_type: a slice of a type with no elements");
+    }
+}
+
+// Whether a value of type `t` owns: an `own` reference, or a struct or fixed array that holds
+// one.
+fn type_owning(types.node* t) bool {
+    if (types.type_is_reference(t)) {
+        return t->is_own;
+    }
+    return types.type_is_owning_aggregate(t);
+}
+
+/// Whether `r` produces an owning value: an `alloc`, an `aggregate`, `cast` or `call` whose type
+/// owns, and the use of a `move` operand.
+fn rvalue_owns(func* f, rvalue r) bool {
+    switch (r.kind) {
+    case rvalue_kind.rv_alloc:
+        return true;
+    case rvalue_kind.rv_aggregate, rvalue_kind.rv_cast, rvalue_kind.rv_call:
+        return type_owning(rvalue_type(f, r));
+    case rvalue_kind.rv_use:
+        return operand_moves(rvalue_operand(f, r, 0));
+    default:
+        return false;
+    }
+}
+
+/// Whether the result of `r` is an aggregate, which only the right side of an assignment into a
+/// place of that type can hold.
+fn rvalue_aggregate(func* f, rvalue r) bool {
+    return gen.gen_is_aggregate(rvalue_type(f, r));
+}
+
+// ---- statements ------------------------------------------------------------------------
+
+enum stmt_kind {
+    st_assign,
+    st_del,
+    st_live,
+    st_dead,
+}
+
+/// One statement. `place` and `value` serve `st_assign`. `place` serves `st_del`, whose operand is
+/// always `move place`. `local` serves `st_live` and `st_dead`. `loc` is the location of the source
+/// construct and `stmt` the index of the source statement whose lowering produced it. `exit_loc`
+/// is the location of the exit that expanded a deferred statement, and the empty range for every
+/// other statement.
+struct statement {
+    stmt_kind kind;
+    place place;
+    rvalue value;
+    u32 local;
+    diag.loc loc;
+    diag.loc exit_loc;
+    u32 stmt;
+}
+
+// `items[..len]` holds the statements of one block in order.
+struct statement_vec {
+    statement mut@ own items;
+    u64 len;
+}
+
+// Ensures room for one more statement, as locals_reserve does for a local.
+fn statements_reserve(statement_vec mut* v) void {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 cap = grown_capacity(v->items.len, "fir.statements_reserve: capacity overflow");
+    statement mut@ own bigger = new(statement, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+/// `p = value`.
+fn stmt_assign(place p, rvalue value, diag.loc at, u32 index) statement {
+    return statement{
+        .kind = stmt_kind.st_assign,
+        .place = p,
+        .value = value,
+        .loc = at,
+        .stmt = index,
+    };
+}
+
+/// `del(move p)`.
+fn stmt_del(place p, diag.loc at, u32 index) statement {
+    return statement{.kind = stmt_kind.st_del, .place = p, .loc = at, .stmt = index};
+}
+
+/// `live(_n)`.
+fn stmt_live(u32 n, diag.loc at, u32 index) statement {
+    return statement{.kind = stmt_kind.st_live, .local = n, .loc = at, .stmt = index};
+}
+
+/// `dead(_n)`.
+fn stmt_dead(u32 n, diag.loc at, u32 index) statement {
+    return statement{.kind = stmt_kind.st_dead, .local = n, .loc = at, .stmt = index};
+}
+
+/// Whether `s` writes a place, and which one in `out`. An assignment writes its place. A `del`
+/// writes its place too, because it empties it.
+fn stmt_writes_place(statement* s, place mut* out) bool {
+    if (s->kind == stmt_kind.st_assign || s->kind == stmt_kind.st_del) {
+        *out = s->place;
+        return true;
+    }
+    return false;
+}
+
+/// Operand `i` that `s` reads, in evaluation order, in `out`. False when `i` is at or past the
+/// count. An assignment reads the operands of its rvalue; a call through a value reads the callee
+/// before the arguments. A `del` reads `move place`. `live` and `dead` read nothing.
+fn stmt_reads(func* f, statement* s, u32 i, operand mut* out) bool {
+    if (s->kind == stmt_kind.st_del) {
+        if (i != 0) {
+            return false;
+        }
+        *out = operand_move(s->place);
+        return true;
+    }
+    if (s->kind != stmt_kind.st_assign) {
+        return false;
+    }
+    rvalue r = s->value;
+    u32 mut at = i;
+    if (r.kind == rvalue_kind.rv_call && r.callee == callee_kind.cl_value) {
+        if (at == 0) {
+            *out = r.callee_op;
+            return true;
+        }
+        at -= 1;
+    }
+    if (at >= r.ops_len) {
+        return false;
+    }
+    *out = rvalue_operand(f, r, at);
+    return true;
+}
+
+// The walk of stmt_reads_place and term_reads_place: it counts the places it visits and keeps
+// visit `want`.
+struct read_cursor {
+    u32 want;
+    u32 seen;
+    place found;
+    bool done;
+}
+
+fn read_visit(read_cursor mut* c, place p) void {
+    if (!c->done && c->seen == c->want) {
+        c->found = p;
+        c->done = true;
+    }
+    c->seen += 1;
+}
+
+// Visits the index local of each index projection of `p`, in projection order.
+fn read_index_locals(func* f, read_cursor mut* c, place p) void {
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        projection pj = place_projection(f, p, i);
+        if (pj.kind == proj_kind.pj_index) {
+            read_visit(c, place_local(pj.index));
+        }
+        i += 1;
+    }
+}
+
+// Visits the index locals of `p` and then `p`, whose value the statement reads.
+fn read_place(func* f, read_cursor mut* c, place p) void {
+    read_index_locals(f, c, p);
+    read_visit(c, p);
+}
+
+fn read_operand(func* f, read_cursor mut* c, operand o) void {
+    if (o.kind != operand_kind.ok_const) {
+        read_place(f, c, o.place);
+    }
+}
+
+/// Place `i` that `s` reads, in `out`. False when `i` is at or past the count. Every index local
+/// of every place that the statement names is a read, and it comes as the place of that local,
+/// with no projection. The order is evaluation order: the index locals of the destination of an
+/// assignment, then the callee of a call through a value, the index locals of the place of an
+/// `addr` or a `slice`, and the operands of the rvalue, each with its index locals before its
+/// place. A `del` reads the index locals of its place and then the place. The place of an `addr`
+/// or a `slice`, and the destination of an assignment, are not reads of their value.
+fn stmt_reads_place(func* f, statement* s, u32 i, place mut* out) bool {
+    read_cursor mut c = read_cursor{.want = i};
+    switch (s->kind) {
+    case stmt_kind.st_assign:
+        read_index_locals(f, &c, s->place);
+        rvalue r = s->value;
+        if (r.kind == rvalue_kind.rv_call && r.callee == callee_kind.cl_value) {
+            read_operand(f, &c, r.callee_op);
+        }
+        if (r.kind == rvalue_kind.rv_addr || r.kind == rvalue_kind.rv_slice) {
+            read_index_locals(f, &c, r.place);
+        }
+        u32 mut k = 0;
+        while (k < r.ops_len && !c.done) {
+            read_operand(f, &c, rvalue_operand(f, r, k));
+            k += 1;
+        }
+    case stmt_kind.st_del:
+        read_place(f, &c, s->place);
+    case stmt_kind.st_live, stmt_kind.st_dead:
+        return false;
+    }
+    if (c.done) {
+        *out = c.found;
+    }
+    return c.done;
+}
+
+// ---- terminators --------------------------------------------------------------------------
+
+enum term_kind {
+    tk_goto,
+    tk_switch,
+    tk_return,
+    tk_check,
+    tk_check_overwrite, // `check(overwrite: p)`, which names its place
+    tk_fail,
+    tk_trap,
+    tk_unreachable,
+}
+
+/// The kind of a runtime check. Each kind has one runtime entry in `std.rt`.
+enum check_kind {
+    chk_overflow,
+    chk_shift,
+    chk_div_zero,
+    chk_div_overflow,
+    chk_bounds,
+    chk_span,
+    chk_alloc_count,
+    chk_overwrite,
+    chk_enum,
+    chk_user,
+    chk_panic,
+}
+
+/// One arm of a `switch`: the block to go to when the operand equals `value`.
+struct arm {
+    consts.cval value;
+    u32 target;
+}
+
+// `items[..len]` holds the arms of every switch of one function.
+struct arm_vec {
+    arm mut@ own items;
+    u64 len;
+}
+
+/// The one terminator of a block. `target` is the block of a `goto` and the continuation of a
+/// `check`. `cond` is the operand of a `switch` and the condition of a `check`. The arms of a
+/// `switch` are entries `arms_first` to `arms_first + arms_len - 1` of the function's arm vector,
+/// and `otherwise` is the block for no match. `check` is the kind of a `check` or a `fail`, whose
+/// reported operands are entries `args_first` to `args_first + args_len - 1` of the operand
+/// vector. `place` is the place of `check(overwrite: p)`. `loc`, `exit_loc` and `stmt` are as a
+/// statement has them.
+struct terminator {
+    term_kind kind;
+    u32 target;
+    operand cond;
+    u32 arms_first;
+    u32 arms_len;
+    u32 otherwise;
+    check_kind check;
+    u32 args_first;
+    u32 args_len;
+    place place;
+    diag.loc loc;
+    diag.loc exit_loc;
+    u32 stmt;
+}
+
+// Ensures room for one more arm, as locals_reserve does for a local.
+fn arms_reserve(arm_vec mut* v) void {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 cap = grown_capacity(v->items.len, "fir.arms_reserve: capacity overflow");
+    arm mut@ own bigger = new(arm, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+/// Appends an arm to the function's arm vector and returns its position. The arms of one switch
+/// stand next to each other.
+fn arm_push(func mut* f, consts.cval value, u32 target) u32 {
+    if (f->arms.len >= U32_LIMIT) {
+        panic("fir.arm_push: too many arms");
+    }
+    arms_reserve(&f->arms);
+    u32 at = cast(f->arms.len, u32);
+    f->arms.items[f->arms.len] = arm{value, target};
+    f->arms.len += 1;
+    return at;
+}
+
+/// Returns arm `i` of the switch `t`. The function panics when `i` is at or past the count.
+fn term_arm(func* f, terminator* t, u32 i) arm {
+    if (i >= t->arms_len) {
+        panic("fir.term_arm: index out of range");
+    }
+    u64 at = cast(t->arms_first, u64) + cast(i, u64);
+    if (at >= f->arms.len) {
+        panic("fir.term_arm: the switch is not in this function");
+    }
+    return f->arms.items[at];
+}
+
+// A terminator of `kind` at `at`, with the statement index `index`.
+fn term_start(term_kind kind, diag.loc at, u32 index) terminator {
+    return terminator{.kind = kind, .loc = at, .stmt = index};
+}
+
+/// `goto target`.
+fn term_goto(u32 target, diag.loc at, u32 index) terminator {
+    terminator mut t = term_start(term_kind.tk_goto, at, index);
+    t.target = target;
+    return t;
+}
+
+/// `switch(a) -> [arms, otherwise: otherwise]` over the `len` arms that arm_push placed from
+/// `first`.
+fn term_switch(operand a, u32 first, u32 len, u32 otherwise, diag.loc at, u32 index)
+    terminator {
+    terminator mut t = term_start(term_kind.tk_switch, at, index);
+    t.cond = a;
+    t.arms_first = first;
+    t.arms_len = len;
+    t.otherwise = otherwise;
+    return t;
+}
+
+/// `return`.
+fn term_return(diag.loc at, u32 index) terminator {
+    return term_start(term_kind.tk_return, at, index);
+}
+
+/// `check(cond, kind, args) -> target` over the `len` reported operands that operand_push placed
+/// from `first`. `cond` is true on failure, except for `chk_user`, where it is true on success.
+fn term_check(operand cond, check_kind kind, u32 first, u32 len, u32 target, diag.loc at,
+              u32 index) terminator {
+    terminator mut t = term_start(term_kind.tk_check, at, index);
+    t.cond = cond;
+    t.check = kind;
+    t.args_first = first;
+    t.args_len = len;
+    t.target = target;
+    return t;
+}
+
+/// `check(overwrite: p) -> target`: it continues when the owning value at `p` is null.
+fn term_check_overwrite(place p, u32 target, diag.loc at, u32 index) terminator {
+    terminator mut t = term_start(term_kind.tk_check_overwrite, at, index);
+    t.check = check_kind.chk_overwrite;
+    t.place = p;
+    t.target = target;
+    return t;
+}
+
+/// `fail(kind, args)` over the `len` reported operands that operand_push placed from `first`.
+fn term_fail(check_kind kind, u32 first, u32 len, diag.loc at, u32 index) terminator {
+    terminator mut t = term_start(term_kind.tk_fail, at, index);
+    t.check = kind;
+    t.args_first = first;
+    t.args_len = len;
+    return t;
+}
+
+/// `trap`.
+fn term_trap(diag.loc at, u32 index) terminator {
+    return term_start(term_kind.tk_trap, at, index);
+}
+
+/// `unreachable`.
+fn term_unreachable(diag.loc at, u32 index) terminator {
+    return term_start(term_kind.tk_unreachable, at, index);
+}
+
+/// Block `i` that `t` names, in `out`, in this order: the target of a `goto`, the arms and then
+/// `otherwise` of a `switch`, the continuation of a `check`. False when `i` is at or past the
+/// count.
+fn term_targets(func* f, terminator* t, u32 i, u32 mut* out) bool {
+    switch (t->kind) {
+    case term_kind.tk_goto, term_kind.tk_check, term_kind.tk_check_overwrite:
+        if (i != 0) {
+            return false;
+        }
+        *out = t->target;
+        return true;
+    case term_kind.tk_switch:
+        if (i < t->arms_len) {
+            *out = term_arm(f, t, i).target;
+            return true;
+        }
+        if (i != t->arms_len) {
+            return false;
+        }
+        *out = t->otherwise;
+        return true;
+    case term_kind.tk_return, term_kind.tk_fail, term_kind.tk_trap,
+        term_kind.tk_unreachable:
+        return false;
+    }
+}
+
+/// Place `i` that `t` reads, in `out`, in the shape of stmt_reads_place. False when `i` is at or
+/// past the count. A `switch` reads its operand. A `check` reads its condition and then its
+/// reported operands, and a `fail` its reported operands. `check(overwrite: p)` reads the index
+/// locals of `p` and not its value: the test of `p` counts as no use of it (spec/fir.md 14). Each
+/// operand and place comes after its index locals. A `return` reads `_0` unless `_0` is
+/// `void`. `goto`, `trap` and `unreachable` read nothing.
+fn term_reads_place(func* f, terminator* t, u32 i, place mut* out) bool {
+    read_cursor mut c = read_cursor{.want = i};
+    switch (t->kind) {
+    case term_kind.tk_switch:
+        read_operand(f, &c, t->cond);
+    case term_kind.tk_check:
+        read_operand(f, &c, t->cond);
+        read_term_args(f, &c, t);
+    case term_kind.tk_fail:
+        read_term_args(f, &c, t);
+    case term_kind.tk_check_overwrite:
+        read_index_locals(f, &c, t->place);
+    case term_kind.tk_return:
+        if (local_at(f, 0)->ty->kind != types.type_kind.k_void) {
+            read_visit(&c, place_local(0));
+        }
+    case term_kind.tk_goto, term_kind.tk_trap, term_kind.tk_unreachable:
+        return false;
+    }
+    if (c.done) {
+        *out = c.found;
+    }
+    return c.done;
+}
+
+// Visits the reported operands of a `check` or a `fail`.
+fn read_term_args(func* f, read_cursor mut* c, terminator* t) void {
+    u32 mut k = 0;
+    while (k < t->args_len && !c->done) {
+        read_operand(f, c, operand_at(f, t->args_first + k));
+        k += 1;
+    }
+}
+
+/// Whether `t` ends the program: a `fail`, a `trap` or an `unreachable`.
+fn term_is_abort(terminator* t) bool {
+    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap
+        || t->kind == term_kind.tk_unreachable;
+}
+
+/// Whether a build mode removes a check of `kind`: `release` removes `overflow`, `shift` and
+/// `overwrite`, and `no_bounds` (`--no-bounds-check`) removes `bounds` and `span`.
+fn term_removable(check_kind kind, bool release, bool no_bounds) bool {
+    switch (kind) {
+    case check_kind.chk_overflow, check_kind.chk_shift, check_kind.chk_overwrite:
+        return release;
+    case check_kind.chk_bounds, check_kind.chk_span:
+        return no_bounds;
+    case check_kind.chk_div_zero, check_kind.chk_div_overflow, check_kind.chk_alloc_count,
+        check_kind.chk_enum, check_kind.chk_user, check_kind.chk_panic:
+        return false;
+    }
+}
+
+/// The name of the `std.rt` function that a failure of `kind` calls.
+fn check_entry(check_kind kind) string {
+    switch (kind) {
+    case check_kind.chk_overflow:
+        return "fail_overflow";
+    case check_kind.chk_shift:
+        return "fail_shift";
+    case check_kind.chk_div_zero:
+        return "fail_div_zero";
+    case check_kind.chk_div_overflow:
+        return "fail_div_overflow";
+    case check_kind.chk_bounds:
+        return "fail_bounds";
+    case check_kind.chk_span:
+        return "fail_span";
+    case check_kind.chk_alloc_count:
+        return "fail_alloc_count";
+    case check_kind.chk_overwrite:
+        return "fail_overwrite";
+    case check_kind.chk_enum:
+        return "fail_enum";
+    case check_kind.chk_user:
+        return "assert_fail";
+    case check_kind.chk_panic:
+        return "panic";
+    }
+}
+
+// The form of an operand that a check reports.
+enum reported_form {
+    rf_i64,
+    rf_u64,
+    rf_text, // a `bytes` operand, `char*`
+}
+
+// The most operands a check reports.
+u64 CHECK_REPORTED_MAX = 3;
+
+// Writes the forms of the operands that a check of `kind` reports, in order, and returns the
+// count.
+fn check_reported_forms(check_kind kind, reported_form mut@ out) u32 {
+    switch (kind) {
+    case check_kind.chk_overflow, check_kind.chk_div_zero, check_kind.chk_div_overflow,
+        check_kind.chk_overwrite:
+        return 0;
+    case check_kind.chk_shift, check_kind.chk_enum:
+        out[0] = reported_form.rf_i64;
+        out[1] = reported_form.rf_text;
+        return 2;
+    case check_kind.chk_bounds:
+        out[0] = reported_form.rf_i64;
+        out[1] = reported_form.rf_u64;
+        return 2;
+    case check_kind.chk_span:
+        out[0] = reported_form.rf_i64;
+        out[1] = reported_form.rf_i64;
+        out[2] = reported_form.rf_u64;
+        return 3;
+    case check_kind.chk_alloc_count:
+        out[0] = reported_form.rf_i64;
+        return 1;
+    case check_kind.chk_user:
+        out[0] = reported_form.rf_text;
+        return 1;
+    case check_kind.chk_panic:
+        out[0] = reported_form.rf_text;
+        out[1] = reported_form.rf_u64;
+        return 2;
+    }
+}
+
+/// The count of the operands that a check of `kind` reports. The runtime entry takes a file, a
+/// line and a column after them, which this count leaves out.
+fn check_reported_count(check_kind kind) u32 {
+    reported_form[CHECK_REPORTED_MAX] mut forms = {};
+    return check_reported_forms(kind, forms[..]);
+}
+
+/// The fort type of reported operand `i` of a check of `kind`, or null when `i` is at or past the
+/// count. A `bytes` text is `char*`.
+fn check_reported(check_kind kind, u32 i, types.table mut* tt) types.node* {
+    reported_form[CHECK_REPORTED_MAX] mut forms = {};
+    u32 n = check_reported_forms(kind, forms[..]);
+    if (i >= n) {
+        return null;
+    }
+    switch (forms[cast(i, u64)]) {
+    case reported_form.rf_i64:
+        return types.type_prim(tt, prim.prim_kind.prim_i64);
+    case reported_form.rf_u64:
+        return types.type_prim(tt, prim.prim_kind.prim_u64);
+    case reported_form.rf_text:
+        types.node* ch = types.type_prim(tt, prim.prim_kind.prim_char);
+        return types.type_ptr(tt, ch, false, false);
+    }
+}
+
+// ---- blocks ----------------------------------------------------------------------------
+
+/// One block: its statements in order and its terminator. `terminated` says whether
+/// block_set_terminator has set `term`.
+struct block {
+    u32 number;
+    statement_vec statements;
+    terminator term;
+    bool terminated;
+}
+
+// `items[..len]` holds the blocks of one function in number order.
+struct block_vec {
+    block mut@ own items;
+    u64 len;
+}
+
+// Ensures room for one more block, as locals_reserve does for a local. A block owns its
+// statements, so the growth moves each block.
+fn blocks_reserve(block_vec mut* v) void {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 cap = grown_capacity(v->items.len, "fir.blocks_reserve: capacity overflow");
+    block mut@ own bigger = new(block, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = move(v->items[i]);
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+/// Adds an empty block and returns its number. Blocks are numbered from 0 in creation order.
+fn block_new(func mut* f) u32 {
+    if (f->blocks.len >= U32_LIMIT) {
+        panic("fir.block_new: too many blocks");
+    }
+    blocks_reserve(&f->blocks);
+    u32 n = cast(f->blocks.len, u32);
+    f->blocks.items[f->blocks.len].number = n;
+    f->blocks.len += 1;
+    return n;
+}
+
+fn block_count(func* f) u32 {
+    return cast(f->blocks.len, u32);
+}
+
+/// Returns block `b`. The function panics when `b` is at or past the count. A later block_new can
+/// move the blocks, so the pointer is valid until then.
+fn block_at(func* f, u32 b) block* {
+    if (cast(b, u64) >= f->blocks.len) {
+        panic("fir.block_at: index out of range");
+    }
+    return &f->blocks.items[cast(b, u64)];
+}
+
+// Block `b` of a function the caller may change.
+fn block_mut(func mut* f, u32 b) block mut* {
+    if (cast(b, u64) >= f->blocks.len) {
+        panic("fir.block_mut: index out of range");
+    }
+    return &f->blocks.items[cast(b, u64)];
+}
+
+/// Appends `s` to block `b`. The function panics when the block already has a terminator.
+fn block_append(func mut* f, u32 b, statement s) void {
+    block mut* bl = block_mut(f, b);
+    if (bl->terminated) {
+        panic("fir.block_append: the block already has a terminator");
+    }
+    if (bl->statements.len >= U32_LIMIT) {
+        panic("fir.block_append: too many statements");
+    }
+    statements_reserve(&bl->statements);
+    bl->statements.items[bl->statements.len] = s;
+    bl->statements.len += 1;
+}
+
+/// Sets the terminator of block `b`. The function panics when the block already has one.
+fn block_set_terminator(func mut* f, u32 b, terminator t) void {
+    block mut* bl = block_mut(f, b);
+    if (bl->terminated) {
+        panic("fir.block_set_terminator: the block already has a terminator");
+    }
+    bl->term = t;
+    bl->terminated = true;
+}
+
+/// Returns statement `i` of block `b`. The function panics when `i` is at or past the count.
+fn block_statement(func* f, u32 b, u32 i) statement* {
+    block* bl = block_at(f, b);
+    if (cast(i, u64) >= bl->statements.len) {
+        panic("fir.block_statement: index out of range");
+    }
+    return &bl->statements.items[cast(i, u64)];
+}
+
+fn block_statement_count(func* f, u32 b) u32 {
+    return cast(block_at(f, b)->statements.len, u32);
+}
+
+/// The predecessors of every block. The predecessors of block `b` are `preds[first[b]]` to
+/// `preds[first[b + 1] - 1]`: the numbers of the blocks whose terminators name `b`, in ascending
+/// order, each once.
+struct pred_table {
+    u32 mut@ own first;
+    u32 mut@ own preds;
+}
+
+// Whether target `i` of `t` repeats an earlier target of `t`.
+fn target_repeats(func* f, terminator* t, u32 i, u32 target) bool {
+    u32 mut j = 0;
+    u32 mut earlier = 0;
+    while (j < i && term_targets(f, t, j, &earlier)) {
+        if (earlier == target) {
+            return true;
+        }
+        j += 1;
+    }
+    return false;
+}
+
+// Walks the targets of every terminated block `p` in block order. The first time the terminator
+// of `p` names a block `t`, the walk counts the edge in `first[t + 1]`, or, when `fill` is set,
+// writes `p` at `preds[cursor[t]]` and advances the cursor.
+fn walk_edges(func* f, pred_table mut* pt, u32 mut@ cursor, bool fill) void {
+    u32 n = block_count(f);
+    u32 mut p = 0;
+    while (p < n) {
+        block* bl = block_at(f, p);
+        u32 mut i = 0;
+        u32 mut target = 0;
+        while (bl->terminated && term_targets(f, &bl->term, i, &target)) {
+            if (target >= n) {
+                panic("fir.func_predecessors: a terminator names no block");
+            }
+            if (!target_repeats(f, &bl->term, i, target)) {
+                u64 at = cast(target, u64);
+                if (fill) {
+                    pt->preds[cast(cursor[at], u64)] = p;
+                    cursor[at] += 1;
+                } else {
+                    pt->first[at + 1] += 1;
+                }
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+}
+
+/// Builds the predecessor table of `f` in one pass over the terminators and a prefix sum.
+fn func_predecessors(func* f) pred_table {
+    u64 n = f->blocks.len;
+    pred_table mut pt = pred_table{};
+    pt.first = new(u32, n + 1);
+    u32 mut@ own cursor = new(u32, n + 1);
+    walk_edges(f, &pt, cursor, false);
+    u64 mut b = 0;
+    while (b < n) {
+        pt.first[b + 1] += pt.first[b];
+        cursor[b] = pt.first[b];
+        b += 1;
+    }
+    u64 total = cast(pt.first[n], u64);
+    if (total > 0) {
+        pt.preds = new(u32, total);
+        walk_edges(f, &pt, cursor, true);
+    }
+    del(cursor);
+    return pt;
+}
+
+/// The count of the predecessors of block `b`.
+fn pred_count(pred_table* pt, u32 b) u32 {
+    u64 at = cast(b, u64);
+    if (at + 1 >= pt->first.len) {
+        panic("fir.pred_count: index out of range");
+    }
+    return pt->first[at + 1] - pt->first[at];
+}
+
+/// Predecessor `i` of block `b`. The function panics when `i` is at or past the count.
+fn pred_at(pred_table* pt, u32 b, u32 i) u32 {
+    if (i >= pred_count(pt, b)) {
+        panic("fir.pred_at: index out of range");
+    }
+    return pt->preds[cast(pt->first[cast(b, u64)], u64) + cast(i, u64)];
+}
+
+fn pred_table_free(pred_table mut* pt) void {
+    del(pt->first);
+    del(pt->preds);
+}
+
+// ---- the module --------------------------------------------------------------------------
+
+/// A module-level constant or global: its symbol, its fort type and its folded value from the
+/// checker. `init` is the checked initializer, from which the translator prints an aggregate.
+struct global {
+    ast.sym* sym;
+    types.node* ty;
+    consts.cval value;
+    ast.node* init;
+}
+
+// `items[..len]` holds the functions in module order.
+struct func_vec {
+    func mut@ own items;
+    u64 len;
+}
+
+// `items[..len]` holds the globals in module order.
+struct global_vec {
+    global mut@ own items;
+    u64 len;
+}
+
+// `items[..len]` holds symbols in first-use order.
+struct sym_vec {
+    ast.sym* mut@ own items;
+    u64 len;
+}
+
+/// A FIR module: the functions in the order of the whole program, the module-level constants and
+/// globals, the entry module's `main`, and the `extern fn` symbols that the calls name, in
+/// first-use order.
+struct module {
+    func_vec funcs;
+    global_vec globals;
+    ast.sym* main;
+    sym_vec externs;
+}
+
+fn module_new() module {
+    return module{};
+}
+
+/// Appends `f` to the functions of `m`. The module frees it in module_free.
+fn module_add_function(module mut* m, func f) void {
+    func_vec mut* v = &m->funcs;
+    if (v->len >= v->items.len) {
+        u64 cap = grown_capacity(v->items.len, "fir.module_add_function: capacity overflow");
+        func mut@ own bigger = new(func, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = move(v->items[i]);
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = move(f);
+    v->len += 1;
+}
+
+/// Appends `g` to the globals of `m`.
+fn module_add_global(module mut* m, global g) void {
+    global_vec mut* v = &m->globals;
+    if (v->len >= v->items.len) {
+        u64 cap = grown_capacity(v->items.len, "fir.module_add_global: capacity overflow");
+        global mut@ own bigger = new(global, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = g;
+    v->len += 1;
+}
+
+/// Records the `extern fn` `s` once, at its first use. Two symbols with one C name, `s->name`,
+/// are one extern, because the translator writes one `declare` for each C name.
+// A linear search keeps the first-use order without a hash table.
+fn module_use_extern(module mut* m, ast.sym* s) void {
+    sym_vec mut* v = &m->externs;
+    u64 mut i = 0;
+    while (i < v->len) {
+        if (v->items[i]->name == s->name) {
+            return;
+        }
+        i += 1;
+    }
+    if (v->len >= v->items.len) {
+        u64 cap = grown_capacity(v->items.len, "fir.module_use_extern: capacity overflow");
+        ast.sym* mut@ own bigger = new(ast.sym*, cap);
+        u64 mut k = 0;
+        while (k < v->len) {
+            bigger[k] = v->items[k];
+            k += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = s;
+    v->len += 1;
+}
+
+fn module_function_count(module* m) u64 {
+    return m->funcs.len;
+}
+
+/// Returns function `i`. The function panics when `i` is at or past the count. A later
+/// module_add_function can move the functions, so the pointer is valid until then.
+fn module_function_at(module* m, u64 i) func* {
+    if (i >= m->funcs.len) {
+        panic("fir.module_function_at: index out of range");
+    }
+    return &m->funcs.items[i];
+}
+
+fn module_global_count(module* m) u64 {
+    return m->globals.len;
+}
+
+/// Returns global `i`. The function panics when `i` is at or past the count.
+fn module_global_at(module* m, u64 i) global* {
+    if (i >= m->globals.len) {
+        panic("fir.module_global_at: index out of range");
+    }
+    return &m->globals.items[i];
+}
+
+fn module_extern_count(module* m) u64 {
+    return m->externs.len;
+}
+
+/// Returns extern `i` in first-use order. The function panics when `i` is at or past the count.
+fn module_extern_at(module* m, u64 i) ast.sym* {
+    if (i >= m->externs.len) {
+        panic("fir.module_extern_at: index out of range");
+    }
+    return m->externs.items[i];
+}
+
+/// Releases every function of `m` and the three vectors, and leaves the module empty.
+fn module_free(module mut* m) void {
+    u64 mut i = 0;
+    while (i < m->funcs.len) {
+        func_free(&m->funcs.items[i]);
+        i += 1;
+    }
+    del(m->funcs.items);
+    m->funcs.len = 0;
+    del(m->globals.items);
+    m->globals.len = 0;
+    del(m->externs.items);
+    m->externs.len = 0;
+    m->main = null;
+}

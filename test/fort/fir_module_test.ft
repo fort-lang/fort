@@ -1,0 +1,217 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+/// Checks the FIR module: its functions in order, its globals with their values, its `main`, and
+/// its externs in first-use order, one for each C name.
+import ast;
+import consts;
+import fir;
+import fir_env;
+import heap;
+
+fn functions_keep_their_order() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    fir.func mut first = fir_env.func_of(&e, "add");
+    fir.local_add(&first, fir_env.u64_ty(&e), fir.local_kind.lk_temp, null, fir_env.at(1, 1));
+    fir.func mut second = fir_env.func_of(&e, "nothing");
+    fir.module_add_function(&m, move(first));
+    fir.module_add_function(&m, move(second));
+    assert(fir.module_function_count(&m) == 2);
+    assert(fir.module_function_at(&m, 0)->sym == fir_env.sym(&e, "add"));
+    assert(fir.module_function_at(&m, 1)->sym == fir_env.sym(&e, "nothing"));
+    // The module holds the function as it was built.
+    assert(fir.local_count(fir.module_function_at(&m, 0)) == 4);
+    // The move emptied the caller's function.
+    assert(fir.local_count(&first) == 0);
+}
+
+fn many_functions_keep_their_order_while_the_vector_grows() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u32 mut i = 0;
+    while (i < 40) {
+        fir.func mut f = fir_env.func_of(&e, "nothing");
+        u32 mut k = 0;
+        while (k < i) {
+            fir.block_new(&f);
+            k += 1;
+        }
+        fir.module_add_function(&m, move(f));
+        i += 1;
+    }
+    assert(fir.module_function_count(&m) == 40);
+    i = 0;
+    while (i < 40) {
+        assert(fir.block_count(fir.module_function_at(&m, cast(i, u64))) == i + 1);
+        i += 1;
+    }
+}
+
+fn a_global_keeps_its_value() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    ast.sym* limit = fir_env.sym(&e, "LIMIT");
+    ast.sym* total = fir_env.sym(&e, "total");
+    fir.module_add_global(&m, fir.global{limit, limit->ty, consts.cv_from_i64(7), null});
+    fir.module_add_global(&m, fir.global{total, total->ty, consts.cv_from_i64(-3), null});
+    assert(fir.module_global_count(&m) == 2);
+    fir.global* g = fir.module_global_at(&m, 0);
+    assert(g->sym == limit);
+    fir_env.expect(&e, g->ty, "i32");
+    i64 mut v = 0;
+    assert(consts.cv_to_i64(g->value, &v) && v == 7);
+    assert(consts.cv_to_i64(fir.module_global_at(&m, 1)->value, &v) && v == -3);
+    assert(fir.module_global_at(&m, 1)->sym == total);
+}
+
+fn the_module_holds_the_entry_main() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    assert(m.main == null);
+    m.main = fir_env.sym(&e, "main");
+    assert(m.main->name == "main");
+}
+
+fn an_extern_used_twice_is_recorded_once() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    ast.sym* puts = fir_env.sym(&e, "puts");
+    fir.module_use_extern(&m, puts);
+    fir.module_use_extern(&m, puts);
+    assert(fir.module_extern_count(&m) == 1);
+    assert(fir.module_extern_at(&m, 0) == puts);
+    // A second declaration of one C name is the same extern.
+    ast.sym mut twin = *puts;
+    fir.module_use_extern(&m, &twin);
+    assert(fir.module_extern_count(&m) == 1);
+    assert(fir.module_extern_at(&m, 0) == puts);
+}
+
+fn externs_keep_their_first_use_order() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    ast.sym* labs = fir_env.sym(&e, "labs");
+    ast.sym* puts = fir_env.sym(&e, "puts");
+    ast.sym* abs = fir_env.sym(&e, "abs");
+    fir.module_use_extern(&m, labs);
+    fir.module_use_extern(&m, puts);
+    fir.module_use_extern(&m, labs);
+    fir.module_use_extern(&m, abs);
+    fir.module_use_extern(&m, puts);
+    assert(fir.module_extern_count(&m) == 3);
+    assert(fir.module_extern_at(&m, 0) == labs);
+    assert(fir.module_extern_at(&m, 1) == puts);
+    assert(fir.module_extern_at(&m, 2) == abs);
+}
+
+fn module_free_empties_the_module() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.module mut m = fir.module_new();
+    fir.module_add_function(&m, fir_env.func_of(&e, "add"));
+    fir.module_use_extern(&m, fir_env.sym(&e, "puts"));
+    m.main = fir_env.sym(&e, "main");
+    fir.module_free(&m);
+    assert(fir.module_function_count(&m) == 0);
+    assert(fir.module_global_count(&m) == 0);
+    assert(fir.module_extern_count(&m) == 0);
+    assert(m.main == null);
+    fir.module_free(&m);
+}
+
+// A module of forty functions, forty globals and forty externs, each function with a hundred
+// locals, made and freed two hundred times, leaves the heap where it was. The probe watches the
+// program break and the addresses of the function, global and extern vectors and of the locals
+// of one function. Deleting any one of the four releases of module_free turns it red.
+fn a_module_leaves_the_heap_where_it_was() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    ast.sym* add = fir_env.sym(&e, "add");
+    ast.sym* limit = fir_env.sym(&e, "LIMIT");
+    ast.sym* puts = fir_env.sym(&e, "puts");
+    u64[3] mut break_at = {};
+    u64[3] mut funcs_at = {};
+    u64[3] mut globals_at = {};
+    u64[3] mut externs_at = {};
+    u64[3] mut locals_at = {};
+    // Forty distinct C names, one for each extern.
+    ast.sym[40] mut names = {};
+    string letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
+    u64 mut n = 0;
+    while (n < 40) {
+        names[n] = *puts;
+        names[n].name = letters[n..n + 1];
+        n += 1;
+    }
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        fir.module mut m = fir.module_new();
+        u64 mut i = 0;
+        while (i < 40) {
+            fir.func mut f = fir.func_new(fir_env.tt(&e), add, add->ty);
+            u32 mut k = 0;
+            while (k < 100) {
+                fir.local_add(&f, fir_env.u64_ty(&e), fir.local_kind.lk_temp, null,
+                              fir_env.at(1, 1));
+                k += 1;
+            }
+            fir.module_add_function(&m, move(f));
+            fir.module_add_global(&m, fir.global{limit, limit->ty, consts.cv_from_i64(7), null});
+            fir.module_use_extern(&m, &names[i]);
+            i += 1;
+        }
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            funcs_at[slot] = cast(m.funcs.items.ptr, u64);
+            globals_at[slot] = cast(m.globals.items.ptr, u64);
+            externs_at[slot] = cast(m.externs.items.ptr, u64);
+            locals_at[slot] = cast(fir.module_function_at(&m, 20)->locals.items.ptr, u64);
+        }
+        assert(fir.module_extern_count(&m) == 40);
+        fir.module_free(&m);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(funcs_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(globals_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(externs_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(locals_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    functions_keep_their_order();
+    many_functions_keep_their_order_while_the_vector_grows();
+    a_global_keeps_its_value();
+    the_module_holds_the_entry_main();
+    an_extern_used_twice_is_recorded_once();
+    externs_keep_their_first_use_order();
+    module_free_empties_the_module();
+    a_module_leaves_the_heap_where_it_was();
+    println("ok");
+    return 0;
+}

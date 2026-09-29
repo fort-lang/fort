@@ -1,0 +1,322 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ok
+/// Checks FIR blocks: their numbers, their statements and terminator, the predecessor table, and
+/// the release of a function with many blocks.
+import ast;
+import fir;
+import fir_env;
+import heap;
+import types;
+
+fn copy(u32 n) fir.operand {
+    return fir.operand_copy(fir.place_local(n));
+}
+
+fn live(u32 n, u32 index) fir.statement {
+    return fir.stmt_live(n, fir_env.at(1, 1), index);
+}
+
+fn goto(fir.func mut* f, u32 from, u32 to) void {
+    fir.block_set_terminator(f, from, fir.term_goto(to, fir_env.at(1, 1), 1));
+}
+
+// `from` ends in `switch(_1) -> [1: yes, otherwise: no]`.
+fn branch(fir.func mut* f, u32 from, u32 yes, u32 no) void {
+    u32 first = fir.arm_push(f, fir_env.int_value(1), yes);
+    fir.block_set_terminator(f, from, fir.term_switch(copy(1), first, 1, no, fir_env.at(1, 1), 1));
+}
+
+fn ret(fir.func mut* f, u32 from) void {
+    fir.block_set_terminator(f, from, fir.term_return(fir_env.at(1, 1), 1));
+}
+
+fn func_new_makes_the_entry_block() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    assert(fir.block_count(&f) == 1);
+    fir.block* entry = fir.block_at(&f, 0);
+    assert(entry->number == 0);
+    assert(!entry->terminated);
+    assert(fir.block_statement_count(&f, 0) == 0);
+}
+
+fn blocks_are_numbered_in_creation_order() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    u32 mut i = 1;
+    while (i < 40) {
+        assert(fir.block_new(&f) == i);
+        i += 1;
+    }
+    assert(fir.block_count(&f) == 40);
+    i = 0;
+    while (i < 40) {
+        assert(fir.block_at(&f, i)->number == i);
+        i += 1;
+    }
+}
+
+fn a_block_keeps_its_statements_in_order_and_its_terminator() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    u32 b = fir.block_new(&f);
+    u32 mut i = 0;
+    while (i < 50) {
+        fir.block_append(&f, b, live(i, i + 1));
+        i += 1;
+    }
+    // A statement of one block moves nothing in another block.
+    fir.block_append(&f, 0, live(7, 99));
+    assert(fir.block_statement_count(&f, b) == 50);
+    assert(fir.block_statement_count(&f, 0) == 1);
+    i = 0;
+    while (i < 50) {
+        fir.statement* s = fir.block_statement(&f, b, i);
+        assert(s->local == i && s->stmt == i + 1);
+        i += 1;
+    }
+    assert(fir.block_statement(&f, 0, 0)->stmt == 99);
+    goto(&f, b, 0);
+    fir.block* bl = fir.block_at(&f, b);
+    assert(bl->terminated);
+    assert(bl->term.kind == fir.term_kind.tk_goto && bl->term.target == 0);
+}
+
+fn blocks_keep_their_statements_while_the_vector_grows() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.block_append(&f, 0, live(1, 5));
+    ret(&f, 0);
+    u32 mut i = 0;
+    while (i < 100) {
+        u32 b = fir.block_new(&f);
+        fir.block_append(&f, b, live(b, b));
+        i += 1;
+    }
+    assert(fir.block_statement(&f, 0, 0)->stmt == 5);
+    assert(fir.block_at(&f, 0)->term.kind == fir.term_kind.tk_return);
+    assert(fir.block_statement(&f, 100, 0)->local == 100);
+}
+
+// ---- predecessors -----------------------------------------------------------------------
+
+fn a_diamond_joins_two_predecessors() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    // bb0 -> bb1, bb2 -> bb3
+    u32 left = fir.block_new(&f);
+    u32 right = fir.block_new(&f);
+    u32 join = fir.block_new(&f);
+    branch(&f, 0, left, right);
+    goto(&f, left, join);
+    goto(&f, right, join);
+    ret(&f, join);
+    fir.pred_table mut pt = fir.func_predecessors(&f);
+    defer fir.pred_table_free(&pt);
+    assert(fir.pred_count(&pt, 0) == 0);
+    assert(fir.pred_count(&pt, left) == 1 && fir.pred_at(&pt, left, 0) == 0);
+    assert(fir.pred_count(&pt, right) == 1 && fir.pred_at(&pt, right, 0) == 0);
+    assert(fir.pred_count(&pt, join) == 2);
+    assert(fir.pred_at(&pt, join, 0) == left);
+    assert(fir.pred_at(&pt, join, 1) == right);
+}
+
+fn a_loop_head_has_the_entry_and_the_body() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    // bb0 -> bb1 (head) -> bb2 (body) -> bb1, and bb1 -> bb3 (exit)
+    u32 head = fir.block_new(&f);
+    u32 body = fir.block_new(&f);
+    u32 exit = fir.block_new(&f);
+    goto(&f, 0, head);
+    branch(&f, head, body, exit);
+    goto(&f, body, head);
+    ret(&f, exit);
+    fir.pred_table mut pt = fir.func_predecessors(&f);
+    defer fir.pred_table_free(&pt);
+    assert(fir.pred_count(&pt, head) == 2);
+    assert(fir.pred_at(&pt, head, 0) == 0);
+    assert(fir.pred_at(&pt, head, 1) == body);
+    assert(fir.pred_count(&pt, body) == 1 && fir.pred_at(&pt, body, 0) == head);
+    assert(fir.pred_count(&pt, exit) == 1 && fir.pred_at(&pt, exit, 0) == head);
+    assert(fir.pred_count(&pt, 0) == 0);
+}
+
+fn predecessors_are_ascending_and_each_once() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    // bb0 .. bb4 all go to bb5. bb4 is made first among the sources after bb0, but its number
+    // decides its place.
+    u32 mut i = 1;
+    while (i <= 5) {
+        fir.block_new(&f);
+        i += 1;
+    }
+    goto(&f, 4, 5);
+    goto(&f, 2, 5);
+    goto(&f, 0, 5);
+    goto(&f, 3, 5);
+    // A switch that names bb5 twice and bb5 as otherwise counts once.
+    u32 first = fir.arm_push(&f, fir_env.int_value(1), 5);
+    fir.arm_push(&f, fir_env.int_value(2), 5);
+    fir.block_set_terminator(&f, 1, fir.term_switch(copy(1), first, 2, 5, fir_env.at(1, 1), 1));
+    ret(&f, 5);
+    fir.pred_table mut pt = fir.func_predecessors(&f);
+    defer fir.pred_table_free(&pt);
+    assert(fir.pred_count(&pt, 5) == 5);
+    i = 0;
+    while (i < 5) {
+        assert(fir.pred_at(&pt, 5, i) == i);
+        i += 1;
+    }
+}
+
+fn a_check_and_an_abort_give_their_edges() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    // bb0 checks and continues at bb1; bb2 fails; bb1 is not yet terminated.
+    u32 next = fir.block_new(&f);
+    u32 fail = fir.block_new(&f);
+    fir.terminator chk = fir.term_check(copy(1), fir.check_kind.chk_overflow, 0, 0, next,
+                                        fir_env.at(1, 1), 1);
+    fir.block_set_terminator(&f, 0, chk);
+    fir.block_set_terminator(&f, fail,
+                             fir.term_fail(fir.check_kind.chk_overflow, 0, 0, fir_env.at(1, 1), 1));
+    fir.pred_table mut pt = fir.func_predecessors(&f);
+    defer fir.pred_table_free(&pt);
+    assert(fir.pred_count(&pt, next) == 1 && fir.pred_at(&pt, next, 0) == 0);
+    assert(fir.pred_count(&pt, fail) == 0);
+    assert(fir.pred_count(&pt, 0) == 0);
+}
+
+fn a_function_with_no_edge_has_an_empty_table() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&f);
+    ret(&f, 0);
+    fir.pred_table mut pt = fir.func_predecessors(&f);
+    defer fir.pred_table_free(&pt);
+    assert(fir.pred_count(&pt, 0) == 0);
+    assert(pt.preds.len == 0);
+}
+
+// ---- release ----------------------------------------------------------------------------
+
+// A function with 200 blocks and its predecessor table, made and freed two hundred times, leave
+// the heap where they were. Each block holds four statements, one of them an assignment into a
+// field with two operands, and ends in a switch with one arm, so the round fills the locals, the
+// projections, the operands, the arms, the statements of each block and the blocks. The probe
+// watches the program break and the address of each of those vectors and of the predecessor
+// list. Deleting any one of the eight releases of func_free and pred_table_free turns it red.
+fn two_hundred_blocks_leave_the_heap_where_they_were() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    ast.sym* s = fir_env.sym(&e, "add");
+    types.node* pair = fir_env.ty(&e, "pair");
+    u64[3] mut break_at = {};
+    u64[3] mut locals_at = {};
+    u64[3] mut projs_at = {};
+    u64[3] mut ops_at = {};
+    u64[3] mut arms_at = {};
+    u64[3] mut blocks_at = {};
+    u64[3] mut stmts_at = {};
+    u64[3] mut first_at = {};
+    u64[3] mut preds_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        fir.func mut f = fir.func_new(fir_env.tt(&e), s, s->ty);
+        u32 mut b = 0;
+        while (b < 200) {
+            if (b > 0) {
+                fir.block_new(&f);
+            }
+            u32 local = fir.local_add(&f, pair, fir.local_kind.lk_temp, null, fir_env.at(1, 1));
+            fir.place target = fir.place_field(&f, fir.place_local(local), 0);
+            fir.rvalue sum = fir.rvalue_binary(&f, fir.rvalue_kind.rv_add, copy(1), copy(1));
+            fir.block_append(&f, b, fir.stmt_assign(target, sum, fir_env.at(1, 1), 1));
+            u32 mut i = 1;
+            while (i < 4) {
+                fir.block_append(&f, b, live(i, i));
+                i += 1;
+            }
+            b += 1;
+        }
+        b = 0;
+        while (b < 199) {
+            branch(&f, b, b + 1, b + 1);
+            b += 1;
+        }
+        ret(&f, 199);
+        fir.pred_table mut pt = fir.func_predecessors(&f);
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            locals_at[slot] = cast(f.locals.items.ptr, u64);
+            projs_at[slot] = cast(f.projs.items.ptr, u64);
+            ops_at[slot] = cast(f.ops.items.ptr, u64);
+            arms_at[slot] = cast(f.arms.items.ptr, u64);
+            blocks_at[slot] = cast(f.blocks.items.ptr, u64);
+            stmts_at[slot] = cast(fir.block_at(&f, 100)->statements.items.ptr, u64);
+            first_at[slot] = cast(pt.first.ptr, u64);
+            preds_at[slot] = cast(pt.preds.ptr, u64);
+        }
+        fir.pred_table_free(&pt);
+        fir.func_free(&f);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(locals_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(projs_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(ops_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(arms_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(blocks_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(stmts_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(first_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(preds_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    func_new_makes_the_entry_block();
+    blocks_are_numbered_in_creation_order();
+    a_block_keeps_its_statements_in_order_and_its_terminator();
+    blocks_keep_their_statements_while_the_vector_grows();
+    a_diamond_joins_two_predecessors();
+    a_loop_head_has_the_entry_and_the_body();
+    predecessors_are_ascending_and_each_once();
+    a_check_and_an_abort_give_their_edges();
+    a_function_with_no_edge_has_an_empty_table();
+    two_hundred_blocks_leave_the_heap_where_they_were();
+    println("ok");
+    return 0;
+}

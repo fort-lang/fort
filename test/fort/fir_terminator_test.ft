@@ -1,0 +1,441 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| 11 rows
+//| ok
+/// Checks FIR terminators: the constructors, the blocks each kind names, the kinds that abort,
+/// the checks each build mode removes, and the runtime entry and reported operands of each check
+/// kind against the declarations in std/rt.ft.
+import consts;
+import fir;
+import fir_env;
+import std.rt;
+import std.strbuf;
+import types;
+
+fn copy(u32 n) fir.operand {
+    return fir.operand_copy(fir.place_local(n));
+}
+
+fn int_value(u64 v) consts.cval {
+    return consts.cv_from_u64(v);
+}
+
+// ---- constructors and targets -----------------------------------------------------------
+
+fn a_goto_names_its_target() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    fir.terminator t = fir.term_goto(3, fir_env.at(4, 2), 5);
+    assert(t.kind == fir.term_kind.tk_goto);
+    assert(t.loc.line == 4 && t.loc.col == 2);
+    assert(t.stmt == 5);
+    assert(t.exit_loc.line == 0);
+    u32 mut b = 0;
+    assert(fir.term_targets(&f, &t, 0, &b) && b == 3);
+    assert(!fir.term_targets(&f, &t, 1, &b));
+}
+
+fn a_switch_names_its_arms_then_otherwise() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    u32 first = fir.arm_push(&f, int_value(1), 4);
+    fir.arm_push(&f, int_value(2), 2);
+    fir.arm_push(&f, int_value(3), 4);
+    fir.terminator t = fir.term_switch(copy(1), first, 3, 9, fir_env.at(1, 1), 1);
+    assert(t.kind == fir.term_kind.tk_switch);
+    assert(t.cond.place.local == 1);
+    assert(t.arms_len == 3 && t.otherwise == 9);
+    fir.arm second = fir.term_arm(&f, &t, 1);
+    assert(second.target == 2 && second.value.mag == 2);
+    u32 mut b = 0;
+    assert(fir.term_targets(&f, &t, 0, &b) && b == 4);
+    assert(fir.term_targets(&f, &t, 1, &b) && b == 2);
+    assert(fir.term_targets(&f, &t, 2, &b) && b == 4);
+    assert(fir.term_targets(&f, &t, 3, &b) && b == 9);
+    assert(!fir.term_targets(&f, &t, 4, &b));
+    // A switch with no arm names only its otherwise block.
+    fir.terminator bare = fir.term_switch(copy(1), 0, 0, 7, fir_env.at(1, 1), 1);
+    assert(fir.term_targets(&f, &bare, 0, &b) && b == 7);
+    assert(!fir.term_targets(&f, &bare, 1, &b));
+}
+
+fn a_check_names_its_continuation() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    u32 first = fir.operand_push(&f, copy(1));
+    fir.operand_push(&f, copy(2));
+    fir.terminator t = fir.term_check(copy(3), fir.check_kind.chk_bounds, first, 2, 6,
+                                      fir_env.at(2, 8), 4);
+    assert(t.kind == fir.term_kind.tk_check);
+    assert(t.check == fir.check_kind.chk_bounds);
+    assert(t.cond.place.local == 3);
+    assert(t.args_first == first && t.args_len == 2);
+    assert(fir.operand_at(&f, t.args_first + 1).place.local == 2);
+    u32 mut b = 0;
+    assert(fir.term_targets(&f, &t, 0, &b) && b == 6);
+    assert(!fir.term_targets(&f, &t, 1, &b));
+}
+
+fn an_overwrite_check_names_its_place_and_its_continuation() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "keep");
+    defer fir.func_free(&f);
+    fir.place held = fir.place_field(&f, fir.place_local(1), 0);
+    fir.terminator t = fir.term_check_overwrite(held, 2, fir_env.at(3, 3), 3);
+    assert(t.kind == fir.term_kind.tk_check_overwrite);
+    assert(t.check == fir.check_kind.chk_overwrite);
+    assert(fir.place_compare(&f, t.place, held) == fir.place_rel.pc_equal);
+    u32 mut b = 0;
+    assert(fir.term_targets(&f, &t, 0, &b) && b == 2);
+    assert(!fir.term_targets(&f, &t, 1, &b));
+}
+
+fn return_fail_trap_and_unreachable_name_no_block() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    fir.func mut f = fir_env.func_of(&e, "add");
+    defer fir.func_free(&f);
+    u32 first = fir.operand_push(&f, fir.operand_const(fir.const_bytes("x")));
+    fir.terminator[4] ends = {
+        fir.term_return(fir_env.at(1, 1), 1),
+        fir.term_fail(fir.check_kind.chk_user, first, 1, fir_env.at(1, 1), 2),
+        fir.term_trap(fir_env.at(1, 1), 3),
+        fir.term_unreachable(fir_env.at(1, 1), 0),
+    };
+    assert(ends[0].kind == fir.term_kind.tk_return);
+    assert(ends[1].kind == fir.term_kind.tk_fail);
+    assert(ends[1].check == fir.check_kind.chk_user);
+    assert(ends[1].args_len == 1);
+    assert(ends[2].kind == fir.term_kind.tk_trap);
+    assert(ends[3].kind == fir.term_kind.tk_unreachable);
+    u32 mut b = 0;
+    for (fir.terminator t : ends) {
+        assert(!fir.term_targets(&f, &t, 0, &b));
+    }
+}
+
+fn fail_trap_and_unreachable_abort() void {
+    fir.terminator ret = fir.term_return(fir_env.at(1, 1), 1);
+    fir.terminator jump = fir.term_goto(1, fir_env.at(1, 1), 1);
+    fir.terminator sw = fir.term_switch(copy(1), 0, 0, 1, fir_env.at(1, 1), 1);
+    fir.terminator chk = fir.term_check(copy(1), fir.check_kind.chk_overflow, 0, 0, 1,
+                                        fir_env.at(1, 1), 1);
+    fir.terminator over = fir.term_check_overwrite(fir.place_local(1), 1, fir_env.at(1, 1), 1);
+    fir.terminator fail = fir.term_fail(fir.check_kind.chk_enum, 0, 2, fir_env.at(1, 1), 1);
+    fir.terminator trap = fir.term_trap(fir_env.at(1, 1), 1);
+    fir.terminator never = fir.term_unreachable(fir_env.at(1, 1), 0);
+    assert(!fir.term_is_abort(&ret));
+    assert(!fir.term_is_abort(&jump));
+    assert(!fir.term_is_abort(&sw));
+    assert(!fir.term_is_abort(&chk));
+    assert(!fir.term_is_abort(&over));
+    assert(fir.term_is_abort(&fail));
+    assert(fir.term_is_abort(&trap));
+    assert(fir.term_is_abort(&never));
+}
+
+// ---- build modes ------------------------------------------------------------------------
+
+// The count of check kinds: chk_panic is the last member.
+u32 CHECK_KINDS = 11;
+
+fn the_build_modes_remove_their_checks() void {
+    assert(cast(fir.check_kind.chk_panic, u32) + 1 == CHECK_KINDS);
+    u32 mut removed_release = 0;
+    u32 mut removed_no_bounds = 0;
+    u32 mut k = 0;
+    while (k < CHECK_KINDS) {
+        fir.check_kind kind = cast(k, fir.check_kind);
+        bool by_release = kind == fir.check_kind.chk_overflow
+            || kind == fir.check_kind.chk_shift || kind == fir.check_kind.chk_overwrite;
+        bool by_no_bounds = kind == fir.check_kind.chk_bounds || kind == fir.check_kind.chk_span;
+        // The four combinations of the two modes.
+        assert(!fir.term_removable(kind, false, false));
+        assert(fir.term_removable(kind, true, false) == by_release);
+        assert(fir.term_removable(kind, false, true) == by_no_bounds);
+        assert(fir.term_removable(kind, true, true) == (by_release || by_no_bounds));
+        if (fir.term_removable(kind, true, false)) {
+            removed_release += 1;
+        }
+        if (fir.term_removable(kind, false, true)) {
+            removed_no_bounds += 1;
+        }
+        k += 1;
+    }
+    assert(removed_release == 3);
+    assert(removed_no_bounds == 2);
+}
+
+// ---- runtime entries --------------------------------------------------------------------
+//
+// A test/fort program runs in a temporary directory that holds only the program, so it cannot
+// open std/rt.ft. The compiler reads std/rt.ft when it compiles this test instead: each row binds
+// the entry `rt.<name>` to a local whose declared type spells the whole signature, and a
+// declaration that differs is a compile error. The row then holds check_entry against the name
+// and the signature that check_reported gives against the same spelling.
+
+// The signature of a check of `kind` as the translator calls it: the reported operands, then
+// `char*`, `u32` and `u32`.
+fn signature(fir_env.env mut* e, fir.check_kind kind) string {
+    types.table mut* tt = fir_env.tt(e);
+    strbuf.clear(&e->buf);
+    strbuf.append(&e->buf, "fn (");
+    u32 n = fir.check_reported_count(kind);
+    u32 mut i = 0;
+    while (i < n) {
+        types.node* t = fir.check_reported(kind, i, tt);
+        assert(t != null);
+        types.type_to_str(t, &e->buf);
+        strbuf.append(&e->buf, ", ");
+        i += 1;
+    }
+    assert(fir.check_reported(kind, n, tt) == null);
+    strbuf.append(&e->buf, "char*, u32, u32) noreturn");
+    return strbuf.view(&e->buf);
+}
+
+fn row(fir_env.env mut* e, fir.check_kind kind, string name, string sig, bool bound) void {
+    assert(bound);
+    if (fir.check_entry(kind) != name) {
+        eprintln("fir_terminator_test: expected <", name, ">, got <", fir.check_entry(kind), ">");
+        panic("fir_terminator_test: an entry name differs");
+    }
+    string got = signature(e, kind);
+    if (got != sig) {
+        eprintln("fir_terminator_test: expected <", sig, ">, got <", got, ">");
+        panic("fir_terminator_test: a reported operand differs");
+    }
+}
+
+fn every_check_kind_calls_its_runtime_entry() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    u32 mut rows = 0;
+    fn (char*, u32, u32) noreturn overflow = rt.fail_overflow;
+    row(&e, fir.check_kind.chk_overflow, "fail_overflow", "fn (char*, u32, u32) noreturn",
+        overflow != null);
+    rows += 1;
+    fn (i64, char*, char*, u32, u32) noreturn shift = rt.fail_shift;
+    row(&e, fir.check_kind.chk_shift, "fail_shift",
+        "fn (i64, char*, char*, u32, u32) noreturn", shift != null);
+    rows += 1;
+    fn (char*, u32, u32) noreturn div_zero = rt.fail_div_zero;
+    row(&e, fir.check_kind.chk_div_zero, "fail_div_zero", "fn (char*, u32, u32) noreturn",
+        div_zero != null);
+    rows += 1;
+    fn (char*, u32, u32) noreturn div_overflow = rt.fail_div_overflow;
+    row(&e, fir.check_kind.chk_div_overflow, "fail_div_overflow",
+        "fn (char*, u32, u32) noreturn", div_overflow != null);
+    rows += 1;
+    fn (i64, u64, char*, u32, u32) noreturn bounds = rt.fail_bounds;
+    row(&e, fir.check_kind.chk_bounds, "fail_bounds", "fn (i64, u64, char*, u32, u32) noreturn",
+        bounds != null);
+    rows += 1;
+    fn (i64, i64, u64, char*, u32, u32) noreturn span = rt.fail_span;
+    row(&e, fir.check_kind.chk_span, "fail_span",
+        "fn (i64, i64, u64, char*, u32, u32) noreturn", span != null);
+    rows += 1;
+    fn (i64, char*, u32, u32) noreturn alloc_count = rt.fail_alloc_count;
+    row(&e, fir.check_kind.chk_alloc_count, "fail_alloc_count",
+        "fn (i64, char*, u32, u32) noreturn", alloc_count != null);
+    rows += 1;
+    fn (char*, u32, u32) noreturn overwrite = rt.fail_overwrite;
+    row(&e, fir.check_kind.chk_overwrite, "fail_overwrite", "fn (char*, u32, u32) noreturn",
+        overwrite != null);
+    rows += 1;
+    fn (i64, char*, char*, u32, u32) noreturn bad_enum = rt.fail_enum;
+    row(&e, fir.check_kind.chk_enum, "fail_enum", "fn (i64, char*, char*, u32, u32) noreturn",
+        bad_enum != null);
+    rows += 1;
+    fn (char*, char*, u32, u32) noreturn user = rt.assert_fail;
+    row(&e, fir.check_kind.chk_user, "assert_fail", "fn (char*, char*, u32, u32) noreturn",
+        user != null);
+    rows += 1;
+    fn (char*, u64, char*, u32, u32) noreturn stop = rt.panic;
+    row(&e, fir.check_kind.chk_panic, "panic", "fn (char*, u64, char*, u32, u32) noreturn",
+        stop != null);
+    rows += 1;
+    assert(rows == CHECK_KINDS);
+    println(rows, " rows");
+}
+
+fn a_reported_text_is_the_interned_char_pointer() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    types.table mut* tt = fir_env.tt(&e);
+    assert(fir.check_reported(fir.check_kind.chk_user, 0, tt) == fir_env.char_ptr(&e));
+    assert(fir.check_reported(fir.check_kind.chk_panic, 1, tt) == fir_env.u64_ty(&e));
+    assert(fir.check_reported(fir.check_kind.chk_overflow, 0, tt) == null);
+    assert(fir.check_reported_count(fir.check_kind.chk_span) == 3);
+}
+
+// ---- the places a terminator reads ------------------------------------------------------
+
+// A function over `fn add(i32 x, i64 y) u64` with the locals the read cases name.
+struct reader {
+    fir.func f;
+    u32 a; // i32[4]
+    u32 holders; // holder[2]
+    u32 i; // u64
+    u32 j; // u64
+    u32 flag; // bool
+}
+
+fn reader_of(fir_env.env mut* e) reader {
+    reader mut x = reader{};
+    x.f = fir_env.func_of(e, "add");
+    types.table mut* tt = fir_env.tt(e);
+    x.a = temp(&x.f, types.type_array(tt, fir_env.i32_ty(e), 4));
+    x.holders = temp(&x.f, types.type_array(tt, fir_env.ty(e, "holder"), 2));
+    x.i = temp(&x.f, fir_env.u64_ty(e));
+    x.j = temp(&x.f, fir_env.u64_ty(e));
+    x.flag = temp(&x.f, fir_env.bool_ty(e));
+    return x;
+}
+
+fn temp(fir.func mut* f, types.node* ty) u32 {
+    return fir.local_add(f, ty, fir.local_kind.lk_temp, null, fir_env.at(1, 1));
+}
+
+fn reads(fir.func* f, fir.terminator* t) u32 {
+    fir.place mut p = fir.place{};
+    u32 mut k = 0;
+    while (fir.term_reads_place(f, t, k, &p)) {
+        k += 1;
+    }
+    return k;
+}
+
+// Whether read `k` of `t` is the local `n` with no projection.
+fn reads_local(fir.func* f, fir.terminator* t, u32 k, u32 n) bool {
+    fir.place mut p = fir.place{};
+    return fir.term_reads_place(f, t, k, &p) && p.base == fir.base_kind.bk_local
+        && p.local == n && p.proj_len == 0;
+}
+
+fn reads_place(fir.func* f, fir.terminator* t, u32 k, fir.place want) bool {
+    fir.place mut p = fir.place{};
+    return fir.term_reads_place(f, t, k, &p)
+        && fir.place_compare(f, p, want) == fir.place_rel.pc_equal;
+}
+
+fn a_switch_reads_its_operand_after_its_index_local() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    // `switch(copy _a[_i])`: `_i`, then `_a[_i]`.
+    fir.place elem = fir.place_index(&x.f, fir.place_local(x.a), x.i);
+    fir.terminator t = fir.term_switch(fir.operand_copy(elem), 0, 0, 0, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &t) == 2);
+    assert(reads_local(&x.f, &t, 0, x.i));
+    assert(reads_place(&x.f, &t, 1, elem));
+    // A constant operand reads nothing.
+    fir.operand one = fir.operand_const(fir.const_bool(true));
+    fir.terminator c = fir.term_switch(one, 0, 0, 0, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &c) == 0);
+}
+
+fn a_check_reads_its_condition_then_its_reported_operands() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    // `check(copy _flag, enum, copy _a[_j], bytes "color")`: `_flag`, `_j`, `_a[_j]`.
+    fir.place elem = fir.place_index(&x.f, fir.place_local(x.a), x.j);
+    u32 first = fir.operand_push(&x.f, fir.operand_copy(elem));
+    fir.operand_push(&x.f, fir.operand_const(fir.const_bytes("color")));
+    fir.terminator t = fir.term_check(copy(x.flag), fir.check_kind.chk_enum, first, 2, 1,
+                                      fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &t) == 3);
+    assert(reads_local(&x.f, &t, 0, x.flag));
+    assert(reads_local(&x.f, &t, 1, x.j));
+    assert(reads_place(&x.f, &t, 2, elem));
+    // A `fail` reads its reported operands alone.
+    fir.terminator fail = fir.term_fail(fir.check_kind.chk_enum, first, 2, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &fail) == 2);
+    assert(reads_local(&x.f, &fail, 0, x.j));
+    assert(reads_place(&x.f, &fail, 1, elem));
+}
+
+fn an_overwrite_check_reads_only_the_index_locals_of_its_place() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    // `check(overwrite: _holders[_i].0)` reads `_i`. The test of the value counts as no use of
+    // the place (spec/fir.md 14), so an ownership analysis sees no read of a moved place.
+    fir.place row = fir.place_index(&x.f, fir.place_local(x.holders), x.i);
+    fir.place held = fir.place_field(&x.f, row, 0);
+    fir.terminator t = fir.term_check_overwrite(held, 1, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &t) == 1);
+    assert(reads_local(&x.f, &t, 0, x.i));
+    // With no index, the check reads nothing.
+    fir.terminator plain = fir.term_check_overwrite(fir.place_local(x.i), 1, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &plain) == 0);
+}
+
+fn a_return_reads_the_return_place_unless_it_is_void() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    fir.terminator ret = fir.term_return(fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &ret) == 1);
+    assert(reads_local(&x.f, &ret, 0, 0));
+    fir.func mut g = fir_env.func_of(&e, "nothing");
+    defer fir.func_free(&g);
+    assert(reads(&g, &ret) == 0);
+}
+
+fn goto_trap_and_unreachable_read_nothing() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    fir.terminator jump = fir.term_goto(1, fir_env.at(1, 1), 1);
+    fir.terminator trap = fir.term_trap(fir_env.at(1, 1), 1);
+    fir.terminator never = fir.term_unreachable(fir_env.at(1, 1), 0);
+    assert(reads(&x.f, &jump) == 0);
+    assert(reads(&x.f, &trap) == 0);
+    assert(reads(&x.f, &never) == 0);
+}
+
+fn main() i32 {
+    a_goto_names_its_target();
+    a_switch_names_its_arms_then_otherwise();
+    a_check_names_its_continuation();
+    an_overwrite_check_names_its_place_and_its_continuation();
+    return_fail_trap_and_unreachable_name_no_block();
+    fail_trap_and_unreachable_abort();
+    the_build_modes_remove_their_checks();
+    every_check_kind_calls_its_runtime_entry();
+    a_reported_text_is_the_interned_char_pointer();
+    a_switch_reads_its_operand_after_its_index_local();
+    a_check_reads_its_condition_then_its_reported_operands();
+    an_overwrite_check_reads_only_the_index_locals_of_its_place();
+    a_return_reads_the_return_place_unless_it_is_void();
+    goto_trap_and_unreachable_read_nothing();
+    println("ok");
+    return 0;
+}
