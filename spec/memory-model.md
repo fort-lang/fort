@@ -733,9 +733,9 @@ u8 mut@ own b = new(u8, 64);
 free(cast(b.ptr, void* own));                  // error: a cast never adds own to the view b.ptr
 ```
 
-The refused lines are shapes that a cast accepted before 2026-09-29 (D3.14). The last one made a
-second owner: `b` still looked live after it, so a `del(b)` would free twice and an assignment to
-`b` would trap on the overwrite check. Free `own` spans with `del`.
+The last line would make a second owner: `b` would still look live after it, so a `del(b)` would
+free twice and an assignment to `b` would trap on the overwrite check. Free `own` spans with
+`del`.
 
 ## 5. Fixed arrays and structs
 

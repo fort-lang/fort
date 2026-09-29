@@ -934,8 +934,8 @@ outside it is `own` and every level between the binding and the storage holding 
 is immutable. The first condition keeps a container from being freed while its elements are
 owned by nobody; the second closes the `T** -> const T**` hole for ownership, where a borrowed
 value could be stored, through the copy, into a slot the source still sees as owned. A `cast`
-is the escape from the monotone rule for a drop (section 9.2). Nothing adds `own`: a cast refuses
-it too (D3.14).
+is the escape from the monotone rule for a drop (section 9.2). No conversion or cast adds `own`
+(D3.14).
 
 | Conversion                                        | Result | Reason                          |
 |---------------------------------------------------|--------|---------------------------------|

@@ -846,7 +846,10 @@ bullet at a time and without a rewrite.
   `--since` reads `git diff main...HEAD`, so it counts **committed** work only. A branch
   whose tests are still staged or untracked reads as the ratio of the commits before them. That
   number is smaller than the truth, and it sends an implementor off to write tests the branch
-  already has. Commit first, then measure.
+  already has. Commit first, then measure. Run from a worktree, it needs
+  `--root <worktree>`: the default root is the parent of the script's own directory, the main
+  checkout, and there it printed `no source lines added` for a branch with 100 source lines
+  (T-257, 2026-09-29). Write `python3 agents/lines.py --root "$PWD" --since main --min 3.0`.
 - `agents/lines.py` does not see `editors/`. A branch that changes the VS Code extension alone
   therefore has no figure from the tool, and the criterion is met by hand. Count with `git diff
   --numstat main...HEAD` and the tool's own convention: net lines, raw `wc -l`, comments and blank

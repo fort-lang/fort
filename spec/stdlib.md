@@ -1205,7 +1205,7 @@ fn real_path(string path, strbuf.str_buf mut* out) bool;
 `exe_path` appends the path to `out` and returns true. It returns false and leaves `out`
 unchanged when the system cannot give the path. The caller owns `out`.
 `real_path` appends the canonical form of `path` to `out` and returns true. It returns false and
-leaves `out` unchanged when `realpath(3)` fails; `sys.errno()` then gives the reason. It
+leaves `out` unchanged when `realpath(3)` fails. It
 allocates the buffer of `libc.PATH_MAX` bytes that `realpath` writes, with `new`, and frees it
 before it returns. This is the owning form of `realpath` that D17.13 describes: the `std.libc`
 declaration takes a buffer and returns a view of it.

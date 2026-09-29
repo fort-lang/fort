@@ -353,9 +353,12 @@ Sections:
   depth -- an integer, the `void` behind a `void*`, or a pointee type the cast reinterprets -- the
   target marks no `own` at that depth or below it. So `cast(p, i32* own)` from an `i32*` is an
   error, and so are `cast(bits, void* own)` from a `u64`, `cast(s, string own)` from a `string`
-  and `cast(q, node* own*)` from a `node**`. A cast carries `own` or drops it, and it never adds
-  it. Ownership enters a program only through `new` and through an `extern` signature that says
-  `own` (D17.3, D17.13).
+  and `cast(q, node* own*)` from a `node**`. A fixed-array suffix on one side only ends the
+  correspondence of levels, as it does for `mut`: `cast(&arr, node* own*)` from a
+  `node* own[2] mut arr` is an error, although a fixed array adds no level (D5.2). This is the
+  conservative reading, and a later amendment may relax the `mut` and the `own` walk together. A
+  cast carries `own` or drops it, and it never adds it. Ownership enters a program only through
+  `new` and through an `extern` signature that says `own` (D17.3, D17.13).
 - history: Amended 2026-09-14 (T-085): a cast could add `mut` -- to a pointer at any level, to a
   span at any level, from a `void*`, from a `u64` and from a `string` -- which left `mut` on a
   reference a suggestion. The user withdrew the escape on 2026-09-11, `void*` included. The cost,
@@ -371,7 +374,7 @@ Sections:
   asserts that `void mut* mut@` does not convert to `void* mut@`, and until T-135 three sites of
   `src/fort` (`gen.ft` twice and `types.ft` once) wrote that cast to perform exactly that drop on
   the result of a `new`. Amended 2026-09-10: spans were called slices (D3.5).
-  Amended 2026-09-29 (T-256): a cast could add `own` to a pointer or span. The allowed list held
+  Amended 2026-09-29 (T-257): a cast could add `own` to a pointer or span. The allowed list held
   "adding `own` to a pointer or span (adoption, D17.3)", and "a non-`own` source cast to an `own`
   target adopts". Adoption existed for memory from C. An `extern` that says `own` (D17.13) already
   covers that memory, and every allocating `extern` in `std` says `own`. The cast was then the one
@@ -1255,7 +1258,7 @@ Sections:
   `.ptr`, stack address or literal is a compile error, are D17.9. Allocation has no header, so
   `new`/`del` and C `malloc`/`free` are interchangeable; memory from C is owned when its `extern`
   declaration says `own` (D17.13).
-- history: Amended 2026-09-29 (T-256): the rule read "memory from C is adopted with `cast`
+- history: Amended 2026-09-29 (T-257): the rule read "memory from C is adopted with `cast`
   (D17.3)". A cast no longer adds `own` (D3.14).
 
 ### D10.4 No pointer arithmetic
@@ -1289,7 +1292,7 @@ Sections:
   null function pointer, and data races. Everything else is defined or a diagnosed error. In
   particular there is no strict-aliasing rule: reading an object through a pointer to another type
   of the same size (`*cast(&x, u64*)` for an `f64 x`) is defined and yields the bit pattern.
-- history: Amended 2026-09-29 (T-256): the list held "`del` of adopted memory (D17.3) that is not
+- history: Amended 2026-09-29 (T-257): the list held "`del` of adopted memory (D17.3) that is not
   the start of an allocation" and "writing through a cast that added mutability into read-only
   memory". A cast adds neither `own` nor `mut` (D3.14); the second item was stale since T-085.
 
@@ -1924,7 +1927,7 @@ says ownership is "by convention", this section supersedes it.
   and `node*` are different types, as are `fn (node* own) void` and `fn (node*) void`. `own` on a
   non-reference type (`i32 own`, `point own`, `i32[4] own`) or on a function-pointer type is an
   error; an array or struct that *contains* an `own` reference is an owning aggregate (D17.7).
-- history: Amended 2026-09-29 (T-256): the allocation was "obtained from `new` (or adopted with
+- history: Amended 2026-09-29 (T-257): the allocation was "obtained from `new` (or adopted with
   `cast`, D17.3)". A cast no longer adds `own` (D3.14).
 
 ### D17.2 Where an own marker goes
@@ -1975,7 +1978,7 @@ says ownership is "by convention", this section supersedes it.
   legal, and D10.2 rejects that one. Standard-library functions that allocate
   return `own` (D13.5). An `extern` whose result says `own` produces an owning value (D17.13). A
   `cast` carries `own` or drops it, and the target type of a cast decides (D3.14). A cast never
-  adds `own`, so it produces no owner that its operand was not already. Span
+  adds `own`. Its result owns only what its operand owned. Span
   expressions (`buf[..]`, `buf[lo..hi]`) and `.ptr` always yield views, as do `&`, literals and the
   runtime's `args`.
 - history: Amended 2026-09-14 (T-085): the adoption clause called itself "the same unsafe escape
@@ -1991,7 +1994,7 @@ says ownership is "by convention", this section supersedes it.
   which contradicted the `new(node* own, n)` in its own next clause, D10.2's parse rule, and `void*
   own` (D17.1); it was a second statement of D10.2's rule that had drifted from it, so it now cites
   it instead of restating it.
-  Amended 2026-09-29 (T-256): the rule let `cast` add `own` to a pointer or span, "adopting memory
+  Amended 2026-09-29 (T-257): the rule let `cast` add `own` to a pointer or span, "adopting memory
   that came from C (`cast(p, u8 mut* own)` for a `void mut*` from an extern that does not say
   `own`)", and called adoption "the one unsafe mark a cast adds". D3.14 now refuses that cast.
 
@@ -2139,7 +2142,7 @@ says ownership is "by convention", this section supersedes it.
   buffer with `new`.
 - history: Amended 2026-09-14 (T-086): `malloc` was declared `void* own`, because `void mut*` was
   not a type until D3.11 was amended.
-  Amended 2026-09-29 (T-256): added the borrowing form for a C result that is owned on some calls
+  Amended 2026-09-29 (T-257): added the borrowing form for a C result that is owned on some calls
   only. A cast no longer adds `own` (D3.14), so an `extern` signature is the one way that C memory
   gets an owner.
 
@@ -2151,7 +2154,7 @@ says ownership is "by convention", this section supersedes it.
   the allocation was freed; an `own` value that is never freed. The linear check that would make
   leaks and use after `move` compile errors is deferred (D15); this design is its intended base
   and adds no syntax it would not need.
-- history: Amended 2026-09-29 (T-256): the list held "two `own` copies made through `cast`". A cast
+- history: Amended 2026-09-29 (T-257): the list held "two `own` copies made through `cast`". A cast
   no longer adds `own` (D3.14), and `cast(move(x), ...)` ends the source binding (D17.5).
 
 ## D18 Float printing in the runtime
