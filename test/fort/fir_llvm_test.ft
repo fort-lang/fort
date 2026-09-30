@@ -1,0 +1,968 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| locals ok
+//| classes ok
+//| places ok
+/// Checks the storage that the FIR translator gives each local and the text of its allocas and
+/// places (spec/fir.md 12.1): `%result`, `%ret.sret`, the parameters, the named locals, the
+/// registers, the `%tmp` slots, no storage for a temporary that nothing names, and the three
+/// `getelementptr` shapes. Each lowered case holds the lines that the direct path writes too.
+import fir;
+import fir_llvm;
+import llvm_env;
+import pass_env;
+
+// ---- the storage of the locals ------------------------------------------------------------------
+
+// The source of the worked example of spec/fir.md 13.
+string[9] WORKED = {
+    "fn f(bool c) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    defer del(p);",
+    "    if (c) {",
+    "        return 1;",
+    "    }",
+    "    *p = 7;",
+    "    return *p;",
+    "}",
+};
+
+// The entry block of the worked example: `%result` first, then `c` and `p` in local order. `c`
+// arrives as `%c.in` and stores through `zext`. `_2 = const zero` stores `ptr null`, and `_3` is a
+// register, the result of the call of `std.rt.alloc`, which `bb1` stores into `p`. The
+// terminators are not written yet.
+fn the_entry_block_of_the_worked_example() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, WORKED[..], "f", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 0) == fir_llvm.storage.sk_result);
+    assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_param);
+    assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_named);
+    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_register);
+    string[27] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %c.0 = alloca i8, align 1",
+        "  %p.1 = alloca ptr, align 8",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
+        "",
+        "L1:",
+        "  store ptr %t1, ptr %p.1, align 8",
+        "",
+        "L2:",
+        "  store i32 1, ptr %result, align 4",
+        "  %t2 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t2)",
+        "  store ptr null, ptr %p.1, align 8",
+        "",
+        "L3:",
+        "  %t3 = load ptr, ptr %p.1, align 8",
+        "  store i32 7, ptr %t3, align 4",
+        "  %t4 = load ptr, ptr %p.1, align 8",
+        "  %t5 = load i32, ptr %t4, align 4",
+        "  store i32 %t5, ptr %result, align 4",
+        "  %t6 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t6)",
+        "  store ptr null, ptr %p.1, align 8",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    // the direct path writes the same entry block up to its check, with no `%result`
+    string[6] entry = {
+        "  %c.0 = alloca i8, align 1",
+        "  %p.1 = alloca ptr, align 8",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
+    };
+    llvm_env.in_direct(&e, "f", entry[..]);
+}
+
+// Under --release the build-mode pass folds `_3 = alloc` and `_2 = move _3` into `_2 = alloc`, so
+// no item names `_3` and it gets no storage: no alloca and no register (spec/fir.md 12.1, 13).
+// The store of the call is the direct store of the direct path in release mode.
+fn the_folded_temporary_of_the_worked_example_has_no_storage() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, WORKED[..], "f", pass_env.RELEASE);
+    defer fir.func_free(&f);
+    assert(fir.local_count(&f) == 4);
+    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_none);
+    string[25] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %c.0 = alloca i8, align 1",
+        "  %p.1 = alloca ptr, align 8",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
+        "  store ptr %t1, ptr %p.1, align 8",
+        "",
+        "L1:",
+        "  store i32 1, ptr %result, align 4",
+        "  %t2 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t2)",
+        "  store ptr null, ptr %p.1, align 8",
+        "",
+        "L2:",
+        "  %t3 = load ptr, ptr %p.1, align 8",
+        "  store i32 7, ptr %t3, align 4",
+        "  %t4 = load ptr, ptr %p.1, align 8",
+        "  %t5 = load i32, ptr %t4, align 4",
+        "  store i32 %t5, ptr %result, align 4",
+        "  %t6 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t6)",
+        "  store ptr null, ptr %p.1, align 8",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    string[4] entry = {
+        "  %p.1 = alloca ptr, align 8",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
+    };
+    llvm_env.in_direct(&e, "f", entry[..]);
+    string[2] store = {
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
+        "  store ptr %t1, ptr %p.1, align 8",
+    };
+    llvm_env.in_direct(&e, "f", store[..]);
+}
+
+string[12] SHAPES = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "fn same(pair p) pair {",
+    "    return p;",
+    "}",
+    "fn nothing(i32 x) void {",
+    "}",
+    "fn wrap(i32 a, i32 b) i32 {",
+    "    return a +% b;",
+    "}",
+};
+
+// `_0` of an aggregate type is `%ret.sret` and an aggregate parameter is `%p.in`, and neither has
+// an alloca (toolchain.md 6 item 7): the copy of `return p` writes the caller's storage, as the
+// direct path writes it.
+fn an_aggregate_result_and_parameter_have_no_alloca() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, SHAPES[..], "same", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 0) == fir_llvm.storage.sk_sret);
+    assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_incoming);
+    string[3] want = {
+        "entry:",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %p.in, \\",
+        "i64 16, i1 false)",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.in_direct(&e, "same", want[..]);
+}
+
+// `_0` of type `void` has no storage, and a scalar parameter is stored into its alloca before
+// the first statement (toolchain.md 6 item 10).
+fn a_void_result_has_no_storage() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, SHAPES[..], "nothing", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 0) == fir_llvm.storage.sk_none);
+    string[3] want = {
+        "entry:",
+        "  %x.0 = alloca i32, align 4",
+        "  store i32 %x.in, ptr %x.0, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.in_direct(&e, "nothing", want[..]);
+}
+
+// A scalar `_0` is `%result`, which each assignment of `_0` stores: the one agreed difference of
+// the entry block (spec/fir.md 12.5). The wrapping `+%` is a plain `add` (D16).
+fn a_scalar_result_is_the_alloca_result() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, SHAPES[..], "wrap", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_register);
+    string[10] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %a.0 = alloca i32, align 4",
+        "  %b.1 = alloca i32, align 4",
+        "  store i32 %a.in, ptr %a.0, align 4",
+        "  store i32 %b.in, ptr %b.1, align 4",
+        "  %t0 = load i32, ptr %a.0, align 4",
+        "  %t1 = load i32, ptr %b.1, align 4",
+        "  %t2 = add i32 %t0, %t1",
+        "  store i32 %t2, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    string[7] body = {
+        "  %b.1 = alloca i32, align 4",
+        "  store i32 %a.in, ptr %a.0, align 4",
+        "  store i32 %b.in, ptr %b.1, align 4",
+        "  %t0 = load i32, ptr %a.0, align 4",
+        "  %t1 = load i32, ptr %b.1, align 4",
+        "  %t2 = add i32 %t0, %t1",
+        "  ret i32 %t2",
+    };
+    llvm_env.in_direct(&e, "wrap", body[..]);
+}
+
+// ---- the classification -------------------------------------------------------------------------
+
+// The three cases of the T-209 review, and the two slots of spec/fir.md 12.1.
+string[40] CASES = {
+    "enum color {",
+    "    red,",
+    "    green,",
+    "}",
+    "fn sel(bool c, i32 mut@ a, i32 i) void {",
+    "    a[i] = c ? 1 : 2;",
+    "}",
+    "fn acc(bool c, i32 x) i32 {",
+    "    i32 mut y = x;",
+    "    y += (c ? 1 : 2);",
+    "    return y;",
+    "}",
+    "fn pick(color v) i32 {",
+    "    switch (v) {",
+    "    case color.red:",
+    "        return 1;",
+    "    case color.green:",
+    "        return 2;",
+    "    }",
+    "}",
+    "fn both(bool a, bool b) bool {",
+    "    return a && b;",
+    "}",
+    "fn sum(i32@ s) i32 {",
+    "    i32 mut t = 0;",
+    "    for (i32 x : s) {",
+    "        t +%= x;",
+    "    }",
+    "    return t;",
+    "}",
+    "fn lend(i32 mut* p) i32 {",
+    "    return 0;",
+    "}",
+    "fn keep() i32 {",
+    "    i32 mut v = 5;",
+    "    return lend(&v);",
+    "}",
+    "fn drop() void {",
+    "    lend(null);",
+    "}",
+};
+
+// `a[i] = c ? 1 : 2`: the index `_4` is a register that the store after the join reads, because
+// one statement assigns it and only that statement reads it; the arm value `_7`, which two arms
+// assign, is a slot. The direct path writes the same text up to its bounds check.
+fn an_index_before_a_conditional_is_a_register() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, CASES[..], "sel", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_incoming);
+    assert(llvm_env.storage_of(&f, 4) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(&f, 5) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(&f, 6) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(&f, 7) == fir_llvm.storage.sk_slot);
+    string[27] want = {
+        "entry:",
+        "  %c.0 = alloca i8, align 1",
+        "  %i.2 = alloca i32, align 4",
+        "  %tmp0 = alloca i32, align 4",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store i32 %i.in, ptr %i.2, align 4",
+        "  %t1 = load i32, ptr %i.2, align 4",
+        "  %t2 = sext i32 %t1 to i64",
+        "  %t3 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 1",
+        "  %t4 = load i64, ptr %t3, align 8",
+        "  %t5 = icmp uge i64 %t2, %t4",
+        "",
+        "L1:",
+        "",
+        "L2:",
+        "  store i32 1, ptr %tmp0, align 4",
+        "",
+        "L3:",
+        "  store i32 2, ptr %tmp0, align 4",
+        "",
+        "L4:",
+        "  %t6 = load i32, ptr %tmp0, align 4",
+        "  %t7 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 0",
+        "  %t8 = load ptr, ptr %t7, align 8",
+        "  %t9 = getelementptr inbounds i32, ptr %t8, i64 %t2",
+        "  store i32 %t6, ptr %t9, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.in_direct(&e, "sel", want[1..12]);
+}
+
+// `y += (c ? 1 : 2)`: the old value `_4` and the overflow flag `_6` are registers, and the arm
+// value `_5` is a slot. The `add` of the continuation takes `extractvalue 0` (spec/fir.md 12.2).
+fn a_compound_assignment_over_a_conditional() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, CASES[..], "acc", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_named);
+    assert(llvm_env.storage_of(&f, 4) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(&f, 5) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(&f, 6) == fir_llvm.storage.sk_register);
+    string[29] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %c.0 = alloca i8, align 1",
+        "  %x.1 = alloca i32, align 4",
+        "  %y.2 = alloca i32, align 4",
+        "  %tmp0 = alloca i32, align 4",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store i32 %x.in, ptr %x.1, align 4",
+        "  %t1 = load i32, ptr %x.1, align 4",
+        "  store i32 %t1, ptr %y.2, align 4",
+        "  %t2 = load i32, ptr %y.2, align 4",
+        "",
+        "L1:",
+        "  store i32 1, ptr %tmp0, align 4",
+        "",
+        "L2:",
+        "  store i32 2, ptr %tmp0, align 4",
+        "",
+        "L3:",
+        "  %t3 = load i32, ptr %tmp0, align 4",
+        "  %t4 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %t2, i32 %t3)",
+        "  %t5 = extractvalue { i32, i1 } %t4, 0",
+        "  %t6 = extractvalue { i32, i1 } %t4, 1",
+        "",
+        "L4:",
+        "  store i32 %t5, ptr %y.2, align 4",
+        "  %t7 = load i32, ptr %y.2, align 4",
+        "  store i32 %t7, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.in_direct(&e, "acc", want[2..12]);
+}
+
+// `switch` on an enum with no `default`: `_2`, the value widened for `fail_enum`, is a register,
+// because the failure block of its own statement is the only other item that reads it.
+fn an_enum_value_for_its_failure_block_is_a_register() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, CASES[..], "pick", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(fir.local_count(&f) == 3);
+    assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_register);
+    string[16] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %v.0 = alloca i32, align 4",
+        "  store i32 %v.in, ptr %v.0, align 4",
+        "  %t0 = load i32, ptr %v.0, align 4",
+        "  %t1 = sext i32 %t0 to i64",
+        "",
+        "L1:",
+        "",
+        "L2:",
+        "  store i32 1, ptr %result, align 4",
+        "",
+        "L3:",
+        "  store i32 2, ptr %result, align 4",
+        "",
+        "L4:",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.in_direct(&e, "pick", want[2..6]);
+}
+
+// The `&&` temporary, which two statements assign, is a slot, as the direct path's
+// short-circuit slot is (spec/fir.md 12.1).
+fn the_short_circuit_temporary_is_a_slot() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, CASES[..], "both", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_slot);
+    string[25] want = {
+        "entry:",
+        "  %result = alloca i8, align 1",
+        "  %a.0 = alloca i8, align 1",
+        "  %b.1 = alloca i8, align 1",
+        "  %tmp0 = alloca i8, align 1",
+        "  %t0 = zext i1 %a.in to i8",
+        "  store i8 %t0, ptr %a.0, align 1",
+        "  %t1 = zext i1 %b.in to i8",
+        "  store i8 %t1, ptr %b.1, align 1",
+        "  %t2 = load i8, ptr %a.0, align 1",
+        "  %t3 = trunc i8 %t2 to i1",
+        "  %t4 = zext i1 %t3 to i8",
+        "  store i8 %t4, ptr %tmp0, align 1",
+        "",
+        "L1:",
+        "  %t5 = load i8, ptr %b.1, align 1",
+        "  %t6 = trunc i8 %t5 to i1",
+        "  %t7 = zext i1 %t6 to i8",
+        "  store i8 %t7, ptr %tmp0, align 1",
+        "",
+        "L2:",
+        "  %t8 = load i8, ptr %tmp0, align 1",
+        "  %t9 = trunc i8 %t8 to i1",
+        "  %t10 = zext i1 %t9 to i8",
+        "  store i8 %t10, ptr %result, align 1",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.in_direct(&e, "both", want[2..13]);
+    llvm_env.in_direct(&e, "both", want[15..19]);
+}
+
+// The counter of a range `for`, which the start and the step assign, is a slot, and so is the
+// copy of the collection, whose type is an aggregate. The direct path reads the counter in the
+// head of the loop in the same way.
+fn the_range_counter_is_a_slot() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, CASES[..], "sum", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 4) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(&f, 5) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(&f, 6) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(&f, 7) == fir_llvm.storage.sk_register);
+    string[37] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %t.1 = alloca i32, align 4",
+        "  %x.2 = alloca i32, align 4",
+        "  %tmp0 = alloca %fort.span, align 8",
+        "  %tmp1 = alloca i64, align 8",
+        "  store i32 0, ptr %t.1, align 4",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.in, \\",
+        "i64 16, i1 false)",
+        "  store i64 0, ptr %tmp1, align 8",
+        "",
+        "L1:",
+        "  %t0 = load i64, ptr %tmp1, align 8",
+        "  %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+        "  %t2 = load i64, ptr %t1, align 8",
+        "  %t3 = icmp ult i64 %t0, %t2",
+        "",
+        "L2:",
+        "  %t4 = load i64, ptr %tmp1, align 8",
+        "  %t5 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+        "  %t6 = load ptr, ptr %t5, align 8",
+        "  %t7 = getelementptr inbounds i32, ptr %t6, i64 %t4",
+        "  %t8 = load i32, ptr %t7, align 4",
+        "  store i32 %t8, ptr %x.2, align 4",
+        "  %t9 = load i32, ptr %t.1, align 4",
+        "  %t10 = load i32, ptr %x.2, align 4",
+        "  %t11 = add i32 %t9, %t10",
+        "  store i32 %t11, ptr %t.1, align 4",
+        "",
+        "L3:",
+        "  %t12 = load i64, ptr %tmp1, align 8",
+        "  %t13 = add i64 %t12, 1",
+        "  store i64 %t13, ptr %tmp1, align 8",
+        "",
+        "L4:",
+        "  %t14 = load i32, ptr %t.1, align 4",
+        "  store i32 %t14, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.in_direct(&e, "sum", want[2..10]);
+    llvm_env.in_direct(&e, "sum", want[12..16]);
+}
+
+// The address of a named local is its alloca and prints nothing, so the register `_3 = addr
+// mut(_1)` names `%v.0`. The sink of a call statement is a register of type `void` with no
+// storage. Calls are T-251's, so each call reports and gives `poison`.
+fn an_address_is_a_register_with_no_instruction() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, CASES[..], "keep", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_named);
+    assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_register);
+    u64 before = llvm_env.errors(&e);
+    string[5] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %v.0 = alloca i32, align 4",
+        "  store i32 5, ptr %v.0, align 4",
+        "  store i32 poison, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    assert(llvm_env.errors(&e) == before + 1);
+    assert(e.g.failed);
+    fir.func mut g = llvm_env.lower(&e, CASES[..], "drop", pass_env.CHECKED);
+    defer fir.func_free(&g);
+    assert(fir.local_count(&g) == 2);
+    assert(llvm_env.storage_of(&g, 1) == fir_llvm.storage.sk_register);
+    string[1] none = {"entry:"};
+    llvm_env.expect(&e, llvm_env.translate(&e, &g), none[..]);
+}
+
+// Hand-written functions for the rules that a lowered function does not reach: a temporary that
+// nothing names, a temporary that another statement reads, a read before the assignment in the
+// order of translation, an `addr` of a temporary, a read by a terminator of the same statement,
+// and an aggregate temporary.
+string[80] RULES = {
+    "fn main.unnamed() -> i32 {",
+    "    let _1: i32;",
+    "    let _2: bool;",
+    "",
+    "    bb0: {",
+    "        _0 = const i32 1 #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+    "fn main.mixed() -> i32 {",
+    "    let _1: i32;",
+    "",
+    "    bb0: {",
+    "        _1 = const i32 1 #1:1 s1;",
+    "        _0 = copy _1 #1:1 s2;",
+    "        return #1:1 s2;",
+    "    }",
+    "}",
+    "fn main.early() -> i32 {",
+    "    let _1: i32;",
+    "",
+    "    bb0: {",
+    "        goto bb2 #1:1 s1;",
+    "    }",
+    "    bb1: {",
+    "        _0 = copy _1 #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "    bb2: {",
+    "        _1 = const i32 9 #1:1 s1;",
+    "        goto bb1 #1:1 s1;",
+    "    }",
+    "}",
+    "fn main.pointed() -> i32 {",
+    "    let _1: i32;",
+    "    let _2: i32*;",
+    "",
+    "    bb0: {",
+    "        _1 = const i32 7 #1:1 s1;",
+    "        _2 = addr(_1) #1:1 s1;",
+    "        _0 = copy (*_2) #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+    "fn main.tested(_1 (c): bool) -> i32 {",
+    "    let _2: bool;",
+    "",
+    "    bb0: {",
+    "        _2 = copy _1 #1:1 s1;",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2] #1:1 s1;",
+    "    }",
+    "    bb1: {",
+    "        _0 = const i32 1 #1:1 s2;",
+    "        return #1:1 s2;",
+    "    }",
+    "    bb2: {",
+    "        _0 = const i32 2 #1:1 s3;",
+    "        return #1:1 s3;",
+    "    }",
+    "}",
+    "fn main.whole() -> i32 {",
+    "    let _1: pair;",
+    "    let _2: pair*;",
+    "",
+    "    bb0: {",
+    "        _1 = aggregate pair(const i32 3, const u64 4) #1:1 s1;",
+    "        _0 = copy _1.0 #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+    "fn main.twice() -> i32 {",
+    "    let _1: i32;",
+    "",
+    "    bb0: {",
+    "        _1 = const i32 1 #1:1 s1;",
+    "        _1 = const i32 2 #1:1 s1;",
+    "        _0 = copy _1 #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+};
+
+// The storage of each local of RULES, function by function, and the text of the cases that a
+// slot changes.
+fn the_rules_that_no_lowered_function_reaches() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[4] prelude = {"struct pair {", "    i32 a;", "    u64 b;", "}"};
+    fir.module mut m = llvm_env.parse(&e, prelude[..], RULES[..]);
+    defer fir.module_free(&m);
+    // unnamed: no item names `_1` or `_2`
+    fir.func* unnamed = fir.module_function_at(&m, 0);
+    assert(llvm_env.storage_of(unnamed, 1) == fir_llvm.storage.sk_none);
+    assert(llvm_env.storage_of(unnamed, 2) == fir_llvm.storage.sk_none);
+    string[3] none = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  store i32 1, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, unnamed), none[..]);
+    // mixed: s2 reads what s1 assigns
+    fir.func* mixed = fir.module_function_at(&m, 1);
+    assert(llvm_env.storage_of(mixed, 1) == fir_llvm.storage.sk_slot);
+    string[6] slot = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %tmp0 = alloca i32, align 4",
+        "  store i32 1, ptr %tmp0, align 4",
+        "  %t0 = load i32, ptr %tmp0, align 4",
+        "  store i32 %t0, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, mixed), slot[..]);
+    // early: bb1 reads `_1` before bb2 assigns it in the order of translation
+    fir.func* early = fir.module_function_at(&m, 2);
+    assert(llvm_env.storage_of(early, 1) == fir_llvm.storage.sk_slot);
+    string[10] late = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %tmp0 = alloca i32, align 4",
+        "",
+        "L1:",
+        "  %t0 = load i32, ptr %tmp0, align 4",
+        "  store i32 %t0, ptr %result, align 4",
+        "",
+        "L2:",
+        "  store i32 9, ptr %tmp0, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, early), late[..]);
+    // pointed: a register has no address, so `_1` is a slot; `_2` is a register
+    fir.func* pointed = fir.module_function_at(&m, 3);
+    assert(llvm_env.storage_of(pointed, 1) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(pointed, 2) == fir_llvm.storage.sk_register);
+    string[6] through = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %tmp0 = alloca i32, align 4",
+        "  store i32 7, ptr %tmp0, align 4",
+        "  %t0 = load i32, ptr %tmp0, align 4",
+        "  store i32 %t0, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.translate(&e, pointed), through[..]);
+    // tested: the `switch` of s1 reads `_2`, which s1 assigns
+    fir.func* tested = fir.module_function_at(&m, 4);
+    assert(llvm_env.storage_of(tested, 1) == fir_llvm.storage.sk_param);
+    assert(llvm_env.storage_of(tested, 2) == fir_llvm.storage.sk_register);
+    // whole: an aggregate temporary is a slot; `_2`, which nothing names, has no storage
+    fir.func* whole = fir.module_function_at(&m, 5);
+    assert(llvm_env.storage_of(whole, 1) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(whole, 2) == fir_llvm.storage.sk_none);
+    // twice: two assignments with one index make a slot
+    fir.func* twice = fir.module_function_at(&m, 6);
+    assert(llvm_env.storage_of(twice, 1) == fir_llvm.storage.sk_slot);
+}
+
+// ---- places -------------------------------------------------------------------------------------
+
+string[42] PLACES = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct flags {",
+    "    bool on;",
+    "    i32 n;",
+    "}",
+    "i32 mut G = 3;",
+    "fn field(pair* p) u64 {",
+    "    return p->b;",
+    "}",
+    "fn elem(i32[4] a, u64 i) i32 {",
+    "    return a[i];",
+    "}",
+    "fn at(i32@ s, u64 i) i32 {",
+    "    return s[i];",
+    "}",
+    "fn get(i32* p) i32 {",
+    "    return *p;",
+    "}",
+    "fn ch(string s, u64 i) char {",
+    "    return s[i];",
+    "}",
+    "fn global() i32 {",
+    "    return G;",
+    "}",
+    "fn set(flags mut* f, bool v) void {",
+    "    f->on = v;",
+    "}",
+    "fn on(flags* f) bool {",
+    "    return f->on;",
+    "}",
+    "fn deep(pair[2]* p, u64 i) i32 {",
+    "    return (*p)[i].a;",
+    "}",
+    "fn header(string* s) u64 {",
+    "    return s->len;",
+    "}",
+    "fn nothing() void {",
+    "}",
+    "",
+};
+
+// A deref, then a field of a struct: the load of the pointer, then `getelementptr inbounds
+// %struct.main.pair, ptr %t0, i32 0, i32 1` (toolchain.md 6 item 3).
+fn a_field_through_a_pointer() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[8] want = {
+        "entry:",
+        "  %result = alloca i64, align 8",
+        "  %p.0 = alloca ptr, align 8",
+        "  store ptr %p.in, ptr %p.0, align 8",
+        "  %t0 = load ptr, ptr %p.0, align 8",
+        "  %t1 = getelementptr inbounds %struct.main.pair, ptr %t0, i32 0, i32 1",
+        "  %t2 = load i64, ptr %t1, align 8",
+        "  store i64 %t2, ptr %result, align 8",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "field", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "field", want[2..7]);
+}
+
+// An index on a fixed array: `getelementptr inbounds [4 x i32], ptr %a.in, i64 0, i64 %t0`. The
+// index `_3` is the register of `cast<u64>`, which prints nothing for a `u64`.
+fn an_index_on_a_fixed_array() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[11] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %i.1 = alloca i64, align 8",
+        "  store i64 %i.in, ptr %i.1, align 8",
+        "  %t0 = load i64, ptr %i.1, align 8",
+        "  %t1 = icmp uge i64 %t0, 4",
+        "",
+        "L1:",
+        "  %t2 = getelementptr inbounds [4 x i32], ptr %a.in, i64 0, i64 %t0",
+        "  %t3 = load i32, ptr %t2, align 4",
+        "  store i32 %t3, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "elem", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "elem", want[2..6]);
+    llvm_env.in_direct(&e, "elem", want[8..10]);
+}
+
+// An index on a span: the load of the length for the bounds check, then the load of field 0 and
+// `getelementptr inbounds i32, ptr %t5, i64 %t0`, as the direct path writes it.
+fn an_index_on_a_span() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[15] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %i.1 = alloca i64, align 8",
+        "  store i64 %i.in, ptr %i.1, align 8",
+        "  %t0 = load i64, ptr %i.1, align 8",
+        "  %t1 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 1",
+        "  %t2 = load i64, ptr %t1, align 8",
+        "  %t3 = icmp uge i64 %t0, %t2",
+        "",
+        "L1:",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 0",
+        "  %t5 = load ptr, ptr %t4, align 8",
+        "  %t6 = getelementptr inbounds i32, ptr %t5, i64 %t0",
+        "  %t7 = load i32, ptr %t6, align 4",
+        "  store i32 %t7, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "at", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "at", want[2..8]);
+    llvm_env.in_direct(&e, "at", want[10..14]);
+}
+
+// A deref loads the pointer, then the value.
+fn a_deref() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[7] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %p.0 = alloca ptr, align 8",
+        "  store ptr %p.in, ptr %p.0, align 8",
+        "  %t0 = load ptr, ptr %p.0, align 8",
+        "  %t1 = load i32, ptr %t0, align 4",
+        "  store i32 %t1, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "get", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "get", want[2..6]);
+}
+
+// An index on a `string` takes the element shape over `i8`, the memory type of `char`.
+fn an_index_on_a_string() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[15] want = {
+        "entry:",
+        "  %result = alloca i8, align 1",
+        "  %i.1 = alloca i64, align 8",
+        "  store i64 %i.in, ptr %i.1, align 8",
+        "  %t0 = load i64, ptr %i.1, align 8",
+        "  %t1 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 1",
+        "  %t2 = load i64, ptr %t1, align 8",
+        "  %t3 = icmp uge i64 %t0, %t2",
+        "",
+        "L1:",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 0",
+        "  %t5 = load ptr, ptr %t4, align 8",
+        "  %t6 = getelementptr inbounds i8, ptr %t5, i64 %t0",
+        "  %t7 = load i8, ptr %t6, align 1",
+        "  store i8 %t7, ptr %result, align 1",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "ch", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "ch", want[10..14]);
+}
+
+// A global is its symbol, with no instruction.
+fn a_global() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[4] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %t0 = load i32, ptr @\"main.G\", align 4",
+        "  store i32 %t0, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "global", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "global", want[2..3]);
+}
+
+// A `bool` stores as `zext` and `i8`, and loads as `i8` and `trunc` (toolchain.md 6 item 2). The
+// value comes before the address of the place (spec/fir.md 12.5), where the direct path computes
+// the address first.
+fn a_bool_field_stores_and_loads_through_i8() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[12] want = {
+        "entry:",
+        "  %f.0 = alloca ptr, align 8",
+        "  %v.1 = alloca i8, align 1",
+        "  store ptr %f.in, ptr %f.0, align 8",
+        "  %t0 = zext i1 %v.in to i8",
+        "  store i8 %t0, ptr %v.1, align 1",
+        "  %t1 = load i8, ptr %v.1, align 1",
+        "  %t2 = trunc i8 %t1 to i1",
+        "  %t3 = load ptr, ptr %f.0, align 8",
+        "  %t4 = getelementptr inbounds %struct.main.flags, ptr %t3, i32 0, i32 0",
+        "  %t5 = zext i1 %t2 to i8",
+        "  store i8 %t5, ptr %t4, align 1",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "set", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "set", want[1..6]);
+    string[10] load = {
+        "entry:",
+        "  %result = alloca i8, align 1",
+        "  %f.0 = alloca ptr, align 8",
+        "  store ptr %f.in, ptr %f.0, align 8",
+        "  %t0 = load ptr, ptr %f.0, align 8",
+        "  %t1 = getelementptr inbounds %struct.main.flags, ptr %t0, i32 0, i32 0",
+        "  %t2 = load i8, ptr %t1, align 1",
+        "  %t3 = trunc i8 %t2 to i1",
+        "  %t4 = zext i1 %t3 to i8",
+        "  store i8 %t4, ptr %result, align 1",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "on", pass_env.CHECKED), load[..]);
+    llvm_env.in_direct(&e, "on", load[2..8]);
+}
+
+// Two projections after a deref: the element shape of the array behind the pointer, then the
+// field of the element. A header field of a `string` behind a pointer takes the `%fort.span`
+// shape.
+fn projections_chain_in_order() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[15] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %p.0 = alloca ptr, align 8",
+        "  %i.1 = alloca i64, align 8",
+        "  store ptr %p.in, ptr %p.0, align 8",
+        "  store i64 %i.in, ptr %i.1, align 8",
+        "  %t0 = load i64, ptr %i.1, align 8",
+        "  %t1 = icmp uge i64 %t0, 2",
+        "",
+        "L1:",
+        "  %t2 = load ptr, ptr %p.0, align 8",
+        "  %t3 = getelementptr inbounds [2 x %struct.main.pair], ptr %t2, i64 0, i64 %t0",
+        "  %t4 = getelementptr inbounds %struct.main.pair, ptr %t3, i32 0, i32 0",
+        "  %t5 = load i32, ptr %t4, align 4",
+        "  store i32 %t5, ptr %result, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "deep", pass_env.CHECKED), want[..]);
+    string[8] header = {
+        "entry:",
+        "  %result = alloca i64, align 8",
+        "  %s.0 = alloca ptr, align 8",
+        "  store ptr %s.in, ptr %s.0, align 8",
+        "  %t0 = load ptr, ptr %s.0, align 8",
+        "  %t1 = getelementptr inbounds %fort.span, ptr %t0, i32 0, i32 1",
+        "  %t2 = load i64, ptr %t1, align 8",
+        "  store i64 %t2, ptr %result, align 8",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "header", pass_env.CHECKED), header[..]);
+    llvm_env.in_direct(&e, "header", header[2..7]);
+}
+
+fn main() i32 {
+    the_entry_block_of_the_worked_example();
+    the_folded_temporary_of_the_worked_example_has_no_storage();
+    an_aggregate_result_and_parameter_have_no_alloca();
+    a_void_result_has_no_storage();
+    a_scalar_result_is_the_alloca_result();
+    println("locals ok");
+    an_index_before_a_conditional_is_a_register();
+    a_compound_assignment_over_a_conditional();
+    an_enum_value_for_its_failure_block_is_a_register();
+    the_short_circuit_temporary_is_a_slot();
+    the_range_counter_is_a_slot();
+    an_address_is_a_register_with_no_instruction();
+    the_rules_that_no_lowered_function_reaches();
+    println("classes ok");
+    a_field_through_a_pointer();
+    an_index_on_a_fixed_array();
+    an_index_on_a_span();
+    a_deref();
+    an_index_on_a_string();
+    a_global();
+    a_bool_field_stores_and_loads_through_i8();
+    projections_chain_in_order();
+    println("places ok");
+    return 0;
+}

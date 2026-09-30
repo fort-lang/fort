@@ -546,6 +546,27 @@ came here.
   `test/lang/programs`, the 1820 of `src/fort/main.ft` and the 306 of `src/lsp/main.ft` in the
   four modes, and the verifier accepted each result. On `main.ft`, `--release` removes 1197
   checks and `--no-bounds-check` 730, and the default mode changes no function.
+- **The translator gives each local its storage in one scan, before it writes text** (T-249).
+  `fir_llvm.classify` reads the blocks in number order. A scalar temporary is a register when
+  one statement assigns it whole and every read has the statement index of that statement. Two
+  more conditions keep a register sound, and the lowering never breaks them: no read comes
+  before the assignment in the order of translation, and no `addr` takes its storage. Every
+  other temporary that an item names is a `%tmp` slot, and a temporary that nothing names has
+  no storage. A slot is memory, so it is correct where a register has no value yet. The
+  translator reads every operand before it computes the address of the destination, so a place
+  operand is loaded once for each rvalue that names it (spec/fir.md 12.5). A `move` or a `del`
+  of fixed storage of a temporary zeroes nothing, and an aggregate `move` of any other place
+  goes through a new `%tmp` intermediate. `gen_expr.gen_cast_value` and
+  `gen_expr.gen_overflow_call` write the cast and the overflow intrinsic for both paths, so the
+  ticket that deletes the direct path (T-255) moves them first. T-249 translated the 1822
+  functions of `src/fort/main.ft` and 43793 functions of `test/lang/run` and
+  `test/lang/programs` in the four modes, with a stand-in terminator for each block, and
+  `opt-18 -passes=verify` accepted each module. The stand-ins read only the operand of a
+  `switch` and the condition of a `check`, and a call is `poison`, so that check does not hold
+  the dominance of the reads of a call argument, of a reported operand of a `check` or a `fail`,
+  or of the place of `check(overwrite)`. The review of T-249 probed those reads apart and found
+  none out of dominance. Under `--release`, 1251 temporaries of `main.ft` have no storage, which
+  is the count of T-247.
 
 ## 7. The runtime and the standard library
 

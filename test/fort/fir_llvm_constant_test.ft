@@ -1,0 +1,328 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| constants ok
+//| calls ok
+//| helpers ok
+/// Checks the constants of each kind that the FIR translator writes (spec/fir.md 5.6), the text
+/// that a call leaves until T-251 translates it, and the helpers of places and of one statement
+/// that fir_llvm offers the terminators of T-251.
+import fir;
+import fir_llvm;
+import gen;
+import llvm_env;
+import pass_env;
+import std.strbuf;
+
+// ---- constants ----------------------------------------------------------------------------------
+
+string[44] SOURCE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "enum color {",
+    "    red,",
+    "    green,",
+    "}",
+    "struct mix {",
+    "    f64 f;",
+    "    i32* p;",
+    "    bool b;",
+    "    color k;",
+    "    char c;",
+    "    i16 n;",
+    "}",
+    "fn nothing() void {",
+    "}",
+    "fn make() pair {",
+    "    return pair{1, 2};",
+    "}",
+    "fn sink() void {",
+    "    nothing();",
+    "}",
+    "fn fetch() i32 {",
+    "    pair p = make();",
+    "    return p.a;",
+    "}",
+    "fn consts() void {",
+    "    f64 x = 1.5;",
+    "    f32 y = 0.25;",
+    "    fn () void h = nothing;",
+    "    char c = 'A';",
+    "    bool b = true;",
+    "    color k = color.green;",
+    "    i32* q = null;",
+    "    i64 m = -9223372036854775807 - 1;",
+    "    u64 u = 18446744073709551615;",
+    "    i8 s = -1;",
+    "    u8 t = 255;",
+    "}",
+    "fn zeros() mix {",
+    "    return mix{.n = 1};",
+    "}",
+};
+
+// Each scalar constant is its literal and prints no instruction: a float as the bit pattern of
+// its `double`, a function as its symbol, a `char` and an enum member as numbers, and the bounds
+// of `i64` and `u64` as the fort type reads them. A `bool` stores through `zext` (toolchain.md 6
+// item 2). The whole body is the direct path's.
+fn each_constant_is_its_literal() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[24] want = {
+        "entry:",
+        "  %x.0 = alloca double, align 8",
+        "  %y.1 = alloca float, align 4",
+        "  %h.2 = alloca ptr, align 8",
+        "  %c.3 = alloca i8, align 1",
+        "  %b.4 = alloca i8, align 1",
+        "  %k.5 = alloca i32, align 4",
+        "  %q.6 = alloca ptr, align 8",
+        "  %m.7 = alloca i64, align 8",
+        "  %u.8 = alloca i64, align 8",
+        "  %s.9 = alloca i8, align 1",
+        "  %t.10 = alloca i8, align 1",
+        "  store double 0x3FF8000000000000, ptr %x.0, align 8",
+        "  store float 0x3FD0000000000000, ptr %y.1, align 4",
+        "  store ptr @\"main.nothing\", ptr %h.2, align 8",
+        "  store i8 65, ptr %c.3, align 1",
+        "  %t0 = zext i1 true to i8",
+        "  store i8 %t0, ptr %b.4, align 1",
+        "  store i32 1, ptr %k.5, align 4",
+        "  store ptr null, ptr %q.6, align 8",
+        "  store i64 -9223372036854775808, ptr %m.7, align 8",
+        "  store i64 18446744073709551615, ptr %u.8, align 8",
+        "  store i8 -1, ptr %s.9, align 1",
+        "  store i8 255, ptr %t.10, align 1",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, SOURCE[..], "consts", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "consts", want[..]);
+}
+
+// The zero of each scalar type that a designated literal leaves out: `0.0` for a float, `null`
+// for a pointer, `false` through `zext` for a `bool`, and `0` for an enum and a `char`. Each
+// member stores at the alignment of its field.
+fn the_zero_of_each_scalar_type() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[14] want = {
+        "entry:",
+        "  %t0 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 0",
+        "  store double 0.0, ptr %t0, align 8",
+        "  %t1 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 1",
+        "  store ptr null, ptr %t1, align 8",
+        "  %t2 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 2",
+        "  %t3 = zext i1 false to i8",
+        "  store i8 %t3, ptr %t2, align 1",
+        "  %t4 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 3",
+        "  store i32 0, ptr %t4, align 4",
+        "  %t5 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 4",
+        "  store i8 0, ptr %t5, align 1",
+        "  %t6 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 5",
+        "  store i16 1, ptr %t6, align 2",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, SOURCE[..], "zeros", pass_env.CHECKED), want[..]);
+}
+
+// ---- calls --------------------------------------------------------------------------------------
+
+// A call statement of a `void` function assigns its sink, a register of type `void`, which has no
+// alloca. A call into an aggregate place writes nothing into it. Each call reports `cannot
+// generate code yet for a call` until T-251 translates it; the field read after it takes the
+// direct path's text.
+fn a_call_reports_and_leaves_well_formed_text() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.func mut f = llvm_env.lower(&e, SOURCE[..], "sink", pass_env.CHECKED);
+    defer fir.func_free(&f);
+    assert(fir.local_count(&f) == 2);
+    assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_register);
+    u64 mut before = llvm_env.errors(&e);
+    string[1] none = {"entry:"};
+    llvm_env.expect(&e, llvm_env.translate(&e, &f), none[..]);
+    assert(llvm_env.errors(&e) == before + 1);
+    string[6] want = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %p.0 = alloca %struct.main.pair, align 8",
+        "  %t0 = getelementptr inbounds %struct.main.pair, ptr %p.0, i32 0, i32 0",
+        "  %t1 = load i32, ptr %t0, align 4",
+        "  store i32 %t1, ptr %result, align 4",
+    };
+    fir.func mut g = llvm_env.lower(&e, SOURCE[..], "fetch", pass_env.CHECKED);
+    defer fir.func_free(&g);
+    before = llvm_env.errors(&e);
+    llvm_env.expect(&e, llvm_env.translate(&e, &g), want[..]);
+    assert(llvm_env.errors(&e) == before + 1);
+    assert(e.g.failed);
+    llvm_env.in_direct(&e, "fetch", want[2..3]);
+    llvm_env.in_direct(&e, "fetch", want[3..5]);
+}
+
+// ---- the helpers --------------------------------------------------------------------------------
+
+// A function with one local of each storage kind, whose statements the helpers below reuse.
+string[21] HELPERS = {
+    "fn main.helpers(_1 (p): pair, _2 (x): i32, _3 (q): u8 mut* own) -> i32 {",
+    "    let _4 (b): bool;",
+    "    let _5 (f): f32;",
+    "    let _6: pair;",
+    "    let _7: i32;",
+    "    let _8: u64;",
+    "",
+    "    bb0: {",
+    "        _6 = const zero pair #1:1 s1;",
+    "        _7 = const i32 1 #1:1 s1;",
+    "        _0 = copy _7 #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+    "fn main.text() -> char* {",
+    "",
+    "    bb0: {",
+    "        _0 = const bytes \"hi\" #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+};
+
+string[4] PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+};
+
+// The address of each kind of storage: `%result`, the incoming pointer of an aggregate
+// parameter, the alloca of a scalar parameter and of a named local, a `%tmp` slot, and nothing
+// for a register and for a temporary that nothing names.
+fn each_storage_has_its_address() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    llvm_env.begin(&e.g);
+    fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
+    defer fir_llvm.close(&t);
+    fir_llvm.write_locals(&t);
+    assert(fir_llvm.storage_at(&t, 0) == fir_llvm.storage.sk_result);
+    assert(fir_llvm.address_of(&t, 0) == "%result");
+    assert(fir_llvm.storage_at(&t, 1) == fir_llvm.storage.sk_incoming);
+    assert(fir_llvm.address_of(&t, 1) == "%p.in");
+    assert(fir_llvm.storage_at(&t, 2) == fir_llvm.storage.sk_param);
+    assert(fir_llvm.address_of(&t, 2) == "%x.1");
+    assert(fir_llvm.address_of(&t, 3) == "%q.2");
+    assert(fir_llvm.storage_at(&t, 4) == fir_llvm.storage.sk_named);
+    assert(fir_llvm.address_of(&t, 4) == "%b.3");
+    assert(fir_llvm.address_of(&t, 5) == "%f.4");
+    assert(fir_llvm.storage_at(&t, 6) == fir_llvm.storage.sk_slot);
+    assert(fir_llvm.address_of(&t, 6) == "%tmp0");
+    assert(fir_llvm.storage_at(&t, 7) == fir_llvm.storage.sk_register);
+    assert(fir_llvm.address_of(&t, 7) == "");
+    assert(fir_llvm.storage_at(&t, 8) == fir_llvm.storage.sk_none);
+    assert(fir_llvm.address_of(&t, 8) == "");
+    string[6] allocas = {
+        "  %result = alloca i32, align 4",
+        "  %x.1 = alloca i32, align 4",
+        "  %q.2 = alloca ptr, align 8",
+        "  %b.3 = alloca i8, align 1",
+        "  %f.4 = alloca float, align 4",
+        "  %tmp0 = alloca %struct.main.pair, align 8",
+    };
+    llvm_env.expect(&e, strbuf.view(&e.g.allocas), allocas[..]);
+    // the scalar parameters are stored in parameter order; the aggregate one is not copied
+    string[2] stores = {
+        "  store i32 %x.in, ptr %x.1, align 4",
+        "  store ptr %q.in, ptr %q.2, align 8",
+    };
+    llvm_env.expect(&e, strbuf.view(&e.g.body), stores[..]);
+}
+
+// place_copy, place_zero, place_load and place_store, which the terminators of T-251 use: a copy
+// of an aggregate reads its source address first, a zero of an aggregate is `llvm.memset`, of a
+// pointer `store ptr null`, of a `bool` a `zext` of `false`, and of a float `0.0`.
+fn the_place_helpers() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
+    defer fir.module_free(&m);
+    fir.func mut* f = &m.funcs.items[0];
+    llvm_env.begin(&e.g);
+    fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
+    defer fir_llvm.close(&t);
+    fir_llvm.write_locals(&t);
+    strbuf.clear(&e.g.body);
+    fir_llvm.place_copy(&t, fir.place_local(6), fir.place_local(1));
+    fir_llvm.place_copy(&t, fir.place_local(2), fir.place_local(2));
+    fir_llvm.place_zero(&t, fir.place_local(4));
+    fir_llvm.place_zero(&t, fir.place_local(5));
+    fir_llvm.place_zero(&t, fir.place_local(3));
+    fir_llvm.place_zero(&t, fir.place_local(6));
+    gen.gen_val len = fir_llvm.place_load(&t, fir.place_field(f, fir.place_local(1), 1));
+    assert(len.ty == "i64" && len.val == "%t3");
+    fir.place a = fir.place_field(f, fir.place_local(6), 0);
+    fir_llvm.place_store(&t, a, gen.gen_const_unsigned(&e.g, "i32", 5));
+    string[13] want = {
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %p.in, \\",
+        "i64 16, i1 false)",
+        "  %t0 = load i32, ptr %x.1, align 4",
+        "  store i32 %t0, ptr %x.1, align 4",
+        "  %t1 = zext i1 false to i8",
+        "  store i8 %t1, ptr %b.3, align 1",
+        "  store float 0.0, ptr %f.4, align 4",
+        "  store ptr null, ptr %q.2, align 8",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %tmp0, i8 0, i64 16, i1 false)",
+        "  %t2 = getelementptr inbounds %struct.main.pair, ptr %p.in, i32 0, i32 1",
+        "  %t3 = load i64, ptr %t2, align 8",
+        "  %t4 = getelementptr inbounds %struct.main.pair, ptr %tmp0, i32 0, i32 0",
+        "  store i32 5, ptr %t4, align 4",
+    };
+    llvm_env.expect(&e, strbuf.view(&e.g.body), want[..]);
+    // a register takes a stored value as its own and prints nothing
+    fir_llvm.place_store(&t, fir.place_local(7), gen.gen_const_unsigned(&e.g, "i32", 9));
+    gen.gen_val nine = fir_llvm.place_load(&t, fir.place_local(7));
+    assert(nine.ty == "i32" && nine.val == "9");
+    llvm_env.expect(&e, strbuf.view(&e.g.body), want[..]);
+}
+
+// One statement alone: the harness of llvm_env translates statement `i` of a block after the
+// allocas. A `bytes` constant is the address of its `@.str.N`.
+fn one_statement_alone() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    string[1] zero = {
+        "  call void @llvm.memset.p0.i64(ptr align 8 %tmp0, i8 0, i64 16, i1 false)",
+    };
+    llvm_env.expect(&e, llvm_env.statement_text(&e, f, 0, 0), zero[..]);
+    // a register assignment of a constant prints nothing at all
+    string got = llvm_env.statement_text(&e, f, 0, 1);
+    assert(got == "");
+    string[1] text = {"  store ptr @.str.0, ptr %result, align 8"};
+    fir.func* g = fir.module_function_at(&m, 1);
+    llvm_env.expect(&e, llvm_env.statement_text(&e, g, 0, 0), text[..]);
+    assert(e.g.strs.len == 1 && e.g.strs.items[0].text == "hi");
+}
+
+fn main() i32 {
+    each_constant_is_its_literal();
+    the_zero_of_each_scalar_type();
+    println("constants ok");
+    a_call_reports_and_leaves_well_formed_text();
+    println("calls ok");
+    each_storage_has_its_address();
+    the_place_helpers();
+    one_statement_alone();
+    println("helpers ok");
+    return 0;
+}

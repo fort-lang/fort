@@ -771,8 +771,13 @@ changes the function, and the verifier runs after it. The passes run in this ord
 3. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
    - Under `--release`, it replaces `check(_, overflow)` and `check(overwrite: p)` by `goto`. It
      replaces `check(_, shift, _n, ...) -> bb` by `_m = and(copy _n, const i64 W - 1)` and
-     `goto bb`, and replaces each later read of `_n` by `copy _m`, which is the mask of item 15.
-     `_m` takes the statement index of the check.
+     `goto bb`, which is the mask of item 15. `_m` takes the statement index of the check. When
+     the count `_n` is a whole temporary, the pass replaces each read of `_n` that the mask
+     reaches by `copy _m`. The mask reaches a read when, on every path from `bb0` to the read,
+     the mask stands after the last assignment of `_n`. The mask keeps its own read of `_n`, and
+     a second mask of the same count ends the first. A count that is no whole temporary, such as
+     a constant, a parameter, a named local or a field, keeps every read, and its mask goes as
+     dead (T-247).
    - Under `--no-bounds-check`, it replaces `check(_, bounds, ...)` and `check(_, span, ...)` by
      `goto`.
    - It then removes each assignment `_t = rvalue` where `_t` is a temporary of the lowering,
@@ -822,11 +827,12 @@ read the build mode.
   temporary only in statements that it emits after the definition and on the same path, never
   after a join that the definition does not precede, so the definition dominates every read; each
   expansion of a deferred statement has its own index and its own temporaries. Every other
-  temporary is an `alloca` named `%tmp<K>` (D19.5): the `&&` slot, which two statements assign,
-  and the counter of a range `for`. The translator classifies the locals in one scan before it
-  writes text, as the direct path collects the locals before it emits. The direct path keeps its
-  scalar intermediates in registers and its aggregate temporaries in `%tmp<K>` slots, so this
-  rule gives the same shape.
+  temporary that a statement or a terminator names is an `alloca` named `%tmp<K>` (D19.5): the
+  `&&` slot, which two statements assign, and the counter of a range `for`. The next rule gives
+  a temporary that nothing names no storage. The translator classifies the locals in one scan
+  before it writes text, as the direct path collects the locals before it emits. The direct path
+  keeps its scalar intermediates in registers and its aggregate temporaries in `%tmp<K>` slots,
+  so this rule gives the same shape.
 - A temporary that no statement and no terminator names gets no storage: no register and no
   `alloca`. A statement or a terminator names a local when the local is the base of one of its
   places or the index of one of its projections. The build-mode pass leaves such temporaries,
@@ -851,8 +857,12 @@ read the build mode.
   translator never writes `nsw`, `nuw` or `exact` (D16).
 - `add_overflows` and its two siblings print the `llvm.*.with.overflow` intrinsic of the type,
   then `extractvalue 0`, then `extractvalue 1`, in the order of item 15. The `add` of the same
-  two operands in the continuation block prints nothing and takes the name of `extractvalue 0`.
-  An `add` with other operands prints a plain `add`.
+  two operands in the continuation block prints nothing and takes the name of `extractvalue 0`
+  when three conditions hold: no assignment and no `del` follows the intrinsic in its block, the
+  `check` that ends that block tests the result of the intrinsic, and the `add` is the first
+  assignment or `del` of the continuation. Nothing then writes an operand between the two, and
+  the lowering of section 9.4 writes each checked `add` so. The same holds for `sub` and `mul`.
+  Every other `add` prints a plain `add`.
 - `eq` to `ge` are `icmp` with the predicate the type selects, or `fcmp` for a float (item 15).
 - `cast<T>` is the instruction of item 12, or nothing when the LLVM value types are equal, in
   which case the result takes the name of its operand. A `cast` between aggregate types is a

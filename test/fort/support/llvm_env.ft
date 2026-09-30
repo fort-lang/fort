@@ -1,0 +1,221 @@
+/// Provides the environment of the tests of the FIR translator. It checks a fort source in the
+/// sandbox of lower_env and lowers one function of it, or parses a FIR text against a prelude,
+/// then translates the function with fir_llvm and gives the text. It also emits the same function
+/// with the direct path, so that a test holds the two texts against each other.
+//
+// The translator writes no terminator, no label and no failure block yet (T-251). The text of a
+// translation is `entry:`, the allocas, the stores of the parameters, and the statements of each
+// block in number order, with the line `L<n>:` before the statements of block n > 0, as the
+// labels of spec/fir.md 12.5 name the blocks.
+import check_env;
+import fir;
+import fir_llvm;
+import fir_lower;
+import gen;
+import gen_stmt;
+import lower_env;
+import pass_env;
+import std.str;
+import std.strbuf;
+
+/// The sandbox of lower_env, the emitter of the translator, the emitter of the direct path, and
+/// the buffers of the texts. It must stay at the address that open filled, because each emitter
+/// points into the session of the sandbox.
+struct env {
+    lower_env.env low;
+    gen.emitter g;
+    gen.emitter d;
+    strbuf.str_buf text;
+    strbuf.str_buf want;
+    strbuf.str_buf text2;
+}
+
+fn open(env mut* e) void {
+    lower_env.open(&e->low);
+    gen.gen_init(&e->g, &e->low.c.m.s, gen.gen_options{});
+    gen.gen_init(&e->d, &e->low.c.m.s, gen.gen_options{});
+}
+
+fn close(env mut* e) void {
+    gen.gen_free(&e->g);
+    gen.gen_free(&e->d);
+    strbuf.free(&e->text);
+    strbuf.free(&e->want);
+    strbuf.free(&e->text2);
+    lower_env.close(&e->low);
+}
+
+// Makes both emitters fresh in the mode `m`, so that each numbers its data from 0.
+fn reset(env mut* e, pass_env.mode m) void {
+    gen.gen_free(&e->g);
+    gen.gen_free(&e->d);
+    gen.gen_options opts = gen.gen_options{m.release, m.no_bounds, ""};
+    gen.gen_init(&e->g, &e->low.c.m.s, opts);
+    gen.gen_init(&e->d, &e->low.c.m.s, opts);
+}
+
+/// Checks `lines` with the runtime of lower_env and lowers the function `name`. The verifier, the
+/// build-mode pass of mode `m` and the verifier again run on the result. The caller frees it.
+fn lower(env mut* e, string@ lines, string name, pass_env.mode m) fir.func {
+    lower_env.check_lines(&e->low, lines, true);
+    reset(e, m);
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->low.c.ck, lower_env.decl(&e->low, name), &f, &why)) {
+        panic("llvm_env.lower: the lowering refuses the function");
+    }
+    pass_env.build(&e->low, &f, m);
+    return f;
+}
+
+/// Parses `text`, the lines of a FIR module, against `prelude`, as pass_env.parse does. The
+/// verifier runs on no function of it. The caller frees the module.
+fn parse(env mut* e, string@ prelude, string@ text) fir.module {
+    fir.module m = pass_env.parse(&e->low, prelude, text);
+    reset(e, pass_env.CHECKED);
+    return m;
+}
+
+// The per-function reset of gen_stmt.function_begin that the translator needs: the three
+// counters, the three buffers, and the flags.
+fn begin(gen.emitter mut* g) void {
+    g->temps = 0;
+    g->labels = 0;
+    g->tmps = 0;
+    strbuf.clear(&g->allocas);
+    strbuf.clear(&g->body);
+    strbuf.clear(&g->fail);
+    g->terminated = false;
+    g->failed = false;
+}
+
+/// Translates `f` with a fresh translator and gives `entry:`, the allocas and the body. The text
+/// is valid until the next call.
+fn translate(env mut* e, fir.func* f) string {
+    begin(&e->g);
+    fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
+    defer fir_llvm.close(&t);
+    fir_llvm.write_locals(&t);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        if (b > 0) {
+            gen.gen_block_begin(&e->g, cast(b, u64));
+        }
+        fir_llvm.translate_block(&t, b);
+        b += 1;
+    }
+    strbuf.clear(&e->text);
+    strbuf.append(&e->text, "entry:\n");
+    strbuf.append(&e->text, strbuf.view(&e->g.allocas));
+    strbuf.append(&e->text, strbuf.view(&e->g.body));
+    return strbuf.view(&e->text);
+}
+
+/// Translates statement `i` of block `b` of `f` alone, after the allocas, and gives its text: the
+/// harness of one statement. The statement must read no register that an earlier statement
+/// assigns, because nothing before it ran.
+fn statement_text(env mut* e, fir.func* f, u32 b, u32 i) string {
+    begin(&e->g);
+    fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
+    defer fir_llvm.close(&t);
+    fir_llvm.write_locals(&t);
+    strbuf.clear(&e->g.body);
+    fir_llvm.translate_statement(&t, fir.block_statement(f, b, i));
+    strbuf.clear(&e->text);
+    strbuf.append(&e->text, strbuf.view(&e->g.body));
+    return strbuf.view(&e->text);
+}
+
+/// Lowers the function `name` of `lines` in mode `m` and translates it.
+fn lowered(env mut* e, string@ lines, string name, pass_env.mode m) string {
+    fir.func mut f = lower(e, lines, name, m);
+    defer fir.func_free(&f);
+    return translate(e, &f);
+}
+
+/// Emits the function `name` of the source that the last `lower` checked with the direct path,
+/// in its mode, and gives the definition. The text is valid until the next call.
+fn direct(env mut* e, string name) string {
+    e->d.ck = &e->low.c.ck;
+    e->d.module = check_env.module_at(&e->low.c, "main");
+    strbuf.clear(&e->d.funcs);
+    gen_stmt.gen_function(&e->d, lower_env.decl(&e->low, name));
+    return strbuf.view(&e->d.funcs);
+}
+
+// Joins `lines` into e->want, each ended by a newline. A line that ends with `\` continues on the
+// next entry, as lower_env.expect reads it.
+fn joined(env mut* e, string@ lines) string {
+    strbuf.clear(&e->want);
+    for (string line : lines) {
+        if (line.len > 0 && line[line.len - 1] == '\\') {
+            strbuf.append(&e->want, line[0..line.len - 1]);
+        } else {
+            strbuf.append(&e->want, line);
+            strbuf.push(&e->want, '\n');
+        }
+    }
+    return strbuf.view(&e->want);
+}
+
+/// Holds `got` against the lines `want`. A difference prints both texts.
+fn expect(env mut* e, string got, string@ want) void {
+    string text = joined(e, want);
+    if (got == text) {
+        return;
+    }
+    eprintln("llvm_env: expected");
+    eprint(text);
+    eprintln("llvm_env: got");
+    eprint(got);
+    panic("llvm_env.expect: the text differs");
+}
+
+/// Holds `got` against the lines `head`, then the lines `tail`.
+fn expect2(env mut* e, string got, string@ head, string@ tail) void {
+    expect3(e, got, head, tail, head[0..0]);
+}
+
+/// Holds `got` against the lines `a`, then `b`, then `c`.
+fn expect3(env mut* e, string got, string@ a, string@ b, string@ c) void {
+    strbuf.clear(&e->text2);
+    strbuf.append(&e->text2, joined(e, a));
+    strbuf.append(&e->text2, joined(e, b));
+    strbuf.append(&e->text2, joined(e, c));
+    if (got == strbuf.view(&e->text2)) {
+        return;
+    }
+    eprintln("llvm_env: expected");
+    eprint(strbuf.view(&e->text2));
+    eprintln("llvm_env: got");
+    eprint(got);
+    panic("llvm_env.expect3: the text differs");
+}
+
+/// Holds that the lines `want` stand, together and in order, in the definition that the direct
+/// path writes for the function `name` of the last source.
+fn in_direct(env mut* e, string name, string@ want) void {
+    string d = direct(e, name);
+    string text = joined(e, want);
+    if (str.find(d, text) >= 0) {
+        return;
+    }
+    eprintln("llvm_env: the direct path lacks");
+    eprint(text);
+    eprintln("llvm_env: its definition");
+    eprint(d);
+    panic("llvm_env.in_direct: the direct path writes other text");
+}
+
+/// The storage of local `n` of `f`, as fir_llvm classifies it.
+fn storage_of(fir.func* f, u32 n) fir_llvm.storage {
+    fir_llvm.storage mut@ own kinds = new(fir_llvm.storage, f->locals.len);
+    defer del(kinds);
+    fir_llvm.classify(f, kinds);
+    return kinds[cast(n, u64)];
+}
+
+/// The errors that the session of the sandbox counts, which a gen_todo of the translator adds to.
+fn errors(env* e) u64 {
+    return check_env.errors(&e->low.c);
+}
