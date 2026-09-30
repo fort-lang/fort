@@ -123,16 +123,27 @@ fn a_grown_table_frees_everything_it_made() void {
 // once the program's path is long enough to change a bin.
 //
 // type_table_free makes four releases. `del(t->params)`, `del(t->layout)` and
-// `del(tt->nodes)` are each watched here by an address and by the system view. And
-// each was verified by deleting that one release and watching this test fail.
-// The fourth, `del(t)` on the node itself, is held by the language rather than
-// by a probe. Without this release, the checked
+// `del(tt->nodes)` are each watched here by the system view and, where an
+// address is a view (heap.ADDRESS_IS_A_VIEW), by an address. Each was verified
+// by deleting that one release and watching this test fail, on Linux and on
+// macOS. The fourth, `del(t)` on the node itself, is held by the language
+// rather than by a probe. Without this release, the checked
 // build aborts at the next owning-local write.
 // The diagnostic is `overwriting owned value`.
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_TYPES = 200;
 u64 LEAK_BOUND = 8192;
+
+// The bound of the system view. On Linux it is the program break, which moves by
+// pages, so it takes LEAK_BOUND. On macOS it counts live bytes exactly: it reads
+// 0 when the rounds keep nothing, and a missing `del(t->layout)` moves it by
+// 3136, which LEAK_BOUND would miss.
+$if ($cfg(target_os) == "macos") {
+    u64 SYSTEM_BOUND = 1024;
+} else {
+    u64 SYSTEM_BOUND = LEAK_BOUND;
+}
 
 // The smaller of the distances from the early round to the last two.
 fn moved(u64 early, u64 late, u64 last) u64 {
@@ -191,10 +202,10 @@ fn the_blocks_a_node_owns_are_released_with_it() void {
         }
         round += 1;
     }
-    assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
-    assert(moved(param_at[0], param_at[1], param_at[2]) < LEAK_BOUND);
-    assert(moved(layout_at[0], layout_at[1], layout_at[2]) < LEAK_BOUND);
-    assert(moved(nodes_at[0], nodes_at[1], nodes_at[2]) < LEAK_BOUND);
+    assert(moved(break_at[0], break_at[1], break_at[2]) < SYSTEM_BOUND);
+    assert(!heap.ADDRESS_IS_A_VIEW || moved(param_at[0], param_at[1], param_at[2]) < LEAK_BOUND);
+    assert(!heap.ADDRESS_IS_A_VIEW || moved(layout_at[0], layout_at[1], layout_at[2]) < LEAK_BOUND);
+    assert(!heap.ADDRESS_IS_A_VIEW || moved(nodes_at[0], nodes_at[1], nodes_at[2]) < LEAK_BOUND);
 }
 
 // ---- the parameter list ---------------------------------------------------------

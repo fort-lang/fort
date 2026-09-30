@@ -394,8 +394,13 @@ bullet at a time and without a rewrite.
   until T-038 measured a period of **eight** over the emitter's round and read 26512 with nothing
   leaking; the window has to cover the cycle, and sixteen covers every period seen so far.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
-  per-CPU magazine, so `address_moved` in `test/fort/support/fir_env.ft` answers 0 there and a
-  probe reads the system view only (T-256).
+  per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` is false there,
+  `fir_env.address_moved` answers 0, and each probe that samples an address asserts on it only
+  where the constant is true (T-256, T-270). A probe then reads the system view only, which on
+  macOS counts live bytes exactly and reads 0 when the rounds keep nothing, so its bound must sit
+  below the smallest release it watches: `types_table_test.ft` missed a lost `del(t->layout)`,
+  3136 bytes over its rounds, under a bound of 8192, and takes 1024 on macOS since (T-270).
+  LLVM 18 made the macOS address checks fail 9 rounds in 10 with nothing leaking (T-270).
   **A round large enough to witness a big release makes the block view useless**, which is the
   other half of the same measurement: a round that allocates a hundred kilobytes and gives it all
   back leaves free chunks of every size, so the 32-byte probe lands wherever one starts and ranged
