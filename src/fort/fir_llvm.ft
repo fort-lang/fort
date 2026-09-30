@@ -1,13 +1,15 @@
 /// Translates FIR into LLVM IR text (spec/fir.md 12): the storage of the locals of one function,
-/// its places, its rvalues and its statements. The translator writes into the buffers of a
-/// `gen.emitter` as the direct path does, so the emitter assembles the definition.
+/// its places, its rvalues, its statements, its calls, its terminators and its failure blocks.
+/// The translator writes into the buffers of a `gen.emitter` as the direct path does, and
+/// gen.function_end assembles the definition.
 //
 // The module uses switches and no function-pointer dispatch table. Its functions drop the prefix
-// of the module name. A translator serves one function, and close releases it. The terminators,
-// the calls, the failure blocks and the labels of the blocks come later (T-251): a call reports
-// `cannot generate code yet` through gen.gen_todo.
+// of the module name. A translator serves one function, and close releases it. The signature map
+// of gen.signature_of writes every `define`, every `call` and, through gen_data.emit_extern, every
+// extern `declare`. This module imports no module of the direct path's statements, so that the
+// direct path can call it.
+import ast;
 import consts;
-import diag;
 import fir;
 import gen;
 import gen_expr;
@@ -63,13 +65,15 @@ struct overflow_note {
 
 /// The translator of one function. `cont_of[b]` is one more than the number of the block whose
 /// overflow check continues at `b`, and 0 when no such check exists. `pending` is the note that
-/// the first assignment of the block being translated may reuse.
+/// the first assignment of the block being translated may reuse. `fail_label[b]` is the label of
+/// the failure block that block `b` makes, and 0 when `b` makes none.
 struct translator {
     gen.emitter mut* g;
     fir.func* f;
     local_state mut@ own locals;
     overflow_note mut@ own notes;
     u32 mut@ own cont_of;
+    u64 mut@ own fail_label;
     u32 block;
     overflow_note pending;
 }
@@ -239,6 +243,17 @@ fn open(gen.emitter mut* g, fir.func* f) translator {
         }
         b += 1;
     }
+    // the k-th failure block in the order of the blocks that make them is `%L<B + k>`
+    t.fail_label = new(u64, blocks);
+    u64 mut next = blocks;
+    b = 0;
+    while (b < fir.block_count(f)) {
+        if (makes_failure(f, b)) {
+            t.fail_label[cast(b, u64)] = next;
+            next += 1;
+        }
+        b += 1;
+    }
     return t;
 }
 
@@ -246,6 +261,7 @@ fn close(translator mut* t) void {
     del(t->locals);
     del(t->notes);
     del(t->cont_of);
+    del(t->fail_label);
 }
 
 /// The storage of local `n`.
@@ -876,12 +892,67 @@ fn alloc_value(translator mut* t, fir.statement* s) gen.gen_val {
     return gen.gen_call_rt_value(t->g, runtime_sig.rt_entry.rt_alloc, "ptr", &args);
 }
 
-// A call, which T-251 translates: the report of gen.gen_todo, and `poison` of the result type, so
-// that the text stays well formed.
-fn call_value(translator mut* t, fir.statement* s) gen.gen_val {
-    gen.gen_todo(t->g, s->loc, "a call");
-    types.node* ty = fir.rvalue_type(t->f, s->value);
-    return gen.gen_literal(t->g, gen.gen_value_type(t->g, ty), "poison");
+// ---- calls -------------------------------------------------------------------------------------
+
+// The callee of the call `r`: the symbol of a fort function or of an extern, or the value of the
+// operand of function type, which is read before the arguments (D6.3).
+fn callee_value(translator mut* t, fir.rvalue r) gen.gen_val {
+    if (r.callee == fir.callee_kind.cl_value) {
+        return operand_value(t, r.callee_op);
+    }
+    return gen.gen_literal(t->g, "ptr", gen.gen_symbol_ref(t->g, r.callee_sym));
+}
+
+/// The call of the assignment `s`, with the signature of gen.signature_of (spec/fir.md 12.3):
+/// the callee, then each argument in order, then the address of the place of `s` as the `sret`
+/// pointer of an aggregate result, then the call. It gives the result, or a `void` value.
+// An aggregate argument passes the address of the caller-made copy of toolchain.md 6 item 7. The
+// storage of a temporary is that copy already, because nothing reads it after the call; any other
+// place is copied into a new `%tmp` slot, and a `move` then zeroes it (item 18). A fixed argument
+// carries the extension attribute of its parameter, and an argument of the variadic tail none. A
+// `noreturn` callee is followed by the `trap` that ends its block.
+fn call_of(translator mut* t, fir.statement* s) gen.gen_val {
+    fir.rvalue r = s->value;
+    gen.emitter mut* g = t->g;
+    ast.sym* mut ext = null;
+    if (r.callee == fir.callee_kind.cl_extern) {
+        ext = r.callee_sym;
+    }
+    gen.signature mut sig = gen.signature_of(g, fir.callee_type(t->f, r), ext);
+    defer gen.signature_free(&sig);
+    gen.gen_val callee = callee_value(t, r);
+    held mut@ own args = new(held, cast(r.ops_len, u64));
+    defer del(args);
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(t->f, r, k);
+        held h = hold(t, o, fir.operand_type(t->f, o), true);
+        if (h.aggregate && (h.text || h.zero)) {
+            panic("fir_llvm.call_of: an aggregate argument that is no place");
+        }
+        args[cast(k, u64)] = h;
+        k += 1;
+    }
+    gen.gen_args mut text = gen.gen_args_init();
+    defer gen.gen_args_free(&text);
+    if (sig.sret.len > 0) {
+        gen.gen_val dst = place_addr(t, s->place);
+        gen.gen_args_add_ext(&text, dst, gen.sret_attr(g, &sig));
+    }
+    k = 0;
+    while (k < r.ops_len) {
+        held* h = &args[cast(k, u64)];
+        if (h->aggregate) {
+            gen.gen_args_add(&text, h->addr);
+        } else if (cast(k, u64) < sig.params.len) {
+            gen.gen_args_add_ext(&text, h->value, sig.params[cast(k, u64)].attr);
+        } else {
+            gen.gen_args_add(&text, h->value);
+        }
+        k += 1;
+    }
+    bool pointer = r.callee == fir.callee_kind.cl_value;
+    return gen.gen_call_sig(g, &sig, callee, pointer, &text);
 }
 
 /// The value of the scalar rvalue of the assignment `s` (spec/fir.md 12.2). The function reads
@@ -908,7 +979,7 @@ fn rvalue_value(translator mut* t, fir.statement* s) gen.gen_val {
     case fir.rvalue_kind.rv_alloc:
         return alloc_value(t, s);
     case fir.rvalue_kind.rv_call:
-        return call_value(t, s);
+        return call_of(t, s);
     case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_aggregate:
         panic("fir_llvm.rvalue_value: an rvalue of an aggregate type");
     default:
@@ -1005,7 +1076,7 @@ fn rvalue_into(translator mut* t, fir.statement* s) void {
     case fir.rvalue_kind.rv_slice_ptr:
         slice_ptr_into(t, r, s->place);
     case fir.rvalue_kind.rv_call:
-        gen.gen_todo(t->g, s->loc, "a call");
+        call_of(t, s);
     default:
         panic("fir_llvm.rvalue_into: a scalar rvalue into an aggregate place");
     }
@@ -1093,4 +1164,307 @@ fn translate_block(translator mut* t, u32 b) void {
         translate_statement(t, fir.block_statement(t->f, b, i));
         i += 1;
     }
+}
+
+// ---- labels and failure blocks ------------------------------------------------------------------
+
+/// Whether block `b` of `f` is a failure block itself: a block other than `bb0` that holds only
+/// `fail` (spec/fir.md 12.4). Its number is not a label.
+// `bb0` is the entry block, which LLVM requires, so a `fail` there stands in place.
+fn fail_only(fir.func* f, u32 b) bool {
+    fir.block* bl = fir.block_at(f, b);
+    return b != 0 && bl->terminated && bl->term.kind == fir.term_kind.tk_fail
+        && bl->statements.len == 0;
+}
+
+// Whether block `b` of `f` makes a failure block: it ends in a `check`, or it is a failure block
+// itself.
+fn makes_failure(fir.func* f, u32 b) bool {
+    fir.block* bl = fir.block_at(f, b);
+    if (!bl->terminated) {
+        return false;
+    }
+    fir.term_kind k = bl->term.kind;
+    return k == fir.term_kind.tk_check || k == fir.term_kind.tk_check_overwrite
+        || fail_only(f, b);
+}
+
+/// The label that a branch to block `b` names: `%L<b>`, or the label of the failure block when
+/// `b` is a failure block itself (spec/fir.md 12.5). No terminator names `bb0` (rule V2).
+fn label_of(translator* t, u32 b) u64 {
+    if (b == 0) {
+        panic("fir_llvm.label_of: a branch to the entry block");
+    }
+    if (fail_only(t->f, b)) {
+        return t->fail_label[cast(b, u64)];
+    }
+    return cast(b, u64);
+}
+
+/// The label of the failure block that block `b` makes, `%L<B + k>`, or 0 when it makes none.
+fn failure_label(translator* t, u32 b) u64 {
+    return t->fail_label[cast(b, u64)];
+}
+
+/// The runtime entry that a check or a `fail` of `kind` calls (spec/fir.md 8).
+fn entry_of(fir.check_kind kind) runtime_sig.rt_entry {
+    switch (kind) {
+    case fir.check_kind.chk_overflow:
+        return runtime_sig.rt_entry.rt_fail_overflow;
+    case fir.check_kind.chk_shift:
+        return runtime_sig.rt_entry.rt_fail_shift;
+    case fir.check_kind.chk_div_zero:
+        return runtime_sig.rt_entry.rt_fail_div_zero;
+    case fir.check_kind.chk_div_overflow:
+        return runtime_sig.rt_entry.rt_fail_div_overflow;
+    case fir.check_kind.chk_bounds:
+        return runtime_sig.rt_entry.rt_fail_bounds;
+    case fir.check_kind.chk_span:
+        return runtime_sig.rt_entry.rt_fail_span;
+    case fir.check_kind.chk_alloc_count:
+        return runtime_sig.rt_entry.rt_fail_alloc_count;
+    case fir.check_kind.chk_overwrite:
+        return runtime_sig.rt_entry.rt_fail_overwrite;
+    case fir.check_kind.chk_enum:
+        return runtime_sig.rt_entry.rt_fail_enum;
+    case fir.check_kind.chk_user:
+        return runtime_sig.rt_entry.rt_assert_fail;
+    case fir.check_kind.chk_panic:
+        return runtime_sig.rt_entry.rt_panic;
+    }
+}
+
+// Adds the value of each reported operand of the `check` or `fail` `term` to `args`, in order.
+fn add_reported(translator mut* t, fir.terminator* term, gen.gen_args mut* args) void {
+    u32 mut k = 0;
+    while (k < term->args_len) {
+        gen.gen_args_add(args, operand_value(t, fir.operand_at(t->f, term->args_first + k)));
+        k += 1;
+    }
+}
+
+// The call of the runtime entry of the `fail` `term` with its reported operands, the file, the
+// line and the column, then `unreachable` (toolchain.md 6 items 14 and 19).
+fn fail_call(translator mut* t, fir.terminator* term) void {
+    gen.emitter mut* g = t->g;
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    add_reported(t, term, &args);
+    gen.gen_args_add_loc(g, &args, term->loc);
+    gen.gen_call_rt(g, entry_of(term->check), &args);
+    strbuf.append(&g->body, "  unreachable\n");
+    g->terminated = true;
+}
+
+// Writes the failure block of the block `b` that holds only `fail` into `g->fail`, under its
+// failure label. A reported operand that reads memory loads inside that block.
+fn fail_only_block(translator mut* t, u32 b) void {
+    gen.emitter mut* g = t->g;
+    u64 mark = strbuf.view(&g->body).len;
+    gen.gen_block_begin(g, failure_label(t, b));
+    fail_call(t, &fir.block_at(t->f, b)->term);
+    strbuf.append(&g->fail, strbuf.view(&g->body)[mark..]);
+    strbuf.truncate(&g->body, mark);
+}
+
+// ---- terminators --------------------------------------------------------------------------------
+
+// `switch(a) -> [...]`: `br i1` for a `bool`, to the arm of `true` and the arm of `false`, each
+// `otherwise` when no arm names it; for an integer, a `char` or an enum, an LLVM `switch` with one
+// case for each arm, in arm order, and `otherwise` as its default (toolchain.md 6 item 10).
+fn switch_to(translator mut* t, fir.terminator* term) void {
+    gen.emitter mut* g = t->g;
+    gen.gen_val v = operand_value(t, term->cond);
+    types.node* ty = fir.operand_type(t->f, term->cond);
+    if (gen.place_is_bool(ty)) {
+        u64 mut yes = label_of(t, term->otherwise);
+        u64 mut no = yes;
+        u32 mut i = 0;
+        while (i < term->arms_len) {
+            fir.arm a = fir.term_arm(t->f, term, i);
+            if (a.value.mag != 0) {
+                yes = label_of(t, a.target);
+            } else {
+                no = label_of(t, a.target);
+            }
+            i += 1;
+        }
+        gen.gen_br_cond(g, v, yes, no);
+        return;
+    }
+    gen.gen_switch_begin(g, v, label_of(t, term->otherwise));
+    u32 mut i = 0;
+    while (i < term->arms_len) {
+        fir.arm a = fir.term_arm(t->f, term, i);
+        gen.gen_val c = gen.gen_const_value(g, ty, a.value);
+        gen.gen_switch_case(g, c, label_of(t, a.target));
+        i += 1;
+    }
+    gen.gen_switch_end(g);
+}
+
+// `return`: `ret void` for `_0` of type `void` or of an aggregate type, whose value is at
+// `%ret.sret`; else the load of `%result` and `ret` (toolchain.md 6 item 7).
+fn return_to(translator mut* t) void {
+    gen.emitter mut* g = t->g;
+    if (storage_at(t, 0) != storage.sk_result) {
+        strbuf.append(&g->body, "  ret void\n");
+    } else {
+        types.node* ty = fir.local_at(t->f, 0)->ty;
+        gen.gen_val v = gen.gen_load_place(g, gen.gen_place{local_addr(t, 0), ty});
+        strbuf.append(&g->body, "  ret ");
+        strbuf.append(&g->body, v.ty);
+        strbuf.push(&g->body, ' ');
+        strbuf.append(&g->body, v.val);
+        strbuf.push(&g->body, '\n');
+    }
+    g->terminated = true;
+}
+
+// `check(f, kind, args) -> bb`: the condition and the reported operands, then `br i1` with the
+// failure label first, or the continuation first for the kind `user`, whose condition is true on
+// success; then the failure block `bad`, with the file of the check (D19.6, toolchain.md 6 item
+// 14). The operands are read in the block of the check, so each dominates the failure block.
+fn check_to(translator mut* t, fir.terminator* term, u64 bad) void {
+    gen.emitter mut* g = t->g;
+    gen.gen_val cond = operand_value(t, term->cond);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    add_reported(t, term, &args);
+    u64 next = label_of(t, term->target);
+    if (term->check == fir.check_kind.chk_user) {
+        gen.gen_br_cond(g, cond, next, bad);
+    } else {
+        gen.gen_br_cond(g, cond, bad, next);
+    }
+    gen.gen_fail_block(g, bad, entry_of(term->check), &args, term->loc);
+    // the failure block opened a block of its own; the block of the check ends in its `br`
+    g->terminated = true;
+}
+
+// `check(overwrite: p) -> bb`: the pointer word of `p`, field 0 of a span or a `string`, then
+// `icmp ne ptr` against null, then `br i1` with the failure label first; the failure block calls
+// `std.rt.fail_overwrite` (toolchain.md 6 item 18).
+fn overwrite_to(translator mut* t, fir.terminator* term, u64 bad) void {
+    gen.emitter mut* g = t->g;
+    types.node* ty = fir.place_type(t->f, term->place);
+    gen.gen_val mut word = gen.gen_val{};
+    if (whole_register(t, term->place)) {
+        word = register_value(t, term->place.local);
+    } else if (fir.type_aggregate(ty)) {
+        word = gen.gen_span_ptr(g, place_addr(t, term->place));
+    } else {
+        word = gen.gen_load_place(g, gen.gen_place{place_addr(t, term->place), ty});
+    }
+    gen.gen_val live = gen.gen_icmp(g, "ne", word, gen.gen_literal(g, "ptr", "null"));
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    gen.gen_br_cond(g, live, bad, label_of(t, term->target));
+    gen.gen_fail_block(g, bad, runtime_sig.rt_entry.rt_fail_overwrite, &args, term->loc);
+    g->terminated = true;
+}
+
+/// Translates the terminator of block `b` (spec/fir.md 12.4): `goto` is `br`, `switch` is `br i1`
+/// or an LLVM `switch`, `return` is `ret`, a `check` is a `br i1` and a failure block in
+/// `g->fail`, `fail` is the call and `unreachable` in place, `trap` is the call of `llvm.trap` and
+/// `unreachable`, and `unreachable` is `unreachable`. `g->terminated` is true after each kind.
+fn translate_terminator(translator mut* t, u32 b) void {
+    gen.emitter mut* g = t->g;
+    fir.block* bl = fir.block_at(t->f, b);
+    if (!bl->terminated) {
+        panic("fir_llvm.translate_terminator: a block with no terminator");
+    }
+    fir.terminator* term = &bl->term;
+    switch (term->kind) {
+    case fir.term_kind.tk_goto:
+        gen.gen_br(g, label_of(t, term->target));
+    case fir.term_kind.tk_switch:
+        switch_to(t, term);
+    case fir.term_kind.tk_return:
+        return_to(t);
+    case fir.term_kind.tk_check:
+        check_to(t, term, failure_label(t, b));
+    case fir.term_kind.tk_check_overwrite:
+        overwrite_to(t, term, failure_label(t, b));
+    case fir.term_kind.tk_fail:
+        fail_call(t, term);
+    case fir.term_kind.tk_trap:
+        gen.gen_use_intrinsic(g, gen.IN_TRAP);
+        gen.gen_use_attr(g, gen.ATTR_TRAP);
+        strbuf.append(&g->body, "  call void @llvm.trap()\n  unreachable\n");
+        g->terminated = true;
+    case fir.term_kind.tk_unreachable:
+        strbuf.append(&g->body, "  unreachable\n");
+        g->terminated = true;
+    }
+}
+
+// ---- functions and modules ----------------------------------------------------------------------
+
+// Writes block `b`: its label `L<b>` unless it is `bb0`, its statements and its terminator. A
+// block that holds only `fail` goes into `g->fail` as a failure block instead.
+fn write_block(translator mut* t, u32 b) void {
+    if (fail_only(t->f, b)) {
+        fail_only_block(t, b);
+        return;
+    }
+    if (b > 0) {
+        gen.gen_block_begin(t->g, cast(b, u64));
+    }
+    translate_block(t, b);
+    translate_terminator(t, b);
+}
+
+/// Writes the definition of `f` into `g->funcs` (spec/fir.md 12): the `define` line from the
+/// signature map, the entry block with the allocas and the stores of the scalar parameters, each
+/// normal block in number order with its terminator, and then the failure blocks, in the order of
+/// the numbers of the blocks that make them. The blocks are `entry`, `%L<n>` and `%L<B + k>`.
+/// `g->terminated` is true after it, as after the direct path's gen_function.
+fn translate_function(gen.emitter mut* g, fir.func* f) void {
+    gen.function_begin(g);
+    gen.signature mut sig = gen.signature_of(g, f->ty, null);
+    defer gen.signature_free(&sig);
+    string mut@ own names = new(string, sig.params.len);
+    defer del(names);
+    u64 mut i = 0;
+    while (i < names.len) {
+        fir.local* l = fir.local_at(f, cast(i + 1, u32));
+        names[i] = dotted(g, fir.local_name(l), "in", 0);
+        i += 1;
+    }
+    gen.gen_define(g, f->sym, &sig, names);
+    translator mut t = open(g, f);
+    defer close(&t);
+    write_locals(&t);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        write_block(&t, b);
+        b += 1;
+    }
+    gen.function_end(g);
+}
+
+/// Records the extern functions of `m` in the first-use order of its list, so that
+/// gen_data.gen_finish writes one `declare` for each C name (spec/fir.md 5.1).
+fn declare_externs(gen.emitter mut* g, fir.module* m) void {
+    u64 mut i = 0;
+    while (i < fir.module_extern_count(m)) {
+        gen.gen_use_extern(g, fir.module_extern_at(m, i));
+        i += 1;
+    }
+}
+
+/// Writes each function of `m` in module order, then the C `main` when `m` names the entry
+/// module's `main`, then records the externs of `m`. The named types and the globals are the
+/// caller's, and gen_data.gen_finish assembles the module.
+fn translate_module(gen.emitter mut* g, fir.module* m) void {
+    u64 mut i = 0;
+    while (i < fir.module_function_count(m)) {
+        translate_function(g, fir.module_function_at(m, i));
+        i += 1;
+    }
+    if (m->main != null) {
+        gen.gen_main(g, m->main);
+    }
+    declare_externs(g, m);
 }

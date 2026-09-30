@@ -1,0 +1,710 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| worked ok
+//| terminators ok
+//| failures ok
+/// Checks the whole definitions that the FIR translator writes (spec/fir.md 12.4, 12.5): each
+/// terminator kind, the failure blocks after the normal blocks in the order of the blocks that
+/// make them, and the labels `entry`, `%L<n>` and `%L<B + k>`. Each definition passes the block
+/// rule of llvm_env.verified, and the lines that 12.5 lists no difference for are the direct
+/// path's.
+import fir;
+import fir_llvm;
+import gen;
+import llvm_env;
+import pass_env;
+
+// ---- the worked example -------------------------------------------------------------------------
+
+// The source of the worked example of spec/fir.md 13.
+string[9] WORKED = {
+    "fn f(bool c) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    defer del(p);",
+    "    if (c) {",
+    "        return 1;",
+    "    }",
+    "    *p = 7;",
+    "    return *p;",
+    "}",
+};
+
+// The four blocks are `entry`, `%L1` to `%L3`, and the failure block of the overwrite check of
+// `bb0` is `%L4`, after them. The check loads `p` and compares it with null, the failure label
+// first. Each `return` loads `%result`.
+fn the_worked_example_translates_whole() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[43] want = {
+        "define dso_local i32 @\"main.f\"(i1 zeroext %c.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %c.0 = alloca i8, align 1",
+        "  %p.1 = alloca ptr, align 8",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
+        "  %t2 = load ptr, ptr %p.1, align 8",
+        "  %t3 = icmp ne ptr %t2, null",
+        "  br i1 %t3, label %L4, label %L1",
+        "",
+        "L1:",
+        "  store ptr %t1, ptr %p.1, align 8",
+        "  %t4 = load i8, ptr %c.0, align 1",
+        "  %t5 = trunc i8 %t4 to i1",
+        "  br i1 %t5, label %L2, label %L3",
+        "",
+        "L2:",
+        "  store i32 1, ptr %result, align 4",
+        "  %t6 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t6)",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t7 = load i32, ptr %result, align 4",
+        "  ret i32 %t7",
+        "",
+        "L3:",
+        "  %t8 = load ptr, ptr %p.1, align 8",
+        "  store i32 7, ptr %t8, align 4",
+        "  %t9 = load ptr, ptr %p.1, align 8",
+        "  %t10 = load i32, ptr %t9, align 4",
+        "  store i32 %t10, ptr %result, align 4",
+        "  %t11 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t11)",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t12 = load i32, ptr %result, align 4",
+        "  ret i32 %t12",
+        "",
+        "L4:",
+        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 2, i32 18)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, WORKED[..], "f", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    // the signature, the entry block up to the check, the check and its failure call
+    llvm_env.in_direct(&e, "f", want[0..1]);
+    string[6] entry = {
+        "  %c.0 = alloca i8, align 1",
+        "  %p.1 = alloca ptr, align 8",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
+    };
+    llvm_env.in_direct(&e, "f", entry[..]);
+    llvm_env.in_direct(&e, "f", want[9..11]);
+    llvm_env.in_direct(&e, "f", want[40..42]);
+}
+
+// Under --release the build-mode pass removes the check and merges `bb1` into `bb0`, so three
+// blocks remain and no failure block stands after them (spec/fir.md 13).
+fn the_worked_example_in_release_mode() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[34] want = {
+        "define dso_local i32 @\"main.f\"(i1 zeroext %c.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %c.0 = alloca i8, align 1",
+        "  %p.1 = alloca ptr, align 8",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
+        "  store ptr %t1, ptr %p.1, align 8",
+        "  %t2 = load i8, ptr %c.0, align 1",
+        "  %t3 = trunc i8 %t2 to i1",
+        "  br i1 %t3, label %L1, label %L2",
+        "",
+        "L1:",
+        "  store i32 1, ptr %result, align 4",
+        "  %t4 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t4)",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t5 = load i32, ptr %result, align 4",
+        "  ret i32 %t5",
+        "",
+        "L2:",
+        "  %t6 = load ptr, ptr %p.1, align 8",
+        "  store i32 7, ptr %t6, align 4",
+        "  %t7 = load ptr, ptr %p.1, align 8",
+        "  %t8 = load i32, ptr %t7, align 4",
+        "  store i32 %t8, ptr %result, align 4",
+        "  %t9 = load ptr, ptr %p.1, align 8",
+        "  call void @\"std.rt.free\"(ptr %t9)",
+        "  store ptr null, ptr %p.1, align 8",
+        "  %t10 = load i32, ptr %result, align 4",
+        "  ret i32 %t10",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, WORKED[..], "f", pass_env.RELEASE);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "f", want[5..12]);
+}
+
+// ---- the terminators ----------------------------------------------------------------------------
+
+string[68] SOURCE = {
+    "enum color {",
+    "    red,",
+    "    green,",
+    "}",
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "fn ints(i32 n) i32 {",
+    "    switch (n) {",
+    "    case 1, 2:",
+    "        return 10;",
+    "    default:",
+    "        return 0;",
+    "    }",
+    "}",
+    "fn which(color k) i32 {",
+    "    switch (k) {",
+    "    case color.red:",
+    "        return 1;",
+    "    case color.green:",
+    "        return 2;",
+    "    }",
+    "}",
+    "fn order(color k, i32 a, i32 b) i32 {",
+    "    switch (k) {",
+    "    case color.red:",
+    "        return a + b;",
+    "    case color.green:",
+    "        return a * b;",
+    "    }",
+    "}",
+    "fn check_user(i32 x) void {",
+    "    assert(x > 0);",
+    "}",
+    "fn msg(string m, bool c) void {",
+    "    if (c) {",
+    "        panic(m);",
+    "    }",
+    "}",
+    "fn boom(bool c, i32 x) void {",
+    "    if (c) {",
+    "        i32 y = x;",
+    "        panic(\"boom\");",
+    "    }",
+    "}",
+    "fn stop() noreturn {",
+    "    panic(\"stop\");",
+    "}",
+    "fn call_stop(bool c) i32 {",
+    "    if (c) {",
+    "        stop();",
+    "    }",
+    "    return 0;",
+    "}",
+    "fn loop(i32 n) i32 {",
+    "    i32 mut s = 0;",
+    "    while (s < n) {",
+    "        s += 1;",
+    "    }",
+    "    return s;",
+    "}",
+    "fn idx(i32@ a, u64 i) i32 {",
+    "    return a[i];",
+    "}",
+    "fn make(i32 x) pair {",
+    "    return pair{x, 2};",
+    "}",
+};
+
+// An integer `switch` is an LLVM `switch` with one case for each arm, two of which name one
+// block, and `otherwise` as its default. The block after the `switch`, which no edge reaches, ends
+// in `unreachable`.
+fn an_integer_switch_and_unreachable() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[22] want = {
+        "define dso_local i32 @\"main.ints\"(i32 %n.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %n.0 = alloca i32, align 4",
+        "  store i32 %n.in, ptr %n.0, align 4",
+        "  %t0 = load i32, ptr %n.0, align 4",
+        "  switch i32 %t0, label %L2 [",
+        "    i32 1, label %L1",
+        "    i32 2, label %L1",
+        "  ]",
+        "",
+        "L1:",
+        "  store i32 10, ptr %result, align 4",
+        "  %t1 = load i32, ptr %result, align 4",
+        "  ret i32 %t1",
+        "",
+        "L2:",
+        "  store i32 0, ptr %result, align 4",
+        "  %t2 = load i32, ptr %result, align 4",
+        "  ret i32 %t2",
+        "",
+        "L3:",
+    };
+    string[2] tail = {"  unreachable", "}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "ints", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "ints", want[0..1]);
+    llvm_env.in_direct(&e, "ints", want[3..6]);
+}
+
+// An enum `switch` with no `default` names the block of `fail(enum, ...)` as `otherwise`. That
+// block holds only `fail`, so it is the failure block `%L5`, after the four other blocks; its
+// number 1 is no label. It reports the value widened in the block of the `switch`.
+fn an_enum_switch_and_its_failure_block() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[30] want = {
+        "define dso_local i32 @\"main.which\"(i32 %k.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %k.0 = alloca i32, align 4",
+        "  store i32 %k.in, ptr %k.0, align 4",
+        "  %t0 = load i32, ptr %k.0, align 4",
+        "  %t1 = sext i32 %t0 to i64",
+        "  %t2 = load i32, ptr %k.0, align 4",
+        "  switch i32 %t2, label %L5 [",
+        "    i32 0, label %L2",
+        "    i32 1, label %L3",
+        "  ]",
+        "",
+        "L2:",
+        "  store i32 1, ptr %result, align 4",
+        "  %t3 = load i32, ptr %result, align 4",
+        "  ret i32 %t3",
+        "",
+        "L3:",
+        "  store i32 2, ptr %result, align 4",
+        "  %t4 = load i32, ptr %result, align 4",
+        "  ret i32 %t4",
+        "",
+        "L4:",
+        "  unreachable",
+        "",
+        "L5:",
+        "  call void @\"std.rt.fail_enum\"(i64 %t1, ptr @.str.0, ptr @.file.0, i32 18, i32 5)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "which", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    // the direct path numbers its data again at each emission, so the data comes first
+    llvm_env.in_direct(&e, "which", want[27..29]);
+    llvm_env.in_direct(&e, "which", want[0..1]);
+    llvm_env.in_direct(&e, "which", want[3..7]);
+}
+
+// `return` of a `void` function is `ret void`. The kind `user` branches to the continuation
+// first, and its failure block reports the source text of the argument.
+fn a_user_check_branches_to_the_continuation_first() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[15] want = {
+        "define dso_local void @\"main.check_user\"(i32 %x.in) #0 {",
+        "entry:",
+        "  %x.0 = alloca i32, align 4",
+        "  store i32 %x.in, ptr %x.0, align 4",
+        "  %t0 = load i32, ptr %x.0, align 4",
+        "  %t1 = icmp sgt i32 %t0, 0",
+        "  br i1 %t1, label %L1, label %L2",
+        "",
+        "L1:",
+        "  ret void",
+        "",
+        "L2:",
+        "  call void @\"std.rt.assert_fail\"(ptr @.str.0, ptr @.file.0, i32 34, i32 5)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "check_user", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "check_user", want[12..14]);
+    llvm_env.in_direct(&e, "check_user", want[0..6]);
+}
+
+// A bounds check branches with the failure label first, and its failure block reports the index
+// and the length that the block of the check computed. The element loads in the continuation.
+fn a_bounds_check_branches_to_its_failure_block_first() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[26] want = {
+        "define dso_local i32 @\"main.idx\"(ptr %a.in, i64 %i.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %i.1 = alloca i64, align 8",
+        "  store i64 %i.in, ptr %i.1, align 8",
+        "  %t0 = load i64, ptr %i.1, align 8",
+        "  %t1 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 1",
+        "  %t2 = load i64, ptr %t1, align 8",
+        "  %t3 = icmp uge i64 %t0, %t2",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 1",
+        "  %t5 = load i64, ptr %t4, align 8",
+        "  br i1 %t3, label %L2, label %L1",
+        "",
+        "L1:",
+        "  %t6 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 0",
+        "  %t7 = load ptr, ptr %t6, align 8",
+        "  %t8 = getelementptr inbounds i32, ptr %t7, i64 %t0",
+        "  %t9 = load i32, ptr %t8, align 4",
+        "  store i32 %t9, ptr %result, align 4",
+        "  %t10 = load i32, ptr %result, align 4",
+        "  ret i32 %t10",
+        "",
+        "L2:",
+        "  call void @\"std.rt.fail_bounds\"(i64 %t0, i64 %t5, ptr @.file.0, i32 64, i32 13)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "idx", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "idx", want[0..1]);
+    llvm_env.in_direct(&e, "idx", want[3..9]);
+}
+
+// A `while` loop: `goto` is `br`, the condition a `bool` `switch`, and the check of `s += 1` a
+// `br i1` to the failure block `%L5`, which stands after `%L3` and `%L4` although block 2 makes
+// it. The `add` of the continuation takes the name of `extractvalue 0`.
+fn a_loop_writes_goto_and_its_failure_block_last() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[36] want = {
+        "define dso_local i32 @\"main.loop\"(i32 %n.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %n.0 = alloca i32, align 4",
+        "  %s.1 = alloca i32, align 4",
+        "  store i32 %n.in, ptr %n.0, align 4",
+        "  store i32 0, ptr %s.1, align 4",
+        "  br label %L1",
+        "",
+        "L1:",
+        "  %t0 = load i32, ptr %s.1, align 4",
+        "  %t1 = load i32, ptr %n.0, align 4",
+        "  %t2 = icmp slt i32 %t0, %t1",
+        "  br i1 %t2, label %L2, label %L3",
+        "",
+        "L2:",
+        "  %t3 = load i32, ptr %s.1, align 4",
+        "  %t4 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %t3, i32 1)",
+        "  %t5 = extractvalue { i32, i1 } %t4, 0",
+        "  %t6 = extractvalue { i32, i1 } %t4, 1",
+        "  br i1 %t6, label %L5, label %L4",
+        "",
+        "L3:",
+        "  %t7 = load i32, ptr %s.1, align 4",
+        "  store i32 %t7, ptr %result, align 4",
+        "  %t8 = load i32, ptr %result, align 4",
+        "  ret i32 %t8",
+        "",
+        "L4:",
+        "  store i32 %t5, ptr %s.1, align 4",
+        "  br label %L1",
+        "",
+        "L5:",
+        "  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 59, i32 11)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "loop", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "loop", want[0..1]);
+    llvm_env.in_direct(&e, "loop", want[3..5]);
+    llvm_env.in_direct(&e, "loop", want[10..13]);
+    llvm_env.in_direct(&e, "loop", want[33..35]);
+}
+
+// A `noreturn` callee ends its block with the trap of D19.7, which the direct path writes too.
+fn a_trap_follows_a_noreturn_call() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[20] want = {
+        "define dso_local i32 @\"main.call_stop\"(i1 zeroext %c.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %c.0 = alloca i8, align 1",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  %t1 = load i8, ptr %c.0, align 1",
+        "  %t2 = trunc i8 %t1 to i1",
+        "  br i1 %t2, label %L1, label %L2",
+        "",
+        "L1:",
+        "  call void @\"main.stop\"()",
+        "  call void @llvm.trap()",
+        "  unreachable",
+        "",
+        "L2:",
+        "  store i32 0, ptr %result, align 4",
+        "  %t3 = load i32, ptr %result, align 4",
+        "  ret i32 %t3",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_stop", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "call_stop", want[3..8]);
+    llvm_env.in_direct(&e, "call_stop", want[11..14]);
+}
+
+// An aggregate result is written through `%ret.sret`, and `return` is `ret void`. The signature
+// and the entry block are the direct path's; the literal reads its member first (spec/fir.md 6).
+fn an_aggregate_result_returns_void() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[11] want = {
+        "define dso_local void @\"main.make\"(ptr sret(%struct.main.pair) %ret.sret, i32 %x.in) \\",
+        "#0 {",
+        "entry:",
+        "  %x.0 = alloca i32, align 4",
+        "  store i32 %x.in, ptr %x.0, align 4",
+        "  %t0 = load i32, ptr %x.0, align 4",
+        "  %t1 = getelementptr inbounds %struct.main.pair, ptr %ret.sret, i32 0, i32 0",
+        "  store i32 %t0, ptr %t1, align 4",
+        "  %t2 = getelementptr inbounds %struct.main.pair, ptr %ret.sret, i32 0, i32 1",
+        "  store i64 2, ptr %t2, align 8",
+        "  ret void",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "make", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "make", want[0..5]);
+}
+
+// ---- failures -----------------------------------------------------------------------------------
+
+// `panic` in a block that holds only `fail` is the failure block `%L3`, and its number 1 is no
+// label: the `br i1` of `bb0` names `%L3`. The pointer and the length of the message load inside
+// the failure block, because the block has no statement to hold them.
+fn a_panic_alone_in_its_block_is_a_failure_block() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[20] want = {
+        "define dso_local void @\"main.msg\"(ptr %m.in, i1 zeroext %c.in) #0 {",
+        "entry:",
+        "  %c.1 = alloca i8, align 1",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.1, align 1",
+        "  %t1 = load i8, ptr %c.1, align 1",
+        "  %t2 = trunc i8 %t1 to i1",
+        "  br i1 %t2, label %L3, label %L2",
+        "",
+        "L2:",
+        "  ret void",
+        "",
+        "L3:",
+        "  %t3 = getelementptr inbounds %fort.span, ptr %m.in, i32 0, i32 0",
+        "  %t4 = load ptr, ptr %t3, align 8",
+        "  %t5 = getelementptr inbounds %fort.span, ptr %m.in, i32 0, i32 1",
+        "  %t6 = load i64, ptr %t5, align 8",
+        "  call void @\"std.rt.panic\"(ptr %t4, i64 %t6, ptr @.file.0, i32 38, i32 9)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "msg", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "msg", want[0..7]);
+    llvm_env.in_direct(&e, "msg", want[13..19]);
+}
+
+// `panic` after statements is the call and `unreachable` in place, in the block `%L1` that holds
+// the statements, and no failure block follows (toolchain.md 6 item 19).
+fn a_panic_after_statements_stands_in_place() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[21] want = {
+        "define dso_local void @\"main.boom\"(i1 zeroext %c.in, i32 %x.in) #0 {",
+        "entry:",
+        "  %c.0 = alloca i8, align 1",
+        "  %x.1 = alloca i32, align 4",
+        "  %y.2 = alloca i32, align 4",
+        "  %t0 = zext i1 %c.in to i8",
+        "  store i8 %t0, ptr %c.0, align 1",
+        "  store i32 %x.in, ptr %x.1, align 4",
+        "  %t1 = load i8, ptr %c.0, align 1",
+        "  %t2 = trunc i8 %t1 to i1",
+        "  br i1 %t2, label %L1, label %L2",
+        "",
+        "L1:",
+        "  %t3 = load i32, ptr %x.1, align 4",
+        "  store i32 %t3, ptr %y.2, align 4",
+        "  call void @\"std.rt.panic\"(ptr @.str.0, i64 4, ptr @.file.0, i32 44, i32 9)",
+        "  unreachable",
+        "",
+        "L2:",
+        "  ret void",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "boom", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "boom", want[13..17]);
+    llvm_env.in_direct(&e, "boom", want[0..10]);
+}
+
+// `bb0` that holds only `fail` stays the entry block, with the call in place, because LLVM needs
+// an entry block. A `noreturn` function takes `#1`. The whole definition is the direct path's.
+fn a_panic_in_the_entry_block_stands_in_place() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[5] want = {
+        "define dso_local void @\"main.stop\"() #1 {",
+        "entry:",
+        "  call void @\"std.rt.panic\"(ptr @.str.0, i64 4, ptr @.file.0, i32 48, i32 5)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "stop", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.expect(&e, llvm_env.direct(&e, "stop"), want[..]);
+}
+
+// The failure blocks stand after the normal blocks in the order of the numbers of the blocks that
+// make them: the `fail(enum, ...)` block 1 of the `switch` first, as `%L7`, then the overflow
+// checks of the clauses, blocks 2 and 3, as `%L8` and `%L9`. The continuations 5 and 6 are the
+// last normal blocks, and the `add` and the `mul` there take `extractvalue 0`.
+fn the_failure_blocks_follow_the_blocks_that_make_them() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[53] want = {
+        "define dso_local i32 @\"main.order\"(i32 %k.in, i32 %a.in, i32 %b.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %k.0 = alloca i32, align 4",
+        "  %a.1 = alloca i32, align 4",
+        "  %b.2 = alloca i32, align 4",
+        "  store i32 %k.in, ptr %k.0, align 4",
+        "  store i32 %a.in, ptr %a.1, align 4",
+        "  store i32 %b.in, ptr %b.2, align 4",
+        "  %t0 = load i32, ptr %k.0, align 4",
+        "  %t1 = sext i32 %t0 to i64",
+        "  %t2 = load i32, ptr %k.0, align 4",
+        "  switch i32 %t2, label %L7 [",
+        "    i32 0, label %L2",
+        "    i32 1, label %L3",
+        "  ]",
+        "",
+        "L2:",
+        "  %t3 = load i32, ptr %a.1, align 4",
+        "  %t4 = load i32, ptr %b.2, align 4",
+        "  %t5 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %t3, i32 %t4)",
+        "  %t6 = extractvalue { i32, i1 } %t5, 0",
+        "  %t7 = extractvalue { i32, i1 } %t5, 1",
+        "  br i1 %t7, label %L8, label %L5",
+        "",
+        "L3:",
+        "  %t8 = load i32, ptr %a.1, align 4",
+        "  %t9 = load i32, ptr %b.2, align 4",
+        "  %t10 = call { i32, i1 } @llvm.smul.with.overflow.i32(i32 %t8, i32 %t9)",
+        "  %t11 = extractvalue { i32, i1 } %t10, 0",
+        "  %t12 = extractvalue { i32, i1 } %t10, 1",
+        "  br i1 %t12, label %L9, label %L6",
+        "",
+        "L4:",
+        "  unreachable",
+        "",
+        "L5:",
+        "  store i32 %t6, ptr %result, align 4",
+        "  %t13 = load i32, ptr %result, align 4",
+        "  ret i32 %t13",
+        "",
+        "L6:",
+        "  store i32 %t11, ptr %result, align 4",
+        "  %t14 = load i32, ptr %result, align 4",
+        "  ret i32 %t14",
+        "",
+        "L7:",
+        "  call void @\"std.rt.fail_enum\"(i64 %t1, ptr @.str.0, ptr @.file.0, i32 26, i32 5)",
+        "  unreachable",
+        "",
+        "L8:",
+        "  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 28, i32 18)",
+        "  unreachable",
+    };
+    string[5] tail = {
+        "",
+        "L9:",
+        "  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 30, i32 18)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "order", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "order", want[47..49]);
+    llvm_env.in_direct(&e, "order", want[51..53]);
+}
+
+// Translates block 0 of the function `name` of `lines` with its terminator, and gives whether the
+// emitter then holds the block as terminated.
+fn first_block_terminated(llvm_env.env mut* e, string@ lines, string name) bool {
+    fir.func mut f = llvm_env.lower(e, lines, name, pass_env.CHECKED);
+    defer fir.func_free(&f);
+    gen.function_begin(&e->g);
+    fir_llvm.translator mut t = fir_llvm.open(&e->g, &f);
+    defer fir_llvm.close(&t);
+    fir_llvm.write_locals(&t);
+    fir_llvm.translate_block(&t, 0);
+    fir_llvm.translate_terminator(&t, 0);
+    return e->g.terminated;
+}
+
+// A `check` and `check(overwrite)` leave their block terminated, although their failure block
+// opened a block of its own, so a caller that reads `g->terminated` after a terminator reads true.
+fn a_check_leaves_its_block_terminated() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    assert(first_block_terminated(&e, SOURCE[..], "idx"));
+    assert(first_block_terminated(&e, WORKED[..], "f"));
+    assert(first_block_terminated(&e, SOURCE[..], "ints"));
+}
+
+fn main() i32 {
+    the_worked_example_translates_whole();
+    the_worked_example_in_release_mode();
+    println("worked ok");
+    an_integer_switch_and_unreachable();
+    an_enum_switch_and_its_failure_block();
+    a_user_check_branches_to_the_continuation_first();
+    a_bounds_check_branches_to_its_failure_block_first();
+    a_loop_writes_goto_and_its_failure_block_last();
+    a_trap_follows_a_noreturn_call();
+    an_aggregate_result_returns_void();
+    println("terminators ok");
+    a_panic_alone_in_its_block_is_a_failure_block();
+    a_panic_after_statements_stands_in_place();
+    a_panic_in_the_entry_block_stands_in_place();
+    the_failure_blocks_follow_the_blocks_that_make_them();
+    a_check_leaves_its_block_terminated();
+    println("failures ok");
+    return 0;
+}

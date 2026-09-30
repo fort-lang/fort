@@ -828,9 +828,13 @@ read the build mode.
   after a join that the definition does not precede, so the definition dominates every read; each
   expansion of a deferred statement has its own index and its own temporaries. Every other
   temporary that a statement or a terminator names is an `alloca` named `%tmp<K>` (D19.5): the
-  `&&` slot, which two statements assign, and the counter of a range `for`. The next rule gives
-  a temporary that nothing names no storage. The translator classifies the locals in one scan
-  before it writes text, as the direct path collects the locals before it emits. The direct path
+  `&&` slot, which two statements assign, and the counter of a range `for`. A scalar temporary
+  whose storage an `addr` takes is an `alloca` too, because a register has no address. So is a
+  scalar temporary that an item reads before its assignment, in the order of the blocks and of
+  the items in each block, because a register has no value before its assignment. The lowering
+  writes neither case (V13, section 9). The next rule gives a temporary that nothing names no
+  storage. The translator classifies the locals in one scan before it writes text, as the direct
+  path collects the locals before it emits. The direct path
   keeps its scalar intermediates in registers and its aggregate temporaries in `%tmp<K>` slots,
   so this rule gives the same shape.
 - A temporary that no statement and no terminator names gets no storage: no register and no

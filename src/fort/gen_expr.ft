@@ -478,9 +478,9 @@ fn function_ref(gen.emitter mut* g, ast.node* n, gen.gen_val mut* out) bool {
     return true;
 }
 
-// Emits one fort or `extern` call argument. A scalar is an ordinary parameter. An aggregate is a
-// plain `ptr` to a caller-allocated copy.
-fn gen_call_arg(gen.emitter mut* g, gen.gen_args mut* args, ast.node* arg) void {
+// Emits one fort or `extern` call argument with the extension attribute `attr` of its parameter.
+// A scalar is an ordinary parameter. An aggregate is a plain `ptr` to a caller-allocated copy.
+fn gen_call_arg(gen.emitter mut* g, gen.gen_args mut* args, ast.node* arg, string attr) void {
     types.node* t = arg->ty;
     if (gen.gen_is_aggregate(t)) {
         gen.gen_place copy = gen.gen_temp_place(g, t);
@@ -488,46 +488,13 @@ fn gen_call_arg(gen.emitter mut* g, gen.gen_args mut* args, ast.node* arg) void 
         gen.gen_args_add(args, copy.addr);
         return;
     }
-    gen.gen_args_add_ext(args, gen_expr_value(g, arg), gen.gen_ext_attr(t));
-}
-
-// Writes call-site parameter types, such as `(i32, ptr)`. Aggregate parameters use plain `ptr`. An
-// aggregate result adds the leading result pointer. An extern call ends the list with the variadic
-// tail. A call through a function pointer never does, since there is no variadic function type.
-fn gen_call_type(gen.emitter mut* g, types.node* sig, bool variadic) void {
-    gen.gen_text_append(g, "(");
-    u64 mut written = 0;
-    if (gen.gen_is_aggregate(sig->elem)) {
-        // An aggregate result is a leading `ptr` parameter.
-        gen.gen_text_append(g, "ptr");
-        written += 1;
-    }
-    u64 mut i = 0;
-    while (i < sig->params.len) {
-        if (written > 0) {
-            gen.gen_text_append(g, ", ");
-        }
-        written += 1;
-        types.node* pt = sig->params[i];
-        // A struct, fixed array, span or `string` parameter is a plain `ptr`
-        if (gen.gen_is_aggregate(pt)) {
-            gen.gen_text_append(g, "ptr");
-        } else {
-            gen.gen_text_append(g, gen.gen_value_type(g, pt));
-        }
-        i += 1;
-    }
-    if (variadic) {
-        if (written > 0) {
-            gen.gen_text_append(g, ", ");
-        }
-        gen.gen_text_append(g, "...");
-    }
-    gen.gen_text_append(g, ") ");
+    gen.gen_args_add_ext(args, gen_expr_value(g, arg), attr);
 }
 
 // Emits a call to a fort function, `extern` function, or function pointer. `dst` receives an
-// aggregate result. It is null for scalar or void results.
+// aggregate result. It is null for scalar or void results. The signature map of
+// gen.signature_of gives the result, the `sret` pointer, the extension attribute of each fixed
+// argument and the call type; an argument of the variadic tail carries no attribute.
 fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
     gen.gen_val none = gen.gen_literal(g, "void", "");
     ast.sym* mut s = null;
@@ -550,9 +517,9 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
         gen.gen_todo(g, n->loc, "this callee");
         return none;
     }
-    bool is_extern = direct && s->kind == ast.sym_kind.s_extern_fn;
-    bool variadic = is_extern && (s->node->flags & ast.FLAG_VARIADIC) != 0;
-    if (is_extern) {
+    ast.sym* mut ext = null;
+    if (direct && s->kind == ast.sym_kind.s_extern_fn) {
+        ext = s;
         gen.gen_use_extern(g, s);
     }
     if (gen.gen_is_aggregate(sig->elem) && dst == null) {
@@ -561,6 +528,8 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
         gen.gen_todo(g, n->loc, "an aggregate result read without a destination");
         return none;
     }
+    gen.signature mut fs = gen.signature_of(g, sig, ext);
+    defer gen.signature_free(&fs);
     gen.gen_val mut callee = none;
     if (direct) {
         callee.ty = "ptr";
@@ -576,53 +545,21 @@ fn gen_call(gen.emitter mut* g, ast.node* n, gen.gen_place* dst) gen.gen_val {
     defer gen.gen_args_free(&args);
     if (dst != null) {
         // An aggregate result arrives through the leading `sret` pointer
-        strbuf.str_buf mut attr = strbuf.create();
-        defer strbuf.free(&attr);
-        strbuf.append(&attr, "sret(");
-        strbuf.append(&attr, gen.gen_mem_type(g, sig->elem));
-        strbuf.push(&attr, ')');
-        gen.gen_args_add_ext(&args, dst->addr, strbuf.view(&attr));
+        gen.gen_args_add_ext(&args, dst->addr, gen.sret_attr(g, &fs));
     }
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
-        gen_call_arg(g, &args, ast.ast_child(n, i));
+        string mut attr = "";
+        if (i < fs.params.len) {
+            attr = fs.params[i].attr;
+        }
+        gen_call_arg(g, &args, ast.ast_child(n, i), attr);
         if (g->failed) {
             return none;
         }
         i += 1;
     }
-    string ret = gen.gen_result_type(g, sig->elem);
-    bool has_value = ret != "void";
-    gen.gen_val mut r = none;
-    if (has_value) {
-        r = gen.gen_temp(g, ret);
-    } else {
-        gen.gen_ins(g);
-    }
-    gen.gen_text_append(g, "call ");
-    string ret_attr = gen.gen_ext_attr(sig->elem);
-    if (ret_attr.len > 0) {
-        gen.gen_text_append(g, ret_attr);
-        gen.gen_text_append(g, " ");
-    }
-    gen.gen_text_append(g, ret);
-    gen.gen_text_append(g, " ");
-    if (variadic || !direct) {
-        // An extern call uses the matching variadic call type to set the vector-register count. A
-        // function-pointer call includes its function type because an opaque pointer carries none.
-        gen_call_type(g, sig, variadic);
-    }
-    gen.gen_text_append(g, callee.val);
-    gen.gen_text_append(g, "(");
-    gen.gen_text_append(g, gen.gen_args_text(&args));
-    gen.gen_text_append(g, ")");
-    if (is_extern) {
-        // `#3 = { nobuiltin }` on every extern call site. A runtime
-        // entry point is not one, and its group carries no attribute.
-        gen.gen_use_attr(g, gen.ATTR_NOBUILTIN);
-        gen.gen_text_append(g, " #3");
-    }
-    gen.gen_ins_end(g);
+    gen.gen_val r = gen.gen_call_sig(g, &fs, callee, !direct, &args);
     if (sig->is_noreturn) {
         // Every `noreturn` call site ends with a trap, including `extern` calls. The unadorned
         // declaration prevents optimizer removal. The trap catches an `extern` that returns.

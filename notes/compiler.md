@@ -567,6 +567,34 @@ came here.
   or of the place of `check(overwrite)`. The review of T-249 probed those reads apart and found
   none out of dominance. Under `--release`, 1251 temporaries of `main.ft` have no storage, which
   is the count of T-247.
+- **One signature map writes every definition, extern declaration and call** (T-251).
+  `gen.signature_of` maps a fort function type to the result type and its extension attribute,
+  the `sret` type, each parameter with its attribute, and the variadic flag of an `extern fn`.
+  `gen.gen_define`, `gen_data.emit_extern`, `gen_expr.gen_call`, `gen.gen_main` and
+  `fir_llvm.call_of` all read it, and `gen.gen_call_sig` writes each `call`. A fixed argument
+  takes the attribute of its parameter, and an argument of the variadic tail none. The move did
+  not change the direct path's text: `tools/ir_snapshot.sh` of `main` and of the branch gave an
+  empty `diff -r` over 427 run tests in three modes. The calls that the translator makes itself,
+  `std.rt.alloc`, `std.rt.free` and the failure entries, still come from the rows of
+  `runtime_sig`, as the direct path's do. `gen.function_begin`, `gen.function_end` and
+  `gen.gen_main` moved out of `gen_stmt`, because `fir_llvm` must not import `gen_stmt`: the
+  fallback of T-253 calls the translator from `gen_stmt`, and a circular import is an error
+  (D9.5).
+  **The translator numbers the failure blocks before it writes a block** (T-251).
+  `fir_llvm.open` gives the `k`-th block that ends in a `check` or holds only `fail`, in block
+  order, the label `%L<B + k>`, and a branch to a block that holds only `fail` names that label.
+  `bb0` is never such a block, because LLVM needs an entry block, so a `fail` there stands in
+  place. A `check` reads its condition and its reported operands in its own block, before the
+  `br`, so each dominates the failure block; a block that holds only `fail` reads them inside the
+  failure block, which is the one case where a failure block holds more than its call. An
+  aggregate argument passes the storage of a temporary as it is, and copies any other place into
+  a new `%tmp` slot, the caller-made copy, which a `move` then zeroes. The `sret` pointer is the
+  address of the destination, which the translator computes after the arguments. T-251 built a
+  compiler whose `gen_function` emits through FIR (`.tickets/evidence/T251/probe_patch.py`). It
+  reached a fixpoint: the probe built by the direct path, the probe built by itself and the probe
+  built by that one write one module for the compiler source. That module is not the direct
+  path's: `diff` of the two gives 261291 lines on Linux. The probe passed the 702 language tests
+  with `--verify-ir` and the 255 module tests of `test/fort`.
 
 ## 7. The runtime and the standard library
 

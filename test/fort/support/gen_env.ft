@@ -99,7 +99,7 @@ fn open_main(env mut* e) bool {
     return true;
 }
 
-// The per-function reset of gen_stmt.function_begin, minus the slots, so that
+// The per-function reset of gen.function_begin, minus the slots, so that
 // two assertions of one test each start from `%t0` and `L0`.
 //
 // It stays separate from function_begin because the two reset different state. function_begin
@@ -367,10 +367,16 @@ fn line_at(string text, u64 from, u64 mut* next) string {
 // does not reject an instruction after a terminator at all. It splits the block and invents a
 // successor. This function implements bootstrap0/test/common/gen_helpers.h's
 // gen_block_terminators_of.
+fn block_terminators(env mut* e, string text) string {
+    return block_report(&e->buf, text);
+}
+
+// block_terminators over the buffer `buf`, which holds a report, so that a suite with no emitter
+// environment of this module holds the same rule.
 //
 // A block begins at a label line and ends at the next label or at the closing
 // brace of the definition.
-fn block_terminators(env mut* e, string text) string {
+fn block_report(strbuf.str_buf mut* buf, string text) string {
     bool mut in_function = false;
     bool mut open = false;
     bool mut seen = false;
@@ -387,12 +393,12 @@ fn block_terminators(env mut* e, string text) string {
             open = false;
         } else if (line == "}") {
             if (open && count != 1) {
-                return terminator_report(e, label, count);
+                return terminator_report(buf, label, count);
             }
             in_function = false;
         } else if (is_label(line)) {
             if (open && count != 1) {
-                return terminator_report(e, label, count);
+                return terminator_report(buf, label, count);
             }
             label = line;
             open = true;
@@ -401,7 +407,10 @@ fn block_terminators(env mut* e, string text) string {
             if (is_terminator(line)) {
                 count += 1;
             } else if (count > 0) {
-                return join3(e, label, " has an instruction after its terminator", "");
+                strbuf.clear(buf);
+                strbuf.append(buf, label);
+                strbuf.append(buf, " has an instruction after its terminator");
+                return strbuf.view(buf);
             }
         }
     }
@@ -415,13 +424,13 @@ fn block_terminators(env mut* e, string text) string {
 
 // `<label> has N terminators`, the report of a block that ends in none or in
 // more than one.
-fn terminator_report(env mut* e, string label, u64 count) string {
-    strbuf.clear(&e->buf);
-    strbuf.append(&e->buf, label);
-    strbuf.append(&e->buf, " has ");
-    strbuf.append_u64(&e->buf, count);
-    strbuf.append(&e->buf, " terminators");
-    return strbuf.view(&e->buf);
+fn terminator_report(strbuf.str_buf mut* buf, string label, u64 count) string {
+    strbuf.clear(buf);
+    strbuf.append(buf, label);
+    strbuf.append(buf, " has ");
+    strbuf.append_u64(buf, count);
+    strbuf.append(buf, " terminators");
+    return strbuf.view(buf);
 }
 
 // Asserts the structural rule over `text`, printing the report and the module

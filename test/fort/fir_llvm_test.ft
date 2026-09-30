@@ -495,8 +495,8 @@ fn the_range_counter_is_a_slot() void {
 }
 
 // The address of a named local is its alloca and prints nothing, so the register `_3 = addr
-// mut(_1)` names `%v.0`. The sink of a call statement is a register of type `void` with no
-// storage. Calls are T-251's, so each call reports and gives `poison`.
+// mut(_1)` names `%v.0`, and the call passes it. The sink of a call statement is a register with
+// no storage, whose value nothing reads. Each call is the direct path's.
 fn an_address_is_a_register_with_no_instruction() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -506,22 +506,25 @@ fn an_address_is_a_register_with_no_instruction() void {
     assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_named);
     assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_register);
     u64 before = llvm_env.errors(&e);
-    string[5] want = {
+    string[6] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %v.0 = alloca i32, align 4",
         "  store i32 5, ptr %v.0, align 4",
-        "  store i32 poison, ptr %result, align 4",
+        "  %t0 = call i32 @\"main.lend\"(ptr %v.0)",
+        "  store i32 %t0, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    assert(llvm_env.errors(&e) == before + 1);
-    assert(e.g.failed);
+    assert(llvm_env.errors(&e) == before);
+    assert(!e.g.failed);
+    llvm_env.in_direct(&e, "keep", want[3..5]);
     fir.func mut g = llvm_env.lower(&e, CASES[..], "drop", pass_env.CHECKED);
     defer fir.func_free(&g);
     assert(fir.local_count(&g) == 2);
     assert(llvm_env.storage_of(&g, 1) == fir_llvm.storage.sk_register);
-    string[1] none = {"entry:"};
-    llvm_env.expect(&e, llvm_env.translate(&e, &g), none[..]);
+    string[2] dropped = {"entry:", "  %t0 = call i32 @\"main.lend\"(ptr null)"};
+    llvm_env.expect(&e, llvm_env.translate(&e, &g), dropped[..]);
+    llvm_env.in_direct(&e, "drop", dropped[1..]);
 }
 
 // Hand-written functions for the rules that a lowered function does not reach: a temporary that

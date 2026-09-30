@@ -845,110 +845,28 @@ fn emit_alloca(gen.emitter mut* g, string name, types.node* t) void {
     strbuf.push(&g->allocas, '\n');
 }
 
-// One blank line stands between two definitions.
-fn definition_begin(gen.emitter mut* g) void {
-    if (strbuf.view(&g->funcs).len > 0) {
-        strbuf.push(&g->funcs, '\n');
-    }
-}
-
-// Writes a fort definition signature. Scalars are ordinary parameters. An aggregate is a plain
-// `ptr`. An aggregate result adds leading `ptr sret(%T) %ret.sret` to a `void` function.
+// Writes the first line of the definition of the function `fn_node`, whose symbol is `s` and whose
+// type is `sig`, from the signature map of gen.signature_of. Each parameter arrives as
+// `%<ident>.in`.
 fn emit_signature(gen.emitter mut* g, ast.node* fn_node, ast.sym* s, types.node* sig) void {
-    // Read runtime `noreturn` state from the mangled name.
-    // Only the defining module carries the attribute group.
-    runtime_sig.rt_entry rt = runtime_sig.rt_entry_of(gen.gen_symbol(g, s));
-    bool rt_noreturn = rt != runtime_sig.rt_entry.rt_none && runtime_sig.rt_entry_noreturn(rt);
-    definition_begin(g);
-    strbuf.append(&g->funcs, "define dso_local ");
-    string ret_attr = gen.gen_ext_attr(sig->elem);
-    if (ret_attr.len > 0) {
-        // A narrow result carries the same attribute as a narrow parameter,
-        // so that LLVM normalizes on both sides of a call.
-        strbuf.append(&g->funcs, ret_attr);
-        strbuf.push(&g->funcs, ' ');
-    }
-    strbuf.append(&g->funcs, gen.gen_result_type(g, sig->elem));
-    strbuf.push(&g->funcs, ' ');
-    strbuf.append(&g->funcs, gen.gen_symbol_ref(g, s));
-    strbuf.push(&g->funcs, '(');
-    u64 mut written = 0;
-    if (gen.gen_is_aggregate(sig->elem)) {
-        strbuf.append(&g->funcs, "ptr sret(");
-        strbuf.append(&g->funcs, gen.gen_mem_type(g, sig->elem));
-        strbuf.append(&g->funcs, ") %ret.sret");
-        written += 1;
-    }
+    gen.signature mut fs = gen.signature_of(g, sig, null);
+    defer gen.signature_free(&fs);
+    string mut@ own names = new(string, fs.params.len);
+    defer del(names);
+    u64 mut at = 0;
     u64 mut i = 0;
     while (i < ast.ast_len(fn_node)) {
         ast.node* p = ast.ast_child(fn_node, i);
         if (p->kind == ast.ast_kind.k_param && p->sym != null) {
-            if (written > 0) {
-                strbuf.append(&g->funcs, ", ");
+            if (at >= names.len) {
+                panic("gen_stmt.emit_signature: more parameters than the function type has");
             }
-            written += 1;
-            types.node* t = p->sym->ty;
-            if (gen.gen_is_aggregate(t)) {
-                // A struct, fixed array, span or `string` argument is a plain
-                // `ptr` parameter and `byval` is never used.
-                strbuf.append(&g->funcs, "ptr ");
-            } else {
-                strbuf.append(&g->funcs, gen.gen_value_type(g, t));
-                string attr = gen.gen_ext_attr(t);
-                if (attr.len > 0) {
-                    strbuf.push(&g->funcs, ' ');
-                    strbuf.append(&g->funcs, attr);
-                }
-                strbuf.push(&g->funcs, ' ');
-            }
-            strbuf.append(&g->funcs, gen.slot_name(g, p->sym, 0, true));
+            names[at] = gen.slot_name(g, p->sym, 0, true);
+            at += 1;
         }
         i += 1;
     }
-    strbuf.push(&g->funcs, ')');
-    // Every fort definition uses `#0`. A `noreturn` definition uses `#1`.
-    // A `noreturn` runtime entry point uses the cold `#8` group.
-    if (sig->is_noreturn && rt_noreturn) {
-        gen.gen_use_attr(g, gen.ATTR_RT_NORET);
-        strbuf.append(&g->funcs, " #8 {\n");
-    } else if (sig->is_noreturn) {
-        gen.gen_use_attr(g, gen.ATTR_FN_NORET);
-        strbuf.append(&g->funcs, " #1 {\n");
-    } else {
-        gen.gen_use_attr(g, gen.ATTR_FN);
-        strbuf.append(&g->funcs, " #0 {\n");
-    }
-}
-
-// Resets the per-function counters and buffers: every name is fixed per
-// function and reset at each definition.
-fn function_begin(gen.emitter mut* g) void {
-    g->temps = 0;
-    g->labels = 0;
-    g->tmps = 0;
-    g->break_label = 0;
-    g->continue_label = 0;
-    g->has_break = false;
-    g->has_continue = false;
-    gen.slots_free(&g->slots);
-    // a defer expands inside the function that wrote it
-    g->defers.len = 0;
-    g->scopes.len = 0;
-    g->defer_floor = 0;
-    strbuf.clear(&g->allocas);
-    strbuf.clear(&g->body);
-    strbuf.clear(&g->fail);
-    g->terminated = false;
-}
-
-// Appends the entry block, the normal blocks and then the failure blocks, and
-// closes the definition.
-fn function_end(gen.emitter mut* g) void {
-    strbuf.append(&g->funcs, "entry:\n");
-    strbuf.append(&g->funcs, strbuf.view(&g->allocas));
-    strbuf.append(&g->funcs, strbuf.view(&g->body));
-    strbuf.append(&g->funcs, strbuf.view(&g->fail));
-    strbuf.append(&g->funcs, "}\n");
+    gen.gen_define(g, s, &fs, names);
 }
 
 // Creates slots and entry-block allocas in emission order. Parameters come first. Locals follow in
@@ -994,7 +912,7 @@ fn gen_function(gen.emitter mut* g, ast.node* fn_node) void {
         return;
     }
     types.node* sig = s->ty;
-    function_begin(g);
+    gen.function_begin(g);
     emit_signature(g, fn_node, s, sig);
     gen.node_ref_vec mut locals = gen.node_ref_vec{};
     defer gen.refs_free(&locals);
@@ -1039,65 +957,7 @@ fn gen_function(gen.emitter mut* g, ast.node* fn_node) void {
             strbuf.append(&g->body, "  unreachable\n");
         }
     }
-    function_end(g);
-}
-
-// ---- main ---------------------------------------------------------------
-
-// The byte the process status keeps, which is `status & 0xFF`.
-u64 STATUS_MASK = 255;
-
-// `@main` is the C entry point the start-up code calls, so it takes C's `argc` and `argv` and
-// returns C's `int`. It is a definition of this module like any other and carries `dso_local` and
-// `#0`. Calls `std.rt.args_init`, then `std.rt.args`, which builds the span in this frame. It then
-// calls the program's `main`, then `std.rt.flush_all`, and returns the low status byte.
-// `args_init` runs first, since `args` hands out what it built.
-fn gen_main(gen.emitter mut* g, ast.sym* main_sym) void {
-    function_begin(g);
-    gen.gen_use_attr(g, gen.ATTR_FN);
-    definition_begin(g);
-    strbuf.append(&g->funcs, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n");
-    // no fort identifier in the name, `main` being the compiler's
-    gen.gen_val mut span = gen.gen_val{};
-    span.ty = "ptr";
-    span.val = "%args";
-    strbuf.append(&g->allocas, "  %args = alloca ");
-    strbuf.append(&g->allocas, gen.SPAN_TYPE);
-    strbuf.append(&g->allocas, ", align ");
-    strbuf.append_u64(&g->allocas, gen.SPAN_ALIGN);
-    strbuf.push(&g->allocas, '\n');
-    gen.gen_args mut init_args = gen.gen_args_init();
-    gen.gen_args_add(&init_args, gen.gen_literal(g, "i32", "%argc"));
-    gen.gen_args_add(&init_args, gen.gen_literal(g, "ptr", "%argv"));
-    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_args_init, &init_args);
-    gen.gen_args_free(&init_args);
-    // The hidden result pointer carries `sret`, as it does at every aggregate call.
-    gen.gen_args mut args_args = gen.gen_args_init();
-    gen.gen_args_add_ext(&args_args, span, "sret(%fort.span)");
-    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_args, &args_args);
-    gen.gen_args_free(&args_args);
-    // The program's `main` takes the span at `%args` when it declares the parameter. The span is
-    // the caller-made copy of an aggregate argument, so the callee uses it in place.
-    gen.gen_args mut main_args = gen.gen_args_init();
-    if (main_sym->ty->params.len == 1) {
-        gen.gen_args_add(&main_args, span);
-    }
-    gen.gen_val status = gen.gen_temp(g, "i32");
-    strbuf.append(&g->body, "call i32 ");
-    strbuf.append(&g->body, gen.gen_symbol_ref(g, main_sym));
-    strbuf.push(&g->body, '(');
-    strbuf.append(&g->body, gen.gen_args_text(&main_args));
-    strbuf.append(&g->body, ")\n");
-    gen.gen_args_free(&main_args);
-    gen.gen_args mut flush_args = gen.gen_args_init();
-    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);
-    gen.gen_args_free(&flush_args);
-    gen.gen_val masked =
-        gen.gen_binary(g, "and", status, gen.gen_const_unsigned(g, "i32", STATUS_MASK));
-    strbuf.append(&g->body, "  ret i32 ");
-    strbuf.append(&g->body, masked.val);
-    strbuf.push(&g->body, '\n');
-    function_end(g);
+    gen.function_end(g);
 }
 
 // ---- the module ----------------------------------------------------------
@@ -1245,7 +1105,7 @@ fn gen_program(gen.emitter mut* g, check.checker* ck, modules.module_set* set) b
         ast.node* main_decl = find_main(entry->ast);
         if (main_decl != null) {
             // the only unmangled definition, in the entry module
-            gen_main(g, main_decl->sym);
+            gen.gen_main(g, main_decl->sym);
         }
     }
     gen_data.gen_finish(g);
