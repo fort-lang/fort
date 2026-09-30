@@ -9,7 +9,7 @@
 //| program ok
 /// Checks the lowering of fort to FIR (spec/fir.md 9): scalar declarations, the numbers of the
 /// named locals, the statement index, the end of a body, and the report of a construct that the
-/// lowering does not lower yet. Each case lowers one function of a checked source, holds that the
+/// lowering does not lower. Each case lowers one function of a checked source, holds that the
 /// result keeps every rule of the verifier, and compares its text.
 import ast;
 import check_env;
@@ -32,7 +32,7 @@ fn a_scalar_declaration_takes_a_constant_or_a_name() void {
     lower_env.open(&e);
     defer lower_env.close(&e);
     string[1] source = {"fn f(i32 a) i32 { i32 b = 1; i32 c = a; return c; }"};
-    string[14] want = {
+    string[16] want = {
         "fn main.f(_1 (a): i32) -> i32 {",
         "    let _0: i32;",
         "    let _2 (b): i32 #1:23;",
@@ -44,6 +44,8 @@ fn a_scalar_declaration_takes_a_constant_or_a_name() void {
         "        live(_3) #1:34 s2;",
         "        _3 = copy _1 #1:38 s2;",
         "        _0 = copy _3 #1:48 s3;",
+        "        dead(_2) #1:41 s3;",
+        "        dead(_3) #1:41 s3;",
         "        return #1:41 s3;",
         "    }",
         "}",
@@ -80,7 +82,7 @@ fn a_declaration_reads_globals_functions_and_every_scalar_kind() void {
         "    u64 s = sizeof(i64);",
         "}",
     };
-    string[37] want = {
+    string[47] want = {
         "fn main.f(_1 (p): u8*) -> void {",
         "    let _0: void;",
         "    let _2 (a): i32 #11:9;",
@@ -115,6 +117,16 @@ fn a_declaration_reads_globals_functions_and_every_scalar_kind() void {
         "        _10 = const null u8* #19:13 s9;",
         "        live(_11) #20:9 s10;",
         "        _11 = const u64 8 #20:13 s10;",
+        "        dead(_2) #21:1 s0;",
+        "        dead(_3) #21:1 s0;",
+        "        dead(_4) #21:1 s0;",
+        "        dead(_5) #21:1 s0;",
+        "        dead(_6) #21:1 s0;",
+        "        dead(_7) #21:1 s0;",
+        "        dead(_8) #21:1 s0;",
+        "        dead(_9) #21:1 s0;",
+        "        dead(_10) #21:1 s0;",
+        "        dead(_11) #21:1 s0;",
         "        return #21:1 s0;",
         "    }",
         "}",
@@ -172,7 +184,7 @@ fn the_prescan_numbers_named_locals_in_declaration_order() void {
         "    return a;",
         "}",
     };
-    string[26] want = {
+    string[30] want = {
         "fn main.f(_1 (c): bool) -> i32 {",
         "    let _0: i32;",
         "    let _2 (a): i32 #2:9;",
@@ -190,12 +202,16 @@ fn the_prescan_numbers_named_locals_in_declaration_order() void {
         "        _3 = const i32 2 #4:17 s3;",
         "        live(_4) #6:17 s4;",
         "        _4 = copy _3 #6:21 s4;",
+        "        dead(_4) #7:9 s2;",
+        "        dead(_3) #8:5 s2;",
         "        goto bb2 #3:5 s2;",
         "    }",
         "    bb2: {",
         "        live(_5) #10:13 s5;",
         "        _5 = copy _2 #10:17 s5;",
+        "        dead(_5) #11:5 s0;",
         "        _0 = copy _2 #14:12 s6;",
+        "        dead(_2) #14:5 s6;",
         "        return #14:5 s6;",
         "    }",
         "}",
@@ -223,7 +239,7 @@ fn a_compile_time_chain_lowers_its_selected_branch_alone() void {
         "    }",
         "}",
     };
-    string[10] want = {
+    string[11] want = {
         "fn main.g() -> void {",
         "    let _0: void;",
         "    let _1 (z): i32 #5:13;",
@@ -231,6 +247,7 @@ fn a_compile_time_chain_lowers_its_selected_branch_alone() void {
         "    bb0: {",
         "        live(_1) #5:13 s1;",
         "        _1 = const i32 2 #5:17 s1;",
+        "        dead(_1) #6:5 s0;",
         "        return #12:1 s0;",
         "    }",
         "}",
@@ -254,7 +271,7 @@ fn an_if_takes_its_index_before_the_statements_inside_it() void {
         "    return 0;",
         "}",
     };
-    string[17] want = {
+    string[18] want = {
         "fn main.f(_1 (c): bool) -> i32 {",
         "    let _0: i32;",
         "    let _2 (x): i32 #3:13;",
@@ -265,6 +282,7 @@ fn an_if_takes_its_index_before_the_statements_inside_it() void {
         "    bb1: {",
         "        live(_2) #3:13 s2;",
         "        _2 = const i32 1 #3:17 s2;",
+        "        dead(_2) #4:5 s1;",
         "        goto bb2 #2:5 s1;",
         "    }",
         "    bb2: {",
@@ -301,7 +319,7 @@ fn an_else_if_chain_and_the_statements_after_a_return() void {
         "    return after;",
         "}",
     };
-    string[49] want = {
+    string[53] want = {
         "fn main.f(_1 (c): bool, _2 (d): bool) -> i32 {",
         "    let _0: i32;",
         "    let _3 (x): i32 #3:13;",
@@ -315,6 +333,7 @@ fn an_else_if_chain_and_the_statements_after_a_return() void {
         "    bb1: {",
         "        live(_3) #3:13 s2;",
         "        _3 = const i32 1 #3:17 s2;",
+        "        dead(_3) #4:5 s1;",
         "        goto bb2 #2:5 s1;",
         "    }",
         "    bb2: {",
@@ -323,6 +342,7 @@ fn an_else_if_chain_and_the_statements_after_a_return() void {
         "    bb3: {",
         "        live(_4) #6:13 s4;",
         "        _4 = const i32 2 #6:17 s4;",
+        "        dead(_4) #7:5 s3;",
         "        goto bb5 #5:5 s3;",
         "    }",
         "    bb4: {",
@@ -335,6 +355,7 @@ fn an_else_if_chain_and_the_statements_after_a_return() void {
         "    bb6: {",
         "        live(_5) #8:13 s6;",
         "        _5 = const i32 3 #8:17 s6;",
+        "        dead(_5) #9:5 s5;",
         "        goto bb8 #7:12 s5;",
         "    }",
         "    bb7: {",
@@ -348,6 +369,7 @@ fn an_else_if_chain_and_the_statements_after_a_return() void {
         "        live(_6) #13:9 s9;",
         "        _6 = const i32 5 #13:17 s9;",
         "        _0 = copy _6 #14:12 s10;",
+        "        dead(_6) #14:5 s10;",
         "        return #14:5 s10;",
         "    }",
         "}",
@@ -372,7 +394,7 @@ fn a_nested_if_restores_the_index_of_the_outer_one() void {
         "    return 0;",
         "}",
     };
-    string[24] want = {
+    string[25] want = {
         "fn main.nif(_1 (a): bool, _2 (b): bool) -> i32 {",
         "    let _0: i32;",
         "    let _3 (k): i32 #6:13;",
@@ -394,6 +416,7 @@ fn a_nested_if_restores_the_index_of_the_outer_one() void {
         "    bb4: {",
         "        live(_3) #6:13 s4;",
         "        _3 = const i32 2 #6:17 s4;",
+        "        dead(_3) #7:5 s1;",
         "        goto bb2 #2:5 s1;",
         "    }",
         "}",
@@ -403,22 +426,31 @@ fn a_nested_if_restores_the_index_of_the_outer_one() void {
 
 // The lowering keeps no state from one call to the next: two lowerings of one declaration give
 // one text, and a lowering after a refusal gives the text that it gives alone. The refusal stops
-// inside a loop, with scopes open.
+// inside a loop, with scopes, a named local and a deferred statement open. The sandbox has no
+// runtime, so the print of `g` stops its lowering, and `f` needs no runtime entry.
 fn a_lowering_depends_on_its_function_alone() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    string[8] source = {
-        "fn f(string a, bool c) bool {",
-        "    return c && a == \"x\";",
+    string[16] source = {
+        "fn f(u8 mut* own p, bool c) bool {",
+        "    defer del(p);",
+        "    while (c) {",
+        "        if (c) {",
+        "            return c;",
+        "        }",
+        "    }",
+        "    return !c;",
         "}",
-        "fn g() void {",
+        "fn g(bool c) void {",
         "    while (true) {",
-        "        defer g();",
+        "        bool d = c;",
+        "        defer g(d);",
+        "        println(d);",
         "    }",
         "}",
     };
-    lower_env.check_lines(&e, source[..], true);
+    lower_env.check_lines(&e, source[..], false);
     strbuf.str_buf mut first = strbuf.create();
     defer strbuf.free(&first);
     strbuf.append(&first, lower_env.lower_checked(&e, "f"));
@@ -426,8 +458,11 @@ fn a_lowering_depends_on_its_function_alone() void {
     fir.func mut f = fir.func{};
     fir_lower.report mut why = fir_lower.report{};
     assert(!fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, "g"), &f, &why));
+    assert(why.kind == ast.ast_kind.k_ident && why.at.line == 14 && why.at.col == 17);
     assert(lower_env.lower_checked(&e, "f") == strbuf.view(&first));
-    assert(str.find(strbuf.view(&first), "call fn std.rt.str_eq(") > 0);
+    // the deferred `del(p)` stands at both returns and at no other place
+    assert(str.find(strbuf.view(&first), "del(move _1) #2:11 exit 5:13 s5;") > 0);
+    assert(str.find(strbuf.view(&first), "del(move _1) #2:11 exit 8:5 s7;") > 0);
 }
 
 // ---- the end of a body ------------------------------------------------------------------------
@@ -526,14 +561,13 @@ fn a_noreturn_body_ends_in_trap() void {
     lower_env.expect(strbuf.view(&e.text), want[..]);
 }
 
-// ---- constructs that the lowering does not lower yet ------------------------------------------
+// ---- constructs that stopped the lowering ------------------------------------------------------
 
 u64 REFUSAL_LINES = 89;
 
-// One function for each construct that the lowering does not lower yet, and one for each position
-// in which such a construct stops the lowering from inside another construct. `loops`, `fors`,
-// `dos`, `switches` and `ranges` hold constructs that the lowering lowers now, and they stay at
-// their lines so that the locations of the reports below them stay where they are.
+// One function for each construct that stopped the lowering before `defer`, `new`, `del` and the
+// `own` stores lowered, and one for each position in which such a construct stopped the lowering
+// from inside another construct: 83 functions.
 string[REFUSAL_LINES] REFUSAL_SOURCE = {
     "struct pair {",
     "    i32 a;",
@@ -626,104 +660,103 @@ string[REFUSAL_LINES] REFUSAL_SOURCE = {
     "fn in_after_break(bool c) void { while (c) { break; defer calls(); } }",
 };
 
-u64 REFUSALS = 68;
+// The count of the functions of REFUSAL_SOURCE.
+u64 FORMER_REFUSALS = 83;
 
-// The functions of REFUSAL_SOURCE that the lowering refuses, and the line that `--fir` prints for
+// Each function of REFUSAL_SOURCE lowers, and each keeps every rule of the verifier: the 68 that
+// stopped at `defer`, `new`, `del`, an `own` declaration or an `own` store, and the 15 others.
+fn each_construct_that_stopped_the_lowering_lowers() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, REFUSAL_SOURCE[..], true);
+    u64 mut lowered = 0;
+    for (string line : REFUSAL_SOURCE) {
+        if (str.starts_with(line, "fn ")) {
+            i64 open = str.index_of(line, '(');
+            lower_env.lower_checked(&e, line[3..cast(open, u64)]);
+            lowered += 1;
+        }
+    }
+    assert(lowered == FORMER_REFUSALS);
+}
+
+// ---- constructs that the lowering does not lower ----------------------------------------------
+
+u64 NO_RUNTIME_LINES = 23;
+
+// Functions that need an entry of the runtime, which a sandbox without std/rt.ft lacks: a print
+// and a string equality stop the lowering (spec/fir.md 9.8). Each stands in a position that the
+// lowering of this ticket's constructs reaches: a deferred statement expanded at each kind of
+// exit and at a fall-off, an `own` declaration, an `own` store, `del`, `new(T, n)` and `return`.
+string[NO_RUNTIME_LINES] NO_RUNTIME = {
+    "struct pair {",
+    "    i32 a;",
+    "}",
+    "fn own_if(bool c) u8 mut* own { return null; }",
+    "fn count(bool c) i32 { return 1; }",
+    "fn plain() void { println(1); }",
+    "fn at_return(bool c) i32 { defer println(c); if (c) { return 1; } return 2; }",
+    "fn at_end() void { defer println(1); }",
+    "fn at_break(bool c) void { while (c) { defer println(c); break; } }",
+    "fn at_continue(bool c) void { while (c) { defer println(c); continue; } }",
+    "fn in_deferred_loop(bool c) void { defer { while (c) { println(c); } } }",
+    "fn in_owner(string a, string b) void { u8 mut* own p = own_if(a == b); del(p); }",
+    "fn in_own_value(u8 mut* own mut p, string a, string b) void { p = own_if(a == b); }",
+    "fn in_own_target(u8 mut* own[2] mut q, string a, string b) void { q[count(a == b)] = null; }",
+    "fn in_del(string a, string b) void { del(own_if(a == b)); }",
+    "fn in_del_place(u8 mut* own[2] mut q, string a, string b) void { del(q[count(a == b)]); }",
+    "fn in_count(string a, string b) void { del(new(u8, count(a == b))); }",
+    "fn in_result(pair p, string a, string b) pair { defer count(a == b); return p; }",
+    "fn in_value(string a, string b) pair { defer println(a); return pair{count(a == b)}; }",
+    "fn in_range(i32[2] v) void { for (i32 x : v) { println(x); } }",
+    "fn in_for(string a, string b) void { for (bool d = a == b; d; ) { } }",
+    "fn in_clause(i32 n) void { switch (n) { case 1: defer println(n); } }",
+    "fn in_nested(bool c) void { { defer println(c); { bool d = c; } } }",
+};
+
+u64 REFUSALS = 18;
+
+// The functions of NO_RUNTIME that the lowering refuses, and the line that `--fir` prints for
 // each: the kind of the tree node and the location where that node starts.
+// .tickets/evidence/T244/refusals.py computes each location from the source text.
 string[REFUSALS] REFUSED = {
-    "take", "frees", "reowns", "defers", "owner", "allocates", "in_if", "in_then", "in_else",
-    "in_else_if", "in_block", "in_compile_if", "in_left", "in_right", "in_unary", "in_and",
-    "in_and_right", "in_condition", "in_then_arm", "in_else_arm", "in_cast", "in_shift", "in_index",
-    "in_bound", "in_member", "in_assign", "in_compound", "in_print", "in_fprint", "in_assert",
-    "spans", "in_target", "in_step", "in_aggregate_arg", "in_address", "in_arrow", "in_deref",
-    "in_field", "in_indexed", "in_spanned", "in_high", "in_pointer_span", "in_aggregate_call",
-    "in_aggregate_cast", "in_aggregate_condition", "in_aggregate_arm", "in_callee", "in_statement",
-    "in_descriptor", "in_print_string", "in_panic", "in_equal_left", "in_equal_right", "in_moved",
-    "in_while_cond", "in_while_body", "in_do_body", "in_do_cond", "in_for_init", "in_for_cond",
-    "in_for_step", "in_for_body", "in_collection", "in_range_body", "in_operand", "in_clause",
-    "in_default", "in_after_break",
+    "plain", "at_return", "at_end", "at_break", "at_continue", "in_deferred_loop", "in_owner",
+    "in_own_value", "in_own_target", "in_del", "in_del_place", "in_count", "in_result",
+    "in_value", "in_range", "in_for", "in_clause", "in_nested",
 };
 
 string[REFUSALS] REPORTS = {
-    "// not supported: call at 9:34",
-    "// not supported: call at 12:35",
-    "// not supported: assign at 13:53",
-    "// not supported: defer at 14:20",
-    "// not supported: var at 15:19",
-    "// not supported: new at 16:38",
-    "// not supported: new at 17:28",
-    "// not supported: defer at 18:45",
-    "// not supported: defer at 19:45",
-    "// not supported: defer at 20:63",
-    "// not supported: defer at 21:30",
-    "// not supported: defer at 22:46",
-    "// not supported: new at 23:37",
-    "// not supported: new at 24:42",
-    "// not supported: new at 25:34",
-    "// not supported: new at 26:38",
-    "// not supported: new at 27:49",
-    "// not supported: new at 28:37",
-    "// not supported: new at 29:46",
-    "// not supported: new at 30:50",
-    "// not supported: new at 31:37",
-    "// not supported: new at 32:43",
-    "// not supported: new at 33:43",
-    "// not supported: new at 34:46",
-    "// not supported: new at 35:40",
-    "// not supported: new at 36:41",
-    "// not supported: new at 37:44",
-    "// not supported: new at 38:35",
-    "// not supported: new at 39:47",
-    "// not supported: new at 40:35",
-    "// not supported: new at 45:33",
-    "// not supported: new at 53:42",
-    "// not supported: new at 54:40",
-    "// not supported: new at 55:50",
-    "// not supported: new at 56:47",
-    "// not supported: new at 57:38",
-    "// not supported: new at 58:40",
-    "// not supported: new at 59:40",
-    "// not supported: new at 60:40",
-    "// not supported: new at 61:43",
-    "// not supported: new at 62:48",
-    "// not supported: new at 63:46",
-    "// not supported: new at 64:50",
-    "// not supported: new at 65:52",
-    "// not supported: new at 66:54",
-    "// not supported: new at 67:67",
-    "// not supported: new at 68:42",
-    "// not supported: new at 69:31",
-    "// not supported: new at 70:41",
-    "// not supported: new at 71:45",
-    "// not supported: new at 72:38",
-    "// not supported: new at 73:52",
-    "// not supported: new at 74:58",
-    "// not supported: new at 75:68",
-    "// not supported: new at 76:39",
-    "// not supported: defer at 77:45",
-    "// not supported: defer at 78:35",
-    "// not supported: new at 79:43",
-    "// not supported: new at 80:35",
-    "// not supported: new at 81:37",
-    "// not supported: new at 82:46",
-    "// not supported: defer at 83:45",
-    "// not supported: new at 84:52",
-    "// not supported: defer at 85:53",
-    "// not supported: new at 86:37",
-    "// not supported: defer at 87:49",
-    "// not supported: defer at 88:59",
-    "// not supported: defer at 89:53",
+    "// not supported: int at 6:27",
+    "// not supported: ident at 7:42",
+    "// not supported: int at 8:34",
+    "// not supported: ident at 9:54",
+    "// not supported: ident at 10:57",
+    "// not supported: ident at 11:64",
+    "// not supported: binary at 12:65",
+    "// not supported: binary at 13:76",
+    "// not supported: binary at 14:77",
+    "// not supported: binary at 15:51",
+    "// not supported: binary at 16:80",
+    "// not supported: binary at 17:60",
+    "// not supported: binary at 18:63",
+    "// not supported: binary at 19:78",
+    "// not supported: ident at 20:56",
+    "// not supported: binary at 21:54",
+    "// not supported: ident at 22:63",
+    "// not supported: ident at 23:45",
 };
 
-// A construct that the lowering does not lower yet stops the lowering of its function, wherever it
-// stands: the report names the node and where it starts, and the function stays empty.
-fn a_construct_not_lowered_yet_stops_its_function() void {
+// A construct that the lowering does not lower stops the lowering of its function, wherever it
+// stands, a deferred statement included: the report names the node and where it starts, and the
+// function stays empty.
+fn a_construct_not_lowered_stops_its_function() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     u64 mut i = 0;
     while (i < REFUSALS) {
-        string got = lower_env.refused(&e, REFUSAL_SOURCE[..], REFUSED[i]);
+        string got = lower_env.refused_with(&e, NO_RUNTIME[..], REFUSED[i], false);
         if (got.len != REPORTS[i].len + 1 || got[0..REPORTS[i].len] != REPORTS[i]) {
             eprintln("fir_lower_test: ", REFUSED[i], ": expected <", REPORTS[i], ">, got <",
                      got, ">");
@@ -732,13 +765,9 @@ fn a_construct_not_lowered_yet_stops_its_function() void {
         i += 1;
     }
     // the lowering lowers the other functions of the source
-    lower_env.check_lines(&e, REFUSAL_SOURCE[..], true);
-    lower_env.lower_checked(&e, "one");
-    lower_env.lower_checked(&e, "calls");
-    string[5] loops = {"loops", "fors", "dos", "switches", "ranges"};
-    for (string name : loops) {
-        lower_env.lower_checked(&e, name);
-    }
+    lower_env.check_lines(&e, NO_RUNTIME[..], false);
+    lower_env.lower_checked(&e, "own_if");
+    lower_env.lower_checked(&e, "count");
 }
 
 // ---- the program ------------------------------------------------------------------------------
@@ -806,7 +835,8 @@ fn main() i32 {
     a_body_with_a_result_ends_in_unreachable();
     a_noreturn_body_ends_in_trap();
     println("ends ok");
-    a_construct_not_lowered_yet_stops_its_function();
+    each_construct_that_stopped_the_lowering_lowers();
+    a_construct_not_lowered_stops_its_function();
     println("refusals ok");
     the_program_lists_its_functions_in_module_order();
     println("program ok");

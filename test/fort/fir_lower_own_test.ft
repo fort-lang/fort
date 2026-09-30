@@ -1,0 +1,496 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| declarations ok
+//| new ok
+//| del ok
+//| stores ok
+/// Checks the lowering of ownership (spec/fir.md 9.2, 9.3, 9.4): the zeroing of the entry block,
+/// `new(T)` and `new(T, n)` with the count check, `del` of a place and of an rvalue, `move`, and
+/// the overwrite check of a declaration and of an assignment into an `own` reference. Each case
+/// lowers one function of a checked source, holds that the result keeps every rule of the
+/// verifier, and compares its text.
+import lower_env;
+
+// ---- declarations -----------------------------------------------------------------------------
+
+// The entry block zeroes each named local of an `own` reference type, in local order, at its name
+// and with index 0 (spec/fir.md 9.2): `a` in the loop and the span `s`, but not the parameter `q`
+// and not the owning struct `h`, which D17.11 does not check. Each declaration of an `own`
+// reference puts its value in a temporary, checks the local and stores it; `a` repeats that in
+// each iteration, and a second iteration finds null only when the first one freed `a`.
+fn an_owning_declaration_checks_its_local_after_the_zeroing() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[13] source = {
+        "struct holder {",
+        "    u8 mut* own p;",
+        "}",
+        "fn f(u8 mut* own q, bool c) void {",
+        "    holder h = holder{move(q)};",
+        "    while (c) {",
+        "        u8 mut* own a = new(u8);",
+        "        del(a);",
+        "    }",
+        "    u8 mut@ own s = {};",
+        "    del(s);",
+        "    del(h.p);",
+        "}",
+    };
+    string[43] want = {
+        "fn main.f(_1 (q): u8 mut* own, _2 (c): bool) -> void {",
+        "    let _0: void;",
+        "    let _3 (h): holder #5:12;",
+        "    let _4 (a): u8 mut* own #7:21;",
+        "    let _5 (s): u8 mut@ own #10:17;",
+        "    let _6: u8 mut* own #7:25;",
+        "    let _7: u8 mut@ own #10:21;",
+        "",
+        "    bb0: {",
+        "        _4 = const zero u8 mut* own #7:21 s0;",
+        "        _5 = const zero u8 mut@ own #10:17 s0;",
+        "        live(_3) #5:12 s1;",
+        "        _3 = aggregate holder(move _1) #5:16 s1;",
+        "        goto bb1 #6:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        switch(copy _2) -> [true: bb2, otherwise: bb3] #6:5 s2;",
+        "    }",
+        "    bb2: {",
+        "        live(_4) #7:21 s3;",
+        "        _6 = alloc<u8>(const u64 1) #7:25 s3;",
+        "        check(overwrite: _4) -> bb4 #7:21 s3;",
+        "    }",
+        "    bb3: {",
+        "        live(_5) #10:17 s5;",
+        "        _7 = const zero u8 mut@ own #10:21 s5;",
+        "        check(overwrite: _5) -> bb5 #10:17 s5;",
+        "    }",
+        "    bb4: {",
+        "        _4 = move _6 #7:21 s3;",
+        "        del(move _4) #8:9 s4;",
+        "        dead(_4) #9:5 s2;",
+        "        goto bb1 #6:5 s2;",
+        "    }",
+        "    bb5: {",
+        "        _5 = move _7 #10:17 s5;",
+        "        del(move _5) #11:5 s6;",
+        "        del(move _3.0) #12:5 s7;",
+        "        dead(_3) #13:1 s0;",
+        "        dead(_5) #13:1 s0;",
+        "        return #13:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// `null` and a cast that carries `own` enter an `own` declaration through a temporary as well:
+// the constant in a temporary of its type, which the context gives, and the cast, which takes
+// the owner by `move _1`, in the temporary that its lowering made (D3.14, D17.5).
+fn a_constant_and_a_cast_enter_an_owning_declaration_through_a_temporary() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn f(u8 mut* own q) void {",
+        "    u8 mut* own p = null;",
+        "    void* own v = cast(move(q), void* own);",
+        "    del(v);",
+        "    del(p);",
+        "}",
+    };
+    string[29] want = {
+        "fn main.f(_1 (q): u8 mut* own) -> void {",
+        "    let _0: void;",
+        "    let _2 (p): u8 mut* own #2:17;",
+        "    let _3 (v): void* own #3:15;",
+        "    let _4: u8 mut* own #2:21;",
+        "    let _5: void* own #3:19;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero u8 mut* own #2:17 s0;",
+        "        _3 = const zero void* own #3:15 s0;",
+        "        live(_2) #2:17 s1;",
+        "        _4 = const null u8 mut* own #2:21 s1;",
+        "        check(overwrite: _2) -> bb1 #2:17 s1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = move _4 #2:17 s1;",
+        "        live(_3) #3:15 s2;",
+        "        _5 = cast<void* own>(move _1) #3:19 s2;",
+        "        check(overwrite: _3) -> bb2 #3:15 s2;",
+        "    }",
+        "    bb2: {",
+        "        _3 = move _5 #3:15 s2;",
+        "        del(move _3) #4:5 s3;",
+        "        del(move _2) #5:5 s4;",
+        "        dead(_2) #6:1 s0;",
+        "        dead(_3) #6:1 s0;",
+        "        return #6:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// A cast to an owning type never adds `own`, so a constant enters it from a temporary
+// (spec/fir.md 9.4, D3.14): `holder{}` goes into `_1 = const zero holder` and the cast takes
+// `move _1`. No scalar constant reaches such a cast: the checker refuses `null` as a cast operand,
+// the folded module constant `P` included.
+fn a_constant_cast_to_an_owning_type_goes_through_a_temporary() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "struct holder {",
+        "    u8 mut* own p;",
+        "}",
+        "fn f() holder {",
+        "    return cast(holder{}, holder);",
+        "}",
+    };
+    string[10] want = {
+        "fn main.f() -> holder {",
+        "    let _0: holder;",
+        "    let _1: holder #5:17;",
+        "",
+        "    bb0: {",
+        "        _1 = const zero holder #5:17 s1;",
+        "        _0 = cast<holder>(move _1) #5:12 s1;",
+        "        return #5:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    string[4] scalar = {
+        "u8 mut* own P = null;",
+        "fn g() u8 mut* own {",
+        "    return cast(P, u8 mut* own);",
+        "}",
+    };
+    assert(lower_env.diagnostic(&e, scalar[..]) == "3:17: 'null' is not a cast operand");
+}
+
+// ---- new --------------------------------------------------------------------------------------
+
+// `new(T, n)` (spec/fir.md 9.4, D10.2): the count as `i64`; for the signed `n` the check that it
+// is not negative, which reports the count; then the count as `u64`, `alloc` and the header of the
+// span. The unsigned `m` takes no check. Each statement of the allocation stands at the `new`,
+// where the direct path reports `fail_alloc_count`.
+fn a_counted_allocation_checks_a_signed_count() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn f(i32 n, u64 m) void {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    u8 mut@ own t = new(u8, m);",
+        "    del(s);",
+        "    del(t);",
+        "}",
+    };
+    string[46] want = {
+        "fn main.f(_1 (n): i32, _2 (m): u64) -> void {",
+        "    let _0: void;",
+        "    let _3 (s): u8 mut@ own #2:17;",
+        "    let _4 (t): u8 mut@ own #3:17;",
+        "    let _5: u8 mut@ own #2:21;",
+        "    let _6: i64 #2:21;",
+        "    let _7: bool #2:21;",
+        "    let _8: u64 #2:21;",
+        "    let _9: u8 mut* own #2:21;",
+        "    let _10: u8 mut@ own #3:21;",
+        "    let _11: i64 #3:21;",
+        "    let _12: u64 #3:21;",
+        "    let _13: u8 mut* own #3:21;",
+        "",
+        "    bb0: {",
+        "        _3 = const zero u8 mut@ own #2:17 s0;",
+        "        _4 = const zero u8 mut@ own #3:17 s0;",
+        "        live(_3) #2:17 s1;",
+        "        _6 = cast<i64>(copy _1) #2:21 s1;",
+        "        _7 = lt(copy _6, const i64 0) #2:21 s1;",
+        "        check(copy _7, alloc_count, copy _6) -> bb1 #2:21 s1;",
+        "    }",
+        "    bb1: {",
+        "        _8 = cast<u64>(copy _6) #2:21 s1;",
+        "        _9 = alloc<u8>(copy _8) #2:21 s1;",
+        "        _5 = aggregate u8 mut@ own(move _9, copy _8) #2:21 s1;",
+        "        check(overwrite: _3) -> bb2 #2:17 s1;",
+        "    }",
+        "    bb2: {",
+        "        _3 = move _5 #2:17 s1;",
+        "        live(_4) #3:17 s2;",
+        "        _11 = cast<i64>(copy _2) #3:21 s2;",
+        "        _12 = cast<u64>(copy _11) #3:21 s2;",
+        "        _13 = alloc<u8>(copy _12) #3:21 s2;",
+        "        _10 = aggregate u8 mut@ own(move _13, copy _12) #3:21 s2;",
+        "        check(overwrite: _4) -> bb3 #3:17 s2;",
+        "    }",
+        "    bb3: {",
+        "        _4 = move _10 #3:17 s2;",
+        "        del(move _3) #4:5 s3;",
+        "        del(move _4) #5:5 s4;",
+        "        dead(_3) #6:1 s0;",
+        "        dead(_4) #6:1 s0;",
+        "        return #6:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// ---- del --------------------------------------------------------------------------------------
+
+// `del` of a place empties it (D17.9): the field of a pointer and an element of an array after its
+// bounds check. `del` of an rvalue only frees: `new(i32)` and the result of a call stand in the
+// temporary that their lowering made, while `move(p)` and `null` go into a new one first
+// (spec/fir.md 9.4). Each `del` stands at its name.
+fn del_empties_a_place_and_frees_an_rvalue() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[14] source = {
+        "struct vec {",
+        "    u8 mut@ own items;",
+        "}",
+        "fn make() u8 mut* own {",
+        "    return null;",
+        "}",
+        "fn f(vec mut* v, u8 mut* own[2] mut a, u64 i, u8 mut* own p) void {",
+        "    del(v->items);",
+        "    del(a[i]);",
+        "    del(new(i32));",
+        "    del(make());",
+        "    del(move(p));",
+        "    del(null);",
+        "}",
+    };
+    string[31] want = {
+        "fn main.f(_1 (v): vec mut*, _2 (a): u8 mut* own[2], _3 (i): u64, \\",
+        "_4 (p): u8 mut* own) -> void {",
+        "    let _0: void;",
+        "    let _5: u64 #9:10;",
+        "    let _6: bool #9:10;",
+        "    let _7: i64 #9:10;",
+        "    let _8: i32 mut* own #10:9;",
+        "    let _9: u8 mut* own #11:13;",
+        "    let _10: u8 mut* own #12:13;",
+        "    let _11: void* own #13:9;",
+        "",
+        "    bb0: {",
+        "        del(move (*_1).0) #8:5 s1;",
+        "        _5 = cast<u64>(copy _3) #9:10 s2;",
+        "        _6 = ge(copy _5, const u64 2) #9:10 s2;",
+        "        _7 = cast<i64>(copy _5) #9:10 s2;",
+        "        check(copy _6, bounds, copy _7, const u64 2) -> bb1 #9:10 s2;",
+        "    }",
+        "    bb1: {",
+        "        del(move _2[_5]) #9:5 s2;",
+        "        _8 = alloc<i32>(const u64 1) #10:9 s3;",
+        "        del(move _8) #10:5 s3;",
+        "        _9 = call fn main.make() #11:13 s4;",
+        "        del(move _9) #11:5 s4;",
+        "        _10 = move _4 #12:13 s5;",
+        "        del(move _10) #12:5 s5;",
+        "        _11 = const null void* own #13:9 s6;",
+        "        del(move _11) #13:5 s6;",
+        "        return #14:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// ---- stores -----------------------------------------------------------------------------------
+
+// `x = move(y)` (spec/fir.md 9.3): the right side first, `_t = move _y`, then the check and the
+// store at the `=`. So `x = move(x)` empties `x` before its check reads it, and passes (D17.11).
+// The build-mode pass turns the three statements into `_x = move _y` under `--release` (11).
+fn a_moving_store_checks_after_its_right_side() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn f(u8 mut* own mut x, u8 mut* own y) void {",
+        "    x = move(y);",
+        "    x = move(x);",
+        "    del(x);",
+        "}",
+    };
+    string[20] want = {
+        "fn main.f(_1 (x): u8 mut* own, _2 (y): u8 mut* own) -> void {",
+        "    let _0: void;",
+        "    let _3: u8 mut* own #2:13;",
+        "    let _4: u8 mut* own #3:13;",
+        "",
+        "    bb0: {",
+        "        _3 = move _2 #2:13 s1;",
+        "        check(overwrite: _1) -> bb1 #2:7 s1;",
+        "    }",
+        "    bb1: {",
+        "        _1 = move _3 #2:7 s1;",
+        "        _4 = move _1 #3:13 s2;",
+        "        check(overwrite: _1) -> bb2 #3:7 s2;",
+        "    }",
+        "    bb2: {",
+        "        _1 = move _4 #3:7 s2;",
+        "        del(move _1) #4:5 s3;",
+        "        return #5:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// A store into an `own` reference through memory holds the address of its target before the right
+// side, because `new` is a writer that could change the pointer the target reads (spec/fir.md
+// 9.3): `q->next` and the global `G` are no fixed storage. The element of a local array is fixed
+// storage, which no writer reaches, so it is not held.
+fn an_owning_store_through_memory_holds_its_target() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[15] source = {
+        "struct node {",
+        "    node mut* own next;",
+        "}",
+        "fn f(node mut* q) void {",
+        "    q->next = new(node);",
+        "}",
+        "fn g(u64 i) void {",
+        "    u8 mut* own[2] mut a = {};",
+        "    a[i] = new(u8);",
+        "    del(a[i]);",
+        "}",
+        "u8 mut* own mut G = null;",
+        "fn h() void {",
+        "    G = new(u8);",
+        "}",
+    };
+    string[15] field = {
+        "fn main.f(_1 (q): node mut*) -> void {",
+        "    let _0: void;",
+        "    let _2: node mut* own mut* #5:6;",
+        "    let _3: node mut* own #5:15;",
+        "",
+        "    bb0: {",
+        "        _2 = addr mut((*_1).0) #5:6 s1;",
+        "        _3 = alloc<node>(const u64 1) #5:15 s1;",
+        "        check(overwrite: (*_2)) -> bb1 #5:13 s1;",
+        "    }",
+        "    bb1: {",
+        "        (*_2) = move _3 #5:13 s1;",
+        "        return #6:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), field[..]);
+    string[36] element = {
+        "fn main.g(_1 (i): u64) -> void {",
+        "    let _0: void;",
+        "    let _2 (a): u8 mut* own[2] #8:24;",
+        "    let _3: u64 #9:6;",
+        "    let _4: bool #9:6;",
+        "    let _5: i64 #9:6;",
+        "    let _6: u8 mut* own #9:12;",
+        "    let _7: u64 #10:10;",
+        "    let _8: bool #10:10;",
+        "    let _9: i64 #10:10;",
+        "",
+        "    bb0: {",
+        "        live(_2) #8:24 s1;",
+        "        _2 = const zero u8 mut* own[2] #8:28 s1;",
+        "        _3 = cast<u64>(copy _1) #9:6 s2;",
+        "        _4 = ge(copy _3, const u64 2) #9:6 s2;",
+        "        _5 = cast<i64>(copy _3) #9:6 s2;",
+        "        check(copy _4, bounds, copy _5, const u64 2) -> bb1 #9:6 s2;",
+        "    }",
+        "    bb1: {",
+        "        _6 = alloc<u8>(const u64 1) #9:12 s2;",
+        "        check(overwrite: _2[_3]) -> bb2 #9:10 s2;",
+        "    }",
+        "    bb2: {",
+        "        _2[_3] = move _6 #9:10 s2;",
+        "        _7 = cast<u64>(copy _1) #10:10 s3;",
+        "        _8 = ge(copy _7, const u64 2) #10:10 s3;",
+        "        _9 = cast<i64>(copy _7) #10:10 s3;",
+        "        check(copy _8, bounds, copy _9, const u64 2) -> bb3 #10:10 s3;",
+        "    }",
+        "    bb3: {",
+        "        del(move _2[_7]) #10:5 s3;",
+        "        dead(_2) #11:1 s0;",
+        "        return #11:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "g"), element[..]);
+    string[15] global = {
+        "fn main.h() -> void {",
+        "    let _0: void;",
+        "    let _1: u8 mut* own mut* #14:5;",
+        "    let _2: u8 mut* own #14:9;",
+        "",
+        "    bb0: {",
+        "        _1 = addr mut(global main.G) #14:5 s1;",
+        "        _2 = alloc<u8>(const u64 1) #14:9 s1;",
+        "        check(overwrite: (*_1)) -> bb1 #14:7 s1;",
+        "    }",
+        "    bb1: {",
+        "        (*_1) = move _2 #14:7 s1;",
+        "        return #15:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "h"), global[..]);
+}
+
+// A store of an owning struct takes no overwrite check, since D17.11 checks no owning aggregate
+// field by field; the literal writes into the place. A scalar store of `lv = e` stands at the `=`,
+// as spec/fir.md 13 stores `*p = 7`.
+fn an_owning_aggregate_store_takes_no_check() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "struct holder {",
+        "    u8 mut* own p;",
+        "}",
+        "fn f(holder mut h, u8 mut* own q, i32 mut n) void {",
+        "    h = holder{move(q)};",
+        "    n = 3;",
+        "    del(h.p);",
+        "}",
+    };
+    string[10] want = {
+        "fn main.f(_1 (h): holder, _2 (q): u8 mut* own, _3 (n): i32) -> void {",
+        "    let _0: void;",
+        "",
+        "    bb0: {",
+        "        _1 = aggregate holder(move _2) #5:9 s1;",
+        "        _3 = const i32 3 #6:7 s2;",
+        "        del(move _1.0) #7:5 s3;",
+        "        return #8:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+fn main() i32 {
+    an_owning_declaration_checks_its_local_after_the_zeroing();
+    a_constant_and_a_cast_enter_an_owning_declaration_through_a_temporary();
+    a_constant_cast_to_an_owning_type_goes_through_a_temporary();
+    println("declarations ok");
+    a_counted_allocation_checks_a_signed_count();
+    println("new ok");
+    del_empties_a_place_and_frees_an_rvalue();
+    println("del ok");
+    a_moving_store_checks_after_its_right_side();
+    an_owning_store_through_memory_holds_its_target();
+    an_owning_aggregate_store_takes_no_check();
+    println("stores ok");
+    return 0;
+}

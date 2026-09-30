@@ -435,7 +435,9 @@ A parameter needs no statement. The translator stores each scalar parameter into
 - **`lv = e;`**: the place `p` of `lv` first, with its index temporaries and their checks
   (D6.3). When `e` contains a writer and `p` does not designate fixed storage (5.5), the lowering
   holds `_a = addr mut(p)` before `e` and writes `(*_a)` in place of `p`. Then `e` into `p`. For an
-  `own` reference type: `e` into a temporary, `check(overwrite: p)`, then `p = move _t`.
+  `own` reference type: `e` into a temporary, `check(overwrite: p)`, then `p = move _t`. The check
+  and the store stand at the `=` (D17.11). The store of a scalar `e` stands at the `=` too, as
+  section 13 stores `*p = 7`. An aggregate `e` writes into `p` at its own node.
 - **`lv op= e;`**: the place `p` as above, then `_old = copy p`, then the operand `a` of `e`,
   then `p = op(copy _old, a)` with the checks of `op` before it (9.4). The old value is read
   before `e` (D6.3).
@@ -449,13 +451,15 @@ A parameter needs no statement. The translator stores each scalar parameter into
   scope of kind `loop` whose `break` goes to done and whose `continue` goes to head.
 - **`do ... while`**: the blocks body, test and done; `break` goes to done, `continue` to test.
 - **`for`**: init in the current block; the blocks head, body, step and done; an empty condition
-  is `goto body`; `continue` goes to step.
+  is `goto body`; `continue` goes to step. A scope of kind `block` holds the whole `for`, so the
+  local that init declares lives once for the loop and its `dead` stands in done (9.5).
 - **A range `for`**: the collection into a place: an owning collection stays in its place, and
   another collection is copied into a temporary (D17.10). A counter `_i: u64 = const u64 0`; the
   blocks head, body, step and done; `_c = lt(copy _i, len)` and `switch(copy _c)` in head, where
   `len` is the constant length of an array or `copy c.1` of a span or `string`; `live(_x)` and
   `_x = copy c[_i]` in body; the body as a scope of kind `loop`; `_i = add(copy _i, const u64 1)`
-  in step. The counter never passes the length, so its `add` needs no check.
+  in step. The counter never passes the length, so its `add` needs no check. `live(_x)` stands
+  inside the scope of kind `loop` of the body, so each exit of the body ends `x` (9.5).
 - **`switch`**: the operand into an operand; for an enum `switch` without a `default` clause,
   first a block holding `fail(enum, _v, const bytes "<name>")`, where `_v = cast<i64>(a)`
   stands before the `switch`; then one block for each clause in clause order, then done;
@@ -568,7 +572,8 @@ so `G` is read before `bump` runs.
   `trap` after the call.
 - **`move(lv)`**: the operand `move p`.
 - **`del(e)`**: `del(move p)` for a place (`ANN_LVALUE`); for an rvalue, `_t = e` then
-  `del(move _t)`.
+  `del(move _t)`. When the lowering of `e` already put the owning value in a temporary, that
+  temporary is `_t`. The `del` stands at the name `del`, as section 13 shows.
 - **The print family**: `fd` into an operand once, then one `call fn std.rt.print_*` for each
   argument, left to right, with the conversions of item 19: an enum as `cast<i32>(a)`,
   `const enum_table m.E` and the member count; a `string` as its two fields. `println` ends with
@@ -595,6 +600,9 @@ named locals declared in it, and the deferred statements that the walk met in it
 
 - A block pushes a scope when it starts and pops the scope when it ends.
 - `defer s` appends `s` to the innermost scope. It emits nothing (D7.8).
+- `live(_x)` appends `x` to the named locals of the innermost scope. So an exit ends no local
+  that is declared after it (D7.9), and the `dead` markers of one scope follow the order of the
+  declarations.
 - When control falls off the end of a block, the lowering lowers the deferred statements of that
   block's own scope, the last one first, then a `dead` for each local of the scope.
 - An exit walks the stack from the innermost scope outward. For each scope, it lowers the deferred
@@ -609,7 +617,12 @@ named locals declared in it, and the deferred statements that the walk met in it
 - A deferred statement that ends its block (a call of a `noreturn` function) stops the expansion.
 
 Each expansion is a new lowering of the deferred statement. Its statements carry the location of
-the deferred statement and the location of the exit that expanded it (principle 12).
+the deferred statement and the location of the exit that expanded it (principle 12). A fall-off
+stands at the last character of its block: the closing brace, or the last token of a clause. The
+`dead` markers of a fall-off stand there, and the statements of its expansion carry that location
+as the location of their exit. The scope around a `for` falls off at the closing brace of the
+body. When an expansion holds an expansion of its own, the inner statements carry the location
+of the inner exit.
 
 ### 9.6 Return and the end of a body
 
@@ -621,7 +634,7 @@ the deferred statement and the location of the exit that expanded it (principle 
    (D7.8). A scalar `_0` is private to the function. For `ANN_MOVE`, the operand is `move _x`
    (D17.5), so the deferred code sees the zero value (D7.8).
 2. The unwind of 9.5.
-3. `_0 = move _t` when `_0` owns, and `_0 = copy _t` when it does not.
+3. `_0 = move _t` when `_0` owns, and `_0 = copy _t` when it does not, at the `return`.
 4. `return`.
 
 At the end of the body, when the last block has no terminator, the fall-off rule of 9.5 first
@@ -657,7 +670,7 @@ Two kinds of statement have no source statement of their own:
 
 ### 9.8 What the lowering cannot lower
 
-When a function holds a construct that the lowering does not support yet, the lowering stops for
+When a function holds a construct that the lowering does not support, the lowering stops for
 that function and reports "not supported". The report names the kind of the tree node and the
 location of the node: the token where the parser starts it, which is the operator of a binary,
 unary or field node and the `(` of a call. `--fir` prints the report as the comment

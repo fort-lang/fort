@@ -1,0 +1,48 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: fir_lower.unwind: an exit with no scope to leave above the floor
+//! stdout:
+//| the deferred break has a loop outside it
+/// Checks that the expansion of a deferred statement raises the floor (spec/fir.md 9.5): a `break`
+/// inside the deferred statement walks no scope that was open before the expansion. The checker
+/// refuses such a `break` (D7.8), so the test wraps the `break` of a checked loop in a `defer`
+/// node of its own and records it in the scope of that loop. Without the floor the `break` would
+/// find the loop, expand its deferred statements, and so itself again, with no end.
+import ast;
+import check_env;
+import fir;
+import fir_lower;
+import gen;
+import lower_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn f(bool c) void {",
+        "    while (c) {",
+        "        break;",
+        "    }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node mut* decl = check_env.sym_main(&e.c, "f")->node;
+    ast.node mut* loop = ast.ast_child_mut(decl->b, 0);
+    ast.node mut* brk = ast.ast_child_mut(loop->b, 0);
+    ast.node mut wrapper = ast.node{.kind = ast.ast_kind.k_defer, .loc = brk->loc, .a = brk};
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    defer fir_lower.scopes_free(&lw.scopes);
+    defer gen.refs_free(&lw.defers);
+    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
+    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_loop, 0, 0);
+    gen.refs_push(&lw.defers, &wrapper);
+    assert(lw.floor == 0);
+    println("the deferred break has a loop outside it");
+    fir_lower.expand(&lw, 1, brk->loc);
+    println("the deferred break left its expansion");
+    return 0;
+}

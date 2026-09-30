@@ -31,7 +31,7 @@ fn a_literal_is_one_aggregate() void {
         "    return a.x;",
         "}",
     };
-    string[27] want = {
+    string[31] want = {
         "fn main.f(_1 (k): i32) -> i32 {",
         "    let _0: i32;",
         "    let _2 (a): point #6:11;",
@@ -56,6 +56,10 @@ fn a_literal_is_one_aggregate() void {
         "        _7 = add(copy _1, const i32 1) #9:28 s4;",
         "        _5 = aggregate i32[3](copy _1, copy _7, const i32 3) #9:16 s4;",
         "        _0 = copy _2.0 #10:13 s5;",
+        "        dead(_2) #10:5 s5;",
+        "        dead(_3) #10:5 s5;",
+        "        dead(_4) #10:5 s5;",
+        "        dead(_5) #10:5 s5;",
         "        return #10:5 s5;",
         "    }",
         "}",
@@ -83,7 +87,7 @@ fn a_designated_literal_runs_in_source_order() void {
         "    return point{.y = next(&s)};",
         "}",
     };
-    string[21] want = {
+    string[22] want = {
         "fn main.f(_1 (s): point) -> point {",
         "    let _0: point;",
         "    let _2 (t): point #9:11;",
@@ -102,6 +106,7 @@ fn a_designated_literal_runs_in_source_order() void {
         "        _6 = addr mut(_1) #10:28 s2;",
         "        _7 = call fn main.next(copy _6) #10:27 s2;",
         "        _0 = aggregate point(const zero i32, copy _7) #10:12 s2;",
+        "        dead(_2) #10:5 s2;",
         "        return #10:5 s2;",
         "    }",
         "}",
@@ -141,7 +146,7 @@ fn a_literal_reads_its_destination_first() void {
         "    return node{move(q), 0};",
         "}",
     };
-    string[27] want = {
+    string[30] want = {
         "fn main.f(_1 (s): pair, _2 (q): u8 mut* own) -> node {",
         "    let _0: node;",
         "    let _3 (t): string #18:12;",
@@ -166,12 +171,15 @@ fn a_literal_reads_its_destination_first() void {
         "        _9 = call fn main.mk() #20:21 s5;",
         "        _5 = aggregate node(move _9, copy _4.0) #20:14 s5;",
         "        _0 = aggregate node(move _2, const i32 0) #21:12 s6;",
+        "        dead(_3) #21:5 s6;",
+        "        dead(_4) #21:5 s6;",
+        "        dead(_5) #21:5 s6;",
         "        return #21:5 s6;",
         "    }",
         "}",
     };
     lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
-    // `new` waits for the lowering of ownership (T-244)
+    // `new(u8)` is an owning rvalue in a temporary, and it enters its field as `move _t`
     string[7] fresh = {
         "struct node {",
         "    u8 mut* own p;",
@@ -181,7 +189,19 @@ fn a_literal_reads_its_destination_first() void {
         "    return node{new(u8), 0};",
         "}",
     };
-    assert(lower_env.refused(&e, fresh[..], "g") == "// not supported: new at 6:17\n");
+    string[10] allocated = {
+        "fn main.g() -> node {",
+        "    let _0: node;",
+        "    let _1: u8 mut* own #6:17;",
+        "",
+        "    bb0: {",
+        "        _1 = alloc<u8>(const u64 1) #6:17 s1;",
+        "        _0 = aggregate node(move _1, const i32 0) #6:12 s1;",
+        "        return #6:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, fresh[..], "g"), allocated[..]);
 }
 
 // `box{}` of a struct that owns is `const zero box`, which fills an owning place (rule V6).
@@ -250,7 +270,7 @@ fn a_move_a_call_a_conditional_and_a_cast() void {
         "    return w;",
         "}",
     };
-    string[33] want = {
+    string[38] want = {
         "fn main.f(_1 (c): bool, _2 (s): u8 mut@ own, _3 (v): u8@, _4 (b): box) -> u8@ {",
         "    let _0: u8@;",
         "    let _5 (k): color #12:11;",
@@ -281,6 +301,11 @@ fn a_move_a_call_a_conditional_and_a_cast() void {
         "        live(_9) #16:12 s5;",
         "        _9 = cast<string>(copy _3) #16:16 s5;",
         "        _0 = copy _8 #17:12 s6;",
+        "        dead(_5) #17:5 s6;",
+        "        dead(_6) #17:5 s6;",
+        "        dead(_7) #17:5 s6;",
+        "        dead(_8) #17:5 s6;",
+        "        dead(_9) #17:5 s6;",
         "        return #17:5 s6;",
         "    }",
         "}",
@@ -314,7 +339,7 @@ fn a_member_of_an_aggregate_type() void {
         "    return line{point{}, p, \"\"};",
         "}",
     };
-    string[16] want = {
+    string[18] want = {
         "fn main.f(_1 (p): point, _2 (s): string) -> line {",
         "    let _0: line;",
         "    let _3 (l): line #11:10;",
@@ -328,6 +353,8 @@ fn a_member_of_an_aggregate_type() void {
         "        live(_4) #12:14 s2;",
         "        _4 = aggregate point[2](copy _1, const zero point) #12:18 s2;",
         "        _0 = aggregate line(const zero point, copy _3.0, copy _2) #13:12 s3;",
+        "        dead(_3) #13:5 s3;",
+        "        dead(_4) #13:5 s3;",
         "        return #13:5 s3;",
         "    }",
         "}",
@@ -450,7 +477,7 @@ fn a_push_through_a_pointer() void {
         "        check(copy _4, bounds, copy _5, copy (*_1).0.1) -> bb1 #6:13 s1;",
         "    }",
         "    bb1: {",
-        "        (*_1).0[_3] = copy _2 #6:24 s1;",
+        "        (*_1).0[_3] = copy _2 #6:22 s1;",
         "        _6 = copy (*_1).1 #7:6 s2;",
         "        _7 = add_overflows(copy _6, const u64 1) #7:12 s2;",
         "        check(copy _7, overflow) -> bb2 #7:12 s2;",
@@ -477,7 +504,7 @@ fn a_swap_checks_the_target_first() void {
         "    a[j] = t;",
         "}",
     };
-    string[48] want = {
+    string[49] want = {
         "fn main.swap(_1 (a): i32 mut@, _2 (i): u64, _3 (j): u64) -> void {",
         "    let _0: void;",
         "    let _4 (t): i32 #2:9;",
@@ -515,14 +542,15 @@ fn a_swap_checks_the_target_first() void {
         "        check(copy _12, bounds, copy _13, copy _1.1) -> bb3 #3:13 s2;",
         "    }",
         "    bb3: {",
-        "        _1[_8] = copy _1[_11] #3:13 s2;",
+        "        _1[_8] = copy _1[_11] #3:10 s2;",
         "        _14 = cast<u64>(copy _3) #4:6 s3;",
         "        _15 = ge(copy _14, copy _1.1) #4:6 s3;",
         "        _16 = cast<i64>(copy _14) #4:6 s3;",
         "        check(copy _15, bounds, copy _16, copy _1.1) -> bb4 #4:6 s3;",
         "    }",
         "    bb4: {",
-        "        _1[_14] = copy _4 #4:12 s3;",
+        "        _1[_14] = copy _4 #4:10 s3;",
+        "        dead(_4) #5:1 s0;",
         "        return #5:1 s0;",
         "    }",
         "}",

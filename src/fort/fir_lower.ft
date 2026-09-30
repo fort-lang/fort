@@ -1,15 +1,18 @@
 /// Lowers the checked tree of one function to FIR (spec/fir.md 9). It numbers the named locals in
-/// a prescan, and it lowers blocks, `$if`, declarations, assignments, call statements, `if`, the
-/// loops, `switch`, `break`, `continue` and `return`, with the scalar expressions and the runtime
-/// checks of their operators, the places, the aggregate values and the calls. A construct that it
-/// does not lower yet stops the lowering of its function with a report (spec/fir.md 9.8).
+/// a prescan, zeroes each `own` reference local in the entry block, and lowers every statement:
+/// blocks, `$if`, declarations, assignments with the overwrite check of an `own` reference, call
+/// statements, `if`, the loops, `switch`, `defer`, `break`, `continue` and `return`. It lowers the
+/// scalar expressions and the runtime checks of their operators, the places, the aggregate
+/// values, the calls, `new`, `del` and `move`. A construct that it does not lower stops the
+/// lowering of its function with a report (spec/fir.md 9.8).
 //
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: a lowerer lives for the lowering of one function. It reads the tree and the
 // annotations of the checker, and it writes neither. A scalar expression gives an operand, and an
 // operation stands in a temporary. An aggregate expression writes into the place that waits for
 // it, and an expression that designates storage gives a place. A stack of the open scopes gives
-// each `break` and `continue` its target.
+// each `break` and `continue` its target, and each exit and each fall-off the deferred statements
+// and the named locals that it ends.
 import ast;
 import check;
 import consts;
@@ -36,8 +39,8 @@ u64 FD_STDOUT = 1;
 u64 FD_STDERR = 2;
 u64 NEWLINE = 10;
 
-/// Why the lowering of a function stopped: the kind of the tree node that it does not lower yet,
-/// and the location of that node.
+/// Why the lowering of a function stopped: the kind of the tree node that it does not lower, and
+/// the location of that node.
 struct report {
     ast.ast_kind kind;
     diag.loc at;
@@ -59,6 +62,13 @@ enum print_kind {
 
 u64 PRINT_KINDS = 9;
 
+// The kinds of exit, which stop at different scopes (spec/fir.md 9.5).
+enum exit_kind {
+    x_break,
+    x_continue,
+    x_return,
+}
+
 // The kind of an open scope, which says the exits that stop at it (spec/fir.md 9.5): `break` at
 // the innermost `loop` or `case` scope, and `continue` at the innermost `loop` scope.
 enum scope_kind {
@@ -68,12 +78,15 @@ enum scope_kind {
     sc_block, // any other block, and the selected branch of a statement `$if`
 }
 
-// One open scope: its kind and the blocks that its exits go to. A `loop` scope has both targets,
-// a `case` scope `break_target` alone, and the other kinds neither.
+// One open scope: its kind, the blocks that its exits go to, and where its deferred statements and
+// its named locals begin in the vectors of the lowerer. A `loop` scope has both targets, a `case`
+// scope `break_target` alone, and the other kinds neither.
 struct scope {
     scope_kind kind;
     u32 break_target;
     u32 continue_target;
+    u64 defers_first;
+    u64 locals_first;
 }
 
 // `items[..len]` holds the open scopes, the innermost last.
@@ -82,11 +95,22 @@ struct scope_vec {
     u64 len;
 }
 
+// `items[..len]` holds the numbers of the named locals of the open scopes, in the order of their
+// `live` markers.
+struct local_list {
+    u32 mut@ own items;
+    u64 len;
+}
+
 // The state of the lowering of one function. `block` receives the next statement. `counter` is
 // the last statement index that the walk gave, and `stmt` is the index of the statement that the
 // walk lowers now: 0 outside every statement (spec/fir.md 9.7). `scopes` is the stack of the open
-// scopes. `str_eq` is the runtime function that a string equality calls, and `prints` holds the
-// print functions of the runtime in the order of print_kind; each is looked up at its first use.
+// scopes, `defers` holds the `defer` nodes of the open scopes in text order, and `named` their
+// named locals. `floor` is the depth below which no exit walks while a deferred statement lowers,
+// and `exit_at` is the location of the exit that expands it, the empty range outside every
+// expansion. `str_eq` is the runtime function that a string equality calls, and `prints` holds
+// the print functions of the runtime in the order of print_kind; each is looked up at its first
+// use.
 struct lowerer {
     check.checker mut* ck;
     fir.func mut* f;
@@ -94,6 +118,10 @@ struct lowerer {
     u32 counter;
     u32 stmt;
     scope_vec scopes;
+    gen.node_ref_vec defers;
+    local_list named;
+    u64 floor;
+    diag.loc exit_at;
     ast.sym* str_eq;
     bool str_eq_known;
     ast.sym*[PRINT_KINDS] prints;
@@ -142,8 +170,8 @@ fn selected_branch(ast.node* n) ast.node* {
     return current;
 }
 
-/// Writes the line that `--fir` prints in place of a function that the lowering does not lower
-/// yet: `// not supported: <kind> at <line>:<col>`, where `<kind>` is ast.ast_kind_name.
+/// Writes the line that `--fir` prints in place of a function that the lowering does not lower:
+/// `// not supported: <kind> at <line>:<col>`, where `<kind>` is ast.ast_kind_name.
 fn write_report(report* r, strbuf.str_buf mut* out) void {
     strbuf.append(out, "// not supported: ");
     strbuf.append(out, ast.ast_kind_name(r->kind));
@@ -157,14 +185,17 @@ fn write_report(report* r, strbuf.str_buf mut* out) void {
 // ---- the function -----------------------------------------------------------------------------
 
 /// Lowers the function that `decl` defines into *out and returns true. When the body holds a
-/// construct that the lowering does not lower yet, the function writes that construct to *why,
+/// construct that the lowering does not lower, the function writes that construct to *why,
 /// releases what it built, leaves *out empty and returns false.
 fn lower_function(check.checker mut* ck, ast.node* decl, fir.func mut* out, report mut* why)
     bool {
     *out = fir.func_new(&ck->types, decl->sym, decl->sym->ty);
     lowerer mut lw = lowerer{.ck = ck, .f = out};
     defer scopes_free(&lw.scopes);
+    defer gen.refs_free(&lw.defers);
+    defer locals_free(&lw.named);
     prescan(out, decl->b);
+    zero_owners(&lw);
     // the body is the scope of kind `fn` (spec/fir.md 9.2)
     if (!lower_scope(&lw, decl->b, scope_kind.sc_fn, 0, 0)) {
         *why = lw.why;
@@ -173,6 +204,22 @@ fn lower_function(check.checker mut* ck, ast.node* decl, fir.func mut* out, repo
     }
     lower_end(&lw, decl->b);
     return true;
+}
+
+// The entry block (spec/fir.md 9.2): `_n = const zero T` for each named local of an `own`
+// reference type, in local order, at its name and with index 0, so that the first execution of
+// its declaration finds null in its overwrite check (D17.11). A parameter needs none, and D17.11
+// checks no owning aggregate.
+fn zero_owners(lowerer mut* lw) void {
+    u32 mut n = 1;
+    while (n < fir.local_count(lw->f)) {
+        fir.local* l = fir.local_at(lw->f, n);
+        if (l->kind == fir.local_kind.lk_named && own_reference(l->ty)) {
+            fir.operand zero = fir.operand_const(fir.const_zero(l->ty));
+            append(lw, fir.stmt_assign(fir.place_local(n), fir.rvalue_use(lw->f, zero), l->loc, 0));
+        }
+        n += 1;
+    }
 }
 
 // Adds a named local for each declaration below `n`, in the order of gen_stmt.collect_locals: a
@@ -209,7 +256,7 @@ fn lower_end(lowerer mut* lw, ast.node* body) void {
     if (terminated(lw)) {
         return;
     }
-    diag.loc brace = diag.loc_make(body->loc.file, body->loc.end_line, body->loc.end_col - 1);
+    diag.loc brace = end_of(body);
     types.node* ft = lw->f->ty;
     if (ft->is_noreturn) {
         terminate(lw, fir.term_trap(brace, 0));
@@ -220,9 +267,15 @@ fn lower_end(lowerer mut* lw, ast.node* body) void {
     }
 }
 
+// The last character of the source range of `n`: the closing brace of a block, and the last
+// character of the last statement of a clause.
+fn end_of(ast.node* n) diag.loc {
+    return diag.loc_make(n->loc.file, n->loc.end_line, n->loc.end_col - 1);
+}
+
 // ---- the lowerer --------------------------------------------------------------------------------
 
-// Records that the lowering does not lower the node `n` yet, and returns false, so that a caller
+// Records that the lowering does not lower the node `n`, and returns false, so that a caller
 // returns what this returns.
 fn unsupported(lowerer mut* lw, ast.node* n) bool {
     lw->why = report{n->kind, n->loc};
@@ -265,7 +318,8 @@ fn own_reference(types.node* t) bool {
 
 // ---- the scope stack ----------------------------------------------------------------------------
 
-// Opens a scope of `kind` with the targets of its exits, as the innermost one.
+// Opens a scope of `kind` with the targets of its exits, as the innermost one. Its deferred
+// statements and its named locals begin at the ends of the two vectors.
 fn scope_push(lowerer mut* lw, scope_kind kind, u32 break_target, u32 continue_target) void {
     scope_vec mut* v = &lw->scopes;
     if (v->len == v->items.len) {
@@ -279,16 +333,20 @@ fn scope_push(lowerer mut* lw, scope_kind kind, u32 break_target, u32 continue_t
         del(v->items);
         v->items = move(bigger);
     }
-    v->items[v->len] = scope{kind, break_target, continue_target};
+    v->items[v->len] = scope{kind, break_target, continue_target, lw->defers.len, lw->named.len};
     v->len += 1;
 }
 
-// Closes the innermost scope. Every pop follows the push of the same lower_scope.
+// Closes the innermost scope, with its deferred statements and its named locals, so that no later
+// exit expands or ends them (D7.8). Every pop follows the push of the same lower_scope.
 fn scope_pop(lowerer mut* lw) void {
     if (lw->scopes.len == 0) {
         panic("fir_lower.scope_pop: no open scope");
     }
     lw->scopes.len -= 1;
+    scope s = lw->scopes.items[lw->scopes.len];
+    lw->defers.len = s.defers_first;
+    lw->named.len = s.locals_first;
 }
 
 fn scopes_free(scope_vec mut* v) void {
@@ -296,14 +354,47 @@ fn scopes_free(scope_vec mut* v) void {
     v->len = 0;
 }
 
-// Appends `p = r` to the current block, at `at` and with the index of the current statement.
-fn assign(lowerer mut* lw, fir.place p, fir.rvalue r, diag.loc at) void {
-    fir.block_append(lw->f, lw->block, fir.stmt_assign(p, r, at, lw->stmt));
+// Appends the named local `n` to the locals of the innermost scope, when its `live` marker stands.
+fn local_push(lowerer mut* lw, u32 n) void {
+    local_list mut* v = &lw->named;
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir_lower.local_push: capacity overflow");
+        u32 mut@ own bigger = new(u32, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = n;
+    v->len += 1;
 }
 
-// Ends the current block with `t`.
+fn locals_free(local_list mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+// Appends `s` to the current block. Inside the expansion of a deferred statement, `s` carries the
+// location of the exit that expands it (spec/fir.md principle 12).
+fn append(lowerer mut* lw, fir.statement s) void {
+    fir.statement mut marked = s;
+    marked.exit_loc = lw->exit_at;
+    fir.block_append(lw->f, lw->block, marked);
+}
+
+// Appends `p = r` to the current block, at `at` and with the index of the current statement.
+fn assign(lowerer mut* lw, fir.place p, fir.rvalue r, diag.loc at) void {
+    append(lw, fir.stmt_assign(p, r, at, lw->stmt));
+}
+
+// Ends the current block with `t`, which carries the location of the exit as a statement does.
 fn terminate(lowerer mut* lw, fir.terminator t) void {
-    fir.block_set_terminator(lw->f, lw->block, t);
+    fir.terminator mut marked = t;
+    marked.exit_loc = lw->exit_at;
+    fir.block_set_terminator(lw->f, lw->block, marked);
 }
 
 fn terminated(lowerer* lw) bool {
@@ -441,11 +532,16 @@ fn materialize(lowerer mut* lw, fir.operand op, bool later, diag.loc at) fir.ope
 // ---- statements -------------------------------------------------------------------------------
 
 // Lowers the statements of the block `n` in order, as a scope of `kind` whose exits go to the
-// blocks `break_target` and `continue_target` (spec/fir.md 9.5). A statement after a terminator
-// starts a new block that no terminator names (spec/fir.md 9.3).
+// blocks `break_target` and `continue_target`, then its fall-off (spec/fir.md 9.5).
 fn lower_scope(lowerer mut* lw, ast.node* n, scope_kind kind, u32 break_target,
                u32 continue_target) bool {
     scope_push(lw, kind, break_target, continue_target);
+    return lower_statements(lw, n) && close_scope(lw, end_of(n));
+}
+
+// Lowers the statements of the block `n` in order, in the innermost scope. A statement after a
+// terminator starts a new block that no terminator names (spec/fir.md 9.3).
+fn lower_statements(lowerer mut* lw, ast.node* n) bool {
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
         if (terminated(lw)) {
@@ -456,14 +552,127 @@ fn lower_scope(lowerer mut* lw, ast.node* n, scope_kind kind, u32 break_target,
         }
         i += 1;
     }
+    return true;
+}
+
+// The fall-off of the innermost scope, then its pop (spec/fir.md 9.5). When its block has no
+// terminator, control falls off its end at `at`: the deferred statements of the scope, the last
+// one first, then a `dead` for each of its named locals. The markers take the index of the
+// enclosing statement, which is 0 in the body (9.7).
+fn close_scope(lowerer mut* lw, diag.loc at) bool {
+    u64 depth = lw->scopes.len - 1;
+    if (!terminated(lw)) {
+        if (!expand(lw, depth, at)) {
+            return false;
+        }
+        if (!terminated(lw)) {
+            mark_dead(lw, depth, at);
+        }
+    }
     scope_pop(lw);
     return true;
+}
+
+// Where the deferred statements of the scope at `depth` end in their vector: where those of the
+// next scope begin, or at the end of the vector for the innermost scope. locals_end answers the
+// same for the named locals.
+fn defers_end(lowerer* lw, u64 depth) u64 {
+    if (depth + 1 < lw->scopes.len) {
+        return lw->scopes.items[depth + 1].defers_first;
+    }
+    return lw->defers.len;
+}
+
+fn locals_end(lowerer* lw, u64 depth) u64 {
+    if (depth + 1 < lw->scopes.len) {
+        return lw->scopes.items[depth + 1].locals_first;
+    }
+    return lw->named.len;
+}
+
+// Lowers the deferred statements of the scope at `depth`, the last one first, for the exit at
+// `at` (spec/fir.md 9.5, D7.8). Each is a new lowering whose statements carry `at` as their
+// `exit_loc`, and each statement node in it takes a new index (9.7). While one lowers, the floor
+// stands at the depth of the stack, so an exit inside it walks only the scopes that it opens. A
+// deferred statement that ends the block stops the expansion. False when the lowering refuses a
+// deferred statement.
+fn expand(lowerer mut* lw, u64 depth, diag.loc at) bool {
+    u64 first = lw->scopes.items[depth].defers_first;
+    u64 mut i = defers_end(lw, depth);
+    u64 saved_floor = lw->floor;
+    diag.loc saved_exit = lw->exit_at;
+    lw->floor = lw->scopes.len;
+    lw->exit_at = at;
+    bool mut ok = true;
+    while (ok && i > first && !terminated(lw)) {
+        i -= 1;
+        ok = lower_stmt(lw, gen.refs_at(&lw->defers, i)->a);
+    }
+    lw->floor = saved_floor;
+    lw->exit_at = saved_exit;
+    return ok;
+}
+
+// `dead(_n)` at `at` for each named local of the scope at `depth`, in the order of their
+// declarations, with the index of the current statement (spec/fir.md 7, 9.7).
+fn mark_dead(lowerer mut* lw, u64 depth, diag.loc at) void {
+    u64 mut i = lw->scopes.items[depth].locals_first;
+    u64 end = locals_end(lw, depth);
+    while (i < end) {
+        append(lw, fir.stmt_dead(lw->named.items[i], at, lw->stmt));
+        i += 1;
+    }
+}
+
+// Whether an exit of the kind `x` leaves the function, a loop or a clause at a scope of `kind`
+// and stops there: `return` at the `fn` scope, `continue` at a `loop` scope, and `break` at a
+// `loop` or a `case` scope (spec/fir.md 9.5, D7.6).
+fn exit_stops_at(exit_kind x, scope_kind kind) bool {
+    switch (x) {
+    case exit_kind.x_return:
+        return kind == scope_kind.sc_fn;
+    case exit_kind.x_continue:
+        return kind == scope_kind.sc_loop;
+    case exit_kind.x_break:
+        return kind == scope_kind.sc_loop || kind == scope_kind.sc_case;
+    }
+}
+
+// The unwind of the exit `n` of the kind `x` (spec/fir.md 9.5): from the innermost scope outward,
+// the deferred statements of each scope, then its `dead` markers at the exit, until the scope that
+// the exit leaves, whose depth goes to *stop. False when the lowering refuses a deferred
+// statement. A deferred statement that ends the block stops the unwind, and the caller then
+// writes no terminator. The checker refuses an exit that no scope above the floor stops (D7.8).
+fn unwind(lowerer mut* lw, ast.node* n, exit_kind x, u64 mut* stop) bool {
+    u64 mut depth = lw->scopes.len;
+    while (depth > lw->floor) {
+        depth -= 1;
+        if (!expand(lw, depth, n->loc)) {
+            return false;
+        }
+        if (terminated(lw)) {
+            return true;
+        }
+        mark_dead(lw, depth, n->loc);
+        if (exit_stops_at(x, lw->scopes.items[depth].kind)) {
+            *stop = depth;
+            return true;
+        }
+    }
+    panic("fir_lower.unwind: an exit with no scope to leave above the floor");
 }
 
 // A block, or the selected branch of a statement `$if`, as a scope of kind `block`, which only
 // the end of the block leaves.
 fn lower_block(lowerer mut* lw, ast.node* n) bool {
     return lower_scope(lw, n, scope_kind.sc_block, 0, 0);
+}
+
+// `defer s`: no statement. The node goes to the deferred statements of the innermost scope, and
+// each exit and the fall-off of that scope lower `s` again (spec/fir.md 9.3, 9.5, D7.8).
+fn lower_defer(lowerer mut* lw, ast.node* n) bool {
+    gen.refs_push(&lw->defers, n);
+    return true;
 }
 
 // Lowers one statement. A block and a `$if` only group statements, and every other statement
@@ -502,11 +711,13 @@ fn lower_stmt(lowerer mut* lw, ast.node* n) bool {
     case ast.ast_kind.k_switch:
         ok = lower_switch(lw, n);
     case ast.ast_kind.k_break:
-        ok = lower_exit(lw, n, false);
+        ok = lower_exit(lw, n, exit_kind.x_break);
     case ast.ast_kind.k_continue:
-        ok = lower_exit(lw, n, true);
+        ok = lower_exit(lw, n, exit_kind.x_continue);
     case ast.ast_kind.k_return:
         ok = lower_return(lw, n);
+    case ast.ast_kind.k_defer:
+        ok = lower_defer(lw, n);
     default:
         ok = unsupported(lw, n);
     }
@@ -514,15 +725,67 @@ fn lower_stmt(lowerer mut* lw, ast.node* n) bool {
     return ok;
 }
 
-// `T x = e;`: `live(_x)` at the declared name, then `e` into `_x` (spec/fir.md 9.3). An `own`
-// reference waits for the overwrite check of the lowering of ownership.
+// `T x = e;`: `live(_x)` at the declared name, and `_x` joins the locals of the innermost scope.
+// Then `e` into `_x` (spec/fir.md 9.3). An `own` reference takes the overwrite check at the
+// declared name, since the tree records no location for the `=` of a declaration (D17.11).
 fn lower_var_decl(lowerer mut* lw, ast.node* n) bool {
-    if (own_reference(n->sym->ty)) {
-        return unsupported(lw, n);
-    }
     u32 x = local_of(lw, n->sym);
-    fir.block_append(lw->f, lw->block, fir.stmt_live(x, n->name_loc, lw->stmt));
+    live(lw, x, n->name_loc);
+    if (own_reference(n->sym->ty)) {
+        return checked_store(lw, fir.place_local(x), n->b, n->name_loc);
+    }
     return lower_into(lw, n->b, fir.place_local(x));
+}
+
+// `live(_x)` at `at`, and `_x` joins the locals of the innermost scope, whose exits end it.
+fn live(lowerer mut* lw, u32 x, diag.loc at) void {
+    append(lw, fir.stmt_live(x, at, lw->stmt));
+    local_push(lw, x);
+}
+
+// A store into the place `p` of an `own` reference (spec/fir.md 9.3, D17.11): `e` into a
+// temporary `_t`, `check(overwrite: p) -> bb` at `at`, and `p = move _t` in `bb` at `at`. The
+// check runs after the right side and right before the store, so `p = move(p)` passes it.
+fn checked_store(lowerer mut* lw, fir.place p, ast.node* e, diag.loc at) bool {
+    u32 mut t = 0;
+    if (!owning_temp(lw, e, &t)) {
+        return false;
+    }
+    u32 next = fir.block_new(lw->f);
+    terminate(lw, fir.term_check_overwrite(p, next, at, lw->stmt));
+    lw->block = next;
+    assign(lw, p, fir.rvalue_use(lw->f, fir.operand_move(fir.place_local(t))), at);
+    return true;
+}
+
+// Whether `o` reads a temporary of the lowering, with no projection, by `move`: the value that the
+// lowering of an owning rvalue leaves.
+fn moves_temp(lowerer* lw, fir.operand o) bool {
+    return o.kind == fir.operand_kind.ok_move && o.place.base == fir.base_kind.bk_local
+        && o.place.proj_len == 0
+        && fir.local_at(lw->f, o.place.local)->kind == fir.local_kind.lk_temp;
+}
+
+// The owning value of the expression `e` in a temporary, whose number goes to *out: the
+// temporary that the lowering of `e` made for it, or else a new temporary of the type of `e`
+// that `_t = e` fills at `e`. An aggregate writes into the new temporary itself. The checker
+// gives `e` an owning type: an owning rvalue, `move(lv)`, or `null` or `{}` in an owning context.
+fn owning_temp(lowerer mut* lw, ast.node* e, u32 mut* out) bool {
+    if (fir.type_aggregate(e->ty)) {
+        *out = fir.local_add(lw->f, e->ty, fir.local_kind.lk_temp, null, e->loc);
+        return lower_into(lw, e, fir.place_local(*out));
+    }
+    fir.operand mut v = fir.operand{};
+    if (!lower_operand(lw, e, &v)) {
+        return false;
+    }
+    if (moves_temp(lw, v)) {
+        *out = v.place.local;
+        return true;
+    }
+    *out = fir.local_add(lw->f, e->ty, fir.local_kind.lk_temp, null, e->loc);
+    assign(lw, fir.place_local(*out), fir.rvalue_use(lw->f, v), e->loc);
+    return true;
 }
 
 // The rvalue operator of the compound assignment token `op`, or `assign` for `=`. It copies
@@ -616,21 +879,31 @@ fn hold_base(lowerer mut* lw, fir.place p, bool later, diag.loc at) fir.place {
     return hold_address(lw, p, indirect_mut(lw->f, p), at);
 }
 
-// `lv = e;` and `lv op= e;` (spec/fir.md 9.3). `lv = e` writes `e` into the place of `lv`. `lv op=
-// e` reads the old value before `e`, `_old = copy p`, then writes `p = op(copy _old, e)` after the
-// checks of `op`, so the target is computed once (D6.3). An assignment into an `own` reference
-// waits for its overwrite check.
+// `lv = e;` and `lv op= e;` (spec/fir.md 9.3). `lv = e` writes `e` into the place of `lv`: an
+// aggregate writes into it where it is lowered, and a scalar is stored at the `=`, as
+// spec/fir.md 13 stores `*p = 7`. An `own` reference takes the overwrite check and its store at
+// the `=` (D17.11). `lv op= e` reads the old value before `e`, `_old = copy p`, then writes `p =
+// op(copy _old, e)` at the operator after the checks of `op`, so the target is computed once
+// (D6.3).
 fn lower_assign(lowerer mut* lw, ast.node* n) bool {
     lexer.tok_kind op = compound_operator(cast(n->op, lexer.tok_kind));
-    if (op == lexer.tok_kind.assign && own_reference(n->a->ty)) {
-        return unsupported(lw, n);
-    }
     fir.place mut p = fir.place{};
     if (!target_place(lw, n->a, n->b, &p)) {
         return false;
     }
-    if (op == lexer.tok_kind.assign) {
+    if (op == lexer.tok_kind.assign && own_reference(n->a->ty)) {
+        return checked_store(lw, p, n->b, n->loc);
+    }
+    if (op == lexer.tok_kind.assign && fir.type_aggregate(n->b->ty)) {
         return lower_into(lw, n->b, p);
+    }
+    if (op == lexer.tok_kind.assign) {
+        fir.operand mut v = fir.operand{};
+        if (!lower_operand(lw, n->b, &v)) {
+            return false;
+        }
+        assign(lw, p, fir.rvalue_use(lw->f, v), n->loc);
+        return true;
     }
     fir.operand old = old_value(lw, p, n->a->loc);
     fir.operand mut e = fir.operand{};
@@ -781,8 +1054,11 @@ fn lower_do(lowerer mut* lw, ast.node* n) bool {
 // `break` goes to done and whose `continue` goes to step; `s` in step, as a statement of its own,
 // then `goto head` (spec/fir.md 9.3, D7.5). A call of a `noreturn` function in `i` or in `s` ends
 // its block, so no `goto` follows it. The walk meets `s` after `B`, where its block stands, so `s`
-// takes its index after the statements of `B` (9.7).
+// takes its index after the statements of `B` (9.7). A local that `i` declares lives once for the
+// whole loop, so it belongs to a scope of kind `block` around the loop, whose fall-off ends it in
+// done at the end of the loop.
 fn lower_for(lowerer mut* lw, ast.node* n) bool {
+    scope_push(lw, scope_kind.sc_block, 0, 0);
     if (n->a != null && !lower_stmt(lw, n->a)) {
         return false;
     }
@@ -811,7 +1087,7 @@ fn lower_for(lowerer mut* lw, ast.node* n) bool {
         jump(lw, head, n->loc);
     }
     lw->block = done;
-    return true;
+    return close_scope(lw, end_of(n));
 }
 
 // The place that a range `for` walks, in *out (D17.10). An owning collection stays in its place,
@@ -835,11 +1111,12 @@ fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out) bool {
 
 // `for (T x : c) B` (spec/fir.md 9.3): the place of `c`, then the counter `_i: u64 = const u64 0`;
 // the blocks head, body, step and done; `_c = lt(copy _i, len)` and `switch(copy _c)` in head;
-// `live(_x)` and `_x = copy c[_i]` in body, then `B` as a loop body whose `break` goes to done and
-// whose `continue` goes to step; `_i = add(copy _i, const u64 1)` in step. The counter never
-// passes the length, so neither the index nor the `add` needs a check. `x` has the element type
-// without its outermost `own`, so the copy lends (D17.10). The statements of the loop stand at the
-// `for`, `live(_x)` at the name, and the copy of the element at `c`.
+// `live(_x)` and `_x = copy c[_i]` in body, inside the scope of kind `loop` of `B`, whose `break`
+// goes to done, whose `continue` goes to step, and whose every exit ends `x`; `_i = add(copy _i,
+// const u64 1)` in step. The counter never passes the length, so neither the index nor the `add`
+// needs a check. `x` has the element type without its outermost `own`, so the copy lends
+// (D17.10). The statements of the loop stand at the `for`, `live(_x)` at the name, and the copy of
+// the element at `c`.
 fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
     fir.place mut c = fir.place{};
     if (!range_collection(lw, n->b, &c)) {
@@ -859,12 +1136,18 @@ fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
     fir.rvalue below = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_lt, index, length_of(lw, c));
     branch(lw, into_temp(lw, bool_ty(lw), below, n->loc), body, done, n->loc);
     lw->block = body;
+    // `x` belongs to the scope of the body: each iteration starts it, and each exit of the body
+    // ends it
+    scope_push(lw, scope_kind.sc_loop, done, step);
     u32 x = local_of(lw, n->sym);
-    fir.block_append(lw->f, lw->block, fir.stmt_live(x, n->name_loc, lw->stmt));
+    live(lw, x, n->name_loc);
     fir.operand element = fir.operand_copy(fir.place_index(lw->f, c, i));
     assign(lw, fir.place_local(x), fir.rvalue_use(lw->f, element), n->b->loc);
-    if (!lower_loop_body(lw, n->c, done, step, n->loc)) {
+    if (!lower_statements(lw, n->c) || !close_scope(lw, end_of(n->c))) {
         return false;
+    }
+    if (!terminated(lw)) {
+        jump(lw, step, n->loc);
     }
     lw->block = step;
     fir.operand one = int_const(wide, false, 1);
@@ -961,47 +1244,63 @@ fn lower_switch(lowerer mut* lw, ast.node* n) bool {
     return true;
 }
 
-// `break` and `continue` (spec/fir.md 9.3, 9.5): the walk from the innermost scope stops at the
-// first scope of kind `loop` or `case` for `break`, and at the first scope of kind `loop` for
-// `continue`, so a `continue` in a clause reaches the loop around the `switch` (D7.6). Then `goto`
-// the target of that scope, at the keyword. The checker refuses an exit that has no such scope.
-fn lower_exit(lowerer mut* lw, ast.node* n, bool is_continue) bool {
-    u64 mut depth = lw->scopes.len;
-    while (depth > 0) {
-        depth -= 1;
-        scope s = lw->scopes.items[depth];
-        if (s.kind == scope_kind.sc_loop) {
-            u32 mut target = s.break_target;
-            if (is_continue) {
-                target = s.continue_target;
-            }
-            jump(lw, target, n->loc);
-            return true;
-        }
-        if (s.kind == scope_kind.sc_case && !is_continue) {
-            jump(lw, s.break_target, n->loc);
-            return true;
-        }
+// `break` and `continue` (spec/fir.md 9.3, 9.5): the unwind stops at the first scope of kind
+// `loop` or `case` for `break`, and at the first scope of kind `loop` for `continue`, so a
+// `continue` in a clause reaches the loop around the `switch` (D7.6). Then `goto` the target of
+// that scope, at the keyword, unless a deferred statement ended the block.
+fn lower_exit(lowerer mut* lw, ast.node* n, exit_kind x) bool {
+    u64 mut stop = 0;
+    if (!unwind(lw, n, x, &stop)) {
+        return false;
     }
-    panic("fir_lower.lower_exit: a break or a continue with no loop or switch to leave");
+    if (terminated(lw)) {
+        return true;
+    }
+    scope s = lw->scopes.items[stop];
+    u32 mut target = s.break_target;
+    if (x == exit_kind.x_continue) {
+        target = s.continue_target;
+    }
+    jump(lw, target, n->loc);
+    return true;
 }
 
-// `return e` with no deferred statement: `e` into `_0`, then `return` (spec/fir.md 9.6 steps 1
-// and 4). For ANN_MOVE, the operand is `move _x` of the local that `e` names. No deferred
-// statement is open, since the lowering does not lower `defer` yet, so an aggregate result goes
-// into `_0` itself.
+// `return e` (spec/fir.md 9.6): `e` into `_0`, the unwind, and `return` at the keyword. For
+// ANN_MOVE the operand is `move _x` of the local that `e` names (D17.5), so a deferred statement
+// that reads `x` sees the zero value (D7.8). An aggregate `_0` is the storage of the caller, so
+// while a deferred statement is open in any scope, `e` goes into a temporary of the type of `_0`
+// first, and `_0 = move _t` or `_0 = copy _t` follows the unwind at the keyword. A deferred
+// statement that ends the block ends the lowering of the `return`.
 fn lower_return(lowerer mut* lw, ast.node* n) bool {
+    types.node* rt = fir.local_at(lw->f, 0)->ty;
+    bool through = n->a != null && fir.type_aggregate(rt) && lw->defers.len > 0;
+    u32 mut held = 0;
     if (n->a != null) {
-        fir.place result = fir.place_local(0);
+        fir.place mut dst = fir.place_local(0);
+        if (through) {
+            held = fir.local_add(lw->f, rt, fir.local_kind.lk_temp, null, n->a->loc);
+            dst = fir.place_local(held);
+        }
         if ((n->ann & check.ANN_MOVE) != 0) {
             fir.place mut x = fir.place{};
             if (!name_place(lw, n->a, &x)) {
                 panic("fir_lower.lower_return: an implicit move of no local");
             }
-            assign(lw, result, fir.rvalue_use(lw->f, fir.operand_move(x)), n->a->loc);
-        } else if (!lower_into(lw, n->a, result)) {
+            assign(lw, dst, fir.rvalue_use(lw->f, fir.operand_move(x)), n->a->loc);
+        } else if (!lower_into(lw, n->a, dst)) {
             return false;
         }
+    }
+    u64 mut stop = 0;
+    if (!unwind(lw, n, exit_kind.x_return, &stop)) {
+        return false;
+    }
+    if (terminated(lw)) {
+        return true;
+    }
+    if (through) {
+        fir.rvalue result = fir.rvalue_use(lw->f, read_temp(held, rt));
+        assign(lw, fir.place_local(0), result, n->loc);
     }
     terminate(lw, fir.term_return(n->loc, lw->stmt));
     return true;
@@ -1040,6 +1339,12 @@ fn lower_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     case ast.ast_kind.k_brace_init:
         // `{}` of an enum, which the checker allows for no other scalar
         *out = fir.operand_const(fir.const_zero(n->ty));
+        return true;
+    case ast.ast_kind.k_new:
+        // `new(T)`: one zero `T`, whose address is a scalar (D10.2)
+        types.node* one = n->ty->elem;
+        fir.operand count = int_const(u64_ty(lw), false, 1);
+        *out = into_temp(lw, n->ty, fir.rvalue_alloc(lw->f, one, count), n->loc);
         return true;
     default:
         return unsupported(lw, n);
@@ -1454,6 +1759,8 @@ fn lower_into(lowerer mut* lw, ast.node* n, fir.place dst) bool {
         return true;
     case ast.ast_kind.k_ternary:
         return lower_ternary_into(lw, n, dst);
+    case ast.ast_kind.k_new:
+        return lower_new_span(lw, n, dst);
     default:
         break;
     }
@@ -1465,6 +1772,36 @@ fn lower_into(lowerer mut* lw, ast.node* n, fir.place dst) bool {
         return false;
     }
     assign(lw, dst, fir.rvalue_use(lw->f, fir.operand_copy(p)), n->loc);
+    return true;
+}
+
+// `new(T, n)` into `dst` (spec/fir.md 9.4, D10.2): `_n = cast<i64>(n)`; for a signed count `_f =
+// lt(copy _n, const i64 0)` and `check(copy _f, alloc_count, copy _n)`; then `_u = cast<u64>(copy
+// _n)`, `_p = alloc<T>(copy _u)` and `dst = aggregate T mut@ own(move _p, copy _u)`. Each stands at
+// the `new`, where the direct path reports the count. An unsigned count is never negative, so it
+// takes no check, and a zero count is legal.
+fn lower_new_span(lowerer mut* lw, ast.node* n, fir.place dst) bool {
+    fir.operand mut raw = fir.operand{};
+    if (!lower_operand(lw, n->b, &raw)) {
+        return false;
+    }
+    types.node* wide = i64_ty(lw);
+    fir.operand count = into_temp(lw, wide, fir.rvalue_cast(lw->f, wide, raw), n->loc);
+    if (prim.prim_is_signed(n->b->ty->prim)) {
+        fir.rvalue below = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_lt, count,
+                                             int_const(wide, false, 0));
+        fir.operand negative = into_temp(lw, bool_ty(lw), below, n->loc);
+        u32 first = fir.operand_push(lw->f, count);
+        check_then(lw, negative, fir.check_kind.chk_alloc_count, first, 1, n->loc);
+    }
+    types.node* bits = u64_ty(lw);
+    fir.operand size = into_temp(lw, bits, fir.rvalue_cast(lw->f, bits, count), n->loc);
+    types.node* elem = n->ty->elem;
+    fir.rvalue storage = fir.rvalue_alloc(lw->f, elem, size);
+    fir.operand p = into_temp(lw, fir.rvalue_type(lw->f, storage), storage, n->loc);
+    u32 first = fir.operand_push(lw->f, p);
+    fir.operand_push(lw->f, size);
+    assign(lw, dst, fir.rvalue_aggregate_new(n->ty, first, 2), n->loc);
     return true;
 }
 
@@ -1684,9 +2021,8 @@ fn lower_call_stmt(lowerer mut* lw, ast.node* n) bool {
 
 // ---- builtins ---------------------------------------------------------------------------------
 
-// The builtin call `n` as a statement: the print family, `assert` and `panic` (spec/fir.md 9.4).
-// `del` waits for the lowering of ownership, and the checker refuses a `move` whose value no one
-// reads.
+// The builtin call `n` as a statement: the print family, `assert`, `panic` and `del` (spec/fir.md
+// 9.4). The checker refuses a `move` whose value no one reads (D17.8).
 fn lower_builtin(lowerer mut* lw, ast.node* n) bool {
     string name = n->a->sym->name;
     bool out = name == "print" || name == "println";
@@ -1717,7 +2053,31 @@ fn lower_builtin(lowerer mut* lw, ast.node* n) bool {
     if (name == "panic") {
         return lower_panic(lw, n);
     }
+    if (name == "del") {
+        return lower_del(lw, n);
+    }
     return unsupported(lw, n);
+}
+
+// `del(e)` at the name `del` (spec/fir.md 9.4, D17.9): `del(move p)` of the place of an lvalue,
+// with its index checks first, which empties the place; for an rvalue, `_t = e` and then `del(move
+// _t)`, which only frees.
+fn lower_del(lowerer mut* lw, ast.node* n) bool {
+    ast.node* e = ast.ast_child(n, 0);
+    fir.place mut p = fir.place{};
+    if ((e->ann & check.ANN_LVALUE) != 0) {
+        if (!lower_place(lw, e, &p)) {
+            return false;
+        }
+    } else {
+        u32 mut t = 0;
+        if (!owning_temp(lw, e, &t)) {
+            return false;
+        }
+        p = fir.place_local(t);
+    }
+    append(lw, fir.stmt_del(p, n->a->loc, lw->stmt));
+    return true;
 }
 
 // The name of the runtime function of `k`.
