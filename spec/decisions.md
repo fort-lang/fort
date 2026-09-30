@@ -2319,8 +2319,9 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   Two `-S` runs use identical arguments except the `-o` output path.
   That path does not enter the emitted IR text.
   A self-hosted compiler reaches a fixpoint when stage2 and stage3 emit byte-identical modules
-  for the same sources and selected target in both build modes.
-  The toolchain must make two comparisons in each build mode. It must compare with `cmp` the
+  for the same sources and selected target in four modes: checked and `--release` (D11.1), each
+  with and without `--no-bounds-check` (D10.6).
+  The toolchain must make two comparisons in each of the four modes. It must compare with `cmp` the
   `-S` output that two distinct stages emit for one input, with `diff` as the debugging output, and
   it must compare two stage binaries byte for byte.
   On Mac, both links use one output pathname.
@@ -2403,6 +2404,11 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   Amended 2026-09-15 (T-140): two `-S` runs may use different `-o` paths without changing IR.
   Amended 2026-09-17 (T-160): the project removed C-to-fort comparisons. The fixed-point CTest
   entry is now `fixpoint`.
+  Amended 2026-09-29 (T-261): the rule read "in both build modes" and "two comparisons in each
+  build mode". The fixpoint is now checked in four modes, checked and `--release`, each with and
+  without `--no-bounds-check`. The user ruled on 2026-09-29.
+  `--no-bounds-check` removes the index and span checks from the stage binaries, so a stage3
+  built with it is a different program that must reproduce itself too.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).

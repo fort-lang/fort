@@ -1,0 +1,84 @@
+# The checks of the C compiler bootstrap0: format, lint, and the unit suites under the
+# sanitizers. No job here builds the fort compiler.
+#
+# Every job checks out the full history. Configure reads the pinned commit of
+# tools/bootstrap.ref with git, and a shallow clone does not hold it.
+name: bootstrap0
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        run: tools/ci_setup.sh linux lint
+      - name: Configure
+        run: cmake --preset debug
+      - name: Check the format of the C sources
+        run: cmake --build --preset debug --target bootstrap0-format-check
+
+  lint:
+    name: lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, host: linux }
+          - { os: ubuntu-latest, host: linux }
+          - { os: macos-latest, host: darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        run: tools/ci_setup.sh ${{ matrix.host }} lint
+      # clang-tidy reads compile_commands.json, which configure writes. Nothing is built.
+      - name: Configure
+        run: cmake --preset debug
+      - name: Run clang-tidy
+        run: cmake --build --preset debug --target bootstrap0-lint
+
+  sanitizers:
+    name: sanitizers (${{ matrix.os }}, ${{ matrix.preset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Darwin has no MemorySanitizer, so msan runs on Linux only.
+        include:
+          - { os: ubuntu-24.04, host: linux, preset: asan }
+          - { os: ubuntu-24.04, host: linux, preset: ubsan }
+          - { os: ubuntu-24.04, host: linux, preset: msan }
+          - { os: ubuntu-latest, host: linux, preset: asan }
+          - { os: ubuntu-latest, host: linux, preset: ubsan }
+          - { os: ubuntu-latest, host: linux, preset: msan }
+          - { os: macos-latest, host: darwin, preset: asan }
+          - { os: macos-latest, host: darwin, preset: ubsan }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        run: tools/ci_setup.sh ${{ matrix.host }}
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      # The suites and the source tree of the first pin, which two suites read.
+      - name: Build the unit suites
+        run: cmake --build --preset ${{ matrix.preset }} --target fort_bootstrap0_unit_tests
+      - name: Run the unit suites
+        run: |
+          ulimit -c 0
+          ctest --preset ${{ matrix.preset }} -L '^bootstrap0$' -j "$(getconf _NPROCESSORS_ONLN)"

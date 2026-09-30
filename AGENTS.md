@@ -96,7 +96,7 @@ you are working on run successfully, and make sure that the code format and lint
 on top of `main` frequently to reduce the chances of merge conflicts.
 
 Once done with a change that is a single unit of work, squash all commits on the branch into one
-via interactive rebase (`git rebase -i origin/main`, mark all but the first as `squash`). Write a
+via interactive rebase (`git rebase -i main`, mark all but the first as `squash`). Write a
 meaningful commit message that describes _what_ and _why_ -- do not just collate the individual
 commit messages. Agents that cannot run an interactive rebase use the equivalent
 `git reset --soft $(git merge-base main HEAD) && git commit` (not `git reset --soft main`:
@@ -105,8 +105,9 @@ new `main` and silently reverts its newer commits). A feature branch made of sev
 self-contained units of work (for example the language design, or a compiler pass plus its tests
 plus its documentation) keeps its individual commits. **Every merge is `--ff-only`** (the user,
 2026-09-17): rebase onto the target first, then merge. A merge that cannot fast-forward means the
-target moved and the rebase is missing. No merge commit enters the history. Until a remote exists,
-`main` plays the role of `origin/main`. Worktrees live in `.worktrees/`, which is gitignored.
+target moved and the rebase is missing. No merge commit enters the history. Push only `main` to
+`origin` (`fort-lang/fort`) after each merge; CI runs on that push and `ci-status` gates PRs. Fix
+a red `ci-status` on `main` before the next merge (T-261). Git ignores `.worktrees/`.
 
 ### Tickets
 - Keep one markdown ticket per deliverable in `.tickets/` in the main checkout, not a worktree.

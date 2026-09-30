@@ -320,7 +320,9 @@ without a rewrite.
 ## 3. Provisioning
 
 - Provisioning installs `nodejs` (Node 18) for the extension's unit tests and fails loudly when it
-  is older or has no built-in test runner.
+  is older or has no built-in test runner. Configure does not require node: without it, configure
+  prints `node not found: extension_selftest is not registered` and registers one test fewer
+  (T-261).
 - Provisioning disables apport and sets `kernel.core_pattern=core`: Ubuntu's piped core pattern
   ignores `ulimit -c 0` and made every SIGABRT cost about a second. A VM provisioned before that
   change needs `tools/vm provision` once (or the same two commands by hand).
@@ -357,18 +359,18 @@ without a rewrite.
 
 ## 5. The build
 
-- Presets (`CMakePresets.json`, Ninja, clang unless noted): `debug`, `release`
-  (RelWithDebInfo), `asan`, `ubsan`, `msan`, `tsan` and `gcc`; the sanitizer presets set
-  `FORT_SANITIZER` for `cmake/sanitizers.cmake`, which instruments every native target but never
-  the cross-compiled runtime object. **The presets are the same on every host** (2026-09-26): the
-  host decides the target, and a preset the host cannot provide stops at configure time with its
-  reason -- `msan` and `tsan` on darwin (no MemorySanitizer or ThreadSanitizer for arm64 darwin),
-  `gcc` where `gcc` is Apple clang. `asan` on darwin builds with Apple clang (`/usr/bin/clang`,
-  set in `CMakeLists.txt` before `project()`), because the Homebrew clang 19 AddressSanitizer
-  runtime hangs at exit on darwin 25. `tools/vm workflow <preset>` configures, builds and runs
-  ctest; build directories are `build/<Host>/<preset>` inside the worktree. `-Wall -Wextra
-  -Wpedantic -Werror -Wshadow -Wvla -Wstrict-prototypes -Wmissing-prototypes -Wundef` apply to every
-  C target.
+- Presets (`CMakePresets.json`, Ninja, clang unless noted): `debug`, `release` (Release, so every
+  stage of the chain gets `--release`; T-261), `asan`, `ubsan`, `msan`, `tsan` and `gcc`; the
+  sanitizer presets set `FORT_SANITIZER` for `cmake/sanitizers.cmake`, which instruments every
+  native target but never the cross-compiled runtime object. **The presets are the same on every
+  host** (2026-09-26): the host decides the target, and a preset the host cannot provide stops at
+  configure time with its reason -- `msan` and `tsan` on darwin (no MemorySanitizer or
+  ThreadSanitizer for arm64 darwin), `gcc` where `gcc` is Apple clang. `asan` on darwin builds with
+  Apple clang (`/usr/bin/clang`, set in `CMakeLists.txt` before `project()`), because the Homebrew
+  clang 19 AddressSanitizer runtime hangs at exit on darwin 25. `tools/vm workflow <preset>`
+  configures, builds and runs ctest; build directories are `build/<Host>/<preset>` inside the
+  worktree. `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wvla -Wstrict-prototypes
+  -Wmissing-prototypes -Wundef` apply to every C target.
 - C-started mode (`FORT_ENABLE_BOOTSTRAP0=ON`) adds `bootstrap0/CMakeLists.txt` with the binary
   directory `build/<Host>/<preset>/bootstrap`. That file builds `fort_core` and `fort_bootstrap0`.
   It sets its own C11 settings, warnings and definitions. It reads the target and the tool paths
@@ -547,3 +549,24 @@ without a rewrite.
   CalledProcessError from that command. Run `python3 agents/lines.py --since main --min 3.0` on the
   host: it needs git and Python 3 and nothing of the build. On the shared VM git works, because
   provisioning symlinks the host path of the main checkout to `/vagrant` (T-094).
+
+## 7. GitHub Actions
+
+- `main` is pushed to `fort-lang/fort`, a public repository, and CI runs there (T-261).
+  `.github/workflows/ci.yml` calls `bootstrap0.yml` and `fort.yml` and holds the job `ci-status`.
+  A ruleset on `main` requires `ci-status` and nothing else. `ci-status` fails when any job of
+  either called workflow ends in a result other than `success`, so a new job in a component
+  workflow joins the gate with no edit to `ci.yml`.
+- The runners are `ubuntu-24.04`, `ubuntu-latest` and `macos-latest`. The Linux target is
+  x86_64, the Linux runners are x86_64, and the Darwin runner is arm64, so each runner builds and
+  runs its target natively. CI installs none of the qemu, binfmt and cross packages of section 3;
+  the harnesses only give `QEMU_LD_PREFIX` a default.
+- Every job checks out with `fetch-depth: 0`. Configure runs `git cat-file` and
+  `git merge-base --is-ancestor` on the pin of `tools/bootstrap.ref`, and a shallow clone does
+  not hold that commit.
+- `tools/ci_setup.sh <linux|darwin> [lint]` installs the tools. On Linux: `clang-18`, `llvm-18`
+  (for `opt-18`), `libclang-rt-18-dev` and ninja; `vm.mmap_rnd_bits=28`, because the clang 18
+  sanitizer runtimes cannot map their shadow memory at the runner kernel's default; and
+  `kernel.core_pattern=core`, as section 3 does for the VM. On Darwin: Homebrew `llvm@19`, linked
+  with `brew link --force`, so `/opt/homebrew/bin/opt`, the default `FORT_OPT`, exists as on the
+  dev Mac. `lint` adds clang-format 18 and clang-tidy 18.

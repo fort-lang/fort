@@ -1,10 +1,11 @@
 #!/bin/bash
-# tools/fixpoint.sh <build-dir>: verify compiler reproduction in both build modes.
+# tools/fixpoint.sh <build-dir>: verify compiler reproduction in four build modes.
 #
 # CMake supplies stage2. Stage2 builds stage3, and stage3 builds stage4.
 # Each mode compares the stage2 and stage3 modules, then the stage3 and stage4 binaries.
 # The script verifies each module before it compares output bytes.
 # Checked and release modes emit different overflow behavior, so both modes run.
+# --no-bounds-check removes the index and span checks, so each mode also runs with it.
 #
 # The script writes temporary output below <build-dir>/fixpoint/<mode>.
 # Each stage uses identical source paths because those paths can enter failure blocks.
@@ -117,9 +118,9 @@ compile() {
     local output=$3
     mkdir -p "$(dirname "$output")"
     rm -f "$output"
-    # $flags is empty in checked mode and `--release` in release mode. It is
-    # one option and not a path, so the split of an empty $flags into no
-    # argument is what is wanted here.
+    # $flags is empty in checked mode, and it holds one or two options in the
+    # other modes, never a path. The split of $flags into its words, and of an
+    # empty $flags into no argument, is what is wanted here.
     # shellcheck disable=SC2086
     "$compiler" $flags --std-dir "$std" -I "$source_root" \
         --cc "$cc" \
@@ -241,5 +242,7 @@ check_mode() {
 
 check_mode checked ""
 check_mode release --release
+check_mode checked-nobounds --no-bounds-check
+check_mode release-nobounds "--release --no-bounds-check"
 
 exit "$status"

@@ -141,7 +141,7 @@ file(GLOB_RECURSE FORT_BOOTSTRAP0_C_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.c" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 fort_format_targets("bootstrap0-" ${FORT_BOOTSTRAP0_C_SOURCES})
 fort_tidy_target(bootstrap0-lint "${CMAKE_CURRENT_SOURCE_DIR}")
-fort_ctest_target(bootstrap0-unit "${CMAKE_CURRENT_BINARY_DIR}" -L "^unit$")
+fort_ctest_target(bootstrap0-unit "${CMAKE_CURRENT_BINARY_DIR}" -L "^bootstrap0$" -L "^unit$")
 if(TARGET fort_bootstrap0_unit_tests)
     add_dependencies(bootstrap0-unit fort_bootstrap0_unit_tests)
 endif()

@@ -20,8 +20,10 @@ bullet at a time and without a rewrite.
   `format-check`, `lint`, `unit` and `integration` and stops at the first failure. The fort
   targets carry the step's name (`check`); `bootstrap0/CMakeLists.txt` defines `bootstrap0-<step>`,
   whose ctest runs over `build/<Host>/<preset>/bootstrap` and so sees bootstrap0's tests alone; and
-  `<step>-all` runs the step for both components. The bootstrap0 tests carry the label
-  `bootstrap0`, which the fort targets exclude (`ctest -L '^unit$' -LE '^bootstrap0$'`). Unit:
+  `<step>-all` runs the step for both components. Each test carries one component label,
+  `bootstrap0` or `fort`, and a new test must carry one too. The targets select by component and
+  step (`ctest -L '^fort$' -L '^unit$'`; repeated `-L` options select the tests that match all of
+  them), and so does CI (T-261). Unit:
   `test/fort` (`fort-modules`), `test/fir` (`fir`), `highlight_selftest` and `extension_selftest`;
   the 68 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and
   `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit
@@ -516,7 +518,9 @@ bullet at a time and without a rewrite.
 - Product tests use `build/<Host>/<preset>/fort` and `build/<Host>/<preset>/std`. They do not
   compare the C compiler with the fort compiler.
 - The ctest `fixpoint` compiles HEAD twice. It compares the two LLVM modules and the two compiler
-  binaries. It also verifies both modules with LLVM.
+  binaries. It also verifies both modules with LLVM. It does that in four build modes: checked,
+  `--release`, and each with `--no-bounds-check` (T-261). CI runs it on the Linux and the Darwin
+  runners (`notes/environment.md` 7).
 - A successful native build proves the bootstrap edge. The C compiler builds bootstrap-1.
   Bootstrap-0 builds the next compiler in the C-started chain.
 - External-stage1 mode uses an external compiler to build HEAD. It registers no bootstrap tests

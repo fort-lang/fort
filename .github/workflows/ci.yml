@@ -1,0 +1,49 @@
+# The CI of fort. It calls the workflow of each component and gates on one job.
+#
+# bootstrap0.yml checks the C compiler. fort.yml bootstraps the fort compiler from it and
+# runs the tests. The two run in parallel. The job ci-status fails when any job of either
+# workflow does not succeed, so branch protection requires ci-status and nothing else.
+# A new job in a component workflow joins the gate without a change here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run. A push to main gets a group of its
+# own commit, so a later push cannot cancel or displace it, and every commit of main is
+# checked. Only this file sets a concurrency group: a called workflow in the same group
+# would wait for its own caller.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bootstrap0:
+    uses: ./.github/workflows/bootstrap0.yml
+
+  fort:
+    uses: ./.github/workflows/fort.yml
+
+  ci-status:
+    needs: [bootstrap0, fort]
+    # Run when a needed job fails or is skipped too, so the gate always reports.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require success from every job
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "ci-status: a needed job ended with '$result'" >&2
+              exit 1
+            fi
+          done

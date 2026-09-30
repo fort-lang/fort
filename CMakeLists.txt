@@ -365,7 +365,7 @@ set(FORT_GRAPH_FIXPOINT_COMMAND
 add_test(NAME fixpoint
     COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fixpoint PROPERTIES LABELS integration)
+set_tests_properties(fixpoint PROPERTIES LABELS "fort;integration")
 
 # ---- the language server -------------------------------------------------------
 # fort_lsp is src/lsp compiled by the production compiler. It stands at the
@@ -401,7 +401,7 @@ add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
 add_test(NAME lsp-binary
     COMMAND bash "${FORT_TEST_DIR}/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(lsp-binary PROPERTIES LABELS integration)
+set_tests_properties(lsp-binary PROPERTIES LABELS "fort;integration")
 
 # The C helpers of the language tests are compiled for the target by the
 # harness; they also build on the host so that -Werror covers them. They are FFI entry points
@@ -444,7 +444,7 @@ set(FORT_MODULE_TEST_COMMAND
 )
 add_test(NAME fort-modules COMMAND ${FORT_MODULE_TEST_COMMAND})
 set_tests_properties(fort-modules PROPERTIES
-    LABELS unit
+    LABELS "fort;unit"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
 # The FIR tests: test/fir/<pass>/<x>.fir holds a function in the textual form of
@@ -456,7 +456,7 @@ add_test(NAME fir
             --fort "${FORT_COMPILER_BINARY}"
             --std-dir "${FORT_STD_DIR}")
 set_tests_properties(fir PROPERTIES
-    LABELS unit
+    LABELS "fort;unit"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
 # The product language test uses the current compiler and standard library.
@@ -473,13 +473,13 @@ set(FORT_LANG_COMMAND
     -j "${FORT_LANG_JOBS}"
 )
 add_test(NAME lang COMMAND ${FORT_LANG_COMMAND})
-set_tests_properties(lang PROPERTIES LABELS integration)
+set_tests_properties(lang PROPERTIES LABELS "fort;integration")
 
 # Product check mode runs over the same corpus. It compares JSON and text diagnostics.
 # It runs `--index` on each test with a golden index.json file.
 # The harness compares the index byte for byte and reports the measured count.
 add_test(NAME lang-json COMMAND ${FORT_LANG_COMMAND} --check-json)
-set_tests_properties(lang-json PROPERTIES LABELS integration)
+set_tests_properties(lang-json PROPERTIES LABELS "fort;integration")
 # Each harness run takes FORT_LANG_JOBS processors. Told so, `ctest -j` runs
 # nothing beside it; untold, it ran seven tests beside a full-load harness on
 # the darwin host and `lang_selftest` reported its 5 s fake compiler as timed
@@ -497,7 +497,7 @@ add_test(NAME tty
             --cc "${FORT_TARGET_CC_PATH}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(tty PROPERTIES
-    LABELS integration
+    LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
 # The unit tests of the TextMate grammar in editors/vscode (label unit): they
@@ -507,18 +507,24 @@ add_test(NAME highlight_selftest
     COMMAND "${FORT_PYTHON3}" -m unittest highlight_test
     WORKING_DIRECTORY "${FORT_TEST_DIR}")
 set_tests_properties(highlight_selftest PROPERTIES
-    LABELS unit
+    LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.
 # A fake editor drives activation. The manual smoke test covers real editor behavior.
-find_program(FORT_NODE NAMES node nodejs REQUIRED)
-add_test(NAME extension_selftest
-    COMMAND "${FORT_NODE}" --test
-    WORKING_DIRECTORY "${FORT_EDITORS_DIR}/vscode")
-set_tests_properties(extension_selftest PROPERTIES LABELS unit)
+# Node is optional: this test is its only user, and a build without node
+# registers no extension_selftest.
+find_program(FORT_NODE NAMES node nodejs)
+if(FORT_NODE)
+    add_test(NAME extension_selftest
+        COMMAND "${FORT_NODE}" --test
+        WORKING_DIRECTORY "${FORT_EDITORS_DIR}/vscode")
+    set_tests_properties(extension_selftest PROPERTIES LABELS "fort;unit")
+else()
+    message(STATUS "node not found: extension_selftest is not registered")
+endif()
 
 # ---- the gate --------------------------------------------------------------------
 # `gate` is the merge gate of the selected target, run from this build directory:
@@ -565,10 +571,12 @@ add_custom_target(lint
     VERBATIM)
 add_dependencies(lint fort fort_std)
 
-# unit and integration: the top-level ctest also runs the tests of bootstrap0/,
-# whose tests carry the label `bootstrap0`, so the fort targets leave them out.
-fort_ctest_target(unit "${CMAKE_BINARY_DIR}" -L "^unit$" -LE "^bootstrap0$")
-fort_ctest_target(integration "${CMAKE_BINARY_DIR}" -L "^integration$" -LE "^bootstrap0$")
+# unit and integration: each test carries one component label, `fort` or
+# `bootstrap0`. The top-level ctest also sees the tests of bootstrap0/, so the
+# fort targets select the label `fort`. Two -L options select the tests that
+# match both.
+fort_ctest_target(unit "${CMAKE_BINARY_DIR}" -L "^fort$" -L "^unit$")
+fort_ctest_target(integration "${CMAKE_BINARY_DIR}" -L "^fort$" -L "^integration$")
 add_dependencies(unit fort fort_std fort_lsp)
 add_dependencies(integration fort fort_std fort_lsp)
 fort_sequence_target(check format-check lint unit integration)

@@ -1,0 +1,104 @@
+# The checks of the fort compiler: the format of its C test helpers, the fort lint, and a
+# Release bootstrap from bootstrap0 followed by every test.
+#
+# Every job checks out the full history. Configure reads the pinned commit of
+# tools/bootstrap.ref with git, and a shallow clone does not hold it.
+# The Linux target is x86_64-linux-gnu and the Darwin target is arm64, so each runner
+# builds and runs its target natively.
+name: fort
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: format (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, host: linux }
+          - { os: ubuntu-latest, host: linux }
+          - { os: macos-latest, host: darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        run: tools/ci_setup.sh ${{ matrix.host }} lint
+      - name: Configure
+        run: cmake --preset release
+      # fort has no formatter. This checks the C helpers under test/.
+      - name: Check the format of the C test helpers
+        run: cmake --build --preset release --target format-check
+
+  lint:
+    name: lint (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, host: linux }
+          - { os: ubuntu-latest, host: linux }
+          - { os: macos-latest, host: darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        run: tools/ci_setup.sh ${{ matrix.host }}
+      - name: Configure
+        run: cmake --preset release
+      # The lint reads `fort --index`, so the target bootstraps the compiler first. Each
+      # host lints its own std/<target> modules.
+      - name: Lint the fort sources
+        run: cmake --build --preset release --target lint
+
+  bootstrap:
+    name: bootstrap (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, host: linux }
+          - { os: ubuntu-latest, host: linux }
+          - { os: macos-latest, host: darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        run: tools/ci_setup.sh ${{ matrix.host }}
+      # The release preset is a Release build, so every stage of the chain gets --release.
+      - name: Configure
+        run: cmake --preset release
+      # bootstrap0 builds bootstrap-1, which builds HEAD into build/<Host>/release/fort.
+      - name: Bootstrap the compiler
+        run: cmake --build --preset release
+      # The fort tests: the language corpus, the check mode, the fixpoint in four build
+      # modes, the terminal test, the language server, and the module and FIR tests.
+      - name: Run the fort tests
+        run: |
+          ulimit -c 0
+          ctest --preset release -L '^fort$' -j "$(getconf _NPROCESSORS_ONLN)"
+      - name: Run the bootstrap0 tests
+        run: |
+          ulimit -c 0
+          ctest --preset release -L '^bootstrap0$' -j "$(getconf _NPROCESSORS_ONLN)"
+      - name: Keep the fixpoint diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fixpoint-${{ matrix.os }}
+          path: build/*/release/cmake-fixpoint/fixpoint/*/module.diff
+          if-no-files-found: ignore
