@@ -933,13 +933,18 @@ Sections:
 - owner: `core-language.md` (Functions).
 - rule: Terminating statements: `return`; a call to a `noreturn` function or to `panic`; an `if`
   with an `else` whose branches both terminate; `while (true)`, `for (;;)` or a `for` with an empty
-  condition, with no `break` targeting it; a `switch` all of whose cases terminate and that either
-  has a `default` or is an exhaustive enum switch (D7.7), which terminates through the default the
-  compiler gives it; a block whose last statement terminates. A non-`void` function body must end in
-  a terminating statement or it is a compile error ("missing return", reported at the body's closing
-  brace).
+  condition, with no `break` targeting it; a `switch` all of whose cases terminate, that no `break`
+  targets, and that either has a `default` or is an exhaustive enum switch (D7.7), which terminates
+  through the default the compiler gives it; a block whose last statement terminates. A `break`
+  inside a loop or a `switch` that stands in a case targets that inner construct (D7.5, D7.6), and
+  a `continue` targets no `switch`. A non-`void` function body must end in a terminating statement
+  or it is a compile error ("missing return", reported at the body's closing brace).
 - rationale: catching this at compile time is a core "better than C" promise, and the structural
   rule is a few dozen lines to implement.
+- history: Amended 2026-09-30 (T-210): the rule for a `switch` did not name a `break`. A `break` in
+  a case leaves the `switch`, so control fell off the end of a function that the checker accepted,
+  and the emitted code reached `unreachable`. The rule for a `switch` now has the words that the
+  rule for a loop already had.
 
 ### D8.5 The noreturn result type
 - owner: `core-language.md` (Functions).

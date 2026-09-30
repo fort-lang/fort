@@ -46,6 +46,17 @@ fn src4(check_env.env mut* e, string a, string b, string c, string d) bool {
     return check_env.check_src(e, strbuf.view(&sb));
 }
 
+fn src5(check_env.env mut* e, string a, string b, string c, string d, string f) bool {
+    strbuf.str_buf mut sb = strbuf.create();
+    defer strbuf.free(&sb);
+    strbuf.append(&sb, a);
+    strbuf.append(&sb, b);
+    strbuf.append(&sb, c);
+    strbuf.append(&sb, d);
+    strbuf.append(&sb, f);
+    return check_env.check_src(e, strbuf.view(&sb));
+}
+
 fn body2(check_env.env mut* e, string a, string b) bool {
     strbuf.str_buf mut sb = strbuf.create();
     defer strbuf.free(&sb);
@@ -839,6 +850,71 @@ fn an_exhaustive_enum_switch_terminates() void {
     assert(check_env.said(&e, "missing return"));
 }
 
+// A `break` in a clause leaves the switch, so the switch falls through and is
+// not terminating (D8.4). The rule holds in a plain clause, in the default
+// and in an exhaustive enum switch.
+fn a_break_that_leaves_a_switch_ends_its_termination() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(!src4(&e, "fn f(bool c, i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+                 "        if (c) {\n            break;\n        }\n        return 1;\n",
+                 "    default:\n        return 2;\n    }\n}\n",
+                 "fn main() i32 {\n    return f(true, 1);\n}\n"));
+    assert(check_env.report_text(&e, 0) == "11:1: missing return");
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    assert(!src4(&e, "fn f(bool c, i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+                 "        return 1;\n    default:\n",
+                 "        if (c) {\n            break;\n        }\n        return 2;\n    }\n}\n",
+                 "fn main() i32 {\n    return f(true, 1);\n}\n"));
+    assert(check_env.said(&e, "missing return"));
+    check_env.reopen(&e);
+    assert(!src5(&e, "enum color {\n    red,\n    green,\n}\n",
+                 "fn code(color c, bool b) i32 {\n    switch (c) {\n    case color.red:\n",
+                 "        if (b) {\n            break;\n        }\n        return 1;\n",
+                 "    case color.green:\n        return 2;\n    }\n}\n",
+                 "fn main() i32 {\n    return code(color.red, true);\n}\n"));
+    assert(check_env.said(&e, "missing return"));
+    // A `break` in the selected branch of a `$if` leaves the switch too. A
+    // `break` in a branch that is not selected is not in the program.
+    check_env.reopen(&e);
+    assert(!src4(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+                 "        $if (true) {\n            break;\n        }\n        return 1;\n",
+                 "    default:\n        return 2;\n    }\n}\n",
+                 "fn main() i32 {\n    return f(1);\n}\n"));
+    assert(check_env.said(&e, "missing return"));
+    check_env.reopen(&e);
+    assert(src4(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+                "        $if (false) {\n            break;\n        }\n        return 1;\n",
+                "    default:\n        return 2;\n    }\n}\n",
+                "fn main() i32 {\n    return f(1);\n}\n"));
+}
+
+// A `break` of a loop or a switch inside a clause targets that construct, and
+// `continue` never targets a switch (D7.6). The outer switch still terminates.
+fn a_break_of_an_inner_construct_keeps_a_switch_terminating() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(src5(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+                "        while (k > 0) {\n            if (k > 2) {\n                continue;\n",
+                "            }\n            break;\n        }\n        return 1;\n",
+                "    default:\n        return 2;\n    }\n}\n",
+                "fn main() i32 {\n    return f(1);\n}\n"));
+    check_env.reopen(&e);
+    assert(src4(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+                "        for (i32 mut i = 0; i < k; i++) {\n            break;\n        }\n",
+                "        return 1;\n    default:\n        return 2;\n    }\n}\n",
+                "fn main() i32 {\n    return f(1);\n}\n"));
+    check_env.reopen(&e);
+    assert(src5(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+                "        switch (k) {\n        case 0:\n            break;\n",
+                "        default:\n            println(k);\n        }\n        return 1;\n",
+                "    default:\n        return 2;\n    }\n}\n",
+                "fn main() i32 {\n    return f(1);\n}\n"));
+}
+
 fn a_panic_and_a_noreturn_call_terminate() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -1001,6 +1077,8 @@ fn main() i32 {
     a_break_in_an_inner_switch_does_not_target_the_loop();
     a_for_with_no_condition_terminates();
     an_exhaustive_enum_switch_terminates();
+    a_break_that_leaves_a_switch_ends_its_termination();
+    a_break_of_an_inner_construct_keeps_a_switch_terminating();
     a_panic_and_a_noreturn_call_terminate();
     a_noreturn_function_must_end_in_a_terminating_statement();
     a_body_with_an_error_node_never_reports_missing_return();

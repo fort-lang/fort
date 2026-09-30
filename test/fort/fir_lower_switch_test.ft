@@ -5,7 +5,7 @@
 //| switch ok
 //| enum switch ok
 //| clauses ok
-//| known gap ok
+//| clause breaks ok
 /// Checks the lowering of the range `for` and of `switch` to FIR (spec/fir.md 9.3): the place of
 /// the collection and the counter of a range `for`, the arms and the blocks of a `switch`, the
 /// failure block of an enum `switch` without `default`, and the targets of `break` and `continue`
@@ -876,13 +876,11 @@ fn a_clause_is_a_case_scope_inside_a_loop() void {
     lower_env.expect(lower_env.lower(&e, source[..], "walk"), want[..]);
 }
 
-// ---- the known gap of T-210 ---------------------------------------------------------------------
+// ---- a break in a clause (T-210) ---------------------------------------------------------------
 
-// D8.4 counts a `switch` as terminating when it has a `default` and each clause ends in a
-// terminating statement, and check_terminates accepts this body. The `break` leaves the switch, so
-// the body reaches its end, and rule V9 finds the path to `unreachable`. The lowering follows
-// spec/fir.md 9.3; the fix belongs to the checker (T-210), which will refuse this source.
-fn a_break_that_leaves_a_terminating_switch_reaches_unreachable() void {
+// A `break` in a clause leaves the switch, so D8.4 does not count the switch as terminating, and
+// the checker refuses this body before the lowering sees it. Rule V9 no longer meets it.
+fn a_break_that_leaves_a_switch_is_refused_before_the_lowering() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
@@ -899,43 +897,35 @@ fn a_break_that_leaves_a_terminating_switch_reaches_unreachable() void {
         "    }",
         "}",
     };
+    assert(lower_env.diagnostic(&e, source[..]) == "11:1: missing return");
+}
+
+// A `break` of a loop inside a clause targets that loop (D7.6), so the switch still terminates
+// (D8.4). The lowering and rule V9 agree with the checker: no path reaches `unreachable`.
+fn a_break_of_a_loop_inside_a_clause_keeps_the_switch_terminating() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[11] source = {
+        "fn f(bool c, i32 k) i32 {",
+        "    switch (k) {",
+        "    case 1:",
+        "        while (c) {",
+        "            break;",
+        "        }",
+        "        return 1;",
+        "    default:",
+        "        return 2;",
+        "    }",
+        "}",
+    };
     lower_env.check_lines(&e, source[..], true);
     fir.func mut f = fir.func{};
     fir_lower.report mut why = fir_lower.report{};
     assert(fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, "f"), &f, &why));
     defer fir.func_free(&f);
     fir_verify.violation mut v = fir_verify.violation{};
-    assert(fir_verify.find_violation(&f, &e.rt, &v));
-    assert(v.rule == 9 && v.block == 3);
-    strbuf.clear(&e.text);
-    fir_print.print_function(&f, &e.text);
-    string[24] want = {
-        "fn main.f(_1 (c): bool, _2 (k): i32) -> i32 {",
-        "    let _0: i32;",
-        "",
-        "    bb0: {",
-        "        switch(copy _2) -> [i32 1: bb1, otherwise: bb2] #2:5 s1;",
-        "    }",
-        "    bb1: {",
-        "        switch(copy _1) -> [true: bb4, otherwise: bb5] #4:9 s2;",
-        "    }",
-        "    bb2: {",
-        "        _0 = const i32 2 #9:16 s5;",
-        "        return #9:9 s5;",
-        "    }",
-        "    bb3: {",
-        "        unreachable #11:1 s0;",
-        "    }",
-        "    bb4: {",
-        "        goto bb3 #5:13 s3;",
-        "    }",
-        "    bb5: {",
-        "        _0 = const i32 1 #7:16 s4;",
-        "        return #7:9 s4;",
-        "    }",
-        "}",
-    };
-    lower_env.expect(strbuf.view(&e.text), want[..]);
+    assert(!fir_verify.find_violation(&f, &e.rt, &v));
 }
 
 fn main() i32 {
@@ -955,7 +945,8 @@ fn main() i32 {
     println("enum switch ok");
     a_clause_is_a_case_scope_inside_a_loop();
     println("clauses ok");
-    a_break_that_leaves_a_terminating_switch_reaches_unreachable();
-    println("known gap ok");
+    a_break_that_leaves_a_switch_is_refused_before_the_lowering();
+    a_break_of_a_loop_inside_a_clause_keeps_the_switch_terminating();
+    println("clause breaks ok");
     return 0;
 }

@@ -1263,10 +1263,12 @@ error-reporting helper would force a dead `return` after each call.
 A terminating statement is one of: `return`; a call statement to a `noreturn` function,
 including `panic`; an `if` with an `else` whose branches all terminate; `while (true)`,
 `for (;;)`, or any `for` with an empty condition, with no `break` targeting it; a `switch` all
-of whose cases terminate, when it has a `default` or is an exhaustive enum `switch` (D7.7),
-which terminates through the default the compiler gives it; a
-block whose last statement terminates. A non-`void` function body must end in a terminating
-statement, or it is a compile error ("missing return", reported at the body's closing brace).
+of whose cases terminate and that no `break` targets, when it has a `default` or is an
+exhaustive enum `switch` (D7.7), which terminates through the default the compiler gives it; a
+block whose last statement terminates. A `break` inside a loop or a `switch` that stands in a
+case targets that inner construct, and a `continue` targets no `switch`. A non-`void` function
+body must end in a terminating statement, or it is a compile error ("missing return", reported at
+the body's closing brace).
 The rule is structural, not a data-flow analysis: a loop that may run zero times does not
 terminate, however obvious its `return`. Catching this at compile time is a core "better than
 C" promise.
