@@ -366,14 +366,16 @@ without a rewrite.
 ## 5. The build
 
 - Presets (`CMakePresets.json`, Ninja, clang unless noted): `debug`, `release` (Release, so every
-  stage of the chain gets `--release`; T-261), `asan`, `ubsan`, `msan`, `tsan` and `gcc`; the
+  stage of the chain gets `--release`; T-261), `asan`, `ubsan`, `msan`, `tsan` and `gcc`, and
+  `asan-release`, `ubsan-release` and `msan-release`, which add Release (T-266); the
   sanitizer presets set `FORT_SANITIZER` for `cmake/sanitizers.cmake`, which instruments every
   native target but never the cross-compiled runtime object. **The presets are the same on every
   host** (2026-09-26): the host decides the target, and a preset the host cannot provide stops at
-  configure time with its reason -- `msan` and `tsan` on darwin (no MemorySanitizer or
-  ThreadSanitizer for arm64 darwin), `gcc` where `gcc` is Apple clang. `asan` on darwin builds with
-  Apple clang (`/usr/bin/clang`, set in `CMakeLists.txt` before `project()`), because the Homebrew
-  clang 19 AddressSanitizer runtime hangs at exit on darwin 25. `tools/vm workflow <preset>`
+  configure time with its reason -- `msan`, `msan-release` and `tsan` on darwin (no
+  MemorySanitizer or ThreadSanitizer for arm64 darwin), `gcc` where `gcc` is Apple clang. `asan`
+  and `asan-release` on darwin build with Apple clang (`/usr/bin/clang`, set in `CMakeLists.txt`
+  before `project()`), because the Homebrew clang 19 AddressSanitizer runtime hangs at exit on
+  darwin 25. `tools/vm workflow <preset>`
   configures, builds and runs ctest; build directories are `build/<Host>/<preset>` inside the
   worktree. `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wvla -Wstrict-prototypes
   -Wmissing-prototypes -Wundef` apply to every C target.
@@ -564,13 +566,17 @@ without a rewrite.
   either called workflow ends in a result other than `success`, so a new job in a component
   workflow joins the gate with no edit to `ci.yml`.
 - `fort.yml` builds and tests the language server in its job `lsp`, apart from the job
-  `bootstrap` (T-264). `bootstrap` builds the default targets except `fort_lsp` and runs the
-  labels `fort` and `bootstrap0`; `lsp` builds `fort_lsp` and runs the label `lsp`. Each job
+  `bootstrap` (T-264). `bootstrap` builds the default targets except `fort_lsp` and the C unit
+  suites, and runs the label `fort`; `lsp` builds `fort_lsp` and runs the label `lsp`. Each job
   bootstraps the compiler itself, as `lint` does, so no job waits for another. **The job
-  `bootstrap` names its targets**: `fort fort_std lang_ffi_helpers fort_bootstrap0_unit_tests`,
-  the default build without `fort_lsp`. A new `ALL` target in `CMakeLists.txt` gets no CI build
+  `bootstrap` names its targets**: `fort fort_std lang_ffi_helpers`, the default build without
+  `fort_lsp` and the C unit suites. A new `ALL` target in `CMakeLists.txt` gets no CI build
   until its name joins that list or a job of its own; nothing reports the gap. Every `ctest` step
   passes `--no-tests=error`, so a label that selects no test fails the job.
+- `bootstrap0.yml`'s job `unit` runs the label `bootstrap0` under 8 presets on each Linux
+  runner and 6 on macOS (T-266): `debug`, `release`, and `asan`, `ubsan` and `msan` in Debug and
+  in Release (`<sanitizer>-release`). Darwin has no msan. tsan stays out of CI (the user,
+  T-261). The sanitizer flags set no `-O` level, so the build type decides it.
 - The runners are `ubuntu-24.04`, `ubuntu-latest` and `macos-latest`. The Linux target is
   x86_64, the Linux runners are x86_64, and the Darwin runner is arm64, so each runner builds and
   runs its target natively. CI installs none of the qemu, binfmt and cross packages of section 3;

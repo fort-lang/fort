@@ -1,7 +1,9 @@
 # Select the sanitizer for the native build.
 #
 # FORT_SANITIZER names the sanitizer, or it is empty. Its flags instrument each
-# native target. They do not affect cross-compiled programs.
+# native target. They do not affect cross-compiled programs. They set no
+# optimization level: CMAKE_BUILD_TYPE sets it, so a Debug and a Release build
+# of one sanitizer differ as the plain builds do.
 # FORT_SANITIZER_TEST_ENV sets the ctest environment. Each sanitizer allocator
 # returns null for an impossible request. This permits out-of-memory tests.
 
@@ -26,7 +28,6 @@ elseif(FORT_SANITIZER STREQUAL "address")
         -fsanitize=address
         -fno-omit-frame-pointer
         -fno-optimize-sibling-calls
-        -O1
         -g
     )
     add_link_options(-fsanitize=address)
@@ -50,13 +51,12 @@ elseif(FORT_SANITIZER STREQUAL "memory")
         -fsanitize=memory
         -fsanitize-memory-track-origins=2
         -fno-omit-frame-pointer
-        -O1
         -g
     )
     add_link_options(-fsanitize=memory)
     set(FORT_SANITIZER_TEST_ENV "MSAN_OPTIONS=allocator_may_return_null=1")
 elseif(FORT_SANITIZER STREQUAL "thread")
-    add_compile_options(-fsanitize=thread -O1 -g)
+    add_compile_options(-fsanitize=thread -g)
     add_link_options(-fsanitize=thread)
     set(FORT_SANITIZER_TEST_ENV "TSAN_OPTIONS=allocator_may_return_null=1")
 elseif(FORT_SANITIZER STREQUAL "undefined")
