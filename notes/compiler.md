@@ -499,6 +499,20 @@ came here.
   location: the `check(user)` of `assert` and the `fail(panic)` of `panic` stand at the name of the
   builtin and not at its `(`. T-239 moved `fort --fir` over the 450 run programs from 1795 lowered
   functions to 30161, with no panic.
+  **An exit finds its target on a stack of scopes, and never on a counter** (T-242):
+  `fir_lower.lower_scope` pushes one scope for each block, of kind `fn`, `loop`, `case` or `block`,
+  and `lower_exit` walks the stack from the innermost scope. `break` stops at the first `loop` or
+  `case` scope, and `continue` at the first `loop` scope, so a `continue` in a clause reaches the
+  loop around the `switch` (D7.6). A `loop` or `case` scope that stays open after its block turns
+  a later `break` into a jump to the wrong block. The verifier does not see it, because that block
+  is a block of the function. A text test sees it: `a_clause_is_a_case_scope_inside_a_loop` holds
+  a `break` after a `switch`, and a mutant that never closes a scope fails it. T-244 adds
+  the deferred statements and the `dead` markers to the same walk. A range `for` over an owning
+  collection whose place reads memory (`h->items`) holds `_a = addr(p)` before the loop, because
+  D7.5 evaluates the collection once and the body can change `h`. T-242 moved `fort --fir` over the
+  run programs from 30161 lowered functions to 37947, with no panic. The one known program that
+  rule V9 refuses is T-210's: a `break` leaves a `switch` that D8.4 counts as terminating, and
+  `fir_lower_switch_test.ft` holds that violation until the checker refuses the program.
 
 ## 7. The runtime and the standard library
 

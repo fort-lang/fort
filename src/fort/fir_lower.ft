@@ -1,14 +1,15 @@
 /// Lowers the checked tree of one function to FIR (spec/fir.md 9). It numbers the named locals in
-/// a prescan, and it lowers blocks, `$if`, declarations, assignments, call statements, `if` and
-/// `return`, with the scalar expressions and the runtime checks of their operators, the places,
-/// the aggregate values and the calls. A construct that it does not lower yet stops the lowering
-/// of its function with a report (spec/fir.md 9.8).
+/// a prescan, and it lowers blocks, `$if`, declarations, assignments, call statements, `if`, the
+/// loops, `switch`, `break`, `continue` and `return`, with the scalar expressions and the runtime
+/// checks of their operators, the places, the aggregate values and the calls. A construct that it
+/// does not lower yet stops the lowering of its function with a report (spec/fir.md 9.8).
 //
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: a lowerer lives for the lowering of one function. It reads the tree and the
 // annotations of the checker, and it writes neither. A scalar expression gives an operand, and an
 // operation stands in a temporary. An aggregate expression writes into the place that waits for
-// it, and an expression that designates storage gives a place.
+// it, and an expression that designates storage gives a place. A stack of the open scopes gives
+// each `break` and `continue` its target.
 import ast;
 import check;
 import consts;
@@ -58,17 +59,41 @@ enum print_kind {
 
 u64 PRINT_KINDS = 9;
 
+// The kind of an open scope, which says the exits that stop at it (spec/fir.md 9.5): `break` at
+// the innermost `loop` or `case` scope, and `continue` at the innermost `loop` scope.
+enum scope_kind {
+    sc_fn,    // the body of the function
+    sc_loop,  // the body of a loop
+    sc_case,  // the body of a clause of a `switch`
+    sc_block, // any other block, and the selected branch of a statement `$if`
+}
+
+// One open scope: its kind and the blocks that its exits go to. A `loop` scope has both targets,
+// a `case` scope `break_target` alone, and the other kinds neither.
+struct scope {
+    scope_kind kind;
+    u32 break_target;
+    u32 continue_target;
+}
+
+// `items[..len]` holds the open scopes, the innermost last.
+struct scope_vec {
+    scope mut@ own items;
+    u64 len;
+}
+
 // The state of the lowering of one function. `block` receives the next statement. `counter` is
 // the last statement index that the walk gave, and `stmt` is the index of the statement that the
-// walk lowers now: 0 outside every statement (spec/fir.md 9.7). `str_eq` is the runtime function
-// that a string equality calls, and `prints` holds the print functions of the runtime in the order
-// of print_kind; each is looked up at its first use.
+// walk lowers now: 0 outside every statement (spec/fir.md 9.7). `scopes` is the stack of the open
+// scopes. `str_eq` is the runtime function that a string equality calls, and `prints` holds the
+// print functions of the runtime in the order of print_kind; each is looked up at its first use.
 struct lowerer {
     check.checker mut* ck;
     fir.func mut* f;
     u32 block;
     u32 counter;
     u32 stmt;
+    scope_vec scopes;
     ast.sym* str_eq;
     bool str_eq_known;
     ast.sym*[PRINT_KINDS] prints;
@@ -138,8 +163,10 @@ fn lower_function(check.checker mut* ck, ast.node* decl, fir.func mut* out, repo
     bool {
     *out = fir.func_new(&ck->types, decl->sym, decl->sym->ty);
     lowerer mut lw = lowerer{.ck = ck, .f = out};
+    defer scopes_free(&lw.scopes);
     prescan(out, decl->b);
-    if (!lower_block(&lw, decl->b)) {
+    // the body is the scope of kind `fn` (spec/fir.md 9.2)
+    if (!lower_scope(&lw, decl->b, scope_kind.sc_fn, 0, 0)) {
         *why = lw.why;
         fir.func_free(out);
         return false;
@@ -234,6 +261,39 @@ fn i64_ty(lowerer mut* lw) types.node* {
 // Whether `t` is an `own` reference: an `own` pointer, `void* own`, `own` span or `string own`.
 fn own_reference(types.node* t) bool {
     return types.type_is_reference(t) && t->is_own;
+}
+
+// ---- the scope stack ----------------------------------------------------------------------------
+
+// Opens a scope of `kind` with the targets of its exits, as the innermost one.
+fn scope_push(lowerer mut* lw, scope_kind kind, u32 break_target, u32 continue_target) void {
+    scope_vec mut* v = &lw->scopes;
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir_lower.scope_push: capacity overflow");
+        scope mut@ own bigger = new(scope, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = scope{kind, break_target, continue_target};
+    v->len += 1;
+}
+
+// Closes the innermost scope. Every pop follows the push of the same lower_scope.
+fn scope_pop(lowerer mut* lw) void {
+    if (lw->scopes.len == 0) {
+        panic("fir_lower.scope_pop: no open scope");
+    }
+    lw->scopes.len -= 1;
+}
+
+fn scopes_free(scope_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
 }
 
 // Appends `p = r` to the current block, at `at` and with the index of the current statement.
@@ -380,9 +440,12 @@ fn materialize(lowerer mut* lw, fir.operand op, bool later, diag.loc at) fir.ope
 
 // ---- statements -------------------------------------------------------------------------------
 
-// Lowers the statements of the block `n` in order. A statement after a terminator starts a new
-// block that no terminator names (spec/fir.md 9.3).
-fn lower_block(lowerer mut* lw, ast.node* n) bool {
+// Lowers the statements of the block `n` in order, as a scope of `kind` whose exits go to the
+// blocks `break_target` and `continue_target` (spec/fir.md 9.5). A statement after a terminator
+// starts a new block that no terminator names (spec/fir.md 9.3).
+fn lower_scope(lowerer mut* lw, ast.node* n, scope_kind kind, u32 break_target,
+               u32 continue_target) bool {
+    scope_push(lw, kind, break_target, continue_target);
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
         if (terminated(lw)) {
@@ -393,7 +456,14 @@ fn lower_block(lowerer mut* lw, ast.node* n) bool {
         }
         i += 1;
     }
+    scope_pop(lw);
     return true;
+}
+
+// A block, or the selected branch of a statement `$if`, as a scope of kind `block`, which only
+// the end of the block leaves.
+fn lower_block(lowerer mut* lw, ast.node* n) bool {
+    return lower_scope(lw, n, scope_kind.sc_block, 0, 0);
 }
 
 // Lowers one statement. A block and a `$if` only group statements, and every other statement
@@ -421,6 +491,20 @@ fn lower_stmt(lowerer mut* lw, ast.node* n) bool {
         ok = lower_call_stmt(lw, n->a);
     case ast.ast_kind.k_if:
         ok = lower_if(lw, n);
+    case ast.ast_kind.k_while:
+        ok = lower_while(lw, n);
+    case ast.ast_kind.k_do_while:
+        ok = lower_do(lw, n);
+    case ast.ast_kind.k_for:
+        ok = lower_for(lw, n);
+    case ast.ast_kind.k_range_for:
+        ok = lower_range_for(lw, n);
+    case ast.ast_kind.k_switch:
+        ok = lower_switch(lw, n);
+    case ast.ast_kind.k_break:
+        ok = lower_exit(lw, n, false);
+    case ast.ast_kind.k_continue:
+        ok = lower_exit(lw, n, true);
     case ast.ast_kind.k_return:
         ok = lower_return(lw, n);
     default:
@@ -623,6 +707,283 @@ fn lower_arm(lowerer mut* lw, ast.node* n, u32 done, diag.loc at) bool {
         jump(lw, done, at);
     }
     return true;
+}
+
+// ---- loops and switch -------------------------------------------------------------------------
+
+// The body of a loop in the current block, as a scope of kind `loop` whose `break` goes to `done`
+// and whose `continue` goes to `next`. It ends with `goto next` at `at` unless it ends in a
+// terminator (spec/fir.md 9.3).
+fn lower_loop_body(lowerer mut* lw, ast.node* body, u32 done, u32 next, diag.loc at) bool {
+    if (!lower_scope(lw, body, scope_kind.sc_loop, done, next)) {
+        return false;
+    }
+    if (!terminated(lw)) {
+        jump(lw, next, at);
+    }
+    return true;
+}
+
+// The operand of the loop condition `c`, then `switch(a) -> [true: body, otherwise: done]` at
+// `at`.
+fn lower_test(lowerer mut* lw, ast.node* c, u32 body, u32 done, diag.loc at) bool {
+    fir.operand mut a = fir.operand{};
+    if (!lower_operand(lw, c, &a)) {
+        return false;
+    }
+    branch(lw, a, body, done, at);
+    return true;
+}
+
+// `while (c) B`: the blocks head, body and done; `goto head`; the condition in head; `B` as a loop
+// body whose `break` goes to done and whose `continue` goes to head (spec/fir.md 9.3, D7.5). Each
+// terminator of the loop stands at the `while`. The checker folds the condition of `while (true)`,
+// so head ends in `switch(const true)`, and rule V9 takes only its edge to body.
+fn lower_while(lowerer mut* lw, ast.node* n) bool {
+    u32 head = fir.block_new(lw->f);
+    u32 body = fir.block_new(lw->f);
+    u32 done = fir.block_new(lw->f);
+    jump(lw, head, n->loc);
+    lw->block = head;
+    if (!lower_test(lw, n->a, body, done, n->loc)) {
+        return false;
+    }
+    lw->block = body;
+    if (!lower_loop_body(lw, n->b, done, head, n->loc)) {
+        return false;
+    }
+    lw->block = done;
+    return true;
+}
+
+// `do B while (c);`: the blocks body, test and done; `goto body`; `B` as a loop body whose `break`
+// goes to done and whose `continue` goes to test; the condition in test (spec/fir.md 9.3, D7.5).
+// Each terminator of the loop stands at the `do`.
+fn lower_do(lowerer mut* lw, ast.node* n) bool {
+    u32 body = fir.block_new(lw->f);
+    u32 test = fir.block_new(lw->f);
+    u32 done = fir.block_new(lw->f);
+    jump(lw, body, n->loc);
+    lw->block = body;
+    if (!lower_loop_body(lw, n->a, done, test, n->loc)) {
+        return false;
+    }
+    lw->block = test;
+    if (!lower_test(lw, n->b, body, done, n->loc)) {
+        return false;
+    }
+    lw->block = done;
+    return true;
+}
+
+// `for (i; c; s) B`: `i` in the current block, as a statement of its own; the blocks head, body,
+// step and done; the condition in head, or `goto body` for an empty one; `B` as a loop body whose
+// `break` goes to done and whose `continue` goes to step; `s` in step, as a statement of its own,
+// then `goto head` (spec/fir.md 9.3, D7.5). A call of a `noreturn` function in `i` or in `s` ends
+// its block, so no `goto` follows it. The walk meets `s` after `B`, where its block stands, so `s`
+// takes its index after the statements of `B` (9.7).
+fn lower_for(lowerer mut* lw, ast.node* n) bool {
+    if (n->a != null && !lower_stmt(lw, n->a)) {
+        return false;
+    }
+    u32 head = fir.block_new(lw->f);
+    u32 body = fir.block_new(lw->f);
+    u32 step = fir.block_new(lw->f);
+    u32 done = fir.block_new(lw->f);
+    if (!terminated(lw)) {
+        jump(lw, head, n->loc);
+    }
+    lw->block = head;
+    if (n->b == null) {
+        jump(lw, body, n->loc);
+    } else if (!lower_test(lw, n->b, body, done, n->loc)) {
+        return false;
+    }
+    lw->block = body;
+    if (!lower_loop_body(lw, n->d, done, step, n->loc)) {
+        return false;
+    }
+    lw->block = step;
+    if (n->c != null && !lower_stmt(lw, n->c)) {
+        return false;
+    }
+    if (!terminated(lw)) {
+        jump(lw, head, n->loc);
+    }
+    lw->block = done;
+    return true;
+}
+
+// The place that a range `for` walks, in *out (D17.10). An owning collection stays in its place,
+// and the loop lends it. When that place reads memory to find its storage, its address is held
+// first, since D7.5 evaluates the collection once and the body can change what the place reads.
+// Any other collection goes into a new temporary of its type: a fixed array is copied as a value
+// (D7.5).
+fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out) bool {
+    if (fir.type_owning(coll->ty)) {
+        fir.place mut p = fir.place{};
+        if (!lower_place(lw, coll, &p)) {
+            return false;
+        }
+        *out = hold_base(lw, p, true, coll->loc);
+        return true;
+    }
+    u32 t = fir.local_add(lw->f, coll->ty, fir.local_kind.lk_temp, null, coll->loc);
+    *out = fir.place_local(t);
+    return lower_into(lw, coll, *out);
+}
+
+// `for (T x : c) B` (spec/fir.md 9.3): the place of `c`, then the counter `_i: u64 = const u64 0`;
+// the blocks head, body, step and done; `_c = lt(copy _i, len)` and `switch(copy _c)` in head;
+// `live(_x)` and `_x = copy c[_i]` in body, then `B` as a loop body whose `break` goes to done and
+// whose `continue` goes to step; `_i = add(copy _i, const u64 1)` in step. The counter never
+// passes the length, so neither the index nor the `add` needs a check. `x` has the element type
+// without its outermost `own`, so the copy lends (D17.10). The statements of the loop stand at the
+// `for`, `live(_x)` at the name, and the copy of the element at `c`.
+fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
+    fir.place mut c = fir.place{};
+    if (!range_collection(lw, n->b, &c)) {
+        return false;
+    }
+    types.node* wide = u64_ty(lw);
+    u32 i = fir.local_add(lw->f, wide, fir.local_kind.lk_temp, null, n->loc);
+    fir.place counter = fir.place_local(i);
+    fir.operand index = fir.operand_copy(counter);
+    assign(lw, counter, fir.rvalue_use(lw->f, int_const(wide, false, 0)), n->loc);
+    u32 head = fir.block_new(lw->f);
+    u32 body = fir.block_new(lw->f);
+    u32 step = fir.block_new(lw->f);
+    u32 done = fir.block_new(lw->f);
+    jump(lw, head, n->loc);
+    lw->block = head;
+    fir.rvalue below = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_lt, index, length_of(lw, c));
+    branch(lw, into_temp(lw, bool_ty(lw), below, n->loc), body, done, n->loc);
+    lw->block = body;
+    u32 x = local_of(lw, n->sym);
+    fir.block_append(lw->f, lw->block, fir.stmt_live(x, n->name_loc, lw->stmt));
+    fir.operand element = fir.operand_copy(fir.place_index(lw->f, c, i));
+    assign(lw, fir.place_local(x), fir.rvalue_use(lw->f, element), n->b->loc);
+    if (!lower_loop_body(lw, n->c, done, step, n->loc)) {
+        return false;
+    }
+    lw->block = step;
+    fir.operand one = int_const(wide, false, 1);
+    assign(lw, counter, fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_add, index, one), n->loc);
+    jump(lw, head, n->loc);
+    lw->block = done;
+    return true;
+}
+
+// The clause of the switch `n` that is its `default`, or the count of its clauses when it has
+// none. It copies gen_stmt.default_clause, and the copy stays until the migration removes the
+// direct path (T-255).
+fn default_clause(ast.node* n) u64 {
+    u64 clauses = ast.ast_len(n);
+    u64 mut i = 0;
+    while (i < clauses) {
+        if ((ast.ast_child(n, i)->flags & ast.FLAG_DEFAULT) != 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return clauses;
+}
+
+// `switch (e) { ... }` (spec/fir.md 9.3, D7.6, D7.7): the operand `a` of `e`, and for an enum
+// without `default` `_v = cast<i64>(a)`. Then the blocks: first the block of `fail(enum, copy _v,
+// const bytes "<name>")` for such an enum, then one block for each clause in clause order, then
+// done. `switch(a)` has one arm for each label, with the value that the checker folded, and names
+// as `otherwise` the `default` clause, the fail block or done. Each clause body is a scope of kind
+// `case` whose `break` goes to done, and a clause that does not end in a terminator goes to done,
+// since no clause falls through. The statements of the `switch` itself stand at the keyword. The
+// parser gives a `switch` no child but its clauses.
+fn lower_switch(lowerer mut* lw, ast.node* n) bool {
+    fir.operand mut a = fir.operand{};
+    if (!lower_operand(lw, n->a, &a)) {
+        return false;
+    }
+    u64 clauses = ast.ast_len(n);
+    u64 fallback = default_clause(n);
+    types.node* ot = n->a->ty;
+    bool fails = fallback == clauses && ot->kind == types.type_kind.k_enum;
+    fir.operand mut value = fir.operand{};
+    u32 mut fail_block = 0;
+    if (fails) {
+        value = signed_copy(lw, a, n->loc);
+        fail_block = fir.block_new(lw->f);
+    }
+    u32 first = fir.block_count(lw->f);
+    u64 mut i = 0;
+    while (i < clauses) {
+        fir.block_new(lw->f);
+        i += 1;
+    }
+    u32 done = fir.block_new(lw->f);
+    u32 mut otherwise = done;
+    if (fails) {
+        otherwise = fail_block;
+    } else if (fallback < clauses) {
+        otherwise = first + cast(fallback, u32);
+    }
+    u32 arms = cast(lw->f->arms.len, u32);
+    u32 mut count = 0;
+    i = 0;
+    while (i < clauses) {
+        ast.node* clause = ast.ast_child(n, i);
+        u64 mut k = 0;
+        while (k < ast.ast_len(clause)) {
+            consts.cval label = check.check_node_value(lw->ck, ast.ast_child(clause, k));
+            fir.arm_push(lw->f, label, first + cast(i, u32));
+            count += 1;
+            k += 1;
+        }
+        i += 1;
+    }
+    terminate(lw, fir.term_switch(a, arms, count, otherwise, n->loc, lw->stmt));
+    if (fails) {
+        lw->block = fail_block;
+        u32 reported = fir.operand_push(lw->f, value);
+        fir.operand_push(lw->f, fir.operand_const(fir.const_bytes(ot->name)));
+        terminate(lw, fir.term_fail(fir.check_kind.chk_enum, reported, 2, n->loc, lw->stmt));
+    }
+    i = 0;
+    while (i < clauses) {
+        lw->block = first + cast(i, u32);
+        if (!lower_scope(lw, ast.ast_child(n, i)->a, scope_kind.sc_case, done, 0)) {
+            return false;
+        }
+        if (!terminated(lw)) {
+            jump(lw, done, n->loc);
+        }
+        i += 1;
+    }
+    lw->block = done;
+    return true;
+}
+
+// `break` and `continue` (spec/fir.md 9.3, 9.5): the walk from the innermost scope stops at the
+// first scope of kind `loop` or `case` for `break`, and at the first scope of kind `loop` for
+// `continue`, so a `continue` in a clause reaches the loop around the `switch` (D7.6). Then `goto`
+// the target of that scope, at the keyword. The checker refuses an exit that has no such scope.
+fn lower_exit(lowerer mut* lw, ast.node* n, bool is_continue) bool {
+    u64 mut depth = lw->scopes.len;
+    while (depth > 0) {
+        depth -= 1;
+        scope s = lw->scopes.items[depth];
+        if (s.kind == scope_kind.sc_loop) {
+            u32 mut target = s.break_target;
+            if (is_continue) {
+                target = s.continue_target;
+            }
+            jump(lw, target, n->loc);
+            return true;
+        }
+        if (s.kind == scope_kind.sc_case && !is_continue) {
+            jump(lw, s.break_target, n->loc);
+            return true;
+        }
+    }
+    panic("fir_lower.lower_exit: a break or a continue with no loop or switch to leave");
 }
 
 // `return e` with no deferred statement: `e` into `_0`, then `return` (spec/fir.md 9.6 steps 1
