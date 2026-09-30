@@ -614,6 +614,216 @@ fn a_call_of_move_carries_the_move_mark_and_no_other_call_does() void {
     assert(!check_env.has_ann(ast.ast_child(ordinary, 0), check.ANN_MOVE));
 }
 
+// ---- the emptiability marks --------------------------------------------------------
+
+// A module that the checker checks whole, bodies included. Statements 0 to 2
+// of `probe` declare locals. Each later statement passes one place to a sink.
+fn open_places(check_env.env mut* e) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
+    strbuf.append(&b, "struct holder {\n    point pt;\n}\n");
+    strbuf.append(&b, "i32 K = 7;\n");
+    strbuf.append(&b, "i32[2] KA = {1, 2};\n");
+    strbuf.append(&b, "point KP = {1, 2};\n");
+    strbuf.append(&b, "point mut g = {3, 4};\n");
+    strbuf.append(&b, "point mut* KM = &g;\n");
+    strbuf.append(&b, "fn s_i32(i32 v) void {\n    return;\n}\n");
+    strbuf.append(&b, "fn probe(point mut* mp, i32 mut* mq, i32 mut@ ms, point* ip, i32* iq,\n");
+    strbuf.append(&b, "         i32@ is, holder* ih) void {\n");
+    strbuf.append(&b, "    i32 n = 1;\n");
+    strbuf.append(&b, "    i32[2] a = {1, 2};\n");
+    strbuf.append(&b, "    point l = {5, 6};\n");
+    strbuf.append(&b, "    s_i32(n);\n");
+    strbuf.append(&b, "    s_i32(a[0]);\n");
+    strbuf.append(&b, "    s_i32(l.x);\n");
+    strbuf.append(&b, "    s_i32(mp->x);\n");
+    strbuf.append(&b, "    s_i32(*mq);\n");
+    strbuf.append(&b, "    s_i32(K);\n");
+    strbuf.append(&b, "    s_i32(KA[1]);\n");
+    strbuf.append(&b, "    s_i32(KP.y);\n");
+    strbuf.append(&b, "    s_i32(ip->x);\n");
+    strbuf.append(&b, "    s_i32(*iq);\n");
+    strbuf.append(&b, "    s_i32(is[0]);\n");
+    strbuf.append(&b, "    s_i32(ih->pt.x);\n");
+    strbuf.append(&b, "    s_i32(KM->x);\n");
+    strbuf.append(&b, "    s_i32(ms[0]);\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
+    return check_env.check_src(e, strbuf.view(&b));
+}
+
+// The place that the `i`-th statement of `probe` passes to its sink.
+fn place(check_env.env mut* e, u64 i) ast.node* {
+    ast.node* call = check_env.body_expr(e, "probe", i);
+    assert(call->kind == ast.ast_kind.k_call);
+    return ast.ast_child(call, 0);
+}
+
+// The kind that the checker wrote on the place of the `i`-th statement, after
+// a check that the node has the form `kind`.
+fn empty_at(check_env.env mut* e, u64 i, ast.ast_kind kind) check.empty_kind {
+    ast.node* n = place(e, i);
+    assert(n->kind == kind);
+    assert(check_env.has_ann(n, check.ANN_LVALUE));
+    return check.empty_of(n);
+}
+
+fn own_storage_and_a_mutable_indirection_are_emptiable() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_places(&e));
+    assert(check_env.errors(&e) == 0);
+    check.empty_kind ok = check.empty_kind.empty_ok;
+    // A local is its own storage, whether or not it is `mut` (D17.9).
+    assert(empty_at(&e, 3, ast.ast_kind.k_ident) == ok);
+    // An element and a field of a local count as the local.
+    assert(empty_at(&e, 4, ast.ast_kind.k_index) == ok);
+    assert(empty_at(&e, 5, ast.ast_kind.k_field) == ok);
+    // A mutable level 1 lets the store through the pointer or span.
+    assert(empty_at(&e, 6, ast.ast_kind.k_arrow) == ok);
+    assert(empty_at(&e, 7, ast.ast_kind.k_unary) == ok);
+    assert(empty_at(&e, 16, ast.ast_kind.k_index) == ok);
+    // An emptiable lvalue carries neither bit.
+    assert(!check_env.has_ann(place(&e, 3), check.ANN_EMPTY_READONLY));
+    assert(!check_env.has_ann(place(&e, 3), check.ANN_EMPTY_IMMUTABLE));
+}
+
+fn a_constant_and_a_member_of_one_are_read_only() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_places(&e));
+    assert(check_env.errors(&e) == 0);
+    check.empty_kind ro = check.empty_kind.empty_readonly;
+    // D7.10: a module-level constant lives in read-only memory, and an element
+    // or a field of it does too.
+    assert(empty_at(&e, 8, ast.ast_kind.k_ident) == ro);
+    assert(empty_at(&e, 9, ast.ast_kind.k_index) == ro);
+    assert(empty_at(&e, 10, ast.ast_kind.k_field) == ro);
+    // The base of the member carries the same mark.
+    assert(check.empty_of(place(&e, 9)->a) == ro);
+    assert(check.empty_of(place(&e, 10)->a) == ro);
+    assert(check_env.has_ann(place(&e, 8), check.ANN_EMPTY_READONLY));
+    assert(!check_env.has_ann(place(&e, 8), check.ANN_EMPTY_IMMUTABLE));
+    // The read-only memory stops at the first indirection: level 1 of the
+    // constant `KM` is mutable, so `KM->x` is emptiable and `KM` is not.
+    assert(empty_at(&e, 15, ast.ast_kind.k_arrow) == check.empty_kind.empty_ok);
+    assert(check.empty_of(place(&e, 15)->a) == ro);
+}
+
+fn an_immutable_indirection_is_not_emptiable() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_places(&e));
+    assert(check_env.errors(&e) == 0);
+    check.empty_kind im = check.empty_kind.empty_immutable;
+    // Nothing may be taken out of what was only lent (D17.9).
+    assert(empty_at(&e, 11, ast.ast_kind.k_arrow) == im);
+    assert(empty_at(&e, 12, ast.ast_kind.k_unary) == im);
+    assert(empty_at(&e, 13, ast.ast_kind.k_index) == im);
+    // A field below the immutable indirection keeps the reason.
+    assert(empty_at(&e, 14, ast.ast_kind.k_field) == im);
+    assert(check.empty_of(place(&e, 14)->a) == im);
+    // The parameter itself is the function's own storage.
+    assert(check.empty_of(place(&e, 11)->a) == check.empty_kind.empty_ok);
+    assert(check_env.has_ann(place(&e, 11), check.ANN_EMPTY_IMMUTABLE));
+    assert(!check_env.has_ann(place(&e, 11), check.ANN_EMPTY_READONLY));
+}
+
+fn an_rvalue_carries_no_emptiability_mark() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut x = strbuf.create();
+    defer strbuf.free(&x);
+    strbuf.append(&x, "fn three() i32[3] {\n    return nums;\n}\n");
+    strbuf.append(&x, "fn mk() point {\n    return point{1, 2};\n}\n");
+    assert(open_lines(&e, "    s_i32(three()[0]);\n", "    s_i32(mk().x);\n", "", "",
+                      strbuf.view(&x)));
+    probe_all(&e, 2);
+    assert(check_env.errors(&e) == 0);
+    // The checker leaves `empty` at empty_immutable on an rvalue, where it has
+    // no meaning. So the write must stay under the lvalue test.
+    u32 both = check.ANN_EMPTY_READONLY | check.ANN_EMPTY_IMMUTABLE;
+    assert((probe_node(&e, 0, ast.ast_kind.k_index, "")->ann & both) == 0);
+    assert((probe_node(&e, 1, ast.ast_kind.k_field, "x")->ann & both) == 0);
+    // The two calls that the index and the field read.
+    assert((probe_node(&e, 0, ast.ast_kind.k_index, "")->a->ann & both) == 0);
+    assert((probe_node(&e, 1, ast.ast_kind.k_field, "x")->a->ann & both) == 0);
+    // The call of the sink.
+    assert((check_env.body_expr(&e, "probe", 1)->ann & both) == 0);
+}
+
+// A `string` element and a constant of another module. D6.7 makes `e[i]` an
+// lvalue on any `string` expression, a call included; the memory of a
+// `string` is never emptied through it. A qualified constant takes its own
+// path through the checker.
+fn a_string_element_and_an_imported_constant_carry_their_marks() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut l = strbuf.create();
+    defer strbuf.free(&l);
+    strbuf.append(&l, "struct point {\n    i32 x;\n    i32 y;\n}\n");
+    strbuf.append(&l, "i32 LK = 7;\n");
+    strbuf.append(&l, "point LP = {1, 2};\n");
+    check_env.add(&e, "lib.ft", strbuf.view(&l));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "import lib;\n");
+    strbuf.append(&b, "string S = \"abc\";\n");
+    strbuf.append(&b, "fn s_i32(i32 v) void {\n    return;\n}\n");
+    strbuf.append(&b, "fn s_char(char v) void {\n    return;\n}\n");
+    strbuf.append(&b, "fn str() string {\n    return \"xy\";\n}\n");
+    strbuf.append(&b, "fn probe(string t) void {\n");
+    strbuf.append(&b, "    s_char(t[0]);\n");
+    strbuf.append(&b, "    s_char(str()[0]);\n");
+    strbuf.append(&b, "    s_char(S[0]);\n");
+    strbuf.append(&b, "    s_i32(lib.LK);\n");
+    strbuf.append(&b, "    s_i32(lib.LP.x);\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
+    check_env.add(&e, "main.ft", strbuf.view(&b));
+    assert(check_env.check_entry(&e, "main.ft"));
+    assert(check_env.errors(&e) == 0);
+    check.empty_kind im = check.empty_kind.empty_immutable;
+    check.empty_kind ro = check.empty_kind.empty_readonly;
+    u64 mut i = 0;
+    while (i < 5) {
+        assert(check_env.has_ann(place(&e, i), check.ANN_LVALUE));
+        i += 1;
+    }
+    // The element of a `string`, whether the `string` is a parameter, the
+    // result of a call or a module constant.
+    assert(check.empty_of(place(&e, 0)) == im);
+    assert(check.empty_of(place(&e, 1)) == im);
+    assert(check.empty_of(place(&e, 2)) == im);
+    // A constant of another module, and a field of one (D7.10).
+    assert(check.empty_of(place(&e, 3)) == ro);
+    assert(check.empty_of(place(&e, 4)) == ro);
+}
+
+fn move_and_del_read_the_mark_on_their_operand() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(open_lines(&e, "    del(move(owned));\n", "    del(KEPT);\n", "", "",
+                      "point mut* own mut owned = null;\npoint mut* own KEPT = null;\n"));
+    probe_all(&e, 2);
+    // The operand of `move` is emptiable, and the checker accepts it.
+    ast.node* moved = ast.ast_child(check_env.body_expr(&e, "probe", 0), 0);
+    assert(check.empty_of(ast.ast_child(moved, 0)) == check.empty_kind.empty_ok);
+    // The operand of the second `del` is a constant, and the diagnostic gives
+    // the reason that the node carries.
+    ast.node* kept = ast.ast_child(check_env.body_expr(&e, "probe", 1), 0);
+    assert(check.empty_of(kept) == check.empty_kind.empty_readonly);
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "'del' cannot empty a module-level constant"));
+}
+
 // ---- qualified names ---------------------------------------------------------------
 
 fn a_declaration_of_an_imported_module_is_reached_through_its_name() void {
@@ -856,6 +1066,12 @@ fn main() i32 {
     the_five_rvalue_forms_carry_no_lvalue_mark();
     an_index_or_field_of_an_rvalue_and_a_function_name_are_not_lvalues();
     a_call_of_move_carries_the_move_mark_and_no_other_call_does();
+    own_storage_and_a_mutable_indirection_are_emptiable();
+    a_constant_and_a_member_of_one_are_read_only();
+    an_immutable_indirection_is_not_emptiable();
+    an_rvalue_carries_no_emptiability_mark();
+    a_string_element_and_an_imported_constant_carry_their_marks();
+    move_and_del_read_the_mark_on_their_operand();
     a_declaration_of_an_imported_module_is_reached_through_its_name();
     a_name_a_module_does_not_declare_is_reported_with_the_module();
     a_conditional_takes_a_bool_condition_and_two_arms_of_one_type();

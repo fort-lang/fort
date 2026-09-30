@@ -91,6 +91,15 @@ came here.
   asserts a re-check wipes them, and ties `CHECK_ANN_END` to the highest declared bit. Write that
   test shape for any "cleared before it is written" invariant: asserting that a bit *is* set
   after a second pass passes whether or not the clearing happens, so it proves nothing.
+- **The checker writes the emptiability of an lvalue on the node.** `check_expr` in
+  `src/fort/check.ft` sets `ANN_EMPTY_READONLY` on an lvalue that is a module-level constant or a
+  member of one (D7.10). It sets `ANN_EMPTY_IMMUTABLE` on an lvalue below an immutable
+  indirection. An lvalue with neither bit is emptiable (D17.9). `check.empty_of` reads the two
+  bits. It panics on a node without `ANN_LVALUE` and on a node with both bits. `check_expr` writes
+  the bits only beside `ANN_LVALUE`, because the checker leaves `expr.empty` at `empty_immutable`
+  on an rvalue. `check_emptiable` reads the operand of `move` and `del` through `empty_of`, and
+  the linear check (T-182) will read the same bits to judge emptiability on the tree (T-260).
+  bootstrap-0 writes neither bit, because the freeze (section 8) leaves the C unchanged.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a

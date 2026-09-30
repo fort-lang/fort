@@ -39,12 +39,19 @@ u32 ANN_MOVE = 64;
 /// The expression is an lvalue (D6.7): it designates storage. The emitter reads
 /// this bit to decide whether `del` empties its operand (D17.9).
 u32 ANN_LVALUE = 128;
+/// With ANN_LVALUE: `move` and `del` may not empty the lvalue, because it is a
+/// module-level constant or a member of one, in read-only memory (D7.10, D17.9).
+u32 ANN_EMPTY_READONLY = 256;
+/// With ANN_LVALUE: `move` and `del` may not empty the lvalue, because an
+/// indirection on its path has an immutable level (D17.9). An lvalue without
+/// either bit is emptiable. empty_of reads the two bits.
+u32 ANN_EMPTY_IMMUTABLE = 512;
 // One past the highest annotation bit. A new highest bit doubles this
 // sentinel. ANN_ALL then includes each bit that check_module clears.
 // No other code clears `ann`. A missed bit would survive the next check.
 // check_own_test.ft compares this sentinel with the highest declared bit.
 // It also verifies that a second check clears the bits.
-u32 ANN_END = 256;
+u32 ANN_END = 1024;
 u32 ANN_ALL = ANN_END - 1;
 
 // ---- the limits of one declaration -------------------------------------------------
@@ -120,7 +127,8 @@ struct expr {
     bool lvalue;
     // `mut` is a keyword, so the field is `is_mut`
     bool is_mut;
-    // meaningless unless `lvalue`
+    // meaningless unless `lvalue`; check_expr writes it on the node as
+    // ANN_EMPTY_READONLY or ANN_EMPTY_IMMUTABLE
     empty_kind empty;
     // also `null`, a function name and `&` of a declaration
     bool init_const;
@@ -2937,19 +2945,41 @@ fn check_print(checker mut* ck, ast.node mut* n, u64 first) void {
     }
 }
 
-// Whether the lvalue `e` may be emptied by `move` or `del`. An operand reached
-// through an indirection needs that level mutable, because the store is visible
-// to everyone else who holds the pointer or span. `verb` is the builtin's name,
-// which the diagnostic quotes.
-fn check_emptiable(checker mut* ck, ast.node* arg, expr* e, string verb) bool {
-    if (e->empty == empty_kind.empty_ok) {
+/// Whether `move` and `del` may empty the checked lvalue `n`, from the two
+/// bits check_expr wrote on it (D17.9). It panics on a node without
+/// ANN_LVALUE, where the answer has no meaning, and on a node with both bits.
+fn empty_of(ast.node* n) empty_kind {
+    if ((n->ann & ANN_LVALUE) == 0) {
+        panic("check.empty_of: not a checked lvalue");
+    }
+    u32 bits = n->ann & (ANN_EMPTY_READONLY | ANN_EMPTY_IMMUTABLE);
+    if (bits == 0) {
+        return empty_kind.empty_ok;
+    }
+    if (bits == ANN_EMPTY_READONLY) {
+        return empty_kind.empty_readonly;
+    }
+    if (bits == ANN_EMPTY_IMMUTABLE) {
+        return empty_kind.empty_immutable;
+    }
+    panic("check.empty_of: both emptiability bits");
+}
+
+// Whether the checked lvalue `arg` may be emptied by `move` or `del`. An
+// operand reached through an indirection needs that level mutable, because the
+// store is visible to everyone else who holds the pointer or span. `verb` is
+// the builtin's name, which the diagnostic quotes. The answer comes from the
+// node, as the linear check reads it.
+fn check_emptiable(checker mut* ck, ast.node* arg, string verb) bool {
+    empty_kind empty = empty_of(arg);
+    if (empty == empty_kind.empty_ok) {
         return true;
     }
     check_msg_begin(ck);
     msg_quote(ck, verb);
     // The reason is the lvalue's own, not its outermost symbol's: `C.data` of
     // a module-level constant is read-only memory although `data` is a field.
-    if (e->empty == empty_kind.empty_readonly) {
+    if (empty == empty_kind.empty_readonly) {
         msg_str(ck, " cannot empty a module-level constant: it lives in read-only memory");
     } else {
         msg_str(ck, " cannot empty an immutable indirection: nothing may be taken out of what ");
@@ -3026,7 +3056,7 @@ fn check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* ou
         }
         if (e.lvalue) {
             // on an rvalue `del` only frees
-            check_emptiable(ck, arg, &e, s->name);
+            check_emptiable(ck, arg, s->name);
         }
         return;
     }
@@ -3055,7 +3085,7 @@ fn check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* ou
             check_msg_end(ck, arg->loc);
             return;
         }
-        if (!check_emptiable(ck, arg, &e, s->name)) {
+        if (!check_emptiable(ck, arg, s->name)) {
             return;
         }
         // the one universe function with a value
@@ -3558,6 +3588,15 @@ fn check_expr(checker mut* ck, ast.node mut* n, expr mut* out) void {
     }
     if (out->lvalue) {
         n->ann |= ANN_LVALUE;
+        // `empty` has a meaning only on an lvalue, so no other node gets a bit.
+        switch (out->empty) {
+        case empty_kind.empty_ok:
+            // no bit
+        case empty_kind.empty_readonly:
+            n->ann |= ANN_EMPTY_READONLY;
+        case empty_kind.empty_immutable:
+            n->ann |= ANN_EMPTY_IMMUTABLE;
+        }
     }
     if (out->value.kind != consts.cval_kind.cv_none && (n->ann & ANN_CONST) == 0) {
         set_value(ck, n, out->value);
