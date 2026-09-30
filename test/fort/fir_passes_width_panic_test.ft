@@ -1,0 +1,41 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: fir_passes.build_mode: a shift check names no integer type
+//! stdout:
+//| the verifier accepts a shift check that names bool
+/// Checks that the build-mode pass refuses a shift check whose type name is no integer type, since
+/// the width of the mask comes from that name (spec/fir.md 11). The verifier accepts the check,
+/// because the name is a `bytes` operand, the type that the runtime entry takes. The lowering
+/// always names the integer type of the shifted operand, so the case is a broken precondition.
+import fir;
+import fir_passes;
+import lower_env;
+import pass_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[1] prelude = {"fn g(bool c, i64 n) void {}"};
+    string[8] text = {
+        "fn main.g(_1 (c): bool, _2 (n): i64) -> void {",
+        "    bb0: {",
+        "        check(copy _1, shift, copy _2, const bytes \"bool\") -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    fir.module mut fm = pass_env.parse(&e, prelude[..], text[..]);
+    defer fir.module_free(&fm);
+    fir.func mut* f = &fm.funcs.items[0];
+    pass_env.verified(&e, f, "fir_passes_width_panic_test: the verifier refuses the input");
+    // the modes that keep the shift check never read the name
+    fir_passes.build_mode(f, false, true);
+    assert(fir.block_count(f) == 2);
+    println("the verifier accepts a shift check that names bool");
+    fir_passes.build_mode(f, true, false);
+    return 0;
+}

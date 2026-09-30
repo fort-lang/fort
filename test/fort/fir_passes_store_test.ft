@@ -1,0 +1,494 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| fold ok
+//| merge ok
+/// Checks two steps of the build-mode pass of spec/fir.md 11. The fold of `_t = rvalue` and `p =
+/// move _t` around a removed overwrite check needs each of its conditions, one case at a time. The
+/// merge of a continuation leaves alone a continuation that is its own check block or `bb0`,
+/// which rule V2 or V11 refuses in a verified function.
+import diag;
+import fir;
+import fir_passes;
+import lower_env;
+import pass_env;
+
+// ---- the conditions of the fold -----------------------------------------------------------------
+
+string[5] FOLD_PRELUDE = {
+    "struct two {",
+    "    u8 mut* own a;",
+    "    u8 mut* own b;",
+    "}",
+    "u8 mut* own mut KEPT = null;",
+};
+
+// One function for each case. The temporary of each is FOLD_TEMPS at its position, and whether
+// its store folds is FOLDS at its position.
+string[198] FOLD_TEXT = {
+    // the store `p = move _t` follows the check of `p`: it folds
+    "fn main.fa() -> void {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own;",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the store writes `q`, and the check tests `p`
+    "fn main.fb() -> void {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2: u8 mut* own;",
+    "    let _3 (q): u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own;",
+    "        _3 = const zero u8 mut* own;",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = move _2;",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a statement stands between `_t = rvalue` and the check
+    "fn main.fc() -> void {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2: u8 mut* own;",
+    "    let _3 (x): i32;",
+    "",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own;",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        live(_3);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // `_2` is a named local, and not a temporary
+    "fn main.fd() -> void {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2 (t): u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own;",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a statement stands between the check and the store
+    "fn main.fe() -> void {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2: u8 mut* own;",
+    "    let _3 (x): i32;",
+    "",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own;",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        live(_3);",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the store moves another temporary
+    "fn main.ff() -> void {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own;",
+    "        _3 = alloc<u8>(const u64 1);",
+    "        _2 = alloc<u8>(const u64 2);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the other path reads `_3` too
+    "fn main.fg(_1 (c): bool) -> void {",
+    "    let _2 (p): u8 mut* own;",
+    "    let _3: u8 mut* own;",
+    "    let _4 (q): u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _2 = const zero u8 mut* own;",
+    "        _4 = const zero u8 mut* own;",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb3];",
+    "    }",
+    "    bb1: {",
+    "        _3 = alloc<u8>(const u64 1);",
+    "        check(overwrite: _2) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2 = move _3;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        _3 = alloc<u8>(const u64 1);",
+    "        _4 = move _3;",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // the check and the store name two fields of one struct
+    "fn main.fh(_1 (t): two mut*) -> void {",
+    "    let _2: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).1 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // the check and the store name one field: it folds
+    "fn main.fi(_1 (t): two mut*) -> void {",
+    "    let _2: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        check(overwrite: (*_1).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).1 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // the check and the store name one global: it folds
+    "fn main.fj() -> void {",
+    "    let _1: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _1 = alloc<u8>(const u64 1);",
+    "        check(overwrite: global main.KEPT) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        global main.KEPT = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // the check and the store index one array with two index locals
+    "fn main.fk(_1 (v): u8 mut* own[2] mut*, _2 (i): u64, _3 (j): u64) -> void {",
+    "    let _4: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _4 = alloc<u8>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_3] = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // the check and the store index one array with one index local: it folds
+    "fn main.fl(_1 (v): u8 mut* own[2] mut*, _2 (i): u64, _3 (j): u64) -> void {",
+    "    let _4: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _4 = alloc<u8>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_2] = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // the continuation starts with a `del` and holds no store
+    "fn main.fm() -> void {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2: u8 mut* own;",
+    "",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own;",
+    "        _2 = alloc<u8>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+u64 FOLD_COUNT = 13;
+
+u32[FOLD_COUNT] FOLD_TEMPS = {2, 2, 2, 2, 2, 2, 3, 2, 2, 1, 4, 4, 2};
+
+bool[FOLD_COUNT] FOLDS = {
+    true, false, false, false, false, false, false, false, true, true, false, true, false,
+};
+
+// The count of the assignments of the whole local `t` in `f`.
+fn assignments(fir.func* f, u32 t) u32 {
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            bool whole = s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0;
+            if (s->kind == fir.stmt_kind.st_assign && whole && s->place.local == t) {
+                count += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return count;
+}
+
+// A fold replaces one assignment of the temporary by the store, so the store folds exactly when
+// the count of the assignments of the temporary drops by one. The check goes and its
+// continuation merges in every case, so each function ends with one block less.
+fn the_fold_needs_each_of_its_conditions() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut fm = pass_env.parse(&e, FOLD_PRELUDE[..], FOLD_TEXT[..]);
+    defer fir.module_free(&fm);
+    assert(fm.funcs.len == FOLD_COUNT);
+    u64 mut k = 0;
+    while (k < FOLD_COUNT) {
+        fir.func mut* f = &fm.funcs.items[k];
+        u32 before = assignments(f, FOLD_TEMPS[k]);
+        u32 blocks = fir.block_count(f);
+        pass_env.build(&e, f, pass_env.RELEASE);
+        u32 after = assignments(f, FOLD_TEMPS[k]);
+        if (FOLDS[k]) {
+            assert(after + 1 == before);
+        } else {
+            assert(after == before);
+        }
+        assert(fir.block_count(f) + 1 == blocks);
+        k += 1;
+    }
+}
+
+// The folded store takes the place of the store and keeps the rvalue, the location and the
+// statement index of `_t = rvalue`. The store leaves the continuation, whose other statements
+// follow the folded store in the merged block.
+fn the_folded_store_keeps_the_rvalue_and_its_location() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[15] text = {
+        "fn main.fa() -> void {",
+        "    let _1 (p): u8 mut* own;",
+        "    let _2: u8 mut* own;",
+        "",
+        "    bb0: {",
+        "        _1 = const zero u8 mut* own #1:2 s0;",
+        "        _2 = alloc<u8>(const u64 3) #4:9 exit 6:1 s2;",
+        "        check(overwrite: _1) -> bb1 #4:3 s3;",
+        "    }",
+        "    bb1: {",
+        "        _1 = move _2 #4:3 s3;",
+        "        del(move _1) #5:3 s4;",
+        "        return #6:1 s0;",
+        "    }",
+        "}",
+    };
+    string[12] want = {
+        "fn main.fa() -> void {",
+        "    let _0: void;",
+        "    let _1 (p): u8 mut* own;",
+        "    let _2: u8 mut* own;",
+        "",
+        "    bb0: {",
+        "        _1 = const zero u8 mut* own #1:2 s0;",
+        "        _1 = alloc<u8>(const u64 3) #4:9 exit 6:1 s2;",
+        "        del(move _1) #5:3 s4;",
+        "        return #6:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, FOLD_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+}
+
+// ---- the merge ----------------------------------------------------------------------------------
+
+// A check whose continuation is its own block, and a check whose continuation is `bb0`: V11 and
+// V2 refuse the two, so the pass runs without the verifier. Each check goes, and its `goto` keeps
+// the target, because the merge takes no continuation that is its own block or `bb0`.
+fn the_merge_leaves_a_loop_and_the_entry() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[1] prelude = {"fn g(bool c) void {}"};
+    string[8] text = {
+        "fn main.g(_1 (c): bool) -> void {",
+        "    bb0: {",
+        "        goto bb1;",
+        "    }",
+        "    bb1: {",
+        "        check(copy _1, overflow) -> bb1;",
+        "    }",
+        "}",
+    };
+    string[8] mut lines = text;
+    u64 mut k = 0;
+    while (k < 2) {
+        if (k == 1) {
+            lines[5] = "        check(copy _1, overflow) -> bb0;";
+        }
+        fir.module mut fm = pass_env.parse(&e, prelude[..], lines[..]);
+        fir.func mut* f = &fm.funcs.items[0];
+        fir_passes.build_mode(f, true, false);
+        assert(fir.block_count(f) == 2);
+        pass_env.numbered(f);
+        fir.terminator* t = &fir.block_at(f, 1)->term;
+        assert(t->kind == fir.term_kind.tk_goto && t->target == cast(1 - k, u32));
+        fir.module_free(&fm);
+        k += 1;
+    }
+}
+
+// A continuation that another check block continues from: the second check of bb1 continues in
+// bb2, the first check of bb0 in bb1. With both removed, bb0 takes bb1 and then bb2, and bb3,
+// which the `switch` of bb2 names, becomes bb1. A block that no terminator names and that stands
+// between them, bb4, keeps its place after them and becomes bb2.
+fn a_chain_of_continuations_merges_into_its_first_block() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[1] prelude = {"fn g(bool c) void {}"};
+    string[23] text = {
+        "fn main.g(_1 (c): bool) -> void {",
+        "    let _2 (x): i32;",
+        "",
+        "    bb0: {",
+        "        _2 = const i32 0;",
+        "        check(copy _1, overflow) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = const i32 1;",
+        "        check(copy _1, shift, const i64 1, const bytes \"i32\") -> bb2;",
+        "    }",
+        "    bb2: {",
+        "        _2 = const i32 2;",
+        "        switch(copy _1) -> [true: bb3, otherwise: bb3];",
+        "    }",
+        "    bb3: {",
+        "        return;",
+        "    }",
+        "    bb4: {",
+        "        _2 = const i32 4;",
+        "        unreachable;",
+        "    }",
+        "}",
+    };
+    string[19] want = {
+        "fn main.g(_1 (c): bool) -> void {",
+        "    let _0: void;",
+        "    let _2 (x): i32;",
+        "    let _3: i64;",
+        "",
+        "    bb0: {",
+        "        _2 = const i32 0;",
+        "        _2 = const i32 1;",
+        "        _2 = const i32 2;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb1];",
+        "    }",
+        "    bb1: {",
+        "        return;",
+        "    }",
+        "    bb2: {",
+        "        _2 = const i32 4;",
+        "        unreachable;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, prelude[..], text[..], pass_env.RELEASE), want[..]);
+}
+
+// The merge clears the slots of the blocks past the new count, so a block that a later pass adds
+// is empty and has no terminator. Here bb3 and bb4, the two last blocks, merge into bb2, so no
+// block moves into their slots, and five blocks become three. The two blocks that fir.block_new
+// then adds take the two cleared slots: each takes a statement and a terminator, and the function
+// still keeps every rule of the verifier.
+fn a_block_after_a_merge_starts_empty() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[1] prelude = {"fn g(bool c) void {}"};
+    string[21] text = {
+        "fn main.g(_1 (c): bool) -> void {",
+        "    let _2 (x): i32;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+        "    }",
+        "    bb1: {",
+        "        return;",
+        "    }",
+        "    bb2: {",
+        "        _2 = const i32 0;",
+        "        check(copy _1, overflow) -> bb3;",
+        "    }",
+        "    bb3: {",
+        "        _2 = const i32 1;",
+        "        check(copy _1, overflow) -> bb4;",
+        "    }",
+        "    bb4: {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    fir.module mut fm = pass_env.parse(&e, prelude[..], text[..]);
+    defer fir.module_free(&fm);
+    fir.func mut* f = &fm.funcs.items[0];
+    pass_env.build(&e, f, pass_env.RELEASE);
+    assert(fir.block_count(f) == 3);
+    u32 mut k = 0;
+    while (k < 2) {
+        u32 b = fir.block_new(f);
+        assert(b == 3 + k && fir.block_at(f, b)->number == b);
+        assert(!fir.block_at(f, b)->terminated && fir.block_statement_count(f, b) == 0);
+        fir.rvalue r = fir.rvalue_use(f, fir.operand_copy(fir.place_local(2)));
+        fir.block_append(f, b, fir.stmt_assign(fir.place_local(2), r, diag.loc{}, 0));
+        fir.block_set_terminator(f, b, fir.term_return(diag.loc{}, 0));
+        assert(fir.block_statement_count(f, b) == 1);
+        k += 1;
+    }
+    pass_env.verified(&e, f, "fir_passes_store_test: the verifier refuses the new blocks");
+}
+
+fn main() i32 {
+    the_fold_needs_each_of_its_conditions();
+    the_folded_store_keeps_the_rvalue_and_its_location();
+    println("fold ok");
+    the_merge_leaves_a_loop_and_the_entry();
+    a_chain_of_continuations_merges_into_its_first_block();
+    a_block_after_a_merge_starts_empty();
+    println("merge ok");
+    return 0;
+}

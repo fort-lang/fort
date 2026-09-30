@@ -527,6 +527,25 @@ came here.
   41051 and refused none, and `src/fort/main.ft` from 1626 and 144 refused to 1790 and none. A
   function is refused only when it needs a runtime entry that its closure lacks, as the sandbox
   of a test does: a print or a string equality.
+- **The build-mode pass changes only what `spec/fir.md` 11 lists** (T-247).
+  `fir_passes.build_mode` replaces each check that the mode removes by `goto`, writes the mask of
+  a shift check at the end of its block, and replaces each read of the count that the mask
+  reaches. A forward dataflow over the masks, joined by intersection, finds those reads. The pass
+  then removes the pure assignments to temporaries that nothing uses until nothing changes, folds
+  the store after a removed overwrite check, and merges each continuation into its check block.
+  A use is a read of `fir.stmt_read` or `fir.term_read`, or an `addr` or a `slice` of the storage
+  of the local. An `addr` is no read of its place, so a count of the reads alone removes a
+  temporary that a pointer reads later (`test/fir/build_mode/020_addr_keeps.fir`). The width of
+  the mask comes from the type name that the shift check reports, and the pass panics for a name
+  that is no integer type. The pass keeps the `let` of each local, and spec/fir.md 12.1 gives a
+  temporary that nothing names no storage: under `--release`, 1251 such temporaries stand in 548
+  functions of `main.ft`, and none after the lowering (T-247 review, round 1). The pass looks up
+  the masks of a local in a table, because a scan of every mask for each statement took 1.98 s
+  for 8000 shifts. The driver runs the verifier before and after the pass. T-247 ran
+  `--fir-after=build-mode` over the 41051 functions of the run corpus, the 2560 of
+  `test/lang/programs`, the 1820 of `src/fort/main.ft` and the 306 of `src/lsp/main.ft` in the
+  four modes, and the verifier accepted each result. On `main.ft`, `--release` removes 1197
+  checks and `--no-bounds-check` 730, and the default mode changes no function.
 
 ## 7. The runtime and the standard library
 

@@ -1,8 +1,8 @@
 # FIR tests
 
-A FIR test holds one or more functions in the textual form of `spec/fir.md` 13, the pass to run,
-and the expected result (`spec/fir.md` 16.3). `run_tests.py` walks `test/fir/**/*.fir`. For each
-file it runs `fort --fir-test <file>` from this directory and compares the result with the
+A FIR test holds one or more functions in the textual form of `spec/fir.md` 13, the passes to
+run, and the expected result (`spec/fir.md` 16.3). `run_tests.py` walks `test/fir/**/*.fir`. For
+each file it runs `fort --fir-test <file>` from this directory and compares the result with the
 expectation of the file. The ctest `fir` (label `unit`) runs the harness in both gates.
 
 ## The format
@@ -13,7 +13,7 @@ bare `//|` gives an empty line.
 
 | Directive | Meaning |
 |---|---|
-| `//! pass: <name>` | Required. The pass to run on the parsed module. |
+| `//! pass: <name>` | Required and repeatable. A pass to run on the parsed module, in order. |
 | `//! prelude:` then `//| ` lines | Optional. Fort declarations, checked as the module `main`. |
 | `//! expect:` then `//| ` lines | The compiler exits 0 and writes exactly this text. |
 | `//! error: <text>` | Repeatable. The compiler exits 1, and its stderr holds `<text>`. |
@@ -22,12 +22,19 @@ bare `//|` gives an empty line.
 A test states exactly one of `expect:`, `error:` and `panic:`. `panic:` is for a rule of the
 verifier, which ends the compiler with a panic.
 
-The passes: `none` runs nothing, so the test holds the parser and the printer. `verify` runs the
-verifier of `spec/fir.md` 10 on each function in text order. A module whose functions keep every
-rule is written as `none` writes it. The first violation ends the compiler with a panic that
-names the rule, the function, the block and the statement. `build-mode --release` and
-`build-mode --no-bounds-check` are the names of the build-mode pass. This pass does not exist
-yet: the compiler exits 2 for it, and the harness reports an `ERROR`.
+The passes run in the order of their `pass:` directives, each on every function in text order:
+- `none` runs nothing, so the test holds the parser and the printer.
+- `verify` runs the verifier of `spec/fir.md` 10. A module whose functions keep every rule is
+  written as `none` writes it. The first violation ends the compiler with a panic that names the
+  rule, the function, the block and the statement.
+- `build-mode` runs the build-mode pass of `spec/fir.md` 11. Its arguments select the mode:
+  `--release`, `--no-bounds-check`, both in either order, or none for the default mode. Spaces
+  separate the arguments. The pass does not run the verifier, so a test of it names `verify`
+  in a second `pass:` directive.
+
+A pass that the compiler does not know, an argument of `none` or `verify`, and an argument of
+`build-mode` that is not a mode make the compiler exit 2 before any pass runs, and the harness
+reports an `ERROR`.
 
 The prelude keeps the lines and the columns of the file. The compiler replaces the `//|` of each
 prelude line with three spaces and blanks every other line, so a diagnostic of the prelude names
@@ -43,7 +50,8 @@ The names of the FIR text resolve against the prelude:
   name` names an `extern fn` by its C name. `enum_table` takes the type `enum_member*` of the
   prelude.
 
-Put a test in `test/fir/<pass>/NNN_name.fir`, where `<pass>` is the first word of its `pass:`.
+Put a test in `test/fir/<pass>/NNN_name.fir`, where `<pass>` is the first word of its first
+`pass:`, with `-` written as `_`: `test/fir/build_mode/001_overflow_release.fir`.
 A test of the verifier names its rule instead of a number: `verify/vNN_name.fir` breaks rule
 `VNN`, and `verify/green_name.fir` keeps every rule.
 

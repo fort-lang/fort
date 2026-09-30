@@ -1,0 +1,654 @@
+/// Holds the build-mode pass of FIR (spec/fir.md 11): it rewrites one verified function for the
+/// build mode that `--release` and `--no-bounds-check` select.
+//
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: each vector that the pass allocates belongs to one call and is freed before the
+// call returns.
+import consts;
+import fir;
+import fir_flow;
+import prim;
+import types;
+
+// The count of a mask whose reported count is no whole temporary, and the end of a chain of the
+// mask table. No local and no mask has this number.
+u32 NO_LOCAL = 4294967295;
+
+// The integer types that a shift check can name by its type name.
+u64 INTEGER_COUNT = 8;
+
+prim.prim_kind[INTEGER_COUNT] INTEGERS = {
+    prim.prim_kind.prim_i8,
+    prim.prim_kind.prim_i16,
+    prim.prim_kind.prim_i32,
+    prim.prim_kind.prim_i64,
+    prim.prim_kind.prim_u8,
+    prim.prim_kind.prim_u16,
+    prim.prim_kind.prim_u32,
+    prim.prim_kind.prim_u64,
+};
+
+// What the pass removed at the end of one block, by the number that the block had before the
+// merge. `place` is the place `p` of a removed `check(overwrite: p)`.
+struct removal {
+    bool removed; // the block ended in a check that the mode removes, and it ends in `goto` now
+    bool overwrite; // that check was `check(overwrite: p)`
+    fir.place place;
+}
+
+// The mask that replaced a shift check: `_value = and(n, const i64 W - 1)`, the last statement of
+// the block of the check. `count` is the temporary of `n = copy _count`, or NO_LOCAL when `n` is
+// no whole temporary.
+struct mask {
+    u32 count;
+    u32 value;
+}
+
+// The masks of one function with three tables, so that a statement or an operand finds its masks
+// in one step. `of_value[l]` is the mask whose value is local `l`, and `of_count[l]` the first
+// mask whose count is local `l`, each NO_LOCAL for none. `next[k]` is the mask after mask `k`
+// with the same count, or NO_LOCAL. A chain holds its masks in ascending order.
+struct mask_table {
+    mask@ masks;
+    u32 mut@ own of_value;
+    u32 mut@ own of_count;
+    u32 mut@ own next;
+}
+
+/// Rewrites `f` for the build mode. `release` removes the checks of the kinds `overflow`, `shift`
+/// and `overwrite`, and `no_bounds` removes the kinds `bounds` and `span`. Every other check and
+/// every `fail` stays. The pass then removes each pure assignment to a temporary that nothing
+/// uses, folds the store after a removed overwrite check, merges the continuation of each
+/// removed check into the block of the check, and numbers the blocks again in ascending order.
+// The steps keep the order of spec/fir.md 11. The verifier accepts the result when it accepts
+// `f`; the callers run it after the pass.
+fn build_mode(fir.func mut* f, bool release, bool no_bounds) void {
+    u64 n = f->blocks.len;
+    removal mut@ own done = new(removal, n);
+    defer del(done);
+    mask mut@ own masks = new(mask, n);
+    defer del(masks);
+    u64 count = remove_checks(f, release, no_bounds, done, masks);
+    substitute(f, masks[0..count]);
+    remove_dead(f);
+    fold_stores(f, done);
+    merge_blocks(f, done);
+}
+
+// ---- the checks --------------------------------------------------------------------------------
+
+// Replaces each check that the mode removes by `goto` to its continuation, at the location and the
+// statement index of the check, and records it in `done`. A shift check leaves its mask at the
+// end of its block and in `masks`. Returns the count of the masks.
+fn remove_checks(fir.func mut* f, bool release, bool no_bounds, removal mut@ done,
+                 mask mut@ masks) u64 {
+    u64 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator t = fir.block_at(f, b)->term;
+        bool checks = t.kind == fir.term_kind.tk_check
+            || t.kind == fir.term_kind.tk_check_overwrite;
+        if (checks && fir.term_removable(t.check, release, no_bounds)) {
+            u64 at = cast(b, u64);
+            done[at].removed = true;
+            if (t.kind == fir.term_kind.tk_check_overwrite) {
+                done[at].overwrite = true;
+                done[at].place = t.place;
+            }
+            if (t.check == fir.check_kind.chk_shift) {
+                masks[count] = write_mask(f, b, &t);
+                count += 1;
+            }
+            fir.terminator mut jump = fir.term_goto(t.target, t.loc, t.stmt);
+            jump.exit_loc = t.exit_loc;
+            fir.block_mut(f, b)->term = jump;
+        }
+        b += 1;
+    }
+    return count;
+}
+
+// Appends the mask of the shift check `t` to block `b`: `_m = and(n, const i64 W - 1)`, where `n`
+// is the reported count and `W` the width of the type that the check names. `_m` is a new
+// temporary of the type of `n`, and the statement takes the location and the statement index of
+// the check.
+fn write_mask(fir.func mut* f, u32 b, fir.terminator* t) mask {
+    u64 width = shift_width(f, t);
+    fir.operand n = fir.operand_at(f, t->args_first);
+    types.node* wide = types.type_prim(f->tt, prim.prim_kind.prim_i64);
+    fir.operand top = fir.operand_const(fir.const_int(wide, consts.int_make(false, width - 1)));
+    u32 m = fir.local_add(f, fir.operand_type(f, n), fir.local_kind.lk_temp, null, t->loc);
+    fir.rvalue r = fir.rvalue_binary(f, fir.rvalue_kind.rv_and, n, top);
+    fir.statement mut s = fir.stmt_assign(fir.place_local(m), r, t->loc, t->stmt);
+    s.exit_loc = t->exit_loc;
+    push_statement(fir.block_mut(f, b), s);
+    mask mut out = mask{NO_LOCAL, m};
+    // the lowering gives the count a new temporary, which nothing else writes (fir_lower.shifted)
+    if (n.kind == fir.operand_kind.ok_copy && n.place.base == fir.base_kind.bk_local
+        && n.place.proj_len == 0
+        && fir.local_at(f, n.place.local)->kind == fir.local_kind.lk_temp) {
+        out.count = n.place.local;
+    }
+    return out;
+}
+
+// The width in bits of the integer type that the shift check `t` names by its second reported
+// operand, a `bytes` text such as "i32" (spec/fir.md 8). The lowering always reports one, so the
+// function panics for any other operand.
+fn shift_width(fir.func* f, fir.terminator* t) u64 {
+    if (t->args_len == 2) {
+        fir.operand name = fir.operand_at(f, t->args_first + 1);
+        if (name.kind == fir.operand_kind.ok_const
+            && name.value.kind == fir.const_kind.ck_bytes) {
+            for (prim.prim_kind k : INTEGERS) {
+                if (prim.prim_name(k) == name.value.text) {
+                    return cast(prim.prim_size(k), u64) * prim.PRIM_BITS_PER_BYTE;
+                }
+            }
+        }
+    }
+    panic("fir_passes.build_mode: a shift check names no integer type");
+}
+
+// Appends `s` to the statements of `bl` and keeps its terminator.
+fn push_statement(fir.block mut* bl, fir.statement s) void {
+    fir.statements_reserve(&bl->statements);
+    bl->statements.items[bl->statements.len] = s;
+    bl->statements.len += 1;
+}
+
+// ---- the substitution of the masked count ------------------------------------------------------
+
+// Replaces each read of the count `_n` of a mask that the mask reaches by `copy _m`, the read of
+// the mask: on every path from `bb0` to the read, the mask stands after the last write of `_n`.
+// A forward dataflow finds the masks that reach the start of each block. The set of a block is
+// the intersection of the sets at the ends of its predecessors. A block that no terminator names,
+// `bb0` included, starts with the empty set. Each end starts full, so the loop stops at the
+// greatest fixpoint.
+fn substitute(fir.func mut* f, mask@ masks) void {
+    if (masks.len == 0) {
+        return;
+    }
+    u32 width = cast(masks.len, u32);
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    mask_table mut mt = table_new(f, masks);
+    defer table_free(&mt);
+    fir_flow.bits mut@ own ends = new(fir_flow.bits, f->blocks.len);
+    u64 mut b = 0;
+    while (b < ends.len) {
+        ends[b] = fir_flow.bits_new(width);
+        fir_flow.bits_fill(&ends[b]);
+        b += 1;
+    }
+    fir_flow.bits mut live = fir_flow.bits_new(width);
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        b = 0;
+        while (b < ends.len) {
+            block_start(&pt, ends, cast(b, u32), &live);
+            walk_masks(f, &mt, cast(b, u32), &live, false);
+            if (!fir_flow.bits_equal(&live, &ends[b])) {
+                fir_flow.bits_copy(&ends[b], &live);
+                changed = true;
+            }
+            b += 1;
+        }
+    }
+    b = 0;
+    while (b < ends.len) {
+        block_start(&pt, ends, cast(b, u32), &live);
+        walk_masks(f, &mt, cast(b, u32), &live, true);
+        b += 1;
+    }
+    fir_flow.bits_free(&live);
+    b = 0;
+    while (b < ends.len) {
+        fir_flow.bits_free(&ends[b]);
+        b += 1;
+    }
+    del(ends);
+}
+
+// The tables of `masks` over the locals of `f`.
+fn table_new(fir.func* f, mask@ masks) mask_table {
+    mask_table mut mt = mask_table{.masks = masks};
+    mt.of_value = new(u32, f->locals.len);
+    mt.of_count = new(u32, f->locals.len);
+    mt.next = new(u32, masks.len);
+    u64 mut l = 0;
+    while (l < f->locals.len) {
+        mt.of_value[l] = NO_LOCAL;
+        mt.of_count[l] = NO_LOCAL;
+        l += 1;
+    }
+    // from the last mask to the first, so that each chain ascends
+    u64 mut k = masks.len;
+    while (k > 0) {
+        k -= 1;
+        mt.of_value[cast(masks[k].value, u64)] = cast(k, u32);
+        mt.next[k] = NO_LOCAL;
+        u32 c = masks[k].count;
+        if (c != NO_LOCAL) {
+            mt.next[k] = mt.of_count[cast(c, u64)];
+            mt.of_count[cast(c, u64)] = cast(k, u32);
+        }
+    }
+    return mt;
+}
+
+fn table_free(mask_table mut* mt) void {
+    del(mt->of_value);
+    del(mt->of_count);
+    del(mt->next);
+}
+
+// The first mask whose count is local `l`, or NO_LOCAL.
+fn first_of(mask_table* mt, u32 l) u32 {
+    if (l == NO_LOCAL) {
+        return NO_LOCAL;
+    }
+    return mt->of_count[cast(l, u64)];
+}
+
+// Sets `live` to the masks that reach the start of block `b`: the intersection of the sets at the
+// ends of its predecessors, or the empty set when no terminator names `b`.
+fn block_start(fir.pred_table* pt, fir_flow.bits@ ends, u32 b, fir_flow.bits mut* live) void {
+    fir_flow.bits_fill(live);
+    u32 count = fir.pred_count(pt, b);
+    u32 mut i = 0;
+    while (i < count) {
+        fir_flow.bits_intersect(live, &ends[cast(fir.pred_at(pt, b, i), u64)]);
+        i += 1;
+    }
+    if (count == 0) {
+        u32 mut k = 0;
+        while (k < live->count) {
+            fir_flow.bits_clear(live, k);
+            k += 1;
+        }
+    }
+}
+
+// Walks the items of block `b` from `live`, the masks that reach its start, and leaves in `live`
+// the masks that reach its end. With `rewrite` set, it replaces the reads of each item before
+// the item writes. A mask reads its own count and keeps that read.
+fn walk_masks(fir.func mut* f, mask_table* mt, u32 b, fir_flow.bits mut* live, bool rewrite)
+    void {
+    u32 count = fir.block_statement_count(f, b);
+    u32 mut i = 0;
+    while (i < count) {
+        fir.statement mut* s = &fir.block_mut(f, b)->statements.items[cast(i, u64)];
+        u32 which = mask_written(mt, s);
+        if (rewrite && which == NO_LOCAL && s->kind == fir.stmt_kind.st_assign) {
+            rewrite_operands(f, mt, s->value.ops_first, s->value.ops_len, live);
+        }
+        mask_effect(mt, s, which, live);
+        i += 1;
+    }
+    if (rewrite) {
+        fir.terminator mut* t = &fir.block_mut(f, b)->term;
+        if (t->kind == fir.term_kind.tk_switch || t->kind == fir.term_kind.tk_check) {
+            rewrite_operand(mt, &t->cond, live);
+        }
+        // args_len is 0 for every terminator but a `check` and a `fail`
+        rewrite_operands(f, mt, t->args_first, t->args_len, live);
+    }
+}
+
+// The mask that `s` writes, or NO_LOCAL. A mask is the one assignment of its whole temporary.
+fn mask_written(mask_table* mt, fir.statement* s) u32 {
+    if (s->kind != fir.stmt_kind.st_assign || s->place.base != fir.base_kind.bk_local
+        || s->place.proj_len != 0) {
+        return NO_LOCAL;
+    }
+    return mt->of_value[cast(s->place.local, u64)];
+}
+
+// Applies the write of `s` to `live`. The mask `which` starts to reach and ends each other mask
+// of its count. Any other write of a local, whole or in part, ends each mask of that count.
+fn mask_effect(mask_table* mt, fir.statement* s, u32 which, fir_flow.bits mut* live) void {
+    u32 mut count = NO_LOCAL;
+    if (which != NO_LOCAL) {
+        fir_flow.bits_set(live, which);
+        count = mt->masks[cast(which, u64)].count;
+    } else if ((s->kind == fir.stmt_kind.st_assign || s->kind == fir.stmt_kind.st_del)
+               && s->place.base == fir.base_kind.bk_local) {
+        count = s->place.local;
+    }
+    u32 mut k = first_of(mt, count);
+    while (k != NO_LOCAL) {
+        if (k != which) {
+            fir_flow.bits_clear(live, k);
+        }
+        k = mt->next[cast(k, u64)];
+    }
+}
+
+// Rewrites the `len` operands from position `first` of the operand vector of `f`.
+fn rewrite_operands(fir.func mut* f, mask_table* mt, u32 first, u32 len, fir_flow.bits* live)
+    void {
+    u32 mut i = 0;
+    while (i < len) {
+        rewrite_operand(mt, &f->ops.items[cast(first + i, u64)], live);
+        i += 1;
+    }
+}
+
+// Replaces `copy _n` by `copy _m` when `live` holds a mask `_m` of `_n`. Nothing else reads a
+// count: it is an `i64`, which is no index and has no projection.
+fn rewrite_operand(mask_table* mt, fir.operand mut* o, fir_flow.bits* live) void {
+    if (o->kind != fir.operand_kind.ok_copy || o->place.base != fir.base_kind.bk_local
+        || o->place.proj_len != 0) {
+        return;
+    }
+    u32 mut k = first_of(mt, o->place.local);
+    while (k != NO_LOCAL) {
+        if (fir_flow.bits_get(live, k)) {
+            o->place.local = mt->masks[cast(k, u64)].value;
+            return;
+        }
+        k = mt->next[cast(k, u64)];
+    }
+}
+
+// ---- the dead temporaries ----------------------------------------------------------------------
+
+// Removes each assignment that `dead` accepts, and repeats until nothing changes, so the
+// `add_overflows` that fed a removed check goes too.
+fn remove_dead(fir.func mut* f) void {
+    u32 mut@ own uses = new(u32, f->locals.len);
+    defer del(uses);
+    bool mut again = true;
+    while (again) {
+        count_uses(f, uses);
+        again = false;
+        u32 mut b = 0;
+        while (b < fir.block_count(f)) {
+            if (drop_dead(f, b, uses)) {
+                again = true;
+            }
+            b += 1;
+        }
+    }
+}
+
+// Removes the assignments of block `b` that `dead` accepts, and returns whether it removed one.
+fn drop_dead(fir.func mut* f, u32 b, u32@ uses) bool {
+    fir.block mut* bl = fir.block_mut(f, b);
+    u64 mut kept = 0;
+    u64 mut i = 0;
+    while (i < bl->statements.len) {
+        fir.statement s = bl->statements.items[i];
+        if (!dead(f, &s, uses)) {
+            bl->statements.items[kept] = s;
+            kept += 1;
+        }
+        i += 1;
+    }
+    bool dropped = kept < bl->statements.len;
+    bl->statements.len = kept;
+    return dropped;
+}
+
+// Whether `s` assigns a whole temporary: `_t = rvalue`.
+fn assigns_temp(fir.func* f, fir.statement* s) bool {
+    return s->kind == fir.stmt_kind.st_assign && s->place.base == fir.base_kind.bk_local
+        && s->place.proj_len == 0
+        && fir.local_at(f, s->place.local)->kind == fir.local_kind.lk_temp;
+}
+
+// Whether the pass removes `s`: it assigns a whole temporary that `uses` counts no use of, and its
+// rvalue is pure and holds no `move` operand. The pass keeps every other statement: a `call`, an
+// `alloc`, a `del`, an assignment into a named local or into a place with projections.
+fn dead(fir.func* f, fir.statement* s, u32@ uses) bool {
+    if (!assigns_temp(f, s) || uses[cast(s->place.local, u64)] != 0 || !pure(s->value.kind)) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < s->value.ops_len) {
+        if (fir.operand_moves(fir.rvalue_operand(f, s->value, i))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Whether an rvalue of `kind` does nothing but give its result: an operand, an arithmetic,
+// overflow, bitwise, shift, float or comparison rvalue, a `cast`, or an `addr`.
+fn pure(fir.rvalue_kind kind) bool {
+    switch (kind) {
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_add, fir.rvalue_kind.rv_sub,
+        fir.rvalue_kind.rv_mul, fir.rvalue_kind.rv_add_overflows,
+        fir.rvalue_kind.rv_sub_overflows, fir.rvalue_kind.rv_mul_overflows,
+        fir.rvalue_kind.rv_div, fir.rvalue_kind.rv_rem, fir.rvalue_kind.rv_and,
+        fir.rvalue_kind.rv_or, fir.rvalue_kind.rv_xor, fir.rvalue_kind.rv_not,
+        fir.rvalue_kind.rv_shl, fir.rvalue_kind.rv_shr, fir.rvalue_kind.rv_fadd,
+        fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul, fir.rvalue_kind.rv_fdiv,
+        fir.rvalue_kind.rv_fneg, fir.rvalue_kind.rv_eq, fir.rvalue_kind.rv_ne,
+        fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt,
+        fir.rvalue_kind.rv_ge, fir.rvalue_kind.rv_cast, fir.rvalue_kind.rv_addr:
+        return true;
+    case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_alloc,
+        fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
+        return false;
+    }
+}
+
+// Counts in `uses` the uses of each local: each read that fir.stmt_read and fir.term_read give,
+// and each `addr` or `slice` of a place based on it, because the pointer or the span can read the
+// local later.
+fn count_uses(fir.func* f, u32 mut@ uses) void {
+    u64 mut l = 0;
+    while (l < uses.len) {
+        uses[l] = 0;
+        l += 1;
+    }
+    fir.read mut r = fir.read{};
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            u32 mut k = 0;
+            while (fir.stmt_read(f, s, k, &r)) {
+                mark_use(uses, r.place);
+                k += 1;
+            }
+            fir.rvalue_kind kind = s->value.kind;
+            bool points = kind == fir.rvalue_kind.rv_addr || kind == fir.rvalue_kind.rv_slice;
+            if (s->kind == fir.stmt_kind.st_assign && points) {
+                mark_use(uses, s->value.place);
+            }
+            i += 1;
+        }
+        u32 mut k = 0;
+        while (fir.term_read(f, &fir.block_at(f, b)->term, k, &r)) {
+            mark_use(uses, r.place);
+            k += 1;
+        }
+        b += 1;
+    }
+}
+
+fn mark_use(u32 mut@ uses, fir.place p) void {
+    if (p.base == fir.base_kind.bk_local) {
+        uses[cast(p.local, u64)] += 1;
+    }
+}
+
+// ---- the store after a removed overwrite check -------------------------------------------------
+
+// Folds `_t = rvalue` and `p = move _t` into `p = rvalue` where a removed `check(overwrite: p)`
+// stood between the two and nothing else uses `_t`: the direct store of release mode. The folded
+// statement keeps the location and the statement index of `_t = rvalue`, where an `alloc` reports
+// its failure. A fold moves one use of `_t` and no other use, so one count serves every fold.
+fn fold_stores(fir.func mut* f, removal@ done) void {
+    u32 mut@ own uses = new(u32, f->locals.len);
+    defer del(uses);
+    count_uses(f, uses);
+    u64 mut b = 0;
+    while (b < done.len) {
+        if (done[b].overwrite) {
+            fold_store(f, cast(b, u32), done[b].place, uses);
+        }
+        b += 1;
+    }
+}
+
+// Folds the store of block `b`, which ended in the removed `check(overwrite: p)`, when its last
+// statement is `_t = rvalue` and the first statement of its continuation is `p = move _t`.
+fn fold_store(fir.func mut* f, u32 b, fir.place p, u32@ uses) void {
+    fir.block mut* bl = fir.block_mut(f, b);
+    u32 next = bl->term.target;
+    u64 last = bl->statements.len;
+    if (next == b || last == 0) {
+        return;
+    }
+    fir.statement mut* held = &bl->statements.items[last - 1];
+    if (!assigns_temp(f, held) || uses[cast(held->place.local, u64)] != 1) {
+        return;
+    }
+    fir.block mut* cont = fir.block_mut(f, next);
+    if (cont->statements.len == 0) {
+        return;
+    }
+    fir.statement* store = &cont->statements.items[0];
+    if (store->kind != fir.stmt_kind.st_assign || store->value.kind != fir.rvalue_kind.rv_use
+        || !same_place(f, store->place, p)) {
+        return;
+    }
+    fir.operand o = fir.rvalue_operand(f, store->value, 0);
+    if (o.kind != fir.operand_kind.ok_move || o.place.base != fir.base_kind.bk_local
+        || o.place.proj_len != 0 || o.place.local != held->place.local) {
+        return;
+    }
+    held->place = store->place;
+    u64 mut i = 1;
+    while (i < cont->statements.len) {
+        cont->statements.items[i - 1] = cont->statements.items[i];
+        i += 1;
+    }
+    cont->statements.len -= 1;
+}
+
+// Whether two places have the same base and the same projections, index locals included.
+fn same_place(fir.func* f, fir.place a, fir.place b) bool {
+    if (!fir.same_base(a, b) || a.proj_len != b.proj_len) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < a.proj_len) {
+        fir.projection x = fir.place_projection(f, a, i);
+        fir.projection y = fir.place_projection(f, b, i);
+        if (x.kind != y.kind || x.field != y.field || x.index != y.index) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// ---- the merge of the blocks -------------------------------------------------------------------
+
+// Merges the continuation of each removed check into the block of the check, which rule V11 lets
+// be the one predecessor of the continuation. A merged block takes the statements and the
+// terminator of its continuation, so a chain of removed checks merges into its first block. Then
+// the live blocks take the numbers from 0 in ascending order, and every target follows them.
+// A continuation with another predecessor, `bb0` or the block itself stays a block of its own.
+fn merge_blocks(fir.func mut* f, removal mut@ done) void {
+    u64 n = f->blocks.len;
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    bool mut@ own gone = new(bool, n);
+    defer del(gone);
+    u64 mut k = 0;
+    while (k < n) {
+        while (!gone[k] && done[k].removed) {
+            u32 next = fir.block_at(f, cast(k, u32))->term.target;
+            u64 at = cast(next, u64);
+            if (next == 0 || at == k || gone[at] || fir.pred_count(&pt, next) != 1) {
+                break;
+            }
+            absorb(f, cast(k, u32), next);
+            done[k].removed = done[at].removed;
+            gone[at] = true;
+        }
+        k += 1;
+    }
+    renumber(f, gone);
+}
+
+// Appends the statements of block `c` to block `k`, gives `k` the terminator of `c`, and frees
+// the statements of `c`.
+fn absorb(fir.func mut* f, u32 k, u32 c) void {
+    fir.block mut* into = fir.block_mut(f, k);
+    fir.block mut* from = fir.block_mut(f, c);
+    u64 mut i = 0;
+    while (i < from->statements.len) {
+        push_statement(into, from->statements.items[i]);
+        i += 1;
+    }
+    into->term = from->term;
+    del(from->statements.items);
+    from->statements.len = 0;
+}
+
+// Numbers the blocks that `gone` does not hold from 0 in ascending order, rewrites every target
+// of their terminators, and moves each block to the slot of its new number.
+fn renumber(fir.func mut* f, bool@ gone) void {
+    u64 n = f->blocks.len;
+    u32 mut@ own number = new(u32, n);
+    defer del(number);
+    u32 mut live = 0;
+    u64 mut b = 0;
+    while (b < n) {
+        if (!gone[b]) {
+            number[b] = live;
+            live += 1;
+        }
+        b += 1;
+    }
+    b = 0;
+    while (b < n) {
+        if (!gone[b]) {
+            retarget(f, &f->blocks.items[b].term, number);
+            u64 to = cast(number[b], u64);
+            // the slot `to` holds a merged block, whose statements are freed, or a block that
+            // this loop moved already, so the move leaks nothing
+            if (to != b) {
+                f->blocks.items[to] = move(f->blocks.items[b]);
+            }
+            f->blocks.items[to].number = number[b];
+        }
+        b += 1;
+    }
+    // a later block_new takes these slots, so none keeps a terminator of a merged block
+    b = cast(live, u64);
+    while (b < n) {
+        f->blocks.items[b] = fir.block{};
+        b += 1;
+    }
+    f->blocks.len = cast(live, u64);
+}
+
+// Maps every target of `t` through `number`.
+fn retarget(fir.func mut* f, fir.terminator mut* t, u32@ number) void {
+    switch (t->kind) {
+    case fir.term_kind.tk_goto, fir.term_kind.tk_check, fir.term_kind.tk_check_overwrite:
+        t->target = number[cast(t->target, u64)];
+    case fir.term_kind.tk_switch:
+        u32 mut i = 0;
+        while (i < t->arms_len) {
+            fir.arm mut* a = &f->arms.items[cast(t->arms_first + i, u64)];
+            a->target = number[cast(a->target, u64)];
+            i += 1;
+        }
+        t->otherwise = number[cast(t->otherwise, u64)];
+    case fir.term_kind.tk_return, fir.term_kind.tk_fail, fir.term_kind.tk_trap,
+        fir.term_kind.tk_unreachable:
+        return;
+    }
+}
