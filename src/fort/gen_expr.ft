@@ -698,6 +698,20 @@ fn overflow_name(u64 which) string {
 // to std.rt.fail_overflow on failure.
 fn gen_checked(gen.emitter mut* g, u64 which, gen.gen_val a, gen.gen_val b,
                            diag.loc at) gen.gen_val {
+    gen.gen_val mut value = gen.gen_val{};
+    gen.gen_val bad = gen_overflow_call(g, which, a, b, &value);
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    gen.gen_check(g, bad, true, runtime_sig.rt_entry.rt_fail_overflow, &args, at);
+    return value;
+}
+
+// Writes the overflow intrinsic of the family `which` over `a` and `b`, then `extractvalue 0`,
+// then `extractvalue 1`. The first goes to *value, and the function returns the second, which is
+// true on overflow. The caller marks the declaration of the intrinsic used. The FIR translator
+// calls this function too, so both paths write one text.
+fn gen_overflow_call(gen.emitter mut* g, u64 which, gen.gen_val a, gen.gen_val b,
+                     gen.gen_val mut* value) gen.gen_val {
     string pair = pair_type(g, a.ty);
     gen.gen_val call = gen.gen_temp(g, pair);
     gen.gen_text_append(g, "call ");
@@ -716,7 +730,7 @@ fn gen_checked(gen.emitter mut* g, u64 which, gen.gen_val a, gen.gen_val b,
     gen.gen_text_append(g, b.val);
     gen.gen_text_append(g, ")");
     gen.gen_ins_end(g);
-    gen.gen_val value = gen.gen_temp(g, a.ty);
+    *value = gen.gen_temp(g, a.ty);
     gen.gen_text_append(g, "extractvalue ");
     gen.gen_text_append(g, pair);
     gen.gen_text_append(g, " ");
@@ -730,10 +744,7 @@ fn gen_checked(gen.emitter mut* g, u64 which, gen.gen_val a, gen.gen_val b,
     gen.gen_text_append(g, call.val);
     gen.gen_text_append(g, ", 1");
     gen.gen_ins_end(g);
-    gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
-    gen.gen_check(g, bad, true, runtime_sig.rt_entry.rt_fail_overflow, &args, at);
-    return value;
+    return bad;
 }
 
 // `{ iN, i1 }`, the type an overflow intrinsic returns. It is built
@@ -1106,6 +1117,14 @@ fn gen_cast(gen.emitter mut* g, ast.node* n) gen.gen_val {
     if (g->failed || bad_type(to) || bad_type(from)) {
         return v;
     }
+    return gen_cast_value(g, n->loc, to, from, v);
+}
+
+// Converts the scalar `v` of type `from` to the type `to`. The function writes nothing when the two
+// value types are equal, and the result is then `v` itself. `at` is the location of a report. The
+// FIR translator calls this function too, so both paths have one conversion rule.
+fn gen_cast_value(gen.emitter mut* g, diag.loc at, types.node* to, types.node* from,
+                  gen.gen_val v) gen.gen_val {
     bool to_ptr = to->kind == types.type_kind.k_ptr || to->kind == types.type_kind.k_voidptr ||
                   to->kind == types.type_kind.k_fn;
     bool from_ptr = from->kind == types.type_kind.k_ptr ||
@@ -1122,12 +1141,12 @@ fn gen_cast(gen.emitter mut* g, ast.node* n) gen.gen_val {
         return gen.gen_cast_op(g, "ptrtoint", v, gen.gen_value_type(g, to));
     }
     if (types.type_is_float(to) || types.type_is_float(from)) {
-        return gen_float_cast(g, n, to, from, v);
+        return gen_float_cast(g, at, to, from, v);
     }
     u32 from_bits = gen.gen_int_bits(from);
     u32 to_bits = gen.gen_int_bits(to);
     if (from_bits == 0 || to_bits == 0) {
-        gen.gen_todo(g, n->loc, "this cast");
+        gen.gen_todo(g, at, "this cast");
         return v;
     }
     if (is_bool(from)) {
@@ -1147,8 +1166,8 @@ fn gen_cast(gen.emitter mut* g, ast.node* n) gen.gen_val {
 // zero, range saturation, zero for NaN, and no trap. The intrinsic provides these results. `char`,
 // `bool` and an enum reach no float type and no float reaches them, so the checker has refused
 // every other pairing.
-fn gen_float_cast(gen.emitter mut* g, ast.node* n, types.node* to, types.node* from,
-                              gen.gen_val v) gen.gen_val {
+fn gen_float_cast(gen.emitter mut* g, diag.loc at, types.node* to, types.node* from,
+                  gen.gen_val v) gen.gen_val {
     string ty = gen.gen_value_type(g, to);
     if (types.type_is_float(to) && types.type_is_float(from)) {
         if (to->prim == from->prim) {
@@ -1168,7 +1187,7 @@ fn gen_float_cast(gen.emitter mut* g, ast.node* n, types.node* to, types.node* f
     }
     u32 bits = gen.gen_int_bits(to);
     if (bits == 0) {
-        gen.gen_todo(g, n->loc, "this cast");
+        gen.gen_todo(g, at, "this cast");
         return v;
     }
     bool to_signed = gen.gen_is_signed(to);

@@ -1,0 +1,47 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_llvm.register_value: a register is read before its assignment
+//! stdout:
+//| in order
+/// The translator gives a register its value when it translates the one statement that assigns
+/// it, so it translates the statements of a function in the order of the blocks and of their
+/// statements, the order in which fir_llvm.classify finds each assignment before its reads
+/// (spec/fir.md 12.1). A statement translated alone before that assignment has no value to read,
+/// and the translator panics rather than write a name that nothing defines.
+import fir;
+import fir_llvm;
+import llvm_env;
+
+string[10] TEXT = {
+    "fn main.f() -> i32 {",
+    "    let _1: i32;",
+    "",
+    "    bb0: {",
+    "        _1 = const i32 7 #1:1 s1;",
+    "        _0 = copy _1 #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+    "",
+};
+
+// A panic ends the program, so the case stands in a file of its own.
+fn main() i32 {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[1] prelude = {"i32 UNUSED = 0;"};
+    fir.module mut m = llvm_env.parse(&e, prelude[..], TEXT[..]);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_register);
+    // in order, the store of `_0` names the constant that `_1` holds
+    string[1] want = {"  store i32 7, ptr %result, align 4"};
+    string[3] whole = {"entry:", "  %result = alloca i32, align 4", want[0]};
+    llvm_env.expect(&e, llvm_env.translate(&e, f), whole[..]);
+    println("in order");
+    // the second statement alone reads `_1` before its assignment
+    llvm_env.statement_text(&e, f, 0, 1);
+    return 0;
+}

@@ -1,0 +1,1096 @@
+/// Translates FIR into LLVM IR text (spec/fir.md 12): the storage of the locals of one function,
+/// its places, its rvalues and its statements. The translator writes into the buffers of a
+/// `gen.emitter` as the direct path does, so the emitter assembles the definition.
+//
+// The module uses switches and no function-pointer dispatch table. Its functions drop the prefix
+// of the module name. A translator serves one function, and close releases it. The terminators,
+// the calls, the failure blocks and the labels of the blocks come later (T-251): a call reports
+// `cannot generate code yet` through gen.gen_todo.
+import consts;
+import diag;
+import fir;
+import gen;
+import gen_expr;
+import prim;
+import runtime_sig;
+import std.strbuf;
+import types;
+
+// The width of an `i64`, to which a bound of `slice_ptr` widens.
+u32 BITS_64 = 64;
+
+/// How the translator stores a local (spec/fir.md 12.1).
+enum storage {
+    sk_none, // no storage: a temporary that no item names, or `_0` of type `void`
+    sk_register, // a temporary that its one assignment gives a value, with no alloca
+    sk_slot, // every other temporary: the alloca `%tmp<K>`
+    sk_named, // a named local: the alloca `%<ident>.<n - 1>`
+    sk_param, // a scalar parameter: the alloca `%<ident>.<n - 1>`, which `%<ident>.in` fills
+    sk_incoming, // an aggregate parameter: the incoming pointer `%<ident>.in`
+    sk_result, // `_0` of a scalar type: the alloca `%result`
+    sk_sret, // `_0` of an aggregate type: the pointer `%ret.sret`
+}
+
+// What the classifying scan learns of one local.
+struct usage {
+    u32 assigns; // the statements that assign the whole local
+    u32 stmt; // the statement index of the first of them
+    bool named; // a statement or a terminator names the local
+    bool mixed; // an item whose statement index differs from `stmt` reads the local
+    bool early; // a read comes before the first assignment, in the order of translation
+    bool addressed; // an `addr` or a `slice` takes the address of the storage of the local
+}
+
+// The state of one local during the translation. `addr` is the address of its storage, and it is
+// empty for sk_none and sk_register. `value` is the value of a register once `defined` is set.
+struct local_state {
+    storage kind;
+    string addr;
+    gen.gen_val value;
+    bool defined;
+}
+
+// The overflow intrinsic that a block wrote last: its operation, its operands, the local that
+// holds its flag, and its `extractvalue 0`, which the continuation of its check reuses.
+struct overflow_note {
+    bool set;
+    fir.rvalue_kind kind;
+    fir.operand a;
+    fir.operand b;
+    u32 flag;
+    gen.gen_val value;
+}
+
+/// The translator of one function. `cont_of[b]` is one more than the number of the block whose
+/// overflow check continues at `b`, and 0 when no such check exists. `pending` is the note that
+/// the first assignment of the block being translated may reuse.
+struct translator {
+    gen.emitter mut* g;
+    fir.func* f;
+    local_state mut@ own locals;
+    overflow_note mut@ own notes;
+    u32 mut@ own cont_of;
+    u32 block;
+    overflow_note pending;
+}
+
+// ---- the classification ------------------------------------------------------------------------
+
+// Notes that item `stmt` reads local `n`. `u` holds the scan so far.
+fn note_read(usage mut@ u, u32 n, u32 stmt) void {
+    u64 at = cast(n, u64);
+    u[at].named = true;
+    if (u[at].assigns == 0) {
+        u[at].early = true;
+    } else if (u[at].stmt != stmt) {
+        u[at].mixed = true;
+    }
+}
+
+// Notes the base of `p` as named.
+fn note_named(usage mut@ u, fir.place p) void {
+    if (p.base == fir.base_kind.bk_local) {
+        u[cast(p.local, u64)].named = true;
+    }
+}
+
+// Notes what statement `s` reads, then what it names and what it assigns: a statement reads its
+// operands before it writes its place.
+fn scan_statement(fir.func* f, fir.statement* s, usage mut@ u) void {
+    fir.read mut r = fir.read{};
+    u32 mut i = 0;
+    while (fir.stmt_read(f, s, i, &r)) {
+        if (r.place.base == fir.base_kind.bk_local) {
+            note_read(u, r.place.local, s->stmt);
+        }
+        i += 1;
+    }
+    if (s->kind == fir.stmt_kind.st_del) {
+        note_named(u, s->place);
+    }
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    fir.rvalue_kind k = s->value.kind;
+    if (k == fir.rvalue_kind.rv_addr || k == fir.rvalue_kind.rv_slice) {
+        note_named(u, s->value.place);
+        // the address of fixed storage is the address of the storage of its base
+        if (s->value.place.base == fir.base_kind.bk_local && fir.place_fixed(f, s->value.place)) {
+            u[cast(s->value.place.local, u64)].addressed = true;
+        }
+    }
+    note_named(u, s->place);
+    if (s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0) {
+        u64 at = cast(s->place.local, u64);
+        if (u[at].assigns == 0) {
+            u[at].stmt = s->stmt;
+        }
+        u[at].assigns += 1;
+    }
+}
+
+// Notes what terminator `t` reads. Every place that a terminator names, it reads.
+fn scan_terminator(fir.func* f, fir.terminator* t, usage mut@ u) void {
+    fir.read mut r = fir.read{};
+    u32 mut i = 0;
+    while (fir.term_read(f, t, i, &r)) {
+        if (r.place.base == fir.base_kind.bk_local) {
+            note_read(u, r.place.local, t->stmt);
+        }
+        i += 1;
+    }
+}
+
+// The storage of one local from what the scan learned of it (spec/fir.md 12.1).
+fn storage_of_local(fir.local* l, usage* u) storage {
+    bool aggregate = fir.type_aggregate(l->ty);
+    switch (l->kind) {
+    case fir.local_kind.lk_return:
+        if (l->ty->kind == types.type_kind.k_void) {
+            return storage.sk_none;
+        }
+        if (aggregate) {
+            return storage.sk_sret;
+        }
+        return storage.sk_result;
+    case fir.local_kind.lk_param:
+        if (aggregate) {
+            return storage.sk_incoming;
+        }
+        return storage.sk_param;
+    case fir.local_kind.lk_named:
+        return storage.sk_named;
+    case fir.local_kind.lk_temp:
+        if (!u->named) {
+            return storage.sk_none;
+        }
+        if (l->ty->kind == types.type_kind.k_void) {
+            // the sink of a call statement, whose value is nothing
+            return storage.sk_register;
+        }
+        if (!aggregate && u->assigns == 1 && !u->mixed && !u->early && !u->addressed) {
+            return storage.sk_register;
+        }
+        return storage.sk_slot;
+    }
+}
+
+/// Classifies each local of `f` into `out`, which holds one entry for each local, in one scan of
+/// the blocks in number order. A temporary of a scalar type is a register when exactly one
+/// statement assigns it, and only items with the statement index of that statement read it, the
+/// failure blocks of that statement included. Every other temporary that an item names is a
+/// slot, and a temporary that no item names has no storage (spec/fir.md 12.1).
+// Two conditions keep a register sound beyond that rule. A read that the scan meets before the
+// assignment makes the local a slot, because the translator writes the blocks in the same order
+// and has no value to give it yet. An `addr` of the storage of the local makes it a slot, because
+// a register has no address. The lowering writes neither (V13, notes/compiler.md 6).
+fn classify(fir.func* f, storage mut@ out) void {
+    u64 n = f->locals.len;
+    if (out.len != n) {
+        panic("fir_llvm.classify: one entry for each local");
+    }
+    usage mut@ own u = new(usage, n);
+    defer del(u);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.block* bl = fir.block_at(f, b);
+        u64 mut i = 0;
+        while (i < bl->statements.len) {
+            scan_statement(f, &bl->statements.items[i], u);
+            i += 1;
+        }
+        if (bl->terminated) {
+            scan_terminator(f, &bl->term, u);
+        }
+        b += 1;
+    }
+    u64 mut k = 0;
+    while (k < n) {
+        out[k] = storage_of_local(fir.local_at(f, cast(k, u32)), &u[k]);
+        k += 1;
+    }
+}
+
+// ---- the translator ----------------------------------------------------------------------------
+
+/// Makes the translator of `f`, which writes through `g`, and classifies the locals of `f`.
+/// write_locals comes before the first statement.
+fn open(gen.emitter mut* g, fir.func* f) translator {
+    translator mut t = translator{.g = g, .f = f};
+    u64 n = f->locals.len;
+    t.locals = new(local_state, n);
+    storage mut@ own kinds = new(storage, n);
+    defer del(kinds);
+    classify(f, kinds);
+    u64 mut i = 0;
+    while (i < n) {
+        t.locals[i].kind = kinds[i];
+        i += 1;
+    }
+    u64 blocks = f->blocks.len;
+    t.notes = new(overflow_note, blocks);
+    t.cont_of = new(u32, blocks);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.block* bl = fir.block_at(f, b);
+        bool check = bl->terminated && bl->term.kind == fir.term_kind.tk_check;
+        if (check && bl->term.check == fir.check_kind.chk_overflow) {
+            t.cont_of[cast(bl->term.target, u64)] = b + 1;
+        }
+        b += 1;
+    }
+    return t;
+}
+
+fn close(translator mut* t) void {
+    del(t->locals);
+    del(t->notes);
+    del(t->cont_of);
+}
+
+/// The storage of local `n`.
+fn storage_at(translator* t, u32 n) storage {
+    return t->locals[cast(n, u64)].kind;
+}
+
+/// The address of the storage of local `n`, or the empty text when it has none or is a register.
+fn address_of(translator* t, u32 n) string {
+    return t->locals[cast(n, u64)].addr;
+}
+
+// `%<name>.<suffix>`: the name of the storage of a named local or a parameter.
+fn dotted(gen.emitter mut* g, string name, string suffix, u64 n) string {
+    strbuf.clear(&g->scratch);
+    strbuf.push(&g->scratch, '%');
+    strbuf.append(&g->scratch, name);
+    strbuf.push(&g->scratch, '.');
+    if (suffix.len > 0) {
+        strbuf.append(&g->scratch, suffix);
+    } else {
+        strbuf.append_u64(&g->scratch, n);
+    }
+    return gen.gen_take(g);
+}
+
+// `  <name> = alloca <type>, align <n>` in the entry block, as gen_stmt.emit_alloca writes it.
+fn write_alloca(gen.emitter mut* g, string name, types.node* ty) void {
+    string mem = gen.gen_mem_type(g, ty);
+    strbuf.append(&g->allocas, "  ");
+    strbuf.append(&g->allocas, name);
+    strbuf.append(&g->allocas, " = alloca ");
+    strbuf.append(&g->allocas, mem);
+    strbuf.append(&g->allocas, ", align ");
+    strbuf.append_u64(&g->allocas, types.type_alignof(ty));
+    strbuf.push(&g->allocas, '\n');
+}
+
+/// Names the storage of each local and writes the allocas into `g->allocas`, in local order:
+/// `%result`, then the parameters and the named locals as `%<ident>.<n - 1>`, then one `%tmp<K>`
+/// for each slot. It then stores each scalar parameter `%<ident>.in` into its alloca, in
+/// parameter order, into `g->body` (spec/fir.md 12.1).
+fn write_locals(translator mut* t) void {
+    gen.emitter mut* g = t->g;
+    u64 mut n = 0;
+    while (n < t->f->locals.len) {
+        fir.local* l = fir.local_at(t->f, cast(n, u32));
+        local_state mut* st = &t->locals[n];
+        string name = fir.local_name(l);
+        switch (st->kind) {
+        case storage.sk_none, storage.sk_register:
+            st->addr = "";
+        case storage.sk_result:
+            st->addr = "%result";
+            write_alloca(g, st->addr, l->ty);
+        case storage.sk_sret:
+            st->addr = "%ret.sret";
+        case storage.sk_incoming:
+            st->addr = dotted(g, name, "in", 0);
+        case storage.sk_param, storage.sk_named:
+            st->addr = dotted(g, name, "", n - 1);
+            write_alloca(g, st->addr, l->ty);
+        case storage.sk_slot:
+            st->addr = gen.gen_temp_place(g, l->ty).addr.val;
+        }
+        n += 1;
+    }
+    n = 1;
+    while (n < t->f->locals.len) {
+        fir.local* l = fir.local_at(t->f, cast(n, u32));
+        if (t->locals[n].kind == storage.sk_param) {
+            gen.gen_val incoming = gen.gen_val{gen.gen_value_type(g, l->ty),
+                                               dotted(g, fir.local_name(l), "in", 0)};
+            gen.gen_store_place(g, gen.gen_place{local_addr(t, cast(n, u32)), l->ty}, incoming);
+        }
+        n += 1;
+    }
+}
+
+// The address of the storage of local `n`. The function panics for a local with no storage and
+// for a register, which has no address.
+fn local_addr(translator* t, u32 n) gen.gen_val {
+    local_state* st = &t->locals[cast(n, u64)];
+    if (st->kind == storage.sk_none || st->kind == storage.sk_register) {
+        panic("fir_llvm.local_addr: a local with no address");
+    }
+    if (st->addr.len == 0) {
+        panic("fir_llvm.local_addr: write_locals has not run");
+    }
+    return gen.gen_val{"ptr", st->addr};
+}
+
+// The value of the register `n`. The function panics before its assignment.
+fn register_value(translator* t, u32 n) gen.gen_val {
+    local_state* st = &t->locals[cast(n, u64)];
+    if (!st->defined) {
+        panic("fir_llvm.register_value: a register is read before its assignment");
+    }
+    return st->value;
+}
+
+// Whether `p` is a whole register, with no projection.
+fn whole_register(translator* t, fir.place p) bool {
+    return p.base == fir.base_kind.bk_local && p.proj_len == 0
+        && storage_at(t, p.local) == storage.sk_register;
+}
+
+// Whether `p` is fixed storage of a temporary, which nothing reads after a move of it (V12).
+fn temporary_place(translator* t, fir.place p) bool {
+    if (p.base != fir.base_kind.bk_local) {
+        return false;
+    }
+    fir.local* l = fir.local_at(t->f, p.local);
+    return l->kind == fir.local_kind.lk_temp && fir.place_fixed(t->f, p);
+}
+
+// ---- places ------------------------------------------------------------------------------------
+
+// The value of the index local `n`: the register, or a load of its `u64`.
+fn index_value(translator mut* t, u32 n) gen.gen_val {
+    if (storage_at(t, n) == storage.sk_register) {
+        return register_value(t, n);
+    }
+    types.node* ty = fir.local_at(t->f, n)->ty;
+    return gen.gen_load_place(t->g, gen.gen_place{local_addr(t, n), ty});
+}
+
+// The element type of a fixed array, a span or a `string`: a `string` holds `char`.
+fn element_type(translator* t, types.node* ty) types.node* {
+    fir.projection pj = fir.projection{fir.proj_kind.pj_index, 0, 0};
+    return fir.apply_projection(t->f, ty, pj);
+}
+
+// The address of element `index` of the fixed array, span or `string` of type `ty` at `at`: the
+// array shape, or the load of the pointer field and the element shape (toolchain.md 6 item 3).
+fn element_addr(translator mut* t, types.node* ty, gen.gen_val at, gen.gen_val index)
+    gen.gen_val {
+    if (ty->kind == types.type_kind.k_array) {
+        return gen.gen_gep_array(t->g, ty, at, index);
+    }
+    gen.gen_val ptr = gen.gen_span_ptr(t->g, at);
+    return gen.gen_gep_element(t->g, element_type(t, ty), ptr, index);
+}
+
+// The address of field `k` of the struct, span or `string` of type `ty` at `at`.
+fn field_addr(translator mut* t, types.node* ty, gen.gen_val at, u32 k) gen.gen_val {
+    if (ty->kind == types.type_kind.k_struct) {
+        string mem = gen.gen_mem_type(t->g, ty);
+        return gen.gen_gep_field(t->g, mem, at, cast(k, u64));
+    }
+    return gen.gen_gep_field(t->g, gen.SPAN_TYPE, at, cast(k, u64));
+}
+
+/// The address of the place `p`: the storage of its base, then one step for each projection. A
+/// deref loads the pointer at the address so far; on a register base, the register is that
+/// pointer. A field takes a `getelementptr` of the struct or of `%fort.span`, and an index the
+/// array shape or the element shape (spec/fir.md 12.1, toolchain.md 6 item 3).
+fn place_addr(translator mut* t, fir.place p) gen.gen_val {
+    gen.emitter mut* g = t->g;
+    types.node* mut ty = fir.base_type(t->f, p);
+    gen.gen_val mut at = gen.gen_val{};
+    u32 mut i = 0;
+    if (p.base == fir.base_kind.bk_global) {
+        at = gen.gen_literal(g, "ptr", gen.gen_symbol_ref(g, p.global));
+    } else if (storage_at(t, p.local) == storage.sk_register) {
+        if (p.proj_len == 0 || fir.place_projection(t->f, p, 0).kind != fir.proj_kind.pj_deref) {
+            panic("fir_llvm.place_addr: a register has no address");
+        }
+        at = register_value(t, p.local);
+        ty = fir.apply_projection(t->f, ty, fir.place_projection(t->f, p, 0));
+        i = 1;
+    } else {
+        at = local_addr(t, p.local);
+    }
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(t->f, p, i);
+        types.node* next = fir.apply_projection(t->f, ty, pj);
+        switch (pj.kind) {
+        case fir.proj_kind.pj_deref:
+            at = gen.gen_load(g, "ptr", at, types.type_alignof(ty));
+        case fir.proj_kind.pj_field:
+            at = field_addr(t, ty, at, pj.field);
+        case fir.proj_kind.pj_index:
+            gen.gen_val index = index_value(t, pj.index);
+            at = element_addr(t, ty, at, index);
+        }
+        ty = next;
+        i += 1;
+    }
+    return at;
+}
+
+/// The scalar value at the place `p`: the register itself, or the load of its address. A `bool`
+/// loads as `i8` and `trunc` (toolchain.md 6 item 2).
+fn place_load(translator mut* t, fir.place p) gen.gen_val {
+    if (whole_register(t, p)) {
+        return register_value(t, p.local);
+    }
+    types.node* ty = fir.place_type(t->f, p);
+    return gen.gen_load_place(t->g, gen.gen_place{place_addr(t, p), ty});
+}
+
+/// Stores the scalar `v` into the place `p`. A register takes `v` as its value and prints
+/// nothing. A `bool` stores as `zext` and `i8` (toolchain.md 6 item 2).
+fn place_store(translator mut* t, fir.place p, gen.gen_val v) void {
+    if (whole_register(t, p)) {
+        local_state mut* st = &t->locals[cast(p.local, u64)];
+        st->value = v;
+        st->defined = true;
+        return;
+    }
+    types.node* ty = fir.place_type(t->f, p);
+    gen.gen_store_place(t->g, gen.gen_place{place_addr(t, p), ty}, v);
+}
+
+/// Copies the value at `src` into `dst`: `llvm.memcpy` for an aggregate, whose source address
+/// comes first, and a load and a store for a scalar.
+fn place_copy(translator mut* t, fir.place dst, fir.place src) void {
+    types.node* ty = fir.place_type(t->f, dst);
+    if (!fir.type_aggregate(ty)) {
+        place_store(t, dst, place_load(t, src));
+        return;
+    }
+    gen.gen_val from = place_addr(t, src);
+    copy_to(t, place_addr(t, dst), from, ty);
+}
+
+/// Writes the zero value of its type into the place `p`: `llvm.memset` for an aggregate, `store
+/// ptr null` for a pointer, and the zero constant for every other scalar.
+fn place_zero(translator mut* t, fir.place p) void {
+    types.node* ty = fir.place_type(t->f, p);
+    if (fir.type_aggregate(ty)) {
+        memset_at(t, place_addr(t, p), ty);
+        return;
+    }
+    place_store(t, p, zero_value(t->g, ty));
+}
+
+// `llvm.memcpy` of a value of type `ty` from `from` to `to`.
+fn copy_to(translator mut* t, gen.gen_val to, gen.gen_val from, types.node* ty) void {
+    u64 align = types.type_alignof(ty);
+    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty));
+}
+
+// `llvm.memset` of a value of type `ty` at `at` to zero.
+fn memset_at(translator mut* t, gen.gen_val at, types.node* ty) void {
+    gen.gen_memset_zero(t->g, at, types.type_alignof(ty), types.type_sizeof(ty));
+}
+
+// ---- operands ----------------------------------------------------------------------------------
+
+// The zero value of the scalar type `ty`.
+fn zero_value(gen.emitter mut* g, types.node* ty) gen.gen_val {
+    string vt = gen.gen_value_type(g, ty);
+    if (types.type_is_float(ty)) {
+        return gen.gen_literal(g, vt, "0.0");
+    }
+    switch (ty->kind) {
+    case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_fn,
+        types.type_kind.k_null:
+        return gen.gen_literal(g, vt, "null");
+    default:
+        break;
+    }
+    if (gen.place_is_bool(ty)) {
+        return gen.gen_literal(g, vt, "false");
+    }
+    return gen.gen_const_unsigned(g, vt, 0);
+}
+
+/// The value of the scalar constant `c`, which prints no instruction. `bytes` is the address of
+/// its `@.str.N`, an enum table its `@.enum.m.E`, and a function its symbol (toolchain.md 6 items
+/// 5 and 21). A `string` constant and an aggregate `zero` fill a place and have no value.
+fn constant_value(translator mut* t, fir.constant c) gen.gen_val {
+    gen.emitter mut* g = t->g;
+    switch (c.kind) {
+    case fir.const_kind.ck_int, fir.const_kind.ck_float:
+        return gen.gen_const_value(g, c.ty, c.value);
+    case fir.const_kind.ck_bool:
+        if (c.value.mag != 0) {
+            return gen.gen_literal(g, "i1", "true");
+        }
+        return gen.gen_literal(g, "i1", "false");
+    case fir.const_kind.ck_null:
+        return gen.gen_literal(g, "ptr", "null");
+    case fir.const_kind.ck_zero:
+        if (fir.type_aggregate(c.ty)) {
+            panic("fir_llvm.constant_value: the zero of an aggregate has no value");
+        }
+        return zero_value(g, c.ty);
+    case fir.const_kind.ck_string:
+        panic("fir_llvm.constant_value: a string constant has no value");
+    case fir.const_kind.ck_bytes:
+        return gen.gen_literal(g, "ptr", gen.gen_str_ref(g, c.text));
+    case fir.const_kind.ck_enum_table:
+        return gen.gen_literal(g, "ptr", gen.gen_enum_ref(g, c.sym));
+    case fir.const_kind.ck_fn:
+        return gen.gen_literal(g, "ptr", gen.gen_symbol_ref(g, c.sym));
+    }
+}
+
+/// The value of the scalar operand `o`. `copy p` loads `p`, or names the register. `move p` loads
+/// `p` and then zeroes it with `store ptr null`, unless `p` is a temporary, whose move prints no
+/// zeroing (spec/fir.md 12.1, toolchain.md 6 item 18).
+fn operand_value(translator mut* t, fir.operand o) gen.gen_val {
+    if (o.kind == fir.operand_kind.ok_const) {
+        return constant_value(t, o.value);
+    }
+    if (o.kind == fir.operand_kind.ok_copy || whole_register(t, o.place)) {
+        return place_load(t, o.place);
+    }
+    types.node* ty = fir.place_type(t->f, o.place);
+    gen.gen_place at = gen.gen_place{place_addr(t, o.place), ty};
+    gen.gen_val v = gen.gen_load_place(t->g, at);
+    if (!temporary_place(t, o.place)) {
+        gen.gen_zero_owner(t->g, at);
+    }
+    return v;
+}
+
+// An operand after its read: the scalar value, the `@.str.N` of a `string` constant, or the
+// address that holds an aggregate. `zero` is set for an aggregate `zero` constant, which has no
+// read.
+struct held {
+    gen.gen_val value;
+    gen.gen_val addr;
+    types.node* ty;
+    bool aggregate;
+    bool text;
+    u64 len;
+    bool zero;
+}
+
+// Reads the operand `o` of type `ty` before the destination is written (spec/fir.md 6). A scalar
+// goes into a register. An aggregate `move` that is no temporary goes into a new `%tmp` slot,
+// and its place is then zeroed (toolchain.md 6 item 18). When `own_copy` is set, an aggregate
+// `copy` that is no temporary goes into a new `%tmp` slot too (spec/fir.md 12.1, `aggregate`). A
+// temporary is a `%tmp` slot already, which nothing else writes.
+fn hold(translator mut* t, fir.operand o, types.node* ty, bool own_copy) held {
+    held mut h = held{.ty = ty, .aggregate = fir.type_aggregate(ty)};
+    if (!h.aggregate) {
+        h.value = operand_value(t, o);
+        return h;
+    }
+    if (o.kind == fir.operand_kind.ok_const) {
+        if (o.value.kind == fir.const_kind.ck_string) {
+            h.text = true;
+            h.value = gen.gen_literal(t->g, "ptr", gen.gen_str_ref(t->g, o.value.text));
+            h.len = o.value.text.len;
+        } else if (o.value.kind == fir.const_kind.ck_zero) {
+            h.zero = true;
+        } else {
+            panic("fir_llvm.hold: a scalar constant of an aggregate type");
+        }
+        return h;
+    }
+    h.addr = place_addr(t, o.place);
+    bool moves = o.kind == fir.operand_kind.ok_move;
+    if (temporary_place(t, o.place) || (!moves && !own_copy)) {
+        return h;
+    }
+    gen.gen_val from = h.addr;
+    h.addr = gen.gen_temp_place(t->g, ty).addr;
+    copy_to(t, h.addr, from, ty);
+    if (moves) {
+        memset_at(t, from, ty);
+    }
+    return h;
+}
+
+// Writes the held operand `h` into the storage at `to`.
+fn write_held(translator mut* t, held* h, gen.gen_val to) void {
+    if (!h->aggregate) {
+        gen.gen_store_place(t->g, gen.gen_place{to, h->ty}, h->value);
+    } else if (h->zero) {
+        memset_at(t, to, h->ty);
+    } else if (h->text) {
+        gen.gen_span_init(t->g, to, h->value, gen.gen_const_unsigned(t->g, "i64", h->len));
+    } else {
+        copy_to(t, to, h->addr, h->ty);
+    }
+}
+
+// ---- rvalues -----------------------------------------------------------------------------------
+
+// Whether `a` and `b` are one place: the same base and the same projections.
+fn place_same(fir.func* f, fir.place a, fir.place b) bool {
+    if (a.base != b.base || a.proj_len != b.proj_len) {
+        return false;
+    }
+    if (a.base == fir.base_kind.bk_global && a.global != b.global) {
+        return false;
+    }
+    if (a.base == fir.base_kind.bk_local && a.local != b.local) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < a.proj_len) {
+        fir.projection x = fir.place_projection(f, a, i);
+        fir.projection y = fir.place_projection(f, b, i);
+        if (x.kind != y.kind || x.field != y.field || x.index != y.index) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Whether `a` and `b` are one operand: one kind, and one place or one constant.
+fn operand_same(fir.func* f, fir.operand a, fir.operand b) bool {
+    if (a.kind != b.kind) {
+        return false;
+    }
+    if (a.kind != fir.operand_kind.ok_const) {
+        return place_same(f, a.place, b.place);
+    }
+    fir.constant x = a.value;
+    fir.constant y = b.value;
+    return x.kind == y.kind && x.ty == y.ty && consts.cv_eq(x.value, y.value);
+}
+
+// The checked form of `kind`: `add` for `add_overflows`, and so on.
+fn checked_form(fir.rvalue_kind kind) fir.rvalue_kind {
+    switch (kind) {
+    case fir.rvalue_kind.rv_add_overflows:
+        return fir.rvalue_kind.rv_add;
+    case fir.rvalue_kind.rv_sub_overflows:
+        return fir.rvalue_kind.rv_sub;
+    default:
+        return fir.rvalue_kind.rv_mul;
+    }
+}
+
+// The family of the overflow intrinsic of `kind` on a signed or unsigned operand.
+fn overflow_family(fir.rvalue_kind kind, bool sign) u64 {
+    switch (kind) {
+    case fir.rvalue_kind.rv_add_overflows:
+        if (sign) {
+            return gen.OVF_SADD;
+        }
+        return gen.OVF_UADD;
+    case fir.rvalue_kind.rv_sub_overflows:
+        if (sign) {
+            return gen.OVF_SSUB;
+        }
+        return gen.OVF_USUB;
+    default:
+        if (sign) {
+            return gen.OVF_SMUL;
+        }
+        return gen.OVF_UMUL;
+    }
+}
+
+// `add_overflows(a, b)` and its siblings in statement `s`: the intrinsic of the signedness and the
+// width of `a`, `extractvalue 0` and `extractvalue 1` (toolchain.md 6 item 15). The note of the
+// block keeps `extractvalue 0` for the `add` of the continuation, until a later assignment or
+// `del` of the block clears it. The value is `extractvalue 1`.
+fn overflows(translator mut* t, fir.statement* s) gen.gen_val {
+    fir.rvalue r = s->value;
+    fir.operand x = fir.rvalue_operand(t->f, r, 0);
+    fir.operand y = fir.rvalue_operand(t->f, r, 1);
+    types.node* ty = fir.operand_type(t->f, x);
+    gen.gen_val a = operand_value(t, x);
+    gen.gen_val b = operand_value(t, y);
+    u64 which = overflow_family(r.kind, gen.gen_is_signed(ty));
+    gen.gen_use_intrinsic(t->g, gen_expr.overflow_slot(which, gen.gen_int_bits(ty)));
+    gen.gen_use_attr(t->g, gen.ATTR_OVERFLOW);
+    gen.gen_val mut value = gen.gen_val{};
+    gen.gen_val bad = gen_expr.gen_overflow_call(t->g, which, a, b, &value);
+    bool flag = s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0;
+    t->notes[cast(t->block, u64)] = overflow_note{flag, checked_form(r.kind), x, y,
+                                                  s->place.local, value};
+    return bad;
+}
+
+// Whether the `add`, `sub` or `mul` `r` takes the `extractvalue 0` of the note of the check that
+// continues at the block being translated: the same operation over the same operands
+// (spec/fir.md 12.2).
+fn reuses_note(translator* t, fir.rvalue r) bool {
+    overflow_note* n = &t->pending;
+    if (!n->set || n->kind != r.kind) {
+        return false;
+    }
+    return operand_same(t->f, n->a, fir.rvalue_operand(t->f, r, 0))
+        && operand_same(t->f, n->b, fir.rvalue_operand(t->f, r, 1));
+}
+
+// The instruction of an arithmetic, bitwise or shift rvalue on the type `ty`.
+fn operation(fir.rvalue_kind kind, types.node* ty) string {
+    bool sign = gen.gen_is_signed(ty);
+    switch (kind) {
+    case fir.rvalue_kind.rv_add:
+        return "add";
+    case fir.rvalue_kind.rv_sub:
+        return "sub";
+    case fir.rvalue_kind.rv_mul:
+        return "mul";
+    case fir.rvalue_kind.rv_div:
+        if (sign) {
+            return "sdiv";
+        }
+        return "udiv";
+    case fir.rvalue_kind.rv_rem:
+        if (sign) {
+            return "srem";
+        }
+        return "urem";
+    case fir.rvalue_kind.rv_and:
+        return "and";
+    case fir.rvalue_kind.rv_or:
+        return "or";
+    case fir.rvalue_kind.rv_xor:
+        return "xor";
+    case fir.rvalue_kind.rv_shl:
+        return "shl";
+    case fir.rvalue_kind.rv_shr:
+        if (sign) {
+            return "ashr";
+        }
+        return "lshr";
+    case fir.rvalue_kind.rv_fadd:
+        return "fadd";
+    case fir.rvalue_kind.rv_fsub:
+        return "fsub";
+    case fir.rvalue_kind.rv_fmul:
+        return "fmul";
+    case fir.rvalue_kind.rv_fdiv:
+        return "fdiv";
+    default:
+        panic("fir_llvm.operation: not an operation of two operands");
+    }
+}
+
+// The `icmp` predicate of a comparison on the type `ty`, or the `fcmp` predicate of a float: an
+// ordered predicate, except `une`, which is true for a NaN.
+fn predicate(fir.rvalue_kind kind, types.node* ty) string {
+    bool float = types.type_is_float(ty);
+    bool sign = gen.gen_is_signed(ty);
+    switch (kind) {
+    case fir.rvalue_kind.rv_eq:
+        if (float) {
+            return "oeq";
+        }
+        return "eq";
+    case fir.rvalue_kind.rv_ne:
+        if (float) {
+            return "une";
+        }
+        return "ne";
+    case fir.rvalue_kind.rv_lt:
+        if (float) {
+            return "olt";
+        }
+        if (sign) {
+            return "slt";
+        }
+        return "ult";
+    case fir.rvalue_kind.rv_le:
+        if (float) {
+            return "ole";
+        }
+        if (sign) {
+            return "sle";
+        }
+        return "ule";
+    case fir.rvalue_kind.rv_gt:
+        if (float) {
+            return "ogt";
+        }
+        if (sign) {
+            return "sgt";
+        }
+        return "ugt";
+    default:
+        if (float) {
+            return "oge";
+        }
+        if (sign) {
+            return "sge";
+        }
+        return "uge";
+    }
+}
+
+// `a op b`: both operands in order, then the instruction that the type of `a` selects (spec/fir.md
+// 12.2). An `add`, `sub` or `mul` that the note of the block covers prints nothing.
+fn binary_value(translator mut* t, fir.rvalue r) gen.gen_val {
+    if (reuses_note(t, r)) {
+        return t->pending.value;
+    }
+    fir.operand x = fir.rvalue_operand(t->f, r, 0);
+    types.node* ty = fir.operand_type(t->f, x);
+    gen.gen_val a = operand_value(t, x);
+    gen.gen_val b = operand_value(t, fir.rvalue_operand(t->f, r, 1));
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_eq, fir.rvalue_kind.rv_ne, fir.rvalue_kind.rv_lt,
+        fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt, fir.rvalue_kind.rv_ge:
+        if (types.type_is_float(ty)) {
+            return gen.gen_fcmp(t->g, predicate(r.kind, ty), a, b);
+        }
+        return gen.gen_icmp(t->g, predicate(r.kind, ty), a, b);
+    default:
+        return gen.gen_binary(t->g, operation(r.kind, ty), a, b);
+    }
+}
+
+// `not(a)`: `xor` with `true` for a `bool` and with `-1` for an integer.
+fn not_value(translator mut* t, fir.operand x) gen.gen_val {
+    types.node* ty = fir.operand_type(t->f, x);
+    gen.gen_val a = operand_value(t, x);
+    if (gen.place_is_bool(ty)) {
+        return gen.gen_binary(t->g, "xor", a, gen.gen_literal(t->g, "i1", "true"));
+    }
+    return gen.gen_binary(t->g, "xor", a, gen.gen_const_signed(t->g, a.ty, -1));
+}
+
+// `alloc<T>(n)` at the location of statement `s`: `std.rt.alloc` with the size of `T`, `n`, and the
+// file, the line and the column (toolchain.md 6 item 17).
+fn alloc_value(translator mut* t, fir.statement* s) gen.gen_val {
+    gen.gen_val n = operand_value(t, fir.rvalue_operand(t->f, s->value, 0));
+    gen.gen_args mut args = gen.gen_args_init();
+    defer gen.gen_args_free(&args);
+    u64 size = types.type_sizeof(s->value.ty);
+    gen.gen_args_add(&args, gen.gen_const_unsigned(t->g, "i64", size));
+    gen.gen_args_add(&args, n);
+    gen.gen_args_add_loc(t->g, &args, s->loc);
+    return gen.gen_call_rt_value(t->g, runtime_sig.rt_entry.rt_alloc, "ptr", &args);
+}
+
+// A call, which T-251 translates: the report of gen.gen_todo, and `poison` of the result type, so
+// that the text stays well formed.
+fn call_value(translator mut* t, fir.statement* s) gen.gen_val {
+    gen.gen_todo(t->g, s->loc, "a call");
+    types.node* ty = fir.rvalue_type(t->f, s->value);
+    return gen.gen_literal(t->g, gen.gen_value_type(t->g, ty), "poison");
+}
+
+/// The value of the scalar rvalue of the assignment `s` (spec/fir.md 12.2). The function reads
+/// the operands in order and writes nothing into the place of `s`.
+fn rvalue_value(translator mut* t, fir.statement* s) gen.gen_val {
+    fir.rvalue r = s->value;
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_use:
+        return operand_value(t, fir.rvalue_operand(t->f, r, 0));
+    case fir.rvalue_kind.rv_add_overflows, fir.rvalue_kind.rv_sub_overflows,
+        fir.rvalue_kind.rv_mul_overflows:
+        return overflows(t, s);
+    case fir.rvalue_kind.rv_not:
+        return not_value(t, fir.rvalue_operand(t->f, r, 0));
+    case fir.rvalue_kind.rv_fneg:
+        gen.gen_val a = operand_value(t, fir.rvalue_operand(t->f, r, 0));
+        return gen.gen_unary_op(t->g, "fneg", a);
+    case fir.rvalue_kind.rv_cast:
+        fir.operand x = fir.rvalue_operand(t->f, r, 0);
+        gen.gen_val v = operand_value(t, x);
+        return gen_expr.gen_cast_value(t->g, s->loc, r.ty, fir.operand_type(t->f, x), v);
+    case fir.rvalue_kind.rv_addr:
+        return place_addr(t, r.place);
+    case fir.rvalue_kind.rv_alloc:
+        return alloc_value(t, s);
+    case fir.rvalue_kind.rv_call:
+        return call_value(t, s);
+    case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_aggregate:
+        panic("fir_llvm.rvalue_value: an rvalue of an aggregate type");
+    default:
+        return binary_value(t, r);
+    }
+}
+
+// A bound of `slice_ptr` as an `i64`, widened by the signedness of its type as the direct path
+// widens it.
+fn bound_value(translator mut* t, fir.operand o) gen.gen_val {
+    types.node* ty = fir.operand_type(t->f, o);
+    gen.gen_val v = operand_value(t, o);
+    return gen.gen_resize(t->g, v, gen.gen_int_bits(ty), "i64", BITS_64, gen.gen_is_signed(ty));
+}
+
+// The type of member `k` of the aggregate type `ty`: a field of a struct, an element of a fixed
+// array, or a header field of a span or a `string`.
+fn member_type(translator* t, types.node* ty, u32 k) types.node* {
+    if (ty->kind == types.type_kind.k_array) {
+        return ty->elem;
+    }
+    return fir.apply_projection(t->f, ty, fir.projection{fir.proj_kind.pj_field, k, 0});
+}
+
+// The address of member `k` of the aggregate of type `ty` at `at`.
+fn member_addr(translator mut* t, types.node* ty, gen.gen_val at, u32 k) gen.gen_val {
+    if (ty->kind == types.type_kind.k_array) {
+        gen.gen_val index = gen.gen_const_unsigned(t->g, "i64", cast(k, u64));
+        return gen.gen_gep_array(t->g, ty, at, index);
+    }
+    return field_addr(t, ty, at, k);
+}
+
+// `aggregate T(...)` into `dst`: every operand is read first, in order, then each member is
+// written through a `getelementptr` of the destination (spec/fir.md 6, 12.1).
+fn aggregate_into(translator mut* t, fir.rvalue r, fir.place dst) void {
+    types.node* ty = r.ty;
+    held mut@ own members = new(held, cast(r.ops_len, u64));
+    defer del(members);
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        types.node* mt = member_type(t, ty, k);
+        members[cast(k, u64)] = hold(t, fir.rvalue_operand(t->f, r, k), mt, true);
+        k += 1;
+    }
+    gen.gen_val at = place_addr(t, dst);
+    k = 0;
+    while (k < r.ops_len) {
+        write_held(t, &members[cast(k, u64)], member_addr(t, ty, at, k));
+        k += 1;
+    }
+}
+
+// `slice(p, lo, hi)` into `dst`: the address of element `lo` of `p`, `sub hi, lo`, then the two
+// header fields of the destination (toolchain.md 6 item 16).
+fn slice_into(translator mut* t, fir.rvalue r, fir.place dst) void {
+    gen.gen_val lo = operand_value(t, fir.rvalue_operand(t->f, r, 0));
+    gen.gen_val hi = operand_value(t, fir.rvalue_operand(t->f, r, 1));
+    types.node* ty = fir.place_type(t->f, r.place);
+    gen.gen_val base = element_addr(t, ty, place_addr(t, r.place), lo);
+    gen.gen_val len = gen.gen_binary(t->g, "sub", hi, lo);
+    gen.gen_span_init(t->g, place_addr(t, dst), base, len);
+}
+
+// `slice_ptr(a, lo, hi)` into `dst`: the pointer, each bound as an `i64`, the element address
+// at `lo`, `sub hi, lo`, then the header. A pointer has no length, so nothing is checked.
+fn slice_ptr_into(translator mut* t, fir.rvalue r, fir.place dst) void {
+    fir.operand x = fir.rvalue_operand(t->f, r, 0);
+    gen.gen_val p = operand_value(t, x);
+    gen.gen_val lo = bound_value(t, fir.rvalue_operand(t->f, r, 1));
+    gen.gen_val hi = bound_value(t, fir.rvalue_operand(t->f, r, 2));
+    types.node* elem = fir.operand_type(t->f, x)->elem;
+    gen.gen_val base = gen.gen_gep_element(t->g, elem, p, lo);
+    gen.gen_val len = gen.gen_binary(t->g, "sub", hi, lo);
+    gen.gen_span_init(t->g, place_addr(t, dst), base, len);
+}
+
+/// Writes the rvalue of aggregate type of the assignment `s` into its place (spec/fir.md 12.1,
+/// 12.2). The operands are read first, then the address of the place is computed, then the
+/// value is written: `copy` and a `cast` are `llvm.memcpy`, `move` goes through an intermediate,
+/// `zero` is `llvm.memset`, a `string` constant writes the header, and `aggregate`, `slice` and
+/// `slice_ptr` write member by member.
+fn rvalue_into(translator mut* t, fir.statement* s) void {
+    fir.rvalue r = s->value;
+    types.node* ty = fir.place_type(t->f, s->place);
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_cast:
+        held h = hold(t, fir.rvalue_operand(t->f, r, 0), ty, false);
+        write_held(t, &h, place_addr(t, s->place));
+    case fir.rvalue_kind.rv_aggregate:
+        aggregate_into(t, r, s->place);
+    case fir.rvalue_kind.rv_slice:
+        slice_into(t, r, s->place);
+    case fir.rvalue_kind.rv_slice_ptr:
+        slice_ptr_into(t, r, s->place);
+    case fir.rvalue_kind.rv_call:
+        gen.gen_todo(t->g, s->loc, "a call");
+    default:
+        panic("fir_llvm.rvalue_into: a scalar rvalue into an aggregate place");
+    }
+}
+
+// ---- statements --------------------------------------------------------------------------------
+
+// `del(move p)`: the pointer word, field 0 of a span or a `string`, the call of `std.rt.free`,
+// then the zero value into `p`, unless `p` is a temporary (toolchain.md 6 item 17, spec/fir.md
+// 12.1).
+fn del_place(translator mut* t, fir.place p) void {
+    types.node* ty = fir.place_type(t->f, p);
+    gen.gen_val mut ptr = gen.gen_val{};
+    gen.gen_val mut at = gen.gen_val{};
+    bool reg = whole_register(t, p);
+    if (reg) {
+        ptr = register_value(t, p.local);
+    } else {
+        at = place_addr(t, p);
+        if (fir.type_aggregate(ty)) {
+            ptr = gen.gen_span_ptr(t->g, at);
+        } else {
+            ptr = gen.gen_load_place(t->g, gen.gen_place{at, ty});
+        }
+    }
+    gen.gen_args mut args = gen.gen_args_init();
+    gen.gen_args_add(&args, ptr);
+    gen.gen_call_rt(t->g, runtime_sig.rt_entry.rt_free, &args);
+    gen.gen_args_free(&args);
+    if (reg || temporary_place(t, p)) {
+        return;
+    }
+    gen.gen_zero_owner(t->g, gen.gen_place{at, ty});
+}
+
+/// Translates the statement `s` of the block being translated (spec/fir.md 12.2). An assignment
+/// reads its rvalue before it computes the address of its place (12.5). `live` and `dead` print
+/// nothing.
+fn translate_statement(translator mut* t, fir.statement* s) void {
+    if (s->kind == fir.stmt_kind.st_assign || s->kind == fir.stmt_kind.st_del) {
+        // a statement after the intrinsic can write one of its operands, so the note of the block
+        // holds only for an intrinsic that no assignment and no `del` follows
+        t->notes[cast(t->block, u64)].set = false;
+    }
+    switch (s->kind) {
+    case fir.stmt_kind.st_assign:
+        if (fir.type_aggregate(fir.place_type(t->f, s->place))) {
+            rvalue_into(t, s);
+        } else {
+            place_store(t, s->place, rvalue_value(t, s));
+        }
+    case fir.stmt_kind.st_del:
+        del_place(t, s->place);
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        return;
+    }
+    // only the first assignment of a continuation takes the note of its check
+    t->pending.set = false;
+}
+
+/// Starts the translation of block `b`: the note of the overflow check whose continuation `b` is
+/// becomes pending, when that check tests the flag of the note and no assignment and no `del`
+/// follows the intrinsic in its block.
+fn begin_block(translator mut* t, u32 b) void {
+    t->block = b;
+    t->pending = overflow_note{};
+    u32 from = t->cont_of[cast(b, u64)];
+    if (from == 0) {
+        return;
+    }
+    overflow_note* n = &t->notes[cast(from - 1, u64)];
+    fir.operand cond = fir.block_at(t->f, from - 1)->term.cond;
+    bool tests = cond.kind == fir.operand_kind.ok_copy && cond.place.proj_len == 0
+        && cond.place.base == fir.base_kind.bk_local && cond.place.local == n->flag;
+    if (n->set && tests) {
+        t->pending = *n;
+    }
+}
+
+/// Translates each statement of block `b` in order. The terminator is not written here.
+fn translate_block(translator mut* t, u32 b) void {
+    begin_block(t, b);
+    u32 mut i = 0;
+    while (i < fir.block_statement_count(t->f, b)) {
+        translate_statement(t, fir.block_statement(t->f, b, i));
+        i += 1;
+    }
+}

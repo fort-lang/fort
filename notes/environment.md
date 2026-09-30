@@ -277,6 +277,12 @@ without a rewrite.
   diagnostics the restored source cannot produce, and `build/Linux/debug/fort --check` printed
   `constant expression out of range` on a program with no constant in it. No build error said so.
   `ninja -t clean` and a full rebuild cleared it, and the same three suites then passed.
+  T-249 met it with two guest programs and no host at all. A measurement program rewrote one
+  `.ll` under `build/` shorter, in place through `O_TRUNC`, and `opt-18` run next in the guest
+  reported `expected top-level entity` at the line after the new end, and once ended with SIGSEGV,
+  while `python3` in the guest read 4387308 bytes with no NUL and `llvm-as-18` accepted a copy.
+  A program that writes a file for a second tool to read writes each run to a new path, or under
+  the guest's own `/tmp`.
 - **A mutation harness must restore on the path it does not plan to take, and must prove the
   restore.** The stale page above was the face of T-125's incident that a cure exists for; the
   face that caused the damage was different. `bash harness.sh | head -8` closed the pipe, SIGPIPE
