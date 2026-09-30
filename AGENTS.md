@@ -86,7 +86,7 @@ hand.
 Each implementor MUST work in its own worktree `.worktrees/fort-<name>` on a branch prefixed
 `bug/`, `feat/`, etc. The coordinator deletes the worktree once the change is merged. Every
 worktree shares one stash list, so never run a bare `git stash` or `git stash pop`: a pop applies
-another branch's entry. Set work aside with a WIP commit instead (T-212).
+another branch's entry. Set work aside with a WIP commit instead (T-212). Git ignores `.worktrees/`.
 
 #### Change Implementation Loop
 Always implement a change in small incremental commits. A commit MUST be composed of a
@@ -101,13 +101,13 @@ meaningful commit message that describes _what_ and _why_ -- do not just collate
 commit messages. Agents that cannot run an interactive rebase use the equivalent
 `git reset --soft $(git merge-base main HEAD) && git commit` (not `git reset --soft main`:
 if `main` moved since the branch was cut, that commits the branch's old tree on top of the
-new `main` and silently reverts its newer commits). A feature branch made of several
-self-contained units of work (for example the language design, or a compiler pass plus its tests
-plus its documentation) keeps its individual commits. **Every merge is `--ff-only`** (the user,
-2026-09-17): rebase onto the target first, then merge. A merge that cannot fast-forward means the
-target moved and the rebase is missing. No merge commit enters the history. Push only `main` to
-`origin` (`fort-lang/fort`) after each merge; CI runs on that push and `ci-status` gates PRs. Fix
-a red `ci-status` on `main` before the next merge (T-261). Git ignores `.worktrees/`.
+new `main` and silently reverts its newer commits). A feature branch made of several self-contained
+units of work (for example the language design, or a compiler pass plus its tests plus its
+documentation) keeps its individual commits. **Every merge is `--ff-only`** (the user, 2026-09-17):
+rebase onto the target first, then merge. A merge that cannot fast-forward means the target moved
+and the rebase is missing. No merge commit enters the history. Before a merge, push the branch to
+`origin`, run `gh workflow run ci.yml --ref <branch>` and wait for its green `ci-status` (T-268).
+Then push `main` and delete the branch. A red `ci-status` on `main` blocks the next merge (T-261).
 
 ### Tickets
 - Keep one markdown ticket per deliverable in `.tickets/` in the main checkout, not a worktree.
