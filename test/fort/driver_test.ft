@@ -1042,11 +1042,80 @@ fn fir_of_a_clean_program_exits_zero() void {
     assert(run(no_main[0..3]) == EXIT_COMPILE_ERROR);
 }
 
+// A program whose functions build an aggregate, pass it to a call, and read a field of the result.
+string[11] FIR_CALLS = {
+    "struct pair {",
+    "    i32 a;",
+    "    i32 b;",
+    "}",
+    "fn swap(pair p) pair {",
+    "    return pair{p.b, p.a};",
+    "}",
+    "fn main() i32 {",
+    "    pair q = swap(pair{1, 2});",
+    "    return q.a;",
+    "}",
+};
+
+// What `fort --fir` writes for FIR_CALLS: both functions, lowered, verified and printed, with a
+// blank line between them.
+string[22] FIR_CALLS_TEXT = {
+    "fn fir_calls.swap(_1 (p): pair) -> pair {",
+    "    let _0: pair;",
+    "",
+    "    bb0: {",
+    "        _0 = aggregate pair(copy _1.1, copy _1.0) #6:12 s1;",
+    "        return #6:5 s1;",
+    "    }",
+    "}",
+    "",
+    "fn fir_calls.main() -> i32 {",
+    "    let _0: i32;",
+    "    let _1 (q): pair #9:10;",
+    "    let _2: pair #9:19;",
+    "",
+    "    bb0: {",
+    "        live(_1) #9:10 s1;",
+    "        _2 = aggregate pair(const i32 1, const i32 2) #9:19 s1;",
+    "        _1 = call fn fir_calls.swap(copy _2) #9:18 s1;",
+    "        _0 = copy _1.0 #10:13 s2;",
+    "        return #10:5 s2;",
+    "    }",
+    "}",
+};
+
+// --fir lowers a literal, a call with an aggregate argument and result, and a field of a local,
+// runs the verifier on each function, and prints them (spec/fir.md 9.4).
+fn fir_lowers_places_and_calls() void {
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    for (string line : FIR_CALLS) {
+        strbuf.append(&src, line);
+        strbuf.push(&src, '\n');
+    }
+    write_file("fir_calls.ft", strbuf.view(&src));
+    string[3] mut argv = {"fort", "--fir", "fir_calls.ft"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    for (string line : FIR_CALLS_TEXT) {
+        strbuf.append(&want, line);
+        strbuf.push(&want, '\n');
+    }
+    assert(out == strbuf.view(&want));
+}
+
+// A program with a function that the lowering does not lower yet, a loop, and one that it lowers.
+string FIR_MIXED =
+    "fn helper() void {\n    while (true) {\n    }\n}\nfn main() i32 {\n    return 0;\n}\n";
+
 // --fir writes the functions in source order with a blank line between two of them, and the line
 // `// not supported: <kind> at l:c` in place of a function that the lowering does not lower yet.
 fn fir_reports_a_function_that_it_does_not_lower() void {
-    write_file("fir_mixed.ft",
-               "fn helper() void {\n    helper();\n}\nfn main() i32 {\n    return 0;\n}\n");
+    write_file("fir_mixed.ft", FIR_MIXED);
     string[3] mut argv = {"fort", "--fir", "fir_mixed.ft"};
     assert(run(argv[0..3]) == EXIT_OK);
     assert(captured_err_is_empty());
@@ -1054,9 +1123,9 @@ fn fir_reports_a_function_that_it_does_not_lower() void {
     defer del(out);
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
-    strbuf.append(&want, "// not supported: call-stmt at 2:5\n\n");
+    strbuf.append(&want, "// not supported: while at 2:5\n\n");
     strbuf.append(&want, "fn fir_mixed.main() -> i32 {\n    let _0: i32;\n\n    bb0: {\n");
-    strbuf.append(&want, "        _0 = const i32 0 #5:12 s1;\n        return #5:5 s1;\n    }\n}\n");
+    strbuf.append(&want, "        _0 = const i32 0 #6:12 s1;\n        return #6:5 s1;\n    }\n}\n");
     assert(out == strbuf.view(&want));
 }
 
@@ -1297,6 +1366,7 @@ fn main() i32 {
     fir_combines_with_no_other_mode();
     fir_of_a_clean_program_exits_zero();
     fir_reports_a_function_that_it_does_not_lower();
+    fir_lowers_places_and_calls();
     fir_of_a_program_with_a_type_error_exits_one();
     fir_test_parses_as_a_flag();
     fir_test_combines_with_no_other_mode();

@@ -2,6 +2,8 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| refused release ok
+//| refused call release ok
+//| refused print release ok
 //| lowered release ok
 /// Checks that the lowering gives back every block that it takes (notes/testing.md 4). A function
 /// that fir_lower.lower_function refuses is released before the call returns, and a function that
@@ -16,10 +18,12 @@ import lower_env;
 // The count of the lowerings in one round.
 u64 CALLS = 100;
 
-u64 SOURCE_LINES = 16;
+u64 SOURCE_LINES = 35;
 
 // `f` fills every vector of a function: locals, blocks, statements, operands, arms and the
-// projections of a string equality. `g` fills some of them before a call stops it.
+// projections of a string equality. `g` fills some of them before a loop stops it. `h` stops at
+// `new` inside the members of a literal inside the arguments of a call, and `k` inside the
+// arguments of `fprintln`; each of those holds vectors of its own while it lowers its operands.
 string[SOURCE_LINES] SOURCE = {
     "fn f(i32 x, i32 y, bool c, string s) i32 {",
     "    i32 a = x + y;",
@@ -34,8 +38,27 @@ string[SOURCE_LINES] SOURCE = {
     "    i32 a = 1;",
     "    if (c) {",
     "        i32 b = a + 2;",
-    "        g(c);",
+    "        while (c) {",
+    "        }",
     "    }",
+    "}",
+    "struct pair {",
+    "    i32 a;",
+    "    i32 b;",
+    "}",
+    "fn take(i32 mut* own p) i32 {",
+    "    del(p);",
+    "    return 1;",
+    "}",
+    "fn pick(i32 a, i32 b, i32 c, i32 d, pair e, i32 f) i32 {",
+    "    return a;",
+    "}",
+    "fn h(i32 x) i32 {",
+    "    i32 a = x + 1;",
+    "    return pick(a, x, a, x, pair{a, take(new(i32))}, x);",
+    "}",
+    "fn k(i32 x) void {",
+    "    fprintln(x, x, take(new(i32)));",
     "}",
 };
 
@@ -79,6 +102,10 @@ fn rounds_leave_the_heap_where_it_was(string name, bool lowers) void {
 fn main() i32 {
     rounds_leave_the_heap_where_it_was("g", false);
     println("refused release ok");
+    rounds_leave_the_heap_where_it_was("h", false);
+    println("refused call release ok");
+    rounds_leave_the_heap_where_it_was("k", false);
+    println("refused print release ok");
     rounds_leave_the_heap_where_it_was("f", true);
     println("lowered release ok");
     return 0;

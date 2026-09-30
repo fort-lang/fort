@@ -486,7 +486,14 @@ bullet at a time and without a rewrite.
   starts the node: the operator of a binary or unary node, the `(` of a call, the `[` of an
   index, the `.` of a field, the `?` of `?:`, and the keyword of a statement or a `cast`. T-236
   took one location of an arm `move(p)` at the name and not at its `(`, and the run showed it.
-  Count the column of that token, or compute it from the source text with a script.
+  Count the column of that token, or compute it from the source text with a script. The sandbox
+  runtime also declares the nine print functions and `enum_member` (T-239). A line of FIR can pass
+  the 100 columns of a source line, such as a `print_enum` call with its member table, so
+  `lower_env.expect` joins a wanted line that ends with `\` to the next entry; no line of FIR ends
+  with `\`. Three of T-239's hand-derived texts failed at their first run, and the lowering was
+  right each time: a column of `&` read for that of `(`, the `\"` that the printer writes in a
+  `bytes` text, and the lengths of `i32[2][3]`, which D3.6 reads like C, two arrays of three.
+  Settle a column with a script that prints the column of each token, and a length with D3.6.
 - **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
   when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
   holds only the program, and `check_env` sandboxes get an empty runtime. Write

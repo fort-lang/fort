@@ -1,12 +1,14 @@
 /// Lowers the checked tree of one function to FIR (spec/fir.md 9). It numbers the named locals in
-/// a prescan, and it lowers blocks, `$if`, scalar declarations, `if` and a scalar `return`, with
-/// the scalar expressions and the runtime checks of their operators. A construct that it does not
-/// lower yet stops the lowering of its function with a report (spec/fir.md 9.8).
+/// a prescan, and it lowers blocks, `$if`, declarations, assignments, call statements, `if` and
+/// `return`, with the scalar expressions and the runtime checks of their operators, the places,
+/// the aggregate values and the calls. A construct that it does not lower yet stops the lowering
+/// of its function with a report (spec/fir.md 9.8).
 //
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: a lowerer lives for the lowering of one function. It reads the tree and the
-// annotations of the checker, and it writes neither. A scalar expression gives an operand, so
-// `T x = e` writes `_x = a` for the operand `a` of `e`, and an operation stands in a temporary.
+// annotations of the checker, and it writes neither. A scalar expression gives an operand, and an
+// operation stands in a temporary. An aggregate expression writes into the place that waits for
+// it, and an expression that designates storage gives a place.
 import ast;
 import check;
 import consts;
@@ -16,12 +18,22 @@ import gen;
 import lexer;
 import modules;
 import prim;
+import session;
 import std.strbuf;
 import types;
 
 // The module of the runtime, and its function that compares two strings.
 string RUNTIME_MODULE = "std.rt";
 string STR_EQ = "str_eq";
+
+// The fields of a span or a `string` header (spec/fir.md 5.5).
+u32 PTR_FIELD = 0;
+u32 LEN_FIELD = 1;
+
+// The descriptors of the print family without `f`, and the byte that `println` ends with.
+u64 FD_STDOUT = 1;
+u64 FD_STDERR = 2;
+u64 NEWLINE = 10;
 
 /// Why the lowering of a function stopped: the kind of the tree node that it does not lower yet,
 /// and the location of that node.
@@ -30,10 +42,27 @@ struct report {
     diag.loc at;
 }
 
+// The runtime functions of the print family, one for each form of argument (spec/toolchain.md 6
+// item 19).
+enum print_kind {
+    pk_i64,
+    pk_u64,
+    pk_bool,
+    pk_char,
+    pk_ptr,
+    pk_str,
+    pk_enum,
+    pk_f32,
+    pk_f64,
+}
+
+u64 PRINT_KINDS = 9;
+
 // The state of the lowering of one function. `block` receives the next statement. `counter` is
 // the last statement index that the walk gave, and `stmt` is the index of the statement that the
 // walk lowers now: 0 outside every statement (spec/fir.md 9.7). `str_eq` is the runtime function
-// that a string equality calls, looked up at the first one.
+// that a string equality calls, and `prints` holds the print functions of the runtime in the order
+// of print_kind; each is looked up at its first use.
 struct lowerer {
     check.checker mut* ck;
     fir.func mut* f;
@@ -42,6 +71,8 @@ struct lowerer {
     u32 stmt;
     ast.sym* str_eq;
     bool str_eq_known;
+    ast.sym*[PRINT_KINDS] prints;
+    bool prints_known;
     report why;
 }
 
@@ -192,6 +223,19 @@ fn bool_ty(lowerer mut* lw) types.node* {
     return prim_ty(lw, prim.prim_kind.prim_bool);
 }
 
+fn u64_ty(lowerer mut* lw) types.node* {
+    return prim_ty(lw, prim.prim_kind.prim_u64);
+}
+
+fn i64_ty(lowerer mut* lw) types.node* {
+    return prim_ty(lw, prim.prim_kind.prim_i64);
+}
+
+// Whether `t` is an `own` reference: an `own` pointer, `void* own`, `own` span or `string own`.
+fn own_reference(types.node* t) bool {
+    return types.type_is_reference(t) && t->is_own;
+}
+
 // Appends `p = r` to the current block, at `at` and with the index of the current statement.
 fn assign(lowerer mut* lw, fir.place p, fir.rvalue r, diag.loc at) void {
     fir.block_append(lw->f, lw->block, fir.stmt_assign(p, r, at, lw->stmt));
@@ -218,7 +262,8 @@ fn branch(lowerer mut* lw, fir.operand a, u32 yes, u32 no, diag.loc at) void {
 }
 
 // Ends the current block with `check(cond, kind, ...) -> bb` over the `len` reported operands
-// from `first`, and continues in `bb`, a new block. `cond` is true on failure (spec/fir.md 8).
+// from `first`, and continues in `bb`, a new block. `cond` is true on failure, except for the
+// kind `user` (spec/fir.md 8).
 fn check_then(lowerer mut* lw, fir.operand cond, fir.check_kind kind, u32 first, u32 len,
               diag.loc at) void {
     u32 next = fir.block_new(lw->f);
@@ -241,6 +286,96 @@ fn into_temp(lowerer mut* lw, types.node* ty, fir.rvalue r, diag.loc at) fir.ope
     u32 t = fir.local_add(lw->f, ty, fir.local_kind.lk_temp, null, at);
     assign(lw, fir.place_local(t), r, at);
     return read_temp(t, ty);
+}
+
+// ---- the materialization rule -------------------------------------------------------------------
+
+// Whether the expression `n` contains a writer: a call, which covers `move`, `del` and every
+// other builtin, or a `new` (spec/fir.md 9.4). A writer can change a place that an operand
+// before it names.
+fn contains_writer(ast.node* n) bool {
+    if (n == null) {
+        return false;
+    }
+    if (n->kind == ast.ast_kind.k_call || n->kind == ast.ast_kind.k_new) {
+        return true;
+    }
+    if (contains_writer(n->a) || contains_writer(n->b) || contains_writer(n->c)
+        || contains_writer(n->d)) {
+        return true;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (contains_writer(ast.ast_child(n, i))) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Writes to out[i], for each child `i` of `n`, whether a child after it contains a writer, and
+// returns whether any child does. `out` has one entry for each child.
+fn writers_after(ast.node* n, bool mut@ out) bool {
+    bool mut later = false;
+    u64 mut i = ast.ast_len(n);
+    while (i > 0) {
+        i -= 1;
+        out[i] = later;
+        later = later || contains_writer(ast.ast_child(n, i));
+    }
+    return later;
+}
+
+// Whether no writer can change the place `p`: fixed storage whose base is a temporary of the
+// lowering. The lowering takes the address of no temporary's own storage: `addr` and `slice`
+// name an lvalue, and the one lvalue on a temporary is an element that a span points to, which is
+// no fixed storage (spec/fir.md 5.5).
+fn out_of_reach(lowerer* lw, fir.place p) bool {
+    return p.base == fir.base_kind.bk_local
+        && fir.local_at(lw->f, p.local)->kind == fir.local_kind.lk_temp
+        && fir.place_fixed(lw->f, p);
+}
+
+// The type of a copy of a place of type `t`: `t` without `own` at the top level and at each level
+// that the place stores inline, the elements of a fixed array (spec/fir.md 9.4, D17.4). `own`
+// behind a pointer or a span stays.
+fn lent_type(lowerer mut* lw, types.node* t) types.node* {
+    types.table mut* tt = &lw->ck->types;
+    switch (t->kind) {
+    case types.type_kind.k_ptr:
+        return types.type_ptr(tt, t->elem, false, t->is_mut);
+    case types.type_kind.k_voidptr:
+        return types.type_voidptr(tt, false, t->is_mut);
+    case types.type_kind.k_span:
+        return types.type_span(tt, t->elem, false, t->is_mut);
+    case types.type_kind.k_string:
+        return types.type_string(tt, false);
+    case types.type_kind.k_array:
+        return types.type_array(tt, lent_type(lw, t->elem), t->len);
+    default:
+        return t;
+    }
+}
+
+// The materialization rule (spec/fir.md 9.4, principle 4). When `later` says that a later operand
+// of the same rvalue or call contains a writer, and `op` reads a place that a writer can reach,
+// the place is read now: `_t = copy p` in a temporary of the lent type of `p`, or `_t = move p`,
+// at `at`, and the operand reads `_t`. Else `op` stays as it is.
+fn materialize(lowerer mut* lw, fir.operand op, bool later, diag.loc at) fir.operand {
+    if (!later || op.kind == fir.operand_kind.ok_const || out_of_reach(lw, op.place)) {
+        return op;
+    }
+    types.node* mut t = fir.place_type(lw->f, op.place);
+    if (op.kind == fir.operand_kind.ok_copy) {
+        t = lent_type(lw, t);
+    }
+    u32 held = fir.local_add(lw->f, t, fir.local_kind.lk_temp, null, at);
+    assign(lw, fir.place_local(held), fir.rvalue_use(lw->f, op), at);
+    if (op.kind == fir.operand_kind.ok_move) {
+        return fir.operand_move(fir.place_local(held));
+    }
+    return fir.operand_copy(fir.place_local(held));
 }
 
 // ---- statements -------------------------------------------------------------------------------
@@ -278,6 +413,12 @@ fn lower_stmt(lowerer mut* lw, ast.node* n) bool {
     switch (n->kind) {
     case ast.ast_kind.k_var_decl:
         ok = lower_var_decl(lw, n);
+    case ast.ast_kind.k_assign:
+        ok = lower_assign(lw, n);
+    case ast.ast_kind.k_incdec:
+        ok = lower_incdec(lw, n);
+    case ast.ast_kind.k_call_stmt:
+        ok = lower_call_stmt(lw, n->a);
     case ast.ast_kind.k_if:
         ok = lower_if(lw, n);
     case ast.ast_kind.k_return:
@@ -289,22 +430,154 @@ fn lower_stmt(lowerer mut* lw, ast.node* n) bool {
     return ok;
 }
 
-// `T x = e;`: `live(_x)` at the declared name, then the operand of `e` into `_x` (spec/fir.md
-// 9.3). A local of an aggregate type waits for the lowering of places, and an `own` reference
-// for the lowering of ownership.
+// `T x = e;`: `live(_x)` at the declared name, then `e` into `_x` (spec/fir.md 9.3). An `own`
+// reference waits for the overwrite check of the lowering of ownership.
 fn lower_var_decl(lowerer mut* lw, ast.node* n) bool {
-    types.node* t = n->sym->ty;
-    if (fir.type_aggregate(t) || fir.type_owning(t)) {
+    if (own_reference(n->sym->ty)) {
         return unsupported(lw, n);
     }
     u32 x = local_of(lw, n->sym);
     fir.block_append(lw->f, lw->block, fir.stmt_live(x, n->name_loc, lw->stmt));
-    fir.operand mut v = fir.operand{};
-    if (!lower_operand(lw, n->b, &v)) {
+    return lower_into(lw, n->b, fir.place_local(x));
+}
+
+// The rvalue operator of the compound assignment token `op`, or `assign` for `=`. It copies
+// gen_stmt.compound_operator, and the copy stays until the migration removes the direct path
+// (T-255).
+fn compound_operator(lexer.tok_kind op) lexer.tok_kind {
+    switch (op) {
+    case lexer.tok_kind.plus_assign:
+        return lexer.tok_kind.plus;
+    case lexer.tok_kind.minus_assign:
+        return lexer.tok_kind.minus;
+    case lexer.tok_kind.star_assign:
+        return lexer.tok_kind.star;
+    case lexer.tok_kind.slash_assign:
+        return lexer.tok_kind.slash;
+    case lexer.tok_kind.percent_assign:
+        return lexer.tok_kind.percent;
+    case lexer.tok_kind.plus_wrap_assign:
+        return lexer.tok_kind.plus_wrap;
+    case lexer.tok_kind.minus_wrap_assign:
+        return lexer.tok_kind.minus_wrap;
+    case lexer.tok_kind.star_wrap_assign:
+        return lexer.tok_kind.star_wrap;
+    case lexer.tok_kind.amp_assign:
+        return lexer.tok_kind.amp;
+    case lexer.tok_kind.pipe_assign:
+        return lexer.tok_kind.pipe;
+    case lexer.tok_kind.caret_assign:
+        return lexer.tok_kind.caret;
+    case lexer.tok_kind.shl_assign:
+        return lexer.tok_kind.shl;
+    case lexer.tok_kind.shr_assign:
+        return lexer.tok_kind.shr;
+    default:
+        return lexer.tok_kind.assign;
+    }
+}
+
+// The place of the target `lv` of an assignment, in *out: the place with its index temporaries
+// and their checks, first (D6.3). When the right side `e` contains a writer and the place is no
+// fixed storage, a writer could move its storage, so the address is held now, `_a = addr mut(p)`,
+// and the place is `(*_a)` (spec/fir.md 9.3).
+fn target_place(lowerer mut* lw, ast.node* lv, ast.node* e, fir.place mut* out) bool {
+    if (!lower_place(lw, lv, out)) {
         return false;
     }
-    assign(lw, fir.place_local(x), fir.rvalue_use(lw->f, v), n->b->loc);
+    if (!contains_writer(e) || fir.place_fixed(lw->f, *out)) {
+        return true;
+    }
+    *out = hold_address(lw, *out, true, lv->loc);
     return true;
+}
+
+// `_a = addr(p)` in a new temporary at `at`, `addr mut(p)` when `is_mut` is set, and the place
+// `(*_a)`, which names the storage of `p` with no second read of the pointers that led to it.
+fn hold_address(lowerer mut* lw, fir.place p, bool is_mut, diag.loc at) fir.place {
+    types.node* t = types.type_ptr(&lw->ck->types, fir.place_type(lw->f, p), false, is_mut);
+    u32 a = fir.local_add(lw->f, t, fir.local_kind.lk_temp, null, at);
+    assign(lw, fir.place_local(a), fir.rvalue_addr(lw->f, p, is_mut), at);
+    return fir.place_deref(lw->f, fir.place_local(a));
+}
+
+// Whether the storage that `p` reaches through its last read of memory is mutable: the `mut` of
+// the last pointer that a deref reads, or of the last span that an index reads. An index on a
+// `string` gives a `char`, which no projection follows, so it is never that last read. `p` reads
+// memory to find its storage (fir.place_indirect).
+fn indirect_mut(fir.func* f, fir.place p) bool {
+    types.node* mut t = fir.base_type(f, p);
+    bool mut is_mut = false;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        bool span = t->kind == types.type_kind.k_span;
+        if (pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index && span)) {
+            is_mut = t->is_mut;
+        }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    return is_mut;
+}
+
+// The base `p` of an index or of a span expression whose index or bounds run after it. When
+// `later` says that they contain a writer and `p` reads memory to find its storage, its address
+// is held now: the writer could change a pointer that the address reads (D6.3, principle 4). The
+// header of a span or `string` at that address, and the element, are read where they are used.
+fn hold_base(lowerer mut* lw, fir.place p, bool later, diag.loc at) fir.place {
+    if (!later || !fir.place_indirect(lw->f, p)) {
+        return p;
+    }
+    return hold_address(lw, p, indirect_mut(lw->f, p), at);
+}
+
+// `lv = e;` and `lv op= e;` (spec/fir.md 9.3). `lv = e` writes `e` into the place of `lv`. `lv op=
+// e` reads the old value before `e`, `_old = copy p`, then writes `p = op(copy _old, e)` after the
+// checks of `op`, so the target is computed once (D6.3). An assignment into an `own` reference
+// waits for its overwrite check.
+fn lower_assign(lowerer mut* lw, ast.node* n) bool {
+    lexer.tok_kind op = compound_operator(cast(n->op, lexer.tok_kind));
+    if (op == lexer.tok_kind.assign && own_reference(n->a->ty)) {
+        return unsupported(lw, n);
+    }
+    fir.place mut p = fir.place{};
+    if (!target_place(lw, n->a, n->b, &p)) {
+        return false;
+    }
+    if (op == lexer.tok_kind.assign) {
+        return lower_into(lw, n->b, p);
+    }
+    fir.operand old = old_value(lw, p, n->a->loc);
+    fir.operand mut e = fir.operand{};
+    if (!lower_operand(lw, n->b, &e)) {
+        return false;
+    }
+    types.node* t = fir.place_type(lw->f, p);
+    assign(lw, p, operation(lw, op, t, old, e, n->loc), n->loc);
+    return true;
+}
+
+// `lv++;` and `lv--;`: `lv += 1` and `lv -= 1` (spec/fir.md 9.3).
+fn lower_incdec(lowerer mut* lw, ast.node* n) bool {
+    fir.place mut p = fir.place{};
+    if (!lower_place(lw, n->a, &p)) {
+        return false;
+    }
+    fir.operand old = old_value(lw, p, n->a->loc);
+    types.node* t = fir.place_type(lw->f, p);
+    lexer.tok_kind mut op = lexer.tok_kind.minus;
+    if (cast(n->op, lexer.tok_kind) == lexer.tok_kind.plus_plus) {
+        op = lexer.tok_kind.plus;
+    }
+    assign(lw, p, operation(lw, op, t, old, int_const(t, false, 1), n->loc), n->loc);
+    return true;
+}
+
+// `_old = copy p` in a new temporary at `at`, and the operand that reads it.
+fn old_value(lowerer mut* lw, fir.place p, diag.loc at) fir.operand {
+    types.node* t = lent_type(lw, fir.place_type(lw->f, p));
+    return into_temp(lw, t, fir.rvalue_use(lw->f, fir.operand_copy(p)), at);
 }
 
 // `if (c) A else B`: the operand of `c`, `switch -> [true: then, otherwise: else]`, and each arm,
@@ -352,25 +625,22 @@ fn lower_arm(lowerer mut* lw, ast.node* n, u32 done, diag.loc at) bool {
     return true;
 }
 
-// `return e` for a result that is no aggregate, with no deferred statement: the operand of `e`
-// into `_0`, then `return` (spec/fir.md 9.6 steps 1 and 4). For ANN_MOVE, the operand is `move
-// _x` of the local that `e` names. An aggregate result waits for the lowering of places.
+// `return e` with no deferred statement: `e` into `_0`, then `return` (spec/fir.md 9.6 steps 1
+// and 4). For ANN_MOVE, the operand is `move _x` of the local that `e` names. No deferred
+// statement is open, since the lowering does not lower `defer` yet, so an aggregate result goes
+// into `_0` itself.
 fn lower_return(lowerer mut* lw, ast.node* n) bool {
     if (n->a != null) {
-        if (fir.type_aggregate(fir.local_at(lw->f, 0)->ty)) {
-            return unsupported(lw, n);
-        }
-        fir.operand mut v = fir.operand{};
+        fir.place result = fir.place_local(0);
         if ((n->ann & check.ANN_MOVE) != 0) {
             fir.place mut x = fir.place{};
             if (!name_place(lw, n->a, &x)) {
                 panic("fir_lower.lower_return: an implicit move of no local");
             }
-            v = fir.operand_move(x);
-        } else if (!lower_operand(lw, n->a, &v)) {
+            assign(lw, result, fir.rvalue_use(lw->f, fir.operand_move(x)), n->a->loc);
+        } else if (!lower_into(lw, n->a, result)) {
             return false;
         }
-        assign(lw, fir.place_local(0), fir.rvalue_use(lw->f, v), n->a->loc);
     }
     terminate(lw, fir.term_return(n->loc, lw->stmt));
     return true;
@@ -378,18 +648,20 @@ fn lower_return(lowerer mut* lw, ast.node* n) bool {
 
 // ---- operands ---------------------------------------------------------------------------------
 
-// Lowers the scalar expression `n` to an operand in *out (spec/fir.md 9.4): a `const` for a
-// folded constant, `copy p` for a name, `move p` for `move(lv)`, and a temporary for an
-// operation. Each caller asks for a scalar, which the checker then gave the node: a string
-// operand of an equality goes to string_place, and an aggregate declaration or result stops
-// before its expression.
+// Lowers the expression `n` to an operand in *out (spec/fir.md 9.4): a `const` for a folded
+// constant, `copy p` for a place, `move p` for `move(lv)`, and a temporary for an operation. An
+// operand of an aggregate type is a place, which aggregate_operand gives.
 fn lower_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
+    if (fir.type_aggregate(n->ty)) {
+        return aggregate_operand(lw, n, out);
+    }
     if ((n->ann & check.ANN_CONST) != 0) {
         *out = fir.operand_const(constant_of(n->ty, check.check_node_value(lw->ck, n)));
         return true;
     }
     switch (n->kind) {
-    case ast.ast_kind.k_ident, ast.ast_kind.k_field:
+    case ast.ast_kind.k_ident, ast.ast_kind.k_field, ast.ast_kind.k_arrow,
+        ast.ast_kind.k_index:
         return lower_name(lw, n, out);
     case ast.ast_kind.k_unary:
         return lower_unary(lw, n, out);
@@ -403,7 +675,11 @@ fn lower_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
         if ((n->ann & check.ANN_MOVE) != 0) {
             return lower_move(lw, n, out);
         }
-        return unsupported(lw, n);
+        return lower_call_value(lw, n, out);
+    case ast.ast_kind.k_brace_init:
+        // `{}` of an enum, which the checker allows for no other scalar
+        *out = fir.operand_const(fir.const_zero(n->ty));
+        return true;
     default:
         return unsupported(lw, n);
     }
@@ -431,6 +707,150 @@ fn constant_of(types.node* t, consts.cval v) fir.constant {
     }
 }
 
+// An expression of an aggregate type as an operand, which is a place (spec/fir.md 6, D19.3):
+// `move p` for `move(lv)`, `copy p` for an expression that designates storage, and else the value
+// in a new temporary, read by `move _t` when it owns. A folded string constant goes into a
+// temporary, since a constant of an aggregate type fills a place and is no operand of one.
+fn aggregate_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
+    if (n->kind == ast.ast_kind.k_call && (n->ann & check.ANN_MOVE) != 0) {
+        return lower_move(lw, n, out);
+    }
+    if (designates(n) && !string_constant(lw, n)) {
+        fir.place mut p = fir.place{};
+        if (!lower_place(lw, n, &p)) {
+            return false;
+        }
+        *out = fir.operand_copy(p);
+        return true;
+    }
+    u32 t = fir.local_add(lw->f, n->ty, fir.local_kind.lk_temp, null, n->loc);
+    if (!lower_into(lw, n, fir.place_local(t))) {
+        return false;
+    }
+    *out = read_temp(t, n->ty);
+    return true;
+}
+
+// Whether the checker folded `n` to a string constant.
+fn string_constant(lowerer* lw, ast.node* n) bool {
+    return (n->ann & check.ANN_CONST) != 0
+        && check.check_node_value(lw->ck, n).kind == consts.cval_kind.cv_str;
+}
+
+// A name, a field, `->`, `*p` or an index: `copy p` of its place, or `const fn m.f` of a function.
+// The checker gives a name or a field node the symbol of a declaration when the node is a name,
+// `m.NAME` or `m.f`.
+fn lower_name(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
+    bool named = n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field;
+    if (named && n->sym != null && n->sym->kind == ast.sym_kind.s_fn) {
+        *out = fir.operand_const(fir.const_fn(n->sym));
+        return true;
+    }
+    fir.place mut p = fir.place{};
+    if (!lower_place(lw, n, &p)) {
+        return false;
+    }
+    *out = fir.operand_copy(p);
+    return true;
+}
+
+// `move(lv)`: the operand `move p` (spec/fir.md 9.4). The checker lets `move` take an owning
+// lvalue that it may empty, and nothing else.
+fn lower_move(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
+    fir.place mut p = fir.place{};
+    if (!lower_place(lw, ast.ast_child(n, 0), &p)) {
+        return false;
+    }
+    *out = fir.operand_move(p);
+    return true;
+}
+
+// `-x`: `sub(const 0, x)` with the overflow check for an integer, and `fneg(x)` for a float. `!x`
+// on a `bool` and `~x` on an integer: `not(x)`. `*p`: `copy (*q)`. `&lv`: `addr(p)`, or `addr
+// mut(p)` when the checker typed a `mut` pointer (spec/fir.md 9.4).
+fn lower_unary(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
+    lexer.tok_kind op = cast(n->op, lexer.tok_kind);
+    if (op == lexer.tok_kind.star) {
+        return lower_name(lw, n, out);
+    }
+    if (op == lexer.tok_kind.amp) {
+        fir.place mut p = fir.place{};
+        if (!lower_place(lw, n->a, &p)) {
+            return false;
+        }
+        *out = into_temp(lw, n->ty, fir.rvalue_addr(lw->f, p, n->ty->is_mut), n->loc);
+        return true;
+    }
+    fir.operand mut a = fir.operand{};
+    if (!lower_operand(lw, n->a, &a)) {
+        return false;
+    }
+    if (op != lexer.tok_kind.minus) {
+        *out = into_temp(lw, n->ty, fir.rvalue_unary(lw->f, fir.rvalue_kind.rv_not, a), n->loc);
+    } else if (types.type_is_float(n->ty)) {
+        *out = into_temp(lw, n->ty, fir.rvalue_unary(lw->f, fir.rvalue_kind.rv_fneg, a), n->loc);
+    } else {
+        fir.operand zero = fir.operand_const(fir.const_int(n->ty, consts.cv_from_u64(0)));
+        fir.rvalue r = checked(lw, fir.rvalue_kind.rv_sub, n->ty, zero, a, n->loc);
+        *out = into_temp(lw, n->ty, r, n->loc);
+    }
+    return true;
+}
+
+// ---- places -----------------------------------------------------------------------------------
+
+// Whether the form of `n` designates storage: a name, a field, `->`, `*p` or an index. The
+// operand of such a form may still be an rvalue, which lower_place copies into a temporary first.
+fn designates(ast.node* n) bool {
+    switch (n->kind) {
+    case ast.ast_kind.k_ident, ast.ast_kind.k_field, ast.ast_kind.k_arrow,
+        ast.ast_kind.k_index:
+        return true;
+    case ast.ast_kind.k_unary:
+        return cast(n->op, lexer.tok_kind) == lexer.tok_kind.star;
+    default:
+        return false;
+    }
+}
+
+/// Lowers the expression `n` to the place that it designates, in *out (spec/fir.md 9.4, 5.5): a
+/// name, a field by its declaration index, `(*q).k` for `->`, `(*q)` for `*p`, and `a[_i]` after
+/// the bounds check. An aggregate expression that designates no storage goes into a new temporary,
+/// which is then the place (D6.7).
+fn lower_place(lowerer mut* lw, ast.node* n, fir.place mut* out) bool {
+    switch (n->kind) {
+    case ast.ast_kind.k_ident:
+        if (name_place(lw, n, out)) {
+            return true;
+        }
+    case ast.ast_kind.k_field:
+        return field_place(lw, n, out);
+    case ast.ast_kind.k_arrow:
+        fir.place mut target = fir.place{};
+        if (!deref_place(lw, n->a, &target)) {
+            return false;
+        }
+        *out = project_field(lw, n, target);
+        return true;
+    case ast.ast_kind.k_index:
+        return index_place(lw, n, out);
+    case ast.ast_kind.k_unary:
+        if (cast(n->op, lexer.tok_kind) == lexer.tok_kind.star) {
+            return deref_place(lw, n->a, out);
+        }
+    default:
+        break;
+    }
+    if (!fir.type_aggregate(n->ty)) {
+        // a place of a scalar is an lvalue, and the checker gives every lvalue one of the forms
+        // above (D6.7)
+        panic("fir_lower.lower_place: a scalar that designates no storage");
+    }
+    u32 t = fir.local_add(lw->f, n->ty, fir.local_kind.lk_temp, null, n->loc);
+    *out = fir.place_local(t);
+    return lower_into(lw, n, *out);
+}
+
 // The place of the name `n` in *out: `_n` of a parameter or a named local, or `global m.NAME` of
 // a module-level constant or global. False for any other node.
 fn name_place(lowerer* lw, ast.node* n, fir.place mut* out) bool {
@@ -449,62 +869,760 @@ fn name_place(lowerer* lw, ast.node* n, fir.place mut* out) bool {
     return false;
 }
 
-// A name: `copy p` of its place, or `const fn m.f` of a function. The checker gives a field node
-// the symbol of a declaration when the node is `m.NAME` or `m.f`. A field of a value waits for the
-// lowering of places.
-fn lower_name(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
-    fir.place mut p = fir.place{};
-    if (name_place(lw, n, &p)) {
-        *out = fir.operand_copy(p);
+// `a.f`: the global of `m.NAME`, or the field of the place of `a`.
+fn field_place(lowerer mut* lw, ast.node* n, fir.place mut* out) bool {
+    if (name_place(lw, n, out)) {
         return true;
     }
-    if (n->sym != null && n->sym->kind == ast.sym_kind.s_fn) {
-        *out = fir.operand_const(fir.const_fn(n->sym));
+    fir.place mut base = fir.place{};
+    if (!lower_place(lw, n->a, &base)) {
+        return false;
+    }
+    *out = project_field(lw, n, base);
+    return true;
+}
+
+// The field that `n` names of the struct, span or `string` at `base`: `.ptr` and `.len` of a
+// header are fields 0 and 1, and a struct field is its declaration index (spec/fir.md 5.5).
+fn project_field(lowerer mut* lw, ast.node* n, fir.place base) fir.place {
+    types.node* t = fir.place_type(lw->f, base);
+    if (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string) {
+        if (n->name == "len") {
+            return fir.place_field(lw->f, base, LEN_FIELD);
+        }
+        return fir.place_field(lw->f, base, PTR_FIELD);
+    }
+    u64 mut k = 0;
+    if (!gen.gen_field_index(n->sym, &k)) {
+        panic("fir_lower.project_field: a field with no declaration index");
+    }
+    return fir.place_field(lw->f, base, cast(k, u32));
+}
+
+// `(*q)`, where `q` holds the value of the pointer expression `p` (spec/fir.md 9.4): the place
+// that the operand of `p` reads, which is the place of `p` itself when `p` designates storage and a
+// temporary when `p` is an operation. A folded constant, such as a module constant that holds
+// `null`, goes into a temporary first.
+fn deref_place(lowerer mut* lw, ast.node* p, fir.place mut* out) bool {
+    fir.operand mut v = fir.operand{};
+    if (!lower_operand(lw, p, &v)) {
+        return false;
+    }
+    if (v.kind == fir.operand_kind.ok_move) {
+        // the checker refuses to dereference an owning rvalue, which would leave no owner
+        panic("fir_lower.deref_place: a pointer that owns");
+    }
+    fir.place mut q = v.place;
+    if (v.kind == fir.operand_kind.ok_const) {
+        u32 t = fir.local_add(lw->f, p->ty, fir.local_kind.lk_temp, null, p->loc);
+        assign(lw, fir.place_local(t), fir.rvalue_use(lw->f, v), p->loc);
+        q = fir.place_local(t);
+    }
+    *out = fir.place_deref(lw->f, q);
+    return true;
+}
+
+// The length of the fixed array, span or `string` at `base`: `const u64 N` for a fixed array, and
+// `copy base.1` for a header.
+fn length_of(lowerer mut* lw, fir.place base) fir.operand {
+    types.node* t = fir.place_type(lw->f, base);
+    if (t->kind == types.type_kind.k_array) {
+        return int_const(u64_ty(lw), false, t->len);
+    }
+    return fir.operand_copy(fir.place_field(lw->f, base, LEN_FIELD));
+}
+
+// `cast<i64>(a)` in a new temporary at `at`: the form in which a check reports an index or a bound.
+fn signed_copy(lowerer mut* lw, fir.operand a, diag.loc at) fir.operand {
+    types.node* t = i64_ty(lw);
+    return into_temp(lw, t, fir.rvalue_cast(lw->f, t, a), at);
+}
+
+// `a[i]` (spec/fir.md 9.4, D6.8): the place of `a`, held when `i` holds a writer, then `_i =
+// cast<u64>(i)`, which sign-extends a signed index so that a negative index fails the one unsigned
+// compare, `_f = ge(copy _i, len)`, and `check(copy _f, bounds, cast<i64>(copy _i), len)` at the
+// `[`. The place is `a[_i]` in the continuation.
+fn index_place(lowerer mut* lw, ast.node* n, fir.place mut* out) bool {
+    fir.place mut base = fir.place{};
+    if (!lower_place(lw, n->a, &base)) {
+        return false;
+    }
+    base = hold_base(lw, base, contains_writer(n->b), n->a->loc);
+    fir.operand mut i = fir.operand{};
+    if (!lower_operand(lw, n->b, &i)) {
+        return false;
+    }
+    types.node* wide = u64_ty(lw);
+    u32 at = fir.local_add(lw->f, wide, fir.local_kind.lk_temp, null, n->loc);
+    assign(lw, fir.place_local(at), fir.rvalue_cast(lw->f, wide, i), n->loc);
+    fir.operand index = fir.operand_copy(fir.place_local(at));
+    fir.operand len = length_of(lw, base);
+    fir.rvalue past = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_ge, index, len);
+    fir.operand flag = into_temp(lw, bool_ty(lw), past, n->loc);
+    fir.operand reported = signed_copy(lw, index, n->loc);
+    u32 first = fir.operand_push(lw->f, reported);
+    fir.operand_push(lw->f, len);
+    check_then(lw, flag, fir.check_kind.chk_bounds, first, 2, n->loc);
+    *out = fir.place_index(lw->f, base, at);
+    return true;
+}
+
+// A bound of a span expression, `_b = cast<u64>(e)` in a new temporary at `at`, as an index takes
+// it.
+fn span_bound(lowerer mut* lw, ast.node* e, diag.loc at, fir.operand mut* out) bool {
+    fir.operand mut v = fir.operand{};
+    if (!lower_operand(lw, e, &v)) {
+        return false;
+    }
+    types.node* t = u64_ty(lw);
+    *out = into_temp(lw, t, fir.rvalue_cast(lw->f, t, v), at);
+    return true;
+}
+
+// `a[lo..hi]` into `dst` (spec/fir.md 9.4, D6.9). On a fixed array, a span or a `string`: the
+// place of `a`, held when a bound holds a writer, each bound as a `u64`, `0` and the length for an
+// absent bound, `_f = or(gt(lo, hi), gt(hi, len))`, `check(copy _f, span, lo, hi, len)` with the
+// bounds as `i64`, then `slice(a, lo, hi)`, which is `slice mut` for a `mut` span of a fixed
+// array. On a pointer: `slice_ptr(a, lo, hi)` with no check.
+fn lower_span(lowerer mut* lw, ast.node* n, fir.place dst) bool {
+    if (n->a->ty->kind == types.type_kind.k_ptr) {
+        return lower_span_of_pointer(lw, n, dst);
+    }
+    fir.place mut base = fir.place{};
+    if (!lower_place(lw, n->a, &base)) {
+        return false;
+    }
+    base = hold_base(lw, base, contains_writer(n->b) || contains_writer(n->c), n->a->loc);
+    fir.operand len = length_of(lw, base);
+    fir.operand mut lo = int_const(u64_ty(lw), false, 0);
+    fir.operand mut hi = len;
+    if (n->b != null && !span_bound(lw, n->b, n->loc, &lo)) {
+        return false;
+    }
+    if (n->c != null && !span_bound(lw, n->c, n->loc, &hi)) {
+        return false;
+    }
+    types.node* flag = bool_ty(lw);
+    fir.rvalue low_high = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_gt, lo, hi);
+    fir.operand inverted = into_temp(lw, flag, low_high, n->loc);
+    fir.rvalue high_len = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_gt, hi, len);
+    fir.operand past = into_temp(lw, flag, high_len, n->loc);
+    fir.rvalue either = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_or, inverted, past);
+    fir.operand bad = into_temp(lw, flag, either, n->loc);
+    fir.operand low = signed_copy(lw, lo, n->loc);
+    fir.operand high = signed_copy(lw, hi, n->loc);
+    u32 first = fir.operand_push(lw->f, low);
+    fir.operand_push(lw->f, high);
+    fir.operand_push(lw->f, len);
+    check_then(lw, bad, fir.check_kind.chk_span, first, 3, n->loc);
+    bool array = fir.place_type(lw->f, base)->kind == types.type_kind.k_array;
+    assign(lw, dst, fir.rvalue_slice(lw->f, base, lo, hi, array && n->ty->is_mut), n->loc);
+    return true;
+}
+
+// `p[lo..hi]` on a pointer: `slice_ptr(p, lo, hi)`, three operands of one rvalue under the
+// materialization rule. The checker requires both bounds.
+fn lower_span_of_pointer(lowerer mut* lw, ast.node* n, fir.place dst) bool {
+    fir.operand mut p = fir.operand{};
+    if (!lower_operand(lw, n->a, &p)) {
+        return false;
+    }
+    p = materialize(lw, p, contains_writer(n->b) || contains_writer(n->c), n->a->loc);
+    fir.operand mut lo = fir.operand{};
+    if (!lower_operand(lw, n->b, &lo)) {
+        return false;
+    }
+    lo = materialize(lw, lo, contains_writer(n->c), n->b->loc);
+    fir.operand mut hi = fir.operand{};
+    if (!lower_operand(lw, n->c, &hi)) {
+        return false;
+    }
+    assign(lw, dst, fir.rvalue_slice_ptr(lw->f, p, lo, hi), n->loc);
+    return true;
+}
+
+// ---- values written into a place --------------------------------------------------------------
+
+/// Lowers the expression `n` into the place `dst` (spec/fir.md 9.4). A scalar stores its operand,
+/// `dst = a`. An aggregate writes into `dst` itself: a literal as `aggregate` or `const zero`, a
+/// string constant, a span expression, a call, `move(lv)`, a cast, a conditional, or `copy p` of
+/// the place that it designates.
+fn lower_into(lowerer mut* lw, ast.node* n, fir.place dst) bool {
+    if (!fir.type_aggregate(n->ty)) {
+        fir.operand mut v = fir.operand{};
+        if (!lower_operand(lw, n, &v)) {
+            return false;
+        }
+        assign(lw, dst, fir.rvalue_use(lw->f, v), n->loc);
         return true;
+    }
+    if (string_constant(lw, n)) {
+        fir.constant text = fir.const_string(check.check_node_value(lw->ck, n).str);
+        assign(lw, dst, fir.rvalue_use(lw->f, fir.operand_const(text)), n->loc);
+        return true;
+    }
+    switch (n->kind) {
+    case ast.ast_kind.k_brace_init:
+        return lower_literal(lw, n, n->ty, dst, n->loc);
+    case ast.ast_kind.k_struct_lit, ast.ast_kind.k_array_lit:
+        return lower_literal(lw, n->b, n->ty, dst, n->loc);
+    case ast.ast_kind.k_span:
+        return lower_span(lw, n, dst);
+    case ast.ast_kind.k_call:
+        if ((n->ann & check.ANN_MOVE) != 0) {
+            fir.operand mut moved = fir.operand{};
+            if (!lower_move(lw, n, &moved)) {
+                return false;
+            }
+            assign(lw, dst, fir.rvalue_use(lw->f, moved), n->loc);
+            return true;
+        }
+        fir.rvalue mut r = fir.rvalue{};
+        if (!call_rvalue(lw, n, &r)) {
+            return false;
+        }
+        assign(lw, dst, r, n->loc);
+        return true;
+    case ast.ast_kind.k_cast:
+        // a cast between aggregate types carries or drops marks, and never adds `own` (D3.14)
+        fir.operand mut a = fir.operand{};
+        if (!lower_operand(lw, n->a, &a)) {
+            return false;
+        }
+        assign(lw, dst, fir.rvalue_cast(lw->f, n->ty, a), n->loc);
+        return true;
+    case ast.ast_kind.k_ternary:
+        return lower_ternary_into(lw, n, dst);
+    default:
+        break;
+    }
+    if (!designates(n)) {
+        return unsupported(lw, n);
+    }
+    fir.place mut p = fir.place{};
+    if (!lower_place(lw, n, &p)) {
+        return false;
+    }
+    assign(lw, dst, fir.rvalue_use(lw->f, fir.operand_copy(p)), n->loc);
+    return true;
+}
+
+// The value of member `i` of the literal `n`: the child, or the value of a designator.
+fn member_value(ast.node* n, u64 i) ast.node* {
+    ast.node* c = ast.ast_child(n, i);
+    if (c->kind == ast.ast_kind.k_designator) {
+        return c->a;
+    }
+    return c;
+}
+
+// Whether `n` is an empty literal, `{}` or `T{}`, whose value is `const zero T` (D6.5).
+fn empty_literal(ast.node* n) bool {
+    if (n->kind == ast.ast_kind.k_brace_init) {
+        return ast.ast_len(n) == 0;
+    }
+    bool typed = n->kind == ast.ast_kind.k_struct_lit || n->kind == ast.ast_kind.k_array_lit;
+    return typed && ast.ast_len(n->b) == 0;
+}
+
+// Member `v` of a literal as an operand of its `aggregate` (spec/fir.md 9.4). A folded constant
+// stands as a constant: a string constant as `const "..."`, and an empty literal as `const zero
+// T`, which is also the operand of a field that a designated literal leaves out. Every other
+// member is an operand, a place for an aggregate type.
+fn member_operand(lowerer mut* lw, ast.node* v, fir.operand mut* out) bool {
+    if (string_constant(lw, v)) {
+        string text = check.check_node_value(lw->ck, v).str;
+        *out = fir.operand_const(fir.const_string(text));
+        return true;
+    }
+    if (fir.type_aggregate(v->ty) && empty_literal(v)) {
+        *out = fir.operand_const(fir.const_zero(v->ty));
+        return true;
+    }
+    return lower_operand(lw, v, out);
+}
+
+// The index among the fields or elements of member `i` of the literal `n`: its field index for a
+// designator, and `i` for every other member.
+fn member_slot(ast.node* n, u64 i) u64 {
+    ast.node* c = ast.ast_child(n, i);
+    if (c->kind != ast.ast_kind.k_designator) {
+        return i;
+    }
+    u64 mut k = 0;
+    if (!gen.gen_field_index(c->sym, &k)) {
+        panic("fir_lower.member_slot: a designator with no field index");
+    }
+    return k;
+}
+
+// The brace initializer `n` of type `t` into `dst` (spec/fir.md 9.4, D6.5): `const zero T` for
+// `{}`, and else `aggregate T(...)` with one operand for each field or element, in declaration or
+// index order, and `const zero` for a field that a designated literal leaves out. The members run
+// in source order under the materialization rule (D6.3). The translator reads every operand before
+// it writes `dst`, so a member that reads `dst` reads the old value (spec/fir.md 6).
+fn lower_literal(lowerer mut* lw, ast.node* n, types.node* t, fir.place dst, diag.loc at)
+    bool {
+    u64 count = ast.ast_len(n);
+    if (count == 0) {
+        assign(lw, dst, fir.rvalue_use(lw->f, fir.operand_const(fir.const_zero(t))), at);
+        return true;
+    }
+    u64 mut slots = t->len;
+    if (t->kind == types.type_kind.k_struct) {
+        slots = cast(fir.struct_field_count(t), u64);
+    }
+    fir.operand mut@ own members = new(fir.operand, slots);
+    defer del(members);
+    bool mut@ own given = new(bool, slots);
+    defer del(given);
+    bool mut@ own later = new(bool, count);
+    defer del(later);
+    writers_after(n, later);
+    u64 mut i = 0;
+    while (i < count) {
+        ast.node* v = member_value(n, i);
+        u64 k = member_slot(n, i);
+        fir.operand mut m = fir.operand{};
+        if (!member_operand(lw, v, &m)) {
+            return false;
+        }
+        members[k] = materialize(lw, m, later[i], v->loc);
+        given[k] = true;
+        i += 1;
+    }
+    u32 first = cast(lw->f->ops.len, u32);
+    u64 mut k = 0;
+    while (k < slots) {
+        if (given[k]) {
+            fir.operand_push(lw->f, members[k]);
+        } else {
+            fir.constant zero = fir.const_zero(fir.struct_field_type(t, cast(k, u32)));
+            fir.operand_push(lw->f, fir.operand_const(zero));
+        }
+        k += 1;
+    }
+    assign(lw, dst, fir.rvalue_aggregate_new(t, first, cast(slots, u32)), at);
+    return true;
+}
+
+// `c ? a : b` of an aggregate type into `dst`: the operand of `c`, `switch -> [true: then,
+// otherwise: else]`, each arm into `dst`, then `goto done` at the `?` (spec/fir.md 9.4).
+fn lower_ternary_into(lowerer mut* lw, ast.node* n, fir.place dst) bool {
+    fir.operand mut c = fir.operand{};
+    if (!lower_operand(lw, n->a, &c)) {
+        return false;
+    }
+    u32 then_block = fir.block_new(lw->f);
+    u32 else_block = fir.block_new(lw->f);
+    u32 done = fir.block_new(lw->f);
+    branch(lw, c, then_block, else_block, n->loc);
+    lw->block = then_block;
+    if (!lower_into(lw, n->b, dst)) {
+        return false;
+    }
+    jump(lw, done, n->loc);
+    lw->block = else_block;
+    if (!lower_into(lw, n->c, dst)) {
+        return false;
+    }
+    jump(lw, done, n->loc);
+    lw->block = done;
+    return true;
+}
+
+// ---- calls ------------------------------------------------------------------------------------
+
+// Whether `n` calls a builtin of the universe: the print family, `assert`, `panic`, `del` or
+// `move`.
+fn builtin_call(ast.node* n) bool {
+    return n->a != null && n->a->sym != null && n->a->sym->kind == ast.sym_kind.s_builtin;
+}
+
+// The call `n` of a fort function, an `extern fn` or a function value, in *out (spec/fir.md 9.4):
+// the callee first when it is a value (D6.3), then each argument left to right, each under the
+// materialization rule. An argument of an aggregate type is a place, an owning rvalue enters as
+// `move _t`, and an owning place enters a parameter that does not own as `copy p` (D17.4, D17.5).
+fn call_rvalue(lowerer mut* lw, ast.node* n, fir.rvalue mut* out) bool {
+    u64 count = ast.ast_len(n);
+    bool mut@ own later = new(bool, count);
+    defer del(later);
+    bool any = writers_after(n, later);
+    ast.sym* s = n->a->sym;
+    bool direct = s != null
+        && (s->kind == ast.sym_kind.s_fn || s->kind == ast.sym_kind.s_extern_fn);
+    fir.operand mut callee = fir.operand{};
+    if (!direct) {
+        if (!lower_operand(lw, n->a, &callee)) {
+            return false;
+        }
+        callee = materialize(lw, callee, any, n->a->loc);
+    }
+    fir.operand mut@ own args = new(fir.operand, count);
+    defer del(args);
+    u64 mut i = 0;
+    while (i < count) {
+        ast.node* a = ast.ast_child(n, i);
+        fir.operand mut v = fir.operand{};
+        if (!lower_operand(lw, a, &v)) {
+            return false;
+        }
+        args[i] = materialize(lw, v, later[i], a->loc);
+        i += 1;
+    }
+    u32 first = cast(lw->f->ops.len, u32);
+    i = 0;
+    while (i < count) {
+        fir.operand_push(lw->f, args[i]);
+        i += 1;
+    }
+    u32 len = cast(count, u32);
+    if (!direct) {
+        *out = fir.rvalue_call_value(callee, first, len);
+    } else if (s->kind == ast.sym_kind.s_extern_fn) {
+        *out = fir.rvalue_call_extern(s, first, len);
+    } else {
+        *out = fir.rvalue_call_fn(s, first, len);
+    }
+    return true;
+}
+
+// A call in an operand position: its result in a new temporary of the type that the checker gave
+// the call. A builtin has no value there.
+fn lower_call_value(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
+    if (builtin_call(n)) {
+        return unsupported(lw, n);
+    }
+    fir.rvalue mut r = fir.rvalue{};
+    if (!call_rvalue(lw, n, &r)) {
+        return false;
+    }
+    *out = into_temp(lw, n->ty, r, n->loc);
+    return true;
+}
+
+// A call statement (spec/fir.md 9.3): a builtin as lower_builtin writes it, and every other call
+// into a new temporary that nothing reads, of type `void` for a `void` result. A `noreturn` callee
+// ends the block with `trap` right after the call (D8.5, rule V8).
+fn lower_call_stmt(lowerer mut* lw, ast.node* n) bool {
+    if (builtin_call(n)) {
+        return lower_builtin(lw, n);
+    }
+    fir.rvalue mut r = fir.rvalue{};
+    if (!call_rvalue(lw, n, &r)) {
+        return false;
+    }
+    types.node* t = fir.rvalue_type(lw->f, r);
+    u32 sink = fir.local_add(lw->f, t, fir.local_kind.lk_temp, null, n->loc);
+    assign(lw, fir.place_local(sink), r, n->loc);
+    if (fir.callee_type(lw->f, r)->is_noreturn) {
+        terminate(lw, fir.term_trap(n->loc, lw->stmt));
+    }
+    return true;
+}
+
+// ---- builtins ---------------------------------------------------------------------------------
+
+// The builtin call `n` as a statement: the print family, `assert` and `panic` (spec/fir.md 9.4).
+// `del` waits for the lowering of ownership, and the checker refuses a `move` whose value no one
+// reads.
+fn lower_builtin(lowerer mut* lw, ast.node* n) bool {
+    string name = n->a->sym->name;
+    bool out = name == "print" || name == "println";
+    bool err = name == "eprint" || name == "eprintln";
+    bool newline = name == "println" || name == "eprintln" || name == "fprintln";
+    if (out || err) {
+        u64 mut fd = FD_STDERR;
+        if (out) {
+            fd = FD_STDOUT;
+        }
+        return lower_print(lw, n, int_const(prim_ty(lw, prim.prim_kind.prim_i32), false, fd), 0,
+                           newline);
+    }
+    if (name == "fprint" || name == "fprintln") {
+        bool mut@ own later = new(bool, ast.ast_len(n));
+        defer del(later);
+        writers_after(n, later);
+        ast.node* d = ast.ast_child(n, 0);
+        fir.operand mut fd = fir.operand{};
+        if (!lower_operand(lw, d, &fd)) {
+            return false;
+        }
+        return lower_print(lw, n, materialize(lw, fd, later[0], d->loc), 1, newline);
+    }
+    if (name == "assert") {
+        return lower_assert(lw, n);
+    }
+    if (name == "panic") {
+        return lower_panic(lw, n);
     }
     return unsupported(lw, n);
 }
 
-// `move(lv)`: the operand `move p` (spec/fir.md 9.4). The checker lets `move` take an owning
-// lvalue alone. A place other than a name waits for the lowering of places.
-fn lower_move(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
-    ast.node* lv = ast.ast_child(n, 0);
-    fir.place mut p = fir.place{};
-    if (!name_place(lw, lv, &p)) {
-        return unsupported(lw, lv);
+// The name of the runtime function of `k`.
+fn print_name(print_kind k) string {
+    switch (k) {
+    case print_kind.pk_i64:
+        return "print_i64";
+    case print_kind.pk_u64:
+        return "print_u64";
+    case print_kind.pk_bool:
+        return "print_bool";
+    case print_kind.pk_char:
+        return "print_char";
+    case print_kind.pk_ptr:
+        return "print_ptr";
+    case print_kind.pk_str:
+        return "print_str";
+    case print_kind.pk_enum:
+        return "print_enum";
+    case print_kind.pk_f32:
+        return "print_f32";
+    case print_kind.pk_f64:
+        return "print_f64";
     }
-    *out = fir.operand_move(p);
+}
+
+// The runtime function of `k`, or null when the closure holds none, as a sandbox of a test may.
+// The first call finds every print function in one pass over the symbols.
+fn print_entry(lowerer mut* lw, print_kind k) ast.sym* {
+    if (!lw->prints_known) {
+        u64 mut i = 0;
+        while (i < check.check_sym_count(lw->ck)) {
+            ast.sym* s = check.check_sym_at(lw->ck, i);
+            if (runtime_function(s)) {
+                u64 mut j = 0;
+                while (j < PRINT_KINDS) {
+                    if (s->name == print_name(cast(j, print_kind))) {
+                        lw->prints[j] = s;
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        lw->prints_known = true;
+    }
+    return lw->prints[cast(k, u64)];
+}
+
+// Whether `s` is a function of the module std.rt.
+fn runtime_function(ast.sym* s) bool {
+    return s->kind == ast.sym_kind.s_fn && s->owner != null
+        && s->owner->kind == ast.sym_kind.s_module && s->owner->name == RUNTIME_MODULE;
+}
+
+// The type of parameter `i` of the runtime function `s`.
+fn param_type(ast.sym* s, u64 i) types.node* {
+    return s->ty->params[i];
+}
+
+// `_t = call fn std.rt.<entry>(...)` in a new `void` temporary at `at`, over the `len` operands
+// that operand_push placed from `first`.
+fn call_runtime(lowerer mut* lw, ast.sym* entry, u32 first, u32 len, diag.loc at) void {
+    fir.rvalue r = fir.rvalue_call_fn(entry, first, len);
+    u32 sink = fir.local_add(lw->f, fir.rvalue_type(lw->f, r), fir.local_kind.lk_temp, null, at);
+    assign(lw, fir.place_local(sink), r, at);
+}
+
+// The print family (spec/fir.md 9.4, spec/toolchain.md 6 item 19): for each argument from `first`,
+// left to right, one call of the print function of its type, which receives `fd` and the argument
+// in the form that it takes. The `ln` forms end with `print_char(fd, const char 10)`. `fd` is an
+// operand that the caller evaluated once.
+fn lower_print(lowerer mut* lw, ast.node* n, fir.operand fd, u64 first, bool newline) bool {
+    u64 mut i = first;
+    while (i < ast.ast_len(n)) {
+        if (!lower_print_arg(lw, ast.ast_child(n, i), fd)) {
+            return false;
+        }
+        i += 1;
+    }
+    if (!newline) {
+        return true;
+    }
+    ast.sym* entry = print_entry(lw, print_kind.pk_char);
+    if (entry == null) {
+        return unsupported(lw, n);
+    }
+    fir.constant nl = fir.const_int(param_type(entry, 1), consts.cv_from_char(NEWLINE));
+    u32 at = fir.operand_push(lw->f, fd);
+    fir.operand_push(lw->f, fir.operand_const(nl));
+    call_runtime(lw, entry, at, 2, n->loc);
     return true;
 }
 
-// `-x`: `sub(const 0, x)` with the overflow check for an integer, and `fneg(x)` for a float. `!x`
-// on a `bool` and `~x` on an integer: `not(x)` (spec/fir.md 9.4). `*p` and `&lv` wait for the
-// lowering of places.
-fn lower_unary(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
-    lexer.tok_kind op = cast(n->op, lexer.tok_kind);
-    if (op == lexer.tok_kind.star || op == lexer.tok_kind.amp) {
-        return unsupported(lw, n);
+// The print function of the type `t`.
+fn print_kind_of(types.node* t) print_kind {
+    switch (t->kind) {
+    case types.type_kind.k_string:
+        return print_kind.pk_str;
+    case types.type_kind.k_enum:
+        return print_kind.pk_enum;
+    case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_fn:
+        return print_kind.pk_ptr;
+    default:
+        break;
     }
-    fir.operand mut a = fir.operand{};
-    if (!lower_operand(lw, n->a, &a)) {
+    switch (t->prim) {
+    case prim.prim_kind.prim_bool:
+        return print_kind.pk_bool;
+    case prim.prim_kind.prim_char:
+        return print_kind.pk_char;
+    case prim.prim_kind.prim_f32:
+        return print_kind.pk_f32;
+    case prim.prim_kind.prim_f64:
+        return print_kind.pk_f64;
+    default:
+        break;
+    }
+    if (prim.prim_is_signed(t->prim)) {
+        return print_kind.pk_i64;
+    }
+    return print_kind.pk_u64;
+}
+
+// The operand `v` in the type `t` of a parameter: `v` itself when the two types agree, and else
+// `cast<t>(v)` in a new temporary at `at`.
+fn converted(lowerer mut* lw, fir.operand v, types.node* t, diag.loc at) fir.operand {
+    if (types.type_same_shape(fir.operand_type(lw->f, v), t)) {
+        return v;
+    }
+    return into_temp(lw, t, fir.rvalue_cast(lw->f, t, v), at);
+}
+
+// One print argument `a`: a `string` as its pointer and its length, an enum as `cast<i32>(a)`,
+// `const enum_table m.E` and its member count, a pointer or a function as `void*`, a signed
+// integer as `i64` and an unsigned one as `u64`, and a `bool`, a `char` or a float as it stands.
+// Each call stands at the argument.
+fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
+    print_kind k = print_kind_of(a->ty);
+    ast.sym* entry = print_entry(lw, k);
+    if (entry == null) {
+        return unsupported(lw, a);
+    }
+    if (k == print_kind.pk_str) {
+        fir.operand mut ptr = fir.operand{};
+        fir.operand mut len = fir.operand{};
+        if (!string_parts(lw, a, &ptr, &len)) {
+            return false;
+        }
+        u32 first = fir.operand_push(lw->f, fd);
+        fir.operand_push(lw->f, ptr);
+        fir.operand_push(lw->f, len);
+        call_runtime(lw, entry, first, 3, a->loc);
+        return true;
+    }
+    fir.operand mut v = fir.operand{};
+    if (!lower_operand(lw, a, &v)) {
         return false;
     }
-    if (op != lexer.tok_kind.minus) {
-        *out = into_temp(lw, n->ty, fir.rvalue_unary(lw->f, fir.rvalue_kind.rv_not, a), n->loc);
-    } else if (types.type_is_float(n->ty)) {
-        *out = into_temp(lw, n->ty, fir.rvalue_unary(lw->f, fir.rvalue_kind.rv_fneg, a), n->loc);
-    } else {
-        fir.operand zero = fir.operand_const(fir.const_int(n->ty, consts.cv_from_u64(0)));
-        *out = checked(lw, n, fir.rvalue_kind.rv_sub, zero, a);
+    fir.operand value = converted(lw, v, param_type(entry, 1), a->loc);
+    u32 first = fir.operand_push(lw->f, fd);
+    fir.operand_push(lw->f, value);
+    if (k != print_kind.pk_enum) {
+        call_runtime(lw, entry, first, 2, a->loc);
+        return true;
     }
+    ast.sym* e = check.nominal_sym(a->ty);
+    fir.constant table = fir.const_enum_table(e, param_type(entry, 2));
+    fir.operand_push(lw->f, fir.operand_const(table));
+    fir.operand_push(lw->f, int_const(param_type(entry, 3), false, gen.gen_enum_count(e)));
+    call_runtime(lw, entry, first, 4, a->loc);
+    return true;
+}
+
+// The pointer and the length of the `string` expression `m`, in *ptr and *len: `const bytes
+// "..."` and its length for a folded constant, as the direct path passes a literal, and else
+// `copy p.0` and `copy p.1` of the place of `m`.
+fn string_parts(lowerer mut* lw, ast.node* m, fir.operand mut* ptr, fir.operand mut* len) bool {
+    if (string_constant(lw, m)) {
+        string text = check.check_node_value(lw->ck, m).str;
+        *ptr = fir.operand_const(fir.const_bytes(text));
+        *len = int_const(u64_ty(lw), false, text.len);
+        return true;
+    }
+    fir.operand mut v = fir.operand{};
+    if (!aggregate_operand(lw, m, &v)) {
+        return false;
+    }
+    if (v.kind != fir.operand_kind.ok_copy) {
+        // the checker gives a print argument and `panic` no owning rvalue, which would leak
+        panic("fir_lower.string_parts: a string that owns");
+    }
+    *ptr = fir.operand_copy(fir.place_field(lw->f, v.place, PTR_FIELD));
+    *len = fir.operand_copy(fir.place_field(lw->f, v.place, LEN_FIELD));
+    return true;
+}
+
+// The byte offset of the position `line`:`col` in `src`, or the length of `src` past its end. It
+// copies gen_expr.source_offset, and the copy stays until the migration removes the direct path
+// (T-255).
+fn source_offset(string src, u32 line, u32 col) u64 {
+    u64 mut at = 0;
+    u32 mut here = 1;
+    while (here < line && at < src.len) {
+        if (src[at] == '\n') {
+            here += 1;
+        }
+        at += 1;
+    }
+    // A zero column wraps and then reads as past the end, as in the direct path.
+    at +%= cast(col, u64) -% 1;
+    if (at < src.len) {
+        return at;
+    }
+    return src.len;
+}
+
+// The source text of the argument of the `assert` call `call`, whose range runs from its `(` to
+// after its `)`: the text between the two, as gen_expr.assert_text reads it. The session holds the
+// text of every module that the closure loaded.
+fn assert_text(lowerer mut* lw, ast.node* call) string {
+    string mut src = "";
+    session.session mut* s = lw->ck->sess;
+    if (!session.has_source(s, call->loc.file) || !session.read_source(s, call->loc.file, &src)) {
+        return "";
+    }
+    u64 open = source_offset(src, call->loc.line, call->loc.col);
+    u64 close = source_offset(src, call->loc.end_line, call->loc.end_col);
+    if (close < open + 2) {
+        return "";
+    }
+    return src[open + 1..close - 1];
+}
+
+// `assert(c)`: the operand of `c`, then `check(a, user, const bytes "<text>") -> bb` at the name
+// `assert`, which the runtime reports (spec/fir.md 9.4). The condition of the kind `user` is true
+// on success.
+fn lower_assert(lowerer mut* lw, ast.node* n) bool {
+    fir.operand mut c = fir.operand{};
+    if (!lower_operand(lw, ast.ast_child(n, 0), &c)) {
+        return false;
+    }
+    u32 first = fir.operand_push(lw->f, fir.operand_const(fir.const_bytes(assert_text(lw, n))));
+    check_then(lw, c, fir.check_kind.chk_user, first, 1, n->a->loc);
+    return true;
+}
+
+// `panic(m)`: the pointer and the length of `m`, then `fail(panic, ptr, len)` at the name `panic`,
+// which the runtime reports (spec/fir.md 9.4). The `fail` ends the block.
+fn lower_panic(lowerer mut* lw, ast.node* n) bool {
+    fir.operand mut ptr = fir.operand{};
+    fir.operand mut len = fir.operand{};
+    if (!string_parts(lw, ast.ast_child(n, 0), &ptr, &len)) {
+        return false;
+    }
+    u32 first = fir.operand_push(lw->f, ptr);
+    fir.operand_push(lw->f, len);
+    terminate(lw, fir.term_fail(fir.check_kind.chk_panic, first, 2, n->a->loc, lw->stmt));
     return true;
 }
 
 // ---- binary operators -------------------------------------------------------------------------
 
 // `a op b`: `&&` and `||` by control flow, `==` and `!=` on strings by the runtime, and every
-// other operator as one rvalue over the operands of `a` and `b`, in that order, with the
-// checks that the operator needs.
+// other operator as one rvalue over the operands of `a` and `b`, in that order, with the checks
+// that the operator needs. The operand of `a` is read before `b` runs when `b` contains a writer.
 fn lower_binary(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     lexer.tok_kind op = cast(n->op, lexer.tok_kind);
     if (op == lexer.tok_kind.and_and || op == lexer.tok_kind.pipe_pipe) {
@@ -515,30 +1633,42 @@ fn lower_binary(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
         return lower_string_eq(lw, n, out);
     }
     fir.operand mut a = fir.operand{};
-    fir.operand mut b = fir.operand{};
-    if (!lower_operand(lw, n->a, &a) || !lower_operand(lw, n->b, &b)) {
+    if (!lower_operand(lw, n->a, &a)) {
         return false;
     }
-    bool float = types.type_is_float(n->a->ty);
+    a = materialize(lw, a, contains_writer(n->b), n->a->loc);
+    fir.operand mut b = fir.operand{};
+    if (!lower_operand(lw, n->b, &b)) {
+        return false;
+    }
+    *out = into_temp(lw, n->ty, operation(lw, op, n->a->ty, a, b, n->loc), n->loc);
+    return true;
+}
+
+// The rvalue of `a op b` over operands of type `t`, after the checks of the operator at `at`:
+// `+`, `-` and `*` on integers with the overflow check, `/` and `%` on integers with the division
+// checks, the shifts with the shift check, and every other operator with none.
+fn operation(lowerer mut* lw, lexer.tok_kind op, types.node* t, fir.operand a, fir.operand b,
+             diag.loc at) fir.rvalue {
+    bool float = types.type_is_float(t);
     fir.rvalue_kind kind = binary_kind(op, float);
     bool arith = op == lexer.tok_kind.plus || op == lexer.tok_kind.minus
         || op == lexer.tok_kind.star;
     if (arith && !float) {
-        *out = checked(lw, n, kind, a, b);
-    } else if (kind == fir.rvalue_kind.rv_div || kind == fir.rvalue_kind.rv_rem) {
-        *out = divided(lw, n, kind, a, b);
-    } else if (kind == fir.rvalue_kind.rv_shl || kind == fir.rvalue_kind.rv_shr) {
-        *out = shifted(lw, n, kind, a, b);
-    } else {
-        *out = into_temp(lw, n->ty, fir.rvalue_binary(lw->f, kind, a, b), n->loc);
+        return checked(lw, kind, t, a, b, at);
     }
-    return true;
+    if (kind == fir.rvalue_kind.rv_div || kind == fir.rvalue_kind.rv_rem) {
+        return divided(lw, kind, t, a, b, at);
+    }
+    if (kind == fir.rvalue_kind.rv_shl || kind == fir.rvalue_kind.rv_shr) {
+        return shifted(lw, kind, t, a, b, at);
+    }
+    return fir.rvalue_binary(lw->f, kind, a, b);
 }
 
 // The rvalue of the binary operator `op` (spec/fir.md 6), with the float forms for a float
-// operand. `+`, `-` and `*` on integers give `add`, `sub` and `mul`, which lower_binary checks,
-// and the wrapping operators give the same forms with no check. The checker refuses `%` on a
-// float.
+// operand. `+`, `-` and `*` on integers give `add`, `sub` and `mul`, which operation checks, and
+// the wrapping operators give the same forms with no check. The checker refuses `%` on a float.
 fn binary_kind(lexer.tok_kind op, bool float) fir.rvalue_kind {
     switch (op) {
     case lexer.tok_kind.plus:
@@ -610,14 +1740,15 @@ fn overflow_kind(fir.rvalue_kind kind) fir.rvalue_kind {
     }
 }
 
-// `a + b`, `a - b` or `a * b` on integers, and the `sub` of `-x`: `_f = add_overflows(a, b)`,
-// `check(copy _f, overflow) -> bb`, then `_t = add(a, b)` in `bb` (spec/fir.md 9.4).
-fn checked(lowerer mut* lw, ast.node* n, fir.rvalue_kind kind, fir.operand a, fir.operand b)
-    fir.operand {
+// `a + b`, `a - b` or `a * b` on integers of type `t`, and the `sub` of `-x`: `_f =
+// add_overflows(a, b)` and `check(copy _f, overflow) -> bb` at `at`, and the rvalue `add(a, b)`
+// for `bb` (spec/fir.md 9.4).
+fn checked(lowerer mut* lw, fir.rvalue_kind kind, types.node* t, fir.operand a, fir.operand b,
+           diag.loc at) fir.rvalue {
     fir.rvalue test = fir.rvalue_binary(lw->f, overflow_kind(kind), a, b);
-    fir.operand flag = into_temp(lw, bool_ty(lw), test, n->loc);
-    check_then(lw, flag, fir.check_kind.chk_overflow, 0, 0, n->loc);
-    return into_temp(lw, n->ty, fir.rvalue_binary(lw->f, kind, a, b), n->loc);
+    fir.operand flag = into_temp(lw, bool_ty(lw), test, at);
+    check_then(lw, flag, fir.check_kind.chk_overflow, 0, 0, at);
+    return fir.rvalue_binary(lw->f, kind, a, b);
 }
 
 // The constant `T v` of the integer type `t`.
@@ -625,51 +1756,50 @@ fn int_const(types.node* t, bool neg, u64 mag) fir.operand {
     return fir.operand_const(fir.const_int(t, consts.int_make(neg, mag)));
 }
 
-// `a / b` and `a % b` on integers: `_z = eq(b, const 0)` and `check(copy _z, div_zero)`; for a
-// signed type, `_o = and(eq(b, const -1), eq(a, const MIN))` and `check(copy _o,
-// div_overflow)`; then `div(a, b)` or `rem(a, b)` (spec/fir.md 9.4). Each condition is
-// true on failure.
-fn divided(lowerer mut* lw, ast.node* n, fir.rvalue_kind kind, fir.operand a, fir.operand b)
-    fir.operand {
-    types.node* t = n->ty;
+// `a / b` and `a % b` on integers of type `t`: `_z = eq(b, const 0)` and `check(copy _z,
+// div_zero)`; for a signed type, `_o = and(eq(b, const -1), eq(a, const MIN))` and `check(copy
+// _o, div_overflow)`; then the rvalue `div(a, b)` or `rem(a, b)` (spec/fir.md 9.4). Each
+// condition is true on failure.
+fn divided(lowerer mut* lw, fir.rvalue_kind kind, types.node* t, fir.operand a, fir.operand b,
+           diag.loc at) fir.rvalue {
     types.node* flag = bool_ty(lw);
     fir.rvalue zero = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_eq, b, int_const(t, false, 0));
-    check_then(lw, into_temp(lw, flag, zero, n->loc), fir.check_kind.chk_div_zero, 0, 0, n->loc);
+    check_then(lw, into_temp(lw, flag, zero, at), fir.check_kind.chk_div_zero, 0, 0, at);
     if (prim.prim_is_signed(t->prim)) {
         u64 bits = cast(prim.prim_size(t->prim), u64) * prim.PRIM_BITS_PER_BYTE;
         fir.operand minus_one = int_const(t, true, 1);
         fir.rvalue minus = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_eq, b, minus_one);
-        fir.operand is_minus = into_temp(lw, flag, minus, n->loc);
+        fir.operand is_minus = into_temp(lw, flag, minus, at);
         fir.operand min = int_const(t, true, cast(1, u64) << (bits - 1));
         fir.rvalue least = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_eq, a, min);
-        fir.operand is_min = into_temp(lw, flag, least, n->loc);
+        fir.operand is_min = into_temp(lw, flag, least, at);
         fir.rvalue both = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_and, is_minus, is_min);
-        fir.operand over = into_temp(lw, flag, both, n->loc);
-        check_then(lw, over, fir.check_kind.chk_div_overflow, 0, 0, n->loc);
+        fir.operand over = into_temp(lw, flag, both, at);
+        check_then(lw, over, fir.check_kind.chk_div_overflow, 0, 0, at);
     }
-    return into_temp(lw, t, fir.rvalue_binary(lw->f, kind, a, b), n->loc);
+    return fir.rvalue_binary(lw->f, kind, a, b);
 }
 
-// `a << b` and `a >> b`: `_n = cast<i64>(b)`, which widens by the signedness of `b`, `_u =
-// cast<u64>(copy _n)`, `_f = ge(copy _u, const u64 W)` for the width W of the type of `a`,
-// `check(copy _f, shift, copy _n, bytes "<type>")`, then `shl(a, cast<T>(copy _n))` or `shr`
-// (spec/fir.md 9.4, toolchain.md 6 item 15). The build-mode pass masks `_n` under `--release`.
-fn shifted(lowerer mut* lw, ast.node* n, fir.rvalue_kind kind, fir.operand a, fir.operand b)
-    fir.operand {
-    types.node* t = n->ty;
-    types.node* wide = prim_ty(lw, prim.prim_kind.prim_i64);
-    types.node* bits = prim_ty(lw, prim.prim_kind.prim_u64);
-    fir.operand count = into_temp(lw, wide, fir.rvalue_cast(lw->f, wide, b), n->loc);
-    fir.operand unsigned = into_temp(lw, bits, fir.rvalue_cast(lw->f, bits, count), n->loc);
+// `a << b` and `a >> b` on a value of type `t`: `_n = cast<i64>(b)`, which widens by the
+// signedness of `b`, `_u = cast<u64>(copy _n)`, `_f = ge(copy _u, const u64 W)` for the width W of
+// `t`, `check(copy _f, shift, copy _n, bytes "<type>")`, then the rvalue `shl(a, cast<T>(copy
+// _n))` or `shr` (spec/fir.md 9.4, toolchain.md 6 item 15). The build-mode pass masks `_n` under
+// `--release`.
+fn shifted(lowerer mut* lw, fir.rvalue_kind kind, types.node* t, fir.operand a, fir.operand b,
+           diag.loc at) fir.rvalue {
+    types.node* wide = i64_ty(lw);
+    types.node* bits = u64_ty(lw);
+    fir.operand count = into_temp(lw, wide, fir.rvalue_cast(lw->f, wide, b), at);
+    fir.operand unsigned = into_temp(lw, bits, fir.rvalue_cast(lw->f, bits, count), at);
     u64 w = cast(prim.prim_size(t->prim), u64) * prim.PRIM_BITS_PER_BYTE;
     fir.rvalue test = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_ge, unsigned,
                                         int_const(bits, false, w));
-    fir.operand flag = into_temp(lw, bool_ty(lw), test, n->loc);
+    fir.operand flag = into_temp(lw, bool_ty(lw), test, at);
     u32 first = fir.operand_push(lw->f, count);
     fir.operand_push(lw->f, fir.operand_const(fir.const_bytes(prim.prim_name(t->prim))));
-    check_then(lw, flag, fir.check_kind.chk_shift, first, 2, n->loc);
-    fir.operand narrow = into_temp(lw, t, fir.rvalue_cast(lw->f, t, count), n->loc);
-    return into_temp(lw, t, fir.rvalue_binary(lw->f, kind, a, narrow), n->loc);
+    check_then(lw, flag, fir.check_kind.chk_shift, first, 2, at);
+    fir.operand narrow = into_temp(lw, t, fir.rvalue_cast(lw->f, t, count), at);
+    return fir.rvalue_binary(lw->f, kind, a, narrow);
 }
 
 // `a && b` and `a || b`: a temporary `_t: bool`, `_t = a`, `switch(copy _t) -> [true: rhs,
@@ -703,8 +1833,9 @@ fn lower_logical(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
 }
 
 // `a == b` and `a != b` on strings: `call fn std.rt.str_eq(copy a.0, copy a.1, copy b.0, copy
-// b.1)`, and `not` of it for `!=` (spec/fir.md 9.4). A closure without std.rt.str_eq, such as a
-// sandbox of a test, leaves the comparison to the direct path.
+// b.1)`, and `not` of it for `!=` (spec/fir.md 9.4). The place of `a` is read before `b` runs when
+// `b` contains a writer. A closure without std.rt.str_eq, such as a sandbox of a test, leaves the
+// comparison to the direct path.
 fn lower_string_eq(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     if (!lw->str_eq_known) {
         lw->str_eq = runtime_fn(lw->ck, STR_EQ);
@@ -713,15 +1844,23 @@ fn lower_string_eq(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     if (lw->str_eq == null) {
         return unsupported(lw, n);
     }
-    fir.place mut a = fir.place{};
-    fir.place mut b = fir.place{};
-    if (!string_place(lw, n->a, &a) || !string_place(lw, n->b, &b)) {
+    fir.operand mut a = fir.operand{};
+    if (!aggregate_operand(lw, n->a, &a)) {
         return false;
     }
-    u32 first = fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, a, 0)));
-    fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, a, 1)));
-    fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, b, 0)));
-    fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, b, 1)));
+    a = materialize(lw, a, contains_writer(n->b), n->a->loc);
+    fir.operand mut b = fir.operand{};
+    if (!aggregate_operand(lw, n->b, &b)) {
+        return false;
+    }
+    if (a.kind != fir.operand_kind.ok_copy || b.kind != fir.operand_kind.ok_copy) {
+        // the checker refuses to compare an owning rvalue, which would leave no owner
+        panic("fir_lower.lower_string_eq: a string that owns");
+    }
+    u32 first = fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, a.place, 0)));
+    fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, a.place, 1)));
+    fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, b.place, 0)));
+    fir.operand_push(lw->f, fir.operand_copy(fir.place_field(lw->f, b.place, 1)));
     fir.operand mut same = into_temp(lw, bool_ty(lw), fir.rvalue_call_fn(lw->str_eq, first, 4),
                                      n->loc);
     if (cast(n->op, lexer.tok_kind) == lexer.tok_kind.ne) {
@@ -738,8 +1877,7 @@ fn runtime_fn(check.checker* ck, string name) ast.sym* {
     u64 mut i = 0;
     while (i < check.check_sym_count(ck)) {
         ast.sym* s = check.check_sym_at(ck, i);
-        if (s->kind == ast.sym_kind.s_fn && s->name == name && s->owner != null
-            && s->owner->kind == ast.sym_kind.s_module && s->owner->name == RUNTIME_MODULE) {
+        if (runtime_function(s) && s->name == name) {
             return s;
         }
         i += 1;
@@ -747,28 +1885,11 @@ fn runtime_fn(check.checker* ck, string name) ast.sym* {
     return null;
 }
 
-// The place of the string operand `n` of an equality: the place of a name, or a temporary that a
-// string constant fills, since a constant of an aggregate type fills a place (spec/fir.md 6).
-// Another operand waits for the lowering of places.
-fn string_place(lowerer mut* lw, ast.node* n, fir.place mut* out) bool {
-    if ((n->ann & check.ANN_CONST) != 0) {
-        consts.cval v = check.check_node_value(lw->ck, n);
-        *out = fir.place_local(fir.local_add(lw->f, n->ty, fir.local_kind.lk_temp, null, n->loc));
-        fir.operand text = fir.operand_const(fir.const_string(v.str));
-        assign(lw, *out, fir.rvalue_use(lw->f, text), n->loc);
-        return true;
-    }
-    if (name_place(lw, n, out)) {
-        return true;
-    }
-    return unsupported(lw, n);
-}
-
-// `c ? a : b`: the operand of `c`, `switch -> [true: then, otherwise: else]`, and each arm into a
-// temporary of the type of the conditional, then `goto done` (spec/fir.md 9.4). The blocks are
-// made in the order then, else, done. The checker gives the conditional the lent type of its arms
-// unless both arms own. So the temporary owns only when the arms are owning rvalues or `null`, and
-// `move _t` reads it then.
+// `c ? a : b` of a scalar type: the operand of `c`, `switch -> [true: then, otherwise: else]`,
+// and each arm into a temporary of the type of the conditional, then `goto done` (spec/fir.md
+// 9.4). The blocks are made in the order then, else, done. The checker gives the conditional the
+// lent type of its arms unless both arms own. So the temporary owns only when the arms are owning
+// rvalues or `null`, and `move _t` reads it then.
 fn lower_ternary(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     fir.operand mut c = fir.operand{};
     if (!lower_operand(lw, n->a, &c)) {

@@ -1,0 +1,1611 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| order ok
+//| calls ok
+//| print ok
+//| assert ok
+//| assign ok
+/// Checks the lowering of calls under the materialization rule, of the print family, of `assert`
+/// and `panic`, and of assignments (spec/fir.md 9.3, 9.4).
+import lower_env;
+
+
+// `G + bump()` reads `G` into a temporary before `bump` runs, and `a + b` over two parameters reads
+// them where the `add` stands, since no writer follows (spec/fir.md 9.4, principle 4).
+fn a_place_is_read_before_a_later_writer() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "i32 mut G = 1;",
+        "fn bump() i32 {",
+        "    G += 1;",
+        "    return G;",
+        "}",
+        "fn f(i32 a, i32 b) i32 {",
+        "    i32 x = G + bump();",
+        "    return a + b;",
+        "}",
+        "fn g() i32 {",
+        "    return G +% bump();",
+        "}",
+    };
+    string[29] want = {
+        "fn main.f(_1 (a): i32, _2 (b): i32) -> i32 {",
+        "    let _0: i32;",
+        "    let _3 (x): i32 #7:9;",
+        "    let _4: i32 #7:13;",
+        "    let _5: i32 #7:21;",
+        "    let _6: bool #7:15;",
+        "    let _7: i32 #7:15;",
+        "    let _8: bool #8:14;",
+        "    let _9: i32 #8:14;",
+        "",
+        "    bb0: {",
+        "        live(_3) #7:9 s1;",
+        "        _4 = copy global main.G #7:13 s1;",
+        "        _5 = call fn main.bump() #7:21 s1;",
+        "        _6 = add_overflows(copy _4, copy _5) #7:15 s1;",
+        "        check(copy _6, overflow) -> bb1 #7:15 s1;",
+        "    }",
+        "    bb1: {",
+        "        _7 = add(copy _4, copy _5) #7:15 s1;",
+        "        _3 = copy _7 #7:15 s1;",
+        "        _8 = add_overflows(copy _1, copy _2) #8:14 s2;",
+        "        check(copy _8, overflow) -> bb2 #8:14 s2;",
+        "    }",
+        "    bb2: {",
+        "        _9 = add(copy _1, copy _2) #8:14 s2;",
+        "        _0 = copy _9 #8:14 s2;",
+        "        return #8:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// With `+%`, which has no check, `G +% bump()` is the three statements of spec/fir.md 9.4:
+// `_1 = copy global G`, `_2 = call fn m.bump()`, `_3 = add(copy _1, copy _2)`.
+fn the_three_statements_of_the_criterion() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "i32 mut G = 1;",
+        "fn bump() i32 {",
+        "    G += 1;",
+        "    return G;",
+        "}",
+        "fn f(i32 a, i32 b) i32 {",
+        "    i32 x = G + bump();",
+        "    return a + b;",
+        "}",
+        "fn g() i32 {",
+        "    return G +% bump();",
+        "}",
+    };
+    string[14] want = {
+        "fn main.g() -> i32 {",
+        "    let _0: i32;",
+        "    let _1: i32 #11:12;",
+        "    let _2: i32 #11:21;",
+        "    let _3: i32 #11:14;",
+        "",
+        "    bb0: {",
+        "        _1 = copy global main.G #11:12 s1;",
+        "        _2 = call fn main.bump() #11:21 s1;",
+        "        _3 = add(copy _1, copy _2) #11:14 s1;",
+        "        _0 = copy _3 #11:14 s1;",
+        "        return #11:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+}
+
+// `G += 1` reads the old value first, `_old = copy global G`, and writes the global after the
+// check of `+` (spec/fir.md 9.3).
+fn a_compound_assignment_to_a_global() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "i32 mut G = 1;",
+        "fn bump() i32 {",
+        "    G += 1;",
+        "    return G;",
+        "}",
+        "fn f(i32 a, i32 b) i32 {",
+        "    i32 x = G + bump();",
+        "    return a + b;",
+        "}",
+        "fn g() i32 {",
+        "    return G +% bump();",
+        "}",
+    };
+    string[16] want = {
+        "fn main.bump() -> i32 {",
+        "    let _0: i32;",
+        "    let _1: i32 #3:5;",
+        "    let _2: bool #3:7;",
+        "",
+        "    bb0: {",
+        "        _1 = copy global main.G #3:5 s1;",
+        "        _2 = add_overflows(copy _1, const i32 1) #3:7 s1;",
+        "        check(copy _2, overflow) -> bb1 #3:7 s1;",
+        "    }",
+        "    bb1: {",
+        "        global main.G = add(copy _1, const i32 1) #3:7 s1;",
+        "        _0 = copy global main.G #4:12 s2;",
+        "        return #4:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "bump"), want[..]);
+}
+
+// `tbl[i].f(g())` reads the callee into a temporary, after the bounds check of `tbl[i]` and before
+// `g` runs (D6.3). A function type takes no array suffix, so the table holds a struct.
+fn a_callee_value_is_read_before_the_arguments() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "struct op {",
+        "    fn (i32) i32 f;",
+        "}",
+        "fn g() i32 {",
+        "    return 2;",
+        "}",
+        "fn h(op[2] tbl, u8 i) i32 {",
+        "    return tbl[i].f(g());",
+        "}",
+    };
+    string[23] want = {
+        "fn main.h(_1 (tbl): op[2], _2 (i): u8) -> i32 {",
+        "    let _0: i32;",
+        "    let _3: u64 #8:15;",
+        "    let _4: bool #8:15;",
+        "    let _5: i64 #8:15;",
+        "    let _6: fn (i32) i32 #8:18;",
+        "    let _7: i32 #8:22;",
+        "    let _8: i32 #8:20;",
+        "",
+        "    bb0: {",
+        "        _3 = cast<u64>(copy _2) #8:15 s1;",
+        "        _4 = ge(copy _3, const u64 2) #8:15 s1;",
+        "        _5 = cast<i64>(copy _3) #8:15 s1;",
+        "        check(copy _4, bounds, copy _5, const u64 2) -> bb1 #8:15 s1;",
+        "    }",
+        "    bb1: {",
+        "        _6 = copy _1[_3].0 #8:18 s1;",
+        "        _7 = call fn main.g() #8:22 s1;",
+        "        _8 = call copy _6(copy _7) #8:20 s1;",
+        "        _0 = copy _8 #8:20 s1;",
+        "        return #8:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "h"), want[..]);
+}
+
+// `take(move(p), p)` moves `p` and then reads it, as the order of D6.3 says, so the second argument
+// is the emptied place. `give(r, move(r))` reads `r` into a temporary of the lent type before the
+// `move`, which is a writer. An owning rvalue enters an `own` parameter as `move _t`, and a `move`
+// before a writer moves into a temporary (spec/fir.md 9.4, D17.4, D17.5).
+fn an_argument_moves_or_lends() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[22] source = {
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "fn mk() u8 mut* own {",
+        "    return null;",
+        "}",
+        "fn take(u8 mut* own p, u8* q) void {",
+        "}",
+        "fn give(u8* q, u8 mut* own p) void {",
+        "}",
+        "fn keep(u8 mut* own p, i32 n) void {",
+        "}",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn f(u8 mut* own p, u8 mut* own r, u8 mut* own w) void {",
+        "    take(move(p), p);",
+        "    give(r, move(r));",
+        "    take(mk(), null);",
+        "    keep(move(w), one());",
+        "}",
+    };
+    string[23] want = {
+        "fn main.f(_1 (p): u8 mut* own, _2 (r): u8 mut* own, _3 (w): u8 mut* own) -> void {",
+        "    let _0: void;",
+        "    let _4: void #18:9;",
+        "    let _5: u8 mut* #19:10;",
+        "    let _6: void #19:9;",
+        "    let _7: u8 mut* own #20:12;",
+        "    let _8: void #20:9;",
+        "    let _9: u8 mut* own #21:14;",
+        "    let _10: i32 #21:22;",
+        "    let _11: void #21:9;",
+        "",
+        "    bb0: {",
+        "        _4 = call fn main.take(move _1, copy _1) #18:9 s1;",
+        "        _5 = copy _2 #19:10 s2;",
+        "        _6 = call fn main.give(copy _5, move _2) #19:9 s2;",
+        "        _7 = call fn main.mk() #20:12 s3;",
+        "        _8 = call fn main.take(move _7, const null u8*) #20:9 s3;",
+        "        _9 = move _3 #21:14 s4;",
+        "        _10 = call fn main.one() #21:22 s4;",
+        "        _11 = call fn main.keep(move _9, copy _10) #21:9 s4;",
+        "        return #22:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// `call extern` for an `extern fn`, its variable tail included, `call copy _g` for a function
+// value, and a statement call into a temporary that nothing reads. An aggregate argument is a
+// place: a parameter as it stands, and a literal or a string constant in a temporary first.
+fn an_extern_a_value_and_an_aggregate_argument() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[28] source = {
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "extern fn puts(char* s) i32;",
+        "extern fn printf(char* f, ...) i32;",
+        "fn stop() noreturn {",
+        "    panic(\"stop\");",
+        "}",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn sum(pair s, string t) i32 {",
+        "    return s.a;",
+        "}",
+        "fn f(char* s, i64 n, pair q) i32 {",
+        "    fn () i32 g = one;",
+        "    i32 r = puts(s);",
+        "    printf(s, n, r);",
+        "    one();",
+        "    return g() + sum(q, \"x\") + sum(pair{1, 2}, \"yz\");",
+        "}",
+        "fn e(bool c) i32 {",
+        "    if (c) {",
+        "        stop();",
+        "    }",
+        "    return 1;",
+        "}",
+    };
+    string[46] want = {
+        "fn main.f(_1 (s): char*, _2 (n): i64, _3 (q): pair) -> i32 {",
+        "    let _0: i32;",
+        "    let _4 (g): fn () i32 #17:15;",
+        "    let _5 (r): i32 #18:9;",
+        "    let _6: i32 #18:17;",
+        "    let _7: i32 #19:11;",
+        "    let _8: i32 #20:8;",
+        "    let _9: i32 #21:13;",
+        "    let _10: string #21:25;",
+        "    let _11: i32 #21:21;",
+        "    let _12: bool #21:16;",
+        "    let _13: i32 #21:16;",
+        "    let _14: pair #21:36;",
+        "    let _15: string #21:48;",
+        "    let _16: i32 #21:35;",
+        "    let _17: bool #21:30;",
+        "    let _18: i32 #21:30;",
+        "",
+        "    bb0: {",
+        "        live(_4) #17:15 s1;",
+        "        _4 = const fn main.one #17:19 s1;",
+        "        live(_5) #18:9 s2;",
+        "        _6 = call extern puts(copy _1) #18:17 s2;",
+        "        _5 = copy _6 #18:17 s2;",
+        "        _7 = call extern printf(copy _1, copy _2, copy _5) #19:11 s3;",
+        "        _8 = call fn main.one() #20:8 s4;",
+        "        _9 = call copy _4() #21:13 s5;",
+        "        _10 = const \"x\" #21:25 s5;",
+        "        _11 = call fn main.sum(copy _3, copy _10) #21:21 s5;",
+        "        _12 = add_overflows(copy _9, copy _11) #21:16 s5;",
+        "        check(copy _12, overflow) -> bb1 #21:16 s5;",
+        "    }",
+        "    bb1: {",
+        "        _13 = add(copy _9, copy _11) #21:16 s5;",
+        "        _14 = aggregate pair(const i32 1, const i32 2) #21:36 s5;",
+        "        _15 = const \"yz\" #21:48 s5;",
+        "        _16 = call fn main.sum(copy _14, copy _15) #21:35 s5;",
+        "        _17 = add_overflows(copy _13, copy _16) #21:30 s5;",
+        "        check(copy _17, overflow) -> bb2 #21:30 s5;",
+        "    }",
+        "    bb2: {",
+        "        _18 = add(copy _13, copy _16) #21:30 s5;",
+        "        _0 = copy _18 #21:30 s5;",
+        "        return #21:5 s5;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// A call of a `noreturn` function writes a `void` temporary and ends its block with `trap` (D8.5,
+// rule V8), so the arm of the `if` needs no `goto`.
+fn a_noreturn_call_ends_its_block() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[28] source = {
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "extern fn puts(char* s) i32;",
+        "extern fn printf(char* f, ...) i32;",
+        "fn stop() noreturn {",
+        "    panic(\"stop\");",
+        "}",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn sum(pair s, string t) i32 {",
+        "    return s.a;",
+        "}",
+        "fn f(char* s, i64 n, pair q) i32 {",
+        "    fn () i32 g = one;",
+        "    i32 r = puts(s);",
+        "    printf(s, n, r);",
+        "    one();",
+        "    return g() + sum(q, \"x\") + sum(pair{1, 2}, \"yz\");",
+        "}",
+        "fn e(bool c) i32 {",
+        "    if (c) {",
+        "        stop();",
+        "    }",
+        "    return 1;",
+        "}",
+    };
+    string[16] want = {
+        "fn main.e(_1 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _2: void #25:13;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #24:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = call fn main.stop() #25:13 s2;",
+        "        trap #25:13 s2;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 1 #27:12 s3;",
+        "        return #27:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "e"), want[..]);
+}
+
+// `panic("stop")` is `fail(panic, ptr, len)` at the name `panic`, with the pointer and the length
+// of the literal as constants, and it ends the body.
+fn a_panic_of_a_literal_ends_the_body() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[28] source = {
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "extern fn puts(char* s) i32;",
+        "extern fn printf(char* f, ...) i32;",
+        "fn stop() noreturn {",
+        "    panic(\"stop\");",
+        "}",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn sum(pair s, string t) i32 {",
+        "    return s.a;",
+        "}",
+        "fn f(char* s, i64 n, pair q) i32 {",
+        "    fn () i32 g = one;",
+        "    i32 r = puts(s);",
+        "    printf(s, n, r);",
+        "    one();",
+        "    return g() + sum(q, \"x\") + sum(pair{1, 2}, \"yz\");",
+        "}",
+        "fn e(bool c) i32 {",
+        "    if (c) {",
+        "        stop();",
+        "    }",
+        "    return 1;",
+        "}",
+    };
+    string[7] want = {
+        "fn main.stop() -> noreturn {",
+        "    let _0: void;",
+        "",
+        "    bb0: {",
+        "        fail(panic, const bytes \"stop\", const u64 4) #8:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "stop"), want[..]);
+}
+
+// `println(x, e)`: `fd` once, `print_i64` of `cast<i64>(x)`, `print_enum` of `cast<i32>(e)` with
+// the member table and the member count, then `print_char` of `const char 10` (spec/fir.md 9.4,
+// spec/toolchain.md 6 item 19).
+fn println_of_an_integer_and_an_enum() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "enum color {",
+        "    red,",
+        "    green,",
+        "}",
+        "fn f(i32 x, color e) void {",
+        "    println(x, e);",
+        "}",
+    };
+    string[18] want = {
+        "fn main.f(_1 (x): i32, _2 (e): color) -> void {",
+        "    let _0: void;",
+        "    let _3: i64 #6:13;",
+        "    let _4: void #6:13;",
+        "    let _5: i32 #6:16;",
+        "    let _6: void #6:16;",
+        "    let _7: void #6:12;",
+        "",
+        "    bb0: {",
+        "        _3 = cast<i64>(copy _1) #6:13 s1;",
+        "        _4 = call fn std.rt.print_i64(const i32 1, copy _3) #6:13 s1;",
+        "        _5 = cast<i32>(copy _2) #6:16 s1;",
+        "        _6 = call fn std.rt.print_enum(const i32 1, copy _5, \\",
+        "const enum_table main.color, const u64 2) #6:16 s1;",
+        "        _7 = call fn std.rt.print_char(const i32 1, const char 10) #6:12 s1;",
+        "        return #7:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// An unsigned integer narrower than 64 bits widens to `u64`, and an `i64` or a `u64` goes to its
+// print function as it stands; `f32` has a function of its own.
+fn print_of_each_integer_and_float() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[17] source = {
+        "fn next(i32 mut* fd) i32 {",
+        "    return 7;",
+        "}",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn f(u8 b, i64 w, u64 u, f32 h) void {",
+        "    print(b, w, u, h);",
+        "}",
+        "fn k(f64 d, bool q, char c) void {",
+        "    print(d, q, c);",
+        "}",
+        "fn g(string s, u8* p, void* v, i32 mut fd) void {",
+        "    eprint(s, \"lit\", \"\", p, v, one);",
+        "    eprintln();",
+        "    fprintln(fd, next(&fd));",
+        "}",
+    };
+    string[17] want = {
+        "fn main.f(_1 (b): u8, _2 (w): i64, _3 (u): u64, _4 (h): f32) -> void {",
+        "    let _0: void;",
+        "    let _5: u64 #8:11;",
+        "    let _6: void #8:11;",
+        "    let _7: void #8:14;",
+        "    let _8: void #8:17;",
+        "    let _9: void #8:20;",
+        "",
+        "    bb0: {",
+        "        _5 = cast<u64>(copy _1) #8:11 s1;",
+        "        _6 = call fn std.rt.print_u64(const i32 1, copy _5) #8:11 s1;",
+        "        _7 = call fn std.rt.print_i64(const i32 1, copy _2) #8:14 s1;",
+        "        _8 = call fn std.rt.print_u64(const i32 1, copy _3) #8:17 s1;",
+        "        _9 = call fn std.rt.print_f32(const i32 1, copy _4) #8:20 s1;",
+        "        return #9:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// `f64`, `bool` and `char` go to their print functions as they stand.
+fn print_of_a_float_a_bool_and_a_char() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[17] source = {
+        "fn next(i32 mut* fd) i32 {",
+        "    return 7;",
+        "}",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn f(u8 b, i64 w, u64 u, f32 h) void {",
+        "    print(b, w, u, h);",
+        "}",
+        "fn k(f64 d, bool q, char c) void {",
+        "    print(d, q, c);",
+        "}",
+        "fn g(string s, u8* p, void* v, i32 mut fd) void {",
+        "    eprint(s, \"lit\", \"\", p, v, one);",
+        "    eprintln();",
+        "    fprintln(fd, next(&fd));",
+        "}",
+    };
+    string[13] want = {
+        "fn main.k(_1 (d): f64, _2 (q): bool, _3 (c): char) -> void {",
+        "    let _0: void;",
+        "    let _4: void #11:11;",
+        "    let _5: void #11:14;",
+        "    let _6: void #11:17;",
+        "",
+        "    bb0: {",
+        "        _4 = call fn std.rt.print_f64(const i32 1, copy _1) #11:11 s1;",
+        "        _5 = call fn std.rt.print_bool(const i32 1, copy _2) #11:14 s1;",
+        "        _6 = call fn std.rt.print_char(const i32 1, copy _3) #11:17 s1;",
+        "        return #12:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "k"), want[..]);
+}
+
+// `eprint` writes to descriptor 2. A `string` place gives its two fields, and a literal, the empty
+// one included, gives `const bytes` and its length. A pointer and a function convert to `void*`,
+// and `void*` stands as it is. `fprintln(fd, next(&fd))` reads `fd` once, into a temporary, before
+// `next` runs.
+fn print_of_strings_pointers_and_a_descriptor() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[17] source = {
+        "fn next(i32 mut* fd) i32 {",
+        "    return 7;",
+        "}",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn f(u8 b, i64 w, u64 u, f32 h) void {",
+        "    print(b, w, u, h);",
+        "}",
+        "fn k(f64 d, bool q, char c) void {",
+        "    print(d, q, c);",
+        "}",
+        "fn g(string s, u8* p, void* v, i32 mut fd) void {",
+        "    eprint(s, \"lit\", \"\", p, v, one);",
+        "    eprintln();",
+        "    fprintln(fd, next(&fd));",
+        "}",
+    };
+    string[39] want = {
+        "fn main.g(_1 (s): string, _2 (p): u8*, _3 (v): void*, _4 (fd): i32) -> void {",
+        "    let _0: void;",
+        "    let _5: void #14:12;",
+        "    let _6: void #14:15;",
+        "    let _7: void #14:22;",
+        "    let _8: void* #14:26;",
+        "    let _9: void #14:26;",
+        "    let _10: void #14:29;",
+        "    let _11: void* #14:32;",
+        "    let _12: void #14:32;",
+        "    let _13: void #15:13;",
+        "    let _14: i32 #16:14;",
+        "    let _15: i32 mut* #16:23;",
+        "    let _16: i32 #16:22;",
+        "    let _17: i64 #16:22;",
+        "    let _18: void #16:22;",
+        "    let _19: void #16:13;",
+        "",
+        "    bb0: {",
+        "        _5 = call fn std.rt.print_str(const i32 2, copy _1.0, copy _1.1) #14:12 s1;",
+        "        _6 = call fn std.rt.print_str(const i32 2, const bytes \"lit\", \\",
+        "const u64 3) #14:15 s1;",
+        "        _7 = call fn std.rt.print_str(const i32 2, const bytes \"\", \\",
+        "const u64 0) #14:22 s1;",
+        "        _8 = cast<void*>(copy _2) #14:26 s1;",
+        "        _9 = call fn std.rt.print_ptr(const i32 2, copy _8) #14:26 s1;",
+        "        _10 = call fn std.rt.print_ptr(const i32 2, copy _3) #14:29 s1;",
+        "        _11 = cast<void*>(const fn main.one) #14:32 s1;",
+        "        _12 = call fn std.rt.print_ptr(const i32 2, copy _11) #14:32 s1;",
+        "        _13 = call fn std.rt.print_char(const i32 2, const char 10) #15:13 s2;",
+        "        _14 = copy _4 #16:14 s3;",
+        "        _15 = addr mut(_4) #16:23 s3;",
+        "        _16 = call fn main.next(copy _15) #16:22 s3;",
+        "        _17 = cast<i64>(copy _16) #16:22 s3;",
+        "        _18 = call fn std.rt.print_i64(copy _14, copy _17) #16:22 s3;",
+        "        _19 = call fn std.rt.print_char(copy _14, const char 10) #16:13 s3;",
+        "        return #17:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+}
+
+// `assert(c)` is `check(a, user, bytes "<text>")` at the name `assert`, with the source text of the
+// argument; a constant condition stays a constant. `panic(m)` of a place gives its two fields, and
+// each `fail` ends its block (spec/fir.md 9.4).
+fn an_assert_and_a_panic() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn f(i32 x, string m) void {",
+        "    assert(x > 0);",
+        "    assert(true);",
+        "    if (x == 2) {",
+        "        panic(\"two\");",
+        "    }",
+        "    panic(m);",
+        "}",
+    };
+    string[23] want = {
+        "fn main.f(_1 (x): i32, _2 (m): string) -> void {",
+        "    let _0: void;",
+        "    let _3: bool #2:14;",
+        "    let _4: bool #4:11;",
+        "",
+        "    bb0: {",
+        "        _3 = gt(copy _1, const i32 0) #2:14 s1;",
+        "        check(copy _3, user, const bytes \"x > 0\") -> bb1 #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        check(const true, user, const bytes \"true\") -> bb2 #3:5 s2;",
+        "    }",
+        "    bb2: {",
+        "        _4 = eq(copy _1, const i32 2) #4:11 s3;",
+        "        switch(copy _4) -> [true: bb3, otherwise: bb4] #4:5 s3;",
+        "    }",
+        "    bb3: {",
+        "        fail(panic, const bytes \"two\", const u64 3) #5:9 s4;",
+        "    }",
+        "    bb4: {",
+        "        fail(panic, copy _2.0, copy _2.1) #7:5 s5;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// `s = inc(&s)` and `t = swap(&t)` write fixed storage, so the place stands after the call. A
+// scalar result goes into a temporary first, and an aggregate result writes `t` itself (spec/fir.md
+// 9.3).
+fn an_assignment_from_a_call_of_its_address() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[20] source = {
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "fn inc(i32 mut* p) i32 {",
+        "    return 1;",
+        "}",
+        "fn swap(pair mut* p) pair {",
+        "    return pair{p->b, p->a};",
+        "}",
+        "fn f(i32 mut s, pair mut t) void {",
+        "    s = inc(&s);",
+        "    t = swap(&t);",
+        "}",
+        "fn g(i32 mut s, i32[4] mut a, i32 mut@ w, i32 i) void {",
+        "    w[i] = inc(&s);",
+        "    a[i] += inc(&s);",
+        "    s++;",
+        "    w[0]--;",
+        "}",
+    };
+    string[15] want = {
+        "fn main.f(_1 (s): i32, _2 (t): pair) -> void {",
+        "    let _0: void;",
+        "    let _3: i32 mut* #12:13;",
+        "    let _4: i32 #12:12;",
+        "    let _5: pair mut* #13:14;",
+        "",
+        "    bb0: {",
+        "        _3 = addr mut(_1) #12:13 s1;",
+        "        _4 = call fn main.inc(copy _3) #12:12 s1;",
+        "        _1 = copy _4 #12:12 s1;",
+        "        _5 = addr mut(_2) #13:14 s2;",
+        "        _2 = call fn main.swap(copy _5) #13:13 s2;",
+        "        return #14:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// `w[i] = inc(&s)` indexes a span, whose storage a writer can move, so the address is held before
+// the call and the store goes through it. `a[i] += inc(&s)` indexes a fixed array: the old value is
+// read before the call, and the target is computed once. `s++` and `w[0]--` are `+= 1` and `-= 1`
+// (spec/fir.md 9.3, D6.3).
+fn an_assignment_holds_the_address_of_a_moving_place() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[20] source = {
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "fn inc(i32 mut* p) i32 {",
+        "    return 1;",
+        "}",
+        "fn swap(pair mut* p) pair {",
+        "    return pair{p->b, p->a};",
+        "}",
+        "fn f(i32 mut s, pair mut t) void {",
+        "    s = inc(&s);",
+        "    t = swap(&t);",
+        "}",
+        "fn g(i32 mut s, i32[4] mut a, i32 mut@ w, i32 i) void {",
+        "    w[i] = inc(&s);",
+        "    a[i] += inc(&s);",
+        "    s++;",
+        "    w[0]--;",
+        "}",
+    };
+    string[69] want = {
+        "fn main.g(_1 (s): i32, _2 (a): i32[4], _3 (w): i32 mut@, _4 (i): i32) -> void {",
+        "    let _0: void;",
+        "    let _5: u64 #16:6;",
+        "    let _6: bool #16:6;",
+        "    let _7: i64 #16:6;",
+        "    let _8: i32 mut* #16:6;",
+        "    let _9: i32 mut* #16:16;",
+        "    let _10: i32 #16:15;",
+        "    let _11: u64 #17:6;",
+        "    let _12: bool #17:6;",
+        "    let _13: i64 #17:6;",
+        "    let _14: i32 #17:6;",
+        "    let _15: i32 mut* #17:17;",
+        "    let _16: i32 #17:16;",
+        "    let _17: bool #17:10;",
+        "    let _18: i32 #18:5;",
+        "    let _19: bool #18:6;",
+        "    let _20: u64 #19:6;",
+        "    let _21: bool #19:6;",
+        "    let _22: i64 #19:6;",
+        "    let _23: i32 #19:6;",
+        "    let _24: bool #19:9;",
+        "",
+        "    bb0: {",
+        "        _5 = cast<u64>(copy _4) #16:6 s1;",
+        "        _6 = ge(copy _5, copy _3.1) #16:6 s1;",
+        "        _7 = cast<i64>(copy _5) #16:6 s1;",
+        "        check(copy _6, bounds, copy _7, copy _3.1) -> bb1 #16:6 s1;",
+        "    }",
+        "    bb1: {",
+        "        _8 = addr mut(_3[_5]) #16:6 s1;",
+        "        _9 = addr mut(_1) #16:16 s1;",
+        "        _10 = call fn main.inc(copy _9) #16:15 s1;",
+        "        (*_8) = copy _10 #16:15 s1;",
+        "        _11 = cast<u64>(copy _4) #17:6 s2;",
+        "        _12 = ge(copy _11, const u64 4) #17:6 s2;",
+        "        _13 = cast<i64>(copy _11) #17:6 s2;",
+        "        check(copy _12, bounds, copy _13, const u64 4) -> bb2 #17:6 s2;",
+        "    }",
+        "    bb2: {",
+        "        _14 = copy _2[_11] #17:6 s2;",
+        "        _15 = addr mut(_1) #17:17 s2;",
+        "        _16 = call fn main.inc(copy _15) #17:16 s2;",
+        "        _17 = add_overflows(copy _14, copy _16) #17:10 s2;",
+        "        check(copy _17, overflow) -> bb3 #17:10 s2;",
+        "    }",
+        "    bb3: {",
+        "        _2[_11] = add(copy _14, copy _16) #17:10 s2;",
+        "        _18 = copy _1 #18:5 s3;",
+        "        _19 = add_overflows(copy _18, const i32 1) #18:6 s3;",
+        "        check(copy _19, overflow) -> bb4 #18:6 s3;",
+        "    }",
+        "    bb4: {",
+        "        _1 = add(copy _18, const i32 1) #18:6 s3;",
+        "        _20 = cast<u64>(const i32 0) #19:6 s4;",
+        "        _21 = ge(copy _20, copy _3.1) #19:6 s4;",
+        "        _22 = cast<i64>(copy _20) #19:6 s4;",
+        "        check(copy _21, bounds, copy _22, copy _3.1) -> bb5 #19:6 s4;",
+        "    }",
+        "    bb5: {",
+        "        _23 = copy _3[_20] #19:6 s4;",
+        "        _24 = sub_overflows(copy _23, const i32 1) #19:9 s4;",
+        "        check(copy _24, overflow) -> bb6 #19:9 s4;",
+        "    }",
+        "    bb6: {",
+        "        _3[_20] = sub(copy _23, const i32 1) #19:9 s4;",
+        "        return #20:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+}
+
+// The left operand of a string equality is read into a temporary of type `string` before the call
+// on the right runs.
+fn a_string_equality_before_a_writer() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[24] source = {
+        "fn get() string {",
+        "    return \"x\";",
+        "}",
+        "fn cmp(string s) bool {",
+        "    return s == get();",
+        "}",
+        "fn bump(u8* mut* p) i32 {",
+        "    return 1;",
+        "}",
+        "fn sp(u8* mut p) u8@ {",
+        "    return p[0..bump(&p)];",
+        "}",
+        "fn sq(u8* mut p, i32 k) u8@ {",
+        "    return p[k..bump(&p)];",
+        "}",
+        "struct cell {",
+        "    i32 v;",
+        "}",
+        "fn cellp() cell* {",
+        "    return null;",
+        "}",
+        "fn cv(u8* mut p) i32 {",
+        "    return cellp()->v + bump(&p);",
+        "}",
+    };
+    string[15] want = {
+        "fn main.cmp(_1 (s): string) -> bool {",
+        "    let _0: bool;",
+        "    let _2: string #5:12;",
+        "    let _3: string #5:20;",
+        "    let _4: bool #5:14;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1 #5:12 s1;",
+        "        _3 = call fn main.get() #5:20 s1;",
+        "        _4 = call fn std.rt.str_eq(copy _2.0, copy _2.1, copy _3.0, \\",
+        "copy _3.1) #5:14 s1;",
+        "        _0 = copy _4 #5:14 s1;",
+        "        return #5:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "cmp"), want[..]);
+}
+
+// `p[0..bump(&p)]`: the pointer is read into a temporary before the bound that holds a writer, and
+// the constant bound needs none.
+fn a_span_of_a_pointer_before_a_writer() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[24] source = {
+        "fn get() string {",
+        "    return \"x\";",
+        "}",
+        "fn cmp(string s) bool {",
+        "    return s == get();",
+        "}",
+        "fn bump(u8* mut* p) i32 {",
+        "    return 1;",
+        "}",
+        "fn sp(u8* mut p) u8@ {",
+        "    return p[0..bump(&p)];",
+        "}",
+        "fn sq(u8* mut p, i32 k) u8@ {",
+        "    return p[k..bump(&p)];",
+        "}",
+        "struct cell {",
+        "    i32 v;",
+        "}",
+        "fn cellp() cell* {",
+        "    return null;",
+        "}",
+        "fn cv(u8* mut p) i32 {",
+        "    return cellp()->v + bump(&p);",
+        "}",
+    };
+    string[14] want = {
+        "fn main.sp(_1 (p): u8*) -> u8@ {",
+        "    let _0: u8@;",
+        "    let _2: u8* #11:12;",
+        "    let _3: u8* mut* #11:22;",
+        "    let _4: i32 #11:21;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1 #11:12 s1;",
+        "        _3 = addr mut(_1) #11:22 s1;",
+        "        _4 = call fn main.bump(copy _3) #11:21 s1;",
+        "        _0 = slice_ptr(copy _2, const i32 0, copy _4) #11:13 s1;",
+        "        return #11:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "sp"), want[..]);
+}
+
+// `p[k..bump(&p)]`: the pointer and the low bound, both places, are read into temporaries before
+// the high bound runs its writer.
+fn a_bound_before_a_writer() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[24] source = {
+        "fn get() string {",
+        "    return \"x\";",
+        "}",
+        "fn cmp(string s) bool {",
+        "    return s == get();",
+        "}",
+        "fn bump(u8* mut* p) i32 {",
+        "    return 1;",
+        "}",
+        "fn sp(u8* mut p) u8@ {",
+        "    return p[0..bump(&p)];",
+        "}",
+        "fn sq(u8* mut p, i32 k) u8@ {",
+        "    return p[k..bump(&p)];",
+        "}",
+        "struct cell {",
+        "    i32 v;",
+        "}",
+        "fn cellp() cell* {",
+        "    return null;",
+        "}",
+        "fn cv(u8* mut p) i32 {",
+        "    return cellp()->v + bump(&p);",
+        "}",
+    };
+    string[16] want = {
+        "fn main.sq(_1 (p): u8*, _2 (k): i32) -> u8@ {",
+        "    let _0: u8@;",
+        "    let _3: u8* #14:12;",
+        "    let _4: i32 #14:14;",
+        "    let _5: u8* mut* #14:22;",
+        "    let _6: i32 #14:21;",
+        "",
+        "    bb0: {",
+        "        _3 = copy _1 #14:12 s1;",
+        "        _4 = copy _2 #14:14 s1;",
+        "        _5 = addr mut(_1) #14:22 s1;",
+        "        _6 = call fn main.bump(copy _5) #14:21 s1;",
+        "        _0 = slice_ptr(copy _3, copy _4, copy _6) #14:13 s1;",
+        "        return #14:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "sq"), want[..]);
+}
+
+// A temporary is out of reach of a writer only as fixed storage: `cellp()->v` reads memory that
+// the temporary points to, so it is read into a temporary of its own before `bump(&p)` runs.
+fn a_temporary_behind_a_pointer_before_a_writer() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[24] source = {
+        "fn get() string {",
+        "    return \"x\";",
+        "}",
+        "fn cmp(string s) bool {",
+        "    return s == get();",
+        "}",
+        "fn bump(u8* mut* p) i32 {",
+        "    return 1;",
+        "}",
+        "fn sp(u8* mut p) u8@ {",
+        "    return p[0..bump(&p)];",
+        "}",
+        "fn sq(u8* mut p, i32 k) u8@ {",
+        "    return p[k..bump(&p)];",
+        "}",
+        "struct cell {",
+        "    i32 v;",
+        "}",
+        "fn cellp() cell* {",
+        "    return null;",
+        "}",
+        "fn cv(u8* mut p) i32 {",
+        "    return cellp()->v + bump(&p);",
+        "}",
+    };
+    string[23] want = {
+        "fn main.cv(_1 (p): u8*) -> i32 {",
+        "    let _0: i32;",
+        "    let _2: cell* #23:17;",
+        "    let _3: i32 #23:19;",
+        "    let _4: u8* mut* #23:30;",
+        "    let _5: i32 #23:29;",
+        "    let _6: bool #23:23;",
+        "    let _7: i32 #23:23;",
+        "",
+        "    bb0: {",
+        "        _2 = call fn main.cellp() #23:17 s1;",
+        "        _3 = copy (*_2).0 #23:19 s1;",
+        "        _4 = addr mut(_1) #23:30 s1;",
+        "        _5 = call fn main.bump(copy _4) #23:29 s1;",
+        "        _6 = add_overflows(copy _3, copy _5) #23:23 s1;",
+        "        check(copy _6, overflow) -> bb1 #23:23 s1;",
+        "    }",
+        "    bb1: {",
+        "        _7 = add(copy _3, copy _5) #23:23 s1;",
+        "        _0 = copy _7 #23:23 s1;",
+        "        return #23:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "cv"), want[..]);
+}
+
+// A function `print_i64` of the program is no print function: the print family calls the one of
+// std.rt.
+fn print_calls_the_runtime_and_no_other_module() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn print_i64(i32 fd, i64 v) void {",
+        "}",
+        "fn f(i32 x) void {",
+        "    print(x);",
+        "}",
+    };
+    string[11] want = {
+        "fn main.f(_1 (x): i32) -> void {",
+        "    let _0: void;",
+        "    let _2: i64 #4:11;",
+        "    let _3: void #4:11;",
+        "",
+        "    bb0: {",
+        "        _2 = cast<i64>(copy _1) #4:11 s1;",
+        "        _3 = call fn std.rt.print_i64(const i32 1, copy _2) #4:11 s1;",
+        "        return #5:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// An owning struct that a call returns enters an owning parameter as `move _t`. Each argument read
+// before the writer `bump()` goes into a temporary of the lent type of its place: `void*`, `u8
+// mut@`, `string` and `u8 mut*[2]` drop the `own` of the top level and of the elements (spec/fir.md
+// 9.4). A writer inside a literal counts too, so `G` is read before `pair{bump(), 2}` runs.
+fn a_copy_before_a_writer_takes_the_lent_type() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[38] source = {
+        "struct box {",
+        "    u8 mut@ own data;",
+        "}",
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "i32 mut G = 1;",
+        "fn bump() i32 {",
+        "    return 2;",
+        "}",
+        "fn make() box {",
+        "    return box{};",
+        "}",
+        "fn consume(box b) void {",
+        "}",
+        "fn look(void* v, u8@ s, string t, u8 mut*[2] a, i32 n) void {",
+        "}",
+        "fn f(void* own v, u8 mut@ own s, string own t, u8 mut* own[2] a) i32 {",
+        "    consume(make());",
+        "    look(v, s, t, a, bump());",
+        "    return G + pair{bump(), 2}.a;",
+        "}",
+        "fn ops(i32 mut x, u32 mut u, i32 y) void {",
+        "    x -= y;",
+        "    x *= y;",
+        "    x /= y;",
+        "    x %= y;",
+        "    x +%= y;",
+        "    x -%= y;",
+        "    x *%= y;",
+        "    u &= 3;",
+        "    u |= 4;",
+        "    u ^= 5;",
+        "    u <<= 1;",
+        "    u >>= 2;",
+        "    x--;",
+        "}",
+    };
+    string[39] want = {
+        "fn main.f(_1 (v): void* own, _2 (s): u8 mut@ own, _3 (t): string own, \\",
+        "_4 (a): u8 mut* own[2]) -> i32 {",
+        "    let _0: i32;",
+        "    let _5: box #20:17;",
+        "    let _6: void #20:12;",
+        "    let _7: void* #21:10;",
+        "    let _8: u8 mut@ #21:13;",
+        "    let _9: string #21:16;",
+        "    let _10: u8 mut*[2] #21:19;",
+        "    let _11: i32 #21:26;",
+        "    let _12: void #21:9;",
+        "    let _13: i32 #22:12;",
+        "    let _14: pair #22:16;",
+        "    let _15: i32 #22:25;",
+        "    let _16: bool #22:14;",
+        "    let _17: i32 #22:14;",
+        "",
+        "    bb0: {",
+        "        _5 = call fn main.make() #20:17 s1;",
+        "        _6 = call fn main.consume(move _5) #20:12 s1;",
+        "        _7 = copy _1 #21:10 s2;",
+        "        _8 = copy _2 #21:13 s2;",
+        "        _9 = copy _3 #21:16 s2;",
+        "        _10 = copy _4 #21:19 s2;",
+        "        _11 = call fn main.bump() #21:26 s2;",
+        "        _12 = call fn main.look(copy _7, copy _8, copy _9, copy _10, \\",
+        "copy _11) #21:9 s2;",
+        "        _13 = copy global main.G #22:12 s3;",
+        "        _15 = call fn main.bump() #22:25 s3;",
+        "        _14 = aggregate pair(copy _15, const i32 2) #22:16 s3;",
+        "        _16 = add_overflows(copy _13, copy _14.0) #22:14 s3;",
+        "        check(copy _16, overflow) -> bb1 #22:14 s3;",
+        "    }",
+        "    bb1: {",
+        "        _17 = add(copy _13, copy _14.0) #22:14 s3;",
+        "        _0 = copy _17 #22:14 s3;",
+        "        return #22:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// Each compound operator reads the old value and writes the rvalue of its operator: the checked
+// forms after their checks, the wrapping and bitwise forms with none, and the shifts after the
+// shift check (spec/fir.md 9.3, 9.4).
+fn each_compound_operator() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[38] source = {
+        "struct box {",
+        "    u8 mut@ own data;",
+        "}",
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "i32 mut G = 1;",
+        "fn bump() i32 {",
+        "    return 2;",
+        "}",
+        "fn make() box {",
+        "    return box{};",
+        "}",
+        "fn consume(box b) void {",
+        "}",
+        "fn look(void* v, u8@ s, string t, u8 mut*[2] a, i32 n) void {",
+        "}",
+        "fn f(void* own v, u8 mut@ own s, string own t, u8 mut* own[2] a) i32 {",
+        "    consume(make());",
+        "    look(v, s, t, a, bump());",
+        "    return G + pair{bump(), 2}.a;",
+        "}",
+        "fn ops(i32 mut x, u32 mut u, i32 y) void {",
+        "    x -= y;",
+        "    x *= y;",
+        "    x /= y;",
+        "    x %= y;",
+        "    x +%= y;",
+        "    x -%= y;",
+        "    x *%= y;",
+        "    u &= 3;",
+        "    u |= 4;",
+        "    u ^= 5;",
+        "    u <<= 1;",
+        "    u >>= 2;",
+        "    x--;",
+        "}",
+    };
+    string[111] want = {
+        "fn main.ops(_1 (x): i32, _2 (u): u32, _3 (y): i32) -> void {",
+        "    let _0: void;",
+        "    let _4: i32 #25:5;",
+        "    let _5: bool #25:7;",
+        "    let _6: i32 #26:5;",
+        "    let _7: bool #26:7;",
+        "    let _8: i32 #27:5;",
+        "    let _9: bool #27:7;",
+        "    let _10: bool #27:7;",
+        "    let _11: bool #27:7;",
+        "    let _12: bool #27:7;",
+        "    let _13: i32 #28:5;",
+        "    let _14: bool #28:7;",
+        "    let _15: bool #28:7;",
+        "    let _16: bool #28:7;",
+        "    let _17: bool #28:7;",
+        "    let _18: i32 #29:5;",
+        "    let _19: i32 #30:5;",
+        "    let _20: i32 #31:5;",
+        "    let _21: u32 #32:5;",
+        "    let _22: u32 #33:5;",
+        "    let _23: u32 #34:5;",
+        "    let _24: u32 #35:5;",
+        "    let _25: i64 #35:7;",
+        "    let _26: u64 #35:7;",
+        "    let _27: bool #35:7;",
+        "    let _28: u32 #35:7;",
+        "    let _29: u32 #36:5;",
+        "    let _30: i64 #36:7;",
+        "    let _31: u64 #36:7;",
+        "    let _32: bool #36:7;",
+        "    let _33: u32 #36:7;",
+        "    let _34: i32 #37:5;",
+        "    let _35: bool #37:6;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _1 #25:5 s1;",
+        "        _5 = sub_overflows(copy _4, copy _3) #25:7 s1;",
+        "        check(copy _5, overflow) -> bb1 #25:7 s1;",
+        "    }",
+        "    bb1: {",
+        "        _1 = sub(copy _4, copy _3) #25:7 s1;",
+        "        _6 = copy _1 #26:5 s2;",
+        "        _7 = mul_overflows(copy _6, copy _3) #26:7 s2;",
+        "        check(copy _7, overflow) -> bb2 #26:7 s2;",
+        "    }",
+        "    bb2: {",
+        "        _1 = mul(copy _6, copy _3) #26:7 s2;",
+        "        _8 = copy _1 #27:5 s3;",
+        "        _9 = eq(copy _3, const i32 0) #27:7 s3;",
+        "        check(copy _9, div_zero) -> bb3 #27:7 s3;",
+        "    }",
+        "    bb3: {",
+        "        _10 = eq(copy _3, const i32 -1) #27:7 s3;",
+        "        _11 = eq(copy _8, const i32 -2147483648) #27:7 s3;",
+        "        _12 = and(copy _10, copy _11) #27:7 s3;",
+        "        check(copy _12, div_overflow) -> bb4 #27:7 s3;",
+        "    }",
+        "    bb4: {",
+        "        _1 = div(copy _8, copy _3) #27:7 s3;",
+        "        _13 = copy _1 #28:5 s4;",
+        "        _14 = eq(copy _3, const i32 0) #28:7 s4;",
+        "        check(copy _14, div_zero) -> bb5 #28:7 s4;",
+        "    }",
+        "    bb5: {",
+        "        _15 = eq(copy _3, const i32 -1) #28:7 s4;",
+        "        _16 = eq(copy _13, const i32 -2147483648) #28:7 s4;",
+        "        _17 = and(copy _15, copy _16) #28:7 s4;",
+        "        check(copy _17, div_overflow) -> bb6 #28:7 s4;",
+        "    }",
+        "    bb6: {",
+        "        _1 = rem(copy _13, copy _3) #28:7 s4;",
+        "        _18 = copy _1 #29:5 s5;",
+        "        _1 = add(copy _18, copy _3) #29:7 s5;",
+        "        _19 = copy _1 #30:5 s6;",
+        "        _1 = sub(copy _19, copy _3) #30:7 s6;",
+        "        _20 = copy _1 #31:5 s7;",
+        "        _1 = mul(copy _20, copy _3) #31:7 s7;",
+        "        _21 = copy _2 #32:5 s8;",
+        "        _2 = and(copy _21, const u32 3) #32:7 s8;",
+        "        _22 = copy _2 #33:5 s9;",
+        "        _2 = or(copy _22, const u32 4) #33:7 s9;",
+        "        _23 = copy _2 #34:5 s10;",
+        "        _2 = xor(copy _23, const u32 5) #34:7 s10;",
+        "        _24 = copy _2 #35:5 s11;",
+        "        _25 = cast<i64>(const i32 1) #35:7 s11;",
+        "        _26 = cast<u64>(copy _25) #35:7 s11;",
+        "        _27 = ge(copy _26, const u64 32) #35:7 s11;",
+        "        check(copy _27, shift, copy _25, const bytes \"u32\") -> bb7 #35:7 s11;",
+        "    }",
+        "    bb7: {",
+        "        _28 = cast<u32>(copy _25) #35:7 s11;",
+        "        _2 = shl(copy _24, copy _28) #35:7 s11;",
+        "        _29 = copy _2 #36:5 s12;",
+        "        _30 = cast<i64>(const i32 2) #36:7 s12;",
+        "        _31 = cast<u64>(copy _30) #36:7 s12;",
+        "        _32 = ge(copy _31, const u64 32) #36:7 s12;",
+        "        check(copy _32, shift, copy _30, const bytes \"u32\") -> bb8 #36:7 s12;",
+        "    }",
+        "    bb8: {",
+        "        _33 = cast<u32>(copy _30) #36:7 s12;",
+        "        _2 = shr(copy _29, copy _33) #36:7 s12;",
+        "        _34 = copy _1 #37:5 s13;",
+        "        _35 = sub_overflows(copy _34, const i32 1) #37:6 s13;",
+        "        check(copy _35, overflow) -> bb9 #37:6 s13;",
+        "    }",
+        "    bb9: {",
+        "        _1 = sub(copy _34, const i32 1) #37:6 s13;",
+        "        return #38:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "ops"), want[..]);
+}
+
+// `p->x = f(&k)`, `G = f(&k)` and `*q += f(&k)` write places that are no fixed storage: a deref and
+// a global. The address is held before the call, and the store and the old value go through it
+// (spec/fir.md 9.3, 5.5).
+fn an_assignment_through_memory_holds_its_address() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[13] source = {
+        "struct point {",
+        "    i32 x;",
+        "    i32 y;",
+        "}",
+        "i32 mut G = 0;",
+        "fn f(i32 mut* k) i32 {",
+        "    return 1;",
+        "}",
+        "fn g(point mut* p, i32 mut k, i32 mut* q) void {",
+        "    p->x = f(&k);",
+        "    G = f(&k);",
+        "    *q += f(&k);",
+        "}",
+    };
+    string[35] want = {
+        "fn main.g(_1 (p): point mut*, _2 (k): i32, _3 (q): i32 mut*) -> void {",
+        "    let _0: void;",
+        "    let _4: i32 mut* #10:6;",
+        "    let _5: i32 mut* #10:14;",
+        "    let _6: i32 #10:13;",
+        "    let _7: i32 mut* #11:5;",
+        "    let _8: i32 mut* #11:11;",
+        "    let _9: i32 #11:10;",
+        "    let _10: i32 mut* #12:5;",
+        "    let _11: i32 #12:5;",
+        "    let _12: i32 mut* #12:13;",
+        "    let _13: i32 #12:12;",
+        "    let _14: bool #12:8;",
+        "",
+        "    bb0: {",
+        "        _4 = addr mut((*_1).0) #10:6 s1;",
+        "        _5 = addr mut(_2) #10:14 s1;",
+        "        _6 = call fn main.f(copy _5) #10:13 s1;",
+        "        (*_4) = copy _6 #10:13 s1;",
+        "        _7 = addr mut(global main.G) #11:5 s2;",
+        "        _8 = addr mut(_2) #11:11 s2;",
+        "        _9 = call fn main.f(copy _8) #11:10 s2;",
+        "        (*_7) = copy _9 #11:10 s2;",
+        "        _10 = addr mut((*_3)) #12:5 s3;",
+        "        _11 = copy (*_10) #12:5 s3;",
+        "        _12 = addr mut(_2) #12:13 s3;",
+        "        _13 = call fn main.f(copy _12) #12:12 s3;",
+        "        _14 = add_overflows(copy _11, copy _13) #12:8 s3;",
+        "        check(copy _14, overflow) -> bb1 #12:8 s3;",
+        "    }",
+        "    bb1: {",
+        "        (*_10) = add(copy _11, copy _13) #12:8 s3;",
+        "        return #13:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+}
+
+// `print()` writes nothing and `println()` only its newline. `fprint(next(&fd))` evaluates its
+// descriptor once although it prints nothing. The text of `assert` runs from its `(` to its last
+// `)`, so a `)` inside a string stays in it. A `noreturn` function value ends its block with
+// `trap` after its call.
+fn the_edges_of_the_builtins() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[14] source = {
+        "fn next(i32 mut* fd) i32 {",
+        "    return 2;",
+        "}",
+        "fn width(string s) i32 {",
+        "    return 1;",
+        "}",
+        "extern fn getpid() i32;",
+        "fn f(i32 mut fd, fn () noreturn stop) void {",
+        "    print();",
+        "    println();",
+        "    fprint(next(&fd));",
+        "    assert(width(\")\") != getpid());",
+        "    stop();",
+        "}",
+    };
+    string[27] want = {
+        "fn main.f(_1 (fd): i32, _2 (stop): fn () noreturn) -> void {",
+        "    let _0: void;",
+        "    let _3: void #10:12;",
+        "    let _4: i32 mut* #11:17;",
+        "    let _5: i32 #11:16;",
+        "    let _6: string #12:18;",
+        "    let _7: i32 #12:17;",
+        "    let _8: i32 #12:32;",
+        "    let _9: bool #12:23;",
+        "    let _10: void #13:9;",
+        "",
+        "    bb0: {",
+        "        _3 = call fn std.rt.print_char(const i32 1, const char 10) #10:12 s2;",
+        "        _4 = addr mut(_1) #11:17 s3;",
+        "        _5 = call fn main.next(copy _4) #11:16 s3;",
+        "        _6 = const \")\" #12:18 s4;",
+        "        _7 = call fn main.width(copy _6) #12:17 s4;",
+        "        _8 = call extern getpid() #12:32 s4;",
+        "        _9 = ne(copy _7, copy _8) #12:23 s4;",
+        "        check(copy _9, user, \\",
+        "const bytes \"width(\\\")\\\") != getpid()\") -> bb1 #12:5 s4;",
+        "    }",
+        "    bb1: {",
+        "        _10 = call copy _2() #13:9 s5;",
+        "        trap #13:9 s5;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// A folded enum member, `char`, negative and positive integer each print as any value of its type:
+// the enum and the integers through a cast into a temporary, the `char` as it stands.
+fn print_of_constants() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "enum color {",
+        "    red,",
+        "    green,",
+        "}",
+        "fn f() void {",
+        "    println(color.green, '\\n', -5, 300);",
+        "}",
+    };
+    string[24] want = {
+        "fn main.f() -> void {",
+        "    let _0: void;",
+        "    let _1: i32 #6:18;",
+        "    let _2: void #6:18;",
+        "    let _3: void #6:26;",
+        "    let _4: i64 #6:32;",
+        "    let _5: void #6:32;",
+        "    let _6: i64 #6:36;",
+        "    let _7: void #6:36;",
+        "    let _8: void #6:12;",
+        "",
+        "    bb0: {",
+        "        _1 = cast<i32>(const color 1) #6:18 s1;",
+        "        _2 = call fn std.rt.print_enum(const i32 1, copy _1, \\",
+        "const enum_table main.color, const u64 2) #6:18 s1;",
+        "        _3 = call fn std.rt.print_char(const i32 1, const char 10) #6:26 s1;",
+        "        _4 = cast<i64>(const i32 -5) #6:32 s1;",
+        "        _5 = call fn std.rt.print_i64(const i32 1, copy _4) #6:32 s1;",
+        "        _6 = cast<i64>(const i32 300) #6:36 s1;",
+        "        _7 = call fn std.rt.print_i64(const i32 1, copy _6) #6:36 s1;",
+        "        _8 = call fn std.rt.print_char(const i32 1, const char 10) #6:12 s1;",
+        "        return #7:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// The largest `u8` widens to `u64` and the least `i8` to `i64`, each a folded constant in a cast;
+// a `u64` constant enters `print_u64` as it stands.
+fn print_of_the_ends_of_narrow_types() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "fn f() void {",
+        "    print(cast(255, u8), cast(-128, i8), cast(0, u64));",
+        "}",
+        "struct box {",
+        "    u8 mut@ own data;",
+        "}",
+        "fn g(box mut a, box mut b) box {",
+        "    a = move(b);",
+        "    return move(a);",
+        "}",
+    };
+    string[17] want = {
+        "fn main.f() -> void {",
+        "    let _0: void;",
+        "    let _1: u64 #2:11;",
+        "    let _2: void #2:11;",
+        "    let _3: i64 #2:26;",
+        "    let _4: void #2:26;",
+        "    let _5: void #2:42;",
+        "",
+        "    bb0: {",
+        "        _1 = cast<u64>(const u8 255) #2:11 s1;",
+        "        _2 = call fn std.rt.print_u64(const i32 1, copy _1) #2:11 s1;",
+        "        _3 = cast<i64>(const i8 -128) #2:26 s1;",
+        "        _4 = call fn std.rt.print_i64(const i32 1, copy _3) #2:26 s1;",
+        "        _5 = call fn std.rt.print_u64(const i32 1, const u64 0) #2:42 s1;",
+        "        return #3:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// `a = move(b)` and `return move(a)` of a struct that owns move its place whole: `_a = move _b`
+// and `_0 = move _a` (D17.5).
+fn an_owning_struct_moves_by_assignment_and_return() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "fn f() void {",
+        "    print(cast(255, u8), cast(-128, i8), cast(0, u64));",
+        "}",
+        "struct box {",
+        "    u8 mut@ own data;",
+        "}",
+        "fn g(box mut a, box mut b) box {",
+        "    a = move(b);",
+        "    return move(a);",
+        "}",
+    };
+    string[9] want = {
+        "fn main.g(_1 (a): box, _2 (b): box) -> box {",
+        "    let _0: box;",
+        "",
+        "    bb0: {",
+        "        _1 = move _2 #8:13 s1;",
+        "        _0 = move _1 #9:16 s2;",
+        "        return #9:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+}
+
+fn main() i32 {
+    a_place_is_read_before_a_later_writer();
+    the_three_statements_of_the_criterion();
+    a_callee_value_is_read_before_the_arguments();
+    a_string_equality_before_a_writer();
+    a_span_of_a_pointer_before_a_writer();
+    a_copy_before_a_writer_takes_the_lent_type();
+    a_bound_before_a_writer();
+    a_temporary_behind_a_pointer_before_a_writer();
+    println("order ok");
+    an_argument_moves_or_lends();
+    an_extern_a_value_and_an_aggregate_argument();
+    a_noreturn_call_ends_its_block();
+    println("calls ok");
+    println_of_an_integer_and_an_enum();
+    print_of_constants();
+    print_of_the_ends_of_narrow_types();
+    print_calls_the_runtime_and_no_other_module();
+    print_of_each_integer_and_float();
+    print_of_a_float_a_bool_and_a_char();
+    print_of_strings_pointers_and_a_descriptor();
+    println("print ok");
+    an_assert_and_a_panic();
+    a_panic_of_a_literal_ends_the_body();
+    the_edges_of_the_builtins();
+    println("assert ok");
+    a_compound_assignment_to_a_global();
+    an_assignment_from_a_call_of_its_address();
+    an_assignment_holds_the_address_of_a_moving_place();
+    each_compound_operator();
+    an_assignment_through_memory_holds_its_address();
+    an_owning_struct_moves_by_assignment_and_return();
+    println("assign ok");
+    return 0;
+}

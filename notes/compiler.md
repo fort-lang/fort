@@ -483,6 +483,22 @@ came here.
   its result (`test/fort/support/lower_env.ft`), and `fort --fir` runs `fir_verify.verify` before
   it prints. A new construct needs both: a text in a `test/fort/fir_lower_*_test.ft` and a clean
   `fort --fir` over the run corpus, which T-236 measured on 450 programs.
+  **An aggregate operand is a place** (T-239): `fir_lower.lower_place` puts an aggregate rvalue in a
+  temporary first, and a call argument of an aggregate type is never a constant (rule V7). The
+  materialization rule of `spec/fir.md` 9.4 holds each `copy p` and `move p` before a later writer,
+  except fixed storage whose base is a temporary: the lowering takes the address of no temporary's
+  own storage, so no writer reaches it. A held copy takes `fir_lower.lent_type`, which drops `own`
+  at the top level and in the elements of a fixed array; a held copy that keeps `own` breaks rule
+  V6. A place is also read late: `P->arr[swap()]` read `P` after `swap()` until review round 1 of
+  T-239 found it, and the direct path reads it before. So an index or a span expression whose index
+  or bound holds a writer holds `_a = addr(base)` first when the base reads memory to find its
+  storage. The target of `lv = e` is held under a wider condition: any target that is no fixed
+  storage, a global included (`spec/fir.md` 9.3), while an index or a span holds only a base that
+  reads memory (9.4). The header of a span and the element are still read where they are used, on
+  both paths. A check stands where the direct path reports it, because the runtime prints that
+  location: the `check(user)` of `assert` and the `fail(panic)` of `panic` stand at the name of the
+  builtin and not at its `(`. T-239 moved `fort --fir` over the 450 run programs from 1795 lowered
+  functions to 30161, with no panic.
 
 ## 7. The runtime and the standard library
 

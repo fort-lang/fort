@@ -434,10 +434,10 @@ A parameter needs no statement. The translator stores each scalar parameter into
   (item 18).
 - **`lv = e;`**: the place `p` of `lv` first, with its index temporaries and their checks
   (D6.3). When `e` contains a writer and `p` does not designate fixed storage (5.5), the lowering
-  holds `_a = addr(p)` before `e` and writes `(*_a)` in place of `p`. Then `e` into `p`. For an
+  holds `_a = addr mut(p)` before `e` and writes `(*_a)` in place of `p`. Then `e` into `p`. For an
   `own` reference type: `e` into a temporary, `check(overwrite: p)`, then `p = move _t`.
-- **`lv op= e;`**: the place `p` as above, then `_old = copy p`, then the value `_e` of `e`, then
-  `p = op(copy _old, copy _e)` with the checks of `op` before it (9.4). The old value is read
+- **`lv op= e;`**: the place `p` as above, then `_old = copy p`, then the operand `a` of `e`,
+  then `p = op(copy _old, a)` with the checks of `op` before it (9.4). The old value is read
   before `e` (D6.3).
 - **`lv++;` and `lv--;`**: as `lv += 1` and `lv -= 1`.
 - **A call statement**: `_t = call ...` into a temporary that nothing reads; a `void` result needs
@@ -494,7 +494,8 @@ left to right. When an operand is `copy p` or `move p` and a later operand of th
 call contains a writer, the lowering writes `_t = copy p` or `_t = move p` at that point and passes
 `copy _t` or `move _t` instead. For `_t = copy p`, `_t` takes the lent type of `p` as above,
 for a parameter and for an operand of an rvalue alike. The same holds for the callee operand of
-an indirect call. Example:
+an indirect call. A place of fixed storage whose base is a temporary is never held, because the
+lowering takes the address of no temporary's own storage (5.5, D6.3). Example:
 `G + bump()` lowers to `_1 = copy global G`, `_2 = call fn m.bump()`, `_3 = add(copy _1, copy _2)`,
 so `G` is read before `bump` runs.
 
@@ -506,11 +507,18 @@ so `G` is read before `bump` runs.
 - **`&lv`**: `addr(p)`.
 - **`a[i]`**: `_i = cast<u64>(i)`, where the cast sign-extends a signed index, so that a negative
   index fails the one unsigned compare (D6.8); `_f = ge(copy _i, len)`; `check(copy _f, bounds,
-  cast<i64>(copy _i), len) -> bb`; then the place `a[_i]` in `bb` (item 16).
+  cast<i64>(copy _i), len) -> bb`; then the place `a[_i]` in `bb` (item 16). D6.3 evaluates `a`
+  to its address before `i`. When `i` contains a writer and the place `p` of `a` reads memory to
+  find its storage (5.5), `_a = addr(p)` holds that address first (D6.3). It is `addr mut(p)`
+  when that storage is mutable. The place is then `(*_a)[_i]`. The header of a span or a `string`
+  and the element are read after `i`, where they are used, with or without a deref. D6.3 leaves
+  open when that header is read. FIR keeps the order of the direct path
+  (`gen_expr.gen_index_place`), so the migration changes no behavior.
 - **`a[lo..hi]`** on an array, a span or a `string`: `_lo = cast<u64>(lo)` and `_hi =
   cast<u64>(hi)` as for an index, with `0` and the length for an absent bound; `_f = or(gt(copy
   _lo, copy _hi), gt(copy _hi, len))`; `check(copy _f, span, cast<i64>(copy _lo), cast<i64>(copy
-  _hi), len)`; then `slice(a, copy _lo, copy _hi)` into the destination (item 16). On a pointer:
+  _hi), len)`; then `slice(a, copy _lo, copy _hi)` into the destination (item 16). When a bound
+  contains a writer, the place of `a` is held as for an index (D6.3). On a pointer:
   `slice_ptr(a, lo, hi)` with no check (D6.9).
 - **`-x`**: `sub(const 0, x)` with the overflow check for an integer; `fneg(x)` for a float.
   `!x` and `~x`: `not`.
@@ -526,7 +534,8 @@ so `G` is read before `bump` runs.
   `_f = ge(copy _u, const u64 W)`, `check(copy _f, shift, copy _n, "<type>")`, then
   `shl(a, cast<T>(copy _n))` or `shr` (item 15).
 - **Comparison**: `eq` to `ge`. A `string` equality is `call fn std.rt.str_eq(copy a.0, copy
-  a.1, copy b.0, copy b.1)`, and `!=` is `not` of it.
+  a.1, copy b.0, copy b.1)`, and `!=` is `not` of it. A string constant operand goes into a
+  temporary `_t = const "..."` first, since `str_eq` reads the fields of a place (D19.3).
 - **`&&` and `||`**: a temporary `_t: bool`; `_t = a`; `switch(copy _t) -> [true: rhs,
   otherwise: done]` for `&&` and the reverse for `||`; `_t = b` in rhs; `goto done`.
 - **`c ? a : b`**: the condition; `switch`; each arm into the destination, a temporary for a
@@ -546,22 +555,30 @@ so `G` is read before `bump` runs.
 - **A call**: the callee first when it is a value (D6.3), then each argument left to right into
   an operand under the materialization rule, then `call`. An owning value in a temporary enters
   an `own` parameter as `move _t`; an owning place enters a parameter that does not own as `copy
-  p` (D17.4, D17.5). A `noreturn` callee ends the block with `trap` after the call.
+  p` (D17.4, D17.5). An argument of an aggregate type is always a place: a string constant or a
+  literal goes into a temporary first (D19.3, rule V7). A `noreturn` callee ends the block with
+  `trap` after the call.
 - **`move(lv)`**: the operand `move p`.
 - **`del(e)`**: `del(move p)` for a place (`ANN_LVALUE`); for an rvalue, `_t = e` then
   `del(move _t)`.
 - **The print family**: `fd` into an operand once, then one `call fn std.rt.print_*` for each
   argument, left to right, with the conversions of item 19: an enum as `cast<i32>(a)`,
   `const enum_table m.E` and the member count; a `string` as its two fields. `println` ends with
-  `print_char` of `const char 10`.
+  `print_char` of `const char 10`. A `string` place gives `copy p.0` and `copy p.1` (D12.2). A
+  folded string constant gives `const bytes "..."` and `const u64` of its length, with no
+  temporary (D12.2).
 - **`assert(c)`**: the operand of `c`, then `check(a, user, "<text>") -> bb`.
-- **`panic(m)`**: the pointer and the length of `m`, then `fail(panic, ptr, len)`.
+- **`panic(m)`**: the pointer and the length of `m`, as the print family takes a `string`, then
+  `fail(panic, ptr, len)` (D12.2). The `check` of `assert` and the `fail` of `panic` stand at the
+  name of the builtin, which the runtime reports (D11.4).
 - **`T{...}`, `T[N]{...}` and `{...}`**: `const zero T` for `{}`, else `aggregate T(...)` with
   each member as an operand, in declaration or index order, and `const zero` for a field a
   designated literal leaves out (D6.5). A member that is an operation goes into a temporary
   first. A member for a field or element of an owning type enters the aggregate as `move`: `move
-  _t` for a temporary that holds an owning value, `move p` for a member written `move(lv)`. Every
-  other member enters as `copy` or as a constant.
+  _t` for a temporary that holds an owning value, `move p` for a member written `move(lv)`. A
+  string constant member stands as `const "..."`, and an empty literal `{}` or `T{}` as `const
+  zero T` (D6.5). Any other member of an aggregate type is a place (D19.3). Every other member
+  enters as `copy` or as a constant.
 
 ### 9.5 Scopes and deferred statements
 
