@@ -1,0 +1,743 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| signatures ok
+//| externs ok
+//| runtime ok
+/// Checks the calls that the FIR translator writes from the signature map of gen.signature_of
+/// (spec/fir.md 12.3): the extension attributes of a narrow result and parameter, the `sret`
+/// pointer of an aggregate result on the definition and at the call, the caller-made copy of an
+/// aggregate argument, a call through a function pointer, the fixed and the variadic extern with
+/// `#3` and their `declare` lines, and one call of each runtime entry that the lowering names.
+/// Each text is held against the direct path's where spec/fir.md 12.5 lists no difference.
+import fir;
+import fir_llvm;
+import gen;
+import llvm_env;
+import pass_env;
+import std.strbuf;
+
+string[62] SOURCE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct big {",
+    "    i64 a;",
+    "    i64 b;",
+    "    i64 c;",
+    "}",
+    "extern fn write(i32 fd, u8* buf, u64 n) i64;",
+    "extern fn printf(char* fmt, ...) i32;",
+    "extern fn c_narrow(i8 a, u16 b) i8;",
+    "fn narrow(u8 a, i16 b) bool {",
+    "    return a > 0;",
+    "}",
+    "fn call_narrow(u8 x, i16 y) bool {",
+    "    return narrow(x, y);",
+    "}",
+    "fn make(i32 x) pair {",
+    "    return pair{x, 2};",
+    "}",
+    "fn take(pair p) i32 {",
+    "    return p.a;",
+    "}",
+    "fn use_pair() i32 {",
+    "    pair q = make(1);",
+    "    return take(q) + take(make(2));",
+    "}",
+    "fn through(fn (i32, i32) i32 op, fn (i32) pair mk) i32 {",
+    "    pair r = mk(3);",
+    "    return op(r.a, 4);",
+    "}",
+    "fn c_calls(char* fmt, u8* buf, i8 n) i64 {",
+    "    printf(fmt, 5, 2.5);",
+    "    i8 k = c_narrow(n, 7);",
+    "    return write(1, buf, 3);",
+    "}",
+    "fn wide() big {",
+    "    return big{1, 2, 3};",
+    "}",
+    "fn call_wide() i64 {",
+    "    big w = wide();",
+    "    return w.c;",
+    "}",
+    "fn eat(u8@ own s) void {",
+    "    del(s);",
+    "}",
+    "fn feed() void {",
+    "    u8@ own s = new(u8, 4);",
+    "    eat(move(s));",
+    "}",
+    "fn nothing() void {",
+    "}",
+    "struct outer {",
+    "    i32 x;",
+    "    pair p;",
+    "}",
+    "fn fill(i32 v) i32 {",
+    "    outer mut w = outer{};",
+    "    w.p = make(v);",
+    "    return w.p.a;",
+    "}",
+};
+
+// ---- signatures ---------------------------------------------------------------------------------
+
+// A `bool` result carries `zeroext`, a `u8` parameter `zeroext` and an `i16` parameter `signext`,
+// on the definition and at the call, as the direct path writes them.
+fn a_narrow_call_extends_its_result_and_its_arguments() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[16] want = {
+        "define dso_local zeroext i1 @\"main.call_narrow\"(i8 zeroext %x.in, i16 signext %y.in) \\",
+        "#0 {",
+        "entry:",
+        "  %result = alloca i8, align 1",
+        "  %x.0 = alloca i8, align 1",
+        "  %y.1 = alloca i16, align 2",
+        "  store i8 %x.in, ptr %x.0, align 1",
+        "  store i16 %y.in, ptr %y.1, align 2",
+        "  %t0 = load i8, ptr %x.0, align 1",
+        "  %t1 = load i16, ptr %y.1, align 2",
+        "  %t2 = call zeroext i1 @\"main.narrow\"(i8 zeroext %t0, i16 signext %t1)",
+        "  %t3 = zext i1 %t2 to i8",
+        "  store i8 %t3, ptr %result, align 1",
+        "  %t4 = load i8, ptr %result, align 1",
+        "  %t5 = trunc i8 %t4 to i1",
+        "  ret i1 %t5",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_narrow", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "call_narrow", want[0..2]);
+    llvm_env.in_direct(&e, "call_narrow", want[4..11]);
+    string[1] callee = {
+        "define dso_local zeroext i1 @\"main.narrow\"(i8 zeroext %a.in, i16 signext %b.in) #0 {",
+    };
+    string whole = llvm_env.lowered_whole(&e, SOURCE[..], "narrow", pass_env.CHECKED);
+    assert(whole[0..callee[0].len] == callee[0]);
+    llvm_env.in_direct(&e, "narrow", callee[..]);
+}
+
+// An aggregate result is a leading `ptr sret(%T)` on the definition and at each call: the address
+// of a named local, and the storage of a temporary. A named aggregate argument goes into a new
+// `%tmp` slot, the caller-made copy; the storage of a temporary is that copy already.
+fn an_aggregate_result_and_an_aggregate_argument() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[24] want = {
+        "define dso_local i32 @\"main.use_pair\"() #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %q.0 = alloca %struct.main.pair, align 8",
+        "  %tmp0 = alloca %struct.main.pair, align 8",
+        "  %tmp1 = alloca %struct.main.pair, align 8",
+        "  call void @\"main.make\"(ptr sret(%struct.main.pair) %q.0, i32 1)",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %q.0, i64 16, \\",
+        "i1 false)",
+        "  %t0 = call i32 @\"main.take\"(ptr %tmp1)",
+        "  call void @\"main.make\"(ptr sret(%struct.main.pair) %tmp0, i32 2)",
+        "  %t1 = call i32 @\"main.take\"(ptr %tmp0)",
+        "  %t2 = call { i32, i1 } @llvm.sadd.with.overflow.i32(i32 %t0, i32 %t1)",
+        "  %t3 = extractvalue { i32, i1 } %t2, 0",
+        "  %t4 = extractvalue { i32, i1 } %t2, 1",
+        "  br i1 %t4, label %L2, label %L1",
+        "",
+        "L1:",
+        "  store i32 %t3, ptr %result, align 4",
+        "  %t5 = load i32, ptr %result, align 4",
+        "  ret i32 %t5",
+        "",
+        "L2:",
+        "  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 27, i32 20)",
+    };
+    string[2] tail = {"  unreachable", "}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "use_pair", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "use_pair", want[6..7]);
+    llvm_env.in_direct(&e, "use_pair", want[12..15]);
+    string[2] callee = {
+        "define dso_local void @\"main.make\"(ptr sret(%struct.main.pair) %ret.sret, i32 %x.in) \\",
+        "#0 {",
+    };
+    string whole = llvm_env.lowered_whole(&e, SOURCE[..], "make", pass_env.CHECKED);
+    llvm_env.in_direct(&e, "make", callee[..]);
+    string head = llvm_env.joined(&e, callee[..]);
+    assert(whole[0..head.len] == head);
+}
+
+// A struct of 24 bytes, wider than two words, takes the same `sret(%T)` on the definition and at
+// the call (notes/compiler.md 6, the size classes).
+fn a_wide_result_takes_sret_too() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[10] want = {
+        "define dso_local i64 @\"main.call_wide\"() #0 {",
+        "entry:",
+        "  %result = alloca i64, align 8",
+        "  %w.0 = alloca %struct.main.big, align 8",
+        "  call void @\"main.wide\"(ptr sret(%struct.main.big) %w.0)",
+        "  %t0 = getelementptr inbounds %struct.main.big, ptr %w.0, i32 0, i32 2",
+        "  %t1 = load i64, ptr %t0, align 8",
+        "  store i64 %t1, ptr %result, align 8",
+        "  %t2 = load i64, ptr %result, align 8",
+        "  ret i64 %t2",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_wide", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "call_wide", want[3..7]);
+    string[1] callee = {
+        "define dso_local void @\"main.wide\"(ptr sret(%struct.main.big) %ret.sret) #0 {",
+    };
+    string whole = llvm_env.lowered_whole(&e, SOURCE[..], "wide", pass_env.CHECKED);
+    assert(whole[0..callee[0].len] == callee[0]);
+    llvm_env.in_direct(&e, "wide", callee[..]);
+}
+
+// The address of the place of an aggregate result is the `sret` pointer, and the translator
+// computes it after the arguments, as it computes the address of every destination after the
+// right side (spec/fir.md 12.5).
+fn the_result_address_comes_after_the_arguments() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[16] want = {
+        "define dso_local i32 @\"main.fill\"(i32 %v.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %v.0 = alloca i32, align 4",
+        "  %w.1 = alloca %struct.main.outer, align 8",
+        "  store i32 %v.in, ptr %v.0, align 4",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %w.1, i8 0, i64 24, i1 false)",
+        "  %t0 = load i32, ptr %v.0, align 4",
+        "  %t1 = getelementptr inbounds %struct.main.outer, ptr %w.1, i32 0, i32 1",
+        "  call void @\"main.make\"(ptr sret(%struct.main.pair) %t1, i32 %t0)",
+        "  %t2 = getelementptr inbounds %struct.main.outer, ptr %w.1, i32 0, i32 1",
+        "  %t3 = getelementptr inbounds %struct.main.pair, ptr %t2, i32 0, i32 0",
+        "  %t4 = load i32, ptr %t3, align 4",
+        "  store i32 %t4, ptr %result, align 4",
+        "  %t5 = load i32, ptr %result, align 4",
+        "  ret i32 %t5",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "fill", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "fill", want[3..7]);
+}
+
+// A call through a function pointer reads the callee before the arguments and writes the call type
+// before it, the `sret` pointer of an aggregate result included (toolchain.md 6 item 7).
+fn a_call_through_a_pointer_writes_its_type() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[17] want = {
+        "define dso_local i32 @\"main.through\"(ptr %op.in, ptr %mk.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %op.0 = alloca ptr, align 8",
+        "  %mk.1 = alloca ptr, align 8",
+        "  %r.2 = alloca %struct.main.pair, align 8",
+        "  store ptr %op.in, ptr %op.0, align 8",
+        "  store ptr %mk.in, ptr %mk.1, align 8",
+        "  %t0 = load ptr, ptr %mk.1, align 8",
+        "  call void (ptr, i32) %t0(ptr sret(%struct.main.pair) %r.2, i32 3)",
+        "  %t1 = load ptr, ptr %op.0, align 8",
+        "  %t2 = getelementptr inbounds %struct.main.pair, ptr %r.2, i32 0, i32 0",
+        "  %t3 = load i32, ptr %t2, align 4",
+        "  %t4 = call i32 (i32, i32) %t1(i32 %t3, i32 4)",
+        "  store i32 %t4, ptr %result, align 4",
+        "  %t5 = load i32, ptr %result, align 4",
+        "  ret i32 %t5",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "through", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "through", want[0..1]);
+    llvm_env.in_direct(&e, "through", want[3..14]);
+}
+
+// `move s` into an owning aggregate parameter copies `s` into a new `%tmp` slot, the caller-made
+// copy, zeroes `s`, and passes the copy (toolchain.md 6 items 7 and 18). A call of a `void`
+// function with no argument is the call alone.
+fn a_moved_argument_is_copied_then_zeroed() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[5] want = {
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %s.0, i64 16, \\",
+        "i1 false)",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)",
+        "  call void @\"main.eat\"(ptr %tmp1)",
+        "  ret void",
+    };
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "feed", pass_env.CHECKED);
+    llvm_env.verified(&e, got);
+    llvm_env.contains(&e, got, want[..]);
+    string[4] body = {
+        "define dso_local void @\"main.nothing\"() #0 {",
+        "entry:",
+        "  ret void",
+        "}",
+    };
+    llvm_env.expect(&e, llvm_env.lowered_whole(&e, SOURCE[..], "nothing", pass_env.CHECKED),
+                    body[..]);
+    llvm_env.expect(&e, llvm_env.direct(&e, "nothing"), body[..]);
+}
+
+// ---- externs ------------------------------------------------------------------------------------
+
+// A fixed extern call has no call type, a variadic one the call type `(ptr, ...)` of its fixed
+// prefix, and each carries `#3`. A narrow extern result and parameter carry `signext` and
+// `zeroext`. An argument of the variadic tail carries no attribute.
+fn an_extern_call_carries_its_c_form() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[20] want = {
+        "define dso_local i64 @\"main.c_calls\"(ptr %fmt.in, ptr %buf.in, i8 signext %n.in) #0 {",
+        "entry:",
+        "  %result = alloca i64, align 8",
+        "  %fmt.0 = alloca ptr, align 8",
+        "  %buf.1 = alloca ptr, align 8",
+        "  %n.2 = alloca i8, align 1",
+        "  %k.3 = alloca i8, align 1",
+        "  store ptr %fmt.in, ptr %fmt.0, align 8",
+        "  store ptr %buf.in, ptr %buf.1, align 8",
+        "  store i8 %n.in, ptr %n.2, align 1",
+        "  %t0 = load ptr, ptr %fmt.0, align 8",
+        "  %t1 = call i32 (ptr, ...) @printf(ptr %t0, i32 5, double 0x4004000000000000) #3",
+        "  %t2 = load i8, ptr %n.2, align 1",
+        "  %t3 = call signext i8 @c_narrow(i8 signext %t2, i16 zeroext 7) #3",
+        "  store i8 %t3, ptr %k.3, align 1",
+        "  %t4 = load ptr, ptr %buf.1, align 8",
+        "  %t5 = call i64 @write(i32 1, ptr %t4, i64 3) #3",
+        "  store i64 %t5, ptr %result, align 8",
+        "  %t6 = load i64, ptr %result, align 8",
+        "  ret i64 %t6",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "c_calls", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "c_calls", want[0..1]);
+    llvm_env.in_direct(&e, "c_calls", want[3..17]);
+}
+
+// The extern list of the FIR module drives the `declare` lines: first-use order, `...` for the
+// variadic tail, the extension attributes, and `nobuiltin` on each. `#3` is the only group that an
+// extern call adds. The direct path declares the same three.
+fn the_extern_list_drives_the_declarations() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    fir.module_add_function(&m, llvm_env.lower(&e, SOURCE[..], "c_calls", pass_env.CHECKED));
+    fir.module_collect_externs(&m);
+    assert(fir.module_extern_count(&m) == 3);
+    assert(fir.module_extern_at(&m, 0)->name == "printf");
+    assert(fir.module_extern_at(&m, 2)->name == "write");
+    fir_llvm.translate_module(&e.g, &m);
+    string[6] want = {
+        "declare i32 @printf(ptr, ...) nobuiltin",
+        "declare signext i8 @c_narrow(i8 signext, i16 zeroext) nobuiltin",
+        "declare i64 @write(i32, ptr, i64) nobuiltin",
+        "",
+        "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }",
+        "attributes #3 = { nobuiltin }",
+    };
+    llvm_env.expect(&e, llvm_env.module_tail(&e), want[..]);
+    llvm_env.in_direct_module(&e, "c_calls", want[0..3]);
+}
+
+// The source of an entry module whose `main` takes the argument span.
+string[3] ENTRY = {
+    "fn main(string@ args) i32 {",
+    "    return 0;",
+    "}",
+};
+
+// A module that names the entry module's `main` gets the C `main` after its functions
+// (spec/fir.md 5.1, toolchain.md 6 item 22): it builds the span in its own frame and passes it
+// as the caller-made copy, through the signature map. The direct path writes the same definition.
+fn the_module_writes_the_c_main() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    fir.module_add_function(&m, llvm_env.lower(&e, ENTRY[..], "main", pass_env.CHECKED));
+    m.main = fir.module_function_at(&m, 0)->sym;
+    fir_llvm.translate_module(&e.g, &m);
+    string[10] want = {
+        "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {",
+        "entry:",
+        "  %args = alloca %fort.span, align 8",
+        "  call void @\"std.rt.args_init\"(i32 %argc, ptr %argv)",
+        "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)",
+        "  %t0 = call i32 @\"main.main\"(ptr %args)",
+        "  call void @\"std.rt.flush_all\"()",
+        "  %t1 = and i32 %t0, 255",
+        "  ret i32 %t1",
+        "}",
+    };
+    string[2] head = {"define dso_local i32 @\"main.main\"(ptr %args.in) #0 {", "entry:"};
+    string got = strbuf.view(&e.g.funcs);
+    llvm_env.verified(&e, got);
+    llvm_env.contains(&e, got, head[..]);
+    llvm_env.contains(&e, got, want[..]);
+    strbuf.clear(&e.d.funcs);
+    gen.gen_main(&e.d, m.main);
+    llvm_env.expect(&e, strbuf.view(&e.d.funcs), want[..]);
+}
+
+// ---- the runtime entries ------------------------------------------------------------------------
+
+string[26] RUNTIME = {
+    "enum color {",
+    "    red,",
+    "    green,",
+    "}",
+    "fn show(i32 i, u16 u, bool b, char c, i32* p, string s, color k, f32 x, f64 y) void {",
+    "    println(i, u, b, c, p, s, k, x, y);",
+    "}",
+    "fn same(string a, string b) bool {",
+    "    return a == b;",
+    "}",
+    "fn shift(i32 a, i32 n) i32 {",
+    "    return a << n;",
+    "}",
+    "fn quot(i32 a, i32 n) i32 {",
+    "    return a / n;",
+    "}",
+    "fn part(i32@ v, u64 lo, u64 hi) i32@ {",
+    "    return v[lo..hi];",
+    "}",
+    "fn many(i64 m) void {",
+    "    i32 mut@ own z = new(i32, m);",
+    "    del(z);",
+    "}",
+    "fn main() i32 {",
+    "    return 0;",
+    "}",
+};
+
+// The print family calls each entry of std.rt through the signature map: `i1 zeroext` for a
+// `bool`, `i8 zeroext` for a `char`, the enum table and its count, and the newline. The whole
+// definition is the direct path's.
+fn each_print_entry_is_a_fort_call() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[45] want = {
+        "define dso_local void @\"main.show\"(i32 %i.in, i16 zeroext %u.in, i1 zeroext %b.in, \\",
+        "i8 zeroext %c.in, ptr %p.in, ptr %s.in, i32 %k.in, float %x.in, double %y.in) #0 {",
+        "entry:",
+        "  %i.0 = alloca i32, align 4",
+        "  %u.1 = alloca i16, align 2",
+        "  %b.2 = alloca i8, align 1",
+        "  %c.3 = alloca i8, align 1",
+        "  %p.4 = alloca ptr, align 8",
+        "  %k.6 = alloca i32, align 4",
+        "  %x.7 = alloca float, align 4",
+        "  %y.8 = alloca double, align 8",
+        "  store i32 %i.in, ptr %i.0, align 4",
+        "  store i16 %u.in, ptr %u.1, align 2",
+        "  %t0 = zext i1 %b.in to i8",
+        "  store i8 %t0, ptr %b.2, align 1",
+        "  store i8 %c.in, ptr %c.3, align 1",
+        "  store ptr %p.in, ptr %p.4, align 8",
+        "  store i32 %k.in, ptr %k.6, align 4",
+        "  store float %x.in, ptr %x.7, align 4",
+        "  store double %y.in, ptr %y.8, align 8",
+        "  %t1 = load i32, ptr %i.0, align 4",
+        "  %t2 = sext i32 %t1 to i64",
+        "  call void @\"std.rt.print_i64\"(i32 1, i64 %t2)",
+        "  %t3 = load i16, ptr %u.1, align 2",
+        "  %t4 = zext i16 %t3 to i64",
+        "  call void @\"std.rt.print_u64\"(i32 1, i64 %t4)",
+        "  %t5 = load i8, ptr %b.2, align 1",
+        "  %t6 = trunc i8 %t5 to i1",
+        "  call void @\"std.rt.print_bool\"(i32 1, i1 zeroext %t6)",
+        "  %t7 = load i8, ptr %c.3, align 1",
+        "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext %t7)",
+        "  %t8 = load ptr, ptr %p.4, align 8",
+        "  call void @\"std.rt.print_ptr\"(i32 1, ptr %t8)",
+        "  %t9 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 0",
+        "  %t10 = load ptr, ptr %t9, align 8",
+        "  %t11 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 1",
+        "  %t12 = load i64, ptr %t11, align 8",
+        "  call void @\"std.rt.print_str\"(i32 1, ptr %t10, i64 %t12)",
+        "  %t13 = load i32, ptr %k.6, align 4",
+        "  call void @\"std.rt.print_enum\"(i32 1, i32 %t13, ptr @.enum.main.color, i64 2)",
+        "  %t14 = load float, ptr %x.7, align 4",
+        "  call void @\"std.rt.print_f32\"(i32 1, float %t14)",
+        "  %t15 = load double, ptr %y.8, align 8",
+        "  call void @\"std.rt.print_f64\"(i32 1, double %t15)",
+        "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)",
+    };
+    string[2] tail = {"  ret void", "}"};
+    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "show", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.expect2(&e, llvm_env.direct(&e, "show"), want[..], tail[..]);
+}
+
+// A string equality calls `std.rt.str_eq`, whose `bool` result is `zeroext i1` at the call.
+fn a_string_equality_calls_str_eq() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[17] want = {
+        "define dso_local zeroext i1 @\"main.same\"(ptr %a.in, ptr %b.in) #0 {",
+        "entry:",
+        "  %result = alloca i8, align 1",
+        "  %t0 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 0",
+        "  %t1 = load ptr, ptr %t0, align 8",
+        "  %t2 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 1",
+        "  %t3 = load i64, ptr %t2, align 8",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %b.in, i32 0, i32 0",
+        "  %t5 = load ptr, ptr %t4, align 8",
+        "  %t6 = getelementptr inbounds %fort.span, ptr %b.in, i32 0, i32 1",
+        "  %t7 = load i64, ptr %t6, align 8",
+        "  %t8 = call zeroext i1 @\"std.rt.str_eq\"(ptr %t1, i64 %t3, ptr %t5, i64 %t7)",
+        "  %t9 = zext i1 %t8 to i8",
+        "  store i8 %t9, ptr %result, align 1",
+        "  %t10 = load i8, ptr %result, align 1",
+        "  %t11 = trunc i8 %t10 to i1",
+        "  ret i1 %t11",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "same", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "same", want[0..1]);
+    llvm_env.in_direct(&e, "same", want[3..12]);
+}
+
+// The shift check reports the count as `i64` and the type name as `bytes`; the masked shift of the
+// continuation truncates the count.
+fn a_shift_check_calls_fail_shift() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[24] want = {
+        "define dso_local i32 @\"main.shift\"(i32 %a.in, i32 %n.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %a.0 = alloca i32, align 4",
+        "  %n.1 = alloca i32, align 4",
+        "  store i32 %a.in, ptr %a.0, align 4",
+        "  store i32 %n.in, ptr %n.1, align 4",
+        "  %t0 = load i32, ptr %n.1, align 4",
+        "  %t1 = sext i32 %t0 to i64",
+        "  %t2 = icmp uge i64 %t1, 32",
+        "  br i1 %t2, label %L2, label %L1",
+        "",
+        "L1:",
+        "  %t3 = trunc i64 %t1 to i32",
+        "  %t4 = load i32, ptr %a.0, align 4",
+        "  %t5 = shl i32 %t4, %t3",
+        "  store i32 %t5, ptr %result, align 4",
+        "  %t6 = load i32, ptr %result, align 4",
+        "  ret i32 %t6",
+        "",
+        "L2:",
+        "  call void @\"std.rt.fail_shift\"(i64 %t1, ptr @.str.0, ptr @.file.0, i32 12, i32 14)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "shift", pass_env.CHECKED);
+    llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "shift", want[0..1]);
+}
+
+// The division reports no operand: its zero check and its overflow check each take a failure
+// block, `%L3` and `%L4`, in the order of the blocks that make them.
+fn a_division_calls_fail_div_zero_and_fail_div_overflow() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[34] want = {
+        "define dso_local i32 @\"main.quot\"(i32 %a.in, i32 %n.in) #0 {",
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %a.0 = alloca i32, align 4",
+        "  %n.1 = alloca i32, align 4",
+        "  store i32 %a.in, ptr %a.0, align 4",
+        "  store i32 %n.in, ptr %n.1, align 4",
+        "  %t0 = load i32, ptr %n.1, align 4",
+        "  %t1 = icmp eq i32 %t0, 0",
+        "  br i1 %t1, label %L3, label %L1",
+        "",
+        "L1:",
+        "  %t2 = load i32, ptr %n.1, align 4",
+        "  %t3 = icmp eq i32 %t2, -1",
+        "  %t4 = load i32, ptr %a.0, align 4",
+        "  %t5 = icmp eq i32 %t4, -2147483648",
+        "  %t6 = and i1 %t3, %t5",
+        "  br i1 %t6, label %L4, label %L2",
+        "",
+        "L2:",
+        "  %t7 = load i32, ptr %a.0, align 4",
+        "  %t8 = load i32, ptr %n.1, align 4",
+        "  %t9 = sdiv i32 %t7, %t8",
+        "  store i32 %t9, ptr %result, align 4",
+        "  %t10 = load i32, ptr %result, align 4",
+        "  ret i32 %t10",
+        "",
+        "L3:",
+        "  call void @\"std.rt.fail_div_zero\"(ptr @.file.0, i32 15, i32 14)",
+        "  unreachable",
+        "",
+        "L4:",
+        "  call void @\"std.rt.fail_div_overflow\"(ptr @.file.0, i32 15, i32 14)",
+        "  unreachable",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "quot", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "quot", want[28..30]);
+    llvm_env.in_direct(&e, "quot", want[32..34]);
+}
+
+// A span expression checks both bounds with one branch and reports `lo`, `hi` and the length; the
+// header of the result goes into `%ret.sret` field by field.
+fn a_span_check_calls_fail_span() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[29] want = {
+        "define dso_local void @\"main.part\"(ptr sret(%fort.span) %ret.sret, ptr %v.in, \\",
+        "i64 %lo.in, i64 %hi.in) #0 {",
+        "entry:",
+        "  %lo.1 = alloca i64, align 8",
+        "  %hi.2 = alloca i64, align 8",
+        "  store i64 %lo.in, ptr %lo.1, align 8",
+        "  store i64 %hi.in, ptr %hi.2, align 8",
+        "  %t0 = load i64, ptr %lo.1, align 8",
+        "  %t1 = load i64, ptr %hi.2, align 8",
+        "  %t2 = icmp ugt i64 %t0, %t1",
+        "  %t3 = getelementptr inbounds %fort.span, ptr %v.in, i32 0, i32 1",
+        "  %t4 = load i64, ptr %t3, align 8",
+        "  %t5 = icmp ugt i64 %t1, %t4",
+        "  %t6 = or i1 %t2, %t5",
+        "  %t7 = getelementptr inbounds %fort.span, ptr %v.in, i32 0, i32 1",
+        "  %t8 = load i64, ptr %t7, align 8",
+        "  br i1 %t6, label %L2, label %L1",
+        "",
+        "L1:",
+        "  %t9 = getelementptr inbounds %fort.span, ptr %v.in, i32 0, i32 0",
+        "  %t10 = load ptr, ptr %t9, align 8",
+        "  %t11 = getelementptr inbounds i32, ptr %t10, i64 %t0",
+        "  %t12 = sub i64 %t1, %t0",
+        "  %t13 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 0",
+        "  store ptr %t11, ptr %t13, align 8",
+        "  %t14 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1",
+        "  store i64 %t12, ptr %t14, align 8",
+        "  ret void",
+        "",
+    };
+    string[5] tail = {
+        "L2:",
+        "  call void @\"std.rt.fail_span\"(i64 %t0, i64 %t1, i64 %t8, ptr @.file.0, i32 18, \\",
+        "i32 13)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "part", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "part", want[0..9]);
+}
+
+// `new(i32, m)` with a signed count checks it with `alloc_count`; the header is built in a `%tmp`
+// slot, the overwrite check of `z` loads its pointer word, and `del(z)` frees and zeroes it.
+fn an_allocation_calls_fail_alloc_count() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[35] want = {
+        "define dso_local void @\"main.many\"(i64 %m.in) #0 {",
+        "entry:",
+        "  %m.0 = alloca i64, align 8",
+        "  %z.1 = alloca %fort.span, align 8",
+        "  %tmp0 = alloca %fort.span, align 8",
+        "  store i64 %m.in, ptr %m.0, align 8",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %z.1, i8 0, i64 16, i1 false)",
+        "  %t0 = load i64, ptr %m.0, align 8",
+        "  %t1 = icmp slt i64 %t0, 0",
+        "  br i1 %t1, label %L3, label %L1",
+        "",
+        "L1:",
+        "  %t2 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, ptr @.file.0, i32 21, i32 22)",
+        "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+        "  store ptr %t2, ptr %t3, align 8",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+        "  store i64 %t0, ptr %t4, align 8",
+        "  %t5 = getelementptr inbounds %fort.span, ptr %z.1, i32 0, i32 0",
+        "  %t6 = load ptr, ptr %t5, align 8",
+        "  %t7 = icmp ne ptr %t6, null",
+        "  br i1 %t7, label %L4, label %L2",
+        "",
+        "L2:",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %z.1, ptr align 8 %tmp0, i64 16, \\",
+        "i1 false)",
+        "  %t8 = getelementptr inbounds %fort.span, ptr %z.1, i32 0, i32 0",
+        "  %t9 = load ptr, ptr %t8, align 8",
+        "  call void @\"std.rt.free\"(ptr %t9)",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %z.1, i8 0, i64 16, i1 false)",
+        "  ret void",
+        "",
+        "L3:",
+        "  call void @\"std.rt.fail_alloc_count\"(i64 %t0, ptr @.file.0, i32 21, i32 22)",
+        "  unreachable",
+        "",
+    };
+    string[4] tail = {
+        "L4:",
+        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 21, i32 18)",
+        "  unreachable",
+        "}",
+    };
+    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "many", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
+    llvm_env.verified(&e, got);
+    llvm_env.in_direct(&e, "many", want[32..34]);
+    llvm_env.in_direct(&e, "many", tail[1..3]);
+}
+
+fn main() i32 {
+    a_narrow_call_extends_its_result_and_its_arguments();
+    an_aggregate_result_and_an_aggregate_argument();
+    a_wide_result_takes_sret_too();
+    the_result_address_comes_after_the_arguments();
+    a_call_through_a_pointer_writes_its_type();
+    a_moved_argument_is_copied_then_zeroed();
+    println("signatures ok");
+    an_extern_call_carries_its_c_form();
+    the_extern_list_drives_the_declarations();
+    the_module_writes_the_c_main();
+    println("externs ok");
+    each_print_entry_is_a_fort_call();
+    a_string_equality_calls_str_eq();
+    a_shift_check_calls_fail_shift();
+    a_division_calls_fail_div_zero_and_fail_div_overflow();
+    a_span_check_calls_fail_span();
+    an_allocation_calls_fail_alloc_count();
+    println("runtime ok");
+    return 0;
+}

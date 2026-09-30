@@ -3,15 +3,18 @@
 /// then translates the function with fir_llvm and gives the text. It also emits the same function
 /// with the direct path, so that a test holds the two texts against each other.
 //
-// The translator writes no terminator, no label and no failure block yet (T-251). The text of a
-// translation is `entry:`, the allocas, the stores of the parameters, and the statements of each
-// block in number order, with the line `L<n>:` before the statements of block n > 0, as the
-// labels of spec/fir.md 12.5 name the blocks.
+// Two forms of a translation. `translate` gives the body alone: `entry:`, the allocas, the stores
+// of the parameters, and the statements of each block in number order, with the line `L<n>:`
+// before the statements of block n > 0 and no terminator. `whole` gives the definition that
+// fir_llvm.translate_function writes, from `define` to `}`, with the terminators and the failure
+// blocks; `verified` holds its block structure.
 import check_env;
 import fir;
 import fir_llvm;
 import fir_lower;
 import gen;
+import gen_data;
+import gen_env;
 import gen_stmt;
 import lower_env;
 import pass_env;
@@ -76,7 +79,7 @@ fn parse(env mut* e, string@ prelude, string@ text) fir.module {
     return m;
 }
 
-// The per-function reset of gen_stmt.function_begin that the translator needs: the three
+// The per-function reset of gen.function_begin that the translator needs: the three
 // counters, the three buffers, and the flags.
 fn begin(gen.emitter mut* g) void {
     g->temps = 0;
@@ -123,6 +126,51 @@ fn statement_text(env mut* e, fir.func* f, u32 b, u32 i) string {
     fir_llvm.translate_statement(&t, fir.block_statement(f, b, i));
     strbuf.clear(&e->text);
     strbuf.append(&e->text, strbuf.view(&e->g.body));
+    return strbuf.view(&e->text);
+}
+
+/// Translates `f` with fir_llvm.translate_function and gives its definition, from `define` to `}`.
+/// The data, the declarations and the attribute groups stay in the emitter. The text is valid
+/// until the next call.
+fn whole(env mut* e, fir.func* f) string {
+    strbuf.clear(&e->g.funcs);
+    fir_llvm.translate_function(&e->g, f);
+    strbuf.clear(&e->text);
+    strbuf.append(&e->text, strbuf.view(&e->g.funcs));
+    return strbuf.view(&e->text);
+}
+
+/// Lowers the function `name` of `lines` in mode `m` and gives its whole definition.
+fn lowered_whole(env mut* e, string@ lines, string name, pass_env.mode m) string {
+    fir.func mut f = lower(e, lines, name, m);
+    defer fir.func_free(&f);
+    return whole(e, &f);
+}
+
+/// Holds the block structure of the definitions in `text`: each block ends in exactly one
+/// terminator and holds no instruction after it, which `opt -passes=verify` does not hold.
+fn verified(env mut* e, string text) void {
+    string report = gen_env.block_report(&e->text2, text);
+    if (report == gen_env.BLOCKS_OK) {
+        return;
+    }
+    eprintln("llvm_env: ", report);
+    eprint(text);
+    panic("llvm_env.verified: a block does not end in one terminator");
+}
+
+/// Assembles the module of the translator's emitter, with its data, its declarations and its
+/// attribute groups, and gives the text from the private data on. The text is valid until the
+/// next call.
+fn module_tail(env mut* e) string {
+    strbuf.clear(&e->g.funcs);
+    gen_data.gen_finish(&e->g);
+    string all = gen.gen_text(&e->g);
+    i64 at = str.find(all, "\n\n");
+    strbuf.clear(&e->text);
+    if (at >= 0) {
+        strbuf.append(&e->text, all[cast(at, u64) + 2..]);
+    }
     return strbuf.view(&e->text);
 }
 
@@ -205,6 +253,35 @@ fn in_direct(env mut* e, string name, string@ want) void {
     eprintln("llvm_env: its definition");
     eprint(d);
     panic("llvm_env.in_direct: the direct path writes other text");
+}
+
+/// Holds that the lines `want` stand, together and in order, in `got`.
+fn contains(env mut* e, string got, string@ want) void {
+    string text = joined(e, want);
+    if (str.find(got, text) >= 0) {
+        return;
+    }
+    eprintln("llvm_env: the text lacks");
+    eprint(text);
+    eprintln("llvm_env: the text");
+    eprint(got);
+    panic("llvm_env.contains: the lines are not in the text");
+}
+
+/// Holds that the lines `want` stand, together and in order, in the module that the direct path
+/// assembles after it emits the function `name` of the last source.
+fn in_direct_module(env mut* e, string name, string@ want) void {
+    direct(e, name);
+    gen_data.gen_finish(&e->d);
+    string text = joined(e, want);
+    if (str.find(gen.gen_text(&e->d), text) >= 0) {
+        return;
+    }
+    eprintln("llvm_env: the direct module lacks");
+    eprint(text);
+    eprintln("llvm_env: its text");
+    eprint(gen.gen_text(&e->d));
+    panic("llvm_env.in_direct_module: the direct path writes other text");
 }
 
 /// The storage of local `n` of `f`, as fir_llvm classifies it.

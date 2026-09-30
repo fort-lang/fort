@@ -395,7 +395,7 @@ bullet at a time and without a rewrite.
   test, and earn it: every release that round covers must then be large enough for the *break* to
   move, which the deletion experiment confirms one release at a time.
   **Two calls that release the same vector cannot be witnessed apart.** `gen_free`'s `slots_free`
-  and `gen_stmt`'s `function_begin` both release the emitter's slot vector, and deleting either
+  and `gen.function_begin` both release the emitter's slot vector, and deleting either
   alone leaks nothing: 15 of `gen_free`'s 16 releases turned T-038's probe red and the sixteenth
   only did so when both were deleted. When a deletion leaves a probe green, ask whether a second
   call already covers it before raising the round size, and write the answer down -- what the

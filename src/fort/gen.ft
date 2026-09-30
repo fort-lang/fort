@@ -1490,6 +1490,291 @@ fn gen_use_extern(emitter mut* g, ast.sym* s) void {
     syms_push(&g->externs, s);
 }
 
+// ---- signatures ----------------------------------------------------------
+
+/// One parameter of an LLVM signature: its IR type and its extension attribute, which is empty
+/// for no attribute. An aggregate parameter is a plain `ptr` with no attribute.
+struct sig_param {
+    string ty;
+    string attr;
+}
+
+/// The LLVM signature of a fort function type. Every `define`, every extern `declare` and every
+/// `call` is written from it, so that a definition and each call of it have one source.
+// `ret` is `void` for a `void` or `noreturn` result and for an aggregate result, which arrives
+// through the leading `sret` pointer whose memory type `sret` holds; `sret` is empty otherwise.
+// `variadic` is set for an extern whose declaration writes `...`, and `is_extern` for any extern.
+struct signature {
+    string ret;
+    string ret_attr;
+    string sret;
+    sig_param mut@ own params;
+    bool variadic;
+    bool is_extern;
+    bool no_return;
+}
+
+/// The signature of the function type `sig`. `ext` is the `extern fn` whose C form applies, or
+/// null for a fort function and for a call through a function pointer.
+// A narrow result or parameter carries `zeroext` or `signext`. An aggregate result is a leading
+// `ptr sret(%T)`, and an aggregate parameter is a plain `ptr`. The target's C form of an extern
+// is the same on both targets: a fixed declaration, and the variadic form only for a declaration
+// that writes `...`.
+fn signature_of(emitter mut* g, types.node* sig, ast.sym* ext) signature {
+    signature mut s = signature{.no_return = sig->is_noreturn};
+    s.ret = gen_result_type(g, sig->elem);
+    s.ret_attr = gen_ext_attr(sig->elem);
+    if (gen_is_aggregate(sig->elem)) {
+        s.sret = gen_mem_type(g, sig->elem);
+    }
+    s.params = new(sig_param, sig->params.len);
+    u64 mut i = 0;
+    while (i < sig->params.len) {
+        types.node* pt = sig->params[i];
+        if (gen_is_aggregate(pt)) {
+            s.params[i] = sig_param{"ptr", ""};
+        } else {
+            s.params[i] = sig_param{gen_value_type(g, pt), gen_ext_attr(pt)};
+        }
+        i += 1;
+    }
+    if (ext != null) {
+        s.is_extern = true;
+        s.variadic = ext->node != null && (ext->node->flags & ast.FLAG_VARIADIC) != 0;
+    }
+    return s;
+}
+
+fn signature_free(signature mut* s) void {
+    del(s->params);
+}
+
+/// The `sret(%T)` attribute of the result pointer of `s`.
+fn sret_attr(emitter mut* g, signature* s) string {
+    strbuf.clear(&g->scratch);
+    strbuf.append(&g->scratch, "sret(");
+    strbuf.append(&g->scratch, s->sret);
+    strbuf.push(&g->scratch, ')');
+    return gen_take(g);
+}
+
+// Appends the call type of `s`, such as `(ptr, i32, ...) `: the result pointer and each aggregate
+// parameter as `ptr`, and `...` for a variadic extern. A call through a function pointer and a
+// variadic extern call write it before the callee.
+fn gen_call_type(emitter mut* g, signature* s) void {
+    gen_text_append(g, "(");
+    u64 mut written = 0;
+    if (s->sret.len > 0) {
+        gen_text_append(g, "ptr");
+        written += 1;
+    }
+    u64 mut i = 0;
+    while (i < s->params.len) {
+        if (written > 0) {
+            gen_text_append(g, ", ");
+        }
+        written += 1;
+        gen_text_append(g, s->params[i].ty);
+        i += 1;
+    }
+    if (s->variadic) {
+        if (written > 0) {
+            gen_text_append(g, ", ");
+        }
+        gen_text_append(g, "...");
+    }
+    gen_text_append(g, ") ");
+}
+
+/// Writes a call of `callee` with the arguments `args` and gives its result, or a `void` value
+/// with no name. `pointer` is set for a call through a function pointer. The caller writes the
+/// `sret` argument first when `s` has one.
+// The call type stands before the callee of a call through a pointer, because an opaque pointer
+// carries none, and before a variadic extern, whose call type sets the vector-register count. An
+// extern call site carries `#3`. A `noreturn` callee needs the trap after the call, which the
+// caller writes.
+fn gen_call_sig(emitter mut* g, signature* s, gen_val callee, bool pointer, gen_args* args)
+    gen_val {
+    gen_val mut r = gen_literal(g, "void", "");
+    if (s->ret != "void") {
+        r = gen_temp(g, s->ret);
+    } else {
+        gen_ins(g);
+    }
+    gen_text_append(g, "call ");
+    if (s->ret_attr.len > 0) {
+        gen_text_append(g, s->ret_attr);
+        gen_text_append(g, " ");
+    }
+    gen_text_append(g, s->ret);
+    gen_text_append(g, " ");
+    if (pointer || s->variadic) {
+        gen_call_type(g, s);
+    }
+    gen_text_append(g, callee.val);
+    gen_text_append(g, "(");
+    gen_text_append(g, gen_args_text(args));
+    gen_text_append(g, ")");
+    if (s->is_extern) {
+        // `#3 = { nobuiltin }` on every extern call site, and on no call of a fort function
+        gen_use_attr(g, ATTR_NOBUILTIN);
+        gen_text_append(g, " #3");
+    }
+    gen_ins_end(g);
+    return r;
+}
+
+/// Writes the first line of the definition of `fn_sym`, whose signature is `s`, into `g->funcs`:
+/// `define dso_local <ret> @"m.f"(<params>) #N {`. `names` holds the incoming name of each
+/// parameter, `%<ident>.in`.
+// A `noreturn` runtime entry takes the cold `#8`, every other `noreturn` function `#1`, and every
+// other definition `#0`. The runtime entry is known by its mangled name.
+fn gen_define(emitter mut* g, ast.sym* fn_sym, signature* s, string@ names) void {
+    if (names.len != s->params.len) {
+        panic("gen.gen_define: one name for each parameter");
+    }
+    runtime_sig.rt_entry rt = runtime_sig.rt_entry_of(gen_symbol(g, fn_sym));
+    bool rt_noreturn = rt != runtime_sig.rt_entry.rt_none && runtime_sig.rt_entry_noreturn(rt);
+    string callee = gen_symbol_ref(g, fn_sym);
+    definition_begin(g);
+    strbuf.append(&g->funcs, "define dso_local ");
+    if (s->ret_attr.len > 0) {
+        strbuf.append(&g->funcs, s->ret_attr);
+        strbuf.push(&g->funcs, ' ');
+    }
+    strbuf.append(&g->funcs, s->ret);
+    strbuf.push(&g->funcs, ' ');
+    strbuf.append(&g->funcs, callee);
+    strbuf.push(&g->funcs, '(');
+    u64 mut written = 0;
+    if (s->sret.len > 0) {
+        strbuf.append(&g->funcs, "ptr sret(");
+        strbuf.append(&g->funcs, s->sret);
+        strbuf.append(&g->funcs, ") %ret.sret");
+        written += 1;
+    }
+    u64 mut i = 0;
+    while (i < s->params.len) {
+        if (written > 0) {
+            strbuf.append(&g->funcs, ", ");
+        }
+        written += 1;
+        strbuf.append(&g->funcs, s->params[i].ty);
+        if (s->params[i].attr.len > 0) {
+            strbuf.push(&g->funcs, ' ');
+            strbuf.append(&g->funcs, s->params[i].attr);
+        }
+        strbuf.push(&g->funcs, ' ');
+        strbuf.append(&g->funcs, names[i]);
+        i += 1;
+    }
+    strbuf.push(&g->funcs, ')');
+    if (s->no_return && rt_noreturn) {
+        gen_use_attr(g, ATTR_RT_NORET);
+        strbuf.append(&g->funcs, " #8 {\n");
+    } else if (s->no_return) {
+        gen_use_attr(g, ATTR_FN_NORET);
+        strbuf.append(&g->funcs, " #1 {\n");
+    } else {
+        gen_use_attr(g, ATTR_FN);
+        strbuf.append(&g->funcs, " #0 {\n");
+    }
+}
+
+// ---- definitions ---------------------------------------------------------
+
+// One blank line stands between two definitions.
+fn definition_begin(emitter mut* g) void {
+    if (strbuf.view(&g->funcs).len > 0) {
+        strbuf.push(&g->funcs, '\n');
+    }
+}
+
+/// Resets the per-function counters and buffers: every name is fixed per function and reset at
+/// each definition.
+fn function_begin(emitter mut* g) void {
+    g->temps = 0;
+    g->labels = 0;
+    g->tmps = 0;
+    g->break_label = 0;
+    g->continue_label = 0;
+    g->has_break = false;
+    g->has_continue = false;
+    slots_free(&g->slots);
+    // a defer expands inside the function that wrote it
+    g->defers.len = 0;
+    g->scopes.len = 0;
+    g->defer_floor = 0;
+    strbuf.clear(&g->allocas);
+    strbuf.clear(&g->body);
+    strbuf.clear(&g->fail);
+    g->terminated = false;
+}
+
+/// Appends the entry block, the normal blocks and then the failure blocks, and closes the
+/// definition.
+fn function_end(emitter mut* g) void {
+    strbuf.append(&g->funcs, "entry:\n");
+    strbuf.append(&g->funcs, strbuf.view(&g->allocas));
+    strbuf.append(&g->funcs, strbuf.view(&g->body));
+    strbuf.append(&g->funcs, strbuf.view(&g->fail));
+    strbuf.append(&g->funcs, "}\n");
+}
+
+// The byte the process status keeps, which is `status & 0xFF`.
+u64 STATUS_MASK = 255;
+
+/// Writes `@main`, the C entry point that the start-up code calls, for the entry module's `main`
+/// `main_sym`. It takes C's `argc` and `argv` and returns C's `int`.
+// It is a definition of this module like any other and carries `dso_local` and `#0`. It calls
+// `std.rt.args_init`, then `std.rt.args`, which builds the span in this frame, then the program's
+// `main`, then `std.rt.flush_all`, and returns the low status byte. `args_init` runs first, since
+// `args` hands out what it built.
+fn gen_main(emitter mut* g, ast.sym* main_sym) void {
+    function_begin(g);
+    gen_use_attr(g, ATTR_FN);
+    definition_begin(g);
+    strbuf.append(&g->funcs, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n");
+    // no fort identifier in the name, `main` being the compiler's
+    gen_val mut span = gen_val{};
+    span.ty = "ptr";
+    span.val = "%args";
+    strbuf.append(&g->allocas, "  %args = alloca ");
+    strbuf.append(&g->allocas, SPAN_TYPE);
+    strbuf.append(&g->allocas, ", align ");
+    strbuf.append_u64(&g->allocas, SPAN_ALIGN);
+    strbuf.push(&g->allocas, '\n');
+    gen_args mut init_args = gen_args_init();
+    gen_args_add(&init_args, gen_literal(g, "i32", "%argc"));
+    gen_args_add(&init_args, gen_literal(g, "ptr", "%argv"));
+    gen_call_rt(g, runtime_sig.rt_entry.rt_args_init, &init_args);
+    gen_args_free(&init_args);
+    // The hidden result pointer carries `sret`, as it does at every aggregate call.
+    gen_args mut args_args = gen_args_init();
+    gen_args_add_ext(&args_args, span, "sret(%fort.span)");
+    gen_call_rt(g, runtime_sig.rt_entry.rt_args, &args_args);
+    gen_args_free(&args_args);
+    // The program's `main` takes the span at `%args` when it declares the parameter. The span is
+    // the caller-made copy of an aggregate argument, so the callee uses it in place.
+    signature mut s = signature_of(g, main_sym->ty, null);
+    defer signature_free(&s);
+    gen_args mut main_args = gen_args_init();
+    if (s.params.len == 1) {
+        gen_args_add_ext(&main_args, span, s.params[0].attr);
+    }
+    gen_val callee = gen_literal(g, "ptr", gen_symbol_ref(g, main_sym));
+    gen_val status = gen_call_sig(g, &s, callee, false, &main_args);
+    gen_args_free(&main_args);
+    gen_args mut flush_args = gen_args_init();
+    gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);
+    gen_args_free(&flush_args);
+    gen_val masked = gen_binary(g, "and", status, gen_const_unsigned(g, "i32", STATUS_MASK));
+    strbuf.append(&g->body, "  ret i32 ");
+    strbuf.append(&g->body, masked.val);
+    strbuf.push(&g->body, '\n');
+    function_end(g);
+}
+
 // ---- calls to the runtime ------------------------------------------------
 
 // Appends `@"std.rt.x"(<args>)`. Writes a runtime call as an ordinary fort call by mangled name. It

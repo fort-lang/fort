@@ -5,8 +5,8 @@
 //| calls ok
 //| helpers ok
 /// Checks the constants of each kind that the FIR translator writes (spec/fir.md 5.6), the text
-/// that a call leaves until T-251 translates it, and the helpers of places and of one statement
-/// that fir_llvm offers the terminators of T-251.
+/// of a call of each result form, and the helpers of places and of one statement that fir_llvm
+/// offers its terminators.
 import fir;
 import fir_llvm;
 import gen;
@@ -130,10 +130,9 @@ fn the_zero_of_each_scalar_type() void {
 // ---- calls --------------------------------------------------------------------------------------
 
 // A call statement of a `void` function assigns its sink, a register of type `void`, which has no
-// alloca. A call into an aggregate place writes nothing into it. Each call reports `cannot
-// generate code yet for a call` until T-251 translates it; the field read after it takes the
-// direct path's text.
-fn a_call_reports_and_leaves_well_formed_text() void {
+// alloca and no value. A call with an aggregate result passes the address of its place as the
+// `sret` pointer, and the field read after it takes the direct path's text.
+fn a_call_writes_each_result_form() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
@@ -141,26 +140,25 @@ fn a_call_reports_and_leaves_well_formed_text() void {
     defer fir.func_free(&f);
     assert(fir.local_count(&f) == 2);
     assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_register);
-    u64 mut before = llvm_env.errors(&e);
-    string[1] none = {"entry:"};
+    u64 before = llvm_env.errors(&e);
+    string[2] none = {"entry:", "  call void @\"main.nothing\"()"};
     llvm_env.expect(&e, llvm_env.translate(&e, &f), none[..]);
-    assert(llvm_env.errors(&e) == before + 1);
-    string[6] want = {
+    llvm_env.in_direct(&e, "sink", none[1..]);
+    string[7] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %p.0 = alloca %struct.main.pair, align 8",
+        "  call void @\"main.make\"(ptr sret(%struct.main.pair) %p.0)",
         "  %t0 = getelementptr inbounds %struct.main.pair, ptr %p.0, i32 0, i32 0",
         "  %t1 = load i32, ptr %t0, align 4",
         "  store i32 %t1, ptr %result, align 4",
     };
     fir.func mut g = llvm_env.lower(&e, SOURCE[..], "fetch", pass_env.CHECKED);
     defer fir.func_free(&g);
-    before = llvm_env.errors(&e);
     llvm_env.expect(&e, llvm_env.translate(&e, &g), want[..]);
-    assert(llvm_env.errors(&e) == before + 1);
-    assert(e.g.failed);
-    llvm_env.in_direct(&e, "fetch", want[2..3]);
-    llvm_env.in_direct(&e, "fetch", want[3..5]);
+    assert(llvm_env.errors(&e) == before);
+    assert(!e.g.failed);
+    llvm_env.in_direct(&e, "fetch", want[3..6]);
 }
 
 // ---- the helpers --------------------------------------------------------------------------------
@@ -318,7 +316,7 @@ fn main() i32 {
     each_constant_is_its_literal();
     the_zero_of_each_scalar_type();
     println("constants ok");
-    a_call_reports_and_leaves_well_formed_text();
+    a_call_writes_each_result_form();
     println("calls ok");
     each_storage_has_its_address();
     the_place_helpers();

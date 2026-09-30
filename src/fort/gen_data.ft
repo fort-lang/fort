@@ -414,38 +414,37 @@ fn gen_global(gen.emitter mut* g, ast.node* decl) void {
 
 // ---- declarations --------------------------------------------------------
 
-// Linux uses the variadic form. Mac fixes an extern without `...`.
-// Mac also marks each extern declaration `nobuiltin` so the optimizer keeps
-// C call effects that a call-site `nobuiltin` does not protect.
+// `declare <ret> @name(<params>) nobuiltin` for the `extern fn` `s`, from the signature map of
+// gen.signature_of: the C types, unmangled, with `...` only for a declaration that writes it.
+// Each extern declaration carries `nobuiltin`, so the optimizer keeps C call effects that a
+// call-site `nobuiltin` does not protect.
 fn emit_extern(gen.emitter mut* g, strbuf.str_buf mut* out, ast.sym* s) void {
-    types.node* sig = s->ty;
+    gen.signature mut sig = gen.signature_of(g, s->ty, s);
+    defer gen.signature_free(&sig);
     strbuf.append(out, "declare ");
-    string ret_attr = gen.gen_ext_attr(sig->elem);
-    if (ret_attr.len > 0) {
-        strbuf.append(out, ret_attr);
+    if (sig.ret_attr.len > 0) {
+        strbuf.append(out, sig.ret_attr);
         strbuf.push(out, ' ');
     }
-    strbuf.append(out, gen.gen_value_type(g, sig->elem));
+    strbuf.append(out, sig.ret);
     strbuf.append(out, " @");
     // one spelling for every `@` name. An extern comes out bare
     gen.gen_append_name(out, "", s->name, false);
     strbuf.push(out, '(');
     u64 mut i = 0;
-    while (i < sig->params.len) {
+    while (i < sig.params.len) {
         if (i > 0) {
             strbuf.append(out, ", ");
         }
-        strbuf.append(out, gen.gen_value_type(g, sig->params[i]));
-        string attr = gen.gen_ext_attr(sig->params[i]);
-        if (attr.len > 0) {
+        strbuf.append(out, sig.params[i].ty);
+        if (sig.params[i].attr.len > 0) {
             strbuf.push(out, ' ');
-            strbuf.append(out, attr);
+            strbuf.append(out, sig.params[i].attr);
         }
         i += 1;
     }
-    bool variadic = (s->node->flags & ast.FLAG_VARIADIC) != 0;
-    if (variadic) {
-        if (sig->params.len > 0) {
+    if (sig.variadic) {
+        if (sig.params.len > 0) {
             strbuf.append(out, ", ");
         }
         strbuf.append(out, "...");
