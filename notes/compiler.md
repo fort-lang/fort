@@ -510,9 +510,10 @@ came here.
   an owning collection whose place reads memory (`h->items`) holds `_a = addr(p)` before the
   loop, because D7.5 evaluates the collection once and the body can change `h`. T-242 moved
   `fort --fir` over the run programs from 30161 lowered functions to 37947, with no panic. The
-  one known program that rule V9 refuses is T-210's: a `break` leaves a `switch` that D8.4
-  counts as terminating, and `fir_lower_switch_test.ft` holds that violation until the checker
-  refuses the program.
+  first program that rule V9 refused was T-210's: a `break` left a `switch` that D8.4 then
+  counted as terminating. Since T-210 the checker refuses that program with `missing return`,
+  and `fir_lower_switch_test.ft` holds both the refusal and a clause whose `break` targets an
+  inner loop, which lowers with no V9 violation.
   **Each exit and each fall-off unwinds the same stack** (T-244). A scope records where its
   deferred statements and its named locals begin in two vectors of the lowerer, and its pop
   truncates both, so no exit expands a `defer` of a closed scope or ends a local of one.

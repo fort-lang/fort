@@ -752,10 +752,10 @@ body because `check_terminates` says that the body terminates. With V9, a disagr
 internal error at compile time, not undefined behavior at run time. The constant clause exists
 because `while (true)` lowers to `switch(const true)`, and D8.4 counts that loop as terminating.
 `check_terminates` accepts a literal `true` in a `while`, a `for` with no condition, and a
-`switch` that has a `default` clause or names every member of its enum and whose clauses all end
-in a terminating statement. The last case has a known gap, T-210: a `break` inside such a clause
-leaves the `switch`, so the body falls off its end and V9 reports it. The implementation must
-measure V9 over the corpus before it trusts the rule (section 16).
+`switch` that has a `default` clause or names every member of its enum, whose clauses all end
+in a terminating statement, and that no `break` targets. T-210 added the last condition: before
+it, a `break` inside such a clause left the `switch`, the body fell off its end, and V9 reported
+it. The implementation must measure V9 over the corpus before it trusts the rule (section 16).
 
 V7 closes the gap of T-072. The lowering takes the fort type of a runtime entry from the
 declaration in `std/rt.ft` that the checker checked. The declaration and each call then have one
@@ -1176,7 +1176,8 @@ The compiler moves to FIR one function at a time.
    the FIR text for meaning and the translated text for the ABI.
 5. **V9 on the corpus.** Before V9 stops the compiler, a ticket runs it in report mode over the
    corpus and records each function that it flags. Each flag is a bug in the checker or in the
-   emitter, or a gap in rule V9. T-210 is the first known flag.
+   emitter, or a gap in rule V9. T-210 was the first known flag, and the checker now refuses
+   its program.
 6. **The end.** The direct path goes when the lowering supports every function of the corpus and
    of `src/fort`. The ticket that deletes it amends these texts: the sentence of D19.1 that names
    the direct path, `toolchain.md` 6 item 1 ("built by appending text in one forward pass"),
