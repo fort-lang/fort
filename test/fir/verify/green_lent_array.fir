@@ -21,8 +21,9 @@
 //| }
 // The materialization rule of spec/fir.md 9.4 on `view2(a, bump())`: `bump` is a writer, so the
 // lowering copies `a` into `_2` before the call. `_2` takes the lent type of `a`, its type with
-// `own` removed at every level (D17.4), so `u8 mut* own[2]` gives `u8 mut*[2]`. A `_2` of the type
-// of `a` would own the allocations of `a` a second time (V6).
+// `own` removed at the top level and at each element of a fixed array (D17.4), so `u8 mut* own[2]`
+// gives `u8 mut*[2]`. A `_2` of the type of `a` would own the allocations of `a` a second time
+// (V6).
 fn main.f(_1 (a): u8 mut* own[2]) -> void {
     let _2: u8 mut*[2];
     let _3: i32;

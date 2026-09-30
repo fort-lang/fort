@@ -30,7 +30,7 @@
 //|         _8 = call fn main.take(move _4) #5:1 s4;
 //|         _4 = alloc<u8>(const u64 1) #6:1 s5;
 //|         _0 = aggregate holder(move _4, const u64 1) #7:1 s6;
-//|         _4 = cast<u8 mut* own>(copy _3) #8:1 s7;
+//|         _4 = cast<u8 mut* own>(move _1) #8:1 s7;
 //|         _5 = cast<string own>(move _2) #9:1 s8;
 //|         _7 = const null void* own #10:1 s9;
 //|         del(move _4) #11:1 s10;
@@ -42,8 +42,8 @@
 //|     }
 //| }
 // V5 and V6 on the edges: each form that gives an owning place its value, a lend of an owning
-// place to a place and to a parameter that do not own, an adopting cast, and a del of each kind
-// of own reference.
+// place to a place and to a parameter that do not own, a cast that carries `own` from a `move`
+// (D3.14, D17.5), and a del of each kind of own reference.
 fn main.f(_1 (q): u8 mut* own, _2 (b): u8 mut@ own, _3 (r): u8 mut*) -> holder {
     let _4 (p): u8 mut* own #2:5;
     let _5: string own;
@@ -60,7 +60,7 @@ fn main.f(_1 (q): u8 mut* own, _2 (b): u8 mut@ own, _3 (r): u8 mut*) -> holder {
         _8 = call fn main.take(move _4) #5:1 s4;
         _4 = alloc<u8>(const u64 1) #6:1 s5;
         _0 = aggregate holder(move _4, const u64 1) #7:1 s6;
-        _4 = cast<u8 mut* own>(copy _3) #8:1 s7;
+        _4 = cast<u8 mut* own>(move _1) #8:1 s7;
         _5 = cast<string own>(move _2) #9:1 s8;
         _7 = const null void* own #10:1 s9;
         del(move _4) #11:1 s10;

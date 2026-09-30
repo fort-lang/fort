@@ -90,7 +90,7 @@ string V4_OVERWRITE = "an overwrite check of another type";
 string V5_MOVE = "a move of a place whose type does not own";
 string V5_DEL = "a del of a place that is not an own reference";
 string V6_PLACE = "an owning place takes a copy or a view";
-string V6_CAST = "a cast copies an owning place";
+string V6_CAST = "a cast adds own";
 string V6_ARGUMENT = "an owning parameter takes a copy or a view";
 string V6_MEMBER = "an owning member takes a copy or a view";
 string V6_LANDS_PLACE = "an owning value in a place that does not own";
@@ -723,31 +723,17 @@ fn v5_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
 
 // ---- V6 ------------------------------------------------------------------------------------
 
-// Whether the place `p` is field 0 of a span or a `string`. The field carries the `own` of its
-// span, so that an `aggregate` builds an owning span from an owning pointer, but a copy of it
-// reads the `.ptr` of the source, which is a view. Field 1, the length, owns nothing, so the test
-// needs no field number.
-fn span_pointer(fir.func* f, fir.place p) bool {
-    if (p.proj_len == 0) {
-        return false;
+// Whether the cast `r` adds `own`, which a cast never does. The target marks a level `own` only
+// where the type of the operand marks that level `own` too; types.type_cast_adds_own is the test
+// of the checker. A target that owns at its outermost level takes a `move` alone: the move carries
+// the owner, a `copy` of an owning place lends it, and a constant owns nothing, whatever the type
+// of the place or the constant says.
+fn cast_adds_own(fir.func* f, fir.rvalue r) bool {
+    fir.operand o = fir.rvalue_operand(f, r, 0);
+    if (types.type_cast_adds_own(r.ty, fir.operand_type(f, o))) {
+        return true;
     }
-    fir.projection last = fir.place_projection(f, p, p.proj_len - 1);
-    if (last.kind != fir.proj_kind.pj_field) {
-        return false;
-    }
-    fir.place mut header = p;
-    header.proj_len -= 1;
-    types.type_kind k = fir.place_type(f, header)->kind;
-    return k == types.type_kind.k_span || k == types.type_kind.k_string;
-}
-
-// Whether `o` is a `copy` of a place whose type owns and that is no view: field 0 of a span or a
-// `string` is a view, whatever `own` its type carries.
-fn copies_owning(fir.func* f, fir.operand o) bool {
-    if (o.kind != fir.operand_kind.ok_copy || span_pointer(f, o.place)) {
-        return false;
-    }
-    return fir.type_owning(fir.place_type(f, o.place));
+    return fir.type_owning(r.ty) && o.kind != fir.operand_kind.ok_move;
 }
 
 // Whether `o` fills an owning position: a `move`, or the constant `null T` or `zero T`. A
@@ -780,13 +766,11 @@ fn position_owns(fir.func* f, fir.rvalue r, u32 k) bool {
     }
 }
 
-// V6 for the operands of `r`. A `cast` to a type that owns does not take a copy of an owning
-// place, because the place and the result would then own one allocation. An owning parameter,
-// field or element takes a `move`, `null` or `zero`. A `move` stands only in a position that
-// owns, because an owning value lands only where something owns it.
+// V6 for the operands of `r`. A `cast` never adds `own`, whatever place it fills. An owning
+// parameter, field or element takes a `move`, `null` or `zero`. A `move` stands only in a
+// position that owns, because an owning value lands only where something owns it.
 fn v6_rvalue(walk mut* w, fir.rvalue r, u32 b, u32 i) bool {
-    bool adopts = r.kind == fir.rvalue_kind.rv_cast && fir.type_owning(r.ty);
-    if (adopts && copies_owning(w->f, fir.rvalue_operand(w->f, r, 0))) {
+    if (r.kind == fir.rvalue_kind.rv_cast && cast_adds_own(w->f, r)) {
         return fail(w, RULE_V6, V6_CAST, b, i);
     }
     bool keeps = r.kind == fir.rvalue_kind.rv_call || r.kind == fir.rvalue_kind.rv_aggregate;

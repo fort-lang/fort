@@ -259,6 +259,9 @@ string NOTHING = "fn main.nothing() -> void";
 // The header of a case that writes `_0` or reads a parameter: the prelude's `fn f(bool c) i32`.
 string F = "fn main.f(_1 (c): bool) -> i32";
 
+// The header of a case that returns an owning struct: the prelude's `fn keep(holder h) holder`.
+string KEEP = "fn main.keep(_1 (h): holder) -> holder";
+
 // Parses the function `header` with the `let` lines `lets` and the blocks `blocks`, and returns
 // whether the verifier finds a violation, which it writes to *v. The textual form needs no line
 // break, so a case writes its `let` lines on one line and its blocks on another. The text must
@@ -391,6 +394,13 @@ fn flow_red(env mut* e, string header, string@ lines, u32 rule, string what, u32
     fir_verify.violation mut v = fir_verify.violation{};
     bool found = lines_verdict(e, header, lines, &v);
     expect_red(e, found, &v, rule, what, block, position);
+}
+
+// Holds that the prelude's `keep`, which returns a `holder`, with the `let` lines `lets` and the
+// blocks `blocks` keeps every rule, the flow rules included.
+fn flow_green_in(env mut* e, string lets, string blocks) void {
+    string[2] lines = {lets, blocks};
+    flow_green(e, KEEP, lines[..]);
 }
 
 // Holds that a verdict found no violation, the flow rules included.
@@ -1288,13 +1298,14 @@ fn v6_an_owning_place_takes_a_move_a_constant_or_an_owning_rvalue() void {
     // a cast into an owning place does not copy an owning place (D17.5)
     red(&e, lets, "bb0: { _9 = cast<string own>(copy _8); return; }", 6, fir_verify.V6_CAST, 0,
         0);
+    // a cast of a view to an owning type adds `own` (D3.14)
+    red(&e, lets, "bb0: { _1 = cast<u8 mut* own>(copy _3); return; }", 6, fir_verify.V6_CAST, 0,
+        0);
     // the forms that give an owning place its value
     green(&e, lets, "bb0: { _9 = cast<string own>(move _8); _1 = move _2; return; }");
     green(&e, lets, "bb0: { _1 = const null u8 mut* own; _4 = const zero holder; return; }");
     green(&e, lets, "bb0: { _1 = alloc<u8>(const u64 1); _2 = call fn main.grab(); return; }");
     green(&e, lets, "bb0: { _4 = aggregate holder(move _1, const u64 0); return; }");
-    // a cast of a view to an owning type adopts it (D3.14)
-    green(&e, lets, "bb0: { _1 = cast<u8 mut* own>(copy _3); return; }");
     // a place that does not own takes a copy of an owning place: a lend
     green(&e, lets, "bb0: { _3 = copy _1; _3 = copy _4.0; return; }");
 }
@@ -1405,11 +1416,12 @@ fn v6_an_owning_value_lands_in_an_owning_position() void {
 }
 
 // A cast to an owning type does not take a copy of an owning place, whatever place it fills.
-fn v6_a_cast_to_own_copies_no_owning_place() void {
+fn v6_a_cast_never_adds_own() void {
     env mut e = env{};
     open(&e);
     defer close(&e);
     string lets = "let _1: u8 mut@ own; let _2: u8@; let _3: string own; let _4: u8 mut*; bb0: {";
+    // a copy of an owning place lends it, whatever place the cast fills (D17.4, D17.5)
     red(&e, lets, "_2 = cast<u8@ own>(copy _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
     red(&e, lets, "_3 = cast<string own>(copy _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
     // field 0 of a struct is the struct's own storage, and an element of a span owns
@@ -1417,15 +1429,71 @@ fn v6_a_cast_to_own_copies_no_owning_place() void {
         "_2 = cast<u8 mut* own>(copy _1.0); return; }", 6, fir_verify.V6_CAST, 0, 0);
     red(&e, "let _1: u8 mut* own mut@; let _2: u64; let _3: u8 mut* own; bb0: {",
         "_3 = cast<u8 mut* own>(copy _1[_2]); return; }", 6, fir_verify.V6_CAST, 0, 0);
-    // a lend to a type that does not own, and an adoption of a view
-    green(&e, lets, "_2 = cast<u8@>(copy _1); return; }");
     // field 0 of a span or a `string` is the `.ptr` of the source, a view (D17.3)
-    green(&e, "let _1: u8 mut@ own; let _2: u8 mut* own; bb0: {",
-          "_2 = cast<u8 mut* own>(copy _1.0); return; }");
-    green(&e, "let _1: string own; let _2: char* own; bb0: {",
-          "_2 = cast<char* own>(copy _1.0); return; }");
-    green(&e, "let _1: u8 mut*; let _2: u8 mut* own; bb0: {",
-          "_2 = cast<u8 mut* own>(copy _1); del(move _2); return; }");
+    red(&e, "let _1: u8 mut@ own; let _2: u8 mut* own; bb0: {",
+        "_2 = cast<u8 mut* own>(copy _1.0); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, "let _1: string own; let _2: char* own; bb0: {",
+        "_2 = cast<char* own>(copy _1.0); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, "let _1: u8 mut@ own; let _2: u8 mut*; bb0: {",
+        "_2 = cast<u8 mut* own>(copy _1.0); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    // a view, into an owning place and into a place that does not own
+    red(&e, "let _1: u8 mut*; let _2: u8 mut* own; bb0: {",
+        "_2 = cast<u8 mut* own>(copy _1); del(move _2); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, "let _1: string; let _2: string; bb0: {",
+        "_2 = cast<string own>(copy _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    // a constant owns nothing, whatever its type says
+    string any = "let _1: u8 mut* own; let _2: void* own; let _3: u8* own* own; bb0: {";
+    red(&e, any, "_1 = cast<u8 mut* own>(const null u8 mut*); return; }", 6, fir_verify.V6_CAST,
+        0, 0);
+    red(&e, any, "_1 = cast<u8 mut* own>(const null u8 mut* own); return; }", 6,
+        fir_verify.V6_CAST, 0, 0);
+    red(&e, any, "_1 = cast<u8 mut* own>(const zero u8 mut* own); return; }", 6,
+        fir_verify.V6_CAST, 0, 0);
+    red(&e, any, "_2 = cast<void* own>(const u64 4096); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    // a level below the outermost: the target owns where the operand does not
+    string deep = "let _1: u8 mut**; let _2: u8 mut* own*; let _3: u8 mut** own; bb0: {";
+    red(&e, deep, "_2 = cast<u8 mut* own*>(copy _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, any, "_3 = cast<u8* own* own>(move _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, "let _1: u8 mut** own; let _2: u8 mut* own* own; bb0: {",
+        "_2 = cast<u8 mut* own* own>(move _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    // a move carries `own` at each level where its place owns (D17.5)
+    string moved = "let _1: u8 mut* own; let _2: u8* own; let _3: void* own; let _4: string own;";
+    string spans = "let _5: u8@ own; let _6: u8 mut* own* own; let _7: void* own; bb0: {";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, moved);
+    strbuf.append(&b, spans);
+    string both = strbuf.view(&b);
+    green(&e, both, "_1 = cast<u8 mut* own>(move _1); return; }");
+    green(&e, both, "_2 = cast<u8* own>(move _1); return; }");
+    green(&e, both, "_3 = cast<void* own>(move _1); return; }");
+    green(&e, both, "_5 = cast<u8@ own>(move _4); return; }");
+    green(&e, both, "_6 = cast<u8 mut* own* own>(move _6); return; }");
+    // a move may drop the `own` of a level behind the outermost; D3.14 allows every drop
+    green(&e, both, "_7 = cast<void* own>(move _6); return; }");
+    // a copy of a place that owns at a level behind the outermost carries that level
+    green(&e, deep, "_2 = cast<u8 mut* own*>(copy _2); return; }");
+    // a cast that drops `own` lends: a view of an owning place, of field 0 and of an element
+    green(&e, lets, "_2 = cast<u8@>(copy _1); return; }");
+    green(&e, lets, "_4 = cast<u8 mut*>(copy _1.0); return; }");
+    green(&e, lets, "_2 = cast<u8@>(copy _3); return; }");
+    green(&e, "let _1: u8 mut* own; let _2: u64; bb0: {", "_2 = cast<u64>(copy _1); return; }");
+    green(&e, "let _1: u8 mut* own mut@; let _2: u64; let _3: void*; bb0: {",
+          "_3 = cast<void*>(copy _1[_2]); return; }");
+    // a constant fills a cast to a type that does not own
+    green(&e, "let _1: u8 mut*; let _2: u64; bb0: {",
+          "_1 = cast<u8 mut*>(const null u8 mut*); _2 = cast<u64>(const i32 7); return; }");
+    // an owning struct: a copy lends and a constant owns nothing, and a move carries the owner
+    string owner = "let _1: holder; let _2: holder; let _3: u8 mut* own; bb0: {";
+    red(&e, owner, "_2 = cast<holder>(copy _1); return; }", 6, fir_verify.V6_CAST, 0, 0);
+    red(&e, owner, "_2 = cast<holder>(const zero holder); return; }", 6, fir_verify.V6_CAST, 0,
+        0);
+    green(&e, owner, "_2 = cast<holder>(move _1); return; }");
+    // `cast(holder{}, holder)` as spec/fir.md 9.4 lowers it: the constant goes into a temporary
+    flow_green_in(&e, "let _2: holder;",
+                  "bb0: { _2 = const zero holder; _0 = cast<holder>(move _2); return; }");
+    // a cast of the owning struct to a pointer or a scalar is no cast D3.14 allows
+    red(&e, owner, "_3 = cast<u8 mut* own>(move _1); return; }", 4, fir_verify.V4_CAST, 0, 0);
 }
 
 // ---- V7 --------------------------------------------------------------------------------------
@@ -2477,7 +2545,7 @@ fn main() i32 {
     v6_owning_parameters_and_members_take_a_move_or_a_constant();
     v6_a_literal_fills_no_owning_position();
     v6_an_owning_value_lands_in_an_owning_position();
-    v6_a_cast_to_own_copies_no_owning_place();
+    v6_a_cast_never_adds_own();
     println("V5 V6 ok");
     v7_a_call_matches_its_callee();
     v7_a_check_reports_what_its_runtime_entry_takes();
