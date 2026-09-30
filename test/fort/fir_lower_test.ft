@@ -1,0 +1,715 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| declarations ok
+//| locals ok
+//| indices ok
+//| ends ok
+//| refusals ok
+//| program ok
+/// Checks the lowering of fort to FIR (spec/fir.md 9): scalar declarations, the numbers of the
+/// named locals, the statement index, the end of a body, and the report of a construct that the
+/// lowering does not lower yet. Each case lowers one function of a checked source, holds that the
+/// result keeps every rule of the verifier, and compares its text.
+import ast;
+import check_env;
+import fir;
+import fir_lower;
+import fir_print;
+import fir_verify;
+import gen;
+import lower_env;
+import modules_env;
+import std.str;
+import std.strbuf;
+
+// ---- declarations -----------------------------------------------------------------------------
+
+// The case of the ticket: a constant, a name and a scalar `return`. Each statement takes the index
+// of its source statement, and each assignment the location of its expression.
+fn a_scalar_declaration_takes_a_constant_or_a_name() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[1] source = {"fn f(i32 a) i32 { i32 b = 1; i32 c = a; return c; }"};
+    string[14] want = {
+        "fn main.f(_1 (a): i32) -> i32 {",
+        "    let _0: i32;",
+        "    let _2 (b): i32 #1:23;",
+        "    let _3 (c): i32 #1:34;",
+        "",
+        "    bb0: {",
+        "        live(_2) #1:23 s1;",
+        "        _2 = const i32 1 #1:27 s1;",
+        "        live(_3) #1:34 s2;",
+        "        _3 = copy _1 #1:38 s2;",
+        "        _0 = copy _3 #1:48 s3;",
+        "        return #1:41 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// A global reads its place, a module-level constant is folded, and a function is a constant. A
+// declaration of each scalar kind writes the constant of its type (spec/fir.md 5.6).
+fn a_declaration_reads_globals_functions_and_every_scalar_kind() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[21] source = {
+        "enum color {",
+        "    red,",
+        "    green,",
+        "}",
+        "i32 LIMIT = 7;",
+        "i32 mut count = 0;",
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn f(u8* p) void {",
+        "    i32 a = count;",
+        "    i32 b = LIMIT;",
+        "    fn () i32 g = one;",
+        "    f64 x = 1;",
+        "    char c = 'A';",
+        "    color k = color.green;",
+        "    bool t = true;",
+        "    u8* q = p;",
+        "    u8* z = null;",
+        "    u64 s = sizeof(i64);",
+        "}",
+    };
+    string[37] want = {
+        "fn main.f(_1 (p): u8*) -> void {",
+        "    let _0: void;",
+        "    let _2 (a): i32 #11:9;",
+        "    let _3 (b): i32 #12:9;",
+        "    let _4 (g): fn () i32 #13:15;",
+        "    let _5 (x): f64 #14:9;",
+        "    let _6 (c): char #15:10;",
+        "    let _7 (k): color #16:11;",
+        "    let _8 (t): bool #17:10;",
+        "    let _9 (q): u8* #18:9;",
+        "    let _10 (z): u8* #19:9;",
+        "    let _11 (s): u64 #20:9;",
+        "",
+        "    bb0: {",
+        "        live(_2) #11:9 s1;",
+        "        _2 = copy global main.count #11:13 s1;",
+        "        live(_3) #12:9 s2;",
+        "        _3 = const i32 7 #12:13 s2;",
+        "        live(_4) #13:15 s3;",
+        "        _4 = const fn main.one #13:19 s3;",
+        "        live(_5) #14:9 s4;",
+        "        _5 = const f64 0x3FF0000000000000 #14:13 s4;",
+        "        live(_6) #15:10 s5;",
+        "        _6 = const char 65 #15:14 s5;",
+        "        live(_7) #16:11 s6;",
+        "        _7 = const color 1 #16:20 s6;",
+        "        live(_8) #17:10 s7;",
+        "        _8 = const true #17:14 s7;",
+        "        live(_9) #18:9 s8;",
+        "        _9 = copy _1 #18:13 s8;",
+        "        live(_10) #19:9 s9;",
+        "        _10 = const null u8* #19:13 s9;",
+        "        live(_11) #20:9 s10;",
+        "        _11 = const u64 8 #20:13 s10;",
+        "        return #21:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// `return x` of an `own` parameter or local is an implicit move (ANN_MOVE, D17.5): the operand is
+// `move _x` and not a copy, which rule V6 would refuse.
+fn a_return_of_an_owning_name_moves_it() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn keep(u8 mut* own p) u8 mut* own {",
+        "    return p;",
+        "}",
+    };
+    string[8] want = {
+        "fn main.keep(_1 (p): u8 mut* own) -> u8 mut* own {",
+        "    let _0: u8 mut* own;",
+        "",
+        "    bb0: {",
+        "        _0 = move _1 #2:12 s1;",
+        "        return #2:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "keep"), want[..]);
+}
+
+// ---- the named locals -------------------------------------------------------------------------
+
+// The prescan numbers the named locals after the parameters in the order of their declarations,
+// nested blocks included, and walks only the branch of a `$if` that the checker selected
+// (spec/fir.md 5.3). `x` stands in a branch that the checker did not select, and takes no number.
+fn the_prescan_numbers_named_locals_in_declaration_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[15] source = {
+        "fn f(bool c) i32 {",
+        "    i32 a = 1;",
+        "    if (c) {",
+        "        i32 b = 2;",
+        "        {",
+        "            i32 d = b;",
+        "        }",
+        "    }",
+        "    $if (sizeof(i64) == 8) {",
+        "        i32 e = a;",
+        "    } else {",
+        "        i32 x = 5;",
+        "    }",
+        "    return a;",
+        "}",
+    };
+    string[26] want = {
+        "fn main.f(_1 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _2 (a): i32 #2:9;",
+        "    let _3 (b): i32 #4:13;",
+        "    let _4 (d): i32 #6:17;",
+        "    let _5 (e): i32 #10:13;",
+        "",
+        "    bb0: {",
+        "        live(_2) #2:9 s1;",
+        "        _2 = const i32 1 #2:13 s1;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #3:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        live(_3) #4:13 s3;",
+        "        _3 = const i32 2 #4:17 s3;",
+        "        live(_4) #6:17 s4;",
+        "        _4 = copy _3 #6:21 s4;",
+        "        goto bb2 #3:5 s2;",
+        "    }",
+        "    bb2: {",
+        "        live(_5) #10:13 s5;",
+        "        _5 = copy _2 #10:17 s5;",
+        "        _0 = copy _2 #14:12 s6;",
+        "        return #14:5 s6;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// An `else $if` chain lowers its first selected branch alone, and a chain that selects nothing
+// lowers nothing. A local of a branch that the checker did not select takes no number.
+fn a_compile_time_chain_lowers_its_selected_branch_alone() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn g() void {",
+        "    $if (false) {",
+        "        i32 y = 1;",
+        "    } else $if (true) {",
+        "        i32 z = 2;",
+        "    } else {",
+        "        i32 w = 3;",
+        "    }",
+        "    $if (false) {",
+        "        i32 v = 0;",
+        "    }",
+        "}",
+    };
+    string[10] want = {
+        "fn main.g() -> void {",
+        "    let _0: void;",
+        "    let _1 (z): i32 #5:13;",
+        "",
+        "    bb0: {",
+        "        live(_1) #5:13 s1;",
+        "        _1 = const i32 2 #5:17 s1;",
+        "        return #12:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+}
+
+// ---- the statement index ----------------------------------------------------------------------
+
+// The case of the ticket: the `if` takes `s1` and the statement inside it `s2`. The `goto` that
+// ends the arm belongs to the `if` and takes `s1`.
+fn an_if_takes_its_index_before_the_statements_inside_it() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn f(bool c) i32 {",
+        "    if (c) {",
+        "        i32 x = 1;",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    string[17] want = {
+        "fn main.f(_1 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _2 (x): i32 #3:13;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        live(_2) #3:13 s2;",
+        "        _2 = const i32 1 #3:17 s2;",
+        "        goto bb2 #2:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 0 #5:12 s3;",
+        "        return #5:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// Each `else if` is an `if` of its own and takes its own index (spec/fir.md 9.7). The blocks of
+// one `if` are made in the order then, else, done (9.3), so the blocks of an inner `if` take
+// larger numbers than the `done` of the outer one. An arm that ends in `return` has no `goto`,
+// and a statement after a `return` starts a block that nothing names.
+fn an_else_if_chain_and_the_statements_after_a_return() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[15] source = {
+        "fn f(bool c, bool d) i32 {",
+        "    if (c) {",
+        "        i32 x = 1;",
+        "    }",
+        "    if (c) {",
+        "        i32 y = 2;",
+        "    } else if (d) {",
+        "        i32 z = 3;",
+        "    } else {",
+        "        return 4;",
+        "    }",
+        "    return 0;",
+        "    i32 after = 5;",
+        "    return after;",
+        "}",
+    };
+    string[49] want = {
+        "fn main.f(_1 (c): bool, _2 (d): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _3 (x): i32 #3:13;",
+        "    let _4 (y): i32 #6:13;",
+        "    let _5 (z): i32 #8:13;",
+        "    let _6 (after): i32 #13:9;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        live(_3) #3:13 s2;",
+        "        _3 = const i32 1 #3:17 s2;",
+        "        goto bb2 #2:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        switch(copy _1) -> [true: bb3, otherwise: bb4] #5:5 s3;",
+        "    }",
+        "    bb3: {",
+        "        live(_4) #6:13 s4;",
+        "        _4 = const i32 2 #6:17 s4;",
+        "        goto bb5 #5:5 s3;",
+        "    }",
+        "    bb4: {",
+        "        switch(copy _2) -> [true: bb6, otherwise: bb7] #7:12 s5;",
+        "    }",
+        "    bb5: {",
+        "        _0 = const i32 0 #12:12 s8;",
+        "        return #12:5 s8;",
+        "    }",
+        "    bb6: {",
+        "        live(_5) #8:13 s6;",
+        "        _5 = const i32 3 #8:17 s6;",
+        "        goto bb8 #7:12 s5;",
+        "    }",
+        "    bb7: {",
+        "        _0 = const i32 4 #10:16 s7;",
+        "        return #10:9 s7;",
+        "    }",
+        "    bb8: {",
+        "        goto bb5 #5:5 s3;",
+        "    }",
+        "    bb9: {",
+        "        live(_6) #13:9 s9;",
+        "        _6 = const i32 5 #13:17 s9;",
+        "        _0 = copy _6 #14:12 s10;",
+        "        return #14:5 s10;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// An `if` inside an `if`: the inner one makes its blocks after the outer `done`, and the `goto`
+// that ends the outer arm takes the index of the outer `if` again after the inner statements.
+fn a_nested_if_restores_the_index_of_the_outer_one() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn nif(bool a, bool b) i32 {",
+        "    if (a) {",
+        "        if (b) {",
+        "            return 1;",
+        "        }",
+        "        i32 k = 2;",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    string[24] want = {
+        "fn main.nif(_1 (a): bool, _2 (b): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _3 (k): i32 #6:13;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        switch(copy _2) -> [true: bb3, otherwise: bb4] #3:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 0 #8:12 s5;",
+        "        return #8:5 s5;",
+        "    }",
+        "    bb3: {",
+        "        _0 = const i32 1 #4:20 s3;",
+        "        return #4:13 s3;",
+        "    }",
+        "    bb4: {",
+        "        live(_3) #6:13 s4;",
+        "        _3 = const i32 2 #6:17 s4;",
+        "        goto bb2 #2:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "nif"), want[..]);
+}
+
+// The lowering keeps no state from one call to the next: two lowerings of one declaration give
+// one text, and a lowering after a refusal gives the text that it gives alone.
+fn a_lowering_depends_on_its_function_alone() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn f(string a, bool c) bool {",
+        "    return c && a == \"x\";",
+        "}",
+        "fn g() void {",
+        "    g();",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    strbuf.str_buf mut first = strbuf.create();
+    defer strbuf.free(&first);
+    strbuf.append(&first, lower_env.lower_checked(&e, "f"));
+    assert(lower_env.lower_checked(&e, "f") == strbuf.view(&first));
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    assert(!fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, "g"), &f, &why));
+    assert(lower_env.lower_checked(&e, "f") == strbuf.view(&first));
+    assert(str.find(strbuf.view(&first), "call fn std.rt.str_eq(") > 0);
+}
+
+// ---- the end of a body ------------------------------------------------------------------------
+
+// A body whose last block has no terminator ends in `unreachable` when it has a result, at the
+// closing brace and with index 0 (spec/fir.md 9.6, 9.7). The checker proved that no path reaches
+// it, and rule V9 holds that.
+fn a_body_with_a_result_ends_in_unreachable() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn f(bool c) i32 {",
+        "    if (c) {",
+        "        return 1;",
+        "    } else {",
+        "        return 2;",
+        "    }",
+        "}",
+    };
+    string[18] want = {
+        "fn main.f(_1 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _0 = const i32 1 #3:16 s2;",
+        "        return #3:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 2 #5:16 s3;",
+        "        return #5:9 s3;",
+        "    }",
+        "    bb3: {",
+        "        unreachable #7:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// A `noreturn` body that reaches its end ends in `trap` (D8.5). The checker accepts such a body
+// only when it ends in a loop or a call that the lowering does not lower yet, so the case calls
+// lower_end on the entry block itself. A block that has a terminator keeps it.
+fn a_noreturn_body_ends_in_trap() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {
+        "fn stop() noreturn {",
+        "    while (true) {",
+        "    }",
+        "}",
+    };
+    assert(lower_env.refused(&e, source[..], "stop") == "// not supported: while at 2:5\n");
+    ast.node* decl = lower_env.decl(&e, "stop");
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    fir_lower.lower_end(&lw, decl->b);
+    fir_lower.lower_end(&lw, decl->b);
+    fir_verify.violation mut v = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &v));
+    strbuf.clear(&e.text);
+    fir_print.print_function(&f, &e.text);
+    string[7] want = {
+        "fn main.stop() -> noreturn {",
+        "    let _0: void;",
+        "",
+        "    bb0: {",
+        "        trap #4:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(strbuf.view(&e.text), want[..]);
+}
+
+// ---- constructs that the lowering does not lower yet ------------------------------------------
+
+u64 REFUSAL_LINES = 50;
+
+// One function for each construct, and one for each construct that stops the lowering from
+// inside another construct.
+string[REFUSAL_LINES] REFUSAL_SOURCE = {
+    "struct pair {",
+    "    i32 a;",
+    "}",
+    "struct holder {",
+    "    u8 mut* own p;",
+    "}",
+    "fn one() i32 { return 1; }",
+    "fn flag() bool { return true; }",
+    "fn text() string { return \"t\"; }",
+    "fn loops(bool c) void { while (c) { } }",
+    "fn calls() void { one(); }",
+    "fn assigns(i32 x) void { i32 mut y = x; y = 2; }",
+    "fn steps() void { i32 mut y = 0; y++; }",
+    "fn defers() void { defer calls(); }",
+    "fn aggregate() i32 { pair p = pair{1}; return 0; }",
+    "fn owner() void { u8 mut* own p = null; }",
+    "fn makes() pair { return pair{2}; }",
+    "fn call_value() i32 { i32 x = one(); return x; }",
+    "fn index(i32[2] a) i32 { return a[0]; }",
+    "fn arrow(pair* p) i32 { return p->a; }",
+    "fn field(pair p) i32 { return p.a; }",
+    "fn deref(i32* p) i32 { return *p; }",
+    "fn address(i32 x) void { i32* q = &x; }",
+    "fn allocates() i32 mut* own { return new(i32); }",
+    "fn moves(holder mut* h) u8* own { return cast(move(h->p), u8* own); }",
+    "fn compares(string s) bool { return text() == s; }",
+    "fn compares_right(string s) bool { return s == text(); }",
+    "fn in_if() void { if (flag()) { } }",
+    "fn in_then(bool c) void { if (c) { one(); } }",
+    "fn in_else(bool c) void { if (c) { } else { one(); } }",
+    "fn in_else_if(bool c, bool d) void { if (c) { } else if (d) { one(); } }",
+    "fn in_block() void { { one(); } }",
+    "fn in_compile_if() void { $if (true) { one(); } }",
+    "fn in_left(i32 x) i32 { return one() + x; }",
+    "fn in_right(i32 x) i32 { return x + one(); }",
+    "fn in_unary() i32 { return -one(); }",
+    "fn in_and(bool c) bool { return flag() && c; }",
+    "fn in_and_right(bool c) bool { return c && flag(); }",
+    "fn in_condition() i32 { return flag() ? 1 : 2; }",
+    "fn in_then_arm(bool c) i32 { return c ? one() : 2; }",
+    "fn in_else_arm(bool c) i32 { return c ? 1 : one(); }",
+    "fn in_cast() i64 { return cast(one(), i64); }",
+    "fn in_shift(i32 x) i32 { return x << one(); }",
+    "fn fors(i32 n) void { for (i32 mut i = 0; i < n; i += 1) { } }",
+    "fn dos(bool c) void { do { } while (c); }",
+    "fn switches(i32 n) void { switch (n) { case 1: one(); default: one(); } }",
+    "fn ranges(i32[2] a) void { for (i32 v : a) { } }",
+    "fn slices(string s, string t) bool { return s[0..1] == t; }",
+    "fn choices(bool c, string s, string t) bool { return (c ? s : t) == s; }",
+    "fn members(pair p, pair q) bool { return p.a == q.a; }",
+};
+
+u64 REFUSALS = 41;
+
+// The functions of REFUSAL_SOURCE that the lowering refuses, and the line that `--fir` prints for
+// each: the kind of the tree node and the location where that node starts.
+string[REFUSALS] REFUSED = {
+    "loops", "calls", "assigns", "steps", "defers", "aggregate", "owner", "makes", "call_value",
+    "index", "arrow", "field", "deref", "address", "allocates", "moves", "compares",
+    "compares_right", "in_if", "in_then", "in_else", "in_else_if", "in_block", "in_compile_if",
+    "in_left", "in_right", "in_unary", "in_and", "in_and_right", "in_condition", "in_then_arm",
+    "in_else_arm", "in_cast", "in_shift", "fors", "dos", "switches", "ranges", "slices", "choices",
+    "members",
+};
+
+string[REFUSALS] REPORTS = {
+    "// not supported: while at 10:25",
+    "// not supported: call-stmt at 11:19",
+    "// not supported: assign at 12:43",
+    "// not supported: incdec at 13:35",
+    "// not supported: defer at 14:20",
+    "// not supported: var at 15:22",
+    "// not supported: var at 16:19",
+    "// not supported: return at 17:19",
+    "// not supported: call at 18:34",
+    "// not supported: index at 19:34",
+    "// not supported: arrow at 20:33",
+    "// not supported: field at 21:32",
+    "// not supported: unary at 22:31",
+    "// not supported: unary at 23:35",
+    "// not supported: new at 24:38",
+    "// not supported: arrow at 25:53",
+    "// not supported: call at 26:41",
+    "// not supported: call at 27:52",
+    "// not supported: call at 28:27",
+    "// not supported: call-stmt at 29:36",
+    "// not supported: call-stmt at 30:45",
+    "// not supported: call-stmt at 31:63",
+    "// not supported: call-stmt at 32:24",
+    "// not supported: call-stmt at 33:40",
+    "// not supported: call at 34:35",
+    "// not supported: call at 35:40",
+    "// not supported: call at 36:32",
+    "// not supported: call at 37:37",
+    "// not supported: call at 38:48",
+    "// not supported: call at 39:36",
+    "// not supported: call at 40:44",
+    "// not supported: call at 41:48",
+    "// not supported: call at 42:35",
+    "// not supported: call at 43:41",
+    "// not supported: for at 44:23",
+    "// not supported: do at 45:23",
+    "// not supported: switch at 46:27",
+    "// not supported: range-for at 47:28",
+    "// not supported: span at 48:46",
+    "// not supported: ternary at 49:57",
+    "// not supported: field at 50:43",
+};
+
+// A construct that the lowering does not lower yet stops the lowering of its function, wherever it
+// stands: the report names the node and where it starts, and the function stays empty.
+fn a_construct_not_lowered_yet_stops_its_function() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    u64 mut i = 0;
+    while (i < REFUSALS) {
+        string got = lower_env.refused(&e, REFUSAL_SOURCE[..], REFUSED[i]);
+        if (got.len != REPORTS[i].len + 1 || got[0..REPORTS[i].len] != REPORTS[i]) {
+            eprintln("fir_lower_test: ", REFUSED[i], ": expected <", REPORTS[i], ">, got <",
+                     got, ">");
+            panic("fir_lower_test: a report differs");
+        }
+        i += 1;
+    }
+    // the lowering lowers the other functions of the source
+    lower_env.check_lines(&e, REFUSAL_SOURCE[..], true);
+    lower_env.lower_checked(&e, "one");
+    lower_env.lower_checked(&e, "flag");
+}
+
+// ---- the program ------------------------------------------------------------------------------
+
+// The functions of a closure in the order of a FIR module: the modules in dependency order, and in
+// each module the declarations in source order with the selected branch of each `$if`. An
+// `extern fn` has no body and is no function to lower.
+fn the_program_lists_its_functions_in_module_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    check_env.reopen(&e.c);
+    check_env.add(&e.c, "std/rt.ft", "fn first() void {\n}\n");
+    modules_env.std_dir_without_runtime(&e.c.m, "std");
+    check_env.add(&e.c, "helper.ft", "fn twice(i32 x) i32 {\n    return x;\n}\n");
+    string[13] source = {
+        "import helper;",
+        "extern fn puts(char* s) i32;",
+        "fn early() void {",
+        "}",
+        "$if (false) {",
+        "    fn gone() void {",
+        "    }",
+        "} else {",
+        "    fn kept() void {",
+        "    }",
+        "}",
+        "fn main() i32 {",
+        "    return helper.twice(0);",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : source) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    strbuf.append(&b, "}\n");
+    check_env.add(&e.c, "main.ft", strbuf.view(&b));
+    assert(check_env.check_entry(&e.c, "main.ft"));
+    gen.node_ref_vec mut decls = gen.node_ref_vec{};
+    defer gen.refs_free(&decls);
+    fir_lower.program_functions(&e.c.m.set, &decls);
+    string[5] names = {"first", "twice", "early", "kept", "main"};
+    assert(decls.len == 5);
+    u64 mut i = 0;
+    while (i < 5) {
+        assert(gen.refs_at(&decls, i)->name == names[i]);
+        i += 1;
+    }
+}
+
+fn main() i32 {
+    a_scalar_declaration_takes_a_constant_or_a_name();
+    a_declaration_reads_globals_functions_and_every_scalar_kind();
+    a_return_of_an_owning_name_moves_it();
+    println("declarations ok");
+    the_prescan_numbers_named_locals_in_declaration_order();
+    a_compile_time_chain_lowers_its_selected_branch_alone();
+    println("locals ok");
+    an_if_takes_its_index_before_the_statements_inside_it();
+    an_else_if_chain_and_the_statements_after_a_return();
+    a_nested_if_restores_the_index_of_the_outer_one();
+    a_lowering_depends_on_its_function_alone();
+    println("indices ok");
+    a_body_with_a_result_ends_in_unreachable();
+    a_noreturn_body_ends_in_trap();
+    println("ends ok");
+    a_construct_not_lowered_yet_stops_its_function();
+    println("refusals ok");
+    the_program_lists_its_functions_in_module_order();
+    println("program ok");
+    return 0;
+}

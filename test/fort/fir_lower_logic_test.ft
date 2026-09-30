@@ -1,0 +1,692 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| comparisons ok
+//| strings ok
+//| short circuit ok
+//| conditional ok
+//| casts ok
+//| nested ok
+/// Checks the lowering of comparisons, of string equality through the runtime, of `&&`, `||` and
+/// `?:` through a temporary and blocks, and of `cast` (spec/fir.md 9.4).
+import lower_env;
+
+// ---- comparisons ------------------------------------------------------------------------------
+
+// The six comparisons on a signed and an unsigned integer, a float and a `char`: one rvalue of
+// type `bool`, whose signedness and float form come from the type of the operands.
+fn a_comparison_is_one_rvalue() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn c(i32 x, i32 y, u64 m, f64 a, char p) bool {",
+        "    bool r1 = x < y;",
+        "    bool r2 = x <= y;",
+        "    bool r3 = m > 7;",
+        "    bool r4 = a >= 1.5;",
+        "    bool r5 = p == 'q';",
+        "    return x != y;",
+        "}",
+    };
+    string[35] want = {
+        "fn main.c(_1 (x): i32, _2 (y): i32, _3 (m): u64, _4 (a): f64, _5 (p): char) -> bool {",
+        "    let _0: bool;",
+        "    let _6 (r1): bool #2:10;",
+        "    let _7 (r2): bool #3:10;",
+        "    let _8 (r3): bool #4:10;",
+        "    let _9 (r4): bool #5:10;",
+        "    let _10 (r5): bool #6:10;",
+        "    let _11: bool #2:17;",
+        "    let _12: bool #3:17;",
+        "    let _13: bool #4:17;",
+        "    let _14: bool #5:17;",
+        "    let _15: bool #6:17;",
+        "    let _16: bool #7:14;",
+        "",
+        "    bb0: {",
+        "        live(_6) #2:10 s1;",
+        "        _11 = lt(copy _1, copy _2) #2:17 s1;",
+        "        _6 = copy _11 #2:17 s1;",
+        "        live(_7) #3:10 s2;",
+        "        _12 = le(copy _1, copy _2) #3:17 s2;",
+        "        _7 = copy _12 #3:17 s2;",
+        "        live(_8) #4:10 s3;",
+        "        _13 = gt(copy _3, const u64 7) #4:17 s3;",
+        "        _8 = copy _13 #4:17 s3;",
+        "        live(_9) #5:10 s4;",
+        "        _14 = ge(copy _4, const f64 0x3FF8000000000000) #5:17 s4;",
+        "        _9 = copy _14 #5:17 s4;",
+        "        live(_10) #6:10 s5;",
+        "        _15 = eq(copy _5, const char 113) #6:17 s5;",
+        "        _10 = copy _15 #6:17 s5;",
+        "        _16 = ne(copy _1, copy _2) #7:14 s6;",
+        "        _0 = copy _16 #7:14 s6;",
+        "        return #7:5 s6;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "c"), want[..]);
+}
+
+// `==` and `!=` on an own pointer, which the operands lend (D17.4), on a `bool` and on an enum.
+fn equality_lends_an_owning_operand() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "enum color {",
+        "    red,",
+        "    green,",
+        "}",
+        "fn q(u8 mut* own p, bool b, color k) bool {",
+        "    bool n = p == null;",
+        "    bool t = b != true;",
+        "    return k == color.red;",
+        "}",
+    };
+    string[20] want = {
+        "fn main.q(_1 (p): u8 mut* own, _2 (b): bool, _3 (k): color) -> bool {",
+        "    let _0: bool;",
+        "    let _4 (n): bool #6:10;",
+        "    let _5 (t): bool #7:10;",
+        "    let _6: bool #6:16;",
+        "    let _7: bool #7:16;",
+        "    let _8: bool #8:14;",
+        "",
+        "    bb0: {",
+        "        live(_4) #6:10 s1;",
+        "        _6 = eq(copy _1, const null u8 mut* own) #6:16 s1;",
+        "        _4 = copy _6 #6:16 s1;",
+        "        live(_5) #7:10 s2;",
+        "        _7 = ne(copy _2, const true) #7:16 s2;",
+        "        _5 = copy _7 #7:16 s2;",
+        "        _8 = eq(copy _3, const color 0) #8:14 s3;",
+        "        _0 = copy _8 #8:14 s3;",
+        "        return #8:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "q"), want[..]);
+}
+
+// ---- strings ----------------------------------------------------------------------------------
+
+// `==` on strings calls std.rt.str_eq with the pointer and the length of each operand, and `!=`
+// is `not` of it. A string constant fills a temporary first, because a constant of an aggregate
+// type fills a place (spec/fir.md 6).
+fn string_equality_calls_the_runtime() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "string NAME = \"abc\";",
+        "fn s(string a, string b) bool {",
+        "    bool e = a == b;",
+        "    bool l = a == \"xy\";",
+        "    bool g = NAME != a;",
+        "    return a != b;",
+        "}",
+    };
+    string[33] want = {
+        "fn main.s(_1 (a): string, _2 (b): string) -> bool {",
+        "    let _0: bool;",
+        "    let _3 (e): bool #3:10;",
+        "    let _4 (l): bool #4:10;",
+        "    let _5 (g): bool #5:10;",
+        "    let _6: bool #3:16;",
+        "    let _7: string #4:19;",
+        "    let _8: bool #4:16;",
+        "    let _9: string #5:14;",
+        "    let _10: bool #5:19;",
+        "    let _11: bool #5:19;",
+        "    let _12: bool #6:14;",
+        "    let _13: bool #6:14;",
+        "",
+        "    bb0: {",
+        "        live(_3) #3:10 s1;",
+        "        _6 = call fn std.rt.str_eq(copy _1.0, copy _1.1, copy _2.0, copy _2.1) #3:16 s1;",
+        "        _3 = copy _6 #3:16 s1;",
+        "        live(_4) #4:10 s2;",
+        "        _7 = const \"xy\" #4:19 s2;",
+        "        _8 = call fn std.rt.str_eq(copy _1.0, copy _1.1, copy _7.0, copy _7.1) #4:16 s2;",
+        "        _4 = copy _8 #4:16 s2;",
+        "        live(_5) #5:10 s3;",
+        "        _9 = const \"abc\" #5:14 s3;",
+        "        _10 = call fn std.rt.str_eq(copy _9.0, copy _9.1, copy _1.0, copy _1.1) #5:19 s3;",
+        "        _11 = not(copy _10) #5:19 s3;",
+        "        _5 = copy _11 #5:19 s3;",
+        "        _12 = call fn std.rt.str_eq(copy _1.0, copy _1.1, copy _2.0, copy _2.1) #6:14 s4;",
+        "        _13 = not(copy _12) #6:14 s4;",
+        "        _0 = copy _13 #6:14 s4;",
+        "        return #6:5 s4;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "s"), want[..]);
+}
+
+// A closure whose runtime has no str_eq, such as a sandbox, leaves a string equality to the
+// direct path. A function of that name in another module is not the runtime's.
+fn string_equality_needs_the_runtime() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn s(string a, string b) bool {",
+        "    return a == b;",
+        "}",
+        "fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {",
+        "    return false;",
+        "}",
+    };
+    string got = lower_env.refused_with(&e, source[..], "s", false);
+    assert(got == "// not supported: binary at 2:14\n");
+}
+
+// ---- short circuit ----------------------------------------------------------------------------
+
+// `a || b` and `a && b || c`: one `bool` temporary for each operator, assigned in both blocks.
+// `&&` goes to the right operand when its left one is true and `||` when it is false. The inner
+// `&&` makes its temporary after the outer `||` made its own.
+fn and_and_or_assign_one_temporary_in_two_blocks() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {
+        "fn l(bool a, bool b, bool c) bool {",
+        "    bool x = a || b;",
+        "    return a && b || c;",
+        "}",
+    };
+    string[38] want = {
+        "fn main.l(_1 (a): bool, _2 (b): bool, _3 (c): bool) -> bool {",
+        "    let _0: bool;",
+        "    let _4 (x): bool #2:10;",
+        "    let _5: bool #2:16;",
+        "    let _6: bool #3:19;",
+        "    let _7: bool #3:14;",
+        "",
+        "    bb0: {",
+        "        live(_4) #2:10 s1;",
+        "        _5 = copy _1 #2:14 s1;",
+        "        switch(copy _5) -> [true: bb2, otherwise: bb1] #2:16 s1;",
+        "    }",
+        "    bb1: {",
+        "        _5 = copy _2 #2:19 s1;",
+        "        goto bb2 #2:16 s1;",
+        "    }",
+        "    bb2: {",
+        "        _4 = copy _5 #2:16 s1;",
+        "        _7 = copy _1 #3:12 s2;",
+        "        switch(copy _7) -> [true: bb3, otherwise: bb4] #3:14 s2;",
+        "    }",
+        "    bb3: {",
+        "        _7 = copy _2 #3:17 s2;",
+        "        goto bb4 #3:14 s2;",
+        "    }",
+        "    bb4: {",
+        "        _6 = copy _7 #3:14 s2;",
+        "        switch(copy _6) -> [true: bb6, otherwise: bb5] #3:19 s2;",
+        "    }",
+        "    bb5: {",
+        "        _6 = copy _3 #3:22 s2;",
+        "        goto bb6 #3:19 s2;",
+        "    }",
+        "    bb6: {",
+        "        _0 = copy _6 #3:19 s2;",
+        "        return #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "l"), want[..]);
+}
+
+// ---- the conditional --------------------------------------------------------------------------
+
+// `c ? a : b` writes a temporary of its type in each arm, and the nested case of the ticket,
+// `(a && b) ? 1 : 2`, switches on the temporary of the `&&`.
+fn a_conditional_writes_its_temporary_in_each_arm() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {
+        "fn t(bool a, bool b, i32 x) i32 {",
+        "    i32 v = a ? x : 2;",
+        "    return (a && b) ? 1 : 2;",
+        "}",
+    };
+    string[44] want = {
+        "fn main.t(_1 (a): bool, _2 (b): bool, _3 (x): i32) -> i32 {",
+        "    let _0: i32;",
+        "    let _4 (v): i32 #2:9;",
+        "    let _5: i32 #2:15;",
+        "    let _6: bool #3:15;",
+        "    let _7: i32 #3:21;",
+        "",
+        "    bb0: {",
+        "        live(_4) #2:9 s1;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:15 s1;",
+        "    }",
+        "    bb1: {",
+        "        _5 = copy _3 #2:17 s1;",
+        "        goto bb3 #2:15 s1;",
+        "    }",
+        "    bb2: {",
+        "        _5 = const i32 2 #2:21 s1;",
+        "        goto bb3 #2:15 s1;",
+        "    }",
+        "    bb3: {",
+        "        _4 = copy _5 #2:15 s1;",
+        "        _6 = copy _1 #3:13 s2;",
+        "        switch(copy _6) -> [true: bb4, otherwise: bb5] #3:15 s2;",
+        "    }",
+        "    bb4: {",
+        "        _6 = copy _2 #3:18 s2;",
+        "        goto bb5 #3:15 s2;",
+        "    }",
+        "    bb5: {",
+        "        switch(copy _6) -> [true: bb6, otherwise: bb7] #3:21 s2;",
+        "    }",
+        "    bb6: {",
+        "        _7 = const i32 1 #3:23 s2;",
+        "        goto bb8 #3:21 s2;",
+        "    }",
+        "    bb7: {",
+        "        _7 = const i32 2 #3:27 s2;",
+        "        goto bb8 #3:21 s2;",
+        "    }",
+        "    bb8: {",
+        "        _0 = copy _7 #3:21 s2;",
+        "        return #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "t"), want[..]);
+}
+
+// Arms that lend give the conditional the lent type, so the temporary owns nothing and a copy
+// fills it. Arms that are owning rvalues or `null` keep `own`, so the temporary owns and `move`
+// reads it (D17.4, spec/fir.md 9.4).
+fn a_conditional_owns_only_when_its_arms_own() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn own_arms(bool c, u8 mut* own p) u8 mut* own {",
+        "    return c ? move(p) : null;",
+        "}",
+        "fn lend_arms(bool c, u8 mut* own p, u8 mut* own q) bool {",
+        "    u8 mut* v = c ? p : q;",
+        "    return v == null;",
+        "}",
+    };
+    string[20] owning = {
+        "fn main.own_arms(_1 (c): bool, _2 (p): u8 mut* own) -> u8 mut* own {",
+        "    let _0: u8 mut* own;",
+        "    let _3: u8 mut* own #2:14;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:14 s1;",
+        "    }",
+        "    bb1: {",
+        "        _3 = move _2 #2:20 s1;",
+        "        goto bb3 #2:14 s1;",
+        "    }",
+        "    bb2: {",
+        "        _3 = const null u8 mut* own #2:26 s1;",
+        "        goto bb3 #2:14 s1;",
+        "    }",
+        "    bb3: {",
+        "        _0 = move _3 #2:14 s1;",
+        "        return #2:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "own_arms"), owning[..]);
+    string[25] lending = {
+        "fn main.lend_arms(_1 (c): bool, _2 (p): u8 mut* own, _3 (q): u8 mut* own) -> bool {",
+        "    let _0: bool;",
+        "    let _4 (v): u8 mut* #5:13;",
+        "    let _5: u8 mut* #5:19;",
+        "    let _6: bool #6:14;",
+        "",
+        "    bb0: {",
+        "        live(_4) #5:13 s1;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #5:19 s1;",
+        "    }",
+        "    bb1: {",
+        "        _5 = copy _2 #5:21 s1;",
+        "        goto bb3 #5:19 s1;",
+        "    }",
+        "    bb2: {",
+        "        _5 = copy _3 #5:25 s1;",
+        "        goto bb3 #5:19 s1;",
+        "    }",
+        "    bb3: {",
+        "        _4 = copy _5 #5:19 s1;",
+        "        _6 = eq(copy _4, const null u8 mut*) #6:14 s2;",
+        "        _0 = copy _6 #6:14 s2;",
+        "        return #6:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "lend_arms"), lending[..]);
+}
+
+// ---- casts ------------------------------------------------------------------------------------
+
+// `cast(e, T)` is `cast<T>(a)` for the operand `a` of `e`: `copy p` of a place, which lends an
+// owning place to a type that does not own, or a constant. The checker folds a cast of a constant
+// to a number, so `cast(300, u8)` is the constant `u8 44`, and a cast to a pointer stays.
+fn a_cast_takes_the_operand_of_its_expression() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn k(i32 x, u8 mut* own p) i64 {",
+        "    u64 a = cast(p, u64);",
+        "    f64 f = cast(x, f64);",
+        "    u8 b = cast(300, u8);",
+        "    void* z = cast(cast(4096, u64), void*);",
+        "    return cast(x, i64);",
+        "}",
+    };
+    string[28] want = {
+        "fn main.k(_1 (x): i32, _2 (p): u8 mut* own) -> i64 {",
+        "    let _0: i64;",
+        "    let _3 (a): u64 #2:9;",
+        "    let _4 (f): f64 #3:9;",
+        "    let _5 (b): u8 #4:8;",
+        "    let _6 (z): void* #5:11;",
+        "    let _7: u64 #2:13;",
+        "    let _8: f64 #3:13;",
+        "    let _9: void* #5:15;",
+        "    let _10: i64 #6:12;",
+        "",
+        "    bb0: {",
+        "        live(_3) #2:9 s1;",
+        "        _7 = cast<u64>(copy _2) #2:13 s1;",
+        "        _3 = copy _7 #2:13 s1;",
+        "        live(_4) #3:9 s2;",
+        "        _8 = cast<f64>(copy _1) #3:13 s2;",
+        "        _4 = copy _8 #3:13 s2;",
+        "        live(_5) #4:8 s3;",
+        "        _5 = const u8 44 #4:12 s3;",
+        "        live(_6) #5:11 s4;",
+        "        _9 = cast<void*>(const u64 4096) #5:15 s4;",
+        "        _6 = copy _9 #5:15 s4;",
+        "        _10 = cast<i64>(copy _1) #6:12 s5;",
+        "        _0 = copy _10 #6:12 s5;",
+        "        return #6:5 s5;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "k"), want[..]);
+}
+
+// A cast to an owning type takes `move p` for `move(lv)` and `move _t` for an owning rvalue in a
+// temporary: the inner cast, and the conditional whose arms own. A cast never adds `own`
+// (D3.14), so the owner moves through each cast into the result.
+fn a_cast_to_an_owning_type_moves_its_operand() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn m(u8 mut* own p) void* own {",
+        "    return cast(cast(move(p), u8* own), void* own);",
+        "}",
+        "fn n(bool c, u8 mut* own p, u8 mut* own q) u8* own {",
+        "    return cast(c ? move(p) : move(q), u8* own);",
+        "}",
+    };
+    string[12] nested = {
+        "fn main.m(_1 (p): u8 mut* own) -> void* own {",
+        "    let _0: void* own;",
+        "    let _2: u8* own #2:17;",
+        "    let _3: void* own #2:12;",
+        "",
+        "    bb0: {",
+        "        _2 = cast<u8* own>(move _1) #2:17 s1;",
+        "        _3 = cast<void* own>(move _2) #2:12 s1;",
+        "        _0 = move _3 #2:12 s1;",
+        "        return #2:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "m"), nested[..]);
+    string[22] conditional = {
+        "fn main.n(_1 (c): bool, _2 (p): u8 mut* own, _3 (q): u8 mut* own) -> u8* own {",
+        "    let _0: u8* own;",
+        "    let _4: u8 mut* own #5:19;",
+        "    let _5: u8* own #5:12;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #5:19 s1;",
+        "    }",
+        "    bb1: {",
+        "        _4 = move _2 #5:25 s1;",
+        "        goto bb3 #5:19 s1;",
+        "    }",
+        "    bb2: {",
+        "        _4 = move _3 #5:35 s1;",
+        "        goto bb3 #5:19 s1;",
+        "    }",
+        "    bb3: {",
+        "        _5 = cast<u8* own>(move _4) #5:12 s1;",
+        "        _0 = move _5 #5:12 s1;",
+        "        return #5:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "n"), conditional[..]);
+}
+
+// ---- nested forms -----------------------------------------------------------------------------
+
+// `!=` on two pointers and `==` on a function value and a function, which is a constant. The
+// operands of `&&` are names.
+fn pointers_and_functions_compare_by_value() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn one() i32 {",
+        "    return 1;",
+        "}",
+        "fn same(u8* p, u8* q, fn () i32 f) bool {",
+        "    bool a = p != q;",
+        "    bool b = f == one;",
+        "    return b && a;",
+        "}",
+    };
+    string[27] want = {
+        "fn main.same(_1 (p): u8*, _2 (q): u8*, _3 (f): fn () i32) -> bool {",
+        "    let _0: bool;",
+        "    let _4 (a): bool #5:10;",
+        "    let _5 (b): bool #6:10;",
+        "    let _6: bool #5:16;",
+        "    let _7: bool #6:16;",
+        "    let _8: bool #7:14;",
+        "",
+        "    bb0: {",
+        "        live(_4) #5:10 s1;",
+        "        _6 = ne(copy _1, copy _2) #5:16 s1;",
+        "        _4 = copy _6 #5:16 s1;",
+        "        live(_5) #6:10 s2;",
+        "        _7 = eq(copy _3, const fn main.one) #6:16 s2;",
+        "        _5 = copy _7 #6:16 s2;",
+        "        _8 = copy _5 #7:12 s3;",
+        "        switch(copy _8) -> [true: bb1, otherwise: bb2] #7:14 s3;",
+        "    }",
+        "    bb1: {",
+        "        _8 = copy _4 #7:17 s3;",
+        "        goto bb2 #7:14 s3;",
+        "    }",
+        "    bb2: {",
+        "        _0 = copy _8 #7:14 s3;",
+        "        return #7:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "same"), want[..]);
+}
+
+// A conditional inside an arm of a conditional, and a check inside an arm: each construct makes
+// its blocks when the walk meets it, so the blocks of the inner `?:` take their numbers before
+// the continuation of the check in the other arm. `!` and `~` take the temporary of the
+// operation under them.
+fn nested_forms_make_their_blocks_in_walk_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn nest(bool a, bool b, i32 x, i32 y) i32 {",
+        "    bool n = !(a && b);",
+        "    i32 m = ~(x | y);",
+        "    return a ? (b ? x : y) : -m;",
+        "}",
+    };
+    string[60] want = {
+        "fn main.nest(_1 (a): bool, _2 (b): bool, _3 (x): i32, _4 (y): i32) -> i32 {",
+        "    let _0: i32;",
+        "    let _5 (n): bool #2:10;",
+        "    let _6 (m): i32 #3:9;",
+        "    let _7: bool #2:18;",
+        "    let _8: bool #2:14;",
+        "    let _9: i32 #3:17;",
+        "    let _10: i32 #3:13;",
+        "    let _11: i32 #4:14;",
+        "    let _12: i32 #4:19;",
+        "    let _13: bool #4:30;",
+        "    let _14: i32 #4:30;",
+        "",
+        "    bb0: {",
+        "        live(_5) #2:10 s1;",
+        "        _7 = copy _1 #2:16 s1;",
+        "        switch(copy _7) -> [true: bb1, otherwise: bb2] #2:18 s1;",
+        "    }",
+        "    bb1: {",
+        "        _7 = copy _2 #2:21 s1;",
+        "        goto bb2 #2:18 s1;",
+        "    }",
+        "    bb2: {",
+        "        _8 = not(copy _7) #2:14 s1;",
+        "        _5 = copy _8 #2:14 s1;",
+        "        live(_6) #3:9 s2;",
+        "        _9 = or(copy _3, copy _4) #3:17 s2;",
+        "        _10 = not(copy _9) #3:13 s2;",
+        "        _6 = copy _10 #3:13 s2;",
+        "        switch(copy _1) -> [true: bb3, otherwise: bb4] #4:14 s3;",
+        "    }",
+        "    bb3: {",
+        "        switch(copy _2) -> [true: bb6, otherwise: bb7] #4:19 s3;",
+        "    }",
+        "    bb4: {",
+        "        _13 = sub_overflows(const i32 0, copy _6) #4:30 s3;",
+        "        check(copy _13, overflow) -> bb9 #4:30 s3;",
+        "    }",
+        "    bb5: {",
+        "        _0 = copy _11 #4:14 s3;",
+        "        return #4:5 s3;",
+        "    }",
+        "    bb6: {",
+        "        _12 = copy _3 #4:21 s3;",
+        "        goto bb8 #4:19 s3;",
+        "    }",
+        "    bb7: {",
+        "        _12 = copy _4 #4:25 s3;",
+        "        goto bb8 #4:19 s3;",
+        "    }",
+        "    bb8: {",
+        "        _11 = copy _12 #4:19 s3;",
+        "        goto bb5 #4:14 s3;",
+        "    }",
+        "    bb9: {",
+        "        _14 = sub(const i32 0, copy _6) #4:30 s3;",
+        "        _11 = copy _14 #4:30 s3;",
+        "        goto bb5 #4:14 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "nest"), want[..]);
+}
+
+// An `if` whose arms both end in `return` has a `done` block that no edge reaches, and the
+// statements after the `if` stand in it. The condition is a `&&` of two comparisons.
+fn the_statements_after_an_if_that_returns_stand_in_its_done_block() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn after(i32 x, i32 y) i32 {",
+        "    if (x < y && y < 10) {",
+        "        return 1;",
+        "    } else {",
+        "        return 2;",
+        "    }",
+        "    i32 z = x;",
+        "    return z;",
+        "}",
+    };
+    string[35] want = {
+        "fn main.after(_1 (x): i32, _2 (y): i32) -> i32 {",
+        "    let _0: i32;",
+        "    let _3 (z): i32 #7:9;",
+        "    let _4: bool #2:15;",
+        "    let _5: bool #2:11;",
+        "    let _6: bool #2:20;",
+        "",
+        "    bb0: {",
+        "        _5 = lt(copy _1, copy _2) #2:11 s1;",
+        "        _4 = copy _5 #2:11 s1;",
+        "        switch(copy _4) -> [true: bb1, otherwise: bb2] #2:15 s1;",
+        "    }",
+        "    bb1: {",
+        "        _6 = lt(copy _2, const i32 10) #2:20 s1;",
+        "        _4 = copy _6 #2:20 s1;",
+        "        goto bb2 #2:15 s1;",
+        "    }",
+        "    bb2: {",
+        "        switch(copy _4) -> [true: bb3, otherwise: bb4] #2:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        _0 = const i32 1 #3:16 s2;",
+        "        return #3:9 s2;",
+        "    }",
+        "    bb4: {",
+        "        _0 = const i32 2 #5:16 s3;",
+        "        return #5:9 s3;",
+        "    }",
+        "    bb5: {",
+        "        live(_3) #7:9 s4;",
+        "        _3 = copy _1 #7:13 s4;",
+        "        _0 = copy _3 #8:12 s5;",
+        "        return #8:5 s5;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "after"), want[..]);
+}
+
+fn main() i32 {
+    a_comparison_is_one_rvalue();
+    equality_lends_an_owning_operand();
+    println("comparisons ok");
+    string_equality_calls_the_runtime();
+    string_equality_needs_the_runtime();
+    println("strings ok");
+    and_and_or_assign_one_temporary_in_two_blocks();
+    println("short circuit ok");
+    a_conditional_writes_its_temporary_in_each_arm();
+    a_conditional_owns_only_when_its_arms_own();
+    println("conditional ok");
+    a_cast_takes_the_operand_of_its_expression();
+    a_cast_to_an_owning_type_moves_its_operand();
+    println("casts ok");
+    pointers_and_functions_compare_by_value();
+    nested_forms_make_their_blocks_in_walk_order();
+    the_statements_after_an_if_that_returns_stand_in_its_done_block();
+    println("nested ok");
+    return 0;
+}

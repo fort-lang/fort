@@ -632,9 +632,12 @@ Two kinds of statement have no source statement of their own:
 ### 9.8 What the lowering cannot lower
 
 When a function holds a construct that the lowering does not support yet, the lowering stops for
-that function and reports "not supported". During the migration, the direct path then writes that
-function (section 16). After the migration, the report is a `gen_todo` diagnostic, as today
-(`notes/compiler.md` 6).
+that function and reports "not supported". The report names the kind of the tree node and the
+location of the node: the token where the parser starts it, which is the operator of a binary,
+unary or field node and the `(` of a call. `--fir` prints the report as the comment
+`// not supported: <kind> at <line>:<col>` in place of the function. During the migration, the
+direct path then writes that function (section 16). After the migration, the report is a
+`gen_todo` diagnostic, as today (`notes/compiler.md` 6).
 
 ## 10. The verifier
 

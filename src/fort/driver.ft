@@ -7,6 +7,7 @@ import consts;
 import containers;
 import diag;
 import fir;
+import fir_lower;
 import fir_parse;
 import fir_print;
 import fir_verify;
@@ -1146,16 +1147,39 @@ fn check_document(session.session mut* s, options* opts, analysis mut* an,
     write_document(s, &files, &ix);
 }
 
-// --fir writes the FIR module of a checked program to stdout, with one print. The lowering
-// does not exist yet (T-236), so the module holds no function and the text is empty.
-// `opts->fir_after` names a pass that does not exist yet either, so every name prints this
-// module.
-fn fir_entry() i32 {
+// --fir lowers each function of a checked program into a FIR module and writes the module to
+// stdout, with one print: the modules in dependency order and the functions of each in source
+// order, with a blank line between two functions. The verifier tests each function before the
+// print, and a violation ends the compiler with a panic that names the rule. A function that the
+// lowering does not lower yet writes the line of fir_lower.write_report in its place.
+// `opts->fir_after` names a pass that does not exist yet, so every name prints this module.
+fn fir_entry(analysis mut* an) i32 {
+    fir_verify.runtime rt = fir_verify.runtime_of(&an->ck);
+    gen.node_ref_vec mut decls = gen.node_ref_vec{};
+    defer gen.refs_free(&decls);
+    fir_lower.program_functions(&an->set, &decls);
+    // The module holds each lowered function for the passes that `--fir-after` will name (T-247);
+    // until they exist, the text is written from each function before it moves into the module.
     fir.module mut m = fir.module_new();
     defer fir.module_free(&m);
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
-    fir_print.print_module(&m, &text);
+    u64 mut i = 0;
+    while (i < decls.len) {
+        if (i > 0) {
+            strbuf.push(&text, '\n');
+        }
+        fir.func mut f = fir.func{};
+        fir_lower.report mut why = fir_lower.report{};
+        if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
+            fir_verify.verify(&f, &rt);
+            fir_print.print_function(&f, &text);
+            fir.module_add_function(&m, move(f));
+        } else {
+            fir_lower.write_report(&why, &text);
+        }
+        i += 1;
+    }
     print(strbuf.view(&text));
     return EXIT_OK;
 }
@@ -1361,7 +1385,7 @@ fn compile_entry(options* opts, string program) i32 {
     }
     if (opts->fir) {
         // --fir stops before the emitter
-        return fir_entry();
+        return fir_entry(&an);
     }
     string mut out_path = opts->output;
     if (!opts->have_output) {

@@ -477,6 +477,14 @@ bullet at a time and without a rewrite.
   `green` and `green_func` accept a flow violation, and `flow_green` accepts none. A green `.fir`
   file keeps every rule, because the pass `verify` runs them all. `//! panic:` matches a
   substring, so a red file whose text passes 100 columns drops the prefix `fir.verify: ` (T-233).
+- **A test of the FIR lowering compares a whole function, and derives it before the run**
+  (T-236). `test/fort/support/lower_env.ft` checks a source in a sandbox whose `std/rt.ft`
+  declares the eleven entries of the check kinds and `str_eq`, lowers one function, runs
+  `fir_verify.find_violation`, and gives the printed text. A location in FIR is where the parser
+  starts the node: the operator of a binary or unary node, the `(` of a call, the `[` of an
+  index, the `.` of a field, the `?` of `?:`, and the keyword of a statement or a `cast`. T-236
+  took one location of an arm `move(p)` at the name and not at its `(`, and the run showed it.
+  Count the column of that token, or compute it from the source text with a script.
 - **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
   when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
   holds only the program, and `check_env` sandboxes get an empty runtime. Write

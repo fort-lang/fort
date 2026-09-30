@@ -1,0 +1,214 @@
+/// Provides the environment of the tests of the lowering. It checks a fort source in a sandbox
+/// whose runtime declares the entries that the lowering and the verifier name, lowers one function
+/// of it, runs the verifier on the result, and gives its text.
+//
+// Each source is checked in a fresh sandbox, because a module set answers a path that it has
+// loaded from the tree of that load (notes/testing.md 4). The text of a lowering stays valid until
+// the next call.
+import ast;
+import check_env;
+import fir;
+import fir_lower;
+import fir_print;
+import fir_verify;
+import modules_env;
+import std.strbuf;
+
+// The count of the lines of RUNTIME.
+u64 RUNTIME_LINES = 47;
+
+// The sandbox std/rt.ft: the runtime entry of each check kind with the parameters that std/rt.ft
+// gives it, and str_eq. A loop that never ends is the body of a `noreturn` entry.
+string[RUNTIME_LINES] RUNTIME = {
+    "fn fail_overflow(char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_div_zero(char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_div_overflow(char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_overwrite(char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {",
+    "    return false;",
+    "}",
+};
+
+/// The checker of the last source, its runtime entries, and the text of the last lowering. It
+/// must stay at the address that open filled, because the checker points into itself.
+struct env {
+    check_env.env c;
+    fir_verify.runtime rt;
+    strbuf.str_buf text;
+}
+
+fn open(env mut* e) void {
+    check_env.open(&e->c);
+    e->text = strbuf.create();
+}
+
+fn close(env mut* e) void {
+    strbuf.free(&e->text);
+    check_env.close(&e->c);
+}
+
+/// Checks `lines`, one line of source each, as the entry module `main` of a fresh sandbox. Its
+/// std/rt.ft holds RUNTIME when `runtime` is set and is empty otherwise. The source needs no
+/// `main`, and it must check with no diagnostic.
+fn check_lines(env mut* e, string@ lines, bool runtime) void {
+    check_env.reopen(&e->c);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    if (runtime) {
+        for (string line : RUNTIME) {
+            strbuf.append(&b, line);
+            strbuf.push(&b, '\n');
+        }
+    }
+    check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    strbuf.clear(&b);
+    for (string line : lines) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    e->c.want_main = false;
+    if (!check_env.check_src(&e->c, strbuf.view(&b))) {
+        eprintln(check_env.report_text(&e->c, 0));
+        panic("lower_env.check_lines: the source does not check");
+    }
+    e->rt = fir_verify.runtime_of(&e->c.ck);
+}
+
+/// Checks `lines` as check_lines does, holds that the checker refuses them, and gives the first
+/// diagnostic as `<line>:<col>: <message>`.
+fn diagnostic(env mut* e, string@ lines) string {
+    check_env.reopen(&e->c);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : lines) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    e->c.want_main = false;
+    if (check_env.check_src(&e->c, strbuf.view(&b))) {
+        panic("lower_env.diagnostic: the source checks");
+    }
+    return check_env.report_text(&e->c, 0);
+}
+
+/// The declaration of the function `name` of the module `main`.
+fn decl(env* e, string name) ast.node* {
+    ast.sym* s = check_env.sym_main(&e->c, name);
+    if (s == null || s->node == null) {
+        panic("lower_env.decl: no such function");
+    }
+    return s->node;
+}
+
+/// Lowers the function `name` of the checked source, holds that the function keeps every rule of
+/// the verifier, and gives its text.
+fn lower_checked(env mut* e, string name) string {
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    strbuf.clear(&e->text);
+    if (!fir_lower.lower_function(&e->c.ck, decl(e, name), &f, &why)) {
+        fir_lower.write_report(&why, &e->text);
+        eprint(strbuf.view(&e->text));
+        panic("lower_env.lower: the lowering refuses the function");
+    }
+    defer fir.func_free(&f);
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (fir_verify.find_violation(&f, &e->rt, &v)) {
+        fir_print.print_function(&f, &e->text);
+        fir_verify.violation_text(&f, &v, &e->text);
+        eprintln(strbuf.view(&e->text));
+        panic("lower_env.lower: the verifier refuses the function");
+    }
+    fir_print.print_function(&f, &e->text);
+    return strbuf.view(&e->text);
+}
+
+/// Checks `lines` with the runtime, lowers the function `name`, holds that the result keeps every
+/// rule of the verifier, and gives its text.
+fn lower(env mut* e, string@ lines, string name) string {
+    check_lines(e, lines, true);
+    return lower_checked(e, name);
+}
+
+/// Checks `lines`, lowers the function `name`, and holds that the lowering refuses it and leaves
+/// the function empty. Gives the line that `--fir` prints for it.
+fn refused_with(env mut* e, string@ lines, string name, bool runtime) string {
+    check_lines(e, lines, runtime);
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    strbuf.clear(&e->text);
+    if (fir_lower.lower_function(&e->c.ck, decl(e, name), &f, &why)) {
+        fir_print.print_function(&f, &e->text);
+        fir.func_free(&f);
+        eprintln(strbuf.view(&e->text));
+        panic("lower_env.refused: the lowering lowers the function");
+    }
+    // the lowering released what it built
+    assert(f.locals.len == 0 && f.blocks.len == 0 && f.ops.len == 0 && f.projs.len == 0);
+    assert(f.arms.len == 0);
+    fir_lower.write_report(&why, &e->text);
+    return strbuf.view(&e->text);
+}
+
+fn refused(env mut* e, string@ lines, string name) string {
+    return refused_with(e, lines, name, true);
+}
+
+/// Holds `got` against the lines `want`, each ended by a newline. A difference prints both texts.
+fn expect(string got, string@ want) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : want) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    if (got == strbuf.view(&b)) {
+        return;
+    }
+    eprintln("lower_env: expected");
+    eprint(strbuf.view(&b));
+    eprintln("lower_env: got");
+    eprint(got);
+    panic("lower_env.expect: the text differs");
+}

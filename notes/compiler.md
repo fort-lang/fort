@@ -475,6 +475,14 @@ came here.
   `p` in `check(overwrite: p)` is the one read with `is_use` false (`spec/fir.md` 14), so an
   ownership analysis such as T-182 skips it, and V12 and V13 test every read. The pointers that
   the address of `p` loads come before it as uses (T-259): skip the test and not those loads.
+- **The FIR lowering takes each type from the checker and derives none** (T-236):
+  `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
+  whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by
+  `move _t`. A construct that the lowering does not lower yet is a `fir_lower.report`, never a
+  panic, and `fort --fir` prints it as a comment. Each test of the lowering runs the verifier on
+  its result (`test/fort/support/lower_env.ft`), and `fort --fir` runs `fir_verify.verify` before
+  it prints. A new construct needs both: a text in a `test/fort/fir_lower_*_test.ft` and a clean
+  `fort --fir` over the run corpus, which T-236 measured on 450 programs.
 
 ## 7. The runtime and the standard library
 

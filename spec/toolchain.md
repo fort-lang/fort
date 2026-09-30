@@ -165,8 +165,14 @@ file (D14.1). Options and the entry file may appear in any order.
   the FIR at a named point of `spec/fir.md` 11: `lower`, the output of the lowering, or
   `build-mode`, the output of the build-mode pass. Any other name, the empty name and `verify`
   included, is a usage error. The last `--fir-after` wins. Until a pass exists, its name writes
-  the module that `--fir` writes. Until the lowering exists, that module holds no function, so
-  the text is empty.
+  the module that `--fir` writes. The module holds each function with a body of the closure: the
+  modules in the order of D9.10, and the functions of each in source order. A blank line stands
+  between two functions. The verifier tests each function before the print, and a violation ends
+  the compiler with a panic (`spec/fir.md` 3). The lowering does not lower every construct yet.
+  For a function that holds such a construct, `--fir` writes the line
+  `// not supported: <kind> at <line>:<col>` in place of the function (`spec/fir.md` 9.8). `<kind>`
+  is the name of the tree node, as `--ast` writes it, and the location is the node's location in
+  the tree (`spec/fir.md` 9.8): the operator of a binary, unary or field node, the `(` of a call.
 - `--fir-test` reads the entry file as a FIR test of `spec/fir.md` 16.3, whose header
   `test/fir/README.md` describes. It checks the lines of the `//! prelude:` block as the module
   `main` through steps 0 to 3 of section 2, with no entry rule, so the prelude need not define

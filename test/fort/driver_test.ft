@@ -995,9 +995,13 @@ fn fir_combines_with_no_other_mode() void {
     assert(err_has(message));
 }
 
-// --fir on a clean program checks the closure, prints the FIR module and exits 0. The lowering
-// does not exist yet, so the module has no function and the text is empty. Nothing is emitted:
-// the output that -o names does not exist after the run.
+// What `fort --fir fir_clean.ft` writes: the one function of the closure, lowered, verified and
+// printed. The empty runtime of the test holds no function.
+string FIR_CLEAN_MAIN = "fn fir_clean.main() -> i32 {\n    let _0: i32;\n\n    bb0: {\n";
+string FIR_CLEAN_BODY = "        _0 = const i32 0 #2:12 s1;\n        return #2:5 s1;\n    }\n}\n";
+
+// --fir on a clean program checks the closure, lowers each function, prints the FIR module and
+// exits 0. Nothing is emitted: the output that -o names does not exist after the run.
 fn fir_of_a_clean_program_exits_zero() void {
     write_file("fir_clean.ft", "fn main() i32 {\n    return 0;\n}\n");
     string[5] mut argv = {"fort", "--fir", "fir_clean.ft", "-o", "fir_clean.out"};
@@ -1005,7 +1009,11 @@ fn fir_of_a_clean_program_exits_zero() void {
     assert(captured_err_is_empty());
     string own out = captured_out();
     defer del(out);
-    assert(out == "");
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, FIR_CLEAN_MAIN);
+    strbuf.append(&want, FIR_CLEAN_BODY);
+    assert(out == strbuf.view(&want));
     strbuf.str_buf mut file = strbuf.create();
     defer strbuf.free(&file);
     assert(!io.read_file("fir_clean.out", &file));
@@ -1032,6 +1040,24 @@ fn fir_of_a_clean_program_exits_zero() void {
     write_file("fir_no_main.ft", "fn helper() i32 {\n    return 0;\n}\n");
     string[3] mut no_main = {"fort", "--fir", "fir_no_main.ft"};
     assert(run(no_main[0..3]) == EXIT_COMPILE_ERROR);
+}
+
+// --fir writes the functions in source order with a blank line between two of them, and the line
+// `// not supported: <kind> at l:c` in place of a function that the lowering does not lower yet.
+fn fir_reports_a_function_that_it_does_not_lower() void {
+    write_file("fir_mixed.ft",
+               "fn helper() void {\n    helper();\n}\nfn main() i32 {\n    return 0;\n}\n");
+    string[3] mut argv = {"fort", "--fir", "fir_mixed.ft"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "// not supported: call-stmt at 2:5\n\n");
+    strbuf.append(&want, "fn fir_mixed.main() -> i32 {\n    let _0: i32;\n\n    bb0: {\n");
+    strbuf.append(&want, "        _0 = const i32 0 #5:12 s1;\n        return #5:5 s1;\n    }\n}\n");
+    assert(out == strbuf.view(&want));
 }
 
 // --fir on a program with a type error prints the diagnostic, exits 1 and writes no FIR.
@@ -1270,6 +1296,7 @@ fn main() i32 {
     an_unknown_fir_pass_is_a_usage_error();
     fir_combines_with_no_other_mode();
     fir_of_a_clean_program_exits_zero();
+    fir_reports_a_function_that_it_does_not_lower();
     fir_of_a_program_with_a_type_error_exits_one();
     fir_test_parses_as_a_flag();
     fir_test_combines_with_no_other_mode();

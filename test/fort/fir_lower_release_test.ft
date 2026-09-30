@@ -1,0 +1,85 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| refused release ok
+//| lowered release ok
+/// Checks that the lowering gives back every block that it takes (notes/testing.md 4). A function
+/// that fir_lower.lower_function refuses is released before the call returns, and a function that
+/// it lowers is released by fir.func_free.
+import ast;
+import fir;
+import fir_env;
+import fir_lower;
+import heap;
+import lower_env;
+
+// The count of the lowerings in one round.
+u64 CALLS = 100;
+
+u64 SOURCE_LINES = 16;
+
+// `f` fills every vector of a function: locals, blocks, statements, operands, arms and the
+// projections of a string equality. `g` fills some of them before a call stops it.
+string[SOURCE_LINES] SOURCE = {
+    "fn f(i32 x, i32 y, bool c, string s) i32 {",
+    "    i32 a = x + y;",
+    "    i32 b = x / y;",
+    "    bool e = c && s == \"abc\";",
+    "    if (e) {",
+    "        return a << 3;",
+    "    }",
+    "    return b;",
+    "}",
+    "fn g(bool c) void {",
+    "    i32 a = 1;",
+    "    if (c) {",
+    "        i32 b = a + 2;",
+    "        g(c);",
+    "    }",
+    "}",
+};
+
+// Each round lowers the function `name` CALLS times. A function that the lowering refuses must
+// come back empty with nothing held, so the probe frees only a lowered one. A leak of one vector
+// of 16 slots in each call keeps 25 KB or more in each round, and the program break moves. The
+// probe watches the system view alone, since the free chunks of a round make the address of a
+// small block no view.
+fn rounds_leave_the_heap_where_it_was(string name, bool lowers) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, SOURCE[..], true);
+    if (lowers) {
+        // the function that the rounds lower keeps every rule of the verifier
+        lower_env.lower_checked(&e, name);
+    }
+    ast.node* decl = lower_env.decl(&e, name);
+    u64[3] mut break_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        u64 mut k = 0;
+        while (k < CALLS) {
+            fir.func mut f = fir.func{};
+            fir_lower.report mut why = fir_lower.report{};
+            assert(fir_lower.lower_function(&e.c.ck, decl, &f, &why) == lowers);
+            if (lowers) {
+                fir.func_free(&f);
+            }
+            k += 1;
+        }
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    rounds_leave_the_heap_where_it_was("g", false);
+    println("refused release ok");
+    rounds_leave_the_heap_where_it_was("f", true);
+    println("lowered release ok");
+    return 0;
+}
