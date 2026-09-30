@@ -375,22 +375,72 @@ fn a_check_reads_its_condition_then_its_reported_operands() void {
     assert(reads_place(&x.f, &fail, 1, elem));
 }
 
-fn an_overwrite_check_reads_only_the_index_locals_of_its_place() void {
+fn an_overwrite_check_reads_its_place_after_its_index_locals() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
     reader mut x = reader_of(&e);
     defer fir.func_free(&x.f);
-    // `check(overwrite: _holders[_i].0)` reads `_i`. The test of the value counts as no use of
-    // the place (spec/fir.md 14), so an ownership analysis sees no read of a moved place.
+    // `check(overwrite: _holders[_i].0)` reads `_i`, then the place, whose pointer word the check
+    // loads (spec/fir.md 12.4). Section 14 counts the test as no use of the place.
     fir.place row = fir.place_index(&x.f, fir.place_local(x.holders), x.i);
     fir.place held = fir.place_field(&x.f, row, 0);
     fir.terminator t = fir.term_check_overwrite(held, 1, fir_env.at(1, 1), 1);
-    assert(reads(&x.f, &t) == 1);
+    assert(reads(&x.f, &t) == 2);
     assert(reads_local(&x.f, &t, 0, x.i));
-    // With no index, the check reads nothing.
+    assert(reads_place(&x.f, &t, 1, held));
+    // the index local is a use; the test of the place is no use of it, and empties nothing
+    fir.read mut r = fir.read{.empties = true, .is_use = false};
+    assert(fir.term_read(&x.f, &t, 0, &r) && r.is_use && !r.empties);
+    r = fir.read{.empties = true, .is_use = true};
+    assert(fir.term_read(&x.f, &t, 1, &r) && !r.is_use && !r.empties);
+    // With no index, the check reads its place alone.
     fir.terminator plain = fir.term_check_overwrite(fir.place_local(x.i), 1, fir_env.at(1, 1), 1);
-    assert(reads(&x.f, &plain) == 0);
+    assert(reads(&x.f, &plain) == 1);
+    assert(reads_local(&x.f, &plain, 0, x.i));
+    r = fir.read{.is_use = true};
+    assert(fir.term_read(&x.f, &plain, 0, &r) && !r.is_use);
+}
+
+fn a_move_in_a_terminator_empties_its_place() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    // V6 refuses a `move` in a terminator; the read reports it all the same
+    fir.place row = fir.place_index(&x.f, fir.place_local(x.holders), x.i);
+    fir.place held = fir.place_field(&x.f, row, 0);
+    fir.terminator t = fir.term_switch(fir.operand_move(held), 0, 0, 0, fir_env.at(1, 1), 1);
+    fir.read mut r = fir.read{.empties = true};
+    assert(fir.term_read(&x.f, &t, 0, &r) && r.place.local == x.i && !r.empties && r.is_use);
+    r = fir.read{};
+    assert(fir.term_read(&x.f, &t, 1, &r) && r.empties && r.is_use);
+    assert(!fir.term_read(&x.f, &t, 2, &r));
+}
+
+fn every_other_read_of_a_terminator_is_a_use() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    // `check(copy _flag, enum, copy _a[_j], bytes "color")` and `return`
+    fir.place elem = fir.place_index(&x.f, fir.place_local(x.a), x.j);
+    u32 first = fir.operand_push(&x.f, fir.operand_copy(elem));
+    fir.operand_push(&x.f, fir.operand_const(fir.const_bytes("color")));
+    fir.terminator t = fir.term_check(copy(x.flag), fir.check_kind.chk_enum, first, 2, 1,
+                                      fir_env.at(1, 1), 1);
+    fir.terminator ret = fir.term_return(fir_env.at(1, 1), 1);
+    fir.read mut r = fir.read{};
+    u32 mut k = 0;
+    while (fir.term_read(&x.f, &t, k, &r)) {
+        assert(r.is_use && !r.empties);
+        r = fir.read{};
+        k += 1;
+    }
+    assert(k == 3);
+    assert(fir.term_read(&x.f, &ret, 0, &r) && r.is_use);
 }
 
 fn a_return_reads_the_return_place_unless_it_is_void() void {
@@ -433,7 +483,9 @@ fn main() i32 {
     a_reported_text_is_the_interned_char_pointer();
     a_switch_reads_its_operand_after_its_index_local();
     a_check_reads_its_condition_then_its_reported_operands();
-    an_overwrite_check_reads_only_the_index_locals_of_its_place();
+    an_overwrite_check_reads_its_place_after_its_index_locals();
+    a_move_in_a_terminator_empties_its_place();
+    every_other_read_of_a_terminator_is_a_use();
     a_return_reads_the_return_place_unless_it_is_void();
     goto_trap_and_unreachable_read_nothing();
     println("ok");

@@ -454,6 +454,192 @@ fn a_call_reads_the_index_locals_of_its_callee_and_arguments() void {
     assert(reads_place(&x, &s, 4, arg));
 }
 
+// ---- pointers and the places that a move empties -----------------------------------------
+
+// Whether read `k` of `s` is the place `want`, empties it after the read when `empties`, and is
+// a use, as every read of a statement is.
+fn reads_emptying(indexed* x, fir.statement* s, u32 k, fir.place want, bool empties) bool {
+    fir.read mut r = fir.read{.empties = !empties, .is_use = false};
+    return fir.stmt_read(&x->f, s, k, &r) && same_parts(r.place, want) && r.empties == empties
+        && r.is_use;
+}
+
+// Whether two places have the same base and the same projections, by their numbers. A place with
+// a deref is never equal to another by fir.place_compare, so the test compares the parts.
+fn same_parts(fir.place a, fir.place b) bool {
+    return a.base == b.base && a.local == b.local && a.global == b.global
+        && a.proj_first == b.proj_first && a.proj_len == b.proj_len;
+}
+
+// Whether read `k` of `s` has the parts of `want`.
+fn reads_parts(indexed* x, fir.statement* s, u32 k, fir.place want) bool {
+    fir.place mut p = fir.place{};
+    return fir.stmt_reads_place(&x->f, s, k, &p) && same_parts(p, want);
+}
+
+// The locals of the pointer cases: `_p: pair mut*`, `_s: i32 mut@`, `_pp: i32 mut* mut*` and
+// `_arr: i32[4] mut*`.
+struct pointers {
+    u32 p;
+    u32 s;
+    u32 pp;
+    u32 arr;
+}
+
+fn pointers_of(fir_env.env mut* e, indexed mut* x) pointers {
+    types.table mut* tt = fir_env.tt(e);
+    types.node* i32t = fir_env.i32_ty(e);
+    pointers mut q = pointers{};
+    q.p = temp(&x->f, types.type_ptr(tt, fir_env.ty(e, "pair"), false, true));
+    q.s = temp(&x->f, types.type_span(tt, i32t, false, true));
+    types.node* inner = types.type_ptr(tt, i32t, false, true);
+    q.pp = temp(&x->f, types.type_ptr(tt, inner, false, true));
+    q.arr = temp(&x->f, types.type_ptr(tt, types.type_array(tt, i32t, 4), false, true));
+    return q;
+}
+
+fn a_destination_reads_its_pointers_after_the_right_side() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    indexed mut x = indexed_of(&e);
+    defer fir.func_free(&x.f);
+    pointers q = pointers_of(&e, &x);
+    // `(*_p).0 = copy _1`: `_1`, then `_p`, whose value the store loads.
+    fir.place field = fir.place_field(&x.f, fir.place_deref(&x.f, fir.place_local(q.p)), 0);
+    fir.statement s = fir.stmt_assign(field, fir.rvalue_use(&x.f, copy(1)), fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &s) == 2);
+    assert(reads_local(&x, &s, 0, 1));
+    assert(reads_local(&x, &s, 1, q.p));
+    // `_s[_i] = copy _1`: `_i` first, then `_1`, then `_s`, whose pointer field the index reads.
+    fir.place elem = fir.place_index(&x.f, fir.place_local(q.s), x.i);
+    fir.statement t = fir.stmt_assign(elem, fir.rvalue_use(&x.f, copy(1)), fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &t) == 3);
+    assert(reads_local(&x, &t, 0, x.i));
+    assert(reads_local(&x, &t, 1, 1));
+    assert(reads_local(&x, &t, 2, q.s));
+    // `(*(*_pp)) = copy _1`: `_1`, then `_pp` and `(*_pp)`, the pointer of each deref.
+    fir.place once = fir.place_deref(&x.f, fir.place_local(q.pp));
+    fir.place twice = fir.place_deref(&x.f, once);
+    fir.statement u = fir.stmt_assign(twice, fir.rvalue_use(&x.f, copy(1)), fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &u) == 3);
+    assert(reads_local(&x, &u, 0, 1));
+    assert(reads_local(&x, &u, 1, q.pp));
+    fir.place mut prefix = twice;
+    prefix.proj_len = 1;
+    assert(reads_parts(&x, &u, 2, prefix));
+    // `_v.0[_i] = copy _1` with `_v: viewer`: the span `_v.0` stands behind a field, so the type
+    // of each prefix decides; `_i`, then `_1`, then `_v.0`.
+    u32 v = temp(&x.f, fir_env.ty(&e, "viewer"));
+    fir.place items = fir.place_field(&x.f, fir.place_local(v), 0);
+    fir.place item = fir.place_index(&x.f, items, x.i);
+    fir.statement w = fir.stmt_assign(item, fir.rvalue_use(&x.f, copy(1)), fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &w) == 3);
+    assert(reads_local(&x, &w, 0, x.i));
+    assert(reads_local(&x, &w, 1, 1));
+    fir.place mut header = item;
+    header.proj_len = 1;
+    assert(reads_parts(&x, &w, 2, header));
+    // `_str[_i] = copy _1` with `_str: string`: `_i`, `_1`, then `_str`, whose pointer field the
+    // index reads, as for a span
+    u32 str = temp(&x.f, types.type_string(fir_env.tt(&e), false));
+    fir.place ch = fir.place_index(&x.f, fir.place_local(str), x.i);
+    fir.statement c = fir.stmt_assign(ch, fir.rvalue_use(&x.f, copy(1)), fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &c) == 3);
+    assert(reads_local(&x, &c, 0, x.i));
+    assert(reads_local(&x, &c, 1, 1));
+    assert(reads_local(&x, &c, 2, str));
+    // the same element of a fixed array behind a field reads no header: `_grid[_i].1[_j]`
+    fir.place deep = nested(&x);
+    fir.statement z = fir.stmt_assign(deep, fir.rvalue_use(&x.f, copy(1)), fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &z) == 3);
+}
+
+fn an_address_reads_the_pointers_of_its_place() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    indexed mut x = indexed_of(&e);
+    defer fir.func_free(&x.f);
+    pointers q = pointers_of(&e, &x);
+    // `_n = addr((*_p).1)`: `_p`, and not the field.
+    fir.place field = fir.place_field(&x.f, fir.place_deref(&x.f, fir.place_local(q.p)), 1);
+    fir.rvalue r = fir.rvalue_addr(&x.f, field, false);
+    fir.statement s = fir.stmt_assign(fir.place_local(x.n), r, fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &s) == 1);
+    assert(reads_local(&x, &s, 0, q.p));
+    // `_n = addr(_s[_i])`: `_i`, then `_s`.
+    fir.place elem = fir.place_index(&x.f, fir.place_local(q.s), x.i);
+    fir.rvalue a = fir.rvalue_addr(&x.f, elem, true);
+    fir.statement t = fir.stmt_assign(fir.place_local(x.n), a, fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &t) == 2);
+    assert(reads_local(&x, &t, 0, x.i));
+    assert(reads_local(&x, &t, 1, q.s));
+    // `_n = addr(_str[_i])` with `_str: string`: `_i`, then `_str`
+    u32 str = temp(&x.f, types.type_string(fir_env.tt(&e), false));
+    fir.place ch = fir.place_index(&x.f, fir.place_local(str), x.i);
+    fir.rvalue b = fir.rvalue_addr(&x.f, ch, false);
+    fir.statement u = fir.stmt_assign(fir.place_local(x.n), b, fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &u) == 2);
+    assert(reads_local(&x, &u, 0, x.i));
+    assert(reads_local(&x, &u, 1, str));
+}
+
+fn a_slice_of_a_span_reads_its_place() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    indexed mut x = indexed_of(&e);
+    defer fir.func_free(&x.f);
+    pointers q = pointers_of(&e, &x);
+    // `_n = slice(_s, copy _i, copy _j)`: `_s`, whose pointer field the slice loads, then the
+    // bounds.
+    fir.rvalue r = fir.rvalue_slice(&x.f, fir.place_local(q.s), copy(x.i), copy(x.j), false);
+    fir.statement s = fir.stmt_assign(fir.place_local(x.n), r, fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &s) == 3);
+    assert(reads_local(&x, &s, 0, q.s));
+    assert(reads_local(&x, &s, 1, x.i));
+    assert(reads_local(&x, &s, 2, x.j));
+    // `_n = slice((*_arr), copy _i, copy _j)`: a fixed array behind a pointer reads the pointer.
+    fir.place target = fir.place_deref(&x.f, fir.place_local(q.arr));
+    fir.rvalue a = fir.rvalue_slice(&x.f, target, copy(x.i), copy(x.j), true);
+    fir.statement t = fir.stmt_assign(fir.place_local(x.n), a, fir_env.at(1, 1), 1);
+    assert(the_count_of_reads(&x, &t) == 3);
+    assert(reads_local(&x, &t, 0, q.arr));
+}
+
+fn a_move_and_a_del_empty_the_place_they_read() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    indexed mut x = indexed_of(&e);
+    defer fir.func_free(&x.f);
+    // `_1 = add(copy _a[_i], copy _a[_j])` empties nothing
+    fir.place elem = fir.place_index(&x.f, fir.place_local(x.a), x.i);
+    fir.place other = fir.place_index(&x.f, fir.place_local(x.a), x.j);
+    fir.rvalue sum = fir.rvalue_binary(&x.f, fir.rvalue_kind.rv_add, fir.operand_copy(elem),
+                                       fir.operand_copy(other));
+    fir.statement s = fir.stmt_assign(fir.place_local(1), sum, fir_env.at(1, 1), 1);
+    assert(reads_emptying(&x, &s, 0, fir.place_local(x.i), false));
+    assert(reads_emptying(&x, &s, 1, elem, false));
+    // `_n = add(move _holders[_i].0, copy _j)`: the move empties its place, and its index local
+    // and the next operand stay
+    fir.place row = fir.place_index(&x.f, fir.place_local(x.holders), x.i);
+    fir.place held = fir.place_field(&x.f, row, 0);
+    fir.rvalue pair = fir.rvalue_binary(&x.f, fir.rvalue_kind.rv_add, fir.operand_move(held),
+                                        copy(x.j));
+    fir.statement t = fir.stmt_assign(fir.place_local(x.n), pair, fir_env.at(1, 1), 1);
+    assert(reads_emptying(&x, &t, 0, fir.place_local(x.i), false));
+    assert(reads_emptying(&x, &t, 1, held, true));
+    assert(reads_emptying(&x, &t, 2, fir.place_local(x.j), false));
+    // `del(move _holders[_i].0)`: the index local stays, and the place is emptied
+    fir.statement d = fir.stmt_del(held, fir_env.at(1, 1), 1);
+    assert(reads_emptying(&x, &d, 0, fir.place_local(x.i), false));
+    assert(reads_emptying(&x, &d, 1, held, true));
+    fir.read mut r = fir.read{};
+    assert(!fir.stmt_read(&x.f, &d, 2, &r));
+}
+
 fn main() i32 {
     an_assignment_holds_its_place_and_rvalue();
     a_del_holds_its_place();
@@ -473,6 +659,10 @@ fn main() i32 {
     a_nested_place_reads_each_index_local_in_order();
     a_del_reads_its_index_local_then_its_place();
     a_call_reads_the_index_locals_of_its_callee_and_arguments();
+    a_destination_reads_its_pointers_after_the_right_side();
+    an_address_reads_the_pointers_of_its_place();
+    a_slice_of_a_span_reads_its_place();
+    a_move_and_a_del_empty_the_place_they_read();
     println("ok");
     return 0;
 }

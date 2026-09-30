@@ -28,6 +28,8 @@
 //|     let _12: char*;
 //|
 //|     bb0: {
+//|         _10 = const i8 0 #1:1 s0;
+//|         _11 = const color 0 #1:1 s0;
 //|         _7 = copy (*_1).0 #2:1 s1;
 //|         _0 = copy (*_1).1 #3:1 s2;
 //|         _12 = copy _2.0 #4:1 s3;
@@ -57,7 +59,8 @@
 //| }
 // V3 and V4 on the edges: each projection on each type it applies to, the last field of a
 // struct, a span and a string, a global and a field of a global, the u64 index, and the switch
-// arms at the ends of the ranges of u8, i8, char and an enum.
+// arms at the ends of the ranges of u8, i8, char and an enum. Each temporary has an assignment
+// before its first read (V13).
 fn main.f(_1 (p): pair*, _2 (s): string own, _3 (v): i32@) -> u64 {
     let _4 (a): i32[4];
     let _5 (h): holder;
@@ -70,6 +73,8 @@ fn main.f(_1 (p): pair*, _2 (s): string own, _3 (v): i32@) -> u64 {
     let _12: char*;
 
     bb0: {
+        _10 = const i8 0 #1:1 s0;
+        _11 = const color 0 #1:1 s0;
         _7 = copy (*_1).0 #2:1 s1;
         _0 = copy (*_1).1 #3:1 s2;
         _12 = copy _2.0 #4:1 s3;

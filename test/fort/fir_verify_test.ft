@@ -10,9 +10,15 @@
 //| V5 V6 ok
 //| V7 ok
 //| V8 V10 ok
+//| V9 ok
+//| V11 ok
+//| V12 ok
+//| V13 ok
+//| graphs ok
+//| report ok
 /// Checks the FIR verifier: `types_agree`, the runtime entries, the text of a violation, and for
-/// each clause of the rules V1 to V8 and V10 a function that breaks it and a function on the edge
-/// that keeps it. A case parses a FIR text against a checked prelude and a sandbox runtime.
+/// each clause of the rules V1 to V13 a function that breaks it and a function on the edge that
+/// keeps it. A case parses a FIR text against a checked prelude and a sandbox runtime.
 import ast;
 import check_env;
 import consts;
@@ -27,7 +33,7 @@ import types;
 
 // ---- the environment ---------------------------------------------------------------------
 
-u64 FIXTURE_LINES = 76;
+u64 FIXTURE_LINES = 86;
 
 // The prelude: the module `main`. `fail_enum` has the name of a runtime entry in another module.
 string[FIXTURE_LINES] FIXTURE = {
@@ -106,6 +112,16 @@ string[FIXTURE_LINES] FIXTURE = {
     "}",
     "fn t6() u8 mut* own {",
     "    return null;",
+    "}",
+    "fn take_lend(u8 mut* own p, u8 mut* q) void {",
+    "    del(p);",
+    "}",
+    "fn lend_take(u8 mut* q, u8 mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn eat(u8 mut* own p) u8 {",
+    "    del(p);",
+    "    return 0;",
     "}",
 };
 
@@ -256,16 +272,45 @@ fn verdict(env mut* e, string header, string lets, string blocks,
     strbuf.append(&e->text, "\n");
     strbuf.append(&e->text, blocks);
     strbuf.append(&e->text, "\n}\n");
+    return text_verdict(e, v);
+}
+
+// Writes to e->text the function `header` whose `let` lines and blocks are the lines `lines`.
+fn lines_text(env mut* e, string header, string@ lines) void {
+    strbuf.clear(&e->text);
+    strbuf.append(&e->text, header);
+    strbuf.append(&e->text, " {\n");
+    for (string line : lines) {
+        strbuf.append(&e->text, line);
+        strbuf.push(&e->text, '\n');
+    }
+    strbuf.append(&e->text, "}\n");
+}
+
+// The verdict on the function `header` whose `let` lines and blocks are the lines `lines`.
+fn lines_verdict(env mut* e, string header, string@ lines, fir_verify.violation mut* v) bool {
+    lines_text(e, header, lines);
+    return text_verdict(e, v);
+}
+
+// Parses the text of the case in e->text. The text must parse with no diagnostic.
+fn parse_text(env mut* e) fir.module {
     string text = strbuf.view(&e->text);
     u64 before = check_env.errors(&e->c);
     fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
     fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
-    defer fir.module_free(&m);
     if (check_env.errors(&e->c) != before) {
         eprintln("fir_verify_test: ", check_env.report_text(&e->c, before), " in");
         eprintln(text);
         panic("fir_verify_test.verdict: a text does not parse");
     }
+    return m;
+}
+
+// Parses the text of the case in e->text and returns the verdict of the verifier on it.
+fn text_verdict(env mut* e, fir_verify.violation mut* v) bool {
+    fir.module mut m = parse_text(e);
+    defer fir.module_free(&m);
     return fir_verify.find_violation(fir.module_function_at(&m, 0), &e->rt, v);
 }
 
@@ -302,10 +347,18 @@ fn red(env mut* e, string lets, string blocks, u32 rule, string what, u32 block,
     red_in(e, NOTHING, lets, blocks, rule, what, block, position);
 }
 
-// Holds that the function `header` with `lets` and `blocks` breaks no rule.
+// Whether `rule` is a flow rule. The flow rules run after every local rule.
+fn flow_rule(u32 rule) bool {
+    return rule == 9 || rule == 11 || rule == 12 || rule == 13;
+}
+
+// Holds that the function `header` with `lets` and `blocks` breaks no local rule. The local
+// rules run first, so a violation of a flow rule says that the function keeps every local rule.
+// The cases of the local rules read temporaries that nothing assigned; the flow rules have their
+// own green cases, which flow_green holds, and a green file of test/fir keeps every rule.
 fn green_in(env mut* e, string header, string lets, string blocks) void {
     fir_verify.violation mut v = fir_verify.violation{};
-    if (verdict(e, header, lets, blocks, &v)) {
+    if (verdict(e, header, lets, blocks, &v) && !flow_rule(v.rule)) {
         eprintln("fir_verify_test: expected no violation, got V", v.rule, " <", v.what, "> at bb",
                  v.block, " ", v.position);
         eprintln(strbuf.view(&e->text));
@@ -325,9 +378,38 @@ fn red_func(env mut* e, fir.func* f, u32 rule, string what, u32 block, u32 posit
     expect_red(e, found, &v, rule, what, block, position);
 }
 
+// Holds that the function that the constructors built breaks no local rule, as green_in does.
 fn green_func(env mut* e, fir.func* f) void {
     fir_verify.violation mut v = fir_verify.violation{};
-    assert(!fir_verify.find_violation(f, &e->rt, &v));
+    assert(!fir_verify.find_violation(f, &e->rt, &v) || flow_rule(v.rule));
+}
+
+// Holds that the function `header` whose `let` lines and blocks are `lines` breaks `rule` with
+// the clause `what` at item `position` of block `block`.
+fn flow_red(env mut* e, string header, string@ lines, u32 rule, string what, u32 block,
+            u32 position) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    bool found = lines_verdict(e, header, lines, &v);
+    expect_red(e, found, &v, rule, what, block, position);
+}
+
+// Holds that a verdict found no violation, the flow rules included.
+fn expect_green(env mut* e, bool found, fir_verify.violation* v) void {
+    if (!found) {
+        return;
+    }
+    eprintln("fir_verify_test: expected no violation, got V", v->rule, " <", v->what, "> at bb",
+             v->block, " ", v->position);
+    eprintln(strbuf.view(&e->text));
+    panic("fir_verify_test.expect_green: the verifier refuses a function");
+}
+
+// Holds that the function `header` whose `let` lines and blocks are `lines` keeps every rule,
+// the flow rules included.
+fn flow_green(env mut* e, string header, string@ lines) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    bool found = lines_verdict(e, header, lines, &v);
+    expect_green(e, found, &v);
 }
 
 // ---- agreement -------------------------------------------------------------------------------
@@ -1551,6 +1633,798 @@ fn v10_live_and_dead_name_a_named_local() void {
     red_func(&e, &f, 10, fir_verify.V10_LOCAL, 0, 0);
 }
 
+// ---- V9 --------------------------------------------------------------------------------------
+
+// The header of a noreturn function: the prelude's `fn stop() noreturn`.
+string STOP = "fn main.stop() -> noreturn";
+
+fn v9_no_path_from_bb0_reaches_unreachable() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[1] entry = {"bb0: { unreachable; }"};
+    flow_red(&e, F, entry[..], 9, fir_verify.V9_REACHED, 0, 0);
+    string[3] arm = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 1; return; }",
+        "bb2: { unreachable; }",
+    };
+    flow_red(&e, F, arm[..], 9, fir_verify.V9_REACHED, 2, 0);
+    // the violation stands at the terminator, after the statements of its block
+    string[2] after = {"bb0: { goto bb1; }", "bb1: { _0 = const i32 2; unreachable; }"};
+    flow_red(&e, F, after[..], 9, fir_verify.V9_REACHED, 1, 1);
+    // a check continues whatever its condition: V9 prunes the edges of a switch only
+    string[2] check = {"bb0: { check(const true, overflow) -> bb1; }", "bb1: { unreachable; }"};
+    flow_red(&e, F, check[..], 9, fir_verify.V9_REACHED, 1, 0);
+    string[3] overwrite = {
+        "let _2 (p): u8 mut* own;",
+        "bb0: { _2 = const null u8 mut* own; check(overwrite: _2) -> bb1; }",
+        "bb1: { unreachable; }",
+    };
+    flow_red(&e, F, overwrite[..], 9, fir_verify.V9_REACHED, 1, 0);
+    // a loop whose condition is no constant leaves through its false edge
+    string[4] loop = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { goto bb1; }",
+        "bb3: { unreachable; }",
+    };
+    flow_red(&e, F, loop[..], 9, fir_verify.V9_REACHED, 3, 0);
+    // the walk takes bb2 before bb1, and the violation is the first block in ascending order
+    string[3] both = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { unreachable; }",
+        "bb2: { unreachable; }",
+    };
+    flow_red(&e, F, both[..], 9, fir_verify.V9_REACHED, 1, 0);
+    // a switch on a local that holds a constant is no switch on a constant
+    string[4] held = {
+        "let _2: bool;",
+        "bb0: { _2 = const true; switch(copy _2) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 0; return; }",
+        "bb2: { unreachable; }",
+    };
+    flow_red(&e, F, held[..], 9, fir_verify.V9_REACHED, 2, 0);
+}
+
+u64 SWITCH_ROWS = 20;
+
+// Switches on a constant at the ends of the ranges of their types: the operand, and the arms to
+// bb1 and bb2 that come before `otherwise: bb3`. SELECTED gives the block that each one takes.
+string[SWITCH_ROWS] OPERANDS = {
+    "const true",
+    "const false",
+    "const false",
+    "const true",
+    "const i32 2",
+    "const i32 7",
+    "const i32 -1",
+    "const i64 -9223372036854775808",
+    "const u64 18446744073709551615",
+    "const u8 0",
+    "const char 65",
+    "const char 0",
+    "const color 1",
+    "const zero bool",
+    "const zero bool",
+    "const zero i32",
+    "const zero u64",
+    "const zero char",
+    "const zero color",
+    "const zero i8",
+};
+
+string[SWITCH_ROWS] ARMS = {
+    "true: bb1, false: bb2, ",
+    "true: bb1, false: bb2, ",
+    "true: bb1, ",
+    "",
+    "i32 1: bb1, i32 2: bb2, ",
+    "i32 1: bb1, i32 2: bb2, ",
+    "i32 1: bb1, i32 -1: bb2, ",
+    "i64 9223372036854775807: bb1, i64 -9223372036854775808: bb2, ",
+    "u64 0: bb1, u64 18446744073709551615: bb2, ",
+    "u8 0: bb1, u8 255: bb2, ",
+    "char 65: bb1, char 66: bb2, ",
+    "char 255: bb1, char 0: bb2, ",
+    "color 0: bb1, color 1: bb2, ",
+    "true: bb1, false: bb2, ",
+    "true: bb1, ",
+    "i32 1: bb1, i32 0: bb2, ",
+    "u64 1: bb1, ",
+    "char 1: bb1, char 0: bb2, ",
+    "color 1: bb1, color 0: bb2, ",
+    "i8 -128: bb1, i8 0: bb2, ",
+};
+
+u32[SWITCH_ROWS] SELECTED = {1, 2, 3, 3, 2, 3, 2, 2, 2, 1, 1, 2, 2, 2, 3, 2, 3, 2, 2, 2};
+
+// The function whose bb0 ends in the switch of row `k` and whose blocks bb1 to bb3 end in
+// `return`, except the block `target`, which ends in `unreachable`.
+fn switch_verdict(env mut* e, u64 k, u32 target, fir_verify.violation mut* v) bool {
+    strbuf.clear(&e->text);
+    strbuf.append(&e->text, F);
+    strbuf.append(&e->text, " {\nbb0: { switch(");
+    strbuf.append(&e->text, OPERANDS[k]);
+    strbuf.append(&e->text, ") -> [");
+    strbuf.append(&e->text, ARMS[k]);
+    strbuf.append(&e->text, "otherwise: bb3]; }\n");
+    u32 mut b = 1;
+    while (b < 4) {
+        strbuf.append(&e->text, "bb");
+        strbuf.append_u64(&e->text, cast(b, u64));
+        if (b == target) {
+            strbuf.append(&e->text, ": { unreachable; }\n");
+        } else {
+            strbuf.append(&e->text, ": { _0 = const i32 0; return; }\n");
+        }
+        b += 1;
+    }
+    strbuf.append(&e->text, "}\n");
+    return text_verdict(e, v);
+}
+
+fn v9_a_switch_on_a_constant_takes_the_selected_edge_only() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    u64 mut k = 0;
+    while (k < SWITCH_ROWS) {
+        u32 mut b = 1;
+        while (b < 4) {
+            fir_verify.violation mut v = fir_verify.violation{};
+            bool found = switch_verdict(&e, k, b, &v);
+            if (b == SELECTED[k]) {
+                expect_red(&e, found, &v, 9, fir_verify.V9_REACHED, b, 0);
+            } else {
+                expect_green(&e, found, &v);
+            }
+            b += 1;
+        }
+        k += 1;
+    }
+}
+
+fn v9_keeps_a_function_that_ends_in_return_or_an_abort() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // `while (true)` in a function that returns a value: the false edge reaches unreachable
+    string[4] forever = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(const true) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { goto bb1; }",
+        "bb3: { unreachable; }",
+    };
+    flow_green(&e, F, forever[..]);
+    // the pruned edge reaches unreachable only through another block
+    string[4] further = {
+        "bb0: { switch(const true) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 0; return; }",
+        "bb2: { goto bb3; }",
+        "bb3: { unreachable; }",
+    };
+    flow_green(&e, F, further[..]);
+    string[3] every = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 1; return; }",
+        "bb2: { _0 = const i32 2; return; }",
+    };
+    flow_green(&e, F, every[..]);
+    // a block after a terminator, and a block that only such a block names
+    string[4] dead = {
+        "bb0: { _0 = const i32 0; return; }",
+        "bb1: { unreachable; }",
+        "bb2: { goto bb3; }",
+        "bb3: { unreachable; }",
+    };
+    flow_green(&e, F, dead[..]);
+    // an abort block is a sink
+    string[3] aborts = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { fail(panic, const bytes \"m\", const u64 1); }",
+        "bb2: { trap; }",
+    };
+    flow_green(&e, F, aborts[..]);
+    string[1] ends = {"bb0: { return; }"};
+    flow_green(&e, NOTHING, ends[..]);
+    string[2] stops = {"let _1: void;", "bb0: { _1 = call fn main.stop(); trap; }"};
+    flow_green(&e, STOP, stops[..]);
+}
+
+// ---- V11 -------------------------------------------------------------------------------------
+
+fn v11_the_continuation_of_a_check_has_one_predecessor() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // a goto from a block that bb0 reaches
+    string[4] reached = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { check(const false, overflow) -> bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(&e, F, reached[..], 11, fir_verify.V11_PREDECESSORS, 1, 0);
+    // a goto from a block that nothing reaches counts too
+    string[3] dead = {
+        "bb0: { check(const false, overflow) -> bb1; }",
+        "bb1: { return; }",
+        "bb2: { goto bb1; }",
+    };
+    flow_red(&e, NOTHING, dead[..], 11, fir_verify.V11_PREDECESSORS, 0, 0);
+    // two checks with one continuation
+    string[4] two = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { check(const false, overflow) -> bb3; }",
+        "bb2: { check(const false, div_zero) -> bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(&e, F, two[..], 11, fir_verify.V11_PREDECESSORS, 1, 0);
+    // the continuation names itself in a switch; the check stands after a statement
+    string[3] loop = {
+        "bb0: { _0 = const i32 1; check(const false, overflow) -> bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { return; }",
+    };
+    flow_red(&e, F, loop[..], 11, fir_verify.V11_PREDECESSORS, 0, 1);
+    // a check that continues into its own block, which bb0 names as well
+    string[3] itself = {
+        "bb0: { goto bb1; }",
+        "bb1: { check(const false, overflow) -> bb1; }",
+        "bb2: { return; }",
+    };
+    flow_red(&e, NOTHING, itself[..], 11, fir_verify.V11_PREDECESSORS, 1, 0);
+    // the overwrite check is a check too
+    string[4] overwrite = {
+        "let _2 (p): u8 mut* own;",
+        "bb0: { _2 = const null u8 mut* own; switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { check(overwrite: _2) -> bb2; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_red(&e, F, overwrite[..], 11, fir_verify.V11_PREDECESSORS, 1, 0);
+}
+
+fn v11_keeps_a_continuation_that_only_its_check_names() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[3] chain = {
+        "bb0: { check(const false, overflow) -> bb1; }",
+        "bb1: { check(const false, div_zero) -> bb2; }",
+        "bb2: { return; }",
+    };
+    flow_green(&e, NOTHING, chain[..]);
+    // the one predecessor of bb1 is bb1 itself
+    string[2] itself = {"bb0: { return; }", "bb1: { check(const false, overflow) -> bb1; }"};
+    flow_green(&e, NOTHING, itself[..]);
+    // the continuation branches to a join, which is no continuation
+    string[4] join = {
+        "bb0: { check(const false, overflow) -> bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_green(&e, F, join[..]);
+    string[3] overwrite = {
+        "let _1 (p): u8 mut* own;",
+        "bb0: { _1 = const null u8 mut* own; check(overwrite: _1) -> bb1; }",
+        "bb1: { return; }",
+    };
+    flow_green(&e, NOTHING, overwrite[..]);
+}
+
+// ---- V12 -------------------------------------------------------------------------------------
+
+// The temporaries of most cases of V12: two owning pointers, a lent one and a `void` result.
+string OWNED = "let _1: u8 mut* own; let _2: u8 mut* own; let _3: u8 mut*; let _4: void;";
+
+// The first statement of most cases of V12.
+string GRAB = "bb0: { _1 = call fn main.grab();";
+
+fn v12_no_read_of_a_temporary_after_a_move_of_it() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[4] copy = {OWNED, GRAB, "_2 = move _1; _3 = copy _1;", "del(move _2); return; }"};
+    flow_red(&e, NOTHING, copy[..], 12, fir_verify.V12_MOVED, 0, 2);
+    string[4] twice = {OWNED, GRAB, "_2 = move _1; del(move _2);", "_2 = move _1; return; }"};
+    flow_red(&e, NOTHING, twice[..], 12, fir_verify.V12_MOVED, 0, 3);
+    string[3] del_copy = {OWNED, GRAB, "del(move _1); _3 = copy _1; return; }"};
+    flow_red(&e, NOTHING, del_copy[..], 12, fir_verify.V12_MOVED, 0, 2);
+    string[3] del_twice = {OWNED, GRAB, "del(move _1); del(move _1); return; }"};
+    flow_red(&e, NOTHING, del_twice[..], 12, fir_verify.V12_MOVED, 0, 2);
+    string[5] deref = {
+        OWNED, "let _5: u8;", GRAB, "_2 = move _1; _5 = copy (*_1);", "del(move _2); return; }",
+    };
+    flow_red(&e, NOTHING, deref[..], 12, fir_verify.V12_MOVED, 0, 2);
+    // the overwrite check loads the pointer word, and a moved temporary still holds it
+    string[4] overwrite = {
+        OWNED, GRAB, "_2 = move _1; check(overwrite: _1) -> bb1; }",
+        "bb1: { del(move _2); return; }",
+    };
+    flow_red(&e, NOTHING, overwrite[..], 12, fir_verify.V12_MOVED, 0, 2);
+    // a terminator reads a reported operand
+    string[3] reported = {
+        "let _1: string own; let _2: string own;",
+        "bb0: { _1 = const zero string own; _2 = move _1;",
+        "fail(panic, copy _1.0, copy _1.1); }",
+    };
+    flow_red(&e, NOTHING, reported[..], 12, fir_verify.V12_MOVED, 0, 2);
+}
+
+fn v12_a_move_takes_effect_at_its_operand() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // the second argument reads what the first emptied
+    string[3] args = {OWNED, GRAB, "_4 = call fn main.take_lend(move _1, copy _1); return; }"};
+    flow_red(&e, NOTHING, args[..], 12, fir_verify.V12_MOVED, 0, 1);
+    // the address of the destination comes after the right side
+    string[3] store = {OWNED, GRAB, "(*_1) = call fn main.eat(move _1); return; }"};
+    flow_red(&e, NOTHING, store[..], 12, fir_verify.V12_MOVED, 0, 1);
+    // a copy before the move is no read after it
+    string[3] lend = {OWNED, GRAB, "_4 = call fn main.lend_take(copy _1, move _1); return; }"};
+    flow_green(&e, NOTHING, lend[..]);
+    // the move empties `_1` before the assignment fills it again
+    string[3] self = {OWNED, GRAB, "_1 = move _1; del(move _1); return; }"};
+    flow_green(&e, NOTHING, self[..]);
+}
+
+fn v12_follows_the_moves_of_every_path() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _2: u8 mut* own; let _3: u8 mut*; let _4: void;";
+    // a loop moves in one iteration and reads in the next
+    string[5] loop = {
+        lets,
+        "bb0: { _2 = call fn main.grab(); goto bb1; }",
+        "bb1: { _3 = copy _2; _4 = call fn main.take(move _2);",
+        "switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_red(&e, F, loop[..], 12, fir_verify.V12_MOVED, 1, 0);
+    // one arm moves, and the join reads
+    string[5] arm = {
+        lets,
+        "bb0: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _4 = call fn main.take(move _2); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _3 = copy _2; _0 = const i32 0; return; }",
+    };
+    flow_red(&e, F, arm[..], 12, fir_verify.V12_MOVED, 3, 0);
+    // V12 holds on any path, and a path can start in a block that nothing names
+    string[4] dead = {
+        OWNED,
+        "bb0: { _1 = call fn main.grab(); goto bb2; }",
+        "bb1: { _2 = move _1; del(move _2); goto bb2; }",
+        "bb2: { _3 = copy _1; del(move _1); return; }",
+    };
+    flow_red(&e, NOTHING, dead[..], 12, fir_verify.V12_MOVED, 2, 0);
+    string[4] alone = {
+        OWNED, "bb0: { return; }", "bb1: { _1 = call fn main.grab(); _2 = move _1;",
+        "_3 = copy _1; del(move _2); return; }",
+    };
+    flow_red(&e, NOTHING, alone[..], 12, fir_verify.V12_MOVED, 1, 2);
+    // the loop assigns again before it reads
+    string[5] again = {
+        lets,
+        "bb0: { goto bb1; }",
+        "bb1: { _2 = call fn main.grab(); _3 = copy _2; _4 = call fn main.take(move _2);",
+        "switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_green(&e, F, again[..]);
+    string[5] join = {
+        lets,
+        "bb0: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _4 = call fn main.take(move _2); _2 = call fn main.grab(); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _3 = copy _2; _4 = call fn main.take(move _2); _0 = const i32 0; return; }",
+    };
+    flow_green(&e, F, join[..]);
+    string[4] refill = {
+        OWNED, GRAB, "_2 = move _1; _1 = call fn main.grab(); _3 = copy _1;",
+        "del(move _1); del(move _2); return; }",
+    };
+    flow_green(&e, NOTHING, refill[..]);
+}
+
+fn v12_a_move_of_a_part_empties_the_temporary() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _1: holder; let _2: u8 mut* own; let _3: u64; let _4 (h): holder;";
+    string pointer = "let _5: holder mut*;";
+    string start = "bb0: { _1 = const zero holder; _2 = move _1.0;";
+    string[4] part = {lets, start, "_3 = copy _1.1;", "del(move _2); return; }"};
+    flow_red(&e, NOTHING, part[..], 12, fir_verify.V12_MOVED, 0, 2);
+    // only an assignment of the whole temporary fills it again
+    string[4] field = {
+        lets, start, "_1.0 = const null u8 mut* own; _3 = copy _1.1;", "del(move _2); return; }",
+    };
+    flow_red(&e, NOTHING, field[..], 12, fir_verify.V12_MOVED, 0, 3);
+    string[4] whole = {
+        lets, start, "_1 = const zero holder; _3 = copy _1.1;", "del(move _2); return; }",
+    };
+    flow_green(&e, NOTHING, whole[..]);
+    // a move through a deref empties the storage the pointer designates, and not the pointer
+    string[5] through = {
+        lets, pointer, "bb0: { _4 = const zero holder; _5 = addr mut(_4);",
+        "_2 = move (*_5).0; _3 = copy (*_5).1;", "del(move _2); return; }",
+    };
+    flow_green(&e, NOTHING, through[..]);
+}
+
+// ---- V13 -------------------------------------------------------------------------------------
+
+fn v13_no_read_of_a_temporary_before_an_assignment_of_it() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[2] first = {"let _1: i32; let _2: i32;", "bb0: { _2 = copy _1; return; }"};
+    flow_red(&e, NOTHING, first[..], 13, fir_verify.V13_UNASSIGNED, 0, 0);
+    // the rvalue reads before the assignment writes
+    string[2] self = {"let _1: i32;", "bb0: { _1 = add(copy _1, const i32 1); return; }"};
+    flow_red(&e, NOTHING, self[..], 13, fir_verify.V13_UNASSIGNED, 0, 0);
+    string[5] arm = {
+        "let _2: i32;",
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = copy _2; return; }",
+    };
+    flow_red(&e, F, arm[..], 13, fir_verify.V13_UNASSIGNED, 3, 0);
+    // the body assigns, and the entry edge does not
+    string[4] loop = {
+        "let _2: i32; bb0: { goto bb1; }",
+        "bb1: { _0 = copy _2; switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { _2 = const i32 1; goto bb1; }",
+        "bb3: { return; }",
+    };
+    flow_red(&e, F, loop[..], 13, fir_verify.V13_UNASSIGNED, 1, 0);
+    // a write into a part assigns no temporary
+    string[2] part = {
+        "let _1: pair; let _2: i32;", "bb0: { _1.0 = const i32 1; _2 = copy _1.0; return; }",
+    };
+    flow_red(&e, NOTHING, part[..], 13, fir_verify.V13_UNASSIGNED, 0, 1);
+}
+
+// Cases whose first read of a temporary comes before any assignment of it: the `let` lines, the
+// blocks, and the position of that read in bb0.
+u64 READ_ROWS = 15;
+
+string[READ_ROWS] READ_LETS = {
+    "let _1: u64; let _2 (a): i32[4]; let _3: i32;",
+    "let _1: u64; let _2 (a): i32[4];",
+    "let _1: i32 mut*;",
+    "let _1: pair*; let _2: i32*;",
+    "let _1: i32@; let _2: i32@;",
+    "let _1: i32 mut@; let _2: u64;",
+    "let _1: u8 mut* own;",
+    "let _1: fn () void; let _2: void;",
+    "let _1: u8 mut* own;",
+    "let _1: bool;",
+    "let _1: bool;",
+    "let _1: i64;",
+    "let _1: u64;",
+    "let _1: u64; let _2 (h): holder;",
+    "let _1: i32; let _2: pair;",
+};
+
+string[READ_ROWS] READ_BLOCKS = {
+    "bb0: { _3 = copy _2[_1]; return; }",
+    "bb0: { _2[_1] = const i32 0; return; }",
+    "bb0: { (*_1) = const i32 0; return; }",
+    "bb0: { _2 = addr((*_1).0); return; }",
+    "bb0: { _2 = slice(_1, const u64 0, const u64 0); return; }",
+    "bb0: { _2 = const u64 0; _1[_2] = const i32 0; return; }",
+    "bb0: { del(move _1); return; }",
+    "bb0: { _2 = call copy _1(); return; }",
+    "bb0: { check(overwrite: _1) -> bb1; } bb1: { return; }",
+    "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb1]; } bb1: { return; }",
+    "bb0: { check(copy _1, overflow) -> bb1; } bb1: { return; }",
+    "bb0: { check(const false, bounds, copy _1, const u64 4) -> bb1; } bb1: { return; }",
+    "bb0: { fail(panic, const bytes \"m\", copy _1); }",
+    "bb0: { _2.1 = copy _1; return; }",
+    "bb0: { _2 = aggregate pair(copy _1, const u64 0); return; }",
+};
+
+u32[READ_ROWS] READ_AT = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+fn v13_tests_each_read_of_an_item() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    u64 mut k = 0;
+    while (k < READ_ROWS) {
+        red(&e, READ_LETS[k], READ_BLOCKS[k], 13, fir_verify.V13_UNASSIGNED, 0, READ_AT[k]);
+        k += 1;
+    }
+}
+
+fn v13_follows_the_edge_that_v9_prunes() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // V9 takes bb1 alone, and V13 joins the false edge through bb2 at bb3
+    string[5] join = {
+        "let _2: i32;",
+        "bb0: { switch(const true) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = copy _2; return; }",
+    };
+    flow_red(&e, F, join[..], 13, fir_verify.V13_UNASSIGNED, 3, 0);
+    string[4] direct = {
+        "let _2: i32;",
+        "bb0: { switch(const true) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 0; return; }",
+        "bb2: { _0 = copy _2; return; }",
+    };
+    flow_red(&e, F, direct[..], 13, fir_verify.V13_UNASSIGNED, 2, 0);
+}
+
+fn v13_keeps_the_temporaries_of_the_lowering() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // `c && d`: the slot takes `c`, and the right side assigns it again
+    string[4] and_slot = {
+        "let _2: bool; let _3: bool;",
+        "bb0: { _2 = copy _1; switch(copy _2) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const false; goto bb2; }",
+        "bb2: { _3 = copy _2; _0 = const i32 0; return; }",
+    };
+    flow_green(&e, F, and_slot[..]);
+    string[4] or_slot = {
+        "let _2: bool; let _3: bool;",
+        "bb0: { _2 = copy _1; switch(copy _2) -> [true: bb2, otherwise: bb1]; }",
+        "bb1: { _2 = const true; goto bb2; }",
+        "bb2: { _3 = copy _2; _0 = const i32 0; return; }",
+    };
+    flow_green(&e, F, or_slot[..]);
+    // `c ? 1 : 2`: each arm assigns the slot
+    string[5] choice = {
+        "let _2: i32;",
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb3; }",
+        "bb2: { _2 = const i32 2; goto bb3; }",
+        "bb3: { _0 = copy _2; return; }",
+    };
+    flow_green(&e, F, choice[..]);
+    // a range `for` over a span copied into a temporary, with its counter
+    string[6] range = {
+        "let _2 (s): i32@; let _3: i32@; let _4: u64; let _5: bool; let _6 (x): i32;",
+        "bb0: { _3 = copy _2; _4 = const u64 0; goto bb1; }",
+        "bb1: { _5 = lt(copy _4, copy _3.1); switch(copy _5) -> [true: bb2, otherwise: bb4]; }",
+        "bb2: { live(_6); _6 = copy _3[_4]; dead(_6); goto bb3; }",
+        "bb3: { _4 = add(copy _4, const u64 1); goto bb1; }",
+        "bb4: { _0 = const i32 0; return; }",
+    };
+    flow_green(&e, F, range[..]);
+}
+
+fn v13_keeps_what_the_rule_does_not_name() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // a block that nothing names, and a block that only such a block names
+    string[4] dead = {
+        "let _2: i32;",
+        "bb0: { _0 = const i32 0; return; }",
+        "bb1: { _0 = copy _2; goto bb2; }",
+        "bb2: { _0 = copy _2; return; }",
+    };
+    flow_green(&e, F, dead[..]);
+    // `_0`, a parameter and a named local need no assignment
+    string[3] named = {
+        "let _2 (x): i32;",
+        "bb0: { _0 = copy _2; _2 = copy _0; switch(copy _1) -> [true: bb1, otherwise: bb1]; }",
+        "bb1: { return; }",
+    };
+    flow_green(&e, F, named[..]);
+    // an addr or a slice of fixed storage reads nothing
+    string[3] address = {
+        "let _1: i32[4]; let _2: i32@; let _3: i32*; let _4: u64;",
+        "bb0: { _4 = const u64 0; _2 = slice(_1, const u64 0, const u64 0);",
+        "_3 = addr(_1[_4]); return; }",
+    };
+    flow_green(&e, NOTHING, address[..]);
+    // a store through an assigned pointer, and a read after an assignment in one block
+    string[3] through = {
+        "let _1: i32 mut*; let _2 (x): i32; let _3: i32;",
+        "bb0: { _1 = addr mut(_2); (*_1) = const i32 0;",
+        "_3 = const i32 0; _3 = add(copy _3, const i32 1); return; }",
+    };
+    flow_green(&e, NOTHING, through[..]);
+    // an assignment of the whole temporary after a write into a part
+    string[2] whole = {
+        "let _1: pair; let _2: i32;",
+        "bb0: { _1.0 = const i32 1; _1 = const zero pair; _2 = copy _1.0; return; }",
+    };
+    flow_green(&e, NOTHING, whole[..]);
+}
+
+// ---- the flow rules on larger graphs ---------------------------------------------------------
+
+fn flow_rules_follow_an_irreducible_loop() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // bb1 and bb2 form a loop that bb0 enters at both blocks. V13: only bb1 assigns `_2`
+    string[5] enter = {
+        "let _2: i32;",
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb2; }",
+        "bb2: { _0 = copy _2; switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { return; }",
+    };
+    flow_red(&e, F, enter[..], 13, fir_verify.V13_UNASSIGNED, 2, 0);
+    string[5] before = {
+        "let _2: i32;",
+        "bb0: { _2 = const i32 0; switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb2; }",
+        "bb2: { _0 = copy _2; switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { return; }",
+    };
+    flow_green(&e, F, before[..]);
+    // V12: bb2 moves `_2`, and the back edge to bb1 carries the move to its read
+    string[5] moved = {
+        "let _2: u8 mut* own; let _3: u8 mut*; let _4: void;",
+        "bb0: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _3 = copy _2; goto bb2; }",
+        "bb2: { _4 = call fn main.take(move _2); switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(&e, F, moved[..], 12, fir_verify.V12_MOVED, 1, 0);
+}
+
+fn flow_rules_follow_nested_loops() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // the inner body bb3 assigns `_2`, and the outer latch bb4 reads it: the path that skips the
+    // inner body reaches bb4 with no assignment
+    string[7] inner = {
+        "let _2: i32;",
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { _2 = const i32 1; goto bb2; }",
+        "bb4: { _0 = copy _2; goto bb1; }",
+        "bb5: { return; }",
+    };
+    flow_red(&e, F, inner[..], 13, fir_verify.V13_UNASSIGNED, 4, 0);
+    // the outer head assigns `_2`, so every path to bb4 passes an assignment
+    string[7] outer = {
+        "let _2: i32;",
+        "bb0: { goto bb1; }",
+        "bb1: { _2 = const i32 0; switch(copy _1) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { _2 = const i32 1; goto bb2; }",
+        "bb4: { _0 = copy _2; goto bb1; }",
+        "bb5: { return; }",
+    };
+    flow_green(&e, F, outer[..]);
+    // V12: the inner loop moves `_2` and assigns it again, and the outer latch moves it once
+    string[7] owned = {
+        "let _2: u8 mut* own; let _3: void;",
+        "bb0: { goto bb1; }",
+        "bb1: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { _3 = call fn main.take(move _2); _2 = call fn main.grab(); goto bb2; }",
+        "bb4: { _3 = call fn main.take(move _2); goto bb1; }",
+        "bb5: { del(move _2); _0 = const i32 0; return; }",
+    };
+    flow_green(&e, F, owned[..]);
+    // the inner body moves `_2` and assigns nothing, so its back edge carries the move
+    string[6] twice = {
+        "let _2: u8 mut* own; let _3: void;",
+        "bb0: { goto bb1; }",
+        "bb1: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb2, otherwise: bb4]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb1]; }",
+        "bb3: { _3 = call fn main.take(move _2); goto bb2; }",
+        "bb4: { del(move _2); _0 = const i32 0; return; }",
+    };
+    flow_red(&e, F, twice[..], 12, fir_verify.V12_MOVED, 3, 0);
+}
+
+fn flow_rules_scale_to_a_long_chain() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // bb0 to bb999 each go to the next block, and the last one ends in unreachable
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u32 mut k = 0;
+    while (k < 999) {
+        strbuf.append(&b, "bb");
+        strbuf.append_u64(&b, cast(k, u64));
+        strbuf.append(&b, ": { goto bb");
+        strbuf.append_u64(&b, cast(k + 1, u64));
+        strbuf.append(&b, "; }\n");
+        k += 1;
+    }
+    strbuf.append(&b, "bb999: { unreachable; }");
+    string[1] chain = {strbuf.view(&b)};
+    flow_red(&e, F, chain[..], 9, fir_verify.V9_REACHED, 999, 0);
+}
+
+// ---- the report ------------------------------------------------------------------------------
+
+// Parses the function `header` whose lines are `lines` and returns what verify_report returns.
+fn lines_report(env mut* e, string header, string@ lines, strbuf.str_buf mut* out) bool {
+    lines_text(e, header, lines);
+    fir.module mut m = parse_text(e);
+    defer fir.module_free(&m);
+    return fir_verify.verify_report(fir.module_function_at(&m, 0), &e->rt, out);
+}
+
+// Holds that verify_report refuses the function `header` whose lines are `lines` with the text
+// `head` followed by `tail`.
+fn expect_report(env mut* e, string header, string@ lines, string head, string tail) void {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    bool ok = lines_report(e, header, lines, &out);
+    string got = strbuf.view(&out);
+    bool same = got.len == head.len + tail.len && got[0..head.len] == head
+        && got[head.len..got.len] == tail;
+    if (ok || !same) {
+        eprintln("fir_verify_test: expected the report <", head, tail, ">, got <", got, ">");
+        panic("fir_verify_test.expect_report: the report differs");
+    }
+}
+
+fn verify_report_writes_the_first_violation() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string[1] fine = {"bb0: { _0 = const i32 0; return; }"};
+    assert(lines_report(&e, F, fine[..], &out));
+    assert(strbuf.view(&out).len == 0);
+    string[3] reached = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 1; return #4:5 s3; }",
+        "bb2: { unreachable #9:1 s5; }",
+    };
+    expect_report(&e, F, reached[..], "fir.verify: V9 a path from bb0 reaches unreachable: ",
+                  "main.f bb2 statement 0 (s5)");
+    string[3] check = {
+        "bb0: { check(const false, overflow) -> bb1 #2:3 s2; }",
+        "bb1: { return; }",
+        "bb2: { goto bb1; }",
+    };
+    expect_report(&e, NOTHING, check[..],
+                  "fir.verify: V11 the continuation of a check has another predecessor: ",
+                  "main.nothing bb0 statement 0 (s2)");
+    string[4] moved = {
+        OWNED, "bb0: { _1 = call fn main.grab() #1:1 s1; _2 = move _1 #2:1 s2;",
+        "_3 = copy _1 #3:1 s3;", "del(move _2) #4:1 s4; return; }",
+    };
+    expect_report(&e, NOTHING, moved[..],
+                  "fir.verify: V12 a read of a temporary after a move of it: ",
+                  "main.nothing bb0 statement 2 (s3)");
+    string[2] first = {"let _1: i32; let _2: i32;", "bb0: { _2 = copy _1 #3:4 s7; return; }"};
+    expect_report(&e, NOTHING, first[..],
+                  "fir.verify: V13 a read of a temporary before an assignment of it: ",
+                  "main.nothing bb0 statement 0 (s7)");
+    // a local rule in a later block comes before a flow rule in an earlier block
+    string[3] local = {
+        "let _1: i32; let _2: i64;", "bb0: { unreachable; }", "bb1: { _1 = copy _2; return; }",
+    };
+    expect_report(&e, NOTHING, local[..], "fir.verify: V4 the two sides of an assignment do not ",
+                  "agree: main.nothing bb1 statement 0 (s0)");
+    // the report adds to the text in the buffer
+    strbuf.append(&out, "> ");
+    assert(!lines_report(&e, NOTHING, first[..], &out));
+    string got = strbuf.view(&out);
+    assert(got.len > 2 && got[0..2] == "> " && got[2..14] == "fir.verify: ");
+}
+
 // ---- the order of the rules ------------------------------------------------------------------
 
 fn the_lowest_rule_wins_over_an_earlier_block() void {
@@ -1614,5 +2488,29 @@ fn main() i32 {
     v10_live_and_dead_name_a_named_local();
     the_lowest_rule_wins_over_an_earlier_block();
     println("V8 V10 ok");
+    v9_no_path_from_bb0_reaches_unreachable();
+    v9_a_switch_on_a_constant_takes_the_selected_edge_only();
+    v9_keeps_a_function_that_ends_in_return_or_an_abort();
+    println("V9 ok");
+    v11_the_continuation_of_a_check_has_one_predecessor();
+    v11_keeps_a_continuation_that_only_its_check_names();
+    println("V11 ok");
+    v12_no_read_of_a_temporary_after_a_move_of_it();
+    v12_a_move_takes_effect_at_its_operand();
+    v12_follows_the_moves_of_every_path();
+    v12_a_move_of_a_part_empties_the_temporary();
+    println("V12 ok");
+    v13_no_read_of_a_temporary_before_an_assignment_of_it();
+    v13_tests_each_read_of_an_item();
+    v13_follows_the_edge_that_v9_prunes();
+    v13_keeps_the_temporaries_of_the_lowering();
+    v13_keeps_what_the_rule_does_not_name();
+    println("V13 ok");
+    flow_rules_follow_an_irreducible_loop();
+    flow_rules_follow_nested_loops();
+    flow_rules_scale_to_a_long_chain();
+    println("graphs ok");
+    verify_report_writes_the_first_violation();
+    println("report ok");
     return 0;
 }

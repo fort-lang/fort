@@ -332,6 +332,17 @@ Rules:
   before the build-mode pass (D17.11, section 9.3).
 - Every statement and terminator carries its location and its statement index (principle 12).
   A statement that a pass makes takes the index of the statement it replaces.
+- A statement or a terminator **reads** a place when it loads the storage of that place. It
+  reads the place of each `copy` and `move` operand and the place of a `del`. It reads the index
+  local of each `index` projection of every place that it names. The destination of an
+  assignment, the place of `addr` and the place of a `slice` of a fixed array are no reads of
+  their value: the item reads the pointer that each `deref` of such a place loads, and the span
+  or `string` header before each index on a span or a `string`. A `slice` of a span or a
+  `string` reads its place, and `check(overwrite: p)` reads `p` to test it (12.4); section 14
+  counts that test as no use of `p`. A `return` reads `_0` unless `_0` is `void`. The reads come
+  in evaluation order, each index local before its place, and the pointers of a destination come
+  after the right side, where the translator computes that address (12.5). A `move` and a `del`
+  empty the place after the read (section 6). Rules V12 and V13 test these reads.
 
 ## 8. Terminators
 
@@ -660,7 +671,9 @@ statement index.
 - **V10**: `live(_n)` and `dead(_n)` name a named local.
 - **V11**: the continuation block of a `check` has exactly one predecessor, the `check`.
 - **V12**: no statement or terminator reads a temporary after a `move` of it with no assignment
-  of it in between, on any path.
+  of it in between, on any path. An item reads a temporary when it reads a place whose base is
+  that temporary (section 7). A `move` or a `del` of a place that designates fixed storage and
+  whose base is the temporary is a move of it. An assignment of it writes the whole temporary.
 - **V13**: every read of a temporary is preceded, on every path from `bb0`, by an assignment of it.
   A named local needs no such rule: the checker requires an initializer (D7.1), and the entry block
   zeroes every `own` reference (9.2). The rule matters most for a temporary that the translator

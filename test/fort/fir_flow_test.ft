@@ -1,0 +1,707 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| small release ok
+//| bits ok
+//| diamond ok
+//| loop ok
+//| edges ok
+//| release ok
+/// Checks the bit sets and the forward dataflow of fir_flow: the sets at the ends of their
+/// words, a diamond and a loop under each join, the in-set of a block that nothing reaches and of
+/// `bb0`, the count of the transfers, and the release of every set.
+import fir;
+import fir_env;
+import fir_flow;
+import fir_parse;
+import heap;
+import std.strbuf;
+
+// ---- the bit sets --------------------------------------------------------------------------
+
+// Writes the numbers of `s` in ascending order, each after a space.
+fn members(fir_flow.bits* s, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut i = 0;
+    while (i < s->count) {
+        if (fir_flow.bits_get(s, i)) {
+            strbuf.push(out, ' ');
+            strbuf.append_u64(out, cast(i, u64));
+        }
+        i += 1;
+    }
+}
+
+// Holds the numbers of `s` against `want`, which gives each number after a space.
+fn expect_set(fir_flow.bits* s, string want) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    members(s, &b);
+    if (strbuf.view(&b) != want) {
+        eprintln("fir_dataflow_test: expected <", want, ">, got <", strbuf.view(&b), ">");
+        panic("fir_dataflow_test.expect_set: a set differs");
+    }
+}
+
+// The set of the numbers below `count` that `list` names.
+fn set_of(u32 count, u32@ list) fir_flow.bits {
+    fir_flow.bits mut s = fir_flow.bits_new(count);
+    for (u32 i : list) {
+        fir_flow.bits_set(&s, i);
+    }
+    return s;
+}
+
+u64 WORD_FULL = 18446744073709551615;
+
+fn a_set_takes_one_word_for_each_64_numbers() void {
+    u32[7] counts = {0, 1, 63, 64, 65, 128, 129};
+    u64[7] words = {0, 1, 1, 1, 2, 2, 3};
+    u64 mut k = 0;
+    while (k < 7) {
+        fir_flow.bits mut s = fir_flow.bits_new(counts[k]);
+        assert(s.count == counts[k]);
+        assert(s.words.len == words[k]);
+        u64 mut w = 0;
+        while (w < s.words.len) {
+            assert(s.words[w] == 0);
+            w += 1;
+        }
+        fir_flow.bits_free(&s);
+        assert(s.count == 0);
+        k += 1;
+    }
+}
+
+fn set_get_and_clear_reach_the_ends_of_each_word() void {
+    fir_flow.bits mut s = fir_flow.bits_new(129);
+    defer fir_flow.bits_free(&s);
+    u32[5] ends = {0, 63, 64, 127, 128};
+    for (u32 i : ends) {
+        assert(!fir_flow.bits_get(&s, i));
+        fir_flow.bits_set(&s, i);
+        assert(fir_flow.bits_get(&s, i));
+    }
+    expect_set(&s, " 0 63 64 127 128");
+    assert(s.words[0] == 9223372036854775809);
+    assert(s.words[1] == 9223372036854775809);
+    assert(s.words[2] == 1);
+    // a second set and a clear of an absent number change nothing
+    fir_flow.bits_set(&s, 63);
+    fir_flow.bits_clear(&s, 62);
+    expect_set(&s, " 0 63 64 127 128");
+    fir_flow.bits_clear(&s, 64);
+    fir_flow.bits_clear(&s, 0);
+    fir_flow.bits_clear(&s, 128);
+    expect_set(&s, " 63 127");
+    assert(!fir_flow.bits_get(&s, 64));
+    assert(s.words[2] == 0);
+}
+
+fn fill_sets_every_number_below_the_count_and_no_other_bit() void {
+    u32[7] counts = {0, 1, 63, 64, 65, 128, 129};
+    u64[7] last = {0, 1, 9223372036854775807, WORD_FULL, 1, WORD_FULL, 1};
+    u64 mut k = 0;
+    while (k < 7) {
+        fir_flow.bits mut s = fir_flow.bits_new(counts[k]);
+        fir_flow.bits_fill(&s);
+        if (s.words.len > 0) {
+            assert(s.words[s.words.len - 1] == last[k]);
+        }
+        u64 mut w = 0;
+        while (w + 1 < s.words.len) {
+            assert(s.words[w] == WORD_FULL);
+            w += 1;
+        }
+        // the set equals the set built one number at a time
+        fir_flow.bits mut one = fir_flow.bits_new(counts[k]);
+        u32 mut i = 0;
+        while (i < counts[k]) {
+            fir_flow.bits_set(&one, i);
+            i += 1;
+        }
+        assert(fir_flow.bits_equal(&s, &one));
+        fir_flow.bits_free(&one);
+        fir_flow.bits_free(&s);
+        k += 1;
+    }
+}
+
+fn union_intersect_equal_and_copy_work_word_by_word() void {
+    u32[3] left = {0, 63, 64};
+    u32[3] right = {63, 64, 100};
+    fir_flow.bits mut a = set_of(101, left[..]);
+    defer fir_flow.bits_free(&a);
+    fir_flow.bits mut b = set_of(101, right[..]);
+    defer fir_flow.bits_free(&b);
+    fir_flow.bits mut u = set_of(101, left[..]);
+    defer fir_flow.bits_free(&u);
+    fir_flow.bits_union(&u, &b);
+    expect_set(&u, " 0 63 64 100");
+    fir_flow.bits mut n = set_of(101, left[..]);
+    defer fir_flow.bits_free(&n);
+    fir_flow.bits_intersect(&n, &b);
+    expect_set(&n, " 63 64");
+    assert(!fir_flow.bits_equal(&a, &b));
+    assert(fir_flow.bits_equal(&a, &a));
+    // the two sets differ only in the last number
+    u32[1] top = {100};
+    fir_flow.bits mut c = set_of(101, top[..]);
+    defer fir_flow.bits_free(&c);
+    fir_flow.bits mut none = fir_flow.bits_new(101);
+    defer fir_flow.bits_free(&none);
+    assert(!fir_flow.bits_equal(&c, &none));
+    assert(!fir_flow.bits_equal(&none, &c));
+    // a copy replaces every number of the destination
+    fir_flow.bits_copy(&c, &a);
+    expect_set(&c, " 0 63 64");
+    assert(fir_flow.bits_equal(&c, &a));
+    fir_flow.bits_copy(&c, &none);
+    expect_set(&c, "");
+    // the empty sets of count 0 are equal, and the joins keep them empty
+    fir_flow.bits mut z = fir_flow.bits_new(0);
+    defer fir_flow.bits_free(&z);
+    fir_flow.bits mut y = fir_flow.bits_new(0);
+    defer fir_flow.bits_free(&y);
+    fir_flow.bits_union(&z, &y);
+    fir_flow.bits_intersect(&z, &y);
+    assert(fir_flow.bits_equal(&z, &y));
+}
+
+// ---- the dataflow --------------------------------------------------------------------------
+
+// The transfer that adds the number of the block. Joined by intersection from an empty entry, the
+// in-set of a block names the blocks on every path to it; joined by union, the blocks on some
+// path to it.
+fn mark_block(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+    fir_flow.bits_set(set, b);
+}
+
+// The transfer that adds the local of each `live` and removes the local of each `dead`: a gen and
+// kill transfer.
+fn scope_marks(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+    u32 count = fir.block_statement_count(f, b);
+    u32 mut i = 0;
+    while (i < count) {
+        fir.statement* s = fir.block_statement(f, b, i);
+        if (s->kind == fir.stmt_kind.st_live) {
+            fir_flow.bits_set(set, s->local);
+        } else if (s->kind == fir.stmt_kind.st_dead) {
+            fir_flow.bits_clear(set, s->local);
+        }
+        i += 1;
+    }
+}
+
+// The fixture, and the module of the function of one case. The function is the fixture's `f`,
+// which takes `_1 (c): bool` and returns `i32`.
+struct env {
+    fir_env.env fx;
+    fir.module m;
+}
+
+fn open(env mut* e) void {
+    fir_env.open(&e->fx);
+}
+
+fn close(env mut* e) void {
+    fir.module_free(&e->m);
+    fir_env.close(&e->fx);
+}
+
+// Parses the function `f` with the `let` lines `lets` and the blocks `blocks`, one text for each
+// block, and returns it. The function stays valid until the next call.
+fn parse(env mut* e, string lets, string@ blocks) fir.func* {
+    fir.module_free(&e->m);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fn main.f(_1 (c): bool) -> i32 {\n");
+    strbuf.append(&b, lets);
+    strbuf.push(&b, '\n');
+    for (string block : blocks) {
+        strbuf.append(&b, block);
+        strbuf.push(&b, '\n');
+    }
+    strbuf.append(&b, "}\n");
+    u64 before = fir_env.errors(&e->fx);
+    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    if (fir_env.errors(&e->fx) != before) {
+        eprintln(strbuf.view(&b));
+        panic("fir_dataflow_test.parse: a text does not parse");
+    }
+    return fir.module_function_at(&e->m, 0);
+}
+
+// Runs the dataflow of `join` with the transfer `transfer` over `f`. Every set holds numbers
+// below `count`. The initial set is the identity of the join, and the entry set is empty.
+fn run(fir.func* f, u32 count, fir_flow.join_kind join,
+       fn (fir.func*, u32, fir_flow.bits mut*) void transfer) fir_flow.dataflow {
+    fir_flow.dataflow mut d = fir_flow.dataflow_new(count, join, transfer);
+    if (join == fir_flow.join_kind.join_intersect) {
+        fir_flow.bits_fill(&d.init);
+    }
+    fir_flow.dataflow_forward(f, &d);
+    return d;
+}
+
+// Holds the in-set and the out-set of block `b` of `d`.
+fn expect_block(fir_flow.dataflow* d, u32 b, string in, string out) void {
+    expect_set(&d->ins[cast(b, u64)], in);
+    expect_set(&d->outs[cast(b, u64)], out);
+}
+
+string[4] DIAMOND = {
+    "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+    "bb1: { goto bb3; }",
+    "bb2: { goto bb3; }",
+    "bb3: { unreachable; }",
+};
+
+fn a_diamond_joins_both_arms() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func* f = parse(&e, "", DIAMOND[..]);
+    fir_flow.dataflow mut all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 0, "", " 0");
+    expect_block(&all, 1, " 0", " 0 1");
+    expect_block(&all, 2, " 0", " 0 2");
+    expect_block(&all, 3, " 0", " 0 3");
+    // each block has its predecessors' out-sets at its first transfer
+    assert(all.steps == 4);
+    fir_flow.dataflow mut some = run(f, 4, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 0, "", " 0");
+    expect_block(&some, 1, " 0", " 0 1");
+    expect_block(&some, 2, " 0", " 0 2");
+    expect_block(&some, 3, " 0 1 2", " 0 1 2 3");
+    assert(some.steps == 4);
+}
+
+fn a_diamond_joins_a_kill_on_one_arm() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _2 (x): i32; let _3 (y): i32;";
+    string[4] blocks = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_2); live(_3); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { unreachable; }",
+    };
+    fir.func* f = parse(&e, lets, blocks[..]);
+    fir_flow.dataflow mut all = run(f, 4, fir_flow.join_kind.join_intersect, scope_marks);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 1, " 2", " 3");
+    expect_block(&all, 2, " 2", " 2");
+    expect_block(&all, 3, "", "");
+    fir_flow.dataflow mut some = run(f, 4, fir_flow.join_kind.join_union, scope_marks);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 3, " 2 3", " 2 3");
+}
+
+string[4] LOOP = {
+    "bb0: { goto bb1; }",
+    "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+    "bb2: { goto bb1; }",
+    "bb3: { unreachable; }",
+};
+
+fn a_loop_reaches_its_fixpoint_through_the_back_edge() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func* f = parse(&e, "", LOOP[..]);
+    fir_flow.dataflow mut all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 0, "", " 0");
+    expect_block(&all, 1, " 0", " 0 1");
+    expect_block(&all, 2, " 0 1", " 0 1 2");
+    expect_block(&all, 3, " 0 1", " 0 1 3");
+    // bb0 to bb3 once, then bb1 again after the back edge changed; bb1 keeps its out-set
+    assert(all.steps == 5);
+    fir_flow.dataflow mut some = run(f, 4, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 0, "", " 0");
+    expect_block(&some, 1, " 0 1 2", " 0 1 2");
+    expect_block(&some, 2, " 0 1 2", " 0 1 2");
+    expect_block(&some, 3, " 0 1 2", " 0 1 2 3");
+    // bb1 changes again and puts bb2 and bb3 back on the list
+    assert(some.steps == 7);
+}
+
+fn a_loop_carries_a_kill_around_the_back_edge() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _2 (x): i32; let _3 (y): i32;";
+    string[4] blocks = {
+        "bb0: { live(_2); live(_3); goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { dead(_2); goto bb1; }",
+        "bb3: { unreachable; }",
+    };
+    fir.func* f = parse(&e, lets, blocks[..]);
+    fir_flow.dataflow mut all = run(f, 4, fir_flow.join_kind.join_intersect, scope_marks);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 1, " 3", " 3");
+    expect_block(&all, 3, " 3", " 3");
+    fir_flow.dataflow mut some = run(f, 4, fir_flow.join_kind.join_union, scope_marks);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 1, " 2 3", " 2 3");
+    expect_block(&some, 2, " 2 3", " 3");
+}
+
+fn a_block_that_nothing_names_starts_from_the_initial_set() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // bb1 follows a terminator and nothing names it; bb2 has bb1 alone as predecessor
+    string[3] blocks = {"bb0: { unreachable; }", "bb1: { goto bb2; }", "bb2: { unreachable; }"};
+    fir.func* f = parse(&e, "", blocks[..]);
+    fir_flow.dataflow mut all = run(f, 3, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 1, " 0 1 2", " 0 1 2");
+    expect_block(&all, 2, " 0 1 2", " 0 1 2");
+    fir_flow.dataflow mut some = run(f, 3, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 1, "", " 1");
+    expect_block(&some, 2, " 1", " 1 2");
+}
+
+fn the_entry_set_joins_the_in_set_of_bb0() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[1] one = {"bb0: { unreachable; }"};
+    fir.func* f = parse(&e, "", one[..]);
+    fir_flow.dataflow mut d = fir_flow.dataflow_new(3, fir_flow.join_kind.join_union,
+                                                        mark_block);
+    defer fir_flow.dataflow_free(&d);
+    fir_flow.bits_set(&d.entry, 2);
+    fir_flow.dataflow_forward(f, &d);
+    expect_block(&d, 0, " 2", " 0 2");
+    // FIR names bb0 in no terminator (V2); the dataflow joins such an edge with the entry set
+    string[3] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { goto bb0; }",
+        "bb2: { unreachable; }",
+    };
+    fir.func* g = parse(&e, "", blocks[..]);
+    fir_flow.dataflow mut back = fir_flow.dataflow_new(3, fir_flow.join_kind.join_union,
+                                                           mark_block);
+    defer fir_flow.dataflow_free(&back);
+    fir_flow.dataflow_forward(g, &back);
+    expect_block(&back, 0, " 0 1", " 0 1");
+    fir_flow.dataflow mut every = run(g, 3, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&every);
+    expect_block(&every, 0, "", " 0");
+    expect_block(&every, 1, " 0", " 0 1");
+}
+
+fn a_block_that_loops_to_itself_joins_its_own_out_set() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string lets = "let _2 (x): i32;";
+    string[3] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { unreachable; }",
+    };
+    fir.func* f = parse(&e, lets, blocks[..]);
+    fir_flow.dataflow mut all = run(f, 3, fir_flow.join_kind.join_intersect, scope_marks);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 1, "", " 2");
+    expect_block(&all, 2, " 2", " 2");
+    fir_flow.dataflow mut some = run(f, 3, fir_flow.join_kind.join_union, scope_marks);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 1, " 2", " 2");
+}
+
+fn a_table_built_once_gives_the_same_result() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func* f = parse(&e, "", LOOP[..]);
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    fir_flow.dataflow mut some = fir_flow.dataflow_new(4, fir_flow.join_kind.join_union,
+                                                      mark_block);
+    defer fir_flow.dataflow_free(&some);
+    fir_flow.dataflow_forward_with(f, &pt, &some);
+    expect_block(&some, 1, " 0 1 2", " 0 1 2");
+    expect_block(&some, 3, " 0 1 2", " 0 1 2 3");
+    assert(some.steps == 7);
+    // a second function with its own table, into the same record
+    fir_flow.dataflow mut all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&all);
+    fir_flow.dataflow_forward_with(f, &pt, &all);
+    expect_block(&all, 2, " 0 1", " 0 1 2");
+    assert(all.steps == 5);
+}
+
+fn a_second_run_replaces_the_result() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func* f = parse(&e, "", LOOP[..]);
+    fir_flow.dataflow mut d = run(f, 4, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&d);
+    string[1] one = {"bb0: { unreachable; }"};
+    fir.func* g = parse(&e, "", one[..]);
+    fir_flow.dataflow_forward(g, &d);
+    assert(d.ins.len == 1 && d.outs.len == 1);
+    expect_block(&d, 0, "", " 0");
+    assert(d.steps == 1);
+}
+
+// ---- the release ---------------------------------------------------------------------------
+
+// A function of BLOCKS blocks: a chain of diamonds, each of which assigns the temporary `_2` on
+// both arms and reads it at the join, and a loop back to the first join. Every flow rule scans it
+// and it keeps each of them.
+u32 BLOCKS = 600;
+
+fn chain(strbuf.str_buf mut* b) void {
+    strbuf.append(b, "fn main.f(_1 (c): bool) -> i32 {\nlet _2: i32; let _3: i32;\n");
+    strbuf.append(b, "bb0: { goto bb1; }\n");
+    u32 mut k = 1;
+    while (k + 3 < BLOCKS) {
+        strbuf.append(b, "bb");
+        strbuf.append_u64(b, cast(k, u64));
+        strbuf.append(b, ": { switch(copy _1) -> [true: bb");
+        strbuf.append_u64(b, cast(k + 1, u64));
+        strbuf.append(b, ", otherwise: bb");
+        strbuf.append_u64(b, cast(k + 2, u64));
+        strbuf.append(b, "]; }\n");
+        u32 mut arm = 1;
+        while (arm < 3) {
+            strbuf.append(b, "bb");
+            strbuf.append_u64(b, cast(k + arm, u64));
+            strbuf.append(b, ": { _2 = const i32 1; goto bb");
+            strbuf.append_u64(b, cast(k + 3, u64));
+            strbuf.append(b, "; }\n");
+            arm += 1;
+        }
+        k += 3;
+    }
+    strbuf.append(b, "bb");
+    strbuf.append_u64(b, cast(k, u64));
+    strbuf.append(b, ": { _3 = copy _2; switch(copy _1) -> [true: bb1, otherwise: bb");
+    strbuf.append_u64(b, cast(k + 1, u64));
+    strbuf.append(b, "]; }\nbb");
+    strbuf.append_u64(b, cast(k + 1, u64));
+    strbuf.append(b, ": { _0 = copy _3; return; }\n}\n");
+}
+
+fn a_block_that_a_switch_names_twice_waits_on_the_list_once() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[4] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, false: bb2, otherwise: bb3]; }",
+        "bb2: { goto bb1; }",
+        "bb3: { unreachable; }",
+    };
+    fir.func* f = parse(&e, "", blocks[..]);
+    fir_flow.dataflow mut some = run(f, 4, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 2, " 0 1 2", " 0 1 2");
+    // the steps of LOOP: bb2 takes one transfer after each change of bb1, and not two
+    assert(some.steps == 7);
+}
+
+fn an_irreducible_loop_reaches_its_fixpoint() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // bb1 and bb2 form a loop with two entries from bb0
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { goto bb2; }",
+        "bb2: { switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { unreachable; }",
+    };
+    fir.func* f = parse(&e, "", blocks[..]);
+    fir_flow.dataflow mut all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 1, " 0", " 0 1");
+    expect_block(&all, 2, " 0", " 0 2");
+    expect_block(&all, 3, " 0 2", " 0 2 3");
+    assert(all.steps == 5);
+    fir_flow.dataflow mut some = run(f, 4, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 1, " 0 1 2", " 0 1 2");
+    expect_block(&some, 2, " 0 1 2", " 0 1 2");
+    expect_block(&some, 3, " 0 1 2", " 0 1 2 3");
+    assert(some.steps == 6);
+}
+
+fn nested_loops_carry_the_inner_back_edge_to_the_outer_head() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // bb1 heads the outer loop and bb2 the inner loop; bb3 is the inner body and bb4 the outer
+    // latch
+    string[6] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { goto bb2; }",
+        "bb4: { goto bb1; }",
+        "bb5: { unreachable; }",
+    };
+    fir.func* f = parse(&e, "", blocks[..]);
+    fir_flow.dataflow mut all = run(f, 6, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&all);
+    expect_block(&all, 1, " 0", " 0 1");
+    expect_block(&all, 2, " 0 1", " 0 1 2");
+    expect_block(&all, 3, " 0 1 2", " 0 1 2 3");
+    expect_block(&all, 4, " 0 1 2", " 0 1 2 4");
+    expect_block(&all, 5, " 0 1", " 0 1 5");
+    fir_flow.dataflow mut some = run(f, 6, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&some);
+    expect_block(&some, 1, " 0 1 2 3 4", " 0 1 2 3 4");
+    expect_block(&some, 2, " 0 1 2 3 4", " 0 1 2 3 4");
+    expect_block(&some, 5, " 0 1 2 3 4", " 0 1 2 3 4 5");
+}
+
+// The chain of the release probe, a chain of 199 diamonds with a back edge from its end to bb1,
+// as one function.
+fn chain_func(env mut* e) fir.func* {
+    fir.module_free(&e->m);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    chain(&text);
+    u64 before = fir_env.errors(&e->fx);
+    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&text),
+                                  fir_env.prelude(&e->fx));
+    assert(fir_env.errors(&e->fx) == before);
+    fir.func* f = fir.module_function_at(&e->m, 0);
+    assert(fir.block_count(f) == BLOCKS);
+    return f;
+}
+
+fn the_transfers_stay_linear_in_the_blocks() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func* f = chain_func(&e);
+    // in ascending order every block but bb1 meets its predecessors done; the back edge changes
+    // bb1 once, and bb1 keeps its out-set
+    fir_flow.dataflow mut all = run(f, BLOCKS, fir_flow.join_kind.join_intersect, mark_block);
+    defer fir_flow.dataflow_free(&all);
+    assert(all.steps == cast(BLOCKS, u64) + 1);
+    expect_set(&all.ins[1], " 0");
+    // under union the back edge changes bb1 and each block after it once more, bb598 excluded,
+    // whose out-set already holds every block before it
+    fir_flow.dataflow mut some = run(f, BLOCKS, fir_flow.join_kind.join_union, mark_block);
+    defer fir_flow.dataflow_free(&some);
+    assert(some.steps == 2 * cast(BLOCKS, u64) - 2);
+}
+
+// Each round runs a dataflow over the chain twice into one record. The address of each result
+// vector is the block view, and the program break is the system view (notes/testing.md 4). The
+// block view of one set of 80 bytes read 465808 with nothing leaked, because a round this large
+// leaves free chunks of every size, so the probe does not watch it. A release of one small set in
+// each run is too small for this round; the probe small_rounds_leave_the_heap_where_it_was holds
+// those releases.
+fn two_hundred_rounds_leave_the_heap_where_it_was() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func* f = chain_func(&e);
+    u64[3] mut ins_at = {};
+    u64[3] mut outs_at = {};
+    u64[3] mut break_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        fir_flow.dataflow mut d = run(f, BLOCKS, fir_flow.join_kind.join_union, mark_block);
+        fir_flow.dataflow_forward(f, &d);
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            ins_at[slot] = cast(d.ins.ptr, u64);
+            outs_at[slot] = cast(d.outs.ptr, u64);
+        }
+        fir_flow.dataflow_free(&d);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(ins_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(outs_at) < fir_env.LEAK_BOUND);
+}
+
+// The count of the dataflows in one round of the next probe.
+u64 CALLS = 100;
+
+// Each round runs CALLS dataflows of each join over a loop of four blocks. A release of one set of
+// 8 to 80 bytes in each run, such as the entry or the initial set, the work list or the set of
+// the next transfer, leaks 32 bytes or more in each run, so 6400 bytes or more in each round, and
+// the program break moves. With one run in each round, the deletion of such a release left the
+// probe above green (the T-233 Log). The probe watches the system view alone, for the reason
+// above. It runs first in main: after the other tests of this program, the allocator served the
+// blocks that the deletion of `bits_free(&next)` leaked out of the free chunks those tests left,
+// and the break read 0.
+fn small_rounds_leave_the_heap_where_it_was() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    fir.func* f = parse(&e, "", LOOP[..]);
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    u64[3] mut break_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        u64 mut k = 0;
+        while (k < CALLS) {
+            fir_flow.dataflow mut all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
+            fir_flow.dataflow_free(&all);
+            fir_flow.dataflow mut some = fir_flow.dataflow_new(4, fir_flow.join_kind.join_union,
+                                                              mark_block);
+            fir_flow.dataflow_forward_with(f, &pt, &some);
+            fir_flow.dataflow_free(&some);
+            k += 1;
+        }
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    small_rounds_leave_the_heap_where_it_was();
+    println("small release ok");
+    a_set_takes_one_word_for_each_64_numbers();
+    set_get_and_clear_reach_the_ends_of_each_word();
+    fill_sets_every_number_below_the_count_and_no_other_bit();
+    union_intersect_equal_and_copy_work_word_by_word();
+    println("bits ok");
+    a_diamond_joins_both_arms();
+    a_diamond_joins_a_kill_on_one_arm();
+    println("diamond ok");
+    a_loop_reaches_its_fixpoint_through_the_back_edge();
+    a_loop_carries_a_kill_around_the_back_edge();
+    println("loop ok");
+    a_block_that_nothing_names_starts_from_the_initial_set();
+    the_entry_set_joins_the_in_set_of_bb0();
+    a_block_that_loops_to_itself_joins_its_own_out_set();
+    a_second_run_replaces_the_result();
+    a_table_built_once_gives_the_same_result();
+    a_block_that_a_switch_names_twice_waits_on_the_list_once();
+    an_irreducible_loop_reaches_its_fixpoint();
+    nested_loops_carry_the_inner_back_edge_to_the_outer_head();
+    println("edges ok");
+    the_transfers_stay_linear_in_the_blocks();
+    two_hundred_rounds_leave_the_heap_where_it_was();
+    println("release ok");
+    return 0;
+}

@@ -1,0 +1,298 @@
+/// Holds bit sets and a forward dataflow over the blocks of one FIR function: the framework of
+/// the join at each block and the fixpoint of each loop that the flow rules of the verifier and
+/// the flow analyses of spec/fir.md 14 use.
+//
+// The module uses no function-pointer dispatch table: the dataflow takes its transfer as one
+// function pointer. It holds no module-level mutable state, and every set it allocates belongs
+// to a record that the caller frees.
+import fir;
+
+// ---- the bit sets --------------------------------------------------------------------------
+
+// The count of the bits of one word of a bit set.
+u64 WORD_BITS = 64;
+
+// A word with every bit set.
+u64 FULL_WORD = 18446744073709551615;
+
+/// A set of the numbers below `count`. Bit `i % 64` of word `i / 64` says whether `i` is in the
+/// set. The bits at and past `count` in the last word stay 0, so two sets with one count are
+/// equal exactly when their words are equal.
+struct bits {
+    u32 count;
+    u64 mut@ own words;
+}
+
+/// The empty set of the numbers below `count`.
+fn bits_new(u32 count) bits {
+    bits mut s = bits{.count = count};
+    s.words = new(u64, (cast(count, u64) + WORD_BITS - 1) / WORD_BITS);
+    return s;
+}
+
+fn bits_free(bits mut* s) void {
+    del(s->words);
+    s->count = 0;
+}
+
+// The word that holds bit `i` of `s`. `who` is the text of the panic when `i` is at or past the
+// count.
+fn bit_word(bits* s, u32 i, string who) u64 {
+    if (i >= s->count) {
+        panic(who);
+    }
+    return cast(i, u64) / WORD_BITS;
+}
+
+// The mask of bit `i` in its word.
+fn bit_mask(u32 i) u64 {
+    u64 one = 1;
+    return one << (cast(i, u64) % WORD_BITS);
+}
+
+/// Adds `i` to `s`. The function panics when `i` is at or past the count.
+fn bits_set(bits mut* s, u32 i) void {
+    u64 w = bit_word(s, i, "fir_flow.bits_set: the bit is out of range");
+    s->words[w] |= bit_mask(i);
+}
+
+/// Removes `i` from `s`. The function panics when `i` is at or past the count.
+fn bits_clear(bits mut* s, u32 i) void {
+    u64 w = bit_word(s, i, "fir_flow.bits_clear: the bit is out of range");
+    s->words[w] &= ~bit_mask(i);
+}
+
+/// Whether `i` is in `s`. The function panics when `i` is at or past the count.
+fn bits_get(bits* s, u32 i) bool {
+    u64 w = bit_word(s, i, "fir_flow.bits_get: the bit is out of range");
+    return (s->words[w] & bit_mask(i)) != 0;
+}
+
+/// Adds every number below the count to `s`.
+fn bits_fill(bits mut* s) void {
+    u64 n = s->words.len;
+    u64 mut w = 0;
+    while (w < n) {
+        s->words[w] = FULL_WORD;
+        w += 1;
+    }
+    u64 rest = cast(s->count, u64) % WORD_BITS;
+    if (rest != 0) {
+        u64 one = 1;
+        s->words[n - 1] = (one << rest) - 1;
+    }
+}
+
+// Panics with `who` unless `a` and `b` are sets of the numbers below one count.
+fn same_count(bits* a, bits* b, string who) void {
+    if (a->count != b->count) {
+        panic(who);
+    }
+}
+
+/// Keeps in `dst` the numbers that `src` holds too. The function panics when the counts differ.
+fn bits_intersect(bits mut* dst, bits* src) void {
+    same_count(dst, src, "fir_flow.bits_intersect: the counts differ");
+    u64 mut w = 0;
+    while (w < dst->words.len) {
+        dst->words[w] &= src->words[w];
+        w += 1;
+    }
+}
+
+/// Adds to `dst` the numbers that `src` holds. The function panics when the counts differ.
+fn bits_union(bits mut* dst, bits* src) void {
+    same_count(dst, src, "fir_flow.bits_union: the counts differ");
+    u64 mut w = 0;
+    while (w < dst->words.len) {
+        dst->words[w] |= src->words[w];
+        w += 1;
+    }
+}
+
+/// Whether `a` and `b` hold the same numbers. The function panics when the counts differ.
+fn bits_equal(bits* a, bits* b) bool {
+    same_count(a, b, "fir_flow.bits_equal: the counts differ");
+    u64 mut w = 0;
+    while (w < a->words.len) {
+        if (a->words[w] != b->words[w]) {
+            return false;
+        }
+        w += 1;
+    }
+    return true;
+}
+
+/// Makes `dst` hold the numbers that `src` holds. The function panics when the counts differ.
+fn bits_copy(bits mut* dst, bits* src) void {
+    same_count(dst, src, "fir_flow.bits_copy: the counts differ");
+    u64 mut w = 0;
+    while (w < dst->words.len) {
+        dst->words[w] = src->words[w];
+        w += 1;
+    }
+}
+
+// ---- the forward dataflow ------------------------------------------------------------------
+
+/// How a forward dataflow joins the out-sets of the predecessors of a block.
+enum join_kind {
+    join_intersect, // a number holds on every path
+    join_union, // a number holds on some path
+}
+
+/// A forward dataflow over the blocks of one function. Each set holds numbers below `count`.
+/// `entry` joins the in-set of `bb0`. `init` is the out-set of every block before the first
+/// transfer, and the in-set of a block other than `bb0` that no terminator names. It must be the
+/// identity of the join: the full set for `join_intersect` and the empty set for `join_union`.
+/// `transfer` changes the in-set of a block into its out-set, and must be monotone.
+/// dataflow_forward writes the fixpoint to `ins` and `outs`, one set for each block, and counts
+/// the transfers it applied in `steps`.
+struct dataflow {
+    u32 count;
+    join_kind join;
+    bits entry;
+    bits init;
+    fn (fir.func*, u32, bits mut*) void transfer;
+    bits mut@ own ins;
+    bits mut@ own outs;
+    u64 steps;
+}
+
+/// A dataflow with an empty `entry` and an empty `init`, and no result.
+fn dataflow_new(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void transfer)
+    dataflow {
+    dataflow mut d = dataflow{.count = count, .join = join, .transfer = transfer};
+    d.entry = bits_new(count);
+    d.init = bits_new(count);
+    return d;
+}
+
+// Releases the sets of each block that dataflow_forward wrote.
+fn results_free(dataflow mut* d) void {
+    u64 mut b = 0;
+    while (b < d->ins.len) {
+        bits_free(&d->ins[b]);
+        bits_free(&d->outs[b]);
+        b += 1;
+    }
+    del(d->ins);
+    del(d->outs);
+}
+
+fn dataflow_free(dataflow mut* d) void {
+    results_free(d);
+    bits_free(&d->entry);
+    bits_free(&d->init);
+}
+
+// Sets the in-set of block `b`: the join of the entry set, for `bb0`, and of the out-set of each
+// predecessor. A block with none of these takes the initial set.
+fn block_in(dataflow mut* d, fir.pred_table* pt, u32 b) void {
+    bits mut* in = &d->ins[cast(b, u64)];
+    bool mut first = true;
+    if (b == 0) {
+        bits_copy(in, &d->entry);
+        first = false;
+    }
+    u32 count = fir.pred_count(pt, b);
+    u32 mut i = 0;
+    while (i < count) {
+        bits* out = &d->outs[cast(fir.pred_at(pt, b, i), u64)];
+        if (first) {
+            bits_copy(in, out);
+            first = false;
+        } else if (d->join == join_kind.join_intersect) {
+            bits_intersect(in, out);
+        } else {
+            bits_union(in, out);
+        }
+        i += 1;
+    }
+    if (first) {
+        bits_copy(in, &d->init);
+    }
+}
+
+// The list of the blocks that wait for a transfer: a ring of one place for each block, which
+// holds a block at most once, because `listed` says which blocks it holds.
+struct work_list {
+    u32 mut@ own ring;
+    bits listed;
+    u64 head;
+    u64 len;
+}
+
+// Appends block `b` to `wl` unless `wl` holds it.
+fn work_push(work_list mut* wl, u32 b) void {
+    if (bits_get(&wl->listed, b)) {
+        return;
+    }
+    bits_set(&wl->listed, b);
+    wl->ring[(wl->head + wl->len) % wl->ring.len] = b;
+    wl->len += 1;
+}
+
+// Removes the first block of `wl` and returns it. `wl` must hold a block.
+fn work_pop(work_list mut* wl) u32 {
+    u32 b = wl->ring[wl->head];
+    wl->head = (wl->head + 1) % wl->ring.len;
+    wl->len -= 1;
+    bits_clear(&wl->listed, b);
+    return b;
+}
+
+/// Runs the dataflow `d` over the blocks of `f` to its fixpoint. After the call, `d->ins[b]` and
+/// `d->outs[b]` hold the sets before and after block `b`. A second call replaces the result.
+fn dataflow_forward(fir.func* f, dataflow mut* d) void {
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    dataflow_forward_with(f, &pt, d);
+}
+
+/// Runs the dataflow `d` as dataflow_forward does, with `pt`, the predecessor table of `f`, which
+/// a caller that runs several dataflows over one function builds once.
+// A worklist in first-in first-out order. It starts with every block in ascending order. After
+// the transfer of a block whose out-set changed, it appends each successor that it does not hold.
+// Each out-set starts at the identity of the join and moves in one direction under a monotone
+// transfer, so it changes at most once for each number, and the loop ends.
+fn dataflow_forward_with(fir.func* f, fir.pred_table* pt, dataflow mut* d) void {
+    results_free(d);
+    u32 n = fir.block_count(f);
+    u64 size = cast(n, u64);
+    d->ins = new(bits, size);
+    d->outs = new(bits, size);
+    d->steps = 0;
+    work_list mut wl = work_list{};
+    wl.ring = new(u32, size);
+    wl.listed = bits_new(n);
+    defer del(wl.ring);
+    defer bits_free(&wl.listed);
+    u32 mut b = 0;
+    while (b < n) {
+        d->ins[cast(b, u64)] = bits_new(d->count);
+        d->outs[cast(b, u64)] = bits_new(d->count);
+        bits_copy(&d->outs[cast(b, u64)], &d->init);
+        work_push(&wl, b);
+        b += 1;
+    }
+    bits mut next = bits_new(d->count);
+    defer bits_free(&next);
+    while (wl.len > 0) {
+        u32 at = work_pop(&wl);
+        block_in(d, pt, at);
+        bits_copy(&next, &d->ins[cast(at, u64)]);
+        d->transfer(f, at, &next);
+        d->steps += 1;
+        if (!bits_equal(&next, &d->outs[cast(at, u64)])) {
+            bits_copy(&d->outs[cast(at, u64)], &next);
+            fir.block* bl = fir.block_at(f, at);
+            u32 mut i = 0;
+            u32 mut target = 0;
+            while (bl->terminated && fir.term_targets(f, &bl->term, i, &target)) {
+                work_push(&wl, target);
+                i += 1;
+            }
+        }
+    }
+}

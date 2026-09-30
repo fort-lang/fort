@@ -1102,21 +1102,34 @@ fn stmt_reads(func* f, statement* s, u32 i, operand mut* out) bool {
     return true;
 }
 
-// The walk of stmt_reads_place and term_reads_place: it counts the places it visits and keeps
-// visit `want`.
+/// One read of a statement or a terminator: the place that it loads, whether a `move` or a `del`
+/// empties that place after the read (spec/fir.md 6), and whether the read is a use of the place.
+/// The test of `check(overwrite: p)` loads `p` and is no use of it (spec/fir.md 14), so an
+/// analysis of ownership skips it; every other read is a use.
+struct read {
+    place place;
+    bool empties;
+    bool is_use;
+}
+
+// The walk of stmt_read and term_read: it counts the reads it visits and keeps visit `want`.
 struct read_cursor {
     u32 want;
     u32 seen;
-    place found;
+    read found;
     bool done;
 }
 
-fn read_visit(read_cursor mut* c, place p) void {
+fn read_mark(read_cursor mut* c, place p, bool empties, bool is_use) void {
     if (!c->done && c->seen == c->want) {
-        c->found = p;
+        c->found = read{p, empties, is_use};
         c->done = true;
     }
     c->seen += 1;
+}
+
+fn read_visit(read_cursor mut* c, place p) void {
+    read_mark(c, p, false, true);
 }
 
 // Visits the index local of each index projection of `p`, in projection order.
@@ -1131,26 +1144,82 @@ fn read_index_locals(func* f, read_cursor mut* c, place p) void {
     }
 }
 
-// Visits the index locals of `p` and then `p`, whose value the statement reads.
+// Visits the pointers that the address of `p` loads, in projection order: the prefix of `p`
+// before each `deref`, and the prefix before each index on a span or a `string`, whose pointer
+// field the index reads.
+fn read_pointers(func* f, read_cursor mut* c, place p) void {
+    types.node* mut t = base_type(f, p);
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        projection pj = place_projection(f, p, i);
+        bool header = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+        if (pj.kind == proj_kind.pj_deref || (pj.kind == proj_kind.pj_index && header)) {
+            place mut prefix = p;
+            prefix.proj_len = i;
+            read_visit(c, prefix);
+        }
+        t = apply_projection(f, t, pj);
+        i += 1;
+    }
+}
+
+// Visits the index locals of `p` and then `p`, whose value the item reads.
 fn read_place(func* f, read_cursor mut* c, place p) void {
     read_index_locals(f, c, p);
     read_visit(c, p);
 }
 
+// Visits the reads of `p`, whose address the item takes and whose value it does not read: the
+// index locals of `p`, then the pointers that its address loads.
+fn read_address(func* f, read_cursor mut* c, place p) void {
+    read_index_locals(f, c, p);
+    read_pointers(f, c, p);
+}
+
+// Visits the index locals of the place of a `copy` or a `move`, then the place. A `move` empties
+// the place after the read.
 fn read_operand(func* f, read_cursor mut* c, operand o) void {
     if (o.kind != operand_kind.ok_const) {
-        read_place(f, c, o.place);
+        read_index_locals(f, c, o.place);
+        read_mark(c, o.place, o.kind == operand_kind.ok_move, true);
     }
 }
 
-/// Place `i` that `s` reads, in `out`. False when `i` is at or past the count. Every index local
-/// of every place that the statement names is a read, and it comes as the place of that local,
-/// with no projection. The order is evaluation order: the index locals of the destination of an
-/// assignment, then the callee of a call through a value, the index locals of the place of an
+// Visits the place of `slice(p, lo, hi)`. A slice of a span or a `string` loads the pointer field
+// of `p`, so it reads `p`. A slice of a fixed array takes the address of `p`.
+fn read_slice(func* f, read_cursor mut* c, place p) void {
+    types.type_kind k = place_type(f, p)->kind;
+    if (k == types.type_kind.k_span || k == types.type_kind.k_string) {
+        read_place(f, c, p);
+    } else {
+        read_address(f, c, p);
+    }
+}
+
+/// Place `i` that `s` reads, in `out`. False when `i` is at or past the count. A read is a load of
+/// the storage of the place (spec/fir.md 7). An index local comes as the place of that local, and
+/// the pointer that a `deref` loads comes as the prefix of the place before the `deref`, both
+/// with no projection of their own. The order is evaluation order: the index locals of the
+/// destination of an assignment, then the callee of a call through a value, the place of an
 /// `addr` or a `slice`, and the operands of the rvalue, each with its index locals before its
-/// place. A `del` reads the index locals of its place and then the place. The place of an `addr`
-/// or a `slice`, and the destination of an assignment, are not reads of their value.
+/// place. Last come the pointers that the address of the destination loads, because the
+/// translator computes that address at the store, after the right side (spec/fir.md 12.5). A
+/// `del` reads the index locals of its place and then the place. The place of an `addr`, the
+/// place of a `slice` of a fixed array and the destination of an assignment are no reads of
+/// their value: their index locals and their pointers are the reads. A `slice` of a span or a
+/// `string` reads its place.
 fn stmt_reads_place(func* f, statement* s, u32 i, place mut* out) bool {
+    read mut r = read{};
+    if (!stmt_read(f, s, i, &r)) {
+        return false;
+    }
+    *out = r.place;
+    return true;
+}
+
+/// Read `i` of `s` in the order of stmt_reads_place, with the place of a `move` operand or of a
+/// `del` marked as emptied. Every read of a statement is a use.
+fn stmt_read(func* f, statement* s, u32 i, read mut* out) bool {
     read_cursor mut c = read_cursor{.want = i};
     switch (s->kind) {
     case stmt_kind.st_assign:
@@ -1159,16 +1228,20 @@ fn stmt_reads_place(func* f, statement* s, u32 i, place mut* out) bool {
         if (r.kind == rvalue_kind.rv_call && r.callee == callee_kind.cl_value) {
             read_operand(f, &c, r.callee_op);
         }
-        if (r.kind == rvalue_kind.rv_addr || r.kind == rvalue_kind.rv_slice) {
-            read_index_locals(f, &c, r.place);
+        if (r.kind == rvalue_kind.rv_addr) {
+            read_address(f, &c, r.place);
+        } else if (r.kind == rvalue_kind.rv_slice) {
+            read_slice(f, &c, r.place);
         }
         u32 mut k = 0;
         while (k < r.ops_len && !c.done) {
             read_operand(f, &c, rvalue_operand(f, r, k));
             k += 1;
         }
+        read_pointers(f, &c, s->place);
     case stmt_kind.st_del:
-        read_place(f, &c, s->place);
+        read_index_locals(f, &c, s->place);
+        read_mark(&c, s->place, true, true);
     case stmt_kind.st_live, stmt_kind.st_dead:
         return false;
     }
@@ -1382,10 +1455,22 @@ fn term_targets(func* f, terminator* t, u32 i, u32 mut* out) bool {
 /// Place `i` that `t` reads, in `out`, in the shape of stmt_reads_place. False when `i` is at or
 /// past the count. A `switch` reads its operand. A `check` reads its condition and then its
 /// reported operands, and a `fail` its reported operands. `check(overwrite: p)` reads the index
-/// locals of `p` and not its value: the test of `p` counts as no use of it (spec/fir.md 14). Each
-/// operand and place comes after its index locals. A `return` reads `_0` unless `_0` is
-/// `void`. `goto`, `trap` and `unreachable` read nothing.
+/// locals of `p` and then `p`, whose pointer word it loads to test it (spec/fir.md 12.4); section
+/// 14 counts that test as no use of `p`, and term_read says so. Each operand and place comes
+/// after its index locals. A `return` reads `_0` unless `_0` is `void`. `goto`, `trap` and
+/// `unreachable` read nothing.
 fn term_reads_place(func* f, terminator* t, u32 i, place mut* out) bool {
+    read mut r = read{};
+    if (!term_read(f, t, i, &r)) {
+        return false;
+    }
+    *out = r.place;
+    return true;
+}
+
+/// Read `i` of `t` in the order of term_reads_place, with the place of a `move` operand marked as
+/// emptied. The read of the place of `check(overwrite: p)` is no use; every other read is one.
+fn term_read(func* f, terminator* t, u32 i, read mut* out) bool {
     read_cursor mut c = read_cursor{.want = i};
     switch (t->kind) {
     case term_kind.tk_switch:
@@ -1397,6 +1482,7 @@ fn term_reads_place(func* f, terminator* t, u32 i, place mut* out) bool {
         read_term_args(f, &c, t);
     case term_kind.tk_check_overwrite:
         read_index_locals(f, &c, t->place);
+        read_mark(&c, t->place, false, false);
     case term_kind.tk_return:
         if (local_at(f, 0)->ty->kind != types.type_kind.k_void) {
             read_visit(&c, place_local(0));

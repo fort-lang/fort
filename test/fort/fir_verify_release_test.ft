@@ -1,0 +1,148 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| small release ok
+//| chain release ok
+/// Checks that fir_verify.find_violation gives back every block it takes: the sets and the stack
+/// of V9, the predecessor table that the flow rules share, and the dataflows and the scan set of
+/// V12 and V13 (notes/testing.md 4).
+import fir;
+import fir_env;
+import fir_parse;
+import fir_verify;
+import heap;
+import std.strbuf;
+
+// Parses `text` against the fixture and returns its one function, which lives in *m.
+fn parse(fir_env.env mut* e, fir.module mut* m, string text) fir.func* {
+    u64 before = fir_env.errors(e);
+    *m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, fir_env.prelude(e));
+    if (fir_env.errors(e) != before) {
+        eprintln(text);
+        panic("fir_verify_release_test.parse: a text does not parse");
+    }
+    return fir.module_function_at(m, 0);
+}
+
+// The count of the calls of the verifier in one round of the small probe.
+u64 CALLS = 100;
+
+// Each round runs every rule of the verifier CALLS times over a loop of four blocks that keeps
+// every rule. A release of one block of 8 to 80 bytes in each call leaks 32 bytes or more in
+// each call, so 3200 bytes or more in each round, and the program break moves. The probe watches
+// the system view alone, because the free chunks of a round leave the address of a small block
+// no view. It runs first, before any other test of this program leaves free chunks that absorb
+// the leak.
+fn small_rounds_leave_the_heap_where_it_was() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    string[7] lines = {
+        "fn main.f(_1 (c): bool) -> i32 {",
+        "let _2: i32;",
+        "bb0: { _2 = const i32 0; goto bb1; }",
+        "bb1: { _0 = copy _2; switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { goto bb1; }",
+        "bb3: { return; }",
+        "}",
+    };
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    for (string line : lines) {
+        strbuf.append(&text, line);
+        strbuf.push(&text, '\n');
+    }
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    fir.func* f = parse(&e, &m, strbuf.view(&text));
+    fir_verify.runtime rt = fir_verify.runtime{};
+    u64[3] mut break_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        u64 mut k = 0;
+        while (k < CALLS) {
+            fir_verify.violation mut v = fir_verify.violation{};
+            assert(!fir_verify.find_violation(f, &rt, &v));
+            k += 1;
+        }
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+}
+
+// The count of the blocks of the chain.
+u32 BLOCKS = 600;
+
+// A function of BLOCKS blocks: a chain of diamonds, each of which assigns the temporary `_2` on
+// both arms, and a join that reads it and loops back to bb1.
+fn chain(strbuf.str_buf mut* b) void {
+    strbuf.append(b, "fn main.f(_1 (c): bool) -> i32 {\nlet _2: i32; let _3: i32;\n");
+    strbuf.append(b, "bb0: { goto bb1; }\n");
+    u32 mut k = 1;
+    while (k + 3 < BLOCKS) {
+        strbuf.append(b, "bb");
+        strbuf.append_u64(b, cast(k, u64));
+        strbuf.append(b, ": { switch(copy _1) -> [true: bb");
+        strbuf.append_u64(b, cast(k + 1, u64));
+        strbuf.append(b, ", otherwise: bb");
+        strbuf.append_u64(b, cast(k + 2, u64));
+        strbuf.append(b, "]; }\n");
+        u32 mut arm = 1;
+        while (arm < 3) {
+            strbuf.append(b, "bb");
+            strbuf.append_u64(b, cast(k + arm, u64));
+            strbuf.append(b, ": { _2 = const i32 1; goto bb");
+            strbuf.append_u64(b, cast(k + 3, u64));
+            strbuf.append(b, "; }\n");
+            arm += 1;
+        }
+        k += 3;
+    }
+    strbuf.append(b, "bb");
+    strbuf.append_u64(b, cast(k, u64));
+    strbuf.append(b, ": { _3 = copy _2; switch(copy _1) -> [true: bb1, otherwise: bb");
+    strbuf.append_u64(b, cast(k + 1, u64));
+    strbuf.append(b, "]; }\nbb");
+    strbuf.append_u64(b, cast(k + 1, u64));
+    strbuf.append(b, ": { _0 = copy _3; return; }\n}\n");
+}
+
+// Each round runs every rule over the chain once, so each result vector of a dataflow is about
+// 10 KB and the program break moves for a leak of one of them.
+fn chain_rounds_leave_the_heap_where_it_was() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    chain(&text);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    fir.func* f = parse(&e, &m, strbuf.view(&text));
+    assert(fir.block_count(f) == BLOCKS);
+    fir_verify.runtime rt = fir_verify.runtime{};
+    u64[3] mut break_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        fir_verify.violation mut v = fir_verify.violation{};
+        assert(!fir_verify.find_violation(f, &rt, &v));
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    small_rounds_leave_the_heap_where_it_was();
+    println("small release ok");
+    chain_rounds_leave_the_heap_where_it_was();
+    println("chain release ok");
+    return 0;
+}

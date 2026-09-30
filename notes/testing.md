@@ -437,7 +437,10 @@ bullet at a time and without a rewrite.
   green while every other release of that function turned it red (T-084). The round therefore
   repeats the allocation the release covers (two hundred parameter lists, a thousand child lists)
   until the leak is a round's worth rather than a block's, and the deletion test is what says it is
-  enough.
+  enough. **Such a probe runs first in its program**: the free chunks that earlier tests leave
+  absorb its leak. `small_rounds_leave_the_heap_where_it_was` in `fir_flow_test.ft` leaks 64
+  bytes in each of 100 calls per round when `bits_free(&next)` is deleted. Run after the other
+  tests of the program, its break read 0; run first, it read 675840 (T-233).
   **A `//! stderr:` directive cannot see a line that should not be there**: it is a substring
   check over the whole run, so "this call wrote nothing" is asserted by capturing the descriptor
   into a file and comparing the bytes: `test/fort/support/capture.ft` does the `dup`/`dup2` and
@@ -469,6 +472,11 @@ bullet at a time and without a rewrite.
   in one program through `fir_verify.find_violation`, which returns the violation and does not
   panic. It parses each case against a prelude and a sandbox `std/rt.ft` that declares the eleven
   runtime entries, because a `check_env` sandbox has an empty runtime (T-229).
+  **The flow rules V9, V11, V12 and V13 run after every local rule**, so a green case of a local
+  rule may break a flow rule: 92 of them read a temporary that nothing assigns (V13). The helpers
+  `green` and `green_func` accept a flow violation, and `flow_green` accepts none. A green `.fir`
+  file keeps every rule, because the pass `verify` runs them all. `//! panic:` matches a
+  substring, so a red file whose text passes 100 columns drops the prefix `fir.verify: ` (T-233).
 - **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
   when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
   holds only the program, and `check_env` sandboxes get an empty runtime. Write
