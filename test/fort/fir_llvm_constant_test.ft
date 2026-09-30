@@ -101,13 +101,62 @@ fn each_constant_is_its_literal() void {
     llvm_env.in_direct(&e, "consts", want[..]);
 }
 
-// The zero of each scalar type that a designated literal leaves out: `0.0` for a float, `null`
-// for a pointer, `false` through `zext` for a `bool`, and `0` for an enum and a `char`. Each
-// member stores at the alignment of its field.
+// A designated literal is `aggregate zeroed`: the translator zeroes the whole value with
+// `llvm.memset`, padding included, and writes only the named field, as the direct path does.
+fn a_designated_literal_zeroes_the_whole_value() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[4] want = {
+        "entry:",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %ret.sret, i8 0, i64 32, i1 false)",
+        "  %t0 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 5",
+        "  store i16 1, ptr %t0, align 2",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, SOURCE[..], "zeros", pass_env.CHECKED), want[..]);
+    llvm_env.in_direct(&e, "zeros", want[1..]);
+}
+
+string[15] MIX = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "enum color {",
+    "    red,",
+    "}",
+    "struct mix {",
+    "    f64 f;",
+    "    i32* p;",
+    "    bool b;",
+    "    color k;",
+    "    char c;",
+    "    i16 n;",
+    "}",
+};
+
+// A plain `aggregate` of `const zero` members, which no literal lowers to since a designated one
+// is `aggregate zeroed`, and which a test writes by hand. The parser reads the line break inside
+// the operand list as a space.
+string[7] ZEROS = {
+    "fn main.zeros() -> mix {",
+    "    bb0: {",
+    "        _0 = aggregate mix(const zero f64, const zero i32*, const zero bool,",
+    "            const zero color, const zero char, const i16 1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The zero of each scalar type: `0.0` for a float, `null` for a pointer, `false` through `zext`
+// for a `bool`, and `0` for an enum and a `char`. Each member stores at the alignment of its
+// field.
 fn the_zero_of_each_scalar_type() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, MIX[..], ZEROS[..]);
+    defer fir.module_free(&m);
     string[14] want = {
         "entry:",
         "  %t0 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 0",
@@ -124,7 +173,7 @@ fn the_zero_of_each_scalar_type() void {
         "  %t6 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 5",
         "  store i16 1, ptr %t6, align 2",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, SOURCE[..], "zeros", pass_env.CHECKED), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, fir.module_function_at(&m, 0)), want[..]);
 }
 
 // ---- calls --------------------------------------------------------------------------------------
@@ -314,6 +363,7 @@ fn one_statement_alone() void {
 
 fn main() i32 {
     each_constant_is_its_literal();
+    a_designated_literal_zeroes_the_whole_value();
     the_zero_of_each_scalar_type();
     println("constants ok");
     a_call_writes_each_result_form();

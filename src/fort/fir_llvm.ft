@@ -1014,7 +1014,9 @@ fn member_addr(translator mut* t, types.node* ty, gen.gen_val at, u32 k) gen.gen
 }
 
 // `aggregate T(...)` into `dst`: every operand is read first, in order, then each member is
-// written through a `getelementptr` of the destination (spec/fir.md 6, 12.1).
+// written through a `getelementptr` of the destination (spec/fir.md 6, 12.1). `aggregate zeroed`
+// zeroes the whole destination with `llvm.memset` between the two, padding included, and writes no
+// member that is `const zero`, as the direct path writes a designated literal.
 fn aggregate_into(translator mut* t, fir.rvalue r, fir.place dst) void {
     types.node* ty = r.ty;
     held mut@ own members = new(held, cast(r.ops_len, u64));
@@ -1026,9 +1028,16 @@ fn aggregate_into(translator mut* t, fir.rvalue r, fir.place dst) void {
         k += 1;
     }
     gen.gen_val at = place_addr(t, dst);
+    if (r.zeroed) {
+        memset_at(t, at, ty);
+    }
     k = 0;
     while (k < r.ops_len) {
-        write_held(t, &members[cast(k, u64)], member_addr(t, ty, at, k));
+        fir.operand o = fir.rvalue_operand(t->f, r, k);
+        bool zero = o.kind == fir.operand_kind.ok_const && o.value.kind == fir.const_kind.ck_zero;
+        if (!r.zeroed || !zero) {
+            write_held(t, &members[cast(k, u64)], member_addr(t, ty, at, k));
+        }
         k += 1;
     }
 }

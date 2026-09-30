@@ -596,6 +596,39 @@ came here.
   built by that one write one module for the compiler source. That module is not the direct
   path's: `diff` of the two gives 261291 lines on Linux. The probe passed the 702 language tests
   with `--verify-ir` and the 255 module tests of `test/fort`.
+- **The compiler writes each function through FIR when the lowering supports it** (T-253,
+  `spec/fir.md` 16.1). `gen_stmt.emit_function` counts the definition in `g->functions`, and
+  with the option `gen_options.fir`, which the driver sets, it lowers the function, runs the
+  verifier, the build-mode pass and the verifier again, and translates a FIR module of that one
+  function, whose extern list gives its `declare` lines. It counts `g->lowered` and returns.
+  Otherwise `gen_stmt.gen_function`, the direct path, writes the function. The emitter suites
+  leave the option false, so they test the direct path, and `llvm_env.direct` still gives its
+  text. Two cases take the direct path. The first is a function that the lowering refuses: a
+  construct that it does not lower refuses the function whatever the runtime, and today it
+  refuses only a function that needs a print or a string equality that the closure lacks
+  (T-244). The second is a function whose `check` or `fail` names a runtime entry that the
+  closure lacks or declares with other parameters, which rule V7 refuses
+  (`fir_verify.runtime_holds` and `entry_fits`); only a test with a stub `std.rt`, or an old
+  `--std-dir`, meets it. Over `test/lang`, `src/fort`, `src/lsp` and `std`, `--fir-stats` gives
+  `lowered N of N` in every module. A violation of a rule of the verifier ends the compiler with
+  a panic (`gen_stmt.emit_fir` runs `check_fir` before the translator), so T-210's program was
+  an internal error of `fort -S` until T-210 made the checker refuse it. No known source program
+  then breaks V9, so `gen_fir_v9_panic_test.ft` gives a FIR function built by hand to
+  `emit_fir`, and `driver_test.ft` gives it to `driver.report_function`, the path of
+  `--fir-verify-report`. A designated literal is `aggregate zeroed`, which the translator writes
+  as the direct path does: a memset of the whole value, the padding included, then the named
+  fields (`run/structs/012_designated_padding`, review round 2). A member of a literal that the
+  lowering builds in a `%tmp` slot of a type with padding, and the operand of a cast, start as
+  `const zero` (`fir_lower.built_operand`), because the direct path builds them in a field whose
+  padding a designated literal has zeroed. A first fix zeroed them in a designated literal alone,
+  and `deep()` of `run/structs/013_designated_member_padding` printed stale padding at `-O0`: a
+  callee's positional literal copied a stale `%tmp` slot into the zeroed field that the caller
+  passed as its `sret` pointer (review round 3). The direct path
+  records an extern where it writes the call, after the calls of the arguments, so that the
+  `declare` lines follow the text of the definitions on both paths (`spec/fir.md` 12.5). The FIR
+  path costs time: in three runs in the VM on T-253's tree, `fort -S src/fort/main.ft` took 3.2 s
+  to 3.4 s through FIR and 1.4 s to 1.6 s through the direct path, and `fort --fir` alone took
+  2.1 s to 2.2 s, so the lowering and the verifier take most of the difference.
 
 ## 7. The runtime and the standard library
 

@@ -1,5 +1,6 @@
 #!/bin/bash
-# tools/ir_snapshot.sh <fort> <std-dir> <out-dir>: write the emitted IR of the run corpus.
+# tools/ir_snapshot.sh [--fir-stats] <fort> <std-dir> <out-dir>: write the emitted IR of the run
+# corpus.
 # <std-dir> is the staged standard library of the build, build/<Host>/debug/std, and not std/.
 #
 # The script reads the test list from `test/lang/run_tests.py --list run/`.
@@ -11,6 +12,11 @@
 # Two snapshots compare with `diff -r` (D19.5). A ticket that must not change the emitted IR
 # uses them as its identity check. The FIR migration compares two snapshots with `llvm-diff`
 # (notes/testing.md 6).
+#
+# With --fir-stats, each `-S` run also gets `--fir-stats` (D14.1), and the script writes the line
+# `<mode> <test path> lowered N of M` of each module to <out-dir>/stats.txt: N functions that the
+# FIR path wrote, of M definitions (spec/fir.md 16.1). It prints the sums of each mode at the end.
+# A compiler before T-253 has no --fir-stats and refuses every test in this mode.
 #
 # The emitter reads two build options (`gen_options`, src/fort/gen.ft).
 # `--release` controls the overflow checks and the overwrite checks.
@@ -37,9 +43,14 @@ set -eu
 set -f
 
 usage() {
-    echo "usage: ir_snapshot.sh <fort> <std-dir> <out-dir>" >&2
+    echo "usage: ir_snapshot.sh [--fir-stats] <fort> <std-dir> <out-dir>" >&2
 }
 
+stats=
+if [ "$#" -eq 4 ] && [ "$1" = --fir-stats ]; then
+    stats=--fir-stats
+    shift
+fi
 if [ "$#" -ne 3 ]; then
     usage
     exit 2
@@ -94,6 +105,9 @@ flags_of() {
 
 status=0
 : >"$out/skipped.txt"
+if [ -n "$stats" ]; then
+    : >"$out/stats.txt"
+fi
 for mode in default release nobounds; do
     mkdir -p "$out/$mode"
 done
@@ -120,12 +134,16 @@ while IFS= read -r path; do
         fi
         # $option is one option or empty. $flags is the directive text, which run_tests.py
         # splits at white space. So the split of each one into words is what is wanted here.
+        # $stats is `--fir-stats` or empty, one word or none.
         # shellcheck disable=SC2086
-        if "$fort" --std-dir "$std" $option $flags -S -o "$module" "$entry" \
-            2>"$out/stderr.txt"; then
+        if "$fort" --std-dir "$std" $stats $option $flags -S -o "$module" "$entry" \
+            2>"$out/stderr.txt" >"$out/stdout.txt"; then
             if [ ! -s "$module" ]; then
                 echo "ir_snapshot.sh: $mode: $path: the compiler exited 0 and wrote no module" >&2
                 status=1
+            fi
+            if [ -n "$stats" ]; then
+                echo "$mode $path $(cat "$out/stdout.txt")" >>"$out/stats.txt"
             fi
         else
             code=$?
@@ -136,7 +154,7 @@ while IFS= read -r path; do
         fi
     done
 done <"$list"
-rm -f "$out/stderr.txt"
+rm -f "$out/stderr.txt" "$out/stdout.txt"
 
 tests=$(wc -l <"$list" | tr -d ' ')
 echo "ir_snapshot.sh: $tests tests"
@@ -146,4 +164,13 @@ for mode in default release nobounds; do
 done
 skipped=$(wc -l <"$out/skipped.txt" | tr -d ' ')
 echo "ir_snapshot.sh: $skipped skipped (skipped.txt)"
+if [ -n "$stats" ]; then
+    # Each line of stats.txt is `<mode> <path> lowered <n> of <m>`.
+    for mode in default release nobounds; do
+        awk -v mode="$mode" '
+            $1 == mode && $3 == "lowered" { n += $4; m += $6 }
+            END { printf "ir_snapshot.sh: %s: lowered %d of %d (stats.txt)\n", mode, n, m }
+        ' "$out/stats.txt"
+    done
+fi
 exit "$status"

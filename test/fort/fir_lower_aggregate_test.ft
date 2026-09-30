@@ -11,9 +11,10 @@
 import lower_env;
 
 
-// `point{1, 2}` is one `aggregate` with its fields in declaration order, `point{.y = 2}` writes
-// `const zero i32` for the field that it leaves out, `{}` is `const zero point`, and an array
-// literal lists every element, an operation among them in a temporary first (D6.5).
+// `point{1, 2}` is one `aggregate` with its fields in declaration order, `point{.y = 2}` is
+// `aggregate zeroed` with `const zero i32` for the field that it leaves out, `{}` is `const zero
+// point`, and an array literal lists every element, an operation among them in a temporary
+// first (D6.5).
 fn a_literal_is_one_aggregate() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -45,7 +46,7 @@ fn a_literal_is_one_aggregate() void {
         "        live(_2) #6:11 s1;",
         "        _2 = aggregate point(const i32 1, const i32 2) #6:15 s1;",
         "        live(_3) #7:11 s2;",
-        "        _3 = aggregate point(const zero i32, const i32 2) #7:15 s2;",
+        "        _3 = aggregate zeroed point(const zero i32, const i32 2) #7:15 s2;",
         "        live(_4) #8:11 s3;",
         "        _4 = const zero point #8:15 s3;",
         "        live(_5) #9:12 s4;",
@@ -102,10 +103,10 @@ fn a_designated_literal_runs_in_source_order() void {
         "        _3 = copy _1.0 #9:27 s1;",
         "        _4 = addr mut(_1) #9:41 s1;",
         "        _5 = call fn main.next(copy _4) #9:40 s1;",
-        "        _2 = aggregate point(copy _5, copy _3) #9:15 s1;",
+        "        _2 = aggregate zeroed point(copy _5, copy _3) #9:15 s1;",
         "        _6 = addr mut(_1) #10:28 s2;",
         "        _7 = call fn main.next(copy _6) #10:27 s2;",
-        "        _0 = aggregate point(const zero i32, copy _7) #10:12 s2;",
+        "        _0 = aggregate zeroed point(const zero i32, copy _7) #10:12 s2;",
         "        dead(_2) #10:5 s2;",
         "        return #10:5 s2;",
         "    }",
@@ -352,7 +353,7 @@ fn a_member_of_an_aggregate_type() void {
         "        _3 = aggregate line(copy _1, copy _5, const \"ab\") #11:14 s1;",
         "        live(_4) #12:14 s2;",
         "        _4 = aggregate point[2](copy _1, const zero point) #12:18 s2;",
-        "        _0 = aggregate line(const zero point, copy _3.0, copy _2) #13:12 s3;",
+        "        _0 = aggregate zeroed line(const zero point, copy _3.0, copy _2) #13:12 s3;",
         "        dead(_3) #13:5 s3;",
         "        dead(_4) #13:5 s3;",
         "        return #13:5 s3;",
@@ -646,7 +647,7 @@ fn a_rect_grows_in_place() void {
         "    bb2: {",
         "        _6 = sub(copy _1.0.0, copy _2) #14:25 s2;",
         "        _1.0 = aggregate point(copy _6, copy _1.0.1) #14:12 s2;",
-        "        _0 = aggregate rect(copy _1.0, copy _1.1) #15:12 s3;",
+        "        _0 = aggregate zeroed rect(copy _1.0, copy _1.1) #15:12 s3;",
         "        return #15:5 s3;",
         "    }",
         "}",
@@ -654,10 +655,191 @@ fn a_rect_grows_in_place() void {
     lower_env.expect(lower_env.lower(&e, source[..], "grow"), want[..]);
 }
 
+// The source of the two tests below: `inner` has padding, `pair` has none.
+string[30] MEMBERS = {
+    "struct inner {",
+    "    u8 a;",
+    "    i64 b;",
+    "}",
+    "struct pair {",
+    "    i64 a;",
+    "    i64 b;",
+    "}",
+    "struct outer {",
+    "    inner i;",
+    "    pair p;",
+    "    inner[2] two;",
+    "}",
+    "fn make(i64 n) inner {",
+    "    return inner{1, n};",
+    "}",
+    "fn wrap(inner x) inner {",
+    "    return x;",
+    "}",
+    "fn couple() pair {",
+    "    return pair{1, 2};",
+    "}",
+    "fn f(bool c, i64 n) outer {",
+    "    outer o = outer{.i = make(n), .p = couple(),",
+    "        .two = {inner{2, n}, c ? make(n) : inner{.a = 3}}};",
+    "    return outer{.i = wrap(inner{4, n}), .p = o.p};",
+    "}",
+    "fn g(i64 n) outer {",
+    "    return outer{make(n), pair{1, 2}, {inner{.a = 5}, {}}};",
+    "}",
+};
+
+// A member of a literal that the lowering builds in a new temporary of a type with padding starts
+// as `const zero`, so its padding reads zero as in the direct path, which builds it in the zeroed
+// field of a designated literal (D6.5, T-253 review round 3). The rule reaches a nested literal,
+// a conditional and the result of a call, and it skips a type with no padding (`pair`), a
+// designated literal, which zeroes itself, and the argument of a call (`_10`).
+fn a_designated_member_starts_zeroed() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[41] want = {
+        "fn main.f(_1 (c): bool, _2 (n): i64) -> outer {",
+        "    let _0: outer;",
+        "    let _3 (o): outer #24:11;",
+        "    let _4: inner #24:30;",
+        "    let _5: pair #24:46;",
+        "    let _6: inner[2] #25:16;",
+        "    let _7: inner #25:17;",
+        "    let _8: inner #25:32;",
+        "    let _9: inner #26:27;",
+        "    let _10: inner #26:28;",
+        "",
+        "    bb0: {",
+        "        live(_3) #24:11 s1;",
+        "        _4 = const zero inner #24:30 s1;",
+        "        _4 = call fn main.make(copy _2) #24:30 s1;",
+        "        _5 = call fn main.couple() #24:46 s1;",
+        "        _6 = const zero inner[2] #25:16 s1;",
+        "        _7 = const zero inner #25:17 s1;",
+        "        _7 = aggregate inner(const u8 2, copy _2) #25:17 s1;",
+        "        _8 = const zero inner #25:32 s1;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #25:32 s1;",
+        "    }",
+        "    bb1: {",
+        "        _8 = call fn main.make(copy _2) #25:38 s1;",
+        "        goto bb3 #25:32 s1;",
+        "    }",
+        "    bb2: {",
+        "        _8 = aggregate zeroed inner(const u8 3, const zero i64) #25:44 s1;",
+        "        goto bb3 #25:32 s1;",
+        "    }",
+        "    bb3: {",
+        "        _6 = aggregate inner[2](copy _7, copy _8) #25:16 s1;",
+        "        _3 = aggregate zeroed outer(copy _4, copy _5, copy _6) #24:15 s1;",
+        "        _9 = const zero inner #26:27 s2;",
+        "        _10 = aggregate inner(const u8 4, copy _2) #26:28 s2;",
+        "        _9 = call fn main.wrap(copy _10) #26:27 s2;",
+        "        _0 = aggregate zeroed outer(copy _9, copy _3.1, const zero inner[2]) #26:12 s2;",
+        "        dead(_3) #26:5 s2;",
+        "        return #26:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, MEMBERS[..], "f"), want[..]);
+}
+
+// A member of a positional literal starts zeroed too. The direct path builds it in the
+// destination, whose padding the caller can have zeroed: a designated literal whose member is
+// `g(n)` passes a zeroed field as the `sret` pointer of `g`. A designated member, `_5`, zeroes
+// itself and takes no zero first.
+fn a_positional_member_starts_zeroed() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[18] want = {
+        "fn main.g(_1 (n): i64) -> outer {",
+        "    let _0: outer;",
+        "    let _2: inner #29:22;",
+        "    let _3: pair #29:27;",
+        "    let _4: inner[2] #29:39;",
+        "    let _5: inner #29:40;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero inner #29:22 s1;",
+        "        _2 = call fn main.make(copy _1) #29:22 s1;",
+        "        _3 = aggregate pair(const i64 1, const i64 2) #29:27 s1;",
+        "        _4 = const zero inner[2] #29:39 s1;",
+        "        _5 = aggregate zeroed inner(const u8 5, const zero i64) #29:40 s1;",
+        "        _4 = aggregate inner[2](copy _5, const zero inner) #29:39 s1;",
+        "        _0 = aggregate outer(copy _2, copy _3, copy _4) #29:12 s1;",
+        "        return #29:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, MEMBERS[..], "g"), want[..]);
+}
+
+// Tail padding counts: `tail` is i64 then u8, so the result of `mk_tail()` starts as `const
+// zero`. A cast copies the whole value, so its own temporary `_1` needs no zero. `packed` and
+// `string` have no padding, so their temporaries start as they are.
+fn a_member_with_tail_padding_starts_zeroed() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[27] source = {
+        "struct tail {",
+        "    i64 a;",
+        "    u8 b;",
+        "}",
+        "struct packed {",
+        "    u8 a;",
+        "    u8 b;",
+        "    u16 c;",
+        "    u32 d;",
+        "}",
+        "struct both {",
+        "    tail t;",
+        "    packed p;",
+        "    string s;",
+        "}",
+        "fn mk_tail() tail {",
+        "    return tail{1, 2};",
+        "}",
+        "fn mk_packed() packed {",
+        "    return packed{1, 2, 3, 4};",
+        "}",
+        "fn name() string {",
+        "    return \"n\";",
+        "}",
+        "fn h() both {",
+        "    return both{.t = cast(mk_tail(), tail), .p = mk_packed(), .s = name()};",
+        "}",
+    };
+    string[17] want = {
+        "fn main.h() -> both {",
+        "    let _0: both;",
+        "    let _1: tail #26:22;",
+        "    let _2: tail #26:34;",
+        "    let _3: packed #26:59;",
+        "    let _4: string #26:72;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero tail #26:34 s1;",
+        "        _2 = call fn main.mk_tail() #26:34 s1;",
+        "        _1 = cast<tail>(copy _2) #26:22 s1;",
+        "        _3 = call fn main.mk_packed() #26:59 s1;",
+        "        _4 = call fn main.name() #26:72 s1;",
+        "        _0 = aggregate zeroed both(copy _1, copy _3, copy _4) #26:12 s1;",
+        "        return #26:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "h"), want[..]);
+}
+
 fn main() i32 {
     a_literal_is_one_aggregate();
     a_designated_literal_runs_in_source_order();
     a_literal_reads_its_destination_first();
+    a_designated_member_starts_zeroed();
+    a_positional_member_starts_zeroed();
+    a_member_with_tail_padding_starts_zeroed();
     println("literal ok");
     each_arm_of_a_conditional_is_a_literal();
     an_empty_literal_of_an_owning_struct();

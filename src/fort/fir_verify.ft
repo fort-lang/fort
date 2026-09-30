@@ -142,6 +142,46 @@ fn runtime_of(check.checker* ck) runtime {
     return rt;
 }
 
+/// Whether `rt` holds a runtime entry that fits the kind of each `check`, `check(overwrite: p)`
+/// and `fail` of `f`: entry_fits for each. Rule V7 refuses `f` when it does not. Only a closure
+/// whose `std.rt` is a stub, as in a test, or comes from an old standard directory lacks one.
+fn runtime_holds(fir.func* f, runtime* rt) bool {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.block* bl = fir.block_at(f, b);
+        fir.term_kind k = bl->term.kind;
+        bool reports = k == fir.term_kind.tk_check || k == fir.term_kind.tk_fail
+            || k == fir.term_kind.tk_check_overwrite;
+        if (bl->terminated && reports && !entry_fits(rt, bl->term.check, f->tt)) {
+            return false;
+        }
+        b += 1;
+    }
+    return true;
+}
+
+/// Whether `rt` holds the runtime entry of `kind` with the parameters that V7 requires: the
+/// operands that fir.check_reported gives, then the file, the line and the column.
+fn entry_fits(runtime* rt, fir.check_kind kind, types.table mut* tt) bool {
+    ast.sym* entry = rt->entry[cast(kind, u64)];
+    if (entry == null) {
+        return false;
+    }
+    u32 count = fir.check_reported_count(kind);
+    types.node* ft = entry->ty;
+    if (ft->params.len != cast(count, u64) + LOCATION_PARAMS) {
+        return false;
+    }
+    u32 mut k = 0;
+    while (k < count) {
+        if (!types_agree(ft->params[cast(k, u64)], fir.check_reported(kind, k, tt))) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
 // ---- agreement and the type classes ------------------------------------------------------
 
 /// Whether the fort types `a` and `b` agree: they are equal after `mut` and `own` are removed at
@@ -906,23 +946,15 @@ fn v7_reported(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
     if (entry == null) {
         return fail(w, RULE_V7, V7_NO_ENTRY, b, position);
     }
-    u32 count = fir.check_reported_count(t->check);
-    types.node* ft = entry->ty;
-    if (ft->params.len != cast(count, u64) + LOCATION_PARAMS) {
+    if (!entry_fits(w->rt, t->check, w->f->tt)) {
         return fail(w, RULE_V7, V7_ENTRY, b, position);
     }
-    u32 mut k = 0;
-    while (k < count) {
-        types.node* want = fir.check_reported(t->check, k, w->f->tt);
-        if (!types_agree(ft->params[cast(k, u64)], want)) {
-            return fail(w, RULE_V7, V7_ENTRY, b, position);
-        }
-        k += 1;
-    }
+    u32 count = fir.check_reported_count(t->check);
+    types.node* ft = entry->ty;
     if (t->args_len != count) {
         return fail(w, RULE_V7, V7_REPORTED_COUNT, b, position);
     }
-    k = 0;
+    u32 mut k = 0;
     while (k < count) {
         fir.operand arg = fir.operand_at(w->f, t->args_first + k);
         if (!types_agree(ft->params[cast(k, u64)], fir.operand_type(w->f, arg))) {

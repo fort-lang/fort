@@ -1,0 +1,83 @@
+//! run
+//! stdout:
+//| 0 0 3
+//| -8
+//| 0 0 0 0 0 0 0 0 3
+//| -8
+//| 1 0 0 0 0 0 0 0 4
+// A designated literal zeroes the whole value before it writes the named fields, the padding
+// bytes included, on both paths of the compiler (spec/fir.md 6, T-253 review round 2). D6.5
+// zeroes the omitted fields; the padding is the compiler's behavior, which this test holds
+// through a byte view of the value. Byte 0 is the omitted `a`, and bytes 1 to 7 are padding.
+struct S {
+    u8 a;
+    i64 b;
+}
+
+// A struct whose first field has padding.
+struct W {
+    S inner;
+    i64 c;
+}
+
+// A function value, which the optimizer cannot follow into its callee.
+struct H {
+    fn (i64) S f;
+}
+
+// The padding byte that `bytes[1] = 7` writes reads zero after the designated literal.
+fn rewrite() void {
+    S mut s = S{.a = 1, .b = 2};
+    u8 mut* p = cast(&s, u8 mut*);
+    u8 mut@ bytes = p[0..16];
+    bytes[1] = 7;
+    s = S{.b = 3};
+    println(bytes[0], " ", bytes[1], " ", s.b);
+}
+
+// Fills the stack with bytes 255, where the frame of `show` stands next.
+fn dirty() i64 {
+    i64[8] mut junk = {-1, -1, -1, -1, -1, -1, -1, -1};
+    i64 mut t = 0;
+    for (u64 mut i = 0; i < 8; i++) {
+        t += junk[i];
+    }
+    return t;
+}
+
+// The padding of a fresh designated literal reads zero whatever the stack held.
+fn show() void {
+    S mut s = S{.b = 3};
+    u8* p = cast(&s, u8*);
+    u8@ bytes = p[0..16];
+    for (u64 mut i = 0; i < 8; i++) {
+        print(bytes[i], " ");
+    }
+    println(s.b);
+}
+
+// A member that a call gives: the direct path passes the zeroed field as the `sret` pointer,
+// and the FIR path a zeroed temporary, so bytes 1 to 7 read zero (T-253 review round 3).
+fn make(i64 n) S {
+    return S{1, n};
+}
+
+fn called(H* h) void {
+    W mut w = W{.inner = h->f(2), .c = 4};
+    u8* p = cast(&w, u8*);
+    u8@ bytes = p[0..24];
+    for (u64 mut i = 0; i < 8; i++) {
+        print(bytes[i], " ");
+    }
+    println(w.c);
+}
+
+fn main() i32 {
+    rewrite();
+    println(dirty());
+    show();
+    H h = H{make};
+    println(dirty());
+    called(&h);
+    return 0;
+}

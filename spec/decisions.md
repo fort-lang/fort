@@ -1589,7 +1589,13 @@ Sections:
   passes that its `//! pass:` directives name, in their order, and write the module to stdout in
   the textual form of `spec/fir.md` 13; a pass that the compiler does not run is an error with
   status 2, and combining it with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or
-  `--fir-after` is a usage error), `--help`, `--version`.
+  `--fir-after` is a usage error), `--fir-verify-report` (implies `--fir`, and writes in place of
+  the FIR one line to stdout for each function that breaks a rule of `spec/fir.md` 10, its first
+  violation after the lowering or after the build-mode pass of the selected mode, then exits 0;
+  `--fir-after` does not change the report), `--fir-stats` (after a build writes its module,
+  write the line `lowered N of M` to stdout: N functions that the FIR path wrote of M
+  definitions of fort functions, `spec/fir.md` 16.1; combining it with `--tokens`, `--ast`,
+  `--check`, `--index`, `--fir` or `--fir-test` is a usage error), `--help`, `--version`.
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
   A Linux x86-64 compiler stores `x86_64-linux-gnu` as its built target.
@@ -1636,6 +1642,9 @@ Sections:
   Amended 2026-09-30 (T-247): `--fir-after=build-mode` wrote the module that `--fir` writes, and
   `--fir-test` ran the one pass of its directive and refused `build-mode` with status 2. The
   build-mode pass exists now, and a test of it names the pass and then `verify`.
+  Amended 2026-09-30 (T-253): `--fir-verify-report` and `--fir-stats` did not exist. They are the
+  measurements of the migration (`spec/fir.md` 16.1, 16.5): the report runs rule V9 over a
+  corpus without a panic, and the count gives the share of functions that the FIR path writes.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.

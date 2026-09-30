@@ -3,6 +3,11 @@
 import ast;
 import check;
 import diag;
+import fir;
+import fir_llvm;
+import fir_lower;
+import fir_passes;
+import fir_verify;
 import gen;
 import gen_data;
 import gen_expr;
@@ -906,11 +911,19 @@ fn gen_slots(gen.emitter mut* g, ast.node* fn_node, gen.node_ref_vec mut* locals
     }
 }
 
-fn gen_function(gen.emitter mut* g, ast.node* fn_node) void {
+// Whether `fn_node` defines a function that the emitter writes: its symbol is a checked function.
+fn emits(ast.node* fn_node) bool {
     ast.sym* s = fn_node->sym;
-    if (s == null || s->error || s->ty == null || s->ty->kind != types.type_kind.k_fn) {
+    return s != null && !s->error && s->ty != null && s->ty->kind == types.type_kind.k_fn;
+}
+
+/// Writes the definition of `fn_node` through the direct path: one walk of the tree that appends
+/// the text of each statement (toolchain.md 6).
+fn gen_function(gen.emitter mut* g, ast.node* fn_node) void {
+    if (!emits(fn_node)) {
         return;
     }
+    ast.sym* s = fn_node->sym;
     types.node* sig = s->ty;
     gen.function_begin(g);
     emit_signature(g, fn_node, s, sig);
@@ -960,6 +973,73 @@ fn gen_function(gen.emitter mut* g, ast.node* fn_node) void {
     gen.function_end(g);
 }
 
+// ---- the two paths of a function (spec/fir.md 16.1) ------------------------
+
+/// What the FIR path of one program reads: the checker, which the lowering takes as `mut`, and
+/// the runtime entries of the checks, which the verifier reads. gen_program makes it once.
+struct fir_path {
+    check.checker mut* ck;
+    fir_verify.runtime rt;
+}
+
+/// The passes between the lowering and the translator (spec/fir.md 3): the verifier, the
+/// build-mode pass of the mode of `g` and the verifier again, whose rules V9 among them stay on.
+/// A violation of a rule ends the compiler with a panic that names it.
+fn check_fir(gen.emitter* g, fir_verify.runtime* rt, fir.func mut* f) void {
+    fir_verify.verify(f, rt);
+    fir_passes.build_mode(f, g->opts.release, g->opts.no_bounds_check);
+    fir_verify.verify(f, rt);
+}
+
+// Writes the definition of `fn_node` through the FIR path and returns true: the lowering,
+// check_fir and the translator (spec/fir.md 3). Returns false and writes nothing when the
+// lowering does not support the function, or when a check of the function names a runtime entry
+// that the closure lacks or declares with another signature, which rule V7 refuses and only a
+// stub `std.rt` of a test or an old --std-dir can cause. A violation of a rule of the verifier
+// ends the compiler with a panic.
+fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(fp->ck, fn_node, &f, &why)) {
+        return false;
+    }
+    if (!fir_verify.runtime_holds(&f, &fp->rt)) {
+        fir.func_free(&f);
+        return false;
+    }
+    emit_fir(g, fp, move(f));
+    return true;
+}
+
+/// Writes the FIR function `f`, which it takes: check_fir, then the translator. `f` is the only
+/// function of its FIR module, so its extern list drives the `declare` lines of its calls
+/// (spec/fir.md 5.1), after the lines of the functions before it.
+fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) void {
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    fir.module_add_function(&m, move(f));
+    fir.func mut* added = &m.funcs.items[0];
+    check_fir(g, &fp->rt, added);
+    fir.module_collect_externs(&m);
+    fir_llvm.translate_module(g, &m);
+}
+
+/// Writes the definition of `fn_node` through the FIR path when `g->opts.fir` is set and the
+/// lowering supports the function, and through the direct path of gen_function otherwise
+/// (spec/fir.md 16.1). `g->functions` counts each definition and `g->lowered` each one that the
+/// FIR path wrote.
+fn emit_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) void {
+    if (!emits(fn_node)) {
+        return;
+    }
+    g->functions += 1;
+    if (g->opts.fir && fir_function(g, fp, fn_node)) {
+        g->lowered += 1;
+        return;
+    }
+    gen_function(g, fn_node);
+}
+
 // ---- the module ----------------------------------------------------------
 
 // The named type of every struct the module declares, in source order, so that a field access names
@@ -1003,28 +1083,28 @@ fn gen_struct_type(gen.emitter mut* g, ast.node* decl) void {
     strbuf.append(&g->named, " }\n");
 }
 
-fn gen_module(gen.emitter mut* g, modules.module* m) void {
+fn gen_module(gen.emitter mut* g, fir_path mut* fp, modules.module* m) void {
     g->module = m;
-    gen_declarations(g, m->ast, 1);
+    gen_declarations(g, fp, m->ast, 1);
     // Module-level data precedes functions. Forward references are legal in
     // LLVM IR, and this order fixes private-data numbering.
-    gen_declarations(g, m->ast, 2);
-    gen_declarations(g, m->ast, 3);
+    gen_declarations(g, fp, m->ast, 2);
+    gen_declarations(g, fp, m->ast, 3);
     g->module = null;
 }
 
-fn gen_declaration(gen.emitter mut* g, ast.node* decl, i32 section) void {
+fn gen_declaration(gen.emitter mut* g, fir_path mut* fp, ast.node* decl, i32 section) void {
     ast.node* mut current = decl;
     while (current->kind == ast.ast_kind.k_compile_if) {
         if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
-            gen_declarations(g, current->b, section);
+            gen_declarations(g, fp, current->b, section);
             return;
         }
         if (current->c == null) {
             return;
         }
         if (current->c->kind != ast.ast_kind.k_compile_if) {
-            gen_declarations(g, current->c, section);
+            gen_declarations(g, fp, current->c, section);
             return;
         }
         current = current->c;
@@ -1034,14 +1114,14 @@ fn gen_declaration(gen.emitter mut* g, ast.node* decl, i32 section) void {
     } else if (section == 2 && current->kind == ast.ast_kind.k_var_decl) {
         gen_data.gen_global(g, current);
     } else if (section == 3 && current->kind == ast.ast_kind.k_fn_decl && current->b != null) {
-        gen_function(g, current);
+        emit_function(g, fp, current);
     }
 }
 
-fn gen_declarations(gen.emitter mut* g, ast.node* list, i32 section) void {
+fn gen_declarations(gen.emitter mut* g, fir_path mut* fp, ast.node* list, i32 section) void {
     u64 mut i = 0;
     while (list != null && i < ast.ast_len(list)) {
-        gen_declaration(g, ast.ast_child(list, i), section);
+        gen_declaration(g, fp, ast.ast_child(list, i), section);
         i += 1;
     }
 }
@@ -1086,9 +1166,14 @@ fn find_main_node(ast.node* decl) ast.node* {
 // Emits closure modules in dependency order, then emits the C `main`.
 // Uses annotations from `ck`. Returns false after an unsupported construct.
 // bootstrap0/src/gen.c stores the module set in the emitter beside the checker;
-// nothing ever reads it back, so it stays a parameter here.
-fn gen_program(gen.emitter mut* g, check.checker* ck, modules.module_set* set) bool {
+// nothing ever reads it back, so it stays a parameter here. The lowering of the FIR path takes
+// `ck` as `mut`, and the emitter keeps a pointer that does not write.
+fn gen_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* set) bool {
     g->ck = ck;
+    fir_path mut fp = fir_path{.ck = ck};
+    if (g->opts.fir) {
+        fp.rt = fir_verify.runtime_of(ck);
+    }
     // The named types every module carries, used or not.
     strbuf.append(&g->named, gen.SPAN_TYPE);
     strbuf.append(&g->named, " = type { ptr, i64 }\n");
@@ -1097,7 +1182,7 @@ fn gen_program(gen.emitter mut* g, check.checker* ck, modules.module_set* set) b
     // every module after the ones it imports
     u64 mut i = 0;
     while (i < modules.count(set)) {
-        gen_module(g, modules.at(set, i));
+        gen_module(g, &fp, modules.at(set, i));
         i += 1;
     }
     modules.module* entry = modules.entry(set);

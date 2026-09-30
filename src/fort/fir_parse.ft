@@ -1243,6 +1243,16 @@ fn take_mut(fir_parser mut* p) bool {
     return false;
 }
 
+// Consumes the mark `zeroed` of `aggregate zeroed T(...)`. The word is the mark only when a type
+// follows it, which starts with a name; a struct named `zeroed` stands before `(` or `[`.
+fn take_zeroed(fir_parser mut* p) bool {
+    if (at_word(p, "zeroed") && ftok_at(&p->toks, p->pos + 1).kind == ftok_kind.ft_ident) {
+        bump(p);
+        return true;
+    }
+    return false;
+}
+
 // Reads `addr [mut](p)` after the name.
 fn parse_addr(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
     bool is_mut = take_mut(p);
@@ -1360,10 +1370,12 @@ fn parse_rvalue(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
         }
         *out = fir.rvalue_alloc(f, ty, a);
     case fir.rvalue_kind.rv_aggregate:
+        bool zeroed = take_zeroed(p);
         if (!take_type(p, &ty) || !parse_operand_list(p, f, &first, &count)) {
             return false;
         }
         *out = fir.rvalue_aggregate_new(ty, first, count);
+        out->zeroed = zeroed;
     case fir.rvalue_kind.rv_call:
         return parse_call(p, f, out);
     default:
