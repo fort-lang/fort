@@ -9,6 +9,7 @@
 import consts;
 import fir;
 import fir_env;
+import prim;
 import std.rt;
 import std.strbuf;
 import types;
@@ -402,6 +403,68 @@ fn an_overwrite_check_reads_its_place_after_its_index_locals() void {
     assert(fir.term_read(&x.f, &plain, 0, &r) && !r.is_use);
 }
 
+// Whether read `k` of `t` is the place `want` itself: its base and its projections. A place that
+// holds a `deref` may overlap every place, so place_compare never calls it equal.
+fn reads_same(fir.func* f, fir.terminator* t, u32 k, fir.place want) bool {
+    fir.place mut p = fir.place{};
+    return fir.term_reads_place(f, t, k, &p) && p.base == want.base && p.local == want.local
+        && p.proj_first == want.proj_first && p.proj_len == want.proj_len;
+}
+
+// The address of the place of `check(overwrite: p)` loads the pointer of each `deref` and the
+// header before each index on a span. Those loads are uses, and they come before the test of `p`,
+// which is no use.
+fn an_overwrite_check_reads_the_pointers_of_its_address_as_uses() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    reader mut x = reader_of(&e);
+    defer fir.func_free(&x.f);
+    types.table mut* tt = fir_env.tt(&e);
+    // `check(overwrite: (*_p).0)` with `_p: holder mut*`: `_p`, then `(*_p).0`.
+    u32 p = temp(&x.f, types.type_ptr(tt, fir_env.ty(&e, "holder"), false, true));
+    fir.place held = fir.place_field(&x.f, fir.place_deref(&x.f, fir.place_local(p)), 0);
+    fir.terminator t = fir.term_check_overwrite(held, 1, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &t) == 2);
+    assert(reads_local(&x.f, &t, 0, p));
+    assert(reads_same(&x.f, &t, 1, held));
+    fir.read mut r = fir.read{.empties = true, .is_use = false};
+    assert(fir.term_read(&x.f, &t, 0, &r) && r.is_use && !r.empties);
+    r = fir.read{.empties = true, .is_use = true};
+    assert(fir.term_read(&x.f, &t, 1, &r) && !r.is_use && !r.empties);
+    assert(!fir.term_read(&x.f, &t, 2, &r));
+    // `check(overwrite: _s[_i])` with `_s: u8 mut* own mut@`: `_i`, then the header `_s`, then
+    // `_s[_i]`.
+    types.node* u8_ty = fir_env.prim_ty(&e, prim.prim_kind.prim_u8);
+    types.node* owner = types.type_ptr(tt, u8_ty, true, true);
+    u32 s = temp(&x.f, types.type_span(tt, owner, false, true));
+    fir.place slot = fir.place_index(&x.f, fir.place_local(s), x.i);
+    fir.terminator u = fir.term_check_overwrite(slot, 1, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &u) == 3);
+    assert(reads_local(&x.f, &u, 0, x.i));
+    assert(reads_local(&x.f, &u, 1, s));
+    assert(reads_same(&x.f, &u, 2, slot));
+    r = fir.read{.empties = true, .is_use = false};
+    assert(fir.term_read(&x.f, &u, 0, &r) && r.is_use && !r.empties);
+    r = fir.read{.empties = true, .is_use = false};
+    assert(fir.term_read(&x.f, &u, 1, &r) && r.is_use && !r.empties);
+    r = fir.read{.empties = true, .is_use = true};
+    assert(fir.term_read(&x.f, &u, 2, &r) && !r.is_use && !r.empties);
+    // a span in a field of a struct behind a pointer: `_q`, then `(*_q).0`, the header
+    types.node* box = types.type_ptr(tt, fir_env.ty(&e, "viewer"), false, true);
+    u32 q = temp(&x.f, box);
+    fir.place items = fir.place_field(&x.f, fir.place_deref(&x.f, fir.place_local(q)), 0);
+    fir.place cell = fir.place_index(&x.f, items, x.j);
+    fir.terminator v = fir.term_check_overwrite(cell, 1, fir_env.at(1, 1), 1);
+    assert(reads(&x.f, &v) == 4);
+    assert(reads_local(&x.f, &v, 0, x.j));
+    assert(reads_local(&x.f, &v, 1, q));
+    fir.place mut header = fir.place{};
+    assert(fir.term_reads_place(&x.f, &v, 2, &header));
+    assert(header.local == q && header.proj_first == cell.proj_first && header.proj_len == 2);
+    assert(reads_same(&x.f, &v, 3, cell));
+}
+
 fn a_move_in_a_terminator_empties_its_place() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -484,6 +547,7 @@ fn main() i32 {
     a_switch_reads_its_operand_after_its_index_local();
     a_check_reads_its_condition_then_its_reported_operands();
     an_overwrite_check_reads_its_place_after_its_index_locals();
+    an_overwrite_check_reads_the_pointers_of_its_address_as_uses();
     a_move_in_a_terminator_empties_its_place();
     every_other_read_of_a_terminator_is_a_use();
     a_return_reads_the_return_place_unless_it_is_void();

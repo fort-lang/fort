@@ -33,7 +33,7 @@ import types;
 
 // ---- the environment ---------------------------------------------------------------------
 
-u64 FIXTURE_LINES = 86;
+u64 FIXTURE_LINES = 94;
 
 // The prelude: the module `main`. `fail_enum` has the name of a runtime entry in another module.
 string[FIXTURE_LINES] FIXTURE = {
@@ -122,6 +122,14 @@ string[FIXTURE_LINES] FIXTURE = {
     "fn eat(u8 mut* own p) u8 {",
     "    del(p);",
     "    return 0;",
+    "}",
+    "fn view_all(u8 mut* own* p) void {",
+    "}",
+    "fn keep_all(u8 mut* own* own p) void {",
+    "    del(p);",
+    "}",
+    "struct shelf {",
+    "    u8 mut* own* p;",
     "}",
 };
 
@@ -1496,6 +1504,52 @@ fn v6_a_cast_never_adds_own() void {
     red(&e, owner, "_3 = cast<u8 mut* own>(move _1); return; }", 4, fir_verify.V4_CAST, 0, 0);
 }
 
+// A copy lends what its place owns and a move carries it, so neither adds `own` at a level behind
+// the outermost, whatever position it fills (D3.14, D17.4).
+fn v6_a_copy_or_a_move_adds_no_own() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string views = "let _1: u8 mut**; let _2: u8 mut* own*; let _3: u8 mut** own; let _4: void;";
+    string owners = "let _5: u8 mut* own* own; let _6: shelf; let _7: u8 mut* own*[2];";
+    string deep = "let _8: u8 mut*[2]*; let _9: u8 mut* own[2]*; let _10: i32; bb0: {";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, views);
+    strbuf.append(&b, owners);
+    strbuf.append(&b, deep);
+    string lets = strbuf.view(&b);
+    // a copy into a place that does not own, the case of the T-233 round 3 review
+    red(&e, lets, "_2 = copy _1; return; }", 6, fir_verify.V6_ADDS_OWN, 0, 0);
+    // the level stored inline in an array behind a pointer
+    red(&e, lets, "_9 = copy _8; return; }", 6, fir_verify.V6_ADDS_OWN, 0, 0);
+    // a move into an owning place: the outer `own` moves, and the level behind it gains one
+    red(&e, lets, "_5 = move _3; return; }", 6, fir_verify.V6_ADDS_OWN, 0, 0);
+    // an argument for a parameter that does not own, and a move into one that owns
+    red(&e, lets, "_4 = call fn main.view_all(copy _1); return; }", 6, fir_verify.V6_ADDS_OWN, 0,
+        0);
+    red(&e, lets, "_4 = call fn main.keep_all(move _3); return; }", 6, fir_verify.V6_ADDS_OWN, 0,
+        0);
+    // a field of a struct, and the second element of an array
+    red(&e, lets, "_6 = aggregate shelf(copy _1); return; }", 6, fir_verify.V6_ADDS_OWN, 0, 0);
+    red(&e, lets, "_7 = aggregate u8 mut* own*[2](copy _2, copy _1); return; }", 6,
+        fir_verify.V6_ADDS_OWN, 0, 0);
+    // the check stands at its statement
+    red(&e, lets, "_10 = const i32 1; _2 = copy _1; return; }", 6, fir_verify.V6_ADDS_OWN, 0, 1);
+    // a copy that carries an inner `own`, or drops the outer one: a lend
+    green(&e, lets, "_2 = copy _5; _1 = copy _2; _9 = copy _9; return; }");
+    green(&e, lets, "_4 = call fn main.view_all(copy _5); return; }");
+    green(&e, lets, "_4 = call fn main.keep_all(move _5); _5 = move _5; return; }");
+    green(&e, lets, "_6 = aggregate shelf(copy _2); return; }");
+    green(&e, lets, "_7 = aggregate u8 mut* own*[2](copy _2, copy _5); return; }");
+    // a constant is no place, and its kind decides where it stands
+    green(&e, lets, "_2 = const null u8 mut**; return; }");
+    green(&e, lets, "_4 = call fn main.view_all(const null u8 mut**); return; }");
+    // an argument in the variadic tail of an extern has no parameter
+    green(&e, "let _1: u8 mut**; let _2: char*; let _3: i32; bb0: {",
+          "_3 = call extern printf(copy _2, copy _1); return; }");
+}
+
 // ---- V7 --------------------------------------------------------------------------------------
 
 fn v7_a_call_matches_its_callee() void {
@@ -2546,6 +2600,7 @@ fn main() i32 {
     v6_a_literal_fills_no_owning_position();
     v6_an_owning_value_lands_in_an_owning_position();
     v6_a_cast_never_adds_own();
+    v6_a_copy_or_a_move_adds_no_own();
     println("V5 V6 ok");
     v7_a_call_matches_its_callee();
     v7_a_check_reports_what_its_runtime_entry_takes();

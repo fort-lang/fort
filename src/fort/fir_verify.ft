@@ -95,6 +95,7 @@ string V6_ARGUMENT = "an owning parameter takes a copy or a view";
 string V6_MEMBER = "an owning member takes a copy or a view";
 string V6_LANDS_PLACE = "an owning value in a place that does not own";
 string V6_LANDS_OPERAND = "a move where no owning position takes it";
+string V6_ADDS_OWN = "a copy or a move adds own";
 string V7_ARGUMENTS = "a call with the wrong count of arguments";
 string V7_ARGUMENT = "an argument does not agree with its parameter";
 string V7_AGGREGATE = "an aggregate argument that is not a place";
@@ -746,6 +747,19 @@ fn fills_owning(fir.operand o) bool {
                                                    || o.value.kind == fir.const_kind.ck_zero);
 }
 
+// The type of the position that operand `k` of the `call` or the `aggregate` `r` fills: the
+// parameter, or the field or element. Null for an argument in the variadic tail of an extern.
+fn position_type(fir.func* f, fir.rvalue r, u32 k) types.node* {
+    if (r.kind == fir.rvalue_kind.rv_aggregate) {
+        return member_type(f, r.ty, k);
+    }
+    types.node* ft = fir.callee_type(f, r);
+    if (cast(k, u64) >= ft->params.len) {
+        return null;
+    }
+    return ft->params[cast(k, u64)];
+}
+
 // Whether the position of operand `k` of `r` owns what it takes: an argument for a parameter
 // whose type owns, a member for a field or element whose type owns, or the operand of a `cast`
 // to a type that owns. The operand of an `rv_use` takes the position of the destination, which
@@ -756,19 +770,29 @@ fn position_owns(fir.func* f, fir.rvalue r, u32 k) bool {
         return true;
     case fir.rvalue_kind.rv_cast:
         return fir.type_owning(r.ty);
-    case fir.rvalue_kind.rv_aggregate:
-        return fir.type_owning(member_type(f, r.ty, k));
-    case fir.rvalue_kind.rv_call:
-        types.node* ft = fir.callee_type(f, r);
-        return cast(k, u64) < ft->params.len && fir.type_owning(ft->params[cast(k, u64)]);
+    case fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
+        types.node* t = position_type(f, r, k);
+        return t != null && fir.type_owning(t);
     default:
         return false;
     }
 }
 
+// Whether the place operand `o` fills a position of type `dst` that marks a level `own` where the
+// type of `o` does not. A copy lends what its place owns and a move carries it, so neither adds
+// `own`. types.type_cast_adds_own is the test of the checker. A constant is no place, and the
+// kind of a constant decides where it may stand. A null `dst` adds nothing.
+fn adds_own(fir.func* f, fir.operand o, types.node* dst) bool {
+    if (dst == null || o.kind == fir.operand_kind.ok_const) {
+        return false;
+    }
+    return types.type_cast_adds_own(dst, fir.operand_type(f, o));
+}
+
 // V6 for the operands of `r`. A `cast` never adds `own`, whatever place it fills. An owning
 // parameter, field or element takes a `move`, `null` or `zero`. A `move` stands only in a
-// position that owns, because an owning value lands only where something owns it.
+// position that owns, because an owning value lands only where something owns it. No argument
+// and no member adds `own` at any level either (D3.14).
 fn v6_rvalue(walk mut* w, fir.rvalue r, u32 b, u32 i) bool {
     if (r.kind == fir.rvalue_kind.rv_cast && cast_adds_own(w->f, r)) {
         return fail(w, RULE_V6, V6_CAST, b, i);
@@ -787,6 +811,9 @@ fn v6_rvalue(walk mut* w, fir.rvalue r, u32 b, u32 i) bool {
         if (!owns && o.kind == fir.operand_kind.ok_move) {
             return fail(w, RULE_V6, V6_LANDS_OPERAND, b, i);
         }
+        if (keeps && adds_own(w->f, o, position_type(w->f, r, k))) {
+            return fail(w, RULE_V6, V6_ADDS_OWN, b, i);
+        }
         k += 1;
     }
     return true;
@@ -794,7 +821,8 @@ fn v6_rvalue(walk mut* w, fir.rvalue r, u32 b, u32 i) bool {
 
 // V6 for an assignment. A place whose type owns takes `null`, `zero` or an rvalue that produces
 // an owning value: a `move`, an `alloc`, or an `aggregate`, a `cast` or a `call` whose type
-// owns. A place that does not own takes no owning value, which nothing would then free.
+// owns. A place that does not own takes no owning value, which nothing would then free. A copy
+// or a move adds no `own` at any level (D3.14).
 fn v6_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
     if (s->kind != fir.stmt_kind.st_assign) {
         return true;
@@ -803,8 +831,9 @@ fn v6_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
     if (!v6_rvalue(w, r, b, i)) {
         return false;
     }
+    types.node* dst = fir.place_type(w->f, s->place);
     bool produces = fir.rvalue_owns(w->f, r);
-    if (fir.type_owning(fir.place_type(w->f, s->place))) {
+    if (fir.type_owning(dst)) {
         bool empty = r.kind == fir.rvalue_kind.rv_use
             && fills_owning(fir.rvalue_operand(w->f, r, 0));
         if (!empty && !produces) {
@@ -812,6 +841,9 @@ fn v6_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
         }
     } else if (produces) {
         return fail(w, RULE_V6, V6_LANDS_PLACE, b, i);
+    }
+    if (r.kind == fir.rvalue_kind.rv_use && adds_own(w->f, fir.rvalue_operand(w->f, r, 0), dst)) {
+        return fail(w, RULE_V6, V6_ADDS_OWN, b, i);
     }
     return true;
 }

@@ -473,7 +473,8 @@ came here.
   below it in the file: six comment lines added above `alloc` moved 9 records in `std.rt`.
 - **A FIR read is a load, and `fir.read.is_use` says whether it is a use** (T-233): the test of
   `p` in `check(overwrite: p)` is the one read with `is_use` false (`spec/fir.md` 14), so an
-  ownership analysis such as T-182 skips it, and V12 and V13 test every read.
+  ownership analysis such as T-182 skips it, and V12 and V13 test every read. The pointers that
+  the address of `p` loads come before it as uses (T-259): skip the test and not those loads.
 
 ## 7. The runtime and the standard library
 

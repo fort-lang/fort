@@ -343,7 +343,9 @@ Rules:
   their value: the item reads the pointer that each `deref` of such a place loads, and the span
   or `string` header before each index on a span or a `string`. A `slice` of a span or a
   `string` reads its place, and `check(overwrite: p)` reads `p` to test it (12.4); section 14
-  counts that test as no use of `p`. A `return` reads `_0` unless `_0` is `void`. The reads come
+  counts that test as no use of `p`. Before that test, the check reads what the address of `p`
+  loads: the pointer of each `deref` and the header before each index on a span or a `string`.
+  Those reads are uses. A `return` reads `_0` unless `_0` is `void`. The reads come
   in evaluation order, each index local before its place, and the pointers of a destination come
   after the right side, where the translator computes that address (12.5). A `move` and a `del`
   empty the place after the read (section 6). Rules V12 and V13 test these reads.
@@ -477,11 +479,15 @@ place expression gives a place. The rules below write a nested rvalue, such as `
 shorthand for one temporary for each inner rvalue, and a bare `"..."` as shorthand for
 `const bytes "..."`. An owning value in a temporary enters an owning place, parameter, field,
 element or cast as `move _t` (D17.5). Every temporary that holds a `copy` of an owning place takes
-the lent type of that place: its type with `own` removed at the top level and at each level stored
-inline in the place, which are the elements of a fixed array, recursively (D17.4, rule V6). `own`
-behind a pointer or a span stays, because the copy lends the reference and not what the reference
-owns. So `u8 mut* own[2]` gives `u8 mut*[2]`, and `u8 mut* own* own` gives `u8 mut* own*`. The one
-exception is the temporary of `return` in 9.6 step 1, which takes the type of `_0`.
+the lent type of that place (D17.4, rule V6). The lent type is the type of the place with `own`
+removed at the top level. It also drops `own` at each level that the place stores inline: the
+elements of a fixed array, at every rank. `own` behind a pointer or a span stays, because the copy
+lends the reference and not what the reference owns. So `u8 mut* own[2]` gives `u8 mut*[2]`, and
+`u8 mut* own* own` gives `u8 mut* own*`. A struct type has no form without the `own` of its
+fields. So the checker lends no struct that owns by value, and no fixed array of such structs
+(D17.4). It refuses a copy of either and asks for `move`, so no temporary holds such a copy. The
+one exception to the lent type is the temporary of `return` in 9.6 step 1, which takes the type
+of `_0`.
 
 **The materialization rule** (principle 4). The lowering lowers the operands of one rvalue or call
 left to right. When an operand is `copy p` or `move p` and a later operand of the same rvalue or
@@ -661,7 +667,12 @@ statement index.
   argument for a parameter of an owning type takes a `move` operand, `null T` or `zero T`. So does a
   member of an `aggregate` for a field or element of an owning type. A `string` or `bytes` constant
   is a view and fills none of these (D17.3, D17.9). A `copy` of an owning place never flows into a
-  place, a parameter, a field or an element of an owning type (D17.4). A `cast` never adds `own`
+  place, a parameter, a field or an element of an owning type (D17.4). No `copy` and no `move`
+  adds `own` at any level. The position that the operand fills is a place, a parameter, a field
+  or an element. Its type marks a level `own` only where the type of the operand marks that level
+  `own` too (D3.14, D17.4). This holds whether the position owns or not. A `copy` lends and a
+  `move` carries what its place owns. So `copy _4` of a `u8 mut**` fills no `u8 mut* own*`. A
+  constant is no place, and its kind decides where it stands. A `cast` never adds `own`
   (D3.14), whatever place it fills. Its target marks a level `own` only where the type of its
   operand marks that level `own` too. A target that owns takes a `move` operand, which carries
   the owner (D17.5). A `copy` of an owning place lends it, field 0 of a span or a `string`
@@ -1007,7 +1018,8 @@ A flow analysis reads a verified function before the build-mode pass. It may ass
   (D3.14): a `cast` that produces an owning value takes it from its `move` operand, so the
   value leaves the place of that operand and enters the destination, as a `move` does;
 - `check(overwrite: p)` reads `p` only to test it, and counts as no use of `p`. It exists to
-  detect the state the analysis tracks (D17.11);
+  detect the state the analysis tracks (D17.11). The pointers that the address of `p` loads are
+  uses, as section 7 says;
 - `dead(_n)` is where an owning local goes out of scope, and where a leak is reported;
 - every statement has a location, and a deferred copy has the location of its exit.
 

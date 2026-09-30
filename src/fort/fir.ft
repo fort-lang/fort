@@ -1455,10 +1455,10 @@ fn term_targets(func* f, terminator* t, u32 i, u32 mut* out) bool {
 /// Place `i` that `t` reads, in `out`, in the shape of stmt_reads_place. False when `i` is at or
 /// past the count. A `switch` reads its operand. A `check` reads its condition and then its
 /// reported operands, and a `fail` its reported operands. `check(overwrite: p)` reads the index
-/// locals of `p` and then `p`, whose pointer word it loads to test it (spec/fir.md 12.4); section
-/// 14 counts that test as no use of `p`, and term_read says so. Each operand and place comes
-/// after its index locals. A `return` reads `_0` unless `_0` is `void`. `goto`, `trap` and
-/// `unreachable` read nothing.
+/// locals of `p`, then the pointers that the address of `p` loads, then `p`, whose pointer word
+/// it loads to test it (spec/fir.md 12.4). Section 14 counts that test as no use of `p`, and
+/// term_read says so. Each operand and place comes after its index locals. A `return` reads `_0`
+/// unless `_0` is `void`. `goto`, `trap` and `unreachable` read nothing.
 fn term_reads_place(func* f, terminator* t, u32 i, place mut* out) bool {
     read mut r = read{};
     if (!term_read(f, t, i, &r)) {
@@ -1469,7 +1469,8 @@ fn term_reads_place(func* f, terminator* t, u32 i, place mut* out) bool {
 }
 
 /// Read `i` of `t` in the order of term_reads_place, with the place of a `move` operand marked as
-/// emptied. The read of the place of `check(overwrite: p)` is no use; every other read is one.
+/// emptied. The read of the place of `check(overwrite: p)` is no use. Every other read is one,
+/// the pointers that the address of that place loads included.
 fn term_read(func* f, terminator* t, u32 i, read mut* out) bool {
     read_cursor mut c = read_cursor{.want = i};
     switch (t->kind) {
@@ -1481,7 +1482,7 @@ fn term_read(func* f, terminator* t, u32 i, read mut* out) bool {
     case term_kind.tk_fail:
         read_term_args(f, &c, t);
     case term_kind.tk_check_overwrite:
-        read_index_locals(f, &c, t->place);
+        read_address(f, &c, t->place);
         read_mark(&c, t->place, false, false);
     case term_kind.tk_return:
         if (local_at(f, 0)->ty->kind != types.type_kind.k_void) {
