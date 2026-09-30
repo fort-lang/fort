@@ -402,17 +402,19 @@ fn a_nested_if_restores_the_index_of_the_outer_one() void {
 }
 
 // The lowering keeps no state from one call to the next: two lowerings of one declaration give
-// one text, and a lowering after a refusal gives the text that it gives alone.
+// one text, and a lowering after a refusal gives the text that it gives alone. The refusal stops
+// inside a loop, with scopes open.
 fn a_lowering_depends_on_its_function_alone() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    string[7] source = {
+    string[8] source = {
         "fn f(string a, bool c) bool {",
         "    return c && a == \"x\";",
         "}",
         "fn g() void {",
         "    while (true) {",
+        "        defer g();",
         "    }",
         "}",
     };
@@ -470,9 +472,9 @@ fn a_body_with_a_result_ends_in_unreachable() void {
 }
 
 // A `noreturn` body that reaches its end ends in `trap` (D8.5). The checker accepts such a body
-// only when it ends in a loop, which the lowering does not lower yet, or in a `noreturn` call,
-// whose `trap` ends the block. So the case calls lower_end on the entry block itself. A block that
-// has a terminator keeps it.
+// when it ends in a loop that no `break` leaves, such as `while (true)`, whose done block is then
+// the last block and takes the `trap`. A block that has a terminator keeps it: a second call of
+// lower_end on a body that ends changes nothing.
 fn a_noreturn_body_ends_in_trap() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -483,7 +485,25 @@ fn a_noreturn_body_ends_in_trap() void {
         "    }",
         "}",
     };
-    assert(lower_env.refused(&e, source[..], "stop") == "// not supported: while at 2:5\n");
+    string[16] lowered = {
+        "fn main.stop() -> noreturn {",
+        "    let _0: void;",
+        "",
+        "    bb0: {",
+        "        goto bb1 #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        switch(const true) -> [true: bb2, otherwise: bb3] #2:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        goto bb1 #2:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        trap #4:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "stop"), lowered[..]);
     ast.node* decl = lower_env.decl(&e, "stop");
     fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
     defer fir.func_free(&f);
@@ -508,10 +528,12 @@ fn a_noreturn_body_ends_in_trap() void {
 
 // ---- constructs that the lowering does not lower yet ------------------------------------------
 
-u64 REFUSAL_LINES = 75;
+u64 REFUSAL_LINES = 89;
 
 // One function for each construct that the lowering does not lower yet, and one for each position
-// in which such a construct stops the lowering from inside another construct.
+// in which such a construct stops the lowering from inside another construct. `loops`, `fors`,
+// `dos`, `switches` and `ranges` hold constructs that the lowering lowers now, and they stay at
+// their lines so that the locations of the reports below them stay where they are.
 string[REFUSAL_LINES] REFUSAL_SOURCE = {
     "struct pair {",
     "    i32 a;",
@@ -530,11 +552,11 @@ string[REFUSAL_LINES] REFUSAL_SOURCE = {
     "fn owner() void { u8 mut* own p = null; }",
     "fn allocates() i32 mut* own { return new(i32); }",
     "fn in_if() void { if (flag(new(i32))) { } }",
-    "fn in_then(bool c) void { if (c) { calls(); while (c) { } } }",
-    "fn in_else(bool c) void { if (c) { } else { while (c) { } } }",
-    "fn in_else_if(bool c, bool d) void { if (c) { } else if (d) { while (d) { } } }",
-    "fn in_block(bool c) void { { while (c) { } } }",
-    "fn in_compile_if(bool c) void { $if (true) { while (c) { } } }",
+    "fn in_then(bool c) void { if (c) { calls(); defer calls(); } }",
+    "fn in_else(bool c) void { if (c) { } else { defer calls(); } }",
+    "fn in_else_if(bool c, bool d) void { if (c) { } else if (d) { defer calls(); } }",
+    "fn in_block(bool c) void { { defer calls(); } }",
+    "fn in_compile_if(bool c) void { $if (true) { defer calls(); } }",
     "fn in_left(i32 x) i32 { return take(new(i32)) + x; }",
     "fn in_right(i32 x) i32 { return x + take(new(i32)); }",
     "fn in_unary() i32 { return -take(new(i32)); }",
@@ -588,38 +610,53 @@ string[REFUSAL_LINES] REFUSAL_SOURCE = {
     "fn in_equal_left(string s) bool { return strs(take(new(i32))) == s; }",
     "fn in_equal_right(string s) bool { return s == strs(take(new(i32))); }",
     "fn in_moved(u8 mut* own[2] mut o) u8 mut* own { return move(o[take(new(i32))]); }",
+    "fn in_while_cond() void { while (flag(new(i32))) { } }",
+    "fn in_while_body(bool c) void { while (c) { defer calls(); } }",
+    "fn in_do_body(bool c) void { do { defer calls(); } while (c); }",
+    "fn in_do_cond() void { do { } while (flag(new(i32))); }",
+    "fn in_for_init() void { for (take(new(i32)); ; ) { } }",
+    "fn in_for_cond() void { for (; flag(new(i32)); ) { } }",
+    "fn in_for_step(bool c) void { for (; c; take(new(i32))) { } }",
+    "fn in_for_body(bool c) void { for (; c; ) { defer calls(); } }",
+    "fn in_collection() void { for (char ch : strs(take(new(i32)))) { } }",
+    "fn in_range_body(i32[2] a) void { for (i32 v : a) { defer calls(); } }",
+    "fn in_operand() void { switch (take(new(i32))) { } }",
+    "fn in_clause(i32 n) void { switch (n) { case 1: defer calls(); } }",
+    "fn in_default(i32 n) void { switch (n) { case 1: default: defer calls(); } }",
+    "fn in_after_break(bool c) void { while (c) { break; defer calls(); } }",
 };
 
-u64 REFUSALS = 59;
+u64 REFUSALS = 68;
 
 // The functions of REFUSAL_SOURCE that the lowering refuses, and the line that `--fir` prints for
 // each: the kind of the tree node and the location where that node starts.
 string[REFUSALS] REFUSED = {
-    "take", "loops", "frees", "reowns", "defers", "owner", "allocates", "in_if", "in_then",
-    "in_else", "in_else_if", "in_block", "in_compile_if", "in_left", "in_right", "in_unary",
-    "in_and", "in_and_right", "in_condition", "in_then_arm", "in_else_arm", "in_cast", "in_shift",
-    "in_index", "in_bound", "in_member", "in_assign", "in_compound", "in_print", "in_fprint",
-    "in_assert", "fors", "dos", "switches", "ranges", "spans", "in_target", "in_step",
-    "in_aggregate_arg", "in_address", "in_arrow", "in_deref", "in_field", "in_indexed",
-    "in_spanned", "in_high", "in_pointer_span", "in_aggregate_call", "in_aggregate_cast",
-    "in_aggregate_condition", "in_aggregate_arm", "in_callee", "in_statement", "in_descriptor",
-    "in_print_string", "in_panic", "in_equal_left", "in_equal_right", "in_moved",
+    "take", "frees", "reowns", "defers", "owner", "allocates", "in_if", "in_then", "in_else",
+    "in_else_if", "in_block", "in_compile_if", "in_left", "in_right", "in_unary", "in_and",
+    "in_and_right", "in_condition", "in_then_arm", "in_else_arm", "in_cast", "in_shift", "in_index",
+    "in_bound", "in_member", "in_assign", "in_compound", "in_print", "in_fprint", "in_assert",
+    "spans", "in_target", "in_step", "in_aggregate_arg", "in_address", "in_arrow", "in_deref",
+    "in_field", "in_indexed", "in_spanned", "in_high", "in_pointer_span", "in_aggregate_call",
+    "in_aggregate_cast", "in_aggregate_condition", "in_aggregate_arm", "in_callee", "in_statement",
+    "in_descriptor", "in_print_string", "in_panic", "in_equal_left", "in_equal_right", "in_moved",
+    "in_while_cond", "in_while_body", "in_do_body", "in_do_cond", "in_for_init", "in_for_cond",
+    "in_for_step", "in_for_body", "in_collection", "in_range_body", "in_operand", "in_clause",
+    "in_default", "in_after_break",
 };
 
 string[REFUSALS] REPORTS = {
     "// not supported: call at 9:34",
-    "// not supported: while at 11:25",
     "// not supported: call at 12:35",
     "// not supported: assign at 13:53",
     "// not supported: defer at 14:20",
     "// not supported: var at 15:19",
     "// not supported: new at 16:38",
     "// not supported: new at 17:28",
-    "// not supported: while at 18:45",
-    "// not supported: while at 19:45",
-    "// not supported: while at 20:63",
-    "// not supported: while at 21:30",
-    "// not supported: while at 22:46",
+    "// not supported: defer at 18:45",
+    "// not supported: defer at 19:45",
+    "// not supported: defer at 20:63",
+    "// not supported: defer at 21:30",
+    "// not supported: defer at 22:46",
     "// not supported: new at 23:37",
     "// not supported: new at 24:42",
     "// not supported: new at 25:34",
@@ -638,10 +675,6 @@ string[REFUSALS] REPORTS = {
     "// not supported: new at 38:35",
     "// not supported: new at 39:47",
     "// not supported: new at 40:35",
-    "// not supported: for at 41:23",
-    "// not supported: do at 42:23",
-    "// not supported: switch at 43:27",
-    "// not supported: range-for at 44:28",
     "// not supported: new at 45:33",
     "// not supported: new at 53:42",
     "// not supported: new at 54:40",
@@ -666,6 +699,20 @@ string[REFUSALS] REPORTS = {
     "// not supported: new at 73:52",
     "// not supported: new at 74:58",
     "// not supported: new at 75:68",
+    "// not supported: new at 76:39",
+    "// not supported: defer at 77:45",
+    "// not supported: defer at 78:35",
+    "// not supported: new at 79:43",
+    "// not supported: new at 80:35",
+    "// not supported: new at 81:37",
+    "// not supported: new at 82:46",
+    "// not supported: defer at 83:45",
+    "// not supported: new at 84:52",
+    "// not supported: defer at 85:53",
+    "// not supported: new at 86:37",
+    "// not supported: defer at 87:49",
+    "// not supported: defer at 88:59",
+    "// not supported: defer at 89:53",
 };
 
 // A construct that the lowering does not lower yet stops the lowering of its function, wherever it
@@ -688,6 +735,10 @@ fn a_construct_not_lowered_yet_stops_its_function() void {
     lower_env.check_lines(&e, REFUSAL_SOURCE[..], true);
     lower_env.lower_checked(&e, "one");
     lower_env.lower_checked(&e, "calls");
+    string[5] loops = {"loops", "fors", "dos", "switches", "ranges"};
+    for (string name : loops) {
+        lower_env.lower_checked(&e, name);
+    }
 }
 
 // ---- the program ------------------------------------------------------------------------------

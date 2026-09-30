@@ -470,6 +470,14 @@ A parameter needs no statement. The translator stores each scalar parameter into
 - **An error node**: the lowering never meets one. The compiler emits no module for a file with
   a syntax error (D14.2).
 
+A construct makes its blocks when control reaches it, in the order that this section names them:
+after the condition of an `if`, the init of a `for`, the collection and the counter of a range
+`for` and the operand of a `switch`, and before the condition of a `while` and the body of a
+`do`; so the blocks that a condition or a body makes take later numbers. The statements and the
+terminators that an `if`, a loop or a `switch` makes for itself stand at its keyword with its
+index (9.7), `break` and `continue` stand at their keyword with their own index, and in a range
+`for` `live(_x)` stands at the name and `_x = copy c[_i]` at the collection.
+
 ### 9.4 Expressions
 
 The lowering of an expression gives an operand, a place, or writes into a place. A scalar expression
@@ -629,9 +637,10 @@ that node the new value: `k_var_decl`, `k_assign`, `k_incdec`, `k_call_stmt`, `k
 `k_do_while`, `k_for`, `k_range_for`, `k_switch`, `k_defer`, `k_return`, `k_break` and
 `k_continue`. `k_block` and `k_compile_if` only group other statements and advance nothing. The
 tree decides, not the grammar: each `else if` is a `k_if` node of its own and takes its own
-index, and the init and the step of a `for` are nodes of their own and take their own indices. A
-nested statement advances the counter when the walk meets it, so an `if` takes an index and
-each statement of its arms takes a later one. An expansion of a deferred statement lowers the
+index, and the init and the step of a `for` are nodes of their own and take their own indices.
+The walk meets the step of a `for` after the body, where the step block stands, so the step takes
+its index after the statements of the body. A nested statement advances the counter when the walk
+meets it, so an `if` takes an index and each statement of its arms takes a later one. An expansion of a deferred statement lowers the
 deferred statement again and advances the counter at each expansion, once for each statement
 node inside it, so `defer { a(); b(); }` takes two new indices at each exit, and its inner
 statements take none at the `defer` itself, which has its own index as a `k_defer` node. A

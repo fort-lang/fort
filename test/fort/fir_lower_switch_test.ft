@@ -1,0 +1,946 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| range for ok
+//| switch ok
+//| enum switch ok
+//| clauses ok
+//| known gap ok
+/// Checks the lowering of the range `for` and of `switch` to FIR (spec/fir.md 9.3): the place of
+/// the collection and the counter of a range `for`, the arms and the blocks of a `switch`, the
+/// failure block of an enum `switch` without `default`, and the targets of `break` and `continue`
+/// in a clause (9.5). Each case lowers one function of a checked source, holds that the result
+/// keeps every rule of the verifier, and compares its text.
+import fir;
+import fir_lower;
+import fir_print;
+import fir_verify;
+import lower_env;
+import std.strbuf;
+
+// ---- the range for ----------------------------------------------------------------------------
+
+// A fixed array is copied into a temporary before the loop (D7.5), and the counter `_i: u64`
+// walks it: `lt` against the constant length in head, `live(_x)` and `_x = copy c[_i]` in body,
+// and `add` with no check in step. `break` goes to done and `continue` to step.
+fn a_range_for_copies_an_array_and_walks_it() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[13] source = {
+        "fn sum(i32[3] a) i32 {",
+        "    i32 mut s = 0;",
+        "    for (i32 v : a) {",
+        "        if (v < 0) {",
+        "            break;",
+        "        }",
+        "        if (v == 0) {",
+        "            continue;",
+        "        }",
+        "        s = v;",
+        "    }",
+        "    return s;",
+        "}",
+    };
+    string[50] want = {
+        "fn main.sum(_1 (a): i32[3]) -> i32 {",
+        "    let _0: i32;",
+        "    let _2 (s): i32 #2:13;",
+        "    let _3 (v): i32 #3:14;",
+        "    let _4: i32[3] #3:18;",
+        "    let _5: u64 #3:5;",
+        "    let _6: bool #3:5;",
+        "    let _7: bool #4:15;",
+        "    let _8: bool #7:15;",
+        "",
+        "    bb0: {",
+        "        live(_2) #2:13 s1;",
+        "        _2 = const i32 0 #2:17 s1;",
+        "        _4 = copy _1 #3:18 s2;",
+        "        _5 = const u64 0 #3:5 s2;",
+        "        goto bb1 #3:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        _6 = lt(copy _5, const u64 3) #3:5 s2;",
+        "        switch(copy _6) -> [true: bb2, otherwise: bb4] #3:5 s2;",
+        "    }",
+        "    bb2: {",
+        "        live(_3) #3:14 s2;",
+        "        _3 = copy _4[_5] #3:18 s2;",
+        "        _7 = lt(copy _3, const i32 0) #4:15 s3;",
+        "        switch(copy _7) -> [true: bb5, otherwise: bb6] #4:9 s3;",
+        "    }",
+        "    bb3: {",
+        "        _5 = add(copy _5, const u64 1) #3:5 s2;",
+        "        goto bb1 #3:5 s2;",
+        "    }",
+        "    bb4: {",
+        "        _0 = copy _2 #12:12 s8;",
+        "        return #12:5 s8;",
+        "    }",
+        "    bb5: {",
+        "        goto bb4 #5:13 s4;",
+        "    }",
+        "    bb6: {",
+        "        _8 = eq(copy _3, const i32 0) #7:15 s5;",
+        "        switch(copy _8) -> [true: bb7, otherwise: bb8] #7:9 s5;",
+        "    }",
+        "    bb7: {",
+        "        goto bb3 #8:13 s6;",
+        "    }",
+        "    bb8: {",
+        "        _2 = copy _3 #10:13 s7;",
+        "        goto bb3 #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "sum"), want[..]);
+}
+
+// An owning span stays in its place, and the loop lends it (D17.10): the length is `copy b.1` and
+// the element `copy b[_i]`. A place that reads memory to find its storage holds its address
+// before the loop, since D7.5 evaluates the collection once: `addr mut` through a `mut` pointer
+// and `addr` through another.
+fn a_range_for_walks_an_owning_collection_in_place() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[11] source = {
+        "struct holder {",
+        "    u8 mut@ own items;",
+        "}",
+        "fn own_walk(u8 mut@ own b, holder mut* h, holder* r) void {",
+        "    for (u8 x : b) {",
+        "    }",
+        "    for (u8 y : h->items) {",
+        "    }",
+        "    for (u8 z : r->items) {",
+        "    }",
+        "}",
+    };
+    string[71] want = {
+        "fn main.own_walk(_1 (b): u8 mut@ own, _2 (h): holder mut*, _3 (r): holder*) -> void {",
+        "    let _0: void;",
+        "    let _4 (x): u8 #5:13;",
+        "    let _5 (y): u8 #7:13;",
+        "    let _6 (z): u8 #9:13;",
+        "    let _7: u64 #5:5;",
+        "    let _8: bool #5:5;",
+        "    let _9: u8 mut@ own mut* #7:18;",
+        "    let _10: u64 #7:5;",
+        "    let _11: bool #7:5;",
+        "    let _12: u8 mut@ own* #9:18;",
+        "    let _13: u64 #9:5;",
+        "    let _14: bool #9:5;",
+        "",
+        "    bb0: {",
+        "        _7 = const u64 0 #5:5 s1;",
+        "        goto bb1 #5:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _8 = lt(copy _7, copy _1.1) #5:5 s1;",
+        "        switch(copy _8) -> [true: bb2, otherwise: bb4] #5:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        live(_4) #5:13 s1;",
+        "        _4 = copy _1[_7] #5:17 s1;",
+        "        goto bb3 #5:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        _7 = add(copy _7, const u64 1) #5:5 s1;",
+        "        goto bb1 #5:5 s1;",
+        "    }",
+        "    bb4: {",
+        "        _9 = addr mut((*_2).0) #7:18 s2;",
+        "        _10 = const u64 0 #7:5 s2;",
+        "        goto bb5 #7:5 s2;",
+        "    }",
+        "    bb5: {",
+        "        _11 = lt(copy _10, copy (*_9).1) #7:5 s2;",
+        "        switch(copy _11) -> [true: bb6, otherwise: bb8] #7:5 s2;",
+        "    }",
+        "    bb6: {",
+        "        live(_5) #7:13 s2;",
+        "        _5 = copy (*_9)[_10] #7:18 s2;",
+        "        goto bb7 #7:5 s2;",
+        "    }",
+        "    bb7: {",
+        "        _10 = add(copy _10, const u64 1) #7:5 s2;",
+        "        goto bb5 #7:5 s2;",
+        "    }",
+        "    bb8: {",
+        "        _12 = addr((*_3).0) #9:18 s3;",
+        "        _13 = const u64 0 #9:5 s3;",
+        "        goto bb9 #9:5 s3;",
+        "    }",
+        "    bb9: {",
+        "        _14 = lt(copy _13, copy (*_12).1) #9:5 s3;",
+        "        switch(copy _14) -> [true: bb10, otherwise: bb12] #9:5 s3;",
+        "    }",
+        "    bb10: {",
+        "        live(_6) #9:13 s3;",
+        "        _6 = copy (*_12)[_13] #9:18 s3;",
+        "        goto bb11 #9:5 s3;",
+        "    }",
+        "    bb11: {",
+        "        _13 = add(copy _13, const u64 1) #9:5 s3;",
+        "        goto bb9 #9:5 s3;",
+        "    }",
+        "    bb12: {",
+        "        return #11:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "own_walk"), want[..]);
+}
+
+// A span, a `string`, a string literal and a module constant that do not own go into a
+// temporary of their type (D17.10): the length of a header is `copy _t.1`, and the empty literal
+// takes the same form. The constant array is read as its global.
+fn a_range_for_copies_a_view_into_a_temporary() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[11] source = {
+        "i32[2] TABLE = {4, 5};",
+        "fn views(u8@ v, string t) void {",
+        "    for (u8 x : v) {",
+        "    }",
+        "    for (char c : t) {",
+        "    }",
+        "    for (char e : \"\") {",
+        "    }",
+        "    for (i32 k : TABLE) {",
+        "    }",
+        "}",
+    };
+    string[95] want = {
+        "fn main.views(_1 (v): u8@, _2 (t): string) -> void {",
+        "    let _0: void;",
+        "    let _3 (x): u8 #3:13;",
+        "    let _4 (c): char #5:15;",
+        "    let _5 (e): char #7:15;",
+        "    let _6 (k): i32 #9:14;",
+        "    let _7: u8@ #3:17;",
+        "    let _8: u64 #3:5;",
+        "    let _9: bool #3:5;",
+        "    let _10: string #5:19;",
+        "    let _11: u64 #5:5;",
+        "    let _12: bool #5:5;",
+        "    let _13: string #7:19;",
+        "    let _14: u64 #7:5;",
+        "    let _15: bool #7:5;",
+        "    let _16: i32[2] #9:18;",
+        "    let _17: u64 #9:5;",
+        "    let _18: bool #9:5;",
+        "",
+        "    bb0: {",
+        "        _7 = copy _1 #3:17 s1;",
+        "        _8 = const u64 0 #3:5 s1;",
+        "        goto bb1 #3:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _9 = lt(copy _8, copy _7.1) #3:5 s1;",
+        "        switch(copy _9) -> [true: bb2, otherwise: bb4] #3:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        live(_3) #3:13 s1;",
+        "        _3 = copy _7[_8] #3:17 s1;",
+        "        goto bb3 #3:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        _8 = add(copy _8, const u64 1) #3:5 s1;",
+        "        goto bb1 #3:5 s1;",
+        "    }",
+        "    bb4: {",
+        "        _10 = copy _2 #5:19 s2;",
+        "        _11 = const u64 0 #5:5 s2;",
+        "        goto bb5 #5:5 s2;",
+        "    }",
+        "    bb5: {",
+        "        _12 = lt(copy _11, copy _10.1) #5:5 s2;",
+        "        switch(copy _12) -> [true: bb6, otherwise: bb8] #5:5 s2;",
+        "    }",
+        "    bb6: {",
+        "        live(_4) #5:15 s2;",
+        "        _4 = copy _10[_11] #5:19 s2;",
+        "        goto bb7 #5:5 s2;",
+        "    }",
+        "    bb7: {",
+        "        _11 = add(copy _11, const u64 1) #5:5 s2;",
+        "        goto bb5 #5:5 s2;",
+        "    }",
+        "    bb8: {",
+        "        _13 = const \"\" #7:19 s3;",
+        "        _14 = const u64 0 #7:5 s3;",
+        "        goto bb9 #7:5 s3;",
+        "    }",
+        "    bb9: {",
+        "        _15 = lt(copy _14, copy _13.1) #7:5 s3;",
+        "        switch(copy _15) -> [true: bb10, otherwise: bb12] #7:5 s3;",
+        "    }",
+        "    bb10: {",
+        "        live(_5) #7:15 s3;",
+        "        _5 = copy _13[_14] #7:19 s3;",
+        "        goto bb11 #7:5 s3;",
+        "    }",
+        "    bb11: {",
+        "        _14 = add(copy _14, const u64 1) #7:5 s3;",
+        "        goto bb9 #7:5 s3;",
+        "    }",
+        "    bb12: {",
+        "        _16 = copy global main.TABLE #9:18 s4;",
+        "        _17 = const u64 0 #9:5 s4;",
+        "        goto bb13 #9:5 s4;",
+        "    }",
+        "    bb13: {",
+        "        _18 = lt(copy _17, const u64 2) #9:5 s4;",
+        "        switch(copy _18) -> [true: bb14, otherwise: bb16] #9:5 s4;",
+        "    }",
+        "    bb14: {",
+        "        live(_6) #9:14 s4;",
+        "        _6 = copy _16[_17] #9:18 s4;",
+        "        goto bb15 #9:5 s4;",
+        "    }",
+        "    bb15: {",
+        "        _17 = add(copy _17, const u64 1) #9:5 s4;",
+        "        goto bb13 #9:5 s4;",
+        "    }",
+        "    bb16: {",
+        "        return #11:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "views"), want[..]);
+}
+
+// The loop variable over an owning array of `own` pointers has the element type without its
+// outermost `own`, so `_x = copy o[_i]` lends the element and rule V6 holds (D17.4, D17.10). A
+// struct element is copied whole.
+fn a_range_for_lends_each_element() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "struct point {",
+        "    i32 x;",
+        "    i32 y;",
+        "}",
+        "fn lend(u8 mut* own[2] o, point[2] ps) void {",
+        "    for (u8 mut* p : o) {",
+        "    }",
+        "    for (point q : ps) {",
+        "    }",
+        "}",
+    };
+    string[49] want = {
+        "fn main.lend(_1 (o): u8 mut* own[2], _2 (ps): point[2]) -> void {",
+        "    let _0: void;",
+        "    let _3 (p): u8 mut* #6:18;",
+        "    let _4 (q): point #8:16;",
+        "    let _5: u64 #6:5;",
+        "    let _6: bool #6:5;",
+        "    let _7: point[2] #8:20;",
+        "    let _8: u64 #8:5;",
+        "    let _9: bool #8:5;",
+        "",
+        "    bb0: {",
+        "        _5 = const u64 0 #6:5 s1;",
+        "        goto bb1 #6:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _6 = lt(copy _5, const u64 2) #6:5 s1;",
+        "        switch(copy _6) -> [true: bb2, otherwise: bb4] #6:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        live(_3) #6:18 s1;",
+        "        _3 = copy _1[_5] #6:22 s1;",
+        "        goto bb3 #6:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        _5 = add(copy _5, const u64 1) #6:5 s1;",
+        "        goto bb1 #6:5 s1;",
+        "    }",
+        "    bb4: {",
+        "        _7 = copy _2 #8:20 s2;",
+        "        _8 = const u64 0 #8:5 s2;",
+        "        goto bb5 #8:5 s2;",
+        "    }",
+        "    bb5: {",
+        "        _9 = lt(copy _8, const u64 2) #8:5 s2;",
+        "        switch(copy _9) -> [true: bb6, otherwise: bb8] #8:5 s2;",
+        "    }",
+        "    bb6: {",
+        "        live(_4) #8:16 s2;",
+        "        _4 = copy _7[_8] #8:20 s2;",
+        "        goto bb7 #8:5 s2;",
+        "    }",
+        "    bb7: {",
+        "        _8 = add(copy _8, const u64 1) #8:5 s2;",
+        "        goto bb5 #8:5 s2;",
+        "    }",
+        "    bb8: {",
+        "        return #10:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "lend"), want[..]);
+}
+
+// An owning element of a fixed array at a runtime index: the place runs once, with its bounds
+// check, before the counter and the blocks of the loop. The index is a temporary that nothing
+// writes again and the array is fixed storage, so the place reads no memory and is not held.
+fn a_range_for_runs_its_collection_once_before_the_loop() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {
+        "fn walk_one(u8 mut@ own[2] bufs, i32 k) void {",
+        "    for (u8 b : bufs[k]) {",
+        "    }",
+        "}",
+    };
+    string[36] want = {
+        "fn main.walk_one(_1 (bufs): u8 mut@ own[2], _2 (k): i32) -> void {",
+        "    let _0: void;",
+        "    let _3 (b): u8 #2:13;",
+        "    let _4: u64 #2:21;",
+        "    let _5: bool #2:21;",
+        "    let _6: i64 #2:21;",
+        "    let _7: u64 #2:5;",
+        "    let _8: bool #2:5;",
+        "",
+        "    bb0: {",
+        "        _4 = cast<u64>(copy _2) #2:21 s1;",
+        "        _5 = ge(copy _4, const u64 2) #2:21 s1;",
+        "        _6 = cast<i64>(copy _4) #2:21 s1;",
+        "        check(copy _5, bounds, copy _6, const u64 2) -> bb1 #2:21 s1;",
+        "    }",
+        "    bb1: {",
+        "        _7 = const u64 0 #2:5 s1;",
+        "        goto bb2 #2:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        _8 = lt(copy _7, copy _1[_4].1) #2:5 s1;",
+        "        switch(copy _8) -> [true: bb3, otherwise: bb5] #2:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        live(_3) #2:13 s1;",
+        "        _3 = copy _1[_4][_7] #2:21 s1;",
+        "        goto bb4 #2:5 s1;",
+        "    }",
+        "    bb4: {",
+        "        _7 = add(copy _7, const u64 1) #2:5 s1;",
+        "        goto bb2 #2:5 s1;",
+        "    }",
+        "    bb5: {",
+        "        return #4:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "walk_one"), want[..]);
+}
+
+// ---- switch -----------------------------------------------------------------------------------
+
+// An integer switch without `default` names done as `otherwise`. The arms follow the clauses and
+// their labels in order, so `case 3, 1` gives two arms to one block. A `break` in a clause goes to
+// done, and a clause that does not end in a terminator, the empty one included, goes to done at
+// the `switch`. A switch with no clause has no arm.
+fn an_integer_switch_without_default_goes_to_done() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[16] source = {
+        "fn pick(i32 n, bool c) i32 {",
+        "    i32 mut r = 0;",
+        "    switch (n) {",
+        "    case 3, 1:",
+        "        if (c) {",
+        "            break;",
+        "        }",
+        "        r = 1;",
+        "    case 2:",
+        "    }",
+        "    return r;",
+        "}",
+        "fn none(i32 n) void {",
+        "    switch (n) {",
+        "    }",
+        "}",
+    };
+    string[27] want = {
+        "fn main.pick(_1 (n): i32, _2 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _3 (r): i32 #2:13;",
+        "",
+        "    bb0: {",
+        "        live(_3) #2:13 s1;",
+        "        _3 = const i32 0 #2:17 s1;",
+        "        switch(copy _1) -> [i32 3: bb1, i32 1: bb1, i32 2: bb2, otherwise: bb3] #3:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        switch(copy _2) -> [true: bb4, otherwise: bb5] #5:9 s3;",
+        "    }",
+        "    bb2: {",
+        "        goto bb3 #3:5 s2;",
+        "    }",
+        "    bb3: {",
+        "        _0 = copy _3 #11:12 s6;",
+        "        return #11:5 s6;",
+        "    }",
+        "    bb4: {",
+        "        goto bb3 #6:13 s4;",
+        "    }",
+        "    bb5: {",
+        "        _3 = const i32 1 #8:13 s5;",
+        "        goto bb3 #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "pick"), want[..]);
+    string[10] empty = {
+        "fn main.none(_1 (n): i32) -> void {",
+        "    let _0: void;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [otherwise: bb1] #14:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        return #16:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "none"), empty[..]);
+}
+
+// A `default` clause in the middle is `otherwise`, and the labels at the ends of `u8` are arms.
+// Every clause returns and the switch has a `default`, so D8.4 counts it as terminating and
+// nothing reaches the `unreachable` in done.
+fn a_default_clause_is_otherwise_wherever_it_stands() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "fn def(u8 n) i32 {",
+        "    switch (n) {",
+        "    case 0:",
+        "        return 1;",
+        "    default:",
+        "        return 2;",
+        "    case 255:",
+        "        return 3;",
+        "    }",
+        "}",
+    };
+    string[22] want = {
+        "fn main.def(_1 (n): u8) -> i32 {",
+        "    let _0: i32;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [u8 0: bb1, u8 255: bb3, otherwise: bb2] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _0 = const i32 1 #4:16 s2;",
+        "        return #4:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 2 #6:16 s3;",
+        "        return #6:9 s3;",
+        "    }",
+        "    bb3: {",
+        "        _0 = const i32 3 #8:16 s4;",
+        "        return #8:9 s4;",
+        "    }",
+        "    bb4: {",
+        "        unreachable #10:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "def"), want[..]);
+}
+
+// The labels at the ends of `i8`, `u64` and `i64` keep their values in the arms. A `char` switch
+// takes the code point of each label.
+fn the_labels_at_the_ends_of_a_type_are_arms() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[24] source = {
+        "fn edges(i8 a, u64 b, i64 c) i32 {",
+        "    switch (a) {",
+        "    case -128:",
+        "        return 1;",
+        "    case 127:",
+        "        return 2;",
+        "    }",
+        "    switch (b) {",
+        "    case 18446744073709551615, 0:",
+        "        return 3;",
+        "    }",
+        "    switch (c) {",
+        "    case -9223372036854775808:",
+        "        return 4;",
+        "    }",
+        "    return 0;",
+        "}",
+        "fn kind(char ch) i32 {",
+        "    switch (ch) {",
+        "    case 'a', '\\n':",
+        "        return 1;",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    string[34] want = {
+        "fn main.edges(_1 (a): i8, _2 (b): u64, _3 (c): i64) -> i32 {",
+        "    let _0: i32;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [i8 -128: bb1, i8 127: bb2, otherwise: bb3] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _0 = const i32 1 #4:16 s2;",
+        "        return #4:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 2 #6:16 s3;",
+        "        return #6:9 s3;",
+        "    }",
+        "    bb3: {",
+        "        switch(copy _2) -> [u64 18446744073709551615: bb4, u64 0: bb4, \\",
+        "otherwise: bb5] #8:5 s4;",
+        "    }",
+        "    bb4: {",
+        "        _0 = const i32 3 #10:16 s5;",
+        "        return #10:9 s5;",
+        "    }",
+        "    bb5: {",
+        "        switch(copy _3) -> [i64 -9223372036854775808: bb6, otherwise: bb7] #12:5 s6;",
+        "    }",
+        "    bb6: {",
+        "        _0 = const i32 4 #14:16 s7;",
+        "        return #14:9 s7;",
+        "    }",
+        "    bb7: {",
+        "        _0 = const i32 0 #16:12 s8;",
+        "        return #16:5 s8;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "edges"), want[..]);
+    string[15] chars = {
+        "fn main.kind(_1 (ch): char) -> i32 {",
+        "    let _0: i32;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [char 97: bb1, char 10: bb1, otherwise: bb2] #19:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _0 = const i32 1 #21:16 s2;",
+        "        return #21:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 0 #23:12 s3;",
+        "        return #23:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "kind"), chars[..]);
+}
+
+// D7.6 refuses a `bool` operand, so a `switch` of FIR on a `bool` comes only from `if`, the loops,
+// `&&`, `||` and `?:`.
+fn the_checker_refuses_a_bool_switch() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {"fn b(bool c) void {", "    switch (c) {", "    }", "}"};
+    assert(lower_env.diagnostic(&e, source[..]) == "2:13: cannot switch on bool");
+}
+
+// ---- the enum switch --------------------------------------------------------------------------
+
+// An enum switch without `default`: `_v = cast<i64>(a)` before the `switch`, and the block of
+// `fail(enum, ...)` first, with the smallest number, as `otherwise` (D7.7, spec/fir.md 8). The
+// clauses list every member, so D8.4 counts the switch as terminating. A switch with `default`
+// has no failure block and no `_v`.
+fn an_enum_switch_fails_first_without_default() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[21] source = {
+        "enum color {",
+        "    red,",
+        "    green,",
+        "    blue,",
+        "}",
+        "fn name(color k) i32 {",
+        "    switch (k) {",
+        "    case color.blue:",
+        "        return 2;",
+        "    case color.red, color.green:",
+        "        return 1;",
+        "    }",
+        "}",
+        "fn other(color k) i32 {",
+        "    switch (k) {",
+        "    case color.red:",
+        "        return 0;",
+        "    default:",
+        "    }",
+        "    return 1;",
+        "}",
+    };
+    string[24] want = {
+        "fn main.name(_1 (k): color) -> i32 {",
+        "    let _0: i32;",
+        "    let _2: i64 #7:5;",
+        "",
+        "    bb0: {",
+        "        _2 = cast<i64>(copy _1) #7:5 s1;",
+        "        switch(copy _1) -> [color 2: bb2, color 0: bb3, color 1: bb3, \\",
+        "otherwise: bb1] #7:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        fail(enum, copy _2, const bytes \"color\") #7:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 2 #9:16 s2;",
+        "        return #9:9 s2;",
+        "    }",
+        "    bb3: {",
+        "        _0 = const i32 1 #11:16 s3;",
+        "        return #11:9 s3;",
+        "    }",
+        "    bb4: {",
+        "        unreachable #13:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "name"), want[..]);
+    string[18] with_default = {
+        "fn main.other(_1 (k): color) -> i32 {",
+        "    let _0: i32;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [color 0: bb1, otherwise: bb2] #15:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _0 = const i32 0 #17:16 s2;",
+        "        return #17:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        goto bb3 #15:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        _0 = const i32 1 #20:12 s3;",
+        "        return #20:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "other"), with_default[..]);
+}
+
+// The operand runs first, with its checks and its call, so the blocks of the operand take smaller
+// numbers than the failure block. `_v` reads the temporary of the call.
+fn the_operand_of_a_switch_runs_before_its_blocks() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[13] source = {
+        "enum color {",
+        "    red,",
+        "    green,",
+        "}",
+        "fn tone(i32 n) color {",
+        "    return color.red;",
+        "}",
+        "fn shade(i32 n) i32 {",
+        "    switch (tone(n + 1)) {",
+        "    case color.red, color.green:",
+        "        return 1;",
+        "    }",
+        "}",
+    };
+    string[28] want = {
+        "fn main.shade(_1 (n): i32) -> i32 {",
+        "    let _0: i32;",
+        "    let _2: bool #9:20;",
+        "    let _3: i32 #9:20;",
+        "    let _4: color #9:17;",
+        "    let _5: i64 #9:5;",
+        "",
+        "    bb0: {",
+        "        _2 = add_overflows(copy _1, const i32 1) #9:20 s1;",
+        "        check(copy _2, overflow) -> bb1 #9:20 s1;",
+        "    }",
+        "    bb1: {",
+        "        _3 = add(copy _1, const i32 1) #9:20 s1;",
+        "        _4 = call fn main.tone(copy _3) #9:17 s1;",
+        "        _5 = cast<i64>(copy _4) #9:5 s1;",
+        "        switch(copy _4) -> [color 0: bb3, color 1: bb3, otherwise: bb2] #9:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        fail(enum, copy _5, const bytes \"color\") #9:5 s1;",
+        "    }",
+        "    bb3: {",
+        "        _0 = const i32 1 #11:16 s2;",
+        "        return #11:9 s2;",
+        "    }",
+        "    bb4: {",
+        "        unreachable #13:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "shade"), want[..]);
+}
+
+// ---- clauses ------------------------------------------------------------------------------------
+
+// A clause is a scope of kind `case` (spec/fir.md 9.5). Its `break` goes to the done of the
+// switch, and its `continue` walks past it to the loop around the switch (D7.6). A `break` in a
+// loop inside a clause goes to the done of that loop, and a `break` after the switch goes to the
+// done of the outer loop, since the scope of the clause is closed.
+fn a_clause_is_a_case_scope_inside_a_loop() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[14] source = {
+        "fn walk(bool c, i32 n) void {",
+        "    while (c) {",
+        "        switch (n) {",
+        "        case 1:",
+        "            continue;",
+        "        case 2:",
+        "            while (c) {",
+        "                break;",
+        "            }",
+        "            break;",
+        "        }",
+        "        break;",
+        "    }",
+        "}",
+    };
+    string[34] want = {
+        "fn main.walk(_1 (c): bool, _2 (n): i32) -> void {",
+        "    let _0: void;",
+        "",
+        "    bb0: {",
+        "        goto bb1 #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        switch(copy _1) -> [true: bb2, otherwise: bb3] #2:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        switch(copy _2) -> [i32 1: bb4, i32 2: bb5, otherwise: bb6] #3:9 s2;",
+        "    }",
+        "    bb3: {",
+        "        return #14:1 s0;",
+        "    }",
+        "    bb4: {",
+        "        goto bb1 #5:13 s3;",
+        "    }",
+        "    bb5: {",
+        "        goto bb7 #7:13 s4;",
+        "    }",
+        "    bb6: {",
+        "        goto bb3 #12:9 s7;",
+        "    }",
+        "    bb7: {",
+        "        switch(copy _1) -> [true: bb8, otherwise: bb9] #7:13 s4;",
+        "    }",
+        "    bb8: {",
+        "        goto bb9 #8:17 s5;",
+        "    }",
+        "    bb9: {",
+        "        goto bb6 #10:13 s6;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "walk"), want[..]);
+}
+
+// ---- the known gap of T-210 ---------------------------------------------------------------------
+
+// D8.4 counts a `switch` as terminating when it has a `default` and each clause ends in a
+// terminating statement, and check_terminates accepts this body. The `break` leaves the switch, so
+// the body reaches its end, and rule V9 finds the path to `unreachable`. The lowering follows
+// spec/fir.md 9.3; the fix belongs to the checker (T-210), which will refuse this source.
+fn a_break_that_leaves_a_terminating_switch_reaches_unreachable() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[11] source = {
+        "fn f(bool c, i32 k) i32 {",
+        "    switch (k) {",
+        "    case 1:",
+        "        if (c) {",
+        "            break;",
+        "        }",
+        "        return 1;",
+        "    default:",
+        "        return 2;",
+        "    }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, "f"), &f, &why));
+    defer fir.func_free(&f);
+    fir_verify.violation mut v = fir_verify.violation{};
+    assert(fir_verify.find_violation(&f, &e.rt, &v));
+    assert(v.rule == 9 && v.block == 3);
+    strbuf.clear(&e.text);
+    fir_print.print_function(&f, &e.text);
+    string[24] want = {
+        "fn main.f(_1 (c): bool, _2 (k): i32) -> i32 {",
+        "    let _0: i32;",
+        "",
+        "    bb0: {",
+        "        switch(copy _2) -> [i32 1: bb1, otherwise: bb2] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        switch(copy _1) -> [true: bb4, otherwise: bb5] #4:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 2 #9:16 s5;",
+        "        return #9:9 s5;",
+        "    }",
+        "    bb3: {",
+        "        unreachable #11:1 s0;",
+        "    }",
+        "    bb4: {",
+        "        goto bb3 #5:13 s3;",
+        "    }",
+        "    bb5: {",
+        "        _0 = const i32 1 #7:16 s4;",
+        "        return #7:9 s4;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(strbuf.view(&e.text), want[..]);
+}
+
+fn main() i32 {
+    a_range_for_copies_an_array_and_walks_it();
+    a_range_for_walks_an_owning_collection_in_place();
+    a_range_for_copies_a_view_into_a_temporary();
+    a_range_for_lends_each_element();
+    a_range_for_runs_its_collection_once_before_the_loop();
+    println("range for ok");
+    an_integer_switch_without_default_goes_to_done();
+    a_default_clause_is_otherwise_wherever_it_stands();
+    the_labels_at_the_ends_of_a_type_are_arms();
+    the_checker_refuses_a_bool_switch();
+    println("switch ok");
+    an_enum_switch_fails_first_without_default();
+    the_operand_of_a_switch_runs_before_its_blocks();
+    println("enum switch ok");
+    a_clause_is_a_case_scope_inside_a_loop();
+    println("clauses ok");
+    a_break_that_leaves_a_terminating_switch_reaches_unreachable();
+    println("known gap ok");
+    return 0;
+}
