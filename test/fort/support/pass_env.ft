@@ -1,0 +1,151 @@
+/// Provides the environment of the tests of the build-mode pass. It checks a prelude or a fort
+/// source in the sandbox of lower_env, parses a FIR text against it or lowers one function of it,
+/// runs fir_passes.build_mode with the verifier before and after it, and gives the printed text.
+//
+// The text of a run stays valid until the next call, because it is the text buffer of the
+// lower_env environment.
+import check_env;
+import fir;
+import fir_lower;
+import fir_parse;
+import fir_passes;
+import fir_print;
+import fir_verify;
+import lower_env;
+import std.strbuf;
+
+/// The flags of one build mode: `--release` and `--no-bounds-check`.
+struct mode {
+    bool release;
+    bool no_bounds;
+}
+
+/// The default mode, which removes no check.
+mode CHECKED = mode{false, false};
+
+/// `--release`.
+mode RELEASE = mode{true, false};
+
+/// `--no-bounds-check`.
+mode NO_BOUNDS = mode{false, true};
+
+/// `--release --no-bounds-check`.
+mode BOTH = mode{true, true};
+
+/// The four modes, in the order CHECKED, RELEASE, NO_BOUNDS, BOTH.
+u64 MODE_COUNT = 4;
+
+mode[MODE_COUNT] MODES = {mode{false, false}, mode{true, false}, mode{false, true},
+                          mode{true, true}};
+
+// Appends each line of `lines` and a newline to `b`.
+fn join(strbuf.str_buf mut* b, string@ lines) void {
+    for (string line : lines) {
+        strbuf.append(b, line);
+        strbuf.push(b, '\n');
+    }
+}
+
+/// Checks `prelude` with the runtime of lower_env as the module `main`, and parses `text`, the
+/// lines of a FIR module, against it. The text must parse with no diagnostic.
+fn parse(lower_env.env mut* e, string@ prelude, string@ text) fir.module {
+    lower_env.check_lines(e, prelude, true);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    join(&b, text);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
+    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", strbuf.view(&b), pre);
+    if (check_env.errors(&e->c) != 0) {
+        eprintln(check_env.report_text(&e->c, 0));
+        panic("pass_env.parse: the text does not parse");
+    }
+    return m;
+}
+
+/// Holds that `f` keeps every rule of the verifier. `what` says which point of the run failed.
+fn verified(lower_env.env mut* e, fir.func* f, string what) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (fir_verify.find_violation(f, &e->rt, &v)) {
+        strbuf.clear(&e->text);
+        fir_print.print_function(f, &e->text);
+        fir_verify.violation_text(f, &v, &e->text);
+        eprintln(strbuf.view(&e->text));
+        panic(what);
+    }
+}
+
+/// Runs the pass in mode `m` on `f` between two runs of the verifier, and holds that each block
+/// has the number of its position after the pass.
+fn build(lower_env.env mut* e, fir.func mut* f, mode m) void {
+    verified(e, f, "pass_env.build: the verifier refuses the input");
+    fir_passes.build_mode(f, m.release, m.no_bounds);
+    verified(e, f, "pass_env.build: the verifier refuses the output");
+    numbered(f);
+}
+
+/// Holds that block `b` of `f` has the number `b`, for each block.
+fn numbered(fir.func* f) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        assert(fir.block_at(f, b)->number == b);
+        b += 1;
+    }
+}
+
+/// Parses `text` against `prelude`, runs the pass in mode `m` on each function between two runs
+/// of the verifier, and gives the printed module.
+fn run(lower_env.env mut* e, string@ prelude, string@ text, mode m) string {
+    fir.module mut fm = parse(e, prelude, text);
+    defer fir.module_free(&fm);
+    u64 mut i = 0;
+    while (i < fm.funcs.len) {
+        build(e, &fm.funcs.items[i], m);
+        i += 1;
+    }
+    strbuf.clear(&e->text);
+    fir_print.print_module(&fm, &e->text);
+    return strbuf.view(&e->text);
+}
+
+/// Checks `source` with the runtime of lower_env, lowers the function `name`, runs the pass in
+/// mode `m` between two runs of the verifier, and gives the printed function.
+fn lowered(lower_env.env mut* e, string@ source, string name, mode m) string {
+    lower_env.check_lines(e, source, true);
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), &f, &why)) {
+        panic("pass_env.lowered: the lowering refuses the function");
+    }
+    defer fir.func_free(&f);
+    build(e, &f, m);
+    strbuf.clear(&e->text);
+    fir_print.print_function(&f, &e->text);
+    return strbuf.view(&e->text);
+}
+
+/// Parses `text` against `prelude`, runs the pass in mode `m` as `run` does, and returns whether
+/// the printed module after the pass is the text before it.
+fn unchanged(lower_env.env mut* e, string@ prelude, string@ text, mode m) bool {
+    fir.module mut fm = parse(e, prelude, text);
+    defer fir.module_free(&fm);
+    strbuf.str_buf mut before = strbuf.create();
+    defer strbuf.free(&before);
+    fir_print.print_module(&fm, &before);
+    u64 mut i = 0;
+    while (i < fm.funcs.len) {
+        build(e, &fm.funcs.items[i], m);
+        i += 1;
+    }
+    strbuf.clear(&e->text);
+    fir_print.print_module(&fm, &e->text);
+    return strbuf.view(&before) == strbuf.view(&e->text);
+}
+
+/// Lowers the function `name` of `source`, runs the pass in mode `m` as `lowered` does, and
+/// returns whether the printed function after the pass is the text that the lowering wrote.
+fn keeps_lowering(lower_env.env mut* e, string@ source, string name, mode m) bool {
+    strbuf.str_buf mut before = strbuf.create();
+    defer strbuf.free(&before);
+    strbuf.append(&before, lower_env.lower(e, source, name));
+    return strbuf.view(&before) == lowered(e, source, name, m);
+}

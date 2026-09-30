@@ -339,7 +339,7 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.find(out, "  --fir              write the program's FIR to stdout and stop\n") >= 0);
     string after = "  --fir-after=<pass> write the FIR after <pass>: lower or build-mode\n";
     assert(str.find(out, after) >= 0);
-    string test = "  --fir-test         read a .fir test, run its pass and write the FIR\n";
+    string test = "  --fir-test         read a .fir test, run its passes and write the FIR\n";
     assert(str.find(out, test) >= 0);
     // --help answers whatever follows it, and nothing else runs.
     assert(captured_err_is_empty());
@@ -1017,7 +1017,7 @@ fn fir_of_a_clean_program_exits_zero() void {
     strbuf.str_buf mut file = strbuf.create();
     defer strbuf.free(&file);
     assert(!io.read_file("fir_clean.out", &file));
-    // Each pass name prints the same module until the passes exist.
+    // The build-mode pass of the default mode finds nothing to change in this program.
     string[3] mut after = {"fort", "--fir-after=build-mode", "fir_clean.ft"};
     assert(run(after[0..3]) == EXIT_OK);
     assert(captured_err_is_empty());
@@ -1258,23 +1258,28 @@ fn fir_test_reads_crlf_line_ends() void {
     assert(out_has("        _0 = copy _1.0 #3:4 s0;\n"));
 }
 
-u64 FIR_TEST_BAD_PASS_COUNT = 6;
+u64 FIR_TEST_BAD_PASS_COUNT = 8;
 
-// A pass that does not exist yet, an unknown pass, and an argument of `none` or `verify`.
+// An argument of `build-mode` that is no build mode, an unknown pass, and an argument of `none`
+// or `verify`. The flags of the build modes are exact: `--release=1` and `-release` are no mode.
 string[FIR_TEST_BAD_PASS_COUNT] FIR_TEST_BAD_PASSES = {
-    "build-mode --release",
-    "build-mode --no-bounds-check",
+    "build-mode --release=1",
+    "build-mode --no-bounds-check -release",
+    "build-mode --Release",
     "bogus",
     "verifier",
+    "build-modes --release",
     "none --release",
     "verify --release",
 };
 
 string[FIR_TEST_BAD_PASS_COUNT] FIR_TEST_BAD_PASS_SAYS = {
-    "fort: error: the pass 'build-mode' does not exist yet\n",
-    "fort: error: the pass 'build-mode' does not exist yet\n",
+    "fort: error: unknown build mode '--release=1'\n",
+    "fort: error: unknown build mode '-release'\n",
+    "fort: error: unknown build mode '--Release'\n",
     "fort: error: unknown pass 'bogus'\n",
     "fort: error: unknown pass 'verifier'\n",
+    "fort: error: unknown pass 'build-modes'\n",
     "fort: error: the pass 'none' takes no argument\n",
     "fort: error: the pass 'verify' takes no argument\n",
 };
@@ -1301,6 +1306,136 @@ fn fir_test_of_a_pass_that_does_not_run_is_exit_two() void {
     string[5] mut target = {"fort", "--fir-test", "--target", "t", "t.fir"};
     assert(run(target[0..5]) == EXIT_USAGE);
     assert(err_has("unsupported target 't'"));
+}
+
+// The runtime of the build-mode tests: the entry of the overflow check, which the lowering and
+// the verifier need for `a + 3`, in a standard directory of its own.
+string FIR_CHECK_RUNTIME =
+    "fn fail_overflow(char* file, u32 line, u32 col) noreturn {\n    while (true) {\n    }\n}\n";
+
+fn write_check_runtime() void {
+    assert(libc.mkdir("std_checks".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    write_file("std_checks/rt.ft", FIR_CHECK_RUNTIME);
+}
+
+// A program whose `main` has an overflow check.
+string FIR_ADD = "fn main() i32 {\n    i32 a = 2;\n    return a + 3;\n}\n";
+
+u64 FIR_ADD_RELEASE_LINES = 13;
+
+// What `--fir-after=build-mode --release` writes for the `main` of FIR_ADD: no check, no
+// `add_overflows`, and one block.
+string[FIR_ADD_RELEASE_LINES] FIR_ADD_RELEASE = {
+    "fn fir_add.main() -> i32 {",
+    "    let _0: i32;",
+    "    let _1 (a): i32 #2:9;",
+    "    let _2: bool #3:14;",
+    "    let _3: i32 #3:14;",
+    "",
+    "    bb0: {",
+    "        live(_1) #2:9 s1;",
+    "        _1 = const i32 2 #2:13 s1;",
+    "        _3 = add(copy _1, const i32 3) #3:14 s2;",
+    "        _0 = copy _3 #3:14 s2;",
+    "        dead(_1) #3:5 s2;",
+    "        return #3:5 s2;",
+};
+
+// --fir-after=build-mode runs the build-mode pass for the mode that --release and
+// --no-bounds-check select, and the verifier after it. The default mode and --no-bounds-check
+// leave `a + 3` as the lowering wrote it; --release removes its overflow check. --fir-after=lower
+// reads no mode.
+fn fir_after_build_mode_runs_the_pass_of_the_mode() void {
+    write_check_runtime();
+    write_file("fir_add.ft", FIR_ADD);
+    string[5] mut lower = {"fort", "--std-dir", "std_checks", "--fir", "fir_add.ft"};
+    assert(run(lower[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own lowered = captured_out();
+    defer del(lowered);
+    assert(str.find(lowered, "check(copy _2, overflow) -> bb1 #3:14 s2;") >= 0);
+    string[6] mut modes = {"fort", "--std-dir", "std_checks", "--fir-after=build-mode", "",
+                           "fir_add.ft"};
+    string[3] kept = {"--fir-after=build-mode", "--no-bounds-check", "--fir-after=lower"};
+    for (string flag : kept) {
+        modes[4] = flag;
+        assert(run(modes[0..6]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        string own out = captured_out();
+        defer del(out);
+        assert(out == lowered);
+    }
+    string[6] mut lower_release = {"fort", "--std-dir", "std_checks", "--fir-after=lower",
+                                   "--release", "fir_add.ft"};
+    assert(run(lower_release[0..6]) == EXIT_OK);
+    string own again = captured_out();
+    defer del(again);
+    assert(again == lowered);
+    modes[4] = "--release";
+    assert(run(modes[0..6]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    for (string line : FIR_ADD_RELEASE) {
+        strbuf.append(&want, line);
+        strbuf.push(&want, '\n');
+    }
+    assert(out_has(strbuf.view(&want)));
+    assert(!out_has("check("));
+    assert(!out_has("add_overflows"));
+}
+
+// A `.fir` test with an overflow check and the passes that its `pass:` directives name, in order.
+fn write_passes_test(string@ passes) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string pass : passes) {
+        strbuf.append(&b, "\x2F/! pass: ");
+        strbuf.append(&b, pass);
+        strbuf.push(&b, '\n');
+    }
+    strbuf.append(&b, "fn main.f(_1 (a): i32) -> i32 {\n    let _2: bool;\n    let _3: i32;\n");
+    strbuf.append(&b, "    bb0: {\n        _2 = add_overflows(copy _1, const i32 1);\n");
+    strbuf.append(&b, "        check(copy _2, overflow) -> bb1;\n    }\n");
+    strbuf.append(&b, "    bb1: {\n        _3 = add(copy _1, const i32 1);\n");
+    strbuf.append(&b, "        _0 = copy _3;\n        return;\n    }\n}\n");
+    write_file("t.fir", strbuf.view(&b));
+}
+
+// What --fir-test writes for write_passes_test after the build-mode pass under --release.
+string FIR_TEST_RELEASED =
+    "        _3 = add(copy _1, const i32 1);\n        _0 = copy _3;\n        return;\n    }\n}\n";
+
+// The `pass:` directives of a `.fir` test run in order. `build-mode` takes --release and
+// --no-bounds-check in either order and with more than one space, and with no argument it is the
+// default mode, which keeps the check. The pass `verify` after it tests its result.
+fn fir_test_runs_its_passes_in_order() void {
+    write_check_runtime();
+    string[5] mut argv = {"fort", "--std-dir", "std_checks", "--fir-test", "t.fir"};
+    string[2] released = {"build-mode --release", "verify"};
+    write_passes_test(released[..]);
+    assert(run(argv[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(out_has(FIR_TEST_RELEASED));
+    assert(!out_has("check("));
+    string[3] both = {"verify", "build-mode  --no-bounds-check  --release", "verify"};
+    write_passes_test(both[..]);
+    assert(run(argv[0..5]) == EXIT_OK);
+    assert(out_has(FIR_TEST_RELEASED));
+    string[2] checked = {"build-mode", "verify"};
+    write_passes_test(checked[..]);
+    assert(run(argv[0..5]) == EXIT_OK);
+    assert(out_has("        check(copy _2, overflow) -> bb1;\n"));
+    string[2] no_bounds = {"none", "build-mode --no-bounds-check"};
+    write_passes_test(no_bounds[..]);
+    assert(run(argv[0..5]) == EXIT_OK);
+    assert(out_has("        check(copy _2, overflow) -> bb1;\n"));
+    // the first pass that does not run stops the test before any pass runs
+    string[3] bad = {"build-mode --release", "verify", "bogus"};
+    write_passes_test(bad[..]);
+    assert(run(argv[0..5]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown pass 'bogus'\n"));
+    assert(!out_has("fn "));
 }
 
 // A diagnostic of the prelude or of the FIR text is exit 1 with no text. A diagnostic of the
@@ -1376,6 +1511,8 @@ fn main() i32 {
     fir_test_reads_crlf_line_ends();
     fir_test_of_the_pass_verify_writes_a_function_that_keeps_the_rules();
     fir_test_of_a_pass_that_does_not_run_is_exit_two();
+    fir_after_build_mode_runs_the_pass_of_the_mode();
+    fir_test_runs_its_passes_in_order();
     fir_test_of_a_malformed_file_is_exit_one();
     println("fir ok");
     the_front_end_walks_the_closure();

@@ -4,10 +4,10 @@
 Every test is a `.fir` file: a header of `//!` directives and `//|` lines,
 then a function in the textual form of spec/fir.md 13. The harness runs
 `fort --fir-test <file>` from the corpus root. The compiler checks the
-prelude, parses the text, runs the pass that `//! pass:` names and writes the
-module. The harness compares the result with the expectation of the test.
-`--bless` writes the `//! expect:` block of each selected test from the
-compiler's output.
+prelude, parses the text, runs the passes that the `//! pass:` directives
+name, in order, and writes the module. The harness compares the result with
+the expectation of the test. `--bless` writes the `//! expect:` block of each
+selected test from the compiler's output.
 
 Standard library only; Python 3.12.
 """
@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent
 # take text, and the ones that state the outcome of a test.
 BLOCKS = ("prelude", "expect")
 WITH_TEXT = ("pass", "error", "panic")
-REPEATABLE = ("error",)
+REPEATABLE = ("error", "pass")
 OUTCOMES = ("expect", "error", "panic")
 HEADER_MARKERS = ("//!", "//|")
 DIRECTIVE_RE = re.compile(r"^//! ([a-z]+)(:)?(.*)$")
@@ -143,7 +143,7 @@ def judge(test, status, stdout, stderr):
     """`(verdict, detail)`: PASS, FAIL with the reason, or ERROR for a harness error.
 
     Exit 2 is a usage, toolchain or internal error of the compiler, and a pass
-    that does not exist yet is one; the harness reports it as an ERROR.
+    that the compiler does not know is one; the harness reports it as an ERROR.
     """
     if status is None or status == 2:
         return "ERROR", stderr.strip() or "exit %s" % status

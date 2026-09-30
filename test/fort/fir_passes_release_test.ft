@@ -1,0 +1,99 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| loop release ok
+//| stores release ok
+/// Checks that the build-mode pass gives back every block that it takes (notes/testing.md 4): the
+/// sets of its dataflow, its tables of blocks, locals and uses, and the statements of each block
+/// that a merge empties, which fir.func_free cannot reach after the numbering.
+import ast;
+import fir;
+import fir_env;
+import fir_lower;
+import fir_passes;
+import heap;
+import lower_env;
+
+// The count of the lowerings and passes in one round.
+u64 CALLS = 50;
+
+// A loop with a shift check and two overflow checks, a store into an element of an array of
+// owners after two bounds checks, and the stores of an own local: every step of the pass runs.
+string[33] SOURCE = {
+    "fn sum(i32 n, u32 k) i32 {",
+    "    i32 mut s = 0;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        s += i << k;",
+    "        i += 1;",
+    "    }",
+    "    return s;",
+    "}",
+    "fn grab() u8 mut* own {",
+    "    return new(u8);",
+    "}",
+    "fn a(u8 mut* own[2] mut v, i64 i) void {",
+    "    del(v[i]);",
+    "    v[i] = grab();",
+    "}",
+    "fn m(bool c) void {",
+    "    u8 mut* own mut p = grab();",
+    "    u8 mut* own mut q = null;",
+    "    del(p);",
+    "    p = move(q);",
+    "    del(p);",
+    "    p = c ? grab() : null;",
+    "    del(p);",
+    "}",
+    "fn s(u8@ b, i32 i) u8 {",
+    "    switch (b[i]) {",
+    "    case 0:",
+    "        return b[1];",
+    "    default:",
+    "        return b[i..][0];",
+    "    }",
+    "}",
+};
+
+// Each round lowers the function `name` CALLS times, runs the pass under --release
+// --no-bounds-check, and frees the function. A leak of one vector of 16 slots in each call keeps
+// 12 KB or more in each round, and the program break moves. The probe watches the system view
+// alone, since the free chunks of a round make the address of a small block no view.
+fn rounds_leave_the_heap_where_it_was(string name) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, SOURCE[..], true);
+    // the function that the rounds lower keeps every rule of the verifier
+    lower_env.lower_checked(&e, name);
+    ast.node* decl = lower_env.decl(&e, name);
+    u64[3] mut break_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        u64 mut k = 0;
+        while (k < CALLS) {
+            fir.func mut f = fir.func{};
+            fir_lower.report mut why = fir_lower.report{};
+            assert(fir_lower.lower_function(&e.c.ck, decl, &f, &why));
+            fir_passes.build_mode(&f, true, true);
+            fir.func_free(&f);
+            k += 1;
+        }
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    rounds_leave_the_heap_where_it_was("sum");
+    println("loop release ok");
+    rounds_leave_the_heap_where_it_was("a");
+    rounds_leave_the_heap_where_it_was("m");
+    rounds_leave_the_heap_where_it_was("s");
+    println("stores release ok");
+    return 0;
+}

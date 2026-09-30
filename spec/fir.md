@@ -780,7 +780,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
      rvalue, or `addr`, the rvalue contains no `move` operand, and no statement or terminator
      reads `_t`. It repeats until nothing changes, so the `add_overflows` that fed a removed
      check goes too. It never removes a `call`, an `alloc`, a `del`, an assignment into a named
-     local, or an assignment into a place with projections.
+     local, or an assignment into a place with projections. It removes no `let`, so a temporary
+     whose assignments go keeps its number, and the translator gives it no storage (12.1).
    - Where a removed `check(overwrite: p)` stood between `_t = rvalue` and `p = move _t`, and
      nothing else reads `_t`, it rewrites the two statements to `p = rvalue`, which is the direct
      store of the direct path in release mode.
@@ -826,6 +827,10 @@ read the build mode.
   writes text, as the direct path collects the locals before it emits. The direct path keeps its
   scalar intermediates in registers and its aggregate temporaries in `%tmp<K>` slots, so this
   rule gives the same shape.
+- A temporary that no statement and no terminator names gets no storage: no register and no
+  `alloca`. A statement or a terminator names a local when the local is the base of one of its
+  places or the index of one of its projections. The build-mode pass leaves such temporaries,
+  because it removes assignments and keeps the `let` of every local (section 11).
 - A place is its base address, then one `getelementptr inbounds` for each projection in the
   three shapes of item 3, then a `load` or a `store`. A `bool` loads as `i8` and `trunc` and
   stores as `zext` and `i8` (item 2).
@@ -1038,8 +1043,11 @@ The deferred `del(p)` appears twice, once on each path to an exit, and nowhere e
 reads each path and finds the `del` on it without a model of D7.8. The statement indices count
 the six statements of the body and the two expansions (9.7): `s2` is the `defer`, which emits
 nothing, `s5` and `s8` are its expansions, and `s0` is the zeroing of the entry block. `_3` is
-read only by `s1`, so the translator gives it a register. In release mode, the build-mode
-pass turns the `check` into `goto bb1`, and nothing else changes.
+read only by `s1`, so in the default mode the translator gives it a register. In release mode,
+the build-mode pass turns the `check` into `goto bb1` (section 11). It folds `_3 =
+alloc<i32>(const u64 1)` and `_2 = move _3` into `_2 = alloc<i32>(const u64 1)`, at the location
+of the `alloc`, and merges `bb1` into `bb0`, so `bb2` and `bb3` become `bb1` and `bb2`. After the
+fold no statement names `_3`, so `_3` gets no storage (12.1).
 
 ## 14. Flow analyses on FIR
 

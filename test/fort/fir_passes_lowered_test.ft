@@ -1,0 +1,459 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| worked example ok
+//| stores ok
+//| loops ok
+//| bounds ok
+//| default ok
+/// Checks the build-mode pass on functions that the lowering writes (spec/fir.md 9, 11): the
+/// worked example of spec/fir.md 13, the stores into `own` places, a loop with shift and overflow
+/// checks, and the bounds and span checks of a `switch`. Each case runs the verifier before and
+/// after the pass. The default mode leaves each lowered function as the lowering wrote it.
+import lower_env;
+import pass_env;
+
+// ---- the worked example -------------------------------------------------------------------------
+
+// The source of the worked example of spec/fir.md 13.
+string[9] WORKED = {
+    "fn f(bool c) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    defer del(p);",
+    "    if (c) {",
+    "        return 1;",
+    "    }",
+    "    *p = 7;",
+    "    return *p;",
+    "}",
+};
+
+// Under --release the overwrite check of the declaration goes, `_3 = alloc<i32>(const u64 1)` and
+// `_2 = move _3` fold into one store at the location of the `alloc`, and bb1 merges into bb0.
+// bb2 and bb3 become bb1 and bb2, and the `switch` names them.
+fn the_worked_example_folds_and_merges() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[25] want = {
+        "fn main.f(_1 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _2 (p): i32 mut* own #2:18;",
+        "    let _3: i32 mut* own #2:22;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero i32 mut* own #2:18 s0;",
+        "        live(_2) #2:18 s1;",
+        "        _2 = alloc<i32>(const u64 1) #2:22 s1;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #4:5 s3;",
+        "    }",
+        "    bb1: {",
+        "        _0 = const i32 1 #5:16 s4;",
+        "        del(move _2) #3:11 exit 5:9 s5;",
+        "        dead(_2) #5:9 s4;",
+        "        return #5:9 s4;",
+        "    }",
+        "    bb2: {",
+        "        (*_2) = const i32 7 #7:8 s6;",
+        "        _0 = copy (*_2) #8:12 s7;",
+        "        del(move _2) #3:11 exit 8:5 s8;",
+        "        dead(_2) #8:5 s7;",
+        "        return #8:5 s7;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, WORKED[..], "f", pass_env.RELEASE), want[..]);
+    // --no-bounds-check keeps the overwrite check, and the function has no bounds check
+    assert(pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.NO_BOUNDS));
+    assert(pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.CHECKED));
+}
+
+// ---- the stores into own places -----------------------------------------------------------------
+
+// A store through a field of a pointer, into an element of an array of owners, and three
+// reassignments of an own local: from a call, from `null` and from `move(q)`. The last store takes
+// a `?:`, whose two arms assign the temporary in two blocks.
+string[27] STORES = {
+    "struct holder {",
+    "    u8 mut* own p;",
+    "}",
+    "fn grab() u8 mut* own {",
+    "    return new(u8);",
+    "}",
+    "fn g(holder mut* h) void {",
+    "    del(h->p);",
+    "    h->p = new(u8);",
+    "}",
+    "fn a(u8 mut* own[2] mut v, i64 i) void {",
+    "    del(v[i]);",
+    "    v[i] = grab();",
+    "}",
+    "fn m(bool c) void {",
+    "    u8 mut* own mut p = grab();",
+    "    u8 mut* own mut q = null;",
+    "    del(p);",
+    "    p = move(q);",
+    "    del(p);",
+    "    p = c ? grab() : null;",
+    "    del(p);",
+    "}",
+    "fn n(i32 k) void {",
+    "    u8 mut@ own s = new(u8, k);",
+    "    del(s);",
+    "}",
+};
+
+// The store through `h->p`: the lowering holds the address of the target in `_2`, and the check
+// and the store name `(*_2)`, so the two statements fold, and the store keeps the location of the
+// `alloc`.
+fn a_store_through_a_pointer_folds() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] want = {
+        "fn main.g(_1 (h): holder mut*) -> void {",
+        "    let _0: void;",
+        "    let _2: u8 mut* own mut* #9:6;",
+        "    let _3: u8 mut* own #9:12;",
+        "",
+        "    bb0: {",
+        "        del(move (*_1).0) #8:5 s1;",
+        "        _2 = addr mut((*_1).0) #9:6 s2;",
+        "        (*_2) = alloc<u8>(const u64 1) #9:12 s2;",
+        "        return #10:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "g", pass_env.RELEASE), want[..]);
+}
+
+// The store into `v[i]`: --release keeps the two bounds checks, folds the call into the element
+// `_1[_6]` and merges the continuation of the overwrite check. With --no-bounds-check too, the
+// bounds checks go with their `ge` and their reported `cast`, and the three continuations merge
+// into bb0. The index locals `_3` and `_6` stay for the places that read them.
+fn a_store_into_an_element_folds() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[28] release = {
+        "fn main.a(_1 (v): u8 mut* own[2], _2 (i): i64) -> void {",
+        "    let _0: void;",
+        "    let _3: u64 #12:10;",
+        "    let _4: bool #12:10;",
+        "    let _5: i64 #12:10;",
+        "    let _6: u64 #13:6;",
+        "    let _7: bool #13:6;",
+        "    let _8: i64 #13:6;",
+        "    let _9: u8 mut* own #13:16;",
+        "",
+        "    bb0: {",
+        "        _3 = cast<u64>(copy _2) #12:10 s1;",
+        "        _4 = ge(copy _3, const u64 2) #12:10 s1;",
+        "        _5 = cast<i64>(copy _3) #12:10 s1;",
+        "        check(copy _4, bounds, copy _5, const u64 2) -> bb1 #12:10 s1;",
+        "    }",
+        "    bb1: {",
+        "        del(move _1[_3]) #12:5 s1;",
+        "        _6 = cast<u64>(copy _2) #13:6 s2;",
+        "        _7 = ge(copy _6, const u64 2) #13:6 s2;",
+        "        _8 = cast<i64>(copy _6) #13:6 s2;",
+        "        check(copy _7, bounds, copy _8, const u64 2) -> bb2 #13:6 s2;",
+        "    }",
+        "    bb2: {",
+        "        _1[_6] = call fn main.grab() #13:16 s2;",
+        "        return #14:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "a", pass_env.RELEASE), release[..]);
+    string[18] both = {
+        "fn main.a(_1 (v): u8 mut* own[2], _2 (i): i64) -> void {",
+        "    let _0: void;",
+        "    let _3: u64 #12:10;",
+        "    let _4: bool #12:10;",
+        "    let _5: i64 #12:10;",
+        "    let _6: u64 #13:6;",
+        "    let _7: bool #13:6;",
+        "    let _8: i64 #13:6;",
+        "    let _9: u8 mut* own #13:16;",
+        "",
+        "    bb0: {",
+        "        _3 = cast<u64>(copy _2) #12:10 s1;",
+        "        del(move _1[_3]) #12:5 s1;",
+        "        _6 = cast<u64>(copy _2) #13:6 s2;",
+        "        _1[_6] = call fn main.grab() #13:16 s2;",
+        "        return #14:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "a", pass_env.BOTH), both[..]);
+}
+
+// The three reassignments of `p` and the declaration of `q` fold: the rvalue of the temporary,
+// a `call`, `const null` or `move _3`, moves into the store. The store of the `?:` does not fold,
+// because the block of its check holds no statement: the two arms assign `_7`. Each continuation
+// merges, so bb1, bb2 and bb3 go into bb0, bb7 goes into bb6, and bb4, bb5 and bb6 become bb1,
+// bb2 and bb3.
+fn the_stores_of_a_local_fold() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[39] want = {
+        "fn main.m(_1 (c): bool) -> void {",
+        "    let _0: void;",
+        "    let _2 (p): u8 mut* own #16:21;",
+        "    let _3 (q): u8 mut* own #17:21;",
+        "    let _4: u8 mut* own #16:29;",
+        "    let _5: u8 mut* own #17:25;",
+        "    let _6: u8 mut* own #19:13;",
+        "    let _7: u8 mut* own #21:11;",
+        "    let _8: u8 mut* own #21:17;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero u8 mut* own #16:21 s0;",
+        "        _3 = const zero u8 mut* own #17:21 s0;",
+        "        live(_2) #16:21 s1;",
+        "        _2 = call fn main.grab() #16:29 s1;",
+        "        live(_3) #17:21 s2;",
+        "        _3 = const null u8 mut* own #17:25 s2;",
+        "        del(move _2) #18:5 s3;",
+        "        _2 = move _3 #19:13 s4;",
+        "        del(move _2) #20:5 s5;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #21:11 s6;",
+        "    }",
+        "    bb1: {",
+        "        _8 = call fn main.grab() #21:17 s6;",
+        "        _7 = move _8 #21:17 s6;",
+        "        goto bb3 #21:11 s6;",
+        "    }",
+        "    bb2: {",
+        "        _7 = const null u8 mut* own #21:22 s6;",
+        "        goto bb3 #21:11 s6;",
+        "    }",
+        "    bb3: {",
+        "        _2 = move _7 #21:7 s6;",
+        "        del(move _2) #22:5 s7;",
+        "        dead(_2) #23:1 s0;",
+        "        dead(_3) #23:1 s0;",
+        "        return #23:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "m", pass_env.RELEASE), want[..]);
+}
+
+// The declaration of an own span from `new(u8, k)`: no mode removes the check of the count, and
+// --release removes the overwrite check of the declaration, so the `aggregate` of the header folds
+// into `_2` and bb2 merges into bb1.
+fn a_span_store_folds_and_the_count_check_stays() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[25] want = {
+        "fn main.n(_1 (k): i32) -> void {",
+        "    let _0: void;",
+        "    let _2 (s): u8 mut@ own #25:17;",
+        "    let _3: u8 mut@ own #25:21;",
+        "    let _4: i64 #25:21;",
+        "    let _5: bool #25:21;",
+        "    let _6: u64 #25:21;",
+        "    let _7: u8 mut* own #25:21;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero u8 mut@ own #25:17 s0;",
+        "        live(_2) #25:17 s1;",
+        "        _4 = cast<i64>(copy _1) #25:21 s1;",
+        "        _5 = lt(copy _4, const i64 0) #25:21 s1;",
+        "        check(copy _5, alloc_count, copy _4) -> bb1 #25:21 s1;",
+        "    }",
+        "    bb1: {",
+        "        _6 = cast<u64>(copy _4) #25:21 s1;",
+        "        _7 = alloc<u8>(copy _6) #25:21 s1;",
+        "        _2 = aggregate u8 mut@ own(move _7, copy _6) #25:21 s1;",
+        "        del(move _2) #26:5 s2;",
+        "        dead(_2) #27:1 s0;",
+        "        return #27:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "n", pass_env.BOTH), want[..]);
+    // the default mode and --no-bounds-check keep both checks
+    assert(pass_env.keeps_lowering(&e, STORES[..], "n", pass_env.CHECKED));
+    assert(pass_env.keeps_lowering(&e, STORES[..], "n", pass_env.NO_BOUNDS));
+}
+
+// ---- a loop -------------------------------------------------------------------------------------
+
+string[9] LOOP = {
+    "fn sum(i32 n, u32 k) i32 {",
+    "    i32 mut s = 0;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        s += i << k;",
+    "        i += 1;",
+    "    }",
+    "    return s;",
+    "}",
+};
+
+// Under --release the shift check of the body becomes the mask `_15`, which the `cast` of the
+// count reads, and the two overflow checks go. The `add_overflows`, the `ge` and the `cast<u64>`
+// that fed the checks go. The body block takes its three continuations, and it keeps the `goto`
+// back to the head of the loop, which no check left. Each round assigns `_7` before the mask, so
+// the mask of the round reaches the `cast`.
+fn a_loop_masks_and_wraps() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[45] want = {
+        "fn main.sum(_1 (n): i32, _2 (k): u32) -> i32 {",
+        "    let _0: i32;",
+        "    let _3 (s): i32 #2:13;",
+        "    let _4 (i): i32 #3:13;",
+        "    let _5: bool #4:14;",
+        "    let _6: i32 #5:9;",
+        "    let _7: i64 #5:16;",
+        "    let _8: u64 #5:16;",
+        "    let _9: bool #5:16;",
+        "    let _10: i32 #5:16;",
+        "    let _11: i32 #5:16;",
+        "    let _12: bool #5:11;",
+        "    let _13: i32 #6:9;",
+        "    let _14: bool #6:11;",
+        "    let _15: i64 #5:16;",
+        "",
+        "    bb0: {",
+        "        live(_3) #2:13 s1;",
+        "        _3 = const i32 0 #2:17 s1;",
+        "        live(_4) #3:13 s2;",
+        "        _4 = const i32 0 #3:17 s2;",
+        "        goto bb1 #4:5 s3;",
+        "    }",
+        "    bb1: {",
+        "        _5 = lt(copy _4, copy _1) #4:14 s3;",
+        "        switch(copy _5) -> [true: bb2, otherwise: bb3] #4:5 s3;",
+        "    }",
+        "    bb2: {",
+        "        _6 = copy _3 #5:9 s4;",
+        "        _7 = cast<i64>(copy _2) #5:16 s4;",
+        "        _15 = and(copy _7, const i64 31) #5:16 s4;",
+        "        _10 = cast<i32>(copy _15) #5:16 s4;",
+        "        _11 = shl(copy _4, copy _10) #5:16 s4;",
+        "        _3 = add(copy _6, copy _11) #5:11 s4;",
+        "        _13 = copy _4 #6:9 s5;",
+        "        _4 = add(copy _13, const i32 1) #6:11 s5;",
+        "        goto bb1 #4:5 s3;",
+        "    }",
+        "    bb3: {",
+        "        _0 = copy _3 #8:12 s6;",
+        "        dead(_3) #8:5 s6;",
+        "        dead(_4) #8:5 s6;",
+        "        return #8:5 s6;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, LOOP[..], "sum", pass_env.RELEASE), want[..]);
+    // --no-bounds-check finds no check that it removes
+    assert(pass_env.keeps_lowering(&e, LOOP[..], "sum", pass_env.NO_BOUNDS));
+}
+
+// ---- bounds and spans ---------------------------------------------------------------------------
+
+string[8] PICK = {
+    "fn pick(i32[4] v, i32 i, u8@ b) u8 {",
+    "    switch (v[i]) {",
+    "    case 0:",
+    "        return b[1];",
+    "    default:",
+    "        return b[i..][0];",
+    "    }",
+    "}",
+};
+
+// Under --no-bounds-check the four bounds and span checks go. bb0 takes bb1 and keeps its
+// `switch`, whose arms now name bb1 and bb2. The arm of `case 0` takes bb5, and the arm of
+// `default` takes bb6 and then bb7, a chain of two removed checks. The span `_10` and the index
+// locals stay; the `or` and the `gt`s of the span check go in two rounds. The block after the
+// `switch`, which no terminator names, keeps its `unreachable` and takes the number 3.
+fn the_bounds_of_a_switch_go() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[39] want = {
+        "fn main.pick(_1 (v): i32[4], _2 (i): i32, _3 (b): u8@) -> u8 {",
+        "    let _0: u8;",
+        "    let _4: u64 #2:14;",
+        "    let _5: bool #2:14;",
+        "    let _6: i64 #2:14;",
+        "    let _7: u64 #4:17;",
+        "    let _8: bool #4:17;",
+        "    let _9: i64 #4:17;",
+        "    let _10: u8@ #6:17;",
+        "    let _11: u64 #6:17;",
+        "    let _12: bool #6:17;",
+        "    let _13: bool #6:17;",
+        "    let _14: bool #6:17;",
+        "    let _15: i64 #6:17;",
+        "    let _16: i64 #6:17;",
+        "    let _17: u64 #6:22;",
+        "    let _18: bool #6:22;",
+        "    let _19: i64 #6:22;",
+        "",
+        "    bb0: {",
+        "        _4 = cast<u64>(copy _2) #2:14 s1;",
+        "        switch(copy _1[_4]) -> [i32 0: bb1, otherwise: bb2] #2:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _7 = cast<u64>(const i32 1) #4:17 s2;",
+        "        _0 = copy _3[_7] #4:17 s2;",
+        "        return #4:9 s2;",
+        "    }",
+        "    bb2: {",
+        "        _11 = cast<u64>(copy _2) #6:17 s3;",
+        "        _10 = slice(_3, copy _11, copy _3.1) #6:17 s3;",
+        "        _17 = cast<u64>(const i32 0) #6:22 s3;",
+        "        _0 = copy _10[_17] #6:22 s3;",
+        "        return #6:9 s3;",
+        "    }",
+        "    bb3: {",
+        "        unreachable #8:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.lowered(&e, PICK[..], "pick", pass_env.NO_BOUNDS), want[..]);
+    // --release finds no check that it removes
+    assert(pass_env.keeps_lowering(&e, PICK[..], "pick", pass_env.RELEASE));
+}
+
+// ---- the default mode ---------------------------------------------------------------------------
+
+// The default mode removes no check, and the lowering leaves no dead temporary in these
+// functions, so the pass changes none of them.
+fn the_default_mode_keeps_each_lowered_function() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    assert(pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.CHECKED));
+    assert(pass_env.keeps_lowering(&e, STORES[..], "g", pass_env.CHECKED));
+    assert(pass_env.keeps_lowering(&e, STORES[..], "a", pass_env.CHECKED));
+    assert(pass_env.keeps_lowering(&e, STORES[..], "m", pass_env.CHECKED));
+    assert(pass_env.keeps_lowering(&e, LOOP[..], "sum", pass_env.CHECKED));
+    assert(pass_env.keeps_lowering(&e, PICK[..], "pick", pass_env.CHECKED));
+}
+
+fn main() i32 {
+    the_worked_example_folds_and_merges();
+    println("worked example ok");
+    a_store_through_a_pointer_folds();
+    a_store_into_an_element_folds();
+    the_stores_of_a_local_fold();
+    a_span_store_folds_and_the_count_check_stays();
+    println("stores ok");
+    a_loop_masks_and_wraps();
+    println("loops ok");
+    the_bounds_of_a_switch_go();
+    println("bounds ok");
+    the_default_mode_keeps_each_lowered_function();
+    println("default ok");
+    return 0;
+}

@@ -307,7 +307,8 @@ bullet at a time and without a rewrite.
   the filesystem still counts the directories, and `git status` no longer shows them. Measured on
   T-117's fix round, a second hand-run left 51 sandboxes with an empty `git status --short`.
   Compile with `-o` into `build/` and run from there. Read `ls -d test/fort/sandbox*` rather than
-  `git status` when a source count is wrong.
+  `git status` when a source count is wrong. T-247 met it again: hand runs from `test/fort` left
+  117 sandboxes, and `highlight_selftest` counted 1000 corpus files against 790.
   **The working directory is any directory, and the ignore line names one** (T-127). A hand run
   from the **top of the worktree** writes `./sandbox<n>/`, which `test/fort/sandbox*/` does not
   match. One run of `check_test.bin` from there left 196 `sandbox<n>/main.ft` files in the root,
@@ -453,17 +454,18 @@ bullet at a time and without a rewrite.
   corpus with the current standard library (T-160).
 
 - **`test/fir` holds the FIR tests**, one `.fir` file each, in the format that `test/fir/README.md`
-  gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: `//! pass:
-  <name>`, an optional `//! prelude:` block of fort declarations, and one outcome, `//! expect:`
-  with its `//|` lines, `//! error: <text>` or `//! panic: <text>`. The FIR text of the function
-  follows the header, and the FIR parser reads the header as comments. `test/fir/run_tests.py` runs
-  `fort --fir-test <file>` from `test/fir` for each file: the compiler checks the prelude as the
-  module `main`, parses the text against it, runs the pass and writes the module. The harness
-  compares stdout with the `expect:` block and shows a unified diff for a difference; `--bless`
-  rewrites the block. Exit 2 from the compiler is an `ERROR`, and the pass `build-mode` gives it
-  until it exists. The ctest `fir` is a unit test and runs the compiler
-  natively, with the environment of the sanitizer presets. Name a test
-  `test/fir/<pass>/NNN_name.fir`. `agents/lines.py` counts no `.fir` file as a test line, and
+  gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: one or more
+  `//! pass: <name>`, an optional `//! prelude:` block of fort declarations, and one outcome,
+  `//! expect:` with its `//|` lines, `//! error: <text>` or `//! panic: <text>`. The FIR text of
+  the function follows the header, and the FIR parser reads the header as comments.
+  `test/fir/run_tests.py` runs `fort --fir-test <file>` from `test/fir` for each file: the
+  compiler checks the prelude as the module `main`, parses the text against it, runs the passes in
+  order and writes the module. The harness compares stdout with the `expect:` block and shows a
+  unified diff for a difference; `--bless` rewrites the block. Exit 2 from the compiler is an
+  `ERROR`. The pass `build-mode` runs no verifier, so each of the 20 tests of
+  `test/fir/build_mode/` names `verify` in a second `pass:` directive (T-247). The ctest `fir` is
+  a unit test and runs the compiler natively, with the environment of the sanitizer presets. Name
+  a test `test/fir/<pass>/NNN_name.fir`. `agents/lines.py` counts no `.fir` file as a test line, and
   `test/highlight_test.py` counts no `.fir` file either (T-224).
   **The pass `verify` ends the compiler with SIGABRT at the first violation**, which `//! panic:`
   matches, so each red case of a rule is a file of its own, `test/fir/verify/vNN_name.fir`. Two
@@ -501,6 +503,12 @@ bullet at a time and without a rewrite.
   a store whose location alone moved, and it printed each moved store for review. Any other
   difference stops the script and writes nothing. The texts of new behavior are still derived by
   hand before their first run.
+- **A test of the build-mode pass runs the verifier on both sides of the pass** (T-247).
+  `test/fort/support/pass_env.ft` parses a FIR text against a prelude, or lowers a source, in the
+  sandbox of `lower_env`. It runs the verifier, `fir_passes.build_mode` and the verifier again,
+  and holds that each block has the number of its position. Give each `check` of a hand-written
+  text a continuation of its own: a continuation that a `switch` or a `goto` names too breaks V11,
+  and two of the texts of T-247 did so before their first run.
 - **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
   when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
   holds only the program, and `check_env` sandboxes get an empty runtime. Write

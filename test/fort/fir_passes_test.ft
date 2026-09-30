@@ -1,0 +1,987 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| kinds ok
+//| widths ok
+//| substitution ok
+//| dead ok
+//| uses ok
+/// Checks the build-mode pass of spec/fir.md 11 on FIR texts: which check kinds each mode
+/// removes, the mask of a shift check and the reads of its count that the mask replaces, and the
+/// removal of the dead temporaries. Each case runs the verifier before and after the pass.
+import consts;
+import fir;
+import fir_passes;
+import lower_env;
+import pass_env;
+import std.strbuf;
+
+// ---- the removal column -------------------------------------------------------------------------
+
+// The terminators of bb0 of KIND_LINES: the kinds of the table of spec/fir.md 8 in its order, each
+// as a `check`, then the two kinds that stand in a `fail`.
+u64 KIND_COUNT = 13;
+
+string[KIND_COUNT] KIND_TERMS = {
+    "check(copy _1, overflow) -> bb1;",
+    "check(copy _1, shift, copy _2, const bytes \"i32\") -> bb1;",
+    "check(copy _1, div_zero) -> bb1;",
+    "check(copy _1, div_overflow) -> bb1;",
+    "check(copy _1, bounds, copy _2, const u64 4) -> bb1;",
+    "check(copy _1, span, copy _2, copy _2, const u64 4) -> bb1;",
+    "check(copy _1, alloc_count, copy _2) -> bb1;",
+    "check(overwrite: _3) -> bb1;",
+    "check(copy _1, enum, copy _2, const bytes \"color\") -> bb1;",
+    "check(copy _1, user, const bytes \"f\") -> bb1;",
+    "check(copy _1, panic, const bytes \"x\", const u64 1) -> bb1;",
+    "fail(enum, copy _2, const bytes \"color\");",
+    "fail(panic, const bytes \"x\", const u64 1);",
+};
+
+// The column "removed by" of spec/fir.md 8: whether --release removes each kind of KIND_TERMS,
+// and whether --no-bounds-check does.
+bool[KIND_COUNT] BY_RELEASE = {
+    true, true, false, false, false, false, false, true, false, false, false, false, false,
+};
+
+bool[KIND_COUNT] BY_NO_BOUNDS = {
+    false, false, false, false, true, true, false, false, false, false, false, false, false,
+};
+
+string[5] KIND_PRELUDE = {
+    "enum color {",
+    "    red,",
+    "}",
+    "fn k(bool f, i64 n, u8 mut* own p) void {",
+    "}",
+};
+
+// The function of each kind: its bb0 ends in the terminator that line 2 takes, and bb1 returns.
+string[8] KIND_LINES = {
+    "fn main.k(_1 (f): bool, _2 (n): i64, _3 (p): u8 mut* own) -> void {",
+    "    bb0: {",
+    "",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// Each of the four modes removes exactly the kinds of its column, for 13 terminators. A removed
+// check leaves `goto bb1`, and bb1 merges into bb0, so one block that returns stays. The mask of
+// the shift check reads the parameter `_2`, which nothing reads later, so the mask goes too. A
+// kept check keeps its block and its continuation.
+fn each_mode_removes_the_kinds_of_its_column() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] mut lines = KIND_LINES;
+    u64 mut removed = 0;
+    u64 mut kept = 0;
+    u64 mut k = 0;
+    while (k < KIND_COUNT) {
+        lines[2] = KIND_TERMS[k];
+        for (pass_env.mode m : pass_env.MODES) {
+            fir.module mut fm = pass_env.parse(&e, KIND_PRELUDE[..], lines[..]);
+            fir.func mut* f = &fm.funcs.items[0];
+            fir.term_kind before = fir.block_at(f, 0)->term.kind;
+            pass_env.build(&e, f, m);
+            if ((m.release && BY_RELEASE[k]) || (m.no_bounds && BY_NO_BOUNDS[k])) {
+                assert(fir.block_count(f) == 1);
+                assert(fir.block_at(f, 0)->term.kind == fir.term_kind.tk_return);
+                assert(fir.block_statement_count(f, 0) == 0);
+                removed += 1;
+            } else {
+                assert(fir.block_count(f) == 2);
+                assert(fir.block_at(f, 0)->term.kind == before);
+                assert(fir.block_at(f, 1)->term.kind == fir.term_kind.tk_return);
+                kept += 1;
+            }
+            fir.module_free(&fm);
+        }
+        k += 1;
+    }
+    // overflow, shift and overwrite in two modes each, bounds and span in two modes each
+    assert(removed == 10);
+    assert(kept == 42);
+}
+
+// A removed check whose continuation cannot merge leaves `goto` at the location, the exit and the
+// statement index of the check. Here the continuation bb1 has a second predecessor, which rule V11
+// forbids, so the input is no verified function and the pass runs without the verifier.
+fn a_removed_check_leaves_goto_at_its_location() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[1] prelude = {"fn g(bool f) void {}"};
+    string[11] text = {
+        "fn main.g(_1 (f): bool) -> void {",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+        "    }",
+        "    bb1: {",
+        "        return;",
+        "    }",
+        "    bb2: {",
+        "        check(copy _1, overflow) -> bb1 #4:9 exit 7:3 s5;",
+        "    }",
+        "}",
+    };
+    fir.module mut fm = pass_env.parse(&e, prelude[..], text[..]);
+    defer fir.module_free(&fm);
+    fir.func mut* f = &fm.funcs.items[0];
+    build_unverified(f, pass_env.RELEASE);
+    assert(fir.block_count(f) == 3);
+    fir.terminator* t = &fir.block_at(f, 2)->term;
+    assert(t->kind == fir.term_kind.tk_goto && t->target == 1);
+    assert(t->loc.line == 4 && t->loc.col == 9 && t->stmt == 5);
+    assert(t->exit_loc.line == 7 && t->exit_loc.col == 3);
+}
+
+// Runs the pass with no verifier, for an input that breaks a rule on purpose.
+fn build_unverified(fir.func mut* f, pass_env.mode m) void {
+    fir_passes.build_mode(f, m.release, m.no_bounds);
+}
+
+// ---- the width of the mask ----------------------------------------------------------------------
+
+// The eight integer types that a shift check can name, and the mask of each: its width less 1.
+u64 WIDTH_COUNT = 8;
+
+string[WIDTH_COUNT] WIDTH_NAMES = {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"};
+
+u64[WIDTH_COUNT] WIDTH_MASKS = {7, 15, 31, 63, 7, 15, 31, 63};
+
+string[1] WIDTH_PRELUDE = {"fn w(bool f, i64 n) void {}"};
+
+// A shift check whose count is the temporary `_3`, a copy of the parameter `_2`, which the named
+// local `_4` reads after the check, so the mask has a reader. Line 6 takes the check.
+string[13] WIDTH_LINES = {
+    "fn main.w(_1 (f): bool, _2 (n): i64) -> void {",
+    "    let _3: i64;",
+    "    let _4 (x): i64;",
+    "",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy _3;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The constant of `and(n, const i64 W - 1)` is the width of the named type less 1, for each of
+// the eight integer types. The mask `_5` is a new temporary of the type `i64` of the count, at the
+// location, the exit and the statement index of the check, and the read of `_3` after the check
+// reads it.
+fn the_mask_is_the_width_of_the_named_type_less_one() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut term = strbuf.create();
+    defer strbuf.free(&term);
+    string[13] mut lines = WIDTH_LINES;
+    u64 mut k = 0;
+    while (k < WIDTH_COUNT) {
+        strbuf.clear(&term);
+        strbuf.append(&term, "check(copy _1, shift, copy _3, const bytes \"");
+        strbuf.append(&term, WIDTH_NAMES[k]);
+        strbuf.append(&term, "\") -> bb1 #3:7 exit 9:1 s2;");
+        lines[6] = strbuf.view(&term);
+        fir.module mut fm = pass_env.parse(&e, WIDTH_PRELUDE[..], lines[..]);
+        fir.func mut* f = &fm.funcs.items[0];
+        pass_env.build(&e, f, pass_env.RELEASE);
+        assert(fir.block_count(f) == 1 && fir.block_statement_count(f, 0) == 3);
+        assert(fir.local_count(f) == 6);
+        fir.local* m = fir.local_at(f, 5);
+        assert(m->kind == fir.local_kind.lk_temp && m->ty == fir.local_at(f, 3)->ty);
+        assert(m->loc.line == 3 && m->loc.col == 7);
+        fir.statement* s = fir.block_statement(f, 0, 1);
+        assert(s->place.local == 5 && s->value.kind == fir.rvalue_kind.rv_and);
+        assert(s->loc.line == 3 && s->loc.col == 7 && s->stmt == 2);
+        assert(s->exit_loc.line == 9 && s->exit_loc.col == 1);
+        fir.operand n = fir.rvalue_operand(f, s->value, 0);
+        assert(n.kind == fir.operand_kind.ok_copy && n.place.local == 3);
+        fir.operand top = fir.rvalue_operand(f, s->value, 1);
+        assert(top.kind == fir.operand_kind.ok_const && top.value.ty == m->ty);
+        u64 mut value = 0;
+        assert(consts.cv_to_u64(top.value.value, &value) && value == WIDTH_MASKS[k]);
+        fir.statement* read = fir.block_statement(f, 0, 2);
+        assert(fir.rvalue_operand(f, read->value, 0).place.local == 5);
+        fir.module_free(&fm);
+        k += 1;
+    }
+}
+
+// ---- the reads that the mask replaces -----------------------------------------------------------
+
+string[1] COUNT_PRELUDE = {"fn f(i32 a, i64 n, bool c) i32 { return 0; }"};
+
+// Which reads of the count `_4` read the mask after the pass. The mask reaches bb2 and the start
+// of bb3 on every path. It does not reach the read of bb1 before the check, the read after the
+// write of `_4` in bb3, the read of bb4, which the path from bb0 reaches with no mask, or the read
+// of bb5, which no terminator names and so starts with no mask.
+fn the_mask_replaces_the_reads_that_it_reaches() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[31] text = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _4: i64;",
+        "    let _5: bool;",
+        "    let _6: i32;",
+        "    let _7 (x): i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        switch(copy _3) -> [true: bb1, otherwise: bb4];",
+        "    }",
+        "    bb1: {",
+        "        _7 = copy _4;",
+        "        _5 = ge(copy _4, const i64 32);",
+        "        check(copy _5, shift, copy _4, const bytes \"i32\") -> bb2;",
+        "    }",
+        "    bb2: {",
+        "        _6 = cast<i32>(copy _4);",
+        "        _0 = shl(copy _1, copy _6);",
+        "        goto bb3;",
+        "    }",
+        "    bb3: {",
+        "        _7 = copy _4;",
+        "        _4 = add(copy _4, const i64 1);",
+        "        _7 = copy _4;",
+        "        goto bb4;",
+        "    }",
+        "    bb4: {",
+        "        _7 = copy _4;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[30] want = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _4: i64;",
+        "    let _5: bool;",
+        "    let _6: i32;",
+        "    let _7 (x): i64;",
+        "    let _8: i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        switch(copy _3) -> [true: bb1, otherwise: bb3];",
+        "    }",
+        "    bb1: {",
+        "        _7 = copy _4;",
+        "        _8 = and(copy _4, const i64 31);",
+        "        _6 = cast<i32>(copy _8);",
+        "        _0 = shl(copy _1, copy _6);",
+        "        goto bb2;",
+        "    }",
+        "    bb2: {",
+        "        _7 = copy _8;",
+        "        _4 = add(copy _8, const i64 1);",
+        "        _7 = copy _4;",
+        "        goto bb3;",
+        "    }",
+        "    bb3: {",
+        "        _7 = copy _4;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+}
+
+// A block that no terminator names starts with no mask, so its read of the count stays. A block
+// after it that only it names takes the same empty set, because the dataflow joins the empty end
+// of its one predecessor.
+fn a_block_that_nothing_names_keeps_the_count() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[21] text = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        check(copy _3, shift, copy _4, const bytes \"i8\") -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        _5 = copy _4;",
+        "        return;",
+        "    }",
+        "    bb2: {",
+        "        _5 = copy _4;",
+        "        goto bb3;",
+        "    }",
+        "    bb3: {",
+        "        _5 = copy _4;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[21] want = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "    let _6: i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        _6 = and(copy _4, const i64 7);",
+        "        _5 = copy _6;",
+        "        return;",
+        "    }",
+        "    bb1: {",
+        "        _5 = copy _4;",
+        "        goto bb2;",
+        "    }",
+        "    bb2: {",
+        "        _5 = copy _4;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+}
+
+// A loop whose header holds the check. The mask reaches the body, whose `add` reads the mask and
+// then writes the count, so the next round masks the new count. The exit after that write keeps
+// `_4`. The body merges into the header, which then names itself.
+fn a_mask_in_a_loop_masks_each_round() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[22] text = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        goto bb1;",
+        "    }",
+        "    bb1: {",
+        "        check(copy _3, shift, copy _4, const bytes \"u64\") -> bb2;",
+        "    }",
+        "    bb2: {",
+        "        _5 = copy _4;",
+        "        _4 = add(copy _4, const i64 1);",
+        "        switch(copy _3) -> [true: bb1, otherwise: bb3];",
+        "    }",
+        "    bb3: {",
+        "        _5 = copy _4;",
+        "        _0 = copy _1;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[22] want = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "    let _6: i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        goto bb1;",
+        "    }",
+        "    bb1: {",
+        "        _6 = and(copy _4, const i64 63);",
+        "        _5 = copy _6;",
+        "        _4 = add(copy _6, const i64 1);",
+        "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+        "    }",
+        "    bb2: {",
+        "        _5 = copy _4;",
+        "        _0 = copy _1;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE),
+                     want[..]);
+}
+
+// The mask stands before a loop, and the body of the loop reads the count. The head of the loop
+// joins the end of the mask and the end of the body, which the dataflow does not know before its
+// first round; each end starts with every mask, so the join keeps the mask and the body reads it.
+// An end that started empty would lose the mask at the head and keep `_4` in the body.
+fn a_mask_before_a_loop_reaches_its_body() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[24] text = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        check(copy _3, shift, copy _4, const bytes \"u8\") -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        goto bb2;",
+        "    }",
+        "    bb2: {",
+        "        _5 = copy _4;",
+        "        switch(copy _3) -> [true: bb3, otherwise: bb4];",
+        "    }",
+        "    bb3: {",
+        "        _5 = add(copy _4, copy _5);",
+        "        goto bb2;",
+        "    }",
+        "    bb4: {",
+        "        _0 = copy _1;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[24] want = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "    let _6: i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        _6 = and(copy _4, const i64 7);",
+        "        goto bb1;",
+        "    }",
+        "    bb1: {",
+        "        _5 = copy _6;",
+        "        switch(copy _3) -> [true: bb2, otherwise: bb3];",
+        "    }",
+        "    bb2: {",
+        "        _5 = add(copy _6, copy _5);",
+        "        goto bb1;",
+        "    }",
+        "    bb3: {",
+        "        _0 = copy _1;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+}
+
+// Two shift checks report one count. The second mask ends the first, so the read after both
+// reads the second mask, and the first mask has no reader and goes. A mask reads its count and
+// keeps that read.
+fn the_last_mask_of_a_count_wins() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[17] text = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        check(copy _3, shift, copy _4, const bytes \"i8\") -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        check(copy _3, shift, copy _4, const bytes \"i32\") -> bb2;",
+        "    }",
+        "    bb2: {",
+        "        _5 = copy _4;",
+        "        _0 = copy _1;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[15] want = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "    let _6: i64;",
+        "    let _7: i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        _7 = and(copy _4, const i64 31);",
+        "        _5 = copy _7;",
+        "        _0 = copy _1;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+}
+
+// The mask rewrites the operands of a terminator too: the operand of a `switch`, and the
+// condition and the reported operands of a `check` that stays.
+fn the_mask_rewrites_the_operands_of_a_terminator() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[20] text = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _4: i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        check(copy _3, shift, copy _4, const bytes \"i16\") -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        switch(copy _4) -> [i64 0: bb2, otherwise: bb3];",
+        "    }",
+        "    bb2: {",
+        "        check(copy _3, alloc_count, copy _4) -> bb4;",
+        "    }",
+        "    bb3: {",
+        "        return;",
+        "    }",
+        "    bb4: {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[20] want = {
+        "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _4: i64;",
+        "    let _5: i64;",
+        "",
+        "    bb0: {",
+        "        _4 = copy _2;",
+        "        _5 = and(copy _4, const i64 15);",
+        "        switch(copy _5) -> [i64 0: bb1, otherwise: bb2];",
+        "    }",
+        "    bb1: {",
+        "        check(copy _3, alloc_count, copy _5) -> bb3;",
+        "    }",
+        "    bb2: {",
+        "        return;",
+        "    }",
+        "    bb3: {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE),
+                     want[..]);
+}
+
+// A count that is no whole temporary has no read to replace: a constant, a field of a parameter,
+// a field of a temporary, a parameter and a named local. Each mask then has no reader and goes.
+// The fields, the whole structs that hold them, the parameter, the named local and `_0` keep
+// their reads.
+fn a_count_that_is_no_local_replaces_nothing() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] prelude = {
+        "struct wide {",
+        "    i64 n;",
+        "}",
+        "fn g(bool c, wide w, i64 n) i64 { return 0; }",
+    };
+    string[34] text = {
+        "fn main.g(_1 (c): bool, _2 (w): wide, _3 (n): i64) -> i64 {",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "    let _6 (y): wide;",
+        "    let _7 (z): i64;",
+        "    let _8: wide;",
+        "",
+        "    bb0: {",
+        "        _7 = copy _3;",
+        "        _8 = copy _2;",
+        "        check(copy _1, shift, const i64 3, const bytes \"i32\") -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        check(copy _1, shift, copy _2.0, const bytes \"i32\") -> bb2;",
+        "    }",
+        "    bb2: {",
+        "        check(copy _1, shift, copy _8.0, const bytes \"i32\") -> bb3;",
+        "    }",
+        "    bb3: {",
+        "        check(copy _1, shift, copy _3, const bytes \"i32\") -> bb4;",
+        "    }",
+        "    bb4: {",
+        "        check(copy _1, shift, copy _7, const bytes \"i32\") -> bb5;",
+        "    }",
+        "    bb5: {",
+        "        _4 = copy _2.0;",
+        "        _5 = add(copy _3, copy _7);",
+        "        _6 = copy _2;",
+        "        _6 = copy _8;",
+        "        _5 = copy _8.0;",
+        "        _0 = copy _4;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[25] want = {
+        "fn main.g(_1 (c): bool, _2 (w): wide, _3 (n): i64) -> i64 {",
+        "    let _0: i64;",
+        "    let _4: i64;",
+        "    let _5 (x): i64;",
+        "    let _6 (y): wide;",
+        "    let _7 (z): i64;",
+        "    let _8: wide;",
+        "    let _9: i64;",
+        "    let _10: i64;",
+        "    let _11: i64;",
+        "    let _12: i64;",
+        "    let _13: i64;",
+        "",
+        "    bb0: {",
+        "        _7 = copy _3;",
+        "        _8 = copy _2;",
+        "        _4 = copy _2.0;",
+        "        _5 = add(copy _3, copy _7);",
+        "        _6 = copy _2;",
+        "        _6 = copy _8;",
+        "        _5 = copy _8.0;",
+        "        _0 = copy _4;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, prelude[..], text[..], pass_env.RELEASE), want[..]);
+}
+
+// ---- the dead temporaries -----------------------------------------------------------------------
+
+// The rvalues of spec/fir.md 6, each assigned to the temporary `_7`, which nothing reads, and the
+// type of `_7`. The first RVALUE_PURE are the pure rvalues that the pass removes: the operand, the
+// arithmetic, overflow, bitwise, shift, float and comparison rvalues, `cast` and `addr`. The pass
+// keeps the others: an operand or a `cast` that moves, `slice`, `slice_ptr`, `alloc`, `aggregate`
+// and `call`.
+u64 RVALUE_COUNT = 35;
+u64 RVALUE_PURE = 28;
+
+string[RVALUE_COUNT] RVALUES = {
+    "copy _1",
+    "add(copy _1, copy _2)",
+    "sub(copy _1, copy _2)",
+    "mul(copy _1, copy _2)",
+    "add_overflows(copy _1, copy _2)",
+    "sub_overflows(copy _1, copy _2)",
+    "mul_overflows(copy _1, copy _2)",
+    "div(copy _1, copy _2)",
+    "rem(copy _1, copy _2)",
+    "and(copy _1, copy _2)",
+    "or(copy _1, copy _2)",
+    "xor(copy _1, copy _2)",
+    "not(copy _1)",
+    "shl(copy _1, copy _2)",
+    "shr(copy _1, copy _2)",
+    "fadd(copy _3, copy _3)",
+    "fsub(copy _3, copy _3)",
+    "fmul(copy _3, copy _3)",
+    "fdiv(copy _3, copy _3)",
+    "fneg(copy _3)",
+    "eq(copy _1, copy _2)",
+    "ne(copy _1, copy _2)",
+    "lt(copy _1, copy _2)",
+    "le(copy _1, copy _2)",
+    "gt(copy _1, copy _2)",
+    "ge(copy _1, copy _2)",
+    "cast<i64>(copy _1)",
+    "addr(_1)",
+    "move _6",
+    "cast<u8 mut* own>(move _6)",
+    "slice(_4, const u64 0, const u64 1)",
+    "slice_ptr(copy _5, const u64 0, const u64 1)",
+    "alloc<u8>(const u64 1)",
+    "aggregate pair(const i32 1, const i32 2)",
+    "call fn main.five()",
+};
+
+string[RVALUE_COUNT] RVALUE_TYPES = {
+    "i32", "i32", "i32", "i32", "bool", "bool", "bool", "i32", "i32", "i32", "i32", "i32", "i32",
+    "i32", "i32", "f64", "f64", "f64", "f64", "f64", "bool", "bool", "bool", "bool", "bool",
+    "bool", "i64", "i32*", "u8 mut* own", "u8 mut* own", "u8@", "u8@", "u8 mut* own", "pair",
+    "i32",
+};
+
+string[9] RVALUE_PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    i32 b;",
+    "}",
+    "fn five() i32 {",
+    "    return 5;",
+    "}",
+    "fn d(i32 a, i32 b, f64 x, u8@ s, u8* p, u8 mut* own o) void {",
+    "}",
+};
+
+// Each pure rvalue goes with its assignment, and each other rvalue stays, in the default mode,
+// which removes no check. The text of each case is `_7 = <rvalue>;` and `return;`.
+fn a_pure_rvalue_goes_and_the_others_stay() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut let7 = strbuf.create();
+    defer strbuf.free(&let7);
+    strbuf.str_buf mut assign = strbuf.create();
+    defer strbuf.free(&assign);
+    string[7] mut lines = {
+        "fn main.d(_1: i32, _2: i32, _3: f64, _4: u8@, _5: u8*, _6: u8 mut* own) -> void {",
+        "",
+        "    bb0: {",
+        "",
+        "        return;",
+        "    }",
+        "}",
+    };
+    u64 mut k = 0;
+    while (k < RVALUE_COUNT) {
+        strbuf.clear(&let7);
+        strbuf.append(&let7, "    let _7: ");
+        strbuf.append(&let7, RVALUE_TYPES[k]);
+        strbuf.push(&let7, ';');
+        strbuf.clear(&assign);
+        strbuf.append(&assign, "        _7 = ");
+        strbuf.append(&assign, RVALUES[k]);
+        strbuf.push(&assign, ';');
+        lines[1] = strbuf.view(&let7);
+        lines[3] = strbuf.view(&assign);
+        fir.module mut fm = pass_env.parse(&e, RVALUE_PRELUDE[..], lines[..]);
+        fir.func mut* f = &fm.funcs.items[0];
+        pass_env.build(&e, f, pass_env.CHECKED);
+        if (k < RVALUE_PURE) {
+            assert(fir.block_statement_count(f, 0) == 0);
+        } else {
+            assert(fir.block_statement_count(f, 0) == 1);
+            assert(fir.block_statement(f, 0, 0)->place.local == 7);
+        }
+        fir.module_free(&fm);
+        k += 1;
+    }
+}
+
+// ---- the uses that keep a temporary -------------------------------------------------------------
+
+string[6] USE_PRELUDE = {
+    "struct holder {",
+    "    u8 mut* own p;",
+    "}",
+    "fn five() i32 {",
+    "    return 5;",
+    "}",
+};
+
+// Each temporary here has one kind of use, and the use keeps it: an index local, the pointer of
+// the place of a `del` and of a destination, the operand of a `switch`, the condition and a
+// reported operand of a `check`, the pointer that the place of an overwrite check loads, the
+// callee of a call through a value, an `addr` or a `slice` of its storage, and a temporary that
+// reads itself in a loop. A parameter, a
+// named local and the return place stay with no reader. Every mode leaves the module as it was:
+// no check here is removable but the bounds check and the overwrite check, and the text keeps
+// those in the default mode.
+fn each_use_keeps_its_temporary() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[114] text = {
+        "fn main.index(_1 (v): i32[4], _2 (i): i32) -> i32 {",
+        "    let _0: i32;",
+        "    let _3: u64;",
+        "",
+        "    bb0: {",
+        "        _3 = cast<u64>(copy _2);",
+        "        _0 = copy _1[_3];",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "fn main.pointers(_1 (h): holder mut*, _2 (p): i32 mut*) -> void {",
+        "    let _0: void;",
+        "    let _3: holder mut*;",
+        "    let _4: i32 mut*;",
+        "",
+        "    bb0: {",
+        "        _3 = copy _1;",
+        "        del(move (*_3).0);",
+        "        _4 = copy _2;",
+        "        (*_4) = const i32 1;",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "fn main.branch(_1 (a): i32, _2 (i): u64) -> i32 {",
+        "    let _0: i32;",
+        "    let _3: bool;",
+        "    let _4: bool;",
+        "    let _5: i64;",
+        "",
+        "    bb0: {",
+        "        _3 = lt(copy _1, const i32 0);",
+        "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+        "    }",
+        "    bb1: {",
+        "        _4 = ge(copy _2, const u64 4);",
+        "        _5 = cast<i64>(copy _2);",
+        "        check(copy _4, bounds, copy _5, const u64 4) -> bb3;",
+        "    }",
+        "    bb2: {",
+        "        return;",
+        "    }",
+        "    bb3: {",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "fn main.owner(_1 (q): u8 mut* own mut*) -> void {",
+        "    let _0: void;",
+        "    let _2: u8 mut* own mut*;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1;",
+        "        check(overwrite: (*_2)) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        (*_2) = const null u8 mut* own;",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "fn main.through() -> i32 {",
+        "    let _0: i32;",
+        "    let _1: fn () i32;",
+        "    let _2: i32;",
+        "",
+        "    bb0: {",
+        "        _1 = const fn main.five;",
+        "        _2 = call copy _1();",
+        "        _0 = copy _2;",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "fn main.pointed() -> i32 {",
+        "    let _0: i32;",
+        "    let _1: i32;",
+        "    let _2: i32*;",
+        "    let _3: i32[2];",
+        "    let _4: i32@;",
+        "    let _5 (n): u64;",
+        "",
+        "    bb0: {",
+        "        _1 = const i32 7;",
+        "        _2 = addr(_1);",
+        "        _3 = aggregate i32[2](const i32 1, const i32 2);",
+        "        _4 = slice(_3, const u64 0, const u64 2);",
+        "        _5 = copy _4.1;",
+        "        _0 = copy (*_2);",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "fn main.again(_1 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _2: i32;",
+        "    let _3 (x): i32;",
+        "",
+        "    bb0: {",
+        "        _1 = const false;",
+        "        _3 = const i32 4;",
+        "        _2 = const i32 0;",
+        "        goto bb1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = add(copy _2, const i32 1);",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 2;",
+        "        trap;",
+        "    }",
+        "}",
+    };
+    assert(pass_env.unchanged(&e, USE_PRELUDE[..], text[..], pass_env.CHECKED));
+    // --no-bounds-check removes the bounds check of `branch`, and so changes the module
+    assert(!pass_env.unchanged(&e, USE_PRELUDE[..], text[..], pass_env.NO_BOUNDS));
+}
+
+// A temporary with two assignments and no reader loses both. A chain of four temporaries, each
+// read only by the next, goes in four rounds, the last one first.
+fn the_removal_repeats_until_nothing_changes() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[23] text = {
+        "fn main.w(_1 (c): bool) -> void {",
+        "    let _2: bool;",
+        "    let _3: i64;",
+        "    let _4: u64;",
+        "    let _5: bool;",
+        "    let _6: bool;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+        "    }",
+        "    bb1: {",
+        "        _2 = const false;",
+        "        goto bb2;",
+        "    }",
+        "    bb2: {",
+        "        _3 = cast<i64>(const i32 7);",
+        "        _4 = cast<u64>(copy _3);",
+        "        _5 = ge(copy _4, const u64 8);",
+        "        _6 = not(copy _5);",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[18] want = {
+        "fn main.w(_1 (c): bool) -> void {",
+        "    let _0: void;",
+        "    let _2: bool;",
+        "    let _3: i64;",
+        "    let _4: u64;",
+        "    let _5: bool;",
+        "    let _6: bool;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+        "    }",
+        "    bb1: {",
+        "        goto bb2;",
+        "    }",
+        "    bb2: {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], pass_env.CHECKED), want[..]);
+}
+
+fn main() i32 {
+    each_mode_removes_the_kinds_of_its_column();
+    a_removed_check_leaves_goto_at_its_location();
+    println("kinds ok");
+    the_mask_is_the_width_of_the_named_type_less_one();
+    println("widths ok");
+    the_mask_replaces_the_reads_that_it_reaches();
+    a_block_that_nothing_names_keeps_the_count();
+    a_mask_in_a_loop_masks_each_round();
+    a_mask_before_a_loop_reaches_its_body();
+    the_last_mask_of_a_count_wins();
+    the_mask_rewrites_the_operands_of_a_terminator();
+    a_count_that_is_no_local_replaces_nothing();
+    println("substitution ok");
+    a_pure_rvalue_goes_and_the_others_stay();
+    println("dead ok");
+    each_use_keeps_its_temporary();
+    the_removal_repeats_until_nothing_changes();
+    println("uses ok");
+    return 0;
+}
