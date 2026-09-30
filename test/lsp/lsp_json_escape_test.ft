@@ -1,0 +1,280 @@
+//! run
+//! flags: -I ../../src/fort -I ../fort/support -I ../../src
+//! stdout:
+//| one-byte escapes ok
+//| unicode escapes ok
+//| surrogates ok
+//| utf-8 ok
+//| writing ok
+//| ok
+/// Checks JSON Unicode escapes through fort byte literals. Each written \u escape decodes to
+/// the expected byte sequence.
+
+import lsp.json;
+import lsp_json_env;
+import std.strbuf;
+
+// ---- the one-byte escapes --------------------------------------------------------
+
+fn the_quote_and_the_backslash_decode_to_themselves() void {
+    lsp_json_env.text_is("\"\\\"\"", "\"");
+    lsp_json_env.text_is("\"\\\\\"", "\\");
+}
+
+fn the_solidus_escape_decodes_to_a_plain_slash() void {
+    // JSON allows \/ and never requires it, so the reader takes it and the
+    // writer never writes it.
+    lsp_json_env.text_is("\"\\/\"", "/");
+    lsp_json_env.reads_as("\"\\/\"", "\"/\"");
+}
+
+fn the_three_escapes_fort_spells_decode_to_their_bytes() void {
+    lsp_json_env.text_is("\"\\n\"", "\n");
+    lsp_json_env.text_is("\"\\r\"", "\r");
+    lsp_json_env.text_is("\"\\t\"", "\t");
+}
+
+fn backspace_and_form_feed_decode_to_their_bytes() void {
+    // \b and \f are JSON's and not fort's, so the expected byte is spelled in
+    // hex: 0x08 and 0x0c.
+    lsp_json_env.text_is("\"\\b\"", "\x08");
+    lsp_json_env.text_is("\"\\f\"", "\x0c");
+}
+
+fn an_escape_stands_anywhere_in_a_string() void {
+    lsp_json_env.text_is("\"\\na\"", "\na");
+    lsp_json_env.text_is("\"a\\n\"", "a\n");
+    lsp_json_env.text_is("\"a\\nb\"", "a\nb");
+    lsp_json_env.text_is("\"\\n\\t\\r\"", "\n\t\r");
+}
+
+fn a_string_of_escapes_alone_decodes_whole() void {
+    lsp_json_env.text_is("\"\\\\\\\\\"", "\\\\");
+    lsp_json_env.text_is("\"\\\"\\\"\"", "\"\"");
+}
+
+// ---- \uXXXX ----------------------------------------------------------------------
+
+fn a_unicode_escape_below_128_decodes_to_one_byte() void {
+    lsp_json_env.text_is("\"\\u0041\"", "A");
+    lsp_json_env.text_is("\"\\u007f\"", "\x7f");
+    lsp_json_env.text_is("\"\\u0000\"", "\x00");
+}
+
+fn the_hex_digits_of_an_escape_read_in_either_case() void {
+    lsp_json_env.text_is("\"\\u00e9\"", "\xc3\xa9");
+    lsp_json_env.text_is("\"\\u00E9\"", "\xc3\xa9");
+    lsp_json_env.text_is("\"\\u00eF\"", "\xc3\xaf");
+}
+
+fn an_escape_below_2048_decodes_to_two_bytes() void {
+    // U+0080, U+00E9 and U+07FF, the ends of the two-byte range and one value
+    // inside it.
+    lsp_json_env.text_is("\"\\u0080\"", "\xc2\x80");
+    lsp_json_env.text_is("\"\\u00e9\"", "\xc3\xa9");
+    lsp_json_env.text_is("\"\\u07ff\"", "\xdf\xbf");
+}
+
+fn an_escape_above_2047_decodes_to_three_bytes() void {
+    // U+0800, U+20AC (the euro sign) and U+FFFF.
+    lsp_json_env.text_is("\"\\u0800\"", "\xe0\xa0\x80");
+    lsp_json_env.text_is("\"\\u20ac\"", "\xe2\x82\xac");
+    lsp_json_env.text_is("\"\\uffff\"", "\xef\xbf\xbf");
+}
+
+fn the_replacement_character_decodes_like_any_other() void {
+    lsp_json_env.text_is("\"\\ufffd\"", "\xef\xbf\xbd");
+}
+
+fn an_escape_joins_the_bytes_around_it() void {
+    lsp_json_env.text_is("\"a\\u00e9b\"", "a\xc3\xa9b");
+    lsp_json_env.text_is("\"\\u0041\\u0042\"", "AB");
+}
+
+// ---- surrogate pairs -------------------------------------------------------------
+
+fn a_surrogate_pair_decodes_to_four_bytes() void {
+    // U+1F600, the first code point of the emoticons block: D83D DE00.
+    lsp_json_env.text_is("\"\\ud83d\\ude00\"", "\xf0\x9f\x98\x80");
+    // U+10000 and U+10FFFF, the ends of the range a pair spells.
+    lsp_json_env.text_is("\"\\ud800\\udc00\"", "\xf0\x90\x80\x80");
+    lsp_json_env.text_is("\"\\udbff\\udfff\"", "\xf4\x8f\xbf\xbf");
+}
+
+fn a_pair_joins_the_bytes_around_it() void {
+    lsp_json_env.text_is("\"a\\ud83d\\ude00b\"", "a\xf0\x9f\x98\x80b");
+}
+
+fn a_high_surrogate_alone_is_refused() void {
+    lsp_json_env.refused("\"\\ud800\"", 1, "a high surrogate needs a low one");
+    lsp_json_env.refused("\"\\udbff\"", 1, "a high surrogate needs a low one");
+}
+
+fn a_high_surrogate_followed_by_anything_else_is_refused() void {
+    lsp_json_env.refused("\"\\ud800a\"", 1, "a high surrogate needs a low one");
+    lsp_json_env.refused("\"\\ud800\\n\"", 1, "a high surrogate needs a low one");
+    lsp_json_env.refused("\"\\ud800\\u0041\"", 7, "a high surrogate needs a low one");
+    lsp_json_env.refused("\"\\ud800\\ud800\"", 7, "a high surrogate needs a low one");
+}
+
+fn a_low_surrogate_alone_is_refused() void {
+    lsp_json_env.refused("\"\\udc00\"", 1, "a low surrogate must follow a high one");
+    lsp_json_env.refused("\"\\udfff\"", 1, "a low surrogate must follow a high one");
+    lsp_json_env.refused("\"a\\udc00\"", 2, "a low surrogate must follow a high one");
+}
+
+// ---- UTF-8 in the source ---------------------------------------------------------
+
+fn a_well_formed_sequence_goes_through_unchanged() void {
+    lsp_json_env.text_is("\"\xc3\xa9\"", "\xc3\xa9");
+    lsp_json_env.text_is("\"\xe2\x82\xac\"", "\xe2\x82\xac");
+    lsp_json_env.text_is("\"\xf0\x9f\x98\x80\"", "\xf0\x9f\x98\x80");
+}
+
+fn a_stray_continuation_byte_is_refused() void {
+    lsp_json_env.refused("\"\x80\"", 1, "a string must be valid UTF-8");
+    lsp_json_env.refused("\"\xbf\"", 1, "a string must be valid UTF-8");
+}
+
+fn a_truncated_sequence_is_refused() void {
+    lsp_json_env.refused("\"\xc3\"", 1, "a string must be valid UTF-8");
+    lsp_json_env.refused("\"\xe2\x82\"", 1, "a string must be valid UTF-8");
+    lsp_json_env.refused("\"\xf0\x9f\x98\"", 1, "a string must be valid UTF-8");
+}
+
+fn a_sequence_cut_by_the_closing_quote_is_refused() void {
+    // The quote is a byte of the source like any other, so a sequence that
+    // runs into it is not well-formed rather than terminated.
+    lsp_json_env.refused("\"\xc3\"x", 1, "a string must be valid UTF-8");
+}
+
+fn an_overlong_form_is_refused() void {
+    // The three overlong spellings of a value that fits in fewer bytes.
+    lsp_json_env.refused("\"\xc0\xaf\"", 1, "a string must be valid UTF-8");
+    lsp_json_env.refused("\"\xe0\x80\xaf\"", 1, "a string must be valid UTF-8");
+    lsp_json_env.refused("\"\xf0\x80\x80\xaf\"", 1, "a string must be valid UTF-8");
+}
+
+fn a_surrogate_encoded_in_utf8_is_refused() void {
+    // ED A0 80 is U+ in the form UTF-8 forbids (RFC 3629).
+    lsp_json_env.refused("\"\xed\xa0\x80\"", 1, "a string must be valid UTF-8");
+}
+
+fn a_value_past_the_last_code_point_is_refused() void {
+    // F4 90 80 80 is U+110000 and F5 starts no sequence at all.
+    lsp_json_env.refused("\"\xf4\x90\x80\x80\"", 1, "a string must be valid UTF-8");
+    lsp_json_env.refused("\"\xf5\x80\x80\x80\"", 1, "a string must be valid UTF-8");
+}
+
+fn the_offset_of_a_bad_byte_is_where_it_stands() void {
+    lsp_json_env.refused("\"abc\x80\"", 4, "a string must be valid UTF-8");
+    lsp_json_env.refused("[\"a\",\"\x80\"]", 6, "a string must be valid UTF-8");
+}
+
+// ---- what the writer puts back ---------------------------------------------------
+
+fn the_writer_escapes_the_quote_and_the_backslash() void {
+    lsp_json_env.round_trip("\"\\\"\"");
+    lsp_json_env.round_trip("\"\\\\\"");
+}
+
+fn the_writer_spells_out_newline_tab_and_return() void {
+    lsp_json_env.round_trip("\"\\n\"");
+    lsp_json_env.round_trip("\"\\t\"");
+    lsp_json_env.round_trip("\"\\r\"");
+}
+
+fn the_writer_writes_every_other_control_byte_as_a_hex_escape() void {
+    lsp_json_env.round_trip("\"\\u0000\"");
+    lsp_json_env.round_trip("\"\\u0001\"");
+    lsp_json_env.round_trip("\"\\u001F\"");
+    // \b and \f have no short form in this writer, as they have none in
+    // src/fort/json.ft.
+    lsp_json_env.reads_as("\"\\b\"", "\"\\u0008\"");
+    lsp_json_env.reads_as("\"\\f\"", "\"\\u000C\"");
+}
+
+fn the_writer_writes_the_hex_digits_of_an_escape_in_upper_case() void {
+    lsp_json_env.reads_as("\"\\u001f\"", "\"\\u001F\"");
+    lsp_json_env.reads_as("\"\\u000b\"", "\"\\u000B\"");
+}
+
+fn the_writer_leaves_a_printable_byte_alone() void {
+    lsp_json_env.round_trip("\" \"");
+    lsp_json_env.round_trip("\"~\"");
+    lsp_json_env.round_trip("\"abc 123\"");
+}
+
+fn the_writer_leaves_a_utf8_sequence_alone() void {
+    lsp_json_env.round_trip("\"\xc3\xa9\"");
+    lsp_json_env.round_trip("\"\xe2\x82\xac\"");
+    lsp_json_env.round_trip("\"\xf0\x9f\x98\x80\"");
+    // An escape the reader decoded comes back as the bytes it decoded to.
+    lsp_json_env.reads_as("\"\\u00e9\"", "\"\xc3\xa9\"");
+    lsp_json_env.reads_as("\"\\ud83d\\ude00\"", "\"\xf0\x9f\x98\x80\"");
+}
+
+fn a_name_is_escaped_the_way_a_string_is() void {
+    lsp_json_env.round_trip("{\"a\\nb\":1}");
+    lsp_json_env.round_trip("{\"\\u0000\":1}");
+    lsp_json_env.reads_as("{\"\\u0041\":1}", "{\"A\":1}");
+}
+
+fn a_string_the_writer_builds_is_valid_utf8_whatever_it_held() void {
+    // The writer takes bytes from its caller and not from the reader, so it
+    // meets the sequences the reader refuses. It replaces each byte of one
+    // with U+FFFD, as src/fort/json.ft does.
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &out);
+    json.write_str(&w, "\x80");
+    lsp_json_env.check(strbuf.view(&out), "\"\xef\xbf\xbd\"", "a stray continuation byte");
+    strbuf.clear(&out);
+    json.write_init(&w, &out);
+    json.write_str(&w, "a\xc3b");
+    lsp_json_env.check(strbuf.view(&out), "\"a\xef\xbf\xbdb\"", "a truncated sequence");
+}
+
+fn main() i32 {
+    the_quote_and_the_backslash_decode_to_themselves();
+    the_solidus_escape_decodes_to_a_plain_slash();
+    the_three_escapes_fort_spells_decode_to_their_bytes();
+    backspace_and_form_feed_decode_to_their_bytes();
+    an_escape_stands_anywhere_in_a_string();
+    a_string_of_escapes_alone_decodes_whole();
+    println("one-byte escapes ok");
+    a_unicode_escape_below_128_decodes_to_one_byte();
+    the_hex_digits_of_an_escape_read_in_either_case();
+    an_escape_below_2048_decodes_to_two_bytes();
+    an_escape_above_2047_decodes_to_three_bytes();
+    the_replacement_character_decodes_like_any_other();
+    an_escape_joins_the_bytes_around_it();
+    println("unicode escapes ok");
+    a_surrogate_pair_decodes_to_four_bytes();
+    a_pair_joins_the_bytes_around_it();
+    a_high_surrogate_alone_is_refused();
+    a_high_surrogate_followed_by_anything_else_is_refused();
+    a_low_surrogate_alone_is_refused();
+    println("surrogates ok");
+    a_well_formed_sequence_goes_through_unchanged();
+    a_stray_continuation_byte_is_refused();
+    a_truncated_sequence_is_refused();
+    a_sequence_cut_by_the_closing_quote_is_refused();
+    an_overlong_form_is_refused();
+    a_surrogate_encoded_in_utf8_is_refused();
+    a_value_past_the_last_code_point_is_refused();
+    the_offset_of_a_bad_byte_is_where_it_stands();
+    println("utf-8 ok");
+    the_writer_escapes_the_quote_and_the_backslash();
+    the_writer_spells_out_newline_tab_and_return();
+    the_writer_writes_every_other_control_byte_as_a_hex_escape();
+    the_writer_writes_the_hex_digits_of_an_escape_in_upper_case();
+    the_writer_leaves_a_printable_byte_alone();
+    the_writer_leaves_a_utf8_sequence_alone();
+    a_name_is_escaped_the_way_a_string_is();
+    a_string_the_writer_builds_is_valid_utf8_whatever_it_held();
+    println("writing ok");
+    println("ok");
+    return 0;
+}

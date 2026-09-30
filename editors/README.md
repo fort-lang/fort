@@ -191,11 +191,12 @@ tools/vm run 'for f in $(git ls-files "*.ft"); do
     case "$out" in *"not found"*) echo "$f $out" ;; esac
 done' > /tmp/painted.txt
 wc -l < /tmp/painted.txt                                        # 191
-grep -c "^test/fort/" /tmp/painted.txt                          # 170
-grep -v "^test/fort/" /tmp/painted.txt | grep -c "module 'std\." # 16
+grep -c "^test/\(fort\|lsp\)/" /tmp/painted.txt                   # 170
+grep -v "^test/\(fort\|lsp\)/" /tmp/painted.txt | grep -c "module 'std\." # 16
 ```
 
-170 of them are under `test/fort/`, whose imports need the `-I ../../src/fort` of their own test
+170 of them are under `test/fort/` and `test/lsp/` (one directory when this was measured; T-264
+moved the server's tests), whose imports need the `-I ../../src/fort` of their own test
 directive, which no search root taken from a closure recovers. 16 name a `std.` module and answer
 to `tools/vm build release` instead, the `std/` beside the release binary being older than the
 checkout. That leaves 5: `src/lsp/json.ft`, which imports `flt` from `src/fort`; two fail tests and

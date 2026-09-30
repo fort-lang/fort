@@ -563,6 +563,14 @@ without a rewrite.
   A ruleset on `main` requires `ci-status` and nothing else. `ci-status` fails when any job of
   either called workflow ends in a result other than `success`, so a new job in a component
   workflow joins the gate with no edit to `ci.yml`.
+- `fort.yml` builds and tests the language server in its job `lsp`, apart from the job
+  `bootstrap` (T-264). `bootstrap` builds the default targets except `fort_lsp` and runs the
+  labels `fort` and `bootstrap0`; `lsp` builds `fort_lsp` and runs the label `lsp`. Each job
+  bootstraps the compiler itself, as `lint` does, so no job waits for another. **The job
+  `bootstrap` names its targets**: `fort fort_std lang_ffi_helpers fort_bootstrap0_unit_tests`,
+  the default build without `fort_lsp`. A new `ALL` target in `CMakeLists.txt` gets no CI build
+  until its name joins that list or a job of its own; nothing reports the gap. Every `ctest` step
+  passes `--no-tests=error`, so a label that selects no test fails the job.
 - The runners are `ubuntu-24.04`, `ubuntu-latest` and `macos-latest`. The Linux target is
   x86_64, the Linux runners are x86_64, and the Darwin runner is arm64, so each runner builds and
   runs its target natively. CI installs none of the qemu, binfmt and cross packages of section 3;

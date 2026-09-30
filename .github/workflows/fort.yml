@@ -1,5 +1,6 @@
-# The checks of the fort compiler: the format of its C test helpers, the fort lint, and a
-# Release bootstrap from bootstrap0 followed by every test.
+# The checks of the fort compiler: the format of its C test helpers, the fort lint, a
+# Release bootstrap from bootstrap0 followed by the compiler and bootstrap0 tests, and
+# the language server build with its tests.
 #
 # Every job checks out the full history. Configure reads the pinned commit of
 # tools/bootstrap.ref with git, and a shallow clone does not hold it.
@@ -83,18 +84,23 @@ jobs:
       - name: Configure
         run: cmake --preset release
       # bootstrap0 builds bootstrap-1, which builds HEAD into build/<Host>/release/fort.
+      # The targets are the default build without fort_lsp, which the job lsp builds.
       - name: Bootstrap the compiler
-        run: cmake --build --preset release
+        run: >-
+          cmake --build --preset release
+          --target fort fort_std lang_ffi_helpers fort_bootstrap0_unit_tests
       # The fort tests: the language corpus, the check mode, the fixpoint in four build
-      # modes, the terminal test, the language server, and the module and FIR tests.
+      # modes, the terminal test, and the module and FIR tests.
       - name: Run the fort tests
         run: |
           ulimit -c 0
-          ctest --preset release -L '^fort$' -j "$(getconf _NPROCESSORS_ONLN)"
+          ctest --preset release -L '^fort$' --no-tests=error \
+            -j "$(getconf _NPROCESSORS_ONLN)"
       - name: Run the bootstrap0 tests
         run: |
           ulimit -c 0
-          ctest --preset release -L '^bootstrap0$' -j "$(getconf _NPROCESSORS_ONLN)"
+          ctest --preset release -L '^bootstrap0$' --no-tests=error \
+            -j "$(getconf _NPROCESSORS_ONLN)"
       - name: Keep the fixpoint diffs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -102,3 +108,34 @@ jobs:
           name: fixpoint-${{ matrix.os }}
           path: build/*/release/cmake-fixpoint/fixpoint/*/module.diff
           if-no-files-found: ignore
+
+  # The language server: fort-lsp and its tests, apart from the compiler's.
+  lsp:
+    name: lsp (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, host: linux }
+          - { os: ubuntu-latest, host: linux }
+          - { os: macos-latest, host: darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        run: tools/ci_setup.sh ${{ matrix.host }}
+      - name: Configure
+        run: cmake --preset release
+      # fort-lsp is src/lsp compiled by the product compiler, so the target bootstraps
+      # the compiler first.
+      - name: Build the language server
+        run: cmake --build --preset release --target fort_lsp
+      # The module tests of test/lsp and the test of the fort-lsp binary.
+      - name: Run the language server tests
+        run: |
+          ulimit -c 0
+          ctest --preset release -L '^lsp$' --no-tests=error \
+            -j "$(getconf _NPROCESSORS_ONLN)"

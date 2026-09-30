@@ -1,0 +1,776 @@
+//! run
+//! flags: -I ../../src/fort -I ../fort/support -I ../../src
+//! stdout:
+//| names ok
+//| lines ok
+//| ascii ok
+//| utf16 ok
+//| utf8 ok
+//| round trip ok
+//| clamps ok
+//| columns ok
+//| sweep ok
+//| ok
+/// Checks line and character positions with tabs, combining marks, and each UTF-8 character
+/// length.
+import lsp.text;
+import lsp_env;
+
+//
+// SAMPLE contains 'a', a tab, U+00E9, U+1D11E, 'e', and U+0301. U+00E9 uses
+// two bytes. U+1D11E uses four bytes and one UTF-16 surrogate pair. U+0301 is
+// the combining acute accent. The rows below show its encodings.
+//
+// Offsets: 0 1 2 3 4 5 6 7 8 9 10.
+// Bytes: a \t C3 A9 F0 9D 84 9E e CC 81.
+// UTF-16 positions: 0 1 2 3 5 6.
+// UTF-8 positions: 0 1 2 4 8 9.
+string SAMPLE = "a\t\xC3\xA9\xF0\x9D\x84\x9Ee\xCC\x81";
+
+// The offsets of SAMPLE that begin a character, and the two indices of each.
+u64 SAMPLE_LEN = 11;
+
+// ---- the names of the encodings --------------------------------------------------
+
+fn the_two_encodings_have_the_names_the_protocol_uses() void {
+    lsp_env.check(text.encoding_name(text.position_encoding.enc_utf16), "utf-16", "name utf-16");
+    lsp_env.check(text.encoding_name(text.position_encoding.enc_utf8), "utf-8", "name utf-8");
+}
+
+fn a_name_the_server_implements_is_read_back() void {
+    text.position_encoding mut enc = text.position_encoding.enc_utf8;
+    assert(text.encoding_of_name("utf-16", &enc));
+    assert(enc == text.position_encoding.enc_utf16);
+    assert(text.encoding_of_name("utf-8", &enc));
+    assert(enc == text.position_encoding.enc_utf8);
+}
+
+fn a_name_the_server_does_not_implement_is_refused() void {
+    text.position_encoding mut enc = text.position_encoding.enc_utf16;
+    // utf-32 is a name the protocol has and this server has not, and the
+    // server must not answer a client that it counts in one.
+    assert(!text.encoding_of_name("utf-32", &enc));
+    assert(!text.encoding_of_name("UTF-16", &enc));
+    assert(!text.encoding_of_name("utf16", &enc));
+    assert(!text.encoding_of_name("", &enc));
+    // A refused name leaves the caller's encoding alone.
+    assert(enc == text.position_encoding.enc_utf16);
+}
+
+// ---- the ASCII case fold ---------------------------------------------------------
+
+fn two_names_that_differ_in_case_alone_are_equal() void {
+    assert(text.equal_no_case("Content-Length", "content-length"));
+    assert(text.equal_no_case("FILE", "file"));
+    assert(text.equal_no_case("", ""));
+    assert(text.equal_no_case("localhost", "LOCALHOST"));
+    assert(text.equal_no_case("aZ09-_", "Az09-_"));
+}
+
+fn the_fold_stops_at_the_ends_of_the_two_letter_ranges() void {
+    // '@' is the byte below 'A' and '`' the byte below 'a'; '[' is the byte
+    // above 'Z' and '{' the byte above 'z'. A fold that shifted them would
+    // make each pair equal, which is the classic off-by-one of this loop.
+    assert(!text.equal_no_case("@", "`"));
+    assert(!text.equal_no_case("[", "{"));
+    assert(!text.equal_no_case("]", "}"));
+    assert(!text.equal_no_case("^", "~"));
+}
+
+fn two_names_that_differ_in_more_than_case_are_not_equal() void {
+    assert(!text.equal_no_case("content-length", "content-type"));
+    assert(!text.equal_no_case("file", "files"));
+    assert(!text.equal_no_case("file", "fil"));
+    assert(!text.equal_no_case("", "a"));
+    // A byte above ASCII decides by its value: this module folds no other
+    // alphabet.
+    assert(!text.equal_no_case("\xC3\x89", "\xC3\xA9"));
+    assert(text.equal_no_case("\xC3\xA9", "\xC3\xA9"));
+}
+
+// ---- where a line begins and ends ------------------------------------------------
+
+fn the_empty_text_is_one_empty_line() void {
+    lsp_env.check_u64(text.line_start("", 0), 0, "empty line 0");
+    lsp_env.check_u64(text.line_start("", 1), 0, "empty line 1");
+    lsp_env.check_u64(text.line_end("", 0), 0, "empty end");
+}
+
+fn a_text_without_a_terminator_is_one_line() void {
+    lsp_env.check_u64(text.line_start("abc", 0), 0, "abc line 0");
+    lsp_env.check_u64(text.line_end("abc", 0), 3, "abc end");
+}
+
+fn a_line_feed_starts_the_next_line() void {
+    string s = "ab\ncd\ne";
+    lsp_env.check_u64(text.line_start(s, 0), 0, "lf line 0");
+    lsp_env.check_u64(text.line_start(s, 1), 3, "lf line 1");
+    lsp_env.check_u64(text.line_start(s, 2), 6, "lf line 2");
+    lsp_env.check_u64(text.line_end(s, 0), 2, "lf end 0");
+    lsp_env.check_u64(text.line_end(s, 3), 5, "lf end 1");
+    lsp_env.check_u64(text.line_end(s, 6), 7, "lf end 2");
+}
+
+fn a_carriage_return_before_the_line_feed_is_part_of_the_terminator() void {
+    string s = "ab\r\ncd";
+    lsp_env.check_u64(text.line_start(s, 1), 4, "crlf line 1");
+    lsp_env.check_u64(text.line_end(s, 0), 2, "crlf end 0");
+    lsp_env.check_u64(text.line_end(s, 4), 6, "crlf end 1");
+}
+
+fn an_empty_line_between_two_terminators_ends_where_it_begins() void {
+    string s = "a\r\n\r\nb";
+    lsp_env.check_u64(text.line_start(s, 1), 3, "empty crlf start");
+    lsp_env.check_u64(text.line_end(s, 3), 3, "empty crlf end");
+    lsp_env.check_u64(text.line_start(s, 2), 5, "empty crlf line 2");
+    string t = "a\n\nb";
+    lsp_env.check_u64(text.line_start(t, 1), 2, "empty lf start");
+    lsp_env.check_u64(text.line_end(t, 2), 2, "empty lf end");
+}
+
+fn a_lone_carriage_return_is_not_a_line_break() void {
+    // An old Mac file is one line, which is how the lexer counts it. A line is
+    // numbered at a line feed and a `\r` is whitespace.
+    string s = "ab\rcd";
+    lsp_env.check_u64(text.line_start(s, 1), 0, "lone cr line 1");
+    lsp_env.check_u64(text.line_end(s, 0), 5, "lone cr end");
+}
+
+fn a_carriage_return_at_the_end_of_the_text_is_ordinary_text() void {
+    // It terminates nothing, so it belongs to the line text. The offset after
+    // it is a position. If line_end strips it, the last byte has no position.
+    lsp_env.check_u64(text.line_end("abc\r", 0), 4, "the end of a line ending in a lone cr");
+    text.position p = text.position_of("abc\r", text.position_encoding.enc_utf16, 4);
+    lsp_env.check_u64(p.character, 4, "the position past a trailing cr");
+    lsp_env.check_u64(text.offset_of("abc\r", text.position_encoding.enc_utf16,
+                                     text.position{0, 4}), 4, "the offset of that position");
+    // The position before it is still its own.
+    text.position q = text.position_of("abc\r", text.position_encoding.enc_utf16, 3);
+    lsp_env.check_u64(q.character, 3, "the position at a trailing cr");
+    // A document of one carriage return, and one of a carriage return after a
+    // real terminator.
+    lsp_env.check_u64(text.line_end("\r", 0), 1, "a document of one cr");
+    lsp_env.check_u64(text.line_end("a\r\nb\r", 3), 5, "a lone cr after a terminator");
+    lsp_env.check_u64(text.line_start("a\r\nb\r", 1), 3, "the line after the terminator");
+}
+
+fn only_the_last_carriage_return_of_a_run_belongs_to_the_terminator() void {
+    // `a\r\r\n`: the second carriage return is half of the terminator and the
+    // first is ordinary text. So the text of line 0 is `a\r` and ends at 2.
+    // TAIL_CR carries the same run, so both text sweeps cover it.
+    string s = "a\r\r\n";
+    lsp_env.check_u64(text.line_end(s, 0), 2, "the end of a line before a run of two");
+    lsp_env.check_u64(text.line_start(s, 1), 4, "the line after that terminator");
+    text.position p = text.position_of(s, text.position_encoding.enc_utf16, 1);
+    lsp_env.check_u64(p.line, 0, "the line of the first carriage return");
+    lsp_env.check_u64(p.character, 1, "the character of the first carriage return");
+    // Both bytes of the terminator answer the end of the line they end.
+    text.position q = text.position_of(s, text.position_encoding.enc_utf16, 2);
+    lsp_env.check_u64(q.character, 2, "the character at the terminator");
+    text.position r = text.position_of(s, text.position_encoding.enc_utf16, 3);
+    lsp_env.check_u64(r.line, 0, "the line of the line feed");
+    lsp_env.check_u64(r.character, 2, "the character inside the terminator");
+    // A run of three: only the last one is the terminator's.
+    lsp_env.check_u64(text.line_end("a\r\r\r\n", 0), 3, "the end of a line before a run of three");
+    // The compiler's own 1-based line and byte column read the run the same
+    // way: column 2 is the first carriage return of the two. And a column past
+    // the text of the line clamps to its end and not into the terminator.
+    text.position c = text.of_line_col(s, text.position_encoding.enc_utf16, 1, 2);
+    lsp_env.check_u64(c.line, 0, "the line of column 2");
+    lsp_env.check_u64(c.character, 1, "the character of column 2");
+    text.position d = text.of_line_col(s, text.position_encoding.enc_utf16, 1, 9);
+    lsp_env.check_u64(d.line, 0, "the line of a column past the end");
+    lsp_env.check_u64(d.character, 2, "the character of a column past the end");
+}
+
+fn a_text_that_ends_in_a_terminator_has_an_empty_last_line() void {
+    string s = "ab\n";
+    lsp_env.check_u64(text.line_start(s, 1), 3, "trailing lf line 1");
+    lsp_env.check_u64(text.line_end(s, 3), 3, "trailing lf end 1");
+}
+
+fn a_line_past_the_last_one_is_the_last_one() void {
+    string s = "ab\ncd";
+    lsp_env.check_u64(text.line_start(s, 2), 3, "past line 2");
+    lsp_env.check_u64(text.line_start(s, 1000), 3, "past line 1000");
+    // The largest u64 there is: a client may send any number.
+    lsp_env.check_u64(text.line_start(s, 18446744073709551615), 3, "past line max");
+}
+
+// ---- ASCII, where the three counts agree -----------------------------------------
+
+fn every_ascii_byte_is_one_character_in_both_encodings() void {
+    string s = "abc";
+    u64 mut i = 0;
+    while (i <= 3) {
+        lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                         text.position{0, i}), i, "ascii utf16");
+        lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf8,
+                                         text.position{0, i}), i, "ascii utf8");
+        i += 1;
+    }
+}
+
+fn a_tab_is_one_character_and_not_a_run_of_columns() void {
+    // The protocol counts code units, so a tab is one, whatever a terminal
+    // renders. The compiler counts it as one byte column for the same reason.
+    string s = "\ta";
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{0, 1}), 1, "tab utf16");
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf8,
+                                     text.position{0, 1}), 1, "tab utf8");
+    text.position p = text.position_of(s, text.position_encoding.enc_utf16, 1);
+    lsp_env.check_u64(p.character, 1, "tab position");
+}
+
+fn a_position_on_a_later_line_counts_from_that_line() void {
+    string s = "ab\ncde\nf";
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{1, 2}), 5, "line 1 char 2");
+    text.position p = text.position_of(s, text.position_encoding.enc_utf16, 5);
+    lsp_env.check_u64(p.line, 1, "offset 5 line");
+    lsp_env.check_u64(p.character, 2, "offset 5 character");
+    text.position q = text.position_of(s, text.position_encoding.enc_utf16, 7);
+    lsp_env.check_u64(q.line, 2, "offset 7 line");
+    lsp_env.check_u64(q.character, 0, "offset 7 character");
+}
+
+// ---- UTF-16 ----------------------------------------------------------------------
+
+fn a_utf16_character_index_is_a_count_of_code_units() void {
+    // 'a' 0, tab 1, U+00E9 2, U+1D11E 3 and 4, 'e' 5, U+0301 6, the end 7.
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 0}), 0, "utf16 0");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 1}), 1, "utf16 1");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 2}), 2, "utf16 2");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 3}), 4, "utf16 3");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 5}), 8, "utf16 5");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 6}), 9, "utf16 6");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 7}), SAMPLE_LEN, "utf16 7");
+}
+
+fn a_position_inside_a_surrogate_pair_rounds_down() void {
+    // Character 4 is the low half of the pair U+1D11E spells. No byte offset
+    // addresses it, so the position rounds down to the first byte of the
+    // character, which is 4.
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 4}), 4, "inside the pair");
+}
+
+fn a_combining_mark_is_a_character_of_its_own() void {
+    // "e" and U+0301 are two code points and two positions: the protocol
+    // counts code units and never grapheme clusters.
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 5}), 8, "before the mark");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16,
+                                     text.position{0, 6}), 9, "between e and the mark");
+    text.position p = text.position_of(SAMPLE, text.position_encoding.enc_utf16, 9);
+    lsp_env.check_u64(p.character, 6, "the mark is character 6");
+}
+
+fn a_byte_offset_inside_a_character_answers_that_character() void {
+    // Every offset inside U+1D11E, which covers bytes 4 to 7, is position 3.
+    u64 mut at = 4;
+    while (at <= 7) {
+        text.position p = text.position_of(SAMPLE, text.position_encoding.enc_utf16, at);
+        lsp_env.check_u64(p.character, 3, "inside the astral character");
+        at += 1;
+    }
+    text.position q = text.position_of(SAMPLE, text.position_encoding.enc_utf16, 3);
+    lsp_env.check_u64(q.character, 2, "inside the two-byte character");
+    text.position r = text.position_of(SAMPLE, text.position_encoding.enc_utf16, 10);
+    lsp_env.check_u64(r.character, 6, "inside the combining mark");
+}
+
+// ---- UTF-8 -----------------------------------------------------------------------
+
+fn a_utf8_character_index_is_a_byte_offset() void {
+    u64 mut at = 0;
+    while (at <= SAMPLE_LEN) {
+        u64 got = text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                 text.position{0, at});
+        // Only an offset that begins a character answers itself. The rest
+        // round down, which the case below states one by one.
+        assert(got <= at);
+        at += 1;
+    }
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, 0}), 0, "utf8 0");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, 2}), 2, "utf8 2");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, 4}), 4, "utf8 4");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, 8}), 8, "utf8 8");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, 9}), 9, "utf8 9");
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, SAMPLE_LEN}), SAMPLE_LEN, "utf8 end");
+}
+
+fn a_utf8_position_inside_a_sequence_rounds_down() void {
+    // Byte 3 is the continuation byte of U+00E9, bytes 5 to 7 those of
+    // U+1D11E and byte 10 that of the combining mark.
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, 3}), 2, "utf8 inside two bytes");
+    u64 mut at = 5;
+    while (at <= 7) {
+        lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                         text.position{0, at}), 4, "utf8 inside four bytes");
+        at += 1;
+    }
+    lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8,
+                                     text.position{0, 10}), 9, "utf8 inside the mark");
+}
+
+fn the_two_encodings_answer_the_same_byte_offsets() void {
+    // The set of byte offsets a character index can address is the same under
+    // both encodings. The starts of the characters, and the end of the line.
+    u64 mut i = 0;
+    while (i <= 12) {
+        u64 a = text.offset_of(SAMPLE, text.position_encoding.enc_utf16, text.position{0, i});
+        u64 b = text.offset_of(SAMPLE, text.position_encoding.enc_utf8, text.position{0, i});
+        assert(a == 0 || a == 1 || a == 2 || a == 4 || a == 8 || a == 9 || a == SAMPLE_LEN);
+        assert(b == 0 || b == 1 || b == 2 || b == 4 || b == 8 || b == 9 || b == SAMPLE_LEN);
+        i += 1;
+    }
+}
+
+fn a_byte_that_starts_no_sequence_is_one_character() void {
+    // A document an editor sends is valid UTF-8, since the reader refuses a
+    // string that is not. This module still answers for bytes that are not,
+    // one byte at a time, so no walk of it can run away.
+    string s = "\xFFa\x80b";
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{0, 2}), 2, "bad byte utf16");
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf8,
+                                     text.position{0, 3}), 3, "bad byte utf8");
+    text.position p = text.position_of(s, text.position_encoding.enc_utf16, 4);
+    lsp_env.check_u64(p.character, 4, "bad bytes are characters");
+    // A truncated sequence at the end of the text is bytes, not a character.
+    string t = "a\xF0\x9D";
+    lsp_env.check_u64(text.offset_of(t, text.position_encoding.enc_utf16,
+                                     text.position{0, 3}), 3, "truncated");
+}
+
+// ---- the round trip --------------------------------------------------------------
+
+fn an_offset_that_begins_a_character_survives_the_round_trip() void {
+    // Every offset of SAMPLE that begins a character comes back from
+    // position_of and offset_of unchanged, under both encodings.
+    u64[7] starts = u64[7]{0, 1, 2, 4, 8, 9, 11};
+    u64 mut i = 0;
+    while (i < 7) {
+        u64 at = starts[i];
+        text.position p16 = text.position_of(SAMPLE, text.position_encoding.enc_utf16, at);
+        lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf16, p16), at,
+                          "round trip utf16");
+        text.position p8 = text.position_of(SAMPLE, text.position_encoding.enc_utf8, at);
+        lsp_env.check_u64(text.offset_of(SAMPLE, text.position_encoding.enc_utf8, p8), at,
+                          "round trip utf8");
+        i += 1;
+    }
+}
+
+fn the_round_trip_holds_across_lines() void {
+    string s = "ab\n\xC3\xA9x\r\n\xF0\x9D\x84\x9E";
+    u64 mut at = 0;
+    while (at <= s.len) {
+        text.position p = text.position_of(s, text.position_encoding.enc_utf16, at);
+        u64 back = text.offset_of(s, text.position_encoding.enc_utf16, p);
+        // An offset inside a character or inside a two-byte terminator lands
+        // on the start of what holds it. So the round trip never moves
+        // forwards and never leaves the line it started on.
+        assert(back <= at);
+        text.position again = text.position_of(s, text.position_encoding.enc_utf16, back);
+        assert(again.line == p.line);
+        at += 1;
+    }
+}
+
+// ---- the clamps ------------------------------------------------------------------
+
+fn a_character_past_the_end_of_the_line_clamps_to_the_line() void {
+    string s = "ab\ncd";
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{0, 9}), 2, "past the first line");
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{1, 9}), 5, "past the last line");
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{0, 18446744073709551615}), 2, "character max");
+}
+
+fn a_character_past_the_end_never_crosses_the_terminator() void {
+    // The clamp lands before the terminator and not on the next line. So a
+    // range that ends past the line does not swallow the line break.
+    string s = "ab\r\ncd";
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{0, 40}), 2, "before the crlf");
+}
+
+fn a_line_past_the_last_one_clamps_to_the_last_line() void {
+    string s = "ab\ncd";
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{7, 0}), 3, "line 7 character 0");
+    lsp_env.check_u64(text.offset_of(s, text.position_encoding.enc_utf16,
+                                     text.position{7, 9}), 5, "line 7 past the end");
+}
+
+fn an_offset_past_the_end_of_the_text_clamps_to_the_end() void {
+    string s = "ab\ncd";
+    text.position p = text.position_of(s, text.position_encoding.enc_utf16, 900);
+    lsp_env.check_u64(p.line, 1, "past the end line");
+    lsp_env.check_u64(p.character, 2, "past the end character");
+    text.position q = text.position_of("", text.position_encoding.enc_utf16, 5);
+    lsp_env.check_u64(q.line, 0, "empty text line");
+    lsp_env.check_u64(q.character, 0, "empty text character");
+}
+
+fn the_empty_text_answers_every_position() void {
+    lsp_env.check_u64(text.offset_of("", text.position_encoding.enc_utf16,
+                                     text.position{0, 0}), 0, "empty 0 0");
+    lsp_env.check_u64(text.offset_of("", text.position_encoding.enc_utf16,
+                                     text.position{9, 9}), 0, "empty 9 9");
+    lsp_env.check_u64(text.offset_of("", text.position_encoding.enc_utf8,
+                                     text.position{9, 9}), 0, "empty utf8");
+}
+
+// ---- the compiler's own line and column ------------------------------------------
+
+fn a_line_and_column_of_the_compiler_becomes_a_position() void {
+    // The compiler numbers both from one and counts the column in bytes.
+    string s = "ab\n\xC3\xA9cd";
+    text.position p = text.of_line_col(s, text.position_encoding.enc_utf16, 1, 1);
+    lsp_env.check_u64(p.line, 0, "1:1 line");
+    lsp_env.check_u64(p.character, 0, "1:1 character");
+    text.position q = text.of_line_col(s, text.position_encoding.enc_utf16, 2, 3);
+    lsp_env.check_u64(q.line, 1, "2:3 line");
+    lsp_env.check_u64(q.character, 1, "2:3 character");
+    text.position r = text.of_line_col(s, text.position_encoding.enc_utf8, 2, 3);
+    lsp_env.check_u64(r.character, 2, "2:3 character in utf8");
+}
+
+fn a_line_or_column_of_zero_reads_as_the_first() void {
+    // The compiler numbers from one, so a zero is a caller that has already
+    // converted. Reading it as the first line and column is the answer that
+    // stays inside the document.
+    string s = "ab\ncd";
+    text.position p = text.of_line_col(s, text.position_encoding.enc_utf16, 0, 0);
+    lsp_env.check_u64(p.line, 0, "0:0 line");
+    lsp_env.check_u64(p.character, 0, "0:0 character");
+}
+
+fn a_column_past_the_end_of_its_line_stays_on_that_line() void {
+    string s = "ab\ncd";
+    text.position p = text.of_line_col(s, text.position_encoding.enc_utf16, 1, 40);
+    lsp_env.check_u64(p.line, 0, "column past the line");
+    lsp_env.check_u64(p.character, 2, "column past the line character");
+    text.position q = text.of_line_col(s, text.position_encoding.enc_utf16, 40, 1);
+    lsp_env.check_u64(q.line, 1, "line past the text");
+    lsp_env.check_u64(q.character, 0, "line past the text character");
+}
+
+
+// ---- the sweep -------------------------------------------------------------------
+
+// The document the sweep walks: four lines, two kinds of terminator, a tab, a
+// character of each UTF-8 length and a combining mark. Every offset of it and
+// every position over it go through the two conversions below.
+string DOCUMENT = "fn\ti32\tmain() {\r\n    \xC3\xA9 = \xF0\x9D\x84\x9E;\n\n\te\xCC\x81nd\r\n";
+
+// A document of carriage returns in every place one can stand. A run of two before a line feed,
+// where only the second belongs to the terminator. One stands alone in the middle of a line.
+// One is the last byte and terminates nothing. Stripping that last byte removes its final
+// position. A second document of plain lines beside it, so the sweep covers a text with no
+// carriage return as well. A third covers bytes that begin no sequence. So the rule that such a
+// byte is one unit is crossed with the line rule and with the round trip.
+string TAIL_CR = "a\r\r\nb\rc\r";
+string LINES_ONLY = "one\ntwo\n\nthree";
+string BAD_UTF8 = "\xFFa\x80\r\n\xC3z\n\xF0\x9D";
+
+// This code decodes the sequence units at `i`. It
+// independently checks the module's reading of RFC 3629. A
+// lead byte says how many bytes follow it, and a code point above
+// U+FFFF is a surrogate pair in UTF-16.
+fn oracle_units(u8@ bytes, u64 i, bool utf16, u64 mut* step) u64 {
+    u64 lead = cast(bytes[i], u64);
+    u64 mut len = 1;
+    if (lead >= 0xF0 && lead <= 0xF4) {
+        len = 4;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+        len = 3;
+    } else if (lead >= 0xC2 && lead <= 0xDF) {
+        len = 2;
+    }
+    if (bytes.len - i < len) {
+        len = 1;
+    }
+    u64 mut k = 1;
+    while (k < len) {
+        u64 cont = cast(bytes[i + k], u64);
+        if (cont < 0x80 || cont > 0xBF) {
+            // Not a sequence after all, so the lead byte stands alone.
+            len = 1;
+        }
+        k += 1;
+    }
+    *step = len;
+    if (!utf16) {
+        return len;
+    }
+    if (len == 4) {
+        return 2;
+    }
+    return 1;
+}
+
+// The line that holds `offset`, and where its text begins and ends, by a
+// forward split. A terminator is the two bytes `\r\n` or the one byte `\n`.
+// And the text of a line is what stands before the terminator that ends it.
+//
+// The oracle must stay independent from `line_end` in src/lsp/text.ft. This
+// walk looks forward and matches each terminator in place. It never reads the
+// preceding byte. An offset inside a terminator belongs to the line that the
+// terminator ends. A carriage return without a line feed is ordinary text.
+fn oracle_span(string text, u64 offset, u64 mut* line, u64 mut* start, u64 mut* end) void {
+    u64 mut index = 0;
+    u64 mut from = 0;
+    u64 mut at = 0;
+    while (at < text.len) {
+        u64 mut term = 0;
+        if (at + 1 < text.len && text[at] == '\r' && text[at + 1] == '\n') {
+            term = 2;
+        } else if (text[at] == '\n') {
+            term = 1;
+        }
+        if (term == 0) {
+            at += 1;
+        } else if (offset < at + term) {
+            // At the terminator or inside it: this line ends here.
+            *line = index;
+            *start = from;
+            *end = at;
+            return;
+        } else {
+            index += 1;
+            at += term;
+            from = at;
+        }
+    }
+    *line = index;
+    *start = from;
+    *end = text.len;
+}
+
+// The line of an offset, read off that split.
+fn oracle_line(string text, u64 offset) u64 {
+    u64 mut line = 0;
+    u64 mut start = 0;
+    u64 mut end = 0;
+    oracle_span(text, offset, &line, &start, &end);
+    return line;
+}
+
+// The character of an offset, counted here: the units from the start of its
+// line to the last sequence boundary at or before it.
+fn oracle_character(string text, u64 offset, bool utf16) u64 {
+    u8@ bytes = cast(text, u8@);
+    u64 mut line = 0;
+    u64 mut start = 0;
+    u64 mut end = 0;
+    oracle_span(text, offset, &line, &start, &end);
+    // The terminator belongs to no line's text, so an offset that falls inside
+    // one counts to the end of the line it ends.
+    u64 mut stop = offset;
+    if (stop > end) {
+        stop = end;
+    }
+    u64 mut character = 0;
+    u64 mut at = start;
+    while (at < stop) {
+        u64 mut step = 1;
+        u64 units = oracle_units(bytes, at, utf16, &step);
+        if (at + step > stop) {
+            return character;
+        }
+        character += units;
+        at += step;
+    }
+    return character;
+}
+
+fn every_offset_of_a_document_answers_the_position_the_oracle_counts() void {
+    // The UTF-8 walk of the oracle reads RFC 3629 a second time and its line
+    // split walks the terminators forward. So a module that agreed with itself
+    // and with nothing else fails here.
+    offsets_agree_with_the_oracle(DOCUMENT);
+    offsets_agree_with_the_oracle(TAIL_CR);
+    offsets_agree_with_the_oracle(LINES_ONLY);
+    offsets_agree_with_the_oracle(BAD_UTF8);
+    offsets_agree_with_the_oracle("");
+}
+
+fn offsets_agree_with_the_oracle(string doc) void {
+    u64 mut at = 0;
+    while (at <= doc.len) {
+        text.position p16 = text.position_of(doc, text.position_encoding.enc_utf16, at);
+        lsp_env.check_u64(p16.line, oracle_line(doc, at), "the line of an offset");
+        lsp_env.check_u64(p16.character, oracle_character(doc, at, true),
+                          "the utf-16 character of an offset");
+        text.position p8 = text.position_of(doc, text.position_encoding.enc_utf8, at);
+        lsp_env.check_u64(p8.line, oracle_line(doc, at), "the line of an offset in utf-8");
+        lsp_env.check_u64(p8.character, oracle_character(doc, at, false),
+                          "the utf-8 character of an offset");
+        at += 1;
+    }
+}
+
+fn every_offset_comes_back_from_its_position() void {
+    // offset_of(position_of(o)) never moves forwards, lands on a boundary, and
+    // is the same offset when o begins a character. The four documents are the
+    // ones the oracle sweep walks, the empty one among them. A document with
+    // no offset but 0 is where a walk that assumes a first byte fails.
+    offsets_come_back(DOCUMENT);
+    offsets_come_back(TAIL_CR);
+    offsets_come_back(LINES_ONLY);
+    offsets_come_back(BAD_UTF8);
+    offsets_come_back("");
+}
+
+fn offsets_come_back(string doc) void {
+    u64 mut at = 0;
+    while (at <= doc.len) {
+        sweep_round_trip(doc, at, text.position_encoding.enc_utf16);
+        sweep_round_trip(doc, at, text.position_encoding.enc_utf8);
+        at += 1;
+    }
+}
+
+fn sweep_round_trip(string doc, u64 at, text.position_encoding enc) void {
+    text.position p = text.position_of(doc, enc, at);
+    u64 back = text.offset_of(doc, enc, p);
+    assert(back <= at);
+    // The position of the offset it answered is the position it started from,
+    // so the two conversions agree wherever an offset can be named.
+    text.position again = text.position_of(doc, enc, back);
+    lsp_env.check_u64(again.line, p.line, "the line after a round trip");
+    lsp_env.check_u64(again.character, p.character, "the character after a round trip");
+    // The returned offset begins a character or ends the line.
+    u8@ bytes = cast(doc, u8@);
+    if (back < doc.len) {
+        u64 mut step = 1;
+        u64 units = oracle_units(bytes, back, true, &step);
+        assert(units >= 1);
+        assert(step >= 1);
+    }
+}
+
+fn every_position_of_a_document_lands_inside_its_line() void {
+    // Every line of the document, every character from 0 past the end of the
+    // longest line, and both encodings. The offset must lie between the start
+    // of that line and its end, and must never cross a terminator.
+    u64 mut line = 0;
+    while (line < 6) {
+        u64 start = text.line_start(DOCUMENT, line);
+        u64 end = text.line_end(DOCUMENT, start);
+        u64 mut character = 0;
+        u64 mut last = start;
+        while (character < 24) {
+            u64 at16 = text.offset_of(DOCUMENT, text.position_encoding.enc_utf16,
+                                      text.position{line, character});
+            u64 at8 = text.offset_of(DOCUMENT, text.position_encoding.enc_utf8,
+                                     text.position{line, character});
+            assert(at16 >= start && at16 <= end);
+            assert(at8 >= start && at8 <= end);
+            // The character index never moves the offset backwards.
+            assert(at16 >= last);
+            last = at16;
+            character += 1;
+        }
+        // The character past the longest line is the end of this line.
+        lsp_env.check_u64(text.offset_of(DOCUMENT, text.position_encoding.enc_utf16,
+                                         text.position{line, 999}), end,
+                          "a character past the end");
+        line += 1;
+    }
+}
+
+fn the_lines_of_the_document_are_the_ones_the_terminators_make() void {
+    // Four terminators and five lines, the last of them empty, with the
+    // carriage returns outside the text of their lines.
+    lsp_env.check_u64(text.line_start(DOCUMENT, 0), 0, "line 0");
+    u64 line1 = text.line_start(DOCUMENT, 1);
+    u64 line2 = text.line_start(DOCUMENT, 2);
+    u64 line3 = text.line_start(DOCUMENT, 3);
+    u64 line4 = text.line_start(DOCUMENT, 4);
+    assert(line1 > 0 && line2 > line1 && line3 > line2 && line4 > line3);
+    lsp_env.check_u64(line4, DOCUMENT.len, "the empty last line");
+    lsp_env.check_u64(text.line_end(DOCUMENT, line4), DOCUMENT.len, "the end of the last line");
+    // The first line ends before its carriage return.
+    lsp_env.check_u64(text.line_end(DOCUMENT, 0), line1 - 2, "the end of the first line");
+    // The third line is empty.
+    lsp_env.check_u64(text.line_end(DOCUMENT, line2), line2, "the empty third line");
+    // A line past the last is the last.
+    lsp_env.check_u64(text.line_start(DOCUMENT, 5), line4, "a line past the last");
+}
+
+fn main() i32 {
+    the_two_encodings_have_the_names_the_protocol_uses();
+    a_name_the_server_implements_is_read_back();
+    a_name_the_server_does_not_implement_is_refused();
+    two_names_that_differ_in_case_alone_are_equal();
+    the_fold_stops_at_the_ends_of_the_two_letter_ranges();
+    two_names_that_differ_in_more_than_case_are_not_equal();
+    println("names ok");
+    the_empty_text_is_one_empty_line();
+    a_text_without_a_terminator_is_one_line();
+    a_line_feed_starts_the_next_line();
+    a_carriage_return_before_the_line_feed_is_part_of_the_terminator();
+    an_empty_line_between_two_terminators_ends_where_it_begins();
+    a_lone_carriage_return_is_not_a_line_break();
+    a_carriage_return_at_the_end_of_the_text_is_ordinary_text();
+    only_the_last_carriage_return_of_a_run_belongs_to_the_terminator();
+    a_text_that_ends_in_a_terminator_has_an_empty_last_line();
+    a_line_past_the_last_one_is_the_last_one();
+    println("lines ok");
+    every_ascii_byte_is_one_character_in_both_encodings();
+    a_tab_is_one_character_and_not_a_run_of_columns();
+    a_position_on_a_later_line_counts_from_that_line();
+    println("ascii ok");
+    a_utf16_character_index_is_a_count_of_code_units();
+    a_position_inside_a_surrogate_pair_rounds_down();
+    a_combining_mark_is_a_character_of_its_own();
+    a_byte_offset_inside_a_character_answers_that_character();
+    println("utf16 ok");
+    a_utf8_character_index_is_a_byte_offset();
+    a_utf8_position_inside_a_sequence_rounds_down();
+    the_two_encodings_answer_the_same_byte_offsets();
+    a_byte_that_starts_no_sequence_is_one_character();
+    println("utf8 ok");
+    an_offset_that_begins_a_character_survives_the_round_trip();
+    the_round_trip_holds_across_lines();
+    println("round trip ok");
+    a_character_past_the_end_of_the_line_clamps_to_the_line();
+    a_character_past_the_end_never_crosses_the_terminator();
+    a_line_past_the_last_one_clamps_to_the_last_line();
+    an_offset_past_the_end_of_the_text_clamps_to_the_end();
+    the_empty_text_answers_every_position();
+    println("clamps ok");
+    a_line_and_column_of_the_compiler_becomes_a_position();
+    a_line_or_column_of_zero_reads_as_the_first();
+    a_column_past_the_end_of_its_line_stays_on_that_line();
+    println("columns ok");
+    the_lines_of_the_document_are_the_ones_the_terminators_make();
+    every_offset_of_a_document_answers_the_position_the_oracle_counts();
+    every_offset_comes_back_from_its_position();
+    every_position_of_a_document_lands_inside_its_line();
+    println("sweep ok");
+    println("ok");
+    return 0;
+}

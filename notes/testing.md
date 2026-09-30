@@ -21,10 +21,13 @@ bullet at a time and without a rewrite.
   targets carry the step's name (`check`); `bootstrap0/CMakeLists.txt` defines `bootstrap0-<step>`,
   whose ctest runs over `build/<Host>/<preset>/bootstrap` and so sees bootstrap0's tests alone; and
   `<step>-all` runs the step for both components. Each test carries one component label,
-  `bootstrap0` or `fort`, and a new test must carry one too. The targets select by component and
-  step (`ctest -L '^fort$' -L '^unit$'`; repeated `-L` options select the tests that match all of
-  them), and so does CI (T-261). Unit:
-  `test/fort` (`fort-modules`), `test/fir` (`fir`), `highlight_selftest` and `extension_selftest`;
+  `bootstrap0`, `fort` or `lsp`, and a new test must carry one too. The targets select by
+  component and step (`ctest -L '^(fort|lsp)$' -L '^unit$'`; repeated `-L` options select the
+  tests that match all of them), and so does CI (T-261). The label `lsp` holds the language
+  server's tests, `lsp-modules` (`test/lsp`) and `lsp-binary`, so a CI job runs them apart from
+  the compiler's (T-264). Unit:
+  `test/fort` (`fort-modules`), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
+  `highlight_selftest` and `extension_selftest`;
   the 68 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and
   `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit
   tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
@@ -317,39 +320,43 @@ bullet at a time and without a rewrite.
   `test/fort/`, and it is why this line is a rule about the working directory and not a second
   `.gitignore` entry. Remove them with `rm -rf sandbox[0-9]*`. Then run the
   source counter that reported the mismatch.
-- Two corpora run through `run_tests.py`, which takes their root as `--root`.
+- Three corpora run through `run_tests.py`, which takes their root as `--root`.
   CTest `lang` runs the product language corpus with `xfail.txt`. CTest
-  `fort-modules` runs `test/fort/<x>_test.ft` against the compiler modules.
-  `lang` is an integration test and `fort-modules` a unit test. A `test/fort` test is an ordinary
+  `fort-modules` runs `test/fort/<x>_test.ft` against the compiler modules, and CTest
+  `lsp-modules` runs `test/lsp/<x>_test.ft` against the language server's modules.
+  `lang` is an integration test and the other two are unit tests. A `test/fort` test is an ordinary
   run test in the D14.5 directives whose header carries `//! flags: -I ../../src/fort` (the
   compiler's working
-  directory is the corpus root, so the path has two `..`, not three). **`test/fort` holds the
-  tests of `src/lsp` as well**, and a test of a server module carries `-I ../../src` beside that
-  root, since a server module is `lsp.<name>` under the root `src` (T-063); the corpus needs no
-  second root of its own, and a test whose name is taken by a compiler module takes the `lsp_`
-  prefix (`lsp_json_test.ft`, `json_test.ft` being the compiler writer's). Its file name is
+  directory is the corpus root, so the path has two `..`, not three). **The tests of `src/lsp`
+  stand in `test/lsp`** (T-264; `test/fort` until then), in the same format, and a test of a
+  server module carries `-I ../../src` beside that root, since a server module is `lsp.<name>`
+  under the root `src` (T-063). A corpus of its own lets the label `lsp` run the server's tests
+  apart from the compiler's. The files keep the `lsp_` prefix they took in `test/fort`
+  (`lsp_json_test.ft`, `json_test.ft` being the compiler writer's). A file name is
   `<module>_test.ft` or `<module>_<case>_panic_test.ft` for a test whose program must end in a
   panic, since a panic kills the program and each one needs a file; any other `.ft` at that root is
   `bad test name`, because a typo there would otherwise run nowhere and say nothing.
   **Code several of those tests share lives in `test/fort/support/*.ft`**, which they reach with a
-  second include root (`//! flags: -I ../../src/fort -I support`): a `test/fort` test is a program
-  rather than a translation unit, so the `#include`d helper a C suite would use
+  second include root (`//! flags: -I ../../src/fort -I support`; `-I ../fort/support` from
+  `test/lsp`, whose tests share `support/heap.ft` with the compiler's): a `test/fort` test is a
+  program rather than a translation unit, so the `#include`d helper a C suite would use
   (`bootstrap0/test/common/types_helpers.h`) has to be an imported module (`support/types_env.ft`,
   T-032). The directory is invisible to the harness: `discover` walks `run`, `fail`, `programs` and
   the `*_test.ft` of the root and nothing else, so a test misfiled there would run nowhere and say
   nothing. `_report_misplaced_tests` closes that (T-079): a `*_test.ft` anywhere below the root
   outside those three directories is `test outside the root of the corpus`, which is a lint
   problem and not a test, since what belongs under `support/` is shared code and nothing else.
-  `agents/lines.py` counts `test/fort/**/*.ft` as test lines and `src/fort/*.ft` and `src/lsp/*.ft`
-  as source lines, `test/highlight_test.py` tokenizes them, and `tools/fort_lint.py` lints them
-  with the search roots its `SOURCE_SETS` table pairs with the glob
-  (`-I src -I src/fort -I test/fort/support`); a file named on its command line takes the roots of
-  its own `-I` options.
+  `agents/lines.py` counts `test/fort/**/*.ft` and `test/lsp/*.ft` as test lines and
+  `src/fort/*.ft` and `src/lsp/*.ft` as source lines, `test/highlight_test.py` tokenizes them,
+  and `tools/fort_lint.py` lints them with the search roots its `SOURCE_SETS` table pairs with
+  the glob (`-I src -I src/fort -I test/fort/support`); a file named on its command line takes
+  the roots of its own `-I` options.
   **The lint's roots are a superset of the directives' and not a copy of them**, which is the
-  property to keep. `grep -h '//! flags:' test/fort/*.ft | sort | uniq -c` counts three shapes
-  among the 161 tests: 87 carry `-I ../../src/fort -I support`, 53 carry `-I ../../src/fort`
-  alone and 21 carry `-I ../../src/fort -I support -I ../../src`. The lint gives all 161 the same
-  three roots, in another order. The two agree about which file answers an import only while no
+  property to keep. `grep -h '//! flags:' test/fort/*.ft | sort | uniq -c` counted three shapes
+  among the 161 tests of T-063, before T-264 moved the server's tests to `test/lsp`: 87 carry
+  `-I ../../src/fort -I support`, 53 carry `-I ../../src/fort` alone and 21 carry
+  `-I ../../src/fort -I support -I ../../src`. The lint gives all 161 the same three roots, in
+  another order. The two agree about which file answers an import only while no
   root shadows another, and today nothing does, because `src/` holds no `.ft` of its own: a future
   `src/<name>.ft` would be the module `<name>` under the lint's first root and something else
   under a test's, and the lint would then judge a file the harness never compiles (T-063).
@@ -519,20 +526,20 @@ bullet at a time and without a rewrite.
 - **A test that drives a program over a pipe must size the script against the pipe, which holds
   64 KiB.** Nothing drains the pipe while the program under test reads it, so a script above the
   capacity blocks the writer -- the test itself -- and the run dies at `run_tests.py`'s 60 s
-  timeout with no output to read. `test/fort/lsp_protocol_test.ft` writes its whole script and
+  timeout with no output to read. `test/lsp/lsp_protocol_test.ft` writes its whole script and
   closes the writing end before the server starts, which is safe for the few hundred bytes of a
   recorded exchange and for the answers, which are smaller. A script of two thousand messages
   goes through a **file** instead (`io.write_file`, then `io.open_read`), which has no capacity:
-  `test/fort/lsp_server_lifetime_test.ft` does that, and the harness gives each test a directory
+  `test/lsp/lsp_server_lifetime_test.ft` does that, and the harness gives each test a directory
   of its own, so the file is the test's alone (section 3). Two pipes and not one, when the
   program answers: one for its input, one for its output, and the output is drained after the
   loop ends (T-064).
 - **A binary a CMake target builds needs a test that executes the binary**, and a suite of the
-  modules inside it is not that test. Every `test/fort` suite of `src/lsp` drives the modules in
+  modules inside it is not that test. Every `test/lsp` suite of `src/lsp` drives the modules in
   one program of its own, so `src/lsp/main.ft` and the wiring around it -- stdin and stdout as
   the descriptors, the loop's status as the process status -- were covered by nothing until
-  `test/lsp_binary_test.sh` fed the binary a recorded script (ctest `lsp-binary`, label lang,
-  since it runs an x86-64 binary under qemu). Hold such a script against a wrong binary before
+  `test/lsp_binary_test.sh` fed the binary a recorded script (ctest `lsp-binary`, labels `lsp`
+  and `integration`). Hold such a script against a wrong binary before
   trusting it: this one exits 1 for `/bin/cat` and for `build/<Host>/<preset>/fort` (T-064).
 
 ## 5. Product tests and the fixed point
@@ -717,7 +724,7 @@ bullet at a time and without a rewrite.
 - **An oracle is only an oracle where it derives its answer differently, so say
   for each half of one whether it is independent or shared.** T-064 swept every offset of a
   document against a hand-written oracle and the sweep stayed green over a bug in the module's
-  line rule: `oracle_character` in `test/fort/lsp_text_test.ft` derived the end of a line with the
+  line rule: `oracle_character` in `test/lsp/lsp_text_test.ft` derived the end of a line with the
   same expression as `line_end` in `src/lsp/text.ft`, so it tested that expression against itself.
   The halves of it now read: `oracle_units` decodes RFC 3629 a second time (independent),
   `oracle_span` splits the lines forward where the module walks back from the line feed
@@ -750,7 +757,7 @@ bullet at a time and without a rewrite.
   project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
   `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
-  and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
+  `test/lsp` and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
   ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
   writes it there, as it does for `CORPUS_FILES` in `bootstrap0/test/parser_recovery_test.c`.
   The other `.ft` files are listed in `EXCLUDED_DIRS`, each

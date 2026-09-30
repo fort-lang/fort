@@ -401,7 +401,7 @@ add_custom_target(fort_lsp ALL DEPENDS "${FORT_LSP_BINARY}")
 add_test(NAME lsp-binary
     COMMAND bash "${FORT_TEST_DIR}/lsp_binary_test.sh" "${FORT_LSP_BINARY}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(lsp-binary PROPERTIES LABELS "fort;integration")
+set_tests_properties(lsp-binary PROPERTIES LABELS "lsp;integration")
 
 # The C helpers of the language tests are compiled for the target by the
 # harness; they also build on the host so that -Werror covers them. They are FFI entry points
@@ -447,6 +447,25 @@ set_tests_properties(fort-modules PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
 
+# The language server's modules: test/lsp/<x>_test.ft, in the format of
+# test/fort. A corpus of its own, so the label `lsp` selects the server tests
+# apart from the compiler tests.
+set(FORT_LSP_MODULE_TEST_COMMAND
+    "${FORT_PYTHON3}" "${FORT_LANG_HARNESS}"
+    --root "${FORT_TEST_DIR}/lsp"
+    --fort "${FORT_COMPILER_BINARY}"
+    --std-dir "${FORT_STD_DIR}"
+    --cc "${FORT_TARGET_CC_PATH}"
+    --target "${FORT_TARGET_TRIPLE}"
+    --opt "${FORT_OPT_PATH}"
+    --verify-ir
+    -j "${FORT_LANG_JOBS}"
+)
+add_test(NAME lsp-modules COMMAND ${FORT_LSP_MODULE_TEST_COMMAND})
+set_tests_properties(lsp-modules PROPERTIES
+    LABELS "lsp;unit"
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+
 # The FIR tests: test/fir/<pass>/<x>.fir holds a function in the textual form of
 # spec/fir.md 13, the pass to run and the expected text. `fort --fir-test` parses
 # the file, runs the pass and writes the module; test/fir/run_tests.py compares it.
@@ -484,7 +503,8 @@ set_tests_properties(lang-json PROPERTIES LABELS "fort;integration")
 # nothing beside it; untold, it ran seven tests beside a full-load harness on
 # the darwin host and `lang_selftest` reported its 5 s fake compiler as timed
 # out (2026-09-25, three presets).
-set_tests_properties(fort-modules lang lang-json PROPERTIES PROCESSORS ${FORT_LANG_JOBS})
+set_tests_properties(fort-modules lsp-modules lang lang-json
+    PROPERTIES PROCESSORS ${FORT_LANG_JOBS})
 
 # The interactive test checks line flushing when stdout is a terminal.
 # Language tests capture stdout through a pipe and take the non-interactive path.
@@ -571,12 +591,12 @@ add_custom_target(lint
     VERBATIM)
 add_dependencies(lint fort fort_std)
 
-# unit and integration: each test carries one component label, `fort` or
-# `bootstrap0`. The top-level ctest also sees the tests of bootstrap0/, so the
-# fort targets select the label `fort`. Two -L options select the tests that
-# match both.
-fort_ctest_target(unit "${CMAKE_BINARY_DIR}" -L "^fort$" -L "^unit$")
-fort_ctest_target(integration "${CMAKE_BINARY_DIR}" -L "^fort$" -L "^integration$")
+# unit and integration: each test carries one component label, `fort`, `lsp`
+# or `bootstrap0`. The top-level ctest also sees the tests of bootstrap0/, so
+# these targets select the labels `fort` and `lsp`. Two -L options select the
+# tests that match both.
+fort_ctest_target(unit "${CMAKE_BINARY_DIR}" -L "^(fort|lsp)$" -L "^unit$")
+fort_ctest_target(integration "${CMAKE_BINARY_DIR}" -L "^(fort|lsp)$" -L "^integration$")
 add_dependencies(unit fort fort_std fort_lsp)
 add_dependencies(integration fort fort_std fort_lsp)
 fort_sequence_target(check format-check lint unit integration)

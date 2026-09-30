@@ -1,0 +1,28 @@
+//! run
+//! flags: -I ../../src/fort -I ../fort/support -I ../../src
+//! abort
+//! stderr: panic: rpc.set_max_content: above the ceiling
+//! stdout:
+//| the caps below the ceiling ok
+/// Checks the content-size cap for RPC frames. Document offsets use u32, and the total frame
+/// size must fit u64.
+import lsp.rpc;
+import lsp_env;
+import std.io;
+
+fn main() i32 {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    rpc.set_max_content(&c, 0);
+    lsp_env.check_u64(rpc.max_content(&c), rpc.RPC_MAX_CONTENT, "the default cap");
+    rpc.set_max_content(&c, 1);
+    lsp_env.check_u64(rpc.max_content(&c), 1, "the smallest cap");
+    rpc.set_max_content(&c, rpc.RPC_CONTENT_CEILING);
+    lsp_env.check_u64(rpc.max_content(&c), rpc.RPC_CONTENT_CEILING, "the cap at the ceiling");
+    assert(io.close(ends.read_fd));
+    assert(io.close(ends.write_fd));
+    println("the caps below the ceiling ok");
+    rpc.set_max_content(&c, rpc.RPC_CONTENT_CEILING + 1);
+    return 0;
+}

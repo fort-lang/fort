@@ -1,0 +1,327 @@
+//! run
+//! flags: -I ../../src/fort -I ../fort/support -I ../../src
+//! stdout:
+//| prefixes ok
+//| statuses ok
+//| hostile ok
+//| ok
+/// Checks every premature end of an LSP session. The server returns complete responses only and
+/// reports whether shutdown completed.
+import lsp.docs;
+import lsp.json;
+import lsp.server;
+import lsp_env;
+import std.io;
+import std.strbuf;
+
+//
+// The suite checks three properties for each prefix of a nine-message session.
+//
+// * The answer for a prefix is a byte-for-byte prefix of the answer for the
+// complete session. A truncated message gets no answer, and the server invents
+// no answer.
+// * The status is 0 exactly when those bytes include the `shutdown` answer.
+// Otherwise, the status is 1.
+// * the loop always ends. A prefix that cuts a frame ends it through the
+// framing, and a prefix that ends between frames through the stream.
+//
+// The suite sweeps a hostile stream in the same way. For each prefix of
+// invalid bodies, the server answers valid frames and continues reading.
+
+// One frame around `body`, appended to `b`.
+fn frame_into(strbuf.str_buf mut* b, string body) void {
+    strbuf.append(b, "Content-Length: ");
+    strbuf.append_u64(b, body.len);
+    strbuf.append(b, "\r\n\r\n");
+    strbuf.append(b, body);
+}
+
+// The recording includes initialization,
+// notifications, document changes, an unsupported
+// request, cancellation, close, shutdown, and exit.
+fn session_into(strbuf.str_buf mut* b) void {
+    strbuf.clear(b);
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+    strbuf.str_buf mut note = strbuf.create();
+    defer strbuf.free(&note);
+    strbuf.append(&note, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":");
+    strbuf.append(&note, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,");
+    strbuf.append(&note, "\"text\":\"fn main() i32\"}}}");
+    frame_into(b, strbuf.view(&note));
+    strbuf.clear(&note);
+    strbuf.append(&note, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":");
+    strbuf.append(&note, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":2},");
+    strbuf.append(&note, "\"contentChanges\":[{\"text\":\"fn main() i32 {}\"}]}}");
+    frame_into(b, strbuf.view(&note));
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{}}");
+    strbuf.clear(&note);
+    strbuf.append(&note, "{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",");
+    strbuf.append(&note, "\"params\":{\"id\":2}}");
+    frame_into(b, strbuf.view(&note));
+    strbuf.clear(&note);
+    strbuf.append(&note, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":");
+    strbuf.append(&note, "{\"textDocument\":{\"uri\":\"file:///a.ft\"}}}");
+    frame_into(b, strbuf.view(&note));
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\",\"params\":null}");
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":null}");
+}
+
+// A hostile script: every body breaks a rule, and the server must answer each
+// and read the next.
+fn hostile_into(strbuf.str_buf mut* b) void {
+    strbuf.clear(b);
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
+    frame_into(b, "{");
+    frame_into(b, "[1,2]");
+    frame_into(b, "{\"jsonrpc\":\"1.0\",\"id\":2,\"method\":\"shutdown\"}");
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":3.5,\"method\":\"shutdown\"}");
+    frame_into(b, "");
+    frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"shutdown\",\"params\":null}");
+}
+
+// What the server writes for `script`, with the status in *status.
+fn answers_of(string script, i32 mut* status) string own {
+    lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
+    lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
+    lsp_env.feed(in_ends, script);
+    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
+    *status = server.run(&srv);
+    server.free(&srv);
+    assert(io.close(in_ends.read_fd));
+    assert(io.close(out_ends.write_fd));
+    return lsp_env.drain(out_ends);
+}
+
+// Whether `whole` begins with `part`.
+fn begins_with(string whole, string part) bool {
+    return part.len <= whole.len && whole[0..part.len] == part;
+}
+
+// The offset of `needle` in `s`, or -1.
+fn find(string s, string needle) i64 {
+    u64 mut i = 0;
+    while (i + needle.len <= s.len) {
+        if (s[i..i + needle.len] == needle) {
+            return cast(i, i64);
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// The answer to `shutdown`, which the status of a session turns on.
+string SHUTDOWN_ANSWER = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null}";
+
+// ---- every prefix of a session ---------------------------------------------------
+
+fn a_prefix_answers_a_prefix_of_the_session() void {
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    session_into(&script);
+    string whole = strbuf.view(&script);
+    i32 mut status = -1;
+    string own all = answers_of(whole, &status);
+    lsp_env.check_i64(cast(status, i64), 0, "the whole session");
+    u64 mut at = 0;
+    u64 mut shut = 0;
+    while (at <= whole.len) {
+        string own got = answers_of(whole[0..at], &status);
+        if (!begins_with(all, got)) {
+            println("the prefix of ", at, " bytes answered bytes the session does not hold");
+        }
+        assert(begins_with(all, got));
+        // The status is 0 exactly when the answer to shutdown was written.
+        bool answered = find(got, SHUTDOWN_ANSWER) >= 0;
+        if (answered) {
+            shut += 1;
+            lsp_env.check_i64(cast(status, i64), 0, "a prefix that shut the server down");
+        } else {
+            lsp_env.check_i64(cast(status, i64), 1, "a prefix that did not");
+        }
+        del(got);
+        at += 1;
+    }
+    // Every prefix from the end of the shutdown frame to the end of the
+    // script shuts the server down, and no other does. The shutdown frame ends
+    // where the last frame begins. So the count is the length of that frame
+    // and one for the prefix that ends exactly at it.
+    strbuf.str_buf mut last = strbuf.create();
+    defer strbuf.free(&last);
+    frame_into(&last, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":null}");
+    lsp_env.check_u64(shut, last.len + 1, "the prefixes that end after the shutdown");
+    del(all);
+}
+
+fn the_documents_of_a_prefix_follow_the_messages_it_holds() void {
+    // The store answers for the notifications that arrived whole: before the
+    // didOpen there is no document, between it and the didClose there is one.
+    // And the text is the last change the prefix carried.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    session_into(&script);
+    string whole = strbuf.view(&script);
+    i64 opened = find(whole, "didOpen");
+    i64 changed = find(whole, "didChange");
+    i64 closed = find(whole, "didClose");
+    assert(opened > 0 && changed > opened && closed > changed);
+    // A prefix that ends inside the didOpen frame, before its body is whole,
+    // has no document: the name of the method is in that body.
+    documents_are(whole[0..cast(opened, u64)], "", 0, "inside the didOpen");
+    // One that ends inside the didChange frame holds the text of the didOpen,
+    // since that frame arrived whole and this one did not.
+    documents_are(whole[0..cast(changed, u64)], "fn main() i32", 1, "inside the didChange");
+    // One that ends inside the didClose frame holds the text of the change.
+    documents_are(whole[0..cast(closed, u64)], "fn main() i32 {}", 1, "inside the didClose");
+    // The complete session holds nothing again.
+    documents_are(whole, "", 0, "after the didClose");
+}
+
+// The store of a session over `script` holds `count` documents, and the text
+// of file:///a.ft is `want`.
+fn documents_are(string script, string want, u64 count, string what) void {
+    lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
+    lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
+    lsp_env.feed(in_ends, script);
+    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
+    server.run(&srv);
+    lsp_env.check_u64(documents_count(&srv), count, what);
+    lsp_env.check(document_text(&srv), want, what);
+    server.free(&srv);
+    assert(io.close(in_ends.read_fd));
+    assert(io.close(out_ends.write_fd));
+    string own answers = lsp_env.drain(out_ends);
+    del(answers);
+}
+
+// The documents that the server holds, through its public accessor.
+fn documents_count(server.server* srv) u64 {
+    return docs.count(server.documents(srv));
+}
+
+fn document_text(server.server* srv) string {
+    return docs.text_of(server.documents(srv), "file:///a.ft");
+}
+
+// ---- the statuses ----------------------------------------------------------------
+
+fn the_empty_prefix_answers_nothing() void {
+    i32 mut status = -1;
+    string own got = answers_of("", &status);
+    lsp_env.check(got, "", "the empty prefix");
+    lsp_env.check_i64(cast(status, i64), 1, "the status of the empty prefix");
+    del(got);
+}
+
+fn a_session_without_exit_ends_at_the_stream() void {
+    // The whole session but its last frame: the client shut the server down
+    // and then died without sending `exit`. The status is the one an orderly
+    // exit would have answered, since the shutdown is what it turns on.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    session_into(&script);
+    u64 whole_len = script.len;
+    strbuf.str_buf mut last = strbuf.create();
+    defer strbuf.free(&last);
+    frame_into(&last, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":null}");
+    strbuf.truncate(&script, whole_len - last.len);
+    i32 mut status = -1;
+    string own got = answers_of(strbuf.view(&script), &status);
+    assert(find(got, SHUTDOWN_ANSWER) >= 0);
+    lsp_env.check_i64(cast(status, i64), 0, "a session without exit");
+    del(got);
+}
+
+// ---- every prefix of a hostile stream --------------------------------------------
+
+fn a_prefix_of_a_hostile_stream_is_answered_and_read_on() void {
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    hostile_into(&script);
+    string whole = strbuf.view(&script);
+    i32 mut status = -1;
+    string own all = answers_of(whole, &status);
+    // The last frame is a shutdown, which the server answered: every body
+    // before it was answered and none of them ended the loop.
+    lsp_env.check_i64(cast(status, i64), 0, "the whole hostile script");
+    u64 mut at = 0;
+    while (at <= whole.len) {
+        string own got = answers_of(whole[0..at], &status);
+        if (!begins_with(all, got)) {
+            println("the hostile prefix of ", at, " bytes answered bytes it should not");
+        }
+        assert(begins_with(all, got));
+        del(got);
+        at += 1;
+    }
+    del(all);
+}
+
+fn every_answer_of_a_hostile_stream_is_a_message() void {
+    // Whatever the server answers is a JSON-RPC message: the bodies of a
+    // hostile stream must not make it write a document a client cannot read.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    hostile_into(&script);
+    i32 mut status = -1;
+    string own all = answers_of(strbuf.view(&script), &status);
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    u64 mut at = 0;
+    u64 mut seen = 0;
+    while (at < all.len) {
+        u64 mut end = at;
+        while (end + 4 <= all.len && all[end..end + 4] != "\r\n\r\n") {
+            end += 1;
+        }
+        assert(end + 4 <= all.len);
+        u64 mut len = 0;
+        assert(parse_len(all[at..end], &len));
+        string body = all[end + 4..end + 4 + len];
+        assert(json.parse(&d, body));
+        u32 root = json.root(&d);
+        assert(json.kind_of(&d, root) == json.value_kind.k_object);
+        lsp_env.check(json.text_of(&d, json.member_of(&d, root, "jsonrpc")), "2.0",
+                      "the version of an answer");
+        // Every answer carries an id, and every one but the last an error.
+        assert(json.member_of(&d, root, "id") != 0);
+        seen += 1;
+        at = end + 4 + len;
+    }
+    // The seven frames of the script answer seven times: the initialize, the
+    // five bodies that break a rule, and the shutdown.
+    lsp_env.check_u64(seen, 7, "the answers of the hostile script");
+    del(all);
+}
+
+// The length a `Content-Length` header declares.
+fn parse_len(string header, u64 mut* out) bool {
+    if (header.len < 17 || header[0..16] != "Content-Length: ") {
+        return false;
+    }
+    u64 mut value = 0;
+    u64 mut i = 16;
+    while (i < header.len) {
+        if (header[i] < '0' || header[i] > '9') {
+            return false;
+        }
+        value = value * 10 + (cast(header[i], u64) - cast('0', u64));
+        i += 1;
+    }
+    *out = value;
+    return true;
+}
+
+fn main() i32 {
+    a_prefix_answers_a_prefix_of_the_session();
+    the_documents_of_a_prefix_follow_the_messages_it_holds();
+    println("prefixes ok");
+    the_empty_prefix_answers_nothing();
+    a_session_without_exit_ends_at_the_stream();
+    println("statuses ok");
+    a_prefix_of_a_hostile_stream_is_answered_and_read_on();
+    every_answer_of_a_hostile_stream_is_a_message();
+    println("hostile ok");
+    println("ok");
+    return 0;
+}

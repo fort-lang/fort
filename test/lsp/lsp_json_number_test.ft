@@ -1,0 +1,298 @@
+//! run
+//! flags: -I ../../src/fort -I ../fort/support -I ../../src
+//! stdout:
+//| grammar ok
+//| kinds ok
+//| integers ok
+//| bits ok
+//| ok
+/// Checks JSON number grammar, numeric kinds, integer values, and binary64 bits in
+/// src/lsp/json.ft.
+
+import lsp.json;
+import lsp_json_env;
+import std.strbuf;
+
+// The bits of some binary64 values, which the assertions below name rather
+// than spell twice.
+u64 BITS_ZERO = 0x0000000000000000;
+u64 BITS_NEGATIVE_ZERO = 0x8000000000000000;
+u64 BITS_ONE = 0x3ff0000000000000;
+u64 BITS_ONE_AND_A_HALF = 0x3ff8000000000000;
+u64 BITS_MINUS_TWO_AND_A_HALF = 0xc004000000000000;
+u64 BITS_A_TENTH = 0x3fb999999999999a;
+u64 BITS_HUNDRED = 0x4059000000000000;
+u64 BITS_INFINITY = 0x7ff0000000000000;
+u64 BITS_MINUS_INFINITY = 0xfff0000000000000;
+u64 BITS_LARGEST = 0x7fefffffffffffff;
+u64 BITS_SMALLEST_SUBNORMAL = 0x0000000000000001;
+u64 BITS_TWO_TO_THE_53 = 0x4340000000000000;
+
+// The i64 bounds, built without writing a literal no i64 holds.
+fn i64_max() i64 {
+    return 9223372036854775807;
+}
+
+fn i64_min() i64 {
+    return -9223372036854775807 - 1;
+}
+
+// The value of the only number of a document.
+fn int_of(string document) i64 {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, document));
+    return json.int_of(&d, json.root(&d));
+}
+
+// The binary64 bits of the only number of a document.
+fn float_of(string document) u64 {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, document));
+    return json.float_of(&d, json.root(&d));
+}
+
+// ---- the grammar -----------------------------------------------------------------
+
+fn the_forms_of_a_number_are_accepted() void {
+    lsp_json_env.round_trip("0");
+    lsp_json_env.round_trip("-0");
+    lsp_json_env.round_trip("1");
+    lsp_json_env.round_trip("-1");
+    lsp_json_env.round_trip("0.0");
+    lsp_json_env.round_trip("1.5");
+    lsp_json_env.round_trip("-1.5");
+    lsp_json_env.round_trip("1e5");
+    lsp_json_env.round_trip("1E5");
+    lsp_json_env.round_trip("1e+5");
+    lsp_json_env.round_trip("1e-5");
+    lsp_json_env.round_trip("-1.5e-5");
+    lsp_json_env.round_trip("0e0");
+}
+
+fn the_text_of_a_number_is_kept_as_it_was_written() void {
+    // JSON fixes no spelling of a number, so the text is the only byte-stable
+    // answer. 1.50 Is not 1.5 and 1E5 is not 1e5.
+    lsp_json_env.text_is("1.50", "1.50");
+    lsp_json_env.text_is("1E5", "1E5");
+    lsp_json_env.text_is("-0", "-0");
+    lsp_json_env.text_is("1e+05", "1e+05");
+}
+
+fn a_leading_plus_is_refused() void {
+    lsp_json_env.refused("+1", 0, "a value was expected");
+}
+
+fn a_leading_zero_is_refused() void {
+    lsp_json_env.refused("01", 1, "a number has no leading zero");
+    lsp_json_env.refused("-01", 2, "a number has no leading zero");
+    lsp_json_env.refused("00", 1, "a number has no leading zero");
+    lsp_json_env.refused("[0123]", 2, "a number has no leading zero");
+}
+
+fn a_lone_sign_is_refused() void {
+    lsp_json_env.refused("-", 1, "a digit was expected");
+    lsp_json_env.refused("[-]", 2, "a digit was expected");
+    lsp_json_env.refused("-a", 1, "a digit was expected");
+}
+
+fn a_point_needs_a_digit_on_each_side() void {
+    lsp_json_env.refused("1.", 2, "a fraction needs a digit");
+    lsp_json_env.refused("1.e5", 2, "a fraction needs a digit");
+    lsp_json_env.refused(".5", 0, "a value was expected");
+    lsp_json_env.refused("-.5", 1, "a digit was expected");
+}
+
+fn an_exponent_needs_a_digit() void {
+    lsp_json_env.refused("1e", 2, "an exponent needs a digit");
+    lsp_json_env.refused("1e+", 3, "an exponent needs a digit");
+    lsp_json_env.refused("1e-", 3, "an exponent needs a digit");
+    lsp_json_env.refused("1ee5", 2, "an exponent needs a digit");
+}
+
+fn a_second_point_ends_the_number_and_fails_the_document() void {
+    lsp_json_env.refused("1.2.3", 3, "a document is one value");
+}
+
+fn the_spellings_no_json_number_has_are_refused() void {
+    // No hexadecimal, no infinity, no NaN, no separator and no trailing
+    // digit group.
+    lsp_json_env.refused("0x10", 1, "a document is one value");
+    lsp_json_env.refused("Infinity", 0, "a value was expected");
+    lsp_json_env.refused("NaN", 0, "a value was expected");
+    lsp_json_env.refused("1_000", 1, "a document is one value");
+    lsp_json_env.refused("1.0f", 3, "a document is one value");
+}
+
+// ---- the two kinds ---------------------------------------------------------------
+
+fn a_number_without_a_fraction_or_an_exponent_is_an_integer() void {
+    lsp_json_env.kind_is("0", json.value_kind.k_int, "zero");
+    lsp_json_env.kind_is("-0", json.value_kind.k_int, "negative zero");
+    lsp_json_env.kind_is("42", json.value_kind.k_int, "a small integer");
+    lsp_json_env.kind_is("-42", json.value_kind.k_int, "a small negative");
+}
+
+fn a_number_with_a_fraction_or_an_exponent_is_a_float() void {
+    lsp_json_env.kind_is("1.0", json.value_kind.k_float, "a fraction");
+    lsp_json_env.kind_is("1e5", json.value_kind.k_float, "an exponent");
+    lsp_json_env.kind_is("1.0e5", json.value_kind.k_float, "both");
+    // 1e2 is an integer in value and not in spelling, so it is a float. The
+    // kind follows the text, which is what the writer writes back.
+    lsp_json_env.kind_is("1e2", json.value_kind.k_float, "an integer written with an exponent");
+}
+
+fn an_integer_too_wide_for_i64_is_a_float() void {
+    lsp_json_env.kind_is("9223372036854775807", json.value_kind.k_int, "i64 max");
+    lsp_json_env.kind_is("9223372036854775808", json.value_kind.k_float, "one past i64 max");
+    lsp_json_env.kind_is("-9223372036854775808", json.value_kind.k_int, "i64 min");
+    lsp_json_env.kind_is("-9223372036854775809", json.value_kind.k_float, "one below i64 min");
+    lsp_json_env.kind_is("123456789012345678901234567890", json.value_kind.k_float,
+        "thirty digits");
+}
+
+// ---- the integer value -----------------------------------------------------------
+
+fn an_integer_answers_the_value_of_its_text() void {
+    assert(int_of("0") == 0);
+    assert(int_of("-0") == 0);
+    assert(int_of("1") == 1);
+    assert(int_of("-1") == -1);
+    assert(int_of("1000000") == 1000000);
+}
+
+fn the_widest_integers_answer_their_bounds() void {
+    assert(int_of("9223372036854775807") == i64_max());
+    assert(int_of("-9223372036854775808") == i64_min());
+}
+
+fn an_integer_of_a_container_answers_the_same_way() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(json.parse(&d, "{\"id\":-7}"));
+    assert(json.int_of(&d, json.member_of(&d, json.root(&d), "id")) == -7);
+}
+
+// ---- the binary64 bits -----------------------------------------------------------
+
+fn a_float_answers_the_bits_of_its_value() void {
+    assert(float_of("1.5") == BITS_ONE_AND_A_HALF);
+    assert(float_of("-2.5") == BITS_MINUS_TWO_AND_A_HALF);
+    assert(float_of("0.1") == BITS_A_TENTH);
+    assert(float_of("1e2") == BITS_HUNDRED);
+    assert(float_of("1.0") == BITS_ONE);
+}
+
+fn an_integer_answers_bits_as_well() void {
+    // float_of takes a number of either kind, so a caller that wants a
+    // number and not an integer never looks at the kind.
+    assert(float_of("1") == BITS_ONE);
+    assert(float_of("100") == BITS_HUNDRED);
+    assert(float_of("0") == BITS_ZERO);
+}
+
+fn the_sign_of_a_zero_survives() void {
+    assert(float_of("0.0") == BITS_ZERO);
+    assert(float_of("-0.0") == BITS_NEGATIVE_ZERO);
+    assert(float_of("-0") == BITS_NEGATIVE_ZERO);
+    assert(float_of("0e-999") == BITS_ZERO);
+}
+
+fn a_magnitude_past_binary64_answers_an_infinity() void {
+    // JSON bounds no number, so a document that holds one is not malformed:
+    // the value it rounds to is the infinity.
+    assert(float_of("1e400") == BITS_INFINITY);
+    assert(float_of("-1e400") == BITS_MINUS_INFINITY);
+    assert(float_of("1e309") == BITS_INFINITY);
+}
+
+fn a_magnitude_below_the_smallest_subnormal_answers_a_zero() void {
+    assert(float_of("1e-400") == BITS_ZERO);
+    assert(float_of("-1e-400") == BITS_NEGATIVE_ZERO);
+}
+
+fn the_ends_of_the_range_answer_their_bits() void {
+    assert(float_of("1.7976931348623157e308") == BITS_LARGEST);
+    assert(float_of("5e-324") == BITS_SMALLEST_SUBNORMAL);
+}
+
+fn an_integer_beyond_the_exact_range_rounds() void {
+    // 2^53 and 2^53 + 1 have the same binary64 value.
+    // The reader keeps text and returns i64 when possible.
+    assert(float_of("9007199254740992") == BITS_TWO_TO_THE_53);
+    assert(float_of("9007199254740993") == BITS_TWO_TO_THE_53);
+    assert(int_of("9007199254740993") == 9007199254740993);
+}
+
+fn a_number_too_wide_for_i64_answers_its_bits() void {
+    assert(float_of("9223372036854775808") == 0x43e0000000000000);
+    assert(float_of("123456789012345678901234567890") == 0x45f8ee90ff6c373e);
+}
+
+fn an_exponent_no_binary64_holds_answers_an_infinity_or_a_zero() void {
+    // The exponent is read to a limit and saturates there. So a number whose
+    // exponent has twenty digits is the same answer as one whose exponent has
+    // four.
+    assert(float_of("1e99999999999999999999") == BITS_INFINITY);
+    assert(float_of("-1e99999999999999999999") == BITS_MINUS_INFINITY);
+    assert(float_of("1e-99999999999999999999") == BITS_ZERO);
+    assert(float_of("-1e-99999999999999999999") == BITS_NEGATIVE_ZERO);
+}
+
+fn a_number_of_a_thousand_digits_is_read() void {
+    // The text of a number is kept whole, whatever its length, and the value
+    // is the binary64 nearest it.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.push(&source, '1');
+    u64 mut i = 0;
+    while (i < 999) {
+        strbuf.push(&source, '0');
+        i += 1;
+    }
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    string document = strbuf.view(&source);
+    assert(json.parse(&d, document));
+    u32 root = json.root(&d);
+    assert(json.kind_of(&d, root) == json.value_kind.k_float);
+    assert(json.text_of(&d, root) == document);
+    // Ten to the nine hundred and ninety-ninth is past binary64.
+    assert(json.float_of(&d, root) == BITS_INFINITY);
+    lsp_json_env.round_trip(document);
+}
+
+fn main() i32 {
+    the_forms_of_a_number_are_accepted();
+    the_text_of_a_number_is_kept_as_it_was_written();
+    a_leading_plus_is_refused();
+    a_leading_zero_is_refused();
+    a_lone_sign_is_refused();
+    a_point_needs_a_digit_on_each_side();
+    an_exponent_needs_a_digit();
+    a_second_point_ends_the_number_and_fails_the_document();
+    the_spellings_no_json_number_has_are_refused();
+    println("grammar ok");
+    a_number_without_a_fraction_or_an_exponent_is_an_integer();
+    a_number_with_a_fraction_or_an_exponent_is_a_float();
+    an_integer_too_wide_for_i64_is_a_float();
+    println("kinds ok");
+    an_integer_answers_the_value_of_its_text();
+    the_widest_integers_answer_their_bounds();
+    an_integer_of_a_container_answers_the_same_way();
+    println("integers ok");
+    a_float_answers_the_bits_of_its_value();
+    an_integer_answers_bits_as_well();
+    the_sign_of_a_zero_survives();
+    a_magnitude_past_binary64_answers_an_infinity();
+    a_magnitude_below_the_smallest_subnormal_answers_a_zero();
+    the_ends_of_the_range_answer_their_bits();
+    an_integer_beyond_the_exact_range_rounds();
+    a_number_too_wide_for_i64_answers_its_bits();
+    an_exponent_no_binary64_holds_answers_an_infinity_or_a_zero();
+    a_number_of_a_thousand_digits_is_read();
+    println("bits ok");
+    println("ok");
+    return 0;
+}

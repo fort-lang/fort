@@ -1,0 +1,1017 @@
+//! run
+//! flags: -I ../../src/fort -I ../fort/support -I ../../src
+//! stdout:
+//| framing ok
+//| headers ok
+//| bounds ok
+//| ends ok
+//| writing ok
+//| sweep ok
+//| messages ok
+//| answers ok
+//| ok
+/// Checks frame reading, rejected input, frame writing, and JSON-RPC message classification in
+/// src/lsp/rpc.ft.
+
+import lsp.json;
+import lsp.rpc;
+import lsp_env;
+import std.io;
+import std.strbuf;
+
+// The frames of `script`, read with a conn whose read size is `chunk`, joined
+// by `|`. A frame that is refused ends the text with `!<message>`, and a clean
+// end of the stream ends it with `.`.
+fn frames_of(string script, u64 chunk) string own {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, script);
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    rpc.set_chunk(&c, chunk);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string mut body = "";
+    u64 mut seen = 0;
+    while (rpc.read_frame(&c, &body)) {
+        // The count and not the length of the text, since a frame may carry
+        // no bytes at all.
+        if (seen > 0) {
+            strbuf.append(&out, "|");
+        }
+        strbuf.append(&out, body);
+        seen += 1;
+    }
+    if (rpc.has_failed(&c)) {
+        strbuf.append(&out, "!");
+        strbuf.append(&out, rpc.error_message(&c));
+    } else {
+        assert(rpc.at_eof(&c));
+        strbuf.append(&out, ".");
+    }
+    // The reading end is closed here and the writing end was closed by feed.
+    assert(io.close(ends.read_fd));
+    return strbuf.take(&out);
+}
+
+// The script reads as `want`, whatever the read size: one byte at a time, the
+// whole script in one read, and the default.
+fn reads_as(string script, string want) void {
+    string own one = frames_of(script, 1);
+    lsp_env.check(one, want, "chunk 1");
+    del(one);
+    string own few = frames_of(script, 3);
+    lsp_env.check(few, want, "chunk 3");
+    del(few);
+    string own all = frames_of(script, 0);
+    lsp_env.check(all, want, "the default chunk");
+    del(all);
+}
+
+// One frame around `body`.
+fn framed(string body) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "Content-Length: ");
+    strbuf.append_u64(&b, body.len);
+    strbuf.append(&b, "\r\n\r\n");
+    strbuf.append(&b, body);
+    return strbuf.take(&b);
+}
+
+// ---- the frames of a stream ------------------------------------------------------
+
+fn one_frame_is_read_whatever_the_read_size() void {
+    reads_as("Content-Length: 2\r\n\r\n{}", "{}.");
+    reads_as("Content-Length: 7\r\n\r\n[1,2,3]", "[1,2,3].");
+}
+
+fn two_frames_are_read_in_order() void {
+    reads_as("Content-Length: 2\r\n\r\n{}Content-Length: 4\r\n\r\ntrue", "{}|true.");
+}
+
+fn a_body_of_no_bytes_is_a_frame() void {
+    // The framing accepts it. The JSON reader is what refuses an empty
+    // document, and the server answers that with a parse error.
+    reads_as("Content-Length: 0\r\n\r\n", ".");
+    reads_as("Content-Length: 0\r\n\r\nContent-Length: 2\r\n\r\n{}", "|{}.");
+}
+
+fn the_length_and_not_a_scan_decides_where_a_body_ends() void {
+    // A body that holds the terminator of a header block is still one body.
+    string body = "{\"a\":\"\\r\\n\\r\\nContent-Length: 9\"}";
+    string own script = framed(body);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, body);
+    strbuf.append(&want, ".");
+    reads_as(script, strbuf.view(&want));
+    del(script);
+}
+
+fn a_body_of_raw_bytes_is_measured_in_bytes() void {
+    // The length counts bytes and not characters, so a multi-byte character
+    // does not shorten the frame.
+    string body = "\"\xC3\xA9\xF0\x9D\x84\x9E\"";
+    lsp_env.check_u64(body.len, 8, "the bytes of the body");
+    string own script = framed(body);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, body);
+    strbuf.append(&want, ".");
+    reads_as(script, strbuf.view(&want));
+    del(script);
+}
+
+fn the_frames_of_a_long_stream_are_all_read() void {
+    // Twenty frames make the default buffer hold several
+    // frames. A read size of 1 makes it hold one frame at a time.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut i = 0;
+    while (i < 20) {
+        string own frame = framed("{\"n\":1}");
+        strbuf.append(&script, frame);
+        del(frame);
+        if (i > 0) {
+            strbuf.append(&want, "|");
+        }
+        strbuf.append(&want, "{\"n\":1}");
+        i += 1;
+    }
+    strbuf.append(&want, ".");
+    reads_as(strbuf.view(&script), strbuf.view(&want));
+}
+
+// ---- the header block ------------------------------------------------------------
+
+fn a_field_the_server_does_not_read_is_ignored() void {
+    string typed = "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n";
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    strbuf.append(&script, typed);
+    strbuf.append(&script, "Content-Length: 2\r\n\r\n{}");
+    reads_as(strbuf.view(&script), "{}.");
+    reads_as("Content-Length: 2\r\nX-Made-Up: 1\r\n\r\n{}", "{}.");
+}
+
+fn the_field_name_is_read_without_case() void {
+    // The base protocol writes `Content-Length`. The HTTP rule this header
+    // follows compares a field name without case.
+    reads_as("content-length: 2\r\n\r\n{}", "{}.");
+    reads_as("CONTENT-LENGTH: 2\r\n\r\n{}", "{}.");
+}
+
+fn the_spaces_around_a_value_are_dropped() void {
+    reads_as("Content-Length:2\r\n\r\n{}", "{}.");
+    reads_as("Content-Length:    2   \r\n\r\n{}", "{}.");
+    reads_as("Content-Length:\t2\t\r\n\r\n{}", "{}.");
+}
+
+fn two_lengths_that_agree_are_one_length() void {
+    reads_as("Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}", "{}.");
+}
+
+fn two_lengths_that_differ_are_refused() void {
+    // Nothing says where the body ends, so the stream cannot be followed.
+    reads_as("Content-Length: 2\r\nContent-Length: 3\r\n\r\n{}x",
+             "!the frame declares two lengths");
+}
+
+fn a_frame_without_a_length_is_refused() void {
+    reads_as("Content-Type: text/plain\r\n\r\n{}", "!the frame has no Content-Length");
+    reads_as("\r\n{}", "!the frame has no Content-Length");
+}
+
+fn a_field_without_a_colon_is_refused() void {
+    reads_as("Content-Length 2\r\n\r\n{}", "!a header field has no colon");
+}
+
+fn a_length_that_is_no_number_is_refused() void {
+    reads_as("Content-Length: two\r\n\r\n{}", "!the Content-Length is not a number");
+    reads_as("Content-Length: \r\n\r\n{}", "!the Content-Length is not a number");
+    reads_as("Content-Length: -1\r\n\r\n{}", "!the Content-Length is not a number");
+    reads_as("Content-Length: 0x10\r\n\r\n{}", "!the Content-Length is not a number");
+    reads_as("Content-Length: 2 2\r\n\r\n{}", "!the Content-Length is not a number");
+    // Twenty-one digits: above the largest u64, which parse_u64 refuses.
+    reads_as("Content-Length: 111111111111111111111\r\n\r\n{}",
+             "!the Content-Length is not a number");
+}
+
+fn a_header_block_that_ends_its_lines_with_a_line_feed_alone_is_refused() void {
+    // The base protocol ends a header line with `\r\n` and the block with an
+    // empty line. A client that writes a line feed alone writes a block this
+    // module never finds the end of. The reader keeps reading, and the stream
+    // ends inside a header.
+    reads_as("Content-Length: 2\n\n{}", "!the stream ended inside a header");
+    reads_as("Content-Length: 2\n\r\n{}", "!the stream ended inside a header");
+    // A frame in the proper form after it does not rescue it. The scan finds
+    // the terminator of that frame. So the block runs across both and its one
+    // field holds the line feeds the first block ended its lines with.
+    reads_as("Content-Length: 2\n\n{}Content-Length: 2\r\n\r\n{}",
+             "!a header field holds a bare carriage return or line feed");
+    // The same holds for a single carriage return, which ends nothing here.
+    reads_as("Content-Length: 2\r\r{}", "!the stream ended inside a header");
+}
+
+fn a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused() void {
+    // The smuggling shape: a second Content-Length written after a lone line
+    // feed. The block ends at the `\r\n\r\n`. A line-feed
+    // parser sees lengths 5 and 2. The base protocol sees
+    // one field whose value contains a line feed. The two
+    // would then frame the stream differently. This module refuses the field,
+    // and the frame with it, which is also what keeps the two-lengths guard
+    // from being walked around. The second length below never reaches it.
+    string smuggled = "Content-Length: 5\r\nX: a\nContent-Length: 2\r\n\r\n{}abc";
+    reads_as(smuggled, "!a header field holds a bare carriage return or line feed");
+    // A bare carriage return in a value is refused for the same reason, since
+    // a reader may end a line at one.
+    reads_as("Content-Length: 5\r\nX: a\rContent-Length: 2\r\n\r\n{}abc",
+             "!a header field holds a bare carriage return or line feed");
+    // The name is read with the value, so a byte in either refuses the field.
+    reads_as("Content-Length: 2\r\nX\ny: a\r\n\r\n{}",
+             "!a header field holds a bare carriage return or line feed");
+    reads_as("Content-Length:\n2\r\n\r\n{}",
+             "!a header field holds a bare carriage return or line feed");
+    // The field is refused before its colon is looked for. So a line with
+    // neither a colon nor a terminator answers for the byte it holds.
+    reads_as("Content-Length 2\nX\r\n\r\n{}",
+             "!a header field holds a bare carriage return or line feed");
+    // The refusal is this frame's. A frame that was already read still comes
+    // back, and the error follows it.
+    reads_as("Content-Length: 2\r\n\r\n{}Content-Length: 2\r\nX: a\nY: b\r\n\r\n{}",
+             "{}!a header field holds a bare carriage return or line feed");
+    // Two bytes and no others: a tab, a vertical tab and a form feed are
+    // ordinary bytes of a value. This is because no reader of a header block ends a
+    // line at one.
+    reads_as("Content-Length: 2\r\nX: a\tb\r\n\r\n{}", "{}.");
+    reads_as("Content-Length: 2\r\nX: a\x0Bb\r\n\r\n{}", "{}.");
+    reads_as("Content-Length: 2\r\nX: a\x0Cb\r\n\r\n{}", "{}.");
+    // The rule is the header block's alone. A body holds whatever bytes its
+    // length says, both of these among them, since the length and not a scan
+    // decides where it ends.
+    reads_as("Content-Length: 4\r\n\r\n{\r\n}", "{\r\n}.");
+    reads_as("Content-Length: 2\r\n\r\n\r\n", "\r\n.");
+}
+
+fn a_header_field_name_that_holds_a_space_or_a_control_byte_is_refused() void {
+    // The name is compared as it stands. So a name that holds a byte a second
+    // reader may trim is a name no two readers agree about. This module reads
+    // the field as one it does not know, and the other reads a Content-Length.
+    string refused = "!a header field name holds a space or a control byte";
+    reads_as("Content-Length : 2\r\n\r\n{}", refused);
+    reads_as("Content-Length\t: 2\r\n\r\n{}", refused);
+    // Every name of the block, not only the one this module reads.
+    reads_as("Content-Length: 2\r\nX Y: a\r\n\r\n{}", refused);
+    // A line that begins with a space is a continuation line of another
+    // protocol. Here it is a name that holds one, and it is refused as one.
+    reads_as("Content-Length: 2\r\n X: a\r\n\r\n{}", refused);
+    // The class is every byte at or below a space and not the two the RFC
+    // names. JavaScript `String.prototype.trim` removes Unicode
+    // White_Space, including U+000B and U+000C. vscode-jsonrpc
+    // uses JavaScript. A class that is closed against the RFC and
+    // open against the reference implementation is the wrong way round.
+    reads_as("Content-Length: 2\r\nX\x0BY: a\r\n\r\n{}", refused);
+    reads_as("Content-Length: 2\r\nX\x0CY: a\r\n\r\n{}", refused);
+    // Both ends of the class: NUL is its lowest byte, and `!`, the byte above
+    // a space, is an ordinary name byte that nothing trims.
+    reads_as("Content-Length: 2\r\nX\x00Y: a\r\n\r\n{}", refused);
+    reads_as("Content-Length: 2\r\nX!Y: a\r\n\r\n{}", "{}.");
+    // The rule is the name's alone: the value is still trimmed, as
+    // the_spaces_around_a_value_are_dropped holds. And a vertical tab or a
+    // form feed inside a value stays where it is (see the case above, in
+    // a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused).
+    reads_as("Content-Length:  2  \r\n\r\n{}", "{}.");
+    // A value needs no class of its own, and this is why. A trimming reader
+    // reads 2 here and this one reads `2\x0B`, which is no number, so the
+    // frame is refused rather than framed differently. The two readers
+    // disagree about nothing the client receives.
+    reads_as("Content-Length: 2\x0B\r\n\r\n{}", "!the Content-Length is not a number");
+    // The refusal is this frame's. A frame already read still comes back, and
+    // the error follows it.
+    strbuf.str_buf mut after = strbuf.create();
+    defer strbuf.free(&after);
+    strbuf.append(&after, "{}");
+    strbuf.append(&after, refused);
+    reads_as("Content-Length: 2\r\n\r\n{}Content-Length : 2\r\n\r\n{}",
+             strbuf.view(&after));
+}
+
+fn every_byte_at_or_below_a_space_is_refused_in_a_name() void {
+    // The rule is a byte class, so the test is a sweep and not a sample. Every
+    // byte from 0 to 32 is refused inside a name and 33, the byte above the
+    // space, is not. A guard written `<` where it needs `<=` passes every
+    // example above and fails here at 32.
+    string refused_name = "!a header field name holds a space or a control byte";
+    string refused_line = "!a header field holds a bare carriage return or line feed";
+    u64 mut b = 0;
+    while (b <= 33) {
+        strbuf.str_buf mut script = strbuf.create();
+        defer strbuf.free(&script);
+        strbuf.append(&script, "Content-Length: 2\r\nX");
+        strbuf.push_byte(&script, cast(b, u8));
+        strbuf.append(&script, "Y: a\r\n\r\n{}");
+        string mut want = refused_name;
+        if (b == 10 || b == 13) {
+            // The terminator rule stands one guard above this one and answers
+            // for these two first, which is the order this asserts.
+            want = refused_line;
+        }
+        if (b == 33) {
+            want = "{}.";
+        }
+        string own got = frames_of(strbuf.view(&script), 0);
+        lsp_env.check(got, want, "a byte inside a name");
+        del(got);
+        b += 1;
+    }
+    // A name of no bytes at all holds none of the class, so it falls through
+    // to the rule that the block declares no length.
+    reads_as(": 2\r\n\r\n{}", "!the frame has no Content-Length");
+    // A byte above the ASCII range is an ordinary name byte. It is the case
+    // that fails if `char` ever stops comparing by unsigned byte value. A
+    // signed read makes 0xC3 less than a space.
+    reads_as("Content-Length: 2\r\nX\xC3\xA9Y: a\r\n\r\n{}", "{}.");
+}
+
+fn the_script_a_trimming_reader_frames_differently() void {
+    // A reader that accepts the space reads this block as one unknown field
+    // and one Content-Length of 2. It
+    // answered a two-byte body and then a whole second frame. A reader that
+    // trims the name reads one 48-byte body instead and never delivers the
+    // second message. The stream now ends at the field.
+    strbuf.str_buf mut smuggled = strbuf.create();
+    defer strbuf.free(&smuggled);
+    strbuf.append(&smuggled, "Content-Length : 48\r\n");
+    strbuf.append(&smuggled, "Content-Length: 2\r\n\r\n{}");
+    strbuf.append(&smuggled, "Content-Length: 24\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":9}");
+    string refused = "!a header field name holds a space or a control byte";
+    reads_as(strbuf.view(&smuggled), refused);
+    // The same case uses a vertical tab instead of a space. A vertical tab is not whitespace to
+    // the RFC and is whitespace to `String.prototype.trim`. The byte class and not the two
+    // literals is what closes it.
+    strbuf.str_buf mut tabbed = strbuf.create();
+    defer strbuf.free(&tabbed);
+    strbuf.append(&tabbed, "Content-Length\x0B: 48\r\n");
+    strbuf.append(&tabbed, "Content-Length: 2\r\n\r\n{}");
+    strbuf.append(&tabbed, "Content-Length: 24\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":9}");
+    reads_as(strbuf.view(&tabbed), refused);
+    // The other reading, spelled out, so the cost is in the test and not only
+    // in a comment. One field of 48 bytes takes the second message, its header
+    // block and all, as the body of the first frame.
+    strbuf.str_buf mut whole = strbuf.create();
+    defer strbuf.free(&whole);
+    strbuf.append(&whole, "Content-Length: 48\r\n\r\n{}");
+    strbuf.append(&whole, "Content-Length: 24\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":9}");
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "{}Content-Length: 24\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":9}.");
+    // The body is 48 bytes: the `.` of the digest is the clean end of stream.
+    lsp_env.check_u64(strbuf.view(&want).len - 1, 48, "the bytes a trimming reader takes");
+    reads_as(strbuf.view(&whole), strbuf.view(&want));
+}
+
+fn a_frame_after_a_refusal_is_not_read() void {
+    // A conn that failed no longer knows where a frame begins, so it answers
+    // false ever after and the server ends the loop.
+    reads_as("Content-Length: x\r\n\r\n{}Content-Length: 2\r\n\r\n{}",
+             "!the Content-Length is not a number");
+}
+
+// ---- the bounds ------------------------------------------------------------------
+
+fn a_body_at_the_cap_is_read_and_one_above_it_is_refused() void {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, "Content-Length: 5\r\n\r\n[1,2]Content-Length: 6\r\n\r\n[1,23]");
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    rpc.set_max_content(&c, 5);
+    lsp_env.check_u64(rpc.max_content(&c), 5, "the cap that was set");
+    string mut body = "";
+    assert(rpc.read_frame(&c, &body));
+    lsp_env.check(body, "[1,2]", "the frame at the cap");
+    assert(!rpc.read_frame(&c, &body));
+    assert(rpc.has_failed(&c));
+    lsp_env.check(rpc.error_message(&c), "the frame is too large", "above the cap");
+    assert(io.close(ends.read_fd));
+}
+
+fn the_cap_falls_back_to_the_default() void {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, "Content-Length: 2\r\n\r\n{}");
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    lsp_env.check_u64(rpc.max_content(&c), rpc.RPC_MAX_CONTENT, "the default cap");
+    rpc.set_max_content(&c, 4096);
+    lsp_env.check_u64(rpc.max_content(&c), 4096, "a cap of its own");
+    rpc.set_max_content(&c, 0);
+    lsp_env.check_u64(rpc.max_content(&c), rpc.RPC_MAX_CONTENT, "back to the default");
+    lsp_env.check_u64(rpc.chunk_of(&c), rpc.RPC_CHUNK, "the default chunk");
+    rpc.set_chunk(&c, 7);
+    lsp_env.check_u64(rpc.chunk_of(&c), 7, "a chunk of its own");
+    rpc.set_chunk(&c, 0);
+    lsp_env.check_u64(rpc.chunk_of(&c), rpc.RPC_CHUNK, "back to the default chunk");
+    string mut body = "";
+    assert(rpc.read_frame(&c, &body));
+    assert(io.close(ends.read_fd));
+}
+
+fn a_declared_length_is_refused_before_a_byte_of_it_is_read() void {
+    // The frame declares four gibibytes and carries two bytes. The refusal
+    // costs nothing, since the body is never buffered.
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, "Content-Length: 4294967296\r\n\r\n{}");
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    string mut body = "";
+    assert(!rpc.read_frame(&c, &body));
+    lsp_env.check(rpc.error_message(&c), "the frame is too large", "four gibibytes");
+    assert(io.close(ends.read_fd));
+}
+
+fn a_header_block_above_the_bound_is_refused() void {
+    // A client that never sends the empty line would otherwise grow the read
+    // buffer without limit.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    while (script.len <= rpc.RPC_MAX_HEADER) {
+        strbuf.append(&script, "X-Filler: 0123456789012345678901234567890123456789\r\n");
+    }
+    strbuf.append(&script, "Content-Length: 2\r\n\r\n{}");
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, strbuf.view(&script));
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    string mut body = "";
+    assert(!rpc.read_frame(&c, &body));
+    lsp_env.check(rpc.error_message(&c), "the header is too long", "a long header");
+    assert(io.close(ends.read_fd));
+}
+
+fn a_header_block_below_the_bound_is_read() void {
+    // The bound holds a header of a hundred fields, which is far more than the
+    // two the protocol defines.
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    u64 mut i = 0;
+    while (i < 100) {
+        strbuf.append(&script, "X-Filler: 0123456789\r\n");
+        i += 1;
+    }
+    strbuf.append(&script, "Content-Length: 2\r\n\r\n{}");
+    assert(script.len < rpc.RPC_MAX_HEADER);
+    string own got = frames_of(strbuf.view(&script), 0);
+    lsp_env.check(got, "{}.", "a hundred fields");
+    del(got);
+}
+
+// ---- the ends of a stream --------------------------------------------------------
+
+fn an_empty_stream_is_a_clean_end() void {
+    reads_as("", ".");
+}
+
+fn a_stream_that_ends_between_two_frames_is_a_clean_end() void {
+    reads_as("Content-Length: 2\r\n\r\n{}", "{}.");
+}
+
+fn a_stream_that_ends_inside_a_header_is_an_error() void {
+    reads_as("Content-Length: 2\r\n", "!the stream ended inside a header");
+    reads_as("Content-Length: 2\r\n\r", "!the stream ended inside a header");
+    reads_as("C", "!the stream ended inside a header");
+    reads_as("Content-Length: 2\r\n\r\n{}Content-Length: 2\r\n",
+             "{}!the stream ended inside a header");
+}
+
+fn a_stream_that_ends_inside_a_body_is_an_error() void {
+    reads_as("Content-Length: 9\r\n\r\n{}", "!the stream ended inside the body");
+    reads_as("Content-Length: 2\r\n\r\n", "!the stream ended inside the body");
+    reads_as("Content-Length: 2\r\n\r\n{}Content-Length: 5\r\n\r\n{}",
+             "{}!the stream ended inside the body");
+}
+
+fn the_end_of_the_stream_is_no_error() void {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    lsp_env.feed(ends, "Content-Length: 2\r\n\r\n{}");
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    string mut body = "";
+    assert(rpc.read_frame(&c, &body));
+    assert(!rpc.at_eof(&c));
+    assert(!rpc.read_frame(&c, &body));
+    assert(rpc.at_eof(&c));
+    assert(!rpc.has_failed(&c));
+    lsp_env.check(rpc.error_message(&c), "", "no error at the end");
+    // A read after the end answers false again and stays at the end.
+    assert(!rpc.read_frame(&c, &body));
+    assert(rpc.at_eof(&c));
+    assert(io.close(ends.read_fd));
+}
+
+// ---- what write_frame writes -----------------------------------------------------
+
+fn a_frame_is_a_header_an_empty_line_and_the_body() void {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    assert(rpc.write_frame(&c, "{\"a\":1}"));
+    assert(io.close(ends.write_fd));
+    string own got = lsp_env.drain(ends);
+    lsp_env.check(got, "Content-Length: 7\r\n\r\n{\"a\":1}", "one frame");
+    del(got);
+}
+
+fn an_empty_body_is_a_frame_of_length_zero() void {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    assert(rpc.write_frame(&c, ""));
+    assert(io.close(ends.write_fd));
+    string own got = lsp_env.drain(ends);
+    lsp_env.check(got, "Content-Length: 0\r\n\r\n", "an empty body");
+    del(got);
+}
+
+fn the_length_counts_the_bytes_of_the_body() void {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    assert(rpc.write_frame(&c, "\"\xC3\xA9\xF0\x9D\x84\x9E\""));
+    assert(rpc.write_frame(&c, "1"));
+    assert(io.close(ends.write_fd));
+    string own got = lsp_env.drain(ends);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "Content-Length: 8\r\n\r\n\"\xC3\xA9\xF0\x9D\x84\x9E\"");
+    strbuf.append(&want, "Content-Length: 1\r\n\r\n1");
+    lsp_env.check(got, strbuf.view(&want), "two frames");
+    del(got);
+}
+
+fn a_frame_this_module_writes_is_one_it_reads() void {
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    rpc.conn mut writer = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&writer);
+    assert(rpc.write_frame(&writer, "{\"first\":true}"));
+    assert(rpc.write_frame(&writer, ""));
+    assert(rpc.write_frame(&writer, "{\"third\":\"\r\n\"}"));
+    assert(io.close(ends.write_fd));
+    rpc.conn mut reader = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&reader);
+    rpc.set_chunk(&reader, 1);
+    string mut body = "";
+    assert(rpc.read_frame(&reader, &body));
+    lsp_env.check(body, "{\"first\":true}", "first");
+    assert(rpc.read_frame(&reader, &body));
+    lsp_env.check(body, "", "second");
+    assert(rpc.read_frame(&reader, &body));
+    lsp_env.check(body, "{\"third\":\"\r\n\"}", "third");
+    assert(!rpc.read_frame(&reader, &body));
+    assert(rpc.at_eof(&reader));
+    assert(io.close(ends.read_fd));
+}
+
+fn a_write_that_fails_is_an_error_record() void {
+    // Both ends of the pipe are closed, so the write meets EBADF. A write to a pipe whose
+    // reader alone is gone raises SIGPIPE instead, which ends the program before write_all
+    // answers. No test here provokes one: a server whose client died after a whole frame
+    // reached the read buffer does meet it. A SIGPIPE handler is necessary before that case can
+    // return an error.
+    lsp_env.pipe_ends ends = lsp_env.open_pipe();
+    assert(io.close(ends.read_fd));
+    assert(io.close(ends.write_fd));
+    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+    defer rpc.free(&c);
+    assert(!rpc.write_frame(&c, "{}"));
+    assert(rpc.has_failed(&c));
+    lsp_env.check(rpc.error_message(&c), "the stream could not be written", "a closed descriptor");
+}
+
+
+// ---- the sweep -------------------------------------------------------------------
+
+fn a_frame_of_every_length_up_to_sixty_four_is_read() void {
+    // The length is the one number the framing reads. So every length from an
+    // empty body to sixty-four bytes goes through it, written by this module
+    // and read back by it.
+    strbuf.str_buf mut body = strbuf.create();
+    defer strbuf.free(&body);
+    strbuf.str_buf mut script = strbuf.create();
+    defer strbuf.free(&script);
+    u64 mut len = 0;
+    while (len <= 64) {
+        strbuf.clear(&body);
+        u64 mut i = 0;
+        while (i < len) {
+            strbuf.push(&body, cast(cast('a', u64) + i % 26, char));
+            i += 1;
+        }
+        strbuf.clear(&script);
+        string own frame = framed(strbuf.view(&body));
+        strbuf.append(&script, frame);
+        del(frame);
+        lsp_env.pipe_ends ends = lsp_env.open_pipe();
+        lsp_env.feed(ends, strbuf.view(&script));
+        rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
+        rpc.set_chunk(&c, 1);
+        string mut got = "";
+        assert(rpc.read_frame(&c, &got));
+        lsp_env.check_u64(got.len, len, "the length of a frame");
+        lsp_env.check(got, strbuf.view(&body), "the body of a frame");
+        assert(!rpc.read_frame(&c, &got));
+        assert(rpc.at_eof(&c));
+        rpc.free(&c);
+        assert(io.close(ends.read_fd));
+        len += 1;
+    }
+}
+
+fn the_length_a_header_declares_is_read_at_every_width() void {
+    // A decimal number of one digit and of twenty, and the largest u64, which
+    // the cap refuses rather than the reader.
+    reads_as("Content-Length: 0\r\n\r\n", ".");
+    reads_as("Content-Length: 00000000002\r\n\r\n{}", "{}.");
+    reads_as("Content-Length: 18446744073709551615\r\n\r\n{}", "!the frame is too large");
+    reads_as("Content-Length: 18446744073709551616\r\n\r\n{}",
+             "!the Content-Length is not a number");
+}
+
+fn a_field_of_every_shape_is_passed_over() void {
+    // A field the server does not read may hold anything but the terminator,
+    // and the frame is still the one the length declares.
+    reads_as("X-Empty:\r\nContent-Length: 2\r\n\r\n{}", "{}.");
+    reads_as("X-Colons: a:b:c\r\nContent-Length: 2\r\n\r\n{}", "{}.");
+    reads_as("X-Spaces:    \r\nContent-Length: 2\r\n\r\n{}", "{}.");
+    reads_as("Content-Length: 2\r\nX-After: 1\r\n\r\n{}", "{}.");
+    reads_as("X-Length: 9\r\nContent-Length: 2\r\n\r\n{}", "{}.");
+    // A field whose name ends in the one the server reads is another field.
+    reads_as("My-Content-Length: 9\r\nContent-Length: 2\r\n\r\n{}", "{}.");
+    reads_as("Content-Length-Extra: 9\r\nContent-Length: 2\r\n\r\n{}", "{}.");
+}
+
+fn a_header_that_names_only_the_length_twice_over_is_read() void {
+    // The rule is that two lengths that differ are refused. Two that agree are
+    // one length, whatever the case of their names.
+    reads_as("Content-Length: 2\r\ncontent-length: 2\r\nCONTENT-LENGTH: 2\r\n\r\n{}", "{}.");
+}
+
+fn every_id_is_written_as_the_protocol_spells_it() void {
+    // The three kinds of id, at the ends of their ranges, through write_id.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    writes_id(rpc.msg_id{rpc.id_kind.id_int, 0, ""}, "0");
+    writes_id(rpc.msg_id{rpc.id_kind.id_int, -1, ""}, "-1");
+    writes_id(rpc.msg_id{rpc.id_kind.id_int, 9223372036854775807, ""}, "9223372036854775807");
+    writes_id(rpc.msg_id{rpc.id_kind.id_int, -9223372036854775808, ""}, "-9223372036854775808");
+    writes_id(rpc.msg_id{rpc.id_kind.id_str, 0, ""}, "\"\"");
+    writes_id(rpc.msg_id{rpc.id_kind.id_str, 0, "a b"}, "\"a b\"");
+    writes_id(rpc.msg_id{rpc.id_kind.id_str, 0, "\"\\"}, "\"\\\"\\\\\"");
+    writes_id(rpc.msg_id{rpc.id_kind.id_str, 0, "\xC3\xA9"}, "\"\xC3\xA9\"");
+    writes_id(rpc.msg_id{}, "null");
+    // The number of a string id and the text of a number id are not written.
+    writes_id(rpc.msg_id{rpc.id_kind.id_str, 7, "name"}, "\"name\"");
+    writes_id(rpc.msg_id{rpc.id_kind.id_int, 7, "name"}, "7");
+}
+
+// The id is written as `want`.
+fn writes_id(rpc.msg_id id, string want) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &b);
+    rpc.write_id(&w, id);
+    lsp_env.check(strbuf.view(&b), want, want);
+}
+
+fn an_id_of_a_document_is_read_back_as_it_was_written() void {
+    // The round trip of an id: written by write_id, parsed by the reader and
+    // read by id_of, which must answer the id that went in.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    round_trips_id(&d, rpc.msg_id{rpc.id_kind.id_int, 0, ""});
+    round_trips_id(&d, rpc.msg_id{rpc.id_kind.id_int, -9223372036854775808, ""});
+    round_trips_id(&d, rpc.msg_id{rpc.id_kind.id_int, 9223372036854775807, ""});
+    round_trips_id(&d, rpc.msg_id{rpc.id_kind.id_str, 0, "a \"quoted\" name"});
+    round_trips_id(&d, rpc.msg_id{rpc.id_kind.id_str, 0, "\xF0\x9D\x84\x9E"});
+    round_trips_id(&d, rpc.msg_id{});
+}
+
+fn round_trips_id(json.doc mut* d, rpc.msg_id id) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &b);
+    rpc.write_id(&w, id);
+    // The document is parsed from a buffer of its own, since a source may not
+    // alias the storage of the document it is parsed into.
+    string own source = strbuf.take(&b);
+    assert(json.parse(d, source));
+    bool mut ok = true;
+    rpc.msg_id back = rpc.id_of(d, json.root(d), &ok);
+    assert(ok);
+    assert(rpc.same_id(back, id) || id.kind == rpc.id_kind.id_absent);
+    assert(back.kind == id.kind);
+    del(source);
+}
+
+// ---- the message a frame carries -------------------------------------------------
+
+// The document `body`, parsed and classified.
+fn classify(json.doc mut* d, string body, rpc.message mut* out) void {
+    assert(json.parse(d, body));
+    rpc.classify(d, out);
+}
+
+fn a_request_carries_a_method_and_an_id() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{}}", &m);
+    assert(m.kind == rpc.msg_kind.m_request);
+    assert(m.id.kind == rpc.id_kind.id_int);
+    lsp_env.check_i64(m.id.num, 7, "the id of a request");
+    lsp_env.check(m.method, "initialize", "the method of a request");
+    assert(m.params != 0);
+    assert(json.kind_of(&d, m.params) == json.value_kind.k_object);
+}
+
+fn an_id_may_be_a_string() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":\"a-1\",\"method\":\"shutdown\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_request);
+    assert(m.id.kind == rpc.id_kind.id_str);
+    lsp_env.check(m.id.text, "a-1", "a string id");
+    lsp_env.check_u64(cast(m.params, u64), 0, "no params");
+}
+
+fn the_ends_of_the_id_range_are_ids() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":-9223372036854775808,\"method\":\"x\"}", &m);
+    lsp_env.check_i64(m.id.num, -9223372036854775808, "the smallest id");
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":9223372036854775807,\"method\":\"x\"}", &m);
+    lsp_env.check_i64(m.id.num, 9223372036854775807, "the largest id");
+    // One past the largest is no integer, so the reader makes it a float and
+    // this module refuses it.
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":9223372036854775808,\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "an id is a number or a string", "an id past i64");
+}
+
+fn a_notification_carries_a_method_and_no_id() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}", &m);
+    assert(m.kind == rpc.msg_kind.m_notification);
+    assert(m.id.kind == rpc.id_kind.id_absent);
+    lsp_env.check(m.method, "initialized", "the method of a notification");
+}
+
+fn an_id_of_null_names_no_request() void {
+    // LSP 3.17 forbids a null id on a request, and a server that answered one
+    // would address a request the client cannot match. It is a notification.
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"exit\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_notification);
+    assert(m.id.kind == rpc.id_kind.id_absent);
+}
+
+fn a_response_is_neither_a_request_nor_a_notification() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}", &m);
+    assert(m.kind == rpc.msg_kind.m_response);
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-1,\"message\":\"x\"}}", &m);
+    assert(m.kind == rpc.msg_kind.m_response);
+}
+
+fn a_document_that_is_no_message_is_invalid() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "[1,2]", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "a message is a JSON object", "a batch");
+    classify(&d, "\"hello\"", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    classify(&d, "null", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    classify(&d, "{}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "a message carries jsonrpc 2.0", "no version");
+}
+
+fn a_document_that_did_not_parse_is_invalid() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    assert(!json.parse(&d, "{"));
+    rpc.message mut m = rpc.message{};
+    rpc.classify(&d, &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "a message is a JSON object", "a broken document");
+}
+
+fn the_version_must_be_the_string_two_point_zero() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"1.0\",\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    classify(&d, "{\"jsonrpc\":2.0,\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    classify(&d, "{\"jsonrpc\":null,\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "a message carries jsonrpc 2.0", "a version of null");
+}
+
+fn a_method_that_is_no_string_is_invalid() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":7}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "a method is a string", "a method of 7");
+    // The id is still read, so the answer names the request the client asked
+    // about rather than none.
+    assert(m.id.kind == rpc.id_kind.id_int);
+    lsp_env.check_i64(m.id.num, 1, "the id of an invalid request");
+}
+
+fn an_id_of_another_kind_is_invalid() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":1.5,\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":[1],\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"x\"}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "an id is a number or a string", "an id of an object");
+}
+
+fn a_message_with_no_method_and_no_result_is_invalid() void {
+    json.doc mut d = json.create();
+    defer json.free(&d);
+    rpc.message mut m = rpc.message{};
+    classify(&d, "{\"jsonrpc\":\"2.0\",\"id\":1}", &m);
+    assert(m.kind == rpc.msg_kind.m_invalid);
+    lsp_env.check(m.error_msg, "a message has a method, a result or an error",
+                  "an id and nothing else");
+}
+
+fn two_ids_name_one_request_only_when_both_name_a_request() void {
+    rpc.msg_id one = rpc.msg_id{rpc.id_kind.id_int, 1, ""};
+    rpc.msg_id one_again = rpc.msg_id{rpc.id_kind.id_int, 1, ""};
+    rpc.msg_id two = rpc.msg_id{rpc.id_kind.id_int, 2, ""};
+    rpc.msg_id name = rpc.msg_id{rpc.id_kind.id_str, 0, "one"};
+    rpc.msg_id name_again = rpc.msg_id{rpc.id_kind.id_str, 0, "one"};
+    rpc.msg_id other = rpc.msg_id{rpc.id_kind.id_str, 0, "two"};
+    rpc.msg_id absent = rpc.msg_id{};
+    assert(rpc.same_id(one, one_again));
+    assert(!rpc.same_id(one, two));
+    assert(rpc.same_id(name, name_again));
+    assert(!rpc.same_id(name, other));
+    // A number and a string never name one request, whatever they spell.
+    assert(!rpc.same_id(one, name));
+    // Two absent ids name no request, so they are not the same one: a cancel
+    // that carries no id cancels nothing.
+    assert(!rpc.same_id(absent, absent));
+    assert(!rpc.same_id(absent, one));
+}
+
+// ---- the answers -----------------------------------------------------------------
+
+// The document `build` writes, as text.
+fn written(rpc.msg_id id, i64 code, string message, bool is_error) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    json.writer mut w = json.writer{};
+    json.write_init(&w, &b);
+    if (is_error) {
+        rpc.write_error(&w, id, code, message);
+    } else {
+        rpc.response_begin(&w, id);
+        json.write_null(&w);
+        rpc.response_end(&w);
+    }
+    return strbuf.take(&b);
+}
+
+fn a_result_names_the_request_it_answers() void {
+    string own out = written(rpc.msg_id{rpc.id_kind.id_int, 4, ""}, 0, "", false);
+    lsp_env.check(out, "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":null}", "a result");
+    del(out);
+    string own named = written(rpc.msg_id{rpc.id_kind.id_str, 0, "a\"b"}, 0, "", false);
+    lsp_env.check(named, "{\"jsonrpc\":\"2.0\",\"id\":\"a\\\"b\",\"result\":null}",
+                  "a string id is quoted");
+    del(named);
+}
+
+fn an_error_carries_a_code_and_a_message() void {
+    string own out = written(rpc.msg_id{rpc.id_kind.id_int, 1, ""}, rpc.ERROR_METHOD_NOT_FOUND,
+                             "no method x", true);
+    string want =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"no method x\"}}";
+    lsp_env.check(out, want, "an error");
+    del(out);
+}
+
+fn an_error_for_a_request_that_could_not_be_read_carries_a_null_id() void {
+    string own out = written(rpc.msg_id{}, rpc.ERROR_PARSE, "broken", true);
+    string want =
+        "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"broken\"}}";
+    lsp_env.check(out, want, "a parse error");
+    del(out);
+}
+
+fn the_error_codes_are_the_ones_the_protocol_fixes() void {
+    lsp_env.check_i64(rpc.ERROR_PARSE, -32700, "ParseError");
+    lsp_env.check_i64(rpc.ERROR_INVALID_REQUEST, -32600, "InvalidRequest");
+    lsp_env.check_i64(rpc.ERROR_METHOD_NOT_FOUND, -32601, "MethodNotFound");
+    lsp_env.check_i64(rpc.ERROR_INVALID_PARAMS, -32602, "InvalidParams");
+    lsp_env.check_i64(rpc.ERROR_INTERNAL, -32603, "InternalError");
+    lsp_env.check_i64(rpc.ERROR_SERVER_NOT_INITIALIZED, -32002, "ServerNotInitialized");
+    lsp_env.check_i64(rpc.ERROR_REQUEST_CANCELLED, -32800, "RequestCancelled");
+}
+
+fn main() i32 {
+    one_frame_is_read_whatever_the_read_size();
+    two_frames_are_read_in_order();
+    a_body_of_no_bytes_is_a_frame();
+    the_length_and_not_a_scan_decides_where_a_body_ends();
+    a_body_of_raw_bytes_is_measured_in_bytes();
+    the_frames_of_a_long_stream_are_all_read();
+    println("framing ok");
+    a_field_the_server_does_not_read_is_ignored();
+    the_field_name_is_read_without_case();
+    the_spaces_around_a_value_are_dropped();
+    two_lengths_that_agree_are_one_length();
+    two_lengths_that_differ_are_refused();
+    a_frame_without_a_length_is_refused();
+    a_field_without_a_colon_is_refused();
+    a_header_field_that_holds_a_bare_carriage_return_or_line_feed_is_refused();
+    a_header_field_name_that_holds_a_space_or_a_control_byte_is_refused();
+    every_byte_at_or_below_a_space_is_refused_in_a_name();
+    the_script_a_trimming_reader_frames_differently();
+    a_length_that_is_no_number_is_refused();
+    a_header_block_that_ends_its_lines_with_a_line_feed_alone_is_refused();
+    a_frame_after_a_refusal_is_not_read();
+    println("headers ok");
+    a_body_at_the_cap_is_read_and_one_above_it_is_refused();
+    the_cap_falls_back_to_the_default();
+    a_declared_length_is_refused_before_a_byte_of_it_is_read();
+    a_header_block_above_the_bound_is_refused();
+    a_header_block_below_the_bound_is_read();
+    println("bounds ok");
+    an_empty_stream_is_a_clean_end();
+    a_stream_that_ends_between_two_frames_is_a_clean_end();
+    a_stream_that_ends_inside_a_header_is_an_error();
+    a_stream_that_ends_inside_a_body_is_an_error();
+    the_end_of_the_stream_is_no_error();
+    println("ends ok");
+    a_frame_is_a_header_an_empty_line_and_the_body();
+    an_empty_body_is_a_frame_of_length_zero();
+    the_length_counts_the_bytes_of_the_body();
+    a_frame_this_module_writes_is_one_it_reads();
+    a_write_that_fails_is_an_error_record();
+    println("writing ok");
+    a_frame_of_every_length_up_to_sixty_four_is_read();
+    the_length_a_header_declares_is_read_at_every_width();
+    a_field_of_every_shape_is_passed_over();
+    a_header_that_names_only_the_length_twice_over_is_read();
+    every_id_is_written_as_the_protocol_spells_it();
+    an_id_of_a_document_is_read_back_as_it_was_written();
+    println("sweep ok");
+    a_request_carries_a_method_and_an_id();
+    an_id_may_be_a_string();
+    the_ends_of_the_id_range_are_ids();
+    a_notification_carries_a_method_and_no_id();
+    an_id_of_null_names_no_request();
+    a_response_is_neither_a_request_nor_a_notification();
+    a_document_that_is_no_message_is_invalid();
+    a_document_that_did_not_parse_is_invalid();
+    the_version_must_be_the_string_two_point_zero();
+    a_method_that_is_no_string_is_invalid();
+    an_id_of_another_kind_is_invalid();
+    a_message_with_no_method_and_no_result_is_invalid();
+    two_ids_name_one_request_only_when_both_name_a_request();
+    println("messages ok");
+    a_result_names_the_request_it_answers();
+    an_error_carries_a_code_and_a_message();
+    an_error_for_a_request_that_could_not_be_read_carries_a_null_id();
+    the_error_codes_are_the_ones_the_protocol_fixes();
+    println("answers ok");
+    println("ok");
+    return 0;
+}

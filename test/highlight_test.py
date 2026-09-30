@@ -27,6 +27,7 @@ STD_DIR = ROOT / "std"
 FORT_SRC_DIR = ROOT / "src" / "fort"
 LSP_SRC_DIR = ROOT / "src" / "lsp"
 FORT_TESTS_DIR = ROOT / "test" / "fort"
+LSP_TESTS_DIR = ROOT / "test" / "lsp"
 TTY_DIR = ROOT / "test" / "tty"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
@@ -39,6 +40,7 @@ CORPUS_DIRS = (
     FORT_SRC_DIR,
     LSP_SRC_DIR,
     FORT_TESTS_DIR,
+    LSP_TESTS_DIR,
     TTY_DIR,
 )
 # The number of files those directories hold. A floor cannot detect a directory
@@ -59,6 +61,7 @@ CORPUS_MINIMUMS = {
     FORT_SRC_DIR: 20,
     LSP_SRC_DIR: 5,
     FORT_TESTS_DIR: 80,
+    LSP_TESTS_DIR: 20,
     TTY_DIR: 2,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
@@ -780,6 +783,10 @@ class CorpusTest(unittest.TestCase):
         shared fixtures under support/, which rglob reaches."""
         paths = self.check_directory(FORT_TESTS_DIR)
         self.assertTrue(any(p.parent.name == "support" for p in paths), "support/ not walked")
+
+    def test_every_module_test_of_the_language_server_spells_correctly(self):
+        """test/lsp/*.ft: the tests of the language server's modules."""
+        self.check_directory(LSP_TESTS_DIR)
 
     def test_every_terminal_program_spells_correctly(self):
         """Check the terminal test programs."""

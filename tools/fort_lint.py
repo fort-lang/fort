@@ -28,6 +28,7 @@ SOURCE_SETS = (
     ("src/lsp/*.ft", ("src", "src/fort")),
     ("test/fort/*.ft", ("src", "src/fort", "test/fort/support")),
     ("test/fort/support/*.ft", ("src", "src/fort", "test/fort/support")),
+    ("test/lsp/*.ft", ("src", "src/fort", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 TARGETS = ("linux", "darwin")
@@ -380,7 +381,7 @@ def lint_files(fort, root, files, std_dir=None):
                 # that closure. Thus, a run judges a file only when the roots
                 # agree. The default set loses no run to the rule. Std/ resolves
                 # through the copy beside the compiler, which is another file,
-                # and the test/fort tests carry the roots of test/fort/support.
+                # and the test/fort and test/lsp tests carry the roots of test/fort/support.
                 continue
             source = has_source_text(entries[other][3])
             reports[other] = file_problems(records or [], diagnostics, source)
