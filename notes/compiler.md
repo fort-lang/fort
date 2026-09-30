@@ -478,7 +478,7 @@ came here.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by
-  `move _t`. A construct that the lowering does not lower yet is a `fir_lower.report`, never a
+  `move _t`. A construct that the lowering does not lower is a `fir_lower.report`, never a
   panic, and `fort --fir` prints it as a comment. Each test of the lowering runs the verifier on
   its result (`test/fort/support/lower_env.ft`), and `fort --fir` runs `fir_verify.verify` before
   it prints. A new construct needs both: a text in a `test/fort/fir_lower_*_test.ft` and a clean
@@ -506,13 +506,27 @@ came here.
   loop around the `switch` (D7.6). A `loop` or `case` scope that stays open after its block turns
   a later `break` into a jump to the wrong block. The verifier does not see it, because that block
   is a block of the function. A text test sees it: `a_clause_is_a_case_scope_inside_a_loop` holds
-  a `break` after a `switch`, and a mutant that never closes a scope fails it. T-244 adds
-  the deferred statements and the `dead` markers to the same walk. A range `for` over an owning
-  collection whose place reads memory (`h->items`) holds `_a = addr(p)` before the loop, because
-  D7.5 evaluates the collection once and the body can change `h`. T-242 moved `fort --fir` over the
-  run programs from 30161 lowered functions to 37947, with no panic. The one known program that
-  rule V9 refuses is T-210's: a `break` leaves a `switch` that D8.4 counts as terminating, and
-  `fir_lower_switch_test.ft` holds that violation until the checker refuses the program.
+  a `break` after a `switch`, and a mutant that never closes a scope fails it. A range `for` over
+  an owning collection whose place reads memory (`h->items`) holds `_a = addr(p)` before the
+  loop, because D7.5 evaluates the collection once and the body can change `h`. T-242 moved
+  `fort --fir` over the run programs from 30161 lowered functions to 37947, with no panic. The
+  one known program that rule V9 refuses is T-210's: a `break` leaves a `switch` that D8.4
+  counts as terminating, and `fir_lower_switch_test.ft` holds that violation until the checker
+  refuses the program.
+  **Each exit and each fall-off unwinds the same stack** (T-244). A scope records where its
+  deferred statements and its named locals begin in two vectors of the lowerer, and its pop
+  truncates both, so no exit expands a `defer` of a closed scope or ends a local of one.
+  `fir_lower.unwind` lowers the deferred statements of each scope it leaves, the last one first,
+  then writes a `dead` for each local of that scope. A local joins its scope at its `live`, so
+  an exit ends no local declared after it. An expansion raises the floor to the depth of the
+  stack; checked programs never meet the floor, so `fir_lower_expand_panic_test.ft` wraps a
+  checked `break` in a `defer` node of its own to hold it. The local of the init of a `for`
+  belongs to a scope of kind `block` around the loop, and the variable of a range `for` to the
+  scope of its body. The store of a scalar `lv = e` stands at the `=`, as spec/fir.md 13 stores
+  `*p = 7`. T-244 moved `fort --fir` over the run programs from 37947 lowered functions to
+  41051 and refused none, and `src/fort/main.ft` from 1626 and 144 refused to 1790 and none. A
+  function is refused only when it needs a runtime entry that its closure lacks, as the sandbox
+  of a test does: a print or a string equality.
 
 ## 7. The runtime and the standard library
 

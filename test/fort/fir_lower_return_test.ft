@@ -1,0 +1,435 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| moves ok
+//| aggregates ok
+//| ends ok
+//| sum ok
+/// Checks the lowering of `return` and of the end of a body (spec/fir.md 9.6): the value before
+/// the deferred statements, the implicit move of an owning local, the temporary of an aggregate
+/// result while a deferred statement is open, and the three endings of a body after the markers
+/// of its scope. Each case lowers one function of a checked source, holds that the result keeps
+/// every rule of the verifier, and compares its text.
+import lower_env;
+
+// ---- moves ------------------------------------------------------------------------------------
+
+// `return buf` after `defer del(buf)` moves `buf` into `_0` before the expansion, so the deferred
+// `del` finds the zero value and frees nothing on that path (D7.8, D17.5); on the path of
+// `return null` it frees `buf`.
+fn a_returned_owner_is_moved_before_the_deferred_del() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn f(bool c) u8 mut* own {",
+        "    u8 mut* own buf = new(u8);",
+        "    defer del(buf);",
+        "    if (c) {",
+        "        return null;",
+        "    }",
+        "    return buf;",
+        "}",
+    };
+    string[28] want = {
+        "fn main.f(_1 (c): bool) -> u8 mut* own {",
+        "    let _0: u8 mut* own;",
+        "    let _2 (buf): u8 mut* own #2:17;",
+        "    let _3: u8 mut* own #2:23;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero u8 mut* own #2:17 s0;",
+        "        live(_2) #2:17 s1;",
+        "        _3 = alloc<u8>(const u64 1) #2:23 s1;",
+        "        check(overwrite: _2) -> bb1 #2:17 s1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = move _3 #2:17 s1;",
+        "        switch(copy _1) -> [true: bb2, otherwise: bb3] #4:5 s3;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const null u8 mut* own #5:16 s4;",
+        "        del(move _2) #3:11 exit 5:9 s5;",
+        "        dead(_2) #5:9 s4;",
+        "        return #5:9 s4;",
+        "    }",
+        "    bb3: {",
+        "        _0 = move _2 #7:12 s6;",
+        "        del(move _2) #3:11 exit 7:5 s7;",
+        "        dead(_2) #7:5 s6;",
+        "        return #7:5 s6;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+}
+
+// An owning span is an aggregate, so its `return` under an open `defer` goes through a temporary
+// of the type of `_0`: `_t = move _buf` first, the expansion, then `_0 = move _t` at the `return`
+// (spec/fir.md 9.6).
+fn a_returned_owning_span_goes_through_a_temporary() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn s(u64 n) u8 mut@ own {",
+        "    u8 mut@ own buf = new(u8, n);",
+        "    defer del(buf);",
+        "    return buf;",
+        "}",
+    };
+    string[27] want = {
+        "fn main.s(_1 (n): u64) -> u8 mut@ own {",
+        "    let _0: u8 mut@ own;",
+        "    let _2 (buf): u8 mut@ own #2:17;",
+        "    let _3: u8 mut@ own #2:23;",
+        "    let _4: i64 #2:23;",
+        "    let _5: u64 #2:23;",
+        "    let _6: u8 mut* own #2:23;",
+        "    let _7: u8 mut@ own #4:12;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero u8 mut@ own #2:17 s0;",
+        "        live(_2) #2:17 s1;",
+        "        _4 = cast<i64>(copy _1) #2:23 s1;",
+        "        _5 = cast<u64>(copy _4) #2:23 s1;",
+        "        _6 = alloc<u8>(copy _5) #2:23 s1;",
+        "        _3 = aggregate u8 mut@ own(move _6, copy _5) #2:23 s1;",
+        "        check(overwrite: _2) -> bb1 #2:17 s1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = move _3 #2:17 s1;",
+        "        _7 = move _2 #4:12 s3;",
+        "        del(move _2) #3:11 exit 4:5 s4;",
+        "        dead(_2) #4:5 s3;",
+        "        _0 = move _7 #4:5 s3;",
+        "        return #4:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "s"), want[..]);
+}
+
+// ---- aggregates -------------------------------------------------------------------------------
+
+// The result of an aggregate type is the storage of the caller (item 7), so while a deferred
+// statement is open the value goes into a temporary of the type of `_0` first, and `_0 = copy _t`
+// or `_0 = move _t` follows the expansion at the `return` (spec/fir.md 9.6, D7.8). `f` and `g`
+// return while a `defer` is open, and the owning `o` of `g` is an implicit move (D17.5). The scope
+// of the `defer` of `h` closed before its `return`, so `h` writes `_0` itself. `k` returns from
+// inside an `if` while the `defer` of the body is open, and returns a literal. The deferred call
+// of `t` does not return, so it ends the path and `_0` is never written.
+fn an_aggregate_result_waits_in_a_temporary_while_a_defer_is_open() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[38] source = {
+        "struct pair {",
+        "    i32 a;",
+        "    i32 b;",
+        "}",
+        "struct holder {",
+        "    u8 mut* own p;",
+        "}",
+        "fn a() void {",
+        "}",
+        "fn f(pair p) pair {",
+        "    defer a();",
+        "    return p;",
+        "}",
+        "fn g(holder o) holder {",
+        "    defer a();",
+        "    return o;",
+        "}",
+        "fn h(pair p, bool c) pair {",
+        "    if (c) {",
+        "        defer a();",
+        "    }",
+        "    return p;",
+        "}",
+        "fn k(pair p, bool c) pair {",
+        "    defer a();",
+        "    if (c) {",
+        "        return p;",
+        "    }",
+        "    return pair{1, 2};",
+        "}",
+        "fn stop() noreturn {",
+        "    while (true) {",
+        "    }",
+        "}",
+        "fn t(pair p) pair {",
+        "    defer stop();",
+        "    return p;",
+        "}",
+    };
+    string[12] copied = {
+        "fn main.f(_1 (p): pair) -> pair {",
+        "    let _0: pair;",
+        "    let _2: pair #12:12;",
+        "    let _3: void #11:12;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1 #12:12 s2;",
+        "        _3 = call fn main.a() #11:12 exit 12:5 s3;",
+        "        _0 = copy _2 #12:5 s2;",
+        "        return #12:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "f"), copied[..]);
+    string[12] moved = {
+        "fn main.g(_1 (o): holder) -> holder {",
+        "    let _0: holder;",
+        "    let _2: holder #16:12;",
+        "    let _3: void #15:12;",
+        "",
+        "    bb0: {",
+        "        _2 = move _1 #16:12 s2;",
+        "        _3 = call fn main.a() #15:12 exit 16:5 s3;",
+        "        _0 = move _2 #16:5 s2;",
+        "        return #16:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "g"), moved[..]);
+    string[16] closed = {
+        "fn main.h(_1 (p): pair, _2 (c): bool) -> pair {",
+        "    let _0: pair;",
+        "    let _3: void #20:16;",
+        "",
+        "    bb0: {",
+        "        switch(copy _2) -> [true: bb1, otherwise: bb2] #19:5 s1;",
+        "    }",
+        "    bb1: {",
+        "        _3 = call fn main.a() #20:16 exit 21:5 s3;",
+        "        goto bb2 #19:5 s1;",
+        "    }",
+        "    bb2: {",
+        "        _0 = copy _1 #22:12 s4;",
+        "        return #22:5 s4;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "h"), closed[..]);
+    string[23] nested = {
+        "fn main.k(_1 (p): pair, _2 (c): bool) -> pair {",
+        "    let _0: pair;",
+        "    let _3: pair #27:16;",
+        "    let _4: void #25:12;",
+        "    let _5: pair #29:12;",
+        "    let _6: void #25:12;",
+        "",
+        "    bb0: {",
+        "        switch(copy _2) -> [true: bb1, otherwise: bb2] #26:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        _3 = copy _1 #27:16 s3;",
+        "        _4 = call fn main.a() #25:12 exit 27:9 s4;",
+        "        _0 = copy _3 #27:9 s3;",
+        "        return #27:9 s3;",
+        "    }",
+        "    bb2: {",
+        "        _5 = aggregate pair(const i32 1, const i32 2) #29:12 s5;",
+        "        _6 = call fn main.a() #25:12 exit 29:5 s6;",
+        "        _0 = copy _5 #29:5 s5;",
+        "        return #29:5 s5;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "k"), nested[..]);
+    string[11] stopped = {
+        "fn main.t(_1 (p): pair) -> pair {",
+        "    let _0: pair;",
+        "    let _2: pair #37:12;",
+        "    let _3: void #36:15;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1 #37:12 s2;",
+        "        _3 = call fn main.stop() #36:15 exit 37:5 s3;",
+        "        trap #36:15 exit 37:5 s3;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "t"), stopped[..]);
+}
+
+// ---- the end of a body ------------------------------------------------------------------------
+
+// The end of a body that its last block reaches: the fall-off of the scope of kind `fn` first,
+// its deferred statements and then its `dead` markers at the closing brace with index 0, then
+// `return` for a `void` function, `trap` for a `noreturn` one and `unreachable` for any other
+// (spec/fir.md 9.6, 9.7). The done block of `r` is unreachable, and rule V9 holds that.
+fn each_kind_of_body_ends_after_the_markers_of_its_scope() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[19] source = {
+        "fn a() void {",
+        "}",
+        "fn v(bool c) void {",
+        "    i32 x = 1;",
+        "    defer a();",
+        "}",
+        "fn n() noreturn {",
+        "    i32 y = 2;",
+        "    while (true) {",
+        "    }",
+        "}",
+        "fn r(bool c) i32 {",
+        "    i32 z = 3;",
+        "    if (c) {",
+        "        return z;",
+        "    } else {",
+        "        return 0;",
+        "    }",
+        "}",
+    };
+    string[13] ends_void = {
+        "fn main.v(_1 (c): bool) -> void {",
+        "    let _0: void;",
+        "    let _2 (x): i32 #4:9;",
+        "    let _3: void #5:12;",
+        "",
+        "    bb0: {",
+        "        live(_2) #4:9 s1;",
+        "        _2 = const i32 1 #4:13 s1;",
+        "        _3 = call fn main.a() #5:12 exit 6:1 s3;",
+        "        dead(_2) #6:1 s0;",
+        "        return #6:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "v"), ends_void[..]);
+    string[20] ends_trap = {
+        "fn main.n() -> noreturn {",
+        "    let _0: void;",
+        "    let _1 (y): i32 #8:9;",
+        "",
+        "    bb0: {",
+        "        live(_1) #8:9 s1;",
+        "        _1 = const i32 2 #8:13 s1;",
+        "        goto bb1 #9:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        switch(const true) -> [true: bb2, otherwise: bb3] #9:5 s2;",
+        "    }",
+        "    bb2: {",
+        "        goto bb1 #9:5 s2;",
+        "    }",
+        "    bb3: {",
+        "        dead(_1) #11:1 s0;",
+        "        trap #11:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "n"), ends_trap[..]);
+    string[24] ends_unreachable = {
+        "fn main.r(_1 (c): bool) -> i32 {",
+        "    let _0: i32;",
+        "    let _2 (z): i32 #13:9;",
+        "",
+        "    bb0: {",
+        "        live(_2) #13:9 s1;",
+        "        _2 = const i32 3 #13:13 s1;",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #14:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        _0 = copy _2 #15:16 s3;",
+        "        dead(_2) #15:9 s3;",
+        "        return #15:9 s3;",
+        "    }",
+        "    bb2: {",
+        "        _0 = const i32 0 #17:16 s4;",
+        "        dead(_2) #17:9 s4;",
+        "        return #17:9 s4;",
+        "    }",
+        "    bb3: {",
+        "        dead(_2) #19:1 s0;",
+        "        unreachable #19:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower_checked(&e, "r"), ends_unreachable[..]);
+}
+
+// ---- sum --------------------------------------------------------------------------------------
+
+// A loop that sums the elements of a span: the collection copied into a temporary, the counter,
+// the element in the variable of the body, the checked `+=`, the end of the variable at the end of
+// the body, and the end of `total` at the `return`.
+fn a_sum_over_a_span_lowers_byte_for_byte() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn sum(i32@ items) i64 {",
+        "    i64 mut total = 0;",
+        "    for (i32 x : items) {",
+        "        total += cast(x, i64);",
+        "    }",
+        "    return total;",
+        "}",
+    };
+    string[45] want = {
+        "fn main.sum(_1 (items): i32@) -> i64 {",
+        "    let _0: i64;",
+        "    let _2 (total): i64 #2:13;",
+        "    let _3 (x): i32 #3:14;",
+        "    let _4: i32@ #3:18;",
+        "    let _5: u64 #3:5;",
+        "    let _6: bool #3:5;",
+        "    let _7: i64 #4:9;",
+        "    let _8: i64 #4:18;",
+        "    let _9: bool #4:15;",
+        "",
+        "    bb0: {",
+        "        live(_2) #2:13 s1;",
+        "        _2 = const i64 0 #2:21 s1;",
+        "        _4 = copy _1 #3:18 s2;",
+        "        _5 = const u64 0 #3:5 s2;",
+        "        goto bb1 #3:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        _6 = lt(copy _5, copy _4.1) #3:5 s2;",
+        "        switch(copy _6) -> [true: bb2, otherwise: bb4] #3:5 s2;",
+        "    }",
+        "    bb2: {",
+        "        live(_3) #3:14 s2;",
+        "        _3 = copy _4[_5] #3:18 s2;",
+        "        _7 = copy _2 #4:9 s3;",
+        "        _8 = cast<i64>(copy _3) #4:18 s3;",
+        "        _9 = add_overflows(copy _7, copy _8) #4:15 s3;",
+        "        check(copy _9, overflow) -> bb5 #4:15 s3;",
+        "    }",
+        "    bb3: {",
+        "        _5 = add(copy _5, const u64 1) #3:5 s2;",
+        "        goto bb1 #3:5 s2;",
+        "    }",
+        "    bb4: {",
+        "        _0 = copy _2 #6:12 s4;",
+        "        dead(_2) #6:5 s4;",
+        "        return #6:5 s4;",
+        "    }",
+        "    bb5: {",
+        "        _2 = add(copy _7, copy _8) #4:15 s3;",
+        "        dead(_3) #5:5 s2;",
+        "        goto bb3 #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(&e, source[..], "sum"), want[..]);
+}
+
+fn main() i32 {
+    a_returned_owner_is_moved_before_the_deferred_del();
+    a_returned_owning_span_goes_through_a_temporary();
+    println("moves ok");
+    an_aggregate_result_waits_in_a_temporary_while_a_defer_is_open();
+    println("aggregates ok");
+    each_kind_of_body_ends_after_the_markers_of_its_scope();
+    println("ends ok");
+    a_sum_over_a_span_lowers_byte_for_byte();
+    println("sum ok");
+    return 0;
+}

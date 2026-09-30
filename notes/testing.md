@@ -494,6 +494,13 @@ bullet at a time and without a rewrite.
   right each time: a column of `&` read for that of `(`, the `\"` that the printer writes in a
   `bytes` text, and the lengths of `i32[2][3]`, which D3.6 reads like C, two arrays of three.
   Settle a column with a script that prints the column of each token, and a length with D3.6.
+  **A change that adds statements to most expected texts re-derives them with a bless run that
+  names the kinds of change it accepts** (T-244). The `dead` markers of T-244 changed 61 texts in
+  8 suites. For one run, `lower_env.expect` printed the wanted and the lowered text and did not
+  panic. A script then wrote a text back only when each difference was an added `dead` line or
+  a store whose location alone moved, and it printed each moved store for review. Any other
+  difference stops the script and writes nothing. The texts of new behavior are still derived by
+  hand before their first run.
 - **A `test/fort` program cannot open `std/rt.ft`, so the compiler holds a runtime signature
   when it compiles the test.** `run_tests.py` runs the program in a `mkdtemp` directory that
   holds only the program, and `check_env` sandboxes get an empty runtime. Write

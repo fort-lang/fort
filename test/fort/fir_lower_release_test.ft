@@ -2,11 +2,14 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| refused release ok
-//| refused call release ok
-//| refused print release ok
+//| refused expansion release ok
 //| lowered release ok
+//| lowered defer release ok
+//| lowered call release ok
+//| lowered print release ok
 //| lowered loops release ok
 //| deep scopes release ok
+//| wide scopes release ok
 /// Checks that the lowering gives back every block that it takes (notes/testing.md 4). A function
 /// that fir_lower.lower_function refuses is released before the call returns, and a function that
 /// it lowers is released by fir.func_free.
@@ -20,16 +23,18 @@ import lower_env;
 // The count of the lowerings in one round.
 u64 CALLS = 100;
 
-u64 SOURCE_LINES = 56;
+u64 SOURCE_LINES = 79;
 
 // `f` fills every vector of a function: locals, blocks, statements, operands, arms and the
-// projections of a string equality. `g` fills some of them before a `defer` stops it inside a
-// clause inside a loop, with three scopes open: the body, the loop and the clause. `h` stops at
-// `new` inside the members of a literal inside the arguments of a call, and `k` inside the
-// arguments of `fprintln`; each of those holds vectors of its own while it lowers its operands.
-// `m` lowers a range `for` and a `switch`. `deep` opens 22 scopes, more than the 16 of the first
-// capacity of the stack of scopes, so the stack grows once and copies the 16 open scopes. The
-// `break` in its innermost block finds the loop among the copied scopes.
+// projections of a string equality. `g` records a `defer` and a named local inside a clause inside
+// a loop, with three scopes open: the body, the loop and the clause. `h` lowers `new` inside the
+// members of a literal inside the arguments of a call, and `k` inside the arguments of
+// `fprintln`; each of those holds vectors of its own while it lowers its operands. `m` lowers a
+// range `for` and a `switch`. `deep` opens 22 scopes, more than the 16 of the first capacity of the
+// stack of scopes, so the stack grows once and copies the 16 open scopes. The `break` in its
+// innermost block finds the loop among the copied scopes. `wide` declares 18 named locals and
+// records 18 deferred statements in one scope, so the vectors of both grow once, and its `return`
+// reads the copied entries.
 string[SOURCE_LINES] SOURCE = {
     "fn f(i32 x, i32 y, bool c, string s) i32 {",
     "    i32 a = x + y;",
@@ -87,6 +92,62 @@ string[SOURCE_LINES] SOURCE = {
     "        } } } } } } } } } } } } } } } } } } } }",
     "    }",
     "}",
+    "fn wide(bool c) void {",
+    "    bool a0 = c; defer wide(a0);",
+    "    bool a1 = c; defer wide(a1);",
+    "    bool a2 = c; defer wide(a2);",
+    "    bool a3 = c; defer wide(a3);",
+    "    bool a4 = c; defer wide(a4);",
+    "    bool a5 = c; defer wide(a5);",
+    "    bool a6 = c; defer wide(a6);",
+    "    bool a7 = c; defer wide(a7);",
+    "    bool a8 = c; defer wide(a8);",
+    "    bool a9 = c; defer wide(a9);",
+    "    bool b0 = c; defer wide(b0);",
+    "    bool b1 = c; defer wide(b1);",
+    "    bool b2 = c; defer wide(b2);",
+    "    bool b3 = c; defer wide(b3);",
+    "    bool b4 = c; defer wide(b4);",
+    "    bool b5 = c; defer wide(b5);",
+    "    bool b6 = c; defer wide(b6);",
+    "    bool b7 = c; defer wide(b7);",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+u64 REFUSED_LINES = 24;
+
+// Checked without the runtime, so a print stops the lowering. `r` stops inside a clause inside a
+// loop, with three scopes, two named locals and two deferred statements open. `x` stops inside
+// the expansion of a deferred block at a `break`, with a floor raised and a scope of the
+// deferred code open.
+string[REFUSED_LINES] REFUSED_SOURCE = {
+    "fn r(bool c, i32 n) void {",
+    "    i32 a = 1;",
+    "    defer r(c, n);",
+    "    while (c) {",
+    "        switch (n) {",
+    "        case 1:",
+    "            i32 b = a;",
+    "            defer r(c, b);",
+    "            println(b);",
+    "        }",
+    "    }",
+    "}",
+    "fn x(bool c) void {",
+    "    while (c) {",
+    "        bool d = c;",
+    "        defer {",
+    "            bool e = d;",
+    "            while (e) {",
+    "                println(e);",
+    "            }",
+    "        }",
+    "        break;",
+    "    }",
+    "}",
 };
 
 // Each round lowers the function `name` CALLS times. A function that the lowering refuses must
@@ -98,7 +159,11 @@ fn rounds_leave_the_heap_where_it_was(string name, bool lowers) void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    lower_env.check_lines(&e, SOURCE[..], true);
+    if (lowers) {
+        lower_env.check_lines(&e, SOURCE[..], true);
+    } else {
+        lower_env.check_lines(&e, REFUSED_SOURCE[..], false);
+    }
     if (lowers) {
         // the function that the rounds lower keeps every rule of the verifier
         lower_env.lower_checked(&e, name);
@@ -127,17 +192,23 @@ fn rounds_leave_the_heap_where_it_was(string name, bool lowers) void {
 }
 
 fn main() i32 {
-    rounds_leave_the_heap_where_it_was("g", false);
+    rounds_leave_the_heap_where_it_was("r", false);
     println("refused release ok");
-    rounds_leave_the_heap_where_it_was("h", false);
-    println("refused call release ok");
-    rounds_leave_the_heap_where_it_was("k", false);
-    println("refused print release ok");
+    rounds_leave_the_heap_where_it_was("x", false);
+    println("refused expansion release ok");
     rounds_leave_the_heap_where_it_was("f", true);
     println("lowered release ok");
+    rounds_leave_the_heap_where_it_was("g", true);
+    println("lowered defer release ok");
+    rounds_leave_the_heap_where_it_was("h", true);
+    println("lowered call release ok");
+    rounds_leave_the_heap_where_it_was("k", true);
+    println("lowered print release ok");
     rounds_leave_the_heap_where_it_was("m", true);
     println("lowered loops release ok");
     rounds_leave_the_heap_where_it_was("deep", true);
     println("deep scopes release ok");
+    rounds_leave_the_heap_where_it_was("wide", true);
+    println("wide scopes release ok");
     return 0;
 }
