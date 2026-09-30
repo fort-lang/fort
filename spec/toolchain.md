@@ -39,6 +39,8 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--fir`             | write the program's FIR to stdout and stop (D14.1)         | off        |
 | `--fir-after=<pass>` | write the FIR after `<pass>` and stop (D14.1)              | none       |
 | `--fir-test`        | run the passes of a FIR test and write the FIR (D14.1)     | off        |
+| `--fir-verify-report` | write the first FIR violation of each function; stop (D14.1) | off   |
+| `--fir-stats`       | after the build, write `lowered N of M` (D14.1)            | off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
@@ -190,6 +192,22 @@ file (D14.1). Options and the entry file may appear in any order.
   a pass. An unknown pass, an argument of `none` or `verify`, and an argument of `build-mode`
   that is no mode exit 2. `--fir-test` takes the target rule of `--check` and is a usage error
   together with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or `--fir-after`.
+- `--fir-verify-report` implies `--fir` and takes its target rule. It lowers each function of
+  the closure as `--fir` does and runs the verifier of `spec/fir.md` 10 in report mode, first on
+  the output of the lowering and then, when the function keeps every rule, on the output of the
+  build-mode pass for the mode that `--release` and `--no-bounds-check` select. The verifier
+  stops at the first violation of a function, so for each function that breaks a rule it writes
+  one line to stdout, the first violation, `<file>:<line>:<col>: fir.verify: V<n> <what>:
+  <function> bb<k> statement <i> (s<N>)`, where the location is the name of the function. It
+  exits 0 whatever it found. A function that the lowering does not support writes nothing.
+  `--fir-after` does not change the report (`spec/fir.md` 16.5).
+- A build writes each function through the FIR path when the lowering supports it, and through
+  the direct path otherwise (`spec/fir.md` 16.1). `--fir-stats` then writes one line to stdout
+  after the module is written, `lowered N of M`: N functions of the FIR path of M definitions of
+  fort functions in the closure, the compiler-emitted `main` not counted. A compile error writes
+  no line. It combines with `-S`, `-c`, `--release` and `--no-bounds-check`, and it is a usage
+  error together with `--tokens`, `--ast`, `--check`, `--index`, `--fir`, `--fir-after`,
+  `--fir-verify-report` or `--fir-test`, which emit no module.
 - In the fort compiler's `--ast` form, a C extern with `...` prints a bare `...` last in its
   `(params ...)` group. The mark is not a `(param ...)` child.
   A fixed extern prints no mark, and a fort definition cannot print this mark (D8.3, D9.8).
@@ -216,7 +234,7 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 with 2; `--help` prints that line and then the table above, and exits 0.
 
 These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
-Nineteen report a command line the compiler cannot use and then print the usage line:
+Twenty report a command line the compiler cannot use and then print the usage line:
 `missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
 `unknown option '<opt>'`, `no entry file`, `--json requires --check` (D20.2),
 `--tokens does not combine with --check, --json or --index`,
@@ -224,6 +242,7 @@ Nineteen report a command line the compiler cannot use and then print the usage 
 `--fir does not combine with --tokens, --ast, --check, --json or --index`,
 `unknown --fir-after pass '<name>'`,
 `--fir-test does not combine with --tokens, --ast, --check, --json, --index or --fir`,
+`--fir-stats does not combine with --tokens, --ast, --check, --index, --fir or --fir-test`,
 `invalid --cfg assignment '<entry>'`, `invalid --cfg key '<key>'`, `empty --cfg list entry`,
 `duplicate --cfg key '<key>'`, and `cannot override compiler configuration key '<key>'`,
 `unsupported target '<triple>'`, `--std-dir is required for cross-target -S`,
@@ -1007,11 +1026,13 @@ to the emitter's text is a change here.
    12), then `llvm.trap` (item 20). The parameter attributes shown are part of the spelling.
 
    Only referenced declarations are emitted, in a fixed order (D19.5): `extern` C functions in
-   first-use order, then the intrinsics in the order of the table above, the two groups separated
-   by a blank line. There are two groups and no third: a symbol is declared exactly once, and
-   every fort function the module calls, the runtime's included, is defined in it. Two modules
-   that declare one C symbol are two fort declarations of one target symbol and yield one `declare`,
-   which is why the extern group is keyed by the C name and not by the declaration (D9.7, D9.8).
+   first-use order, which is the order of the first call of each in the text of the function
+   definitions (`spec/fir.md` 12.5), then the intrinsics in the order of the table above, the
+   two groups separated by a blank line. There are two groups and no third: a symbol is declared
+   exactly once, and every fort function the module calls, the runtime's included, is defined in
+   it. Two modules that declare one C symbol are two fort declarations of one target symbol and
+   yield one `declare`, which is why the extern group is keyed by the C name and not by the
+   declaration (D9.7, D9.8).
 
 9. **Normalization** (D9.8, D19.2). A narrow value is not widened to 32 bits: an `i8` value has
    type `i8` and its width is in the type. The only extensions the emitter produces are the

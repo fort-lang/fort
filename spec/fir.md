@@ -161,8 +161,9 @@ A FIR module holds:
   value from the checker (D7.10);
 - the entry module's `main` symbol, from which the translator writes the compiler-emitted
   `main` (item 22);
-- the `extern fn` symbols that the calls name, in first-use order (item 8). The translator
-  writes the `declare` lines from this list.
+- the `extern fn` symbols that the calls name, in first-use order (item 8): the functions in
+  module order, and the statements of each in block order. The translator writes the `declare`
+  lines from this list (12.5).
 
 ### 5.2 The function
 
@@ -288,7 +289,9 @@ place lends it (D17.4).
   (item 17). `T` is neither `void` nor a span (D10.2).
 - `aggregate T(a, ...)`: a struct literal with every field in declaration order, an array
   literal with every element, or a span or `string` header with its pointer and its length; `T`
-  (item 3).
+  (item 3). `aggregate zeroed T(a, ...)` is a designated struct literal, whose omitted fields are
+  `const zero`: the translator zeroes the whole destination, padding included, after it reads
+  the operands, as the direct path does (D6.5, T-253 review round 2).
 - `call C(a, ...)`: a call, where `C` is `fn m.f`, `extern name`, or an operand of function
   type; the result type of `C` (items 7, 8).
 
@@ -586,12 +589,21 @@ so `G` is read before `bump` runs.
   name of the builtin, which the runtime reports (D11.4).
 - **`T{...}`, `T[N]{...}` and `{...}`**: `const zero T` for `{}`, else `aggregate T(...)` with
   each member as an operand, in declaration or index order, and `const zero` for a field a
-  designated literal leaves out (D6.5). A member that is an operation goes into a temporary
-  first. A member for a field or element of an owning type enters the aggregate as `move`: `move
-  _t` for a temporary that holds an owning value, `move p` for a member written `move(lv)`. A
+  designated literal leaves out (D6.5). A designated literal is `aggregate zeroed T(...)`. A
+  member that is an operation goes into a temporary first. A member for a field or element of
+  an owning type enters the aggregate as `move`: `move _t` for a temporary that holds an owning
+  value, `move p` for a member written `move(lv)`. A
   string constant member stands as `const "..."`, and an empty literal `{}` or `T{}` as `const
   zero T` (D6.5). Any other member of an aggregate type is a place (D19.3). Every other member
-  enters as `copy` or as a constant.
+  enters as `copy` or as a constant. A member that goes into a new temporary of a type with
+  padding, such as a call, a `?:` or a positional literal, is built in a temporary that
+  `_t = const zero T` zeroes first; so is the operand of a cast between aggregate types. The
+  direct path builds such a value in its destination and leaves the padding of the destination
+  as it was. That padding is zero in a designated literal (D6.5), and in the field that a
+  designated literal passes as the `sret` pointer of a call. So the FIR path leaves zero padding
+  wherever the direct path does. A designated literal and a cast write every byte of their
+  temporary, so they take no zero first, and the argument of a call takes none, since the
+  direct path builds it in a temporary too.
 
 ### 9.5 Scopes and deferred statements
 
@@ -876,6 +888,9 @@ read the build mode.
 - `alloc<T>(n)` is a call of `std.rt.alloc` with the size of `T`, `n`, and the file, line and
   column of the statement (item 17).
 - `aggregate` writes each member into its field or element through a `getelementptr` (item 3).
+  `aggregate zeroed` first writes `llvm.memset` of the whole destination and then each member
+  that is no `const zero`. The word `zeroed` is the mark only when a type follows it, so a
+  struct named `zeroed` stays a type.
 - `call` is `call` with the signature of 12.3; an extern call carries `#3` (item 8).
 - `del(move p)` loads the pointer (field 0 for a span or `string`), calls `std.rt.free`, and
   zeroes `p` (item 17).
@@ -901,9 +916,20 @@ lost a `zeroext`.
   or `string`) and writes `icmp ne ptr` against null (item 18).
 - The translator makes one failure block for each `check`: one call of the runtime entry of
   `kind` with `args`, the `@.file.N`, the line and the column, then `unreachable`. A FIR block
-  that holds only `fail` is a failure block too, written the same way, and its own number is not a
-  label. The translator writes every failure block after the normal blocks of the function, in
-  the order of the numbers of the FIR blocks that hold their `check` or `fail` (D19.6, item 14).
+  other than `bb0` that holds only `fail` is a failure block too, written the same way, and its
+  own number is not a label. The translator writes every failure block after the normal blocks
+  of the function, in the order of the numbers of the FIR blocks that hold their `check` or
+  `fail` (D19.6, item 14).
+- A `check` loads its condition and its reported operands in its own block, before its `br`, so
+  that each dominates the failure block. A block that holds only `fail` has no statement to hold
+  those loads, and more than one block can branch to it. So it loads its reported operands
+  inside its failure block, before the call, and that failure block holds more than the call
+  and `unreachable`. The translator writes such a failure block when it reaches its FIR block in
+  number order, so the `%t` numbers of its loads follow the block order and not the text, in
+  which the failure block stands after the normal blocks (T-251).
+- `bb0` is the entry block even when it holds only `fail`: its call and `unreachable` stand in
+  place in `entry`, as a `fail` after statements does. LLVM needs an entry block, and no
+  terminator names `bb0` (V2), so no label could reach a moved `bb0` (T-251).
 - `fail(panic, ...)` after statements in an ordinary block is the call and `unreachable` in
   place (item 19).
 - `trap` is `call void @llvm.trap()` and `unreachable` (item 20). `unreachable` is
@@ -919,8 +945,16 @@ lost a `zeroext`.
 - It assigns `@.str.<N>` and `@.file.<N>` at first use, walking the modules in the order of
   D9.10, the global initializers of a module before its functions, and the blocks of a function
   in ascending number, with the data of a failure block at the `check` that makes it (D19.5).
-  Extern declarations stand in the first-use order of the module's list (5.1). Intrinsics and
-  attribute groups stand in the fixed order of items 8 and 14.
+  Intrinsics and attribute groups stand in the fixed order of items 8 and 14.
+- Extern declarations stand in the order of the first call of each in the text of the function
+  definitions, the definitions in module order (item 8). One rule holds in any module, whether
+  the FIR path or the direct path writes each function (16.1). The extern list of a FIR function
+  follows its blocks in number order, and the translator writes the blocks in that order, so the
+  list follows the text (5.1). The direct path records an extern where it writes the call, after
+  the calls of the arguments. The `declare` lines of the two paths differ only where the texts of
+  their functions differ: for a `while` whose body breaks after an `if`, FIR numbers the block
+  after the loop before the rest of the body, so a call after the loop can precede a call in the
+  body.
 - The translator gives `#8` to the definitions of the `noreturn` runtime entries that
   `toolchain.md` 5.1 lists, and to no other function (item 14).
 
@@ -938,12 +972,52 @@ knows. Each is a difference in text:
   computes it once, before the right side. Nothing writes memory in between, so the address is
   the same.
 - A place operand is loaded once for each rvalue that names it, so `x / a[i]` loads `a[i]` for
-  the zero test, the overflow test and the division; the direct path loads it once.
+  the zero test, the overflow test and the division; the direct path loads it once. So
+  `fprint(fd, a, b)` loads `fd` again for each print, after the print of the argument before.
+  The print entries of `std.rt` write no global of another module, so the value is the same.
 - The failure blocks of nested constructs stand in another order, because they follow the
   numbers of the blocks that hold their checks; the labels still ascend (D19.6).
+- The index of an index projection loads before the pointer that its base reads: `h->arr[i + 1]`
+  computes and checks `i + 1` before it loads `h`. The direct path loads `h` first.
+- An operand that no temporary holds loads where the rvalue that reads it stands, after the
+  temporaries of the other operands: `push_byte(b, cast(ch, u8))` loads `ch` before `b`. The
+  direct path loads the operands in order. The lowering holds an operand in a temporary before a
+  later writer (9.4), so no write stands between the two loads.
+- An aggregate reads every member before its first store (section 6): `pair{p.b, p.a}` loads
+  both fields and then stores both, and `pair{f(), a + 1}` stores both members after the call
+  and after the overflow check. An aggregate member of an aggregate goes into a `%tmp` slot
+  first and then into its field with `llvm.memcpy`. The direct path writes each member into its
+  field as it reads it, before the calls and the checks of the members after it.
+- A designated literal zeroes the whole value with `llvm.memset` after it reads its members,
+  and the direct path before; both then store the named fields. A member of a literal that FIR
+  builds in a temporary of a type with padding is built in a zeroed temporary, which one
+  `llvm.memset` more zeroes, and then copied into its field (9.4). The direct path builds it in
+  the field, so the padding of that field is zero on the FIR path where the direct path leaves
+  it as it was.
+- An aggregate rvalue goes through a `%tmp` slot: the result of a call, a `slice` and a `cast`
+  between aggregate types is a temporary, and an `llvm.memcpy` copies it into the place that
+  reads it. `return t` of a local of an owning aggregate type copies `t` into one more `%tmp`
+  slot before it copies it into `%ret.sret`. The direct path writes such a value into its
+  destination.
+- `eat(move(s))` copies `s` with one `llvm.memcpy` into the `%tmp` slot of the argument and then
+  zeroes `s`. The direct path writes two: into an intermediate, and from it into the argument
+  copy (T-251).
+- An aggregate argument that is a place other than the storage of a temporary is copied into
+  its `%tmp` slot at the call, after the other arguments and their checks (T-251, open question
+  4 of that ticket). The direct path copies each argument where it evaluates it, so
+  `mem.copy(buf, s[0..n])` copies `buf` before the span check of `s[0..n]`.
+- A `switch` on a `&&`, `||` or `?:` slot loads the slot again, a `load i8` and a `trunc`, in
+  the block that has just stored it. The direct path branches on the value that it stored.
+- A string constant operand of `==` or `!=` on strings goes into a `%tmp` span, and the call of
+  `std.rt.str_eq` loads the two fields of that span. The direct path passes the pointer and the
+  length of the constant.
+- A span check of `s[lo..hi]` tests `lo > hi` before `hi > len`, and `or` joins them in that
+  order. The direct path tests `hi > len` first.
 One difference is in behavior: an aggregate literal that reads its destination (section 6). The
-user ruled on it on 2026-09-28 (open question 5), and D6.3 says so. The migration ticket that
-meets a further difference lists it here or removes it (16.2).
+user ruled on it on 2026-09-28 (open question 5), and D6.3 says so. The test
+`test/lang/run/structs/014_literal_reads_old_value.ft` holds the behavior of FIR, and the oracle
+of 16.2 leaves its function unclassified. The migration ticket that meets a further difference
+lists it here or removes it (16.2).
 
 ## 13. The textual form
 
@@ -980,7 +1054,7 @@ rvalue      = operand
             | "slice" [ "mut" ] "(" place "," operand "," operand ")"
             | "slice_ptr" "(" operand "," operand "," operand ")"
             | "alloc" "<" type ">" "(" operand ")"
-            | "aggregate" type "(" [ operand { "," operand } ] ")"
+            | "aggregate" [ "zeroed" ] type "(" [ operand { "," operand } ] ")"
             | "call" callee "(" [ operand { "," operand } ] ")" ;
 callee      = "fn" name | "extern" name | operand ;
 operand     = "copy" place | "move" place | "const" constant ;
@@ -1163,8 +1237,18 @@ The compiler moves to FIR one function at a time.
    migration ticket must state which reports count as agreement: the differences of 12.5 and no
    other. Before the project relies on it, that ticket must also show that `llvm-diff` reports a
    dropped `zeroext`, a changed `align` and a changed `sret`, because the run corpus cannot see
-   any of the three (`notes/compiler.md` 6). The run corpus and the `fixpoint` ctest stay the
-   witnesses of behavior.
+   any of the three (`notes/compiler.md` 6). T-253 measured that `llvm-diff-18` reports none of
+   the three, at a call or on a definition, and that its report names instructions that did not
+   change. So `llvm-diff` alone is no oracle. `tools/fir_diff.py` runs it and then compares the
+   text of each definition that differs. It reads each block, labeled by its place in a walk
+   from `entry`, as its writes and its terminator in order. An operand stands as the expression
+   that defines it, with its types, alignments and attributes, and a load carries the writes that
+   can reach it. It counts each difference under an item of 12.5 whose rule accepts it, and a
+   difference that no rule accepts is unclassified. Every definition that one of five mutants of
+   the translator (a dropped `zeroext`, a doubled `align`, a dropped `sret`, and two swapped
+   branch targets) or three edits by hand changed is unclassified (`notes/testing.md` 6). The
+   rules accept a difference in text, and some rest on facts about `std.rt`, so the run corpus
+   and the `fixpoint` ctest stay the witnesses of behavior.
 3. **FIR tests.** A test under `test/fir/` holds a function in the textual form of section 13,
    the pass to run, and the expected text after it. An optional prelude of fort declarations
    gives the types and the symbols that the text names; `fort --fir-test` checks it as the
@@ -1177,7 +1261,10 @@ The compiler moves to FIR one function at a time.
 5. **V9 on the corpus.** Before V9 stops the compiler, a ticket runs it in report mode over the
    corpus and records each function that it flags. Each flag is a bug in the checker or in the
    emitter, or a gap in rule V9. T-210 was the first known flag, and the checker now refuses
-   its program.
+   its program. `fort --fir-verify-report` (D14.1) is that report mode. T-253 ran it over
+   `test/lang`, `src/fort`, `src/lsp` and `std` in the three modes, and it flagged no function
+   there. No known source program breaks V9, so the tests of V9 on the paths of the compiler
+   take a FIR function built by hand.
 6. **The end.** The direct path goes when the lowering supports every function of the corpus and
    of `src/fort`. The ticket that deletes it amends these texts: the sentence of D19.1 that names
    the direct path, `toolchain.md` 6 item 1 ("built by appending text in one forward pass"),
@@ -1203,7 +1290,8 @@ default. The user then resolved question 4 by removing its subject: `fort_entry`
    helpers can copy. Ruled: yes.
 3. **The oracle.** `llvm-diff` with the agreed differences of 12.5, plus the run corpus and
    `fixpoint`, is the oracle of the migration, after the ticket of 16.2 proves what `llvm-diff`
-   sees. Ruled: yes.
+   sees. Ruled: yes. T-253 measured what it sees, and the oracle compares the text beside it
+   (16.2).
 4. **`fort_entry` and `main`.** The translator wrote two entry functions from the signature of
    `main` (item 22). Should they be FIR functions? Ruled: no. `fort_entry` had no job left after
    T-088 moved the runtime into fort, and T-212 removed it, so the compiler-emitted `main` calls

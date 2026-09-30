@@ -1,0 +1,146 @@
+//! run
+//! flags: -Xcc -O0
+//! stdout:
+//| -16
+//| 1 0 0 0 0 0 0 0 3
+//| -16
+//| 1 0 0 0 0 0 0 0 4
+//| -16
+//| 1 0 0 0 0 0 0 0 5
+//| -16
+//| 2 0 0 0 0 0 0 0 6
+//| -16
+//| 3 0 0 0 0 0 0 0 7
+//| -16
+//| 1 0 0 0 0 0 0 0 2 0 0 0 0 0 0 0 2 0 0 0 0 0 0 0 8
+//| -16
+//| 1 0 0 0 0 0 0 0 9
+// A member of a designated literal that is itself built in memory keeps the zero padding of the
+// designated literal (D6.5, T-253 review round 3). The direct path builds the member in the
+// zeroed field, and the FIR path builds it in a zeroed temporary, as it builds each member of a
+// literal. `-Xcc -O0` keeps the temporary of the FIR path in the frame, where `dirty` left bytes
+// that are not zero. Byte 0 of each view is the field `a`, and bytes 1 to 7 are padding.
+struct I {
+    u8 a;
+    i64 b;
+}
+
+struct S {
+    I inner;
+    i64 c;
+}
+
+// A positional literal inside a designated literal.
+struct J {
+    I i;
+    i64 k;
+}
+
+struct T {
+    J pair;
+    i64 z;
+}
+
+struct A {
+    I[2] items;
+    i64 c;
+}
+
+struct K {
+    I i;
+    i64 k;
+}
+
+struct U {
+    K kk;
+    i64 z;
+}
+
+// Fills the stack with bytes 255, where the frame of the next function stands next.
+fn dirty() i64 {
+    i64[16] mut junk = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    i64 mut t = 0;
+    for (u64 mut i = 0; i < 16; i++) {
+        t += junk[i];
+    }
+    return t;
+}
+
+fn make(u8 a, i64 n) I {
+    return I{a, n};
+}
+
+// Prints the first `n` bytes of the value at `p`, then `last`.
+fn dump(u8* p, u64 n, i64 last) void {
+    u8@ bytes = p[0..n];
+    for (u64 mut i = 0; i < n; i++) {
+        print(bytes[i], " ");
+    }
+    println(last);
+}
+
+// A positional literal as the member.
+fn nested() void {
+    S s = S{.inner = I{1, 2}, .c = 3};
+    dump(cast(&s, u8*), 8, s.c);
+}
+
+// A call as the member.
+fn called() void {
+    S s = S{.inner = make(1, 2), .c = 4};
+    dump(cast(&s, u8*), 8, s.c);
+}
+
+// A call in a positional literal in a designated literal.
+fn inherited() void {
+    T t = T{.pair = J{make(1, 2), 3}, .z = 5};
+    dump(cast(&t, u8*), 8, t.z);
+}
+
+// A conditional whose arm is a call.
+fn chosen(bool c) void {
+    S s = S{.inner = c ? make(2, 2) : I{9, 9}, .c = 6};
+    dump(cast(&s, u8*), 8, s.c);
+}
+
+// A cast of a call, which the direct path writes into the field.
+fn converted() void {
+    S s = S{.inner = cast(make(3, 2), I), .c = 7};
+    dump(cast(&s, u8*), 8, s.c);
+}
+
+// An array literal of structs with padding.
+fn listed() void {
+    A a = A{.items = {I{1, 2}, I{2, 3}}, .c = 8};
+    dump(cast(&a, u8*), 24, a.c);
+}
+
+// A positional literal in a callee, which the caller's designated literal receives: the
+// direct path passes the zeroed field as the `sret` pointer, and the callee writes the fields of
+// its nested member there.
+fn build_k(i64 n) K {
+    return K{I{1, n}, 2};
+}
+
+fn deep() void {
+    U u = U{.kk = build_k(2), .z = 9};
+    dump(cast(&u, u8*), 8, u.z);
+}
+
+fn main() i32 {
+    println(dirty());
+    nested();
+    println(dirty());
+    called();
+    println(dirty());
+    inherited();
+    println(dirty());
+    chosen(true);
+    println(dirty());
+    converted();
+    println(dirty());
+    listed();
+    println(dirty());
+    deep();
+    return 0;
+}

@@ -595,6 +595,56 @@ bullet at a time and without a rewrite.
   compiler refuses goes into `<out-dir>/skipped.txt`. Measured on T-192: two snapshots of one
   compiler gave an empty `diff -r` on both hosts, and a mutant that wrote `align 2` for each
   `align 1` store in `gen_store` changed 1278 of 1278 modules.
+  `tools/ir_snapshot.sh --fir-stats <fort> <std-dir> <out-dir>` also passes `--fir-stats`
+  (D14.1) and writes the line `<mode> <test> lowered N of M` of each module to
+  `<out-dir>/stats.txt`, with the sums of each mode at the end (T-253).
+- **The oracle of the FIR migration is `tools/fir_diff.py <before> <after> <out>`, and not
+  `llvm-diff` alone** (T-253, `spec/fir.md` 16.2). `llvm-diff-18` reported no difference for a
+  dropped `zeroext`, a doubled `align` or a dropped `sret`, at a call or on a definition: three
+  mutants of `fir_llvm.ft` and five edits by hand of one module left its report empty. Its report
+  is also no record of instructions: for an added `%tmp1` slot it printed
+  `> %fd.0 = alloca i32`. The script runs `llvm-diff` over each pair of modules of two
+  snapshots (`--llvm-diff llvm-diff-18` in the VM,
+  `/opt/homebrew/opt/llvm@18/bin/llvm-diff` on the Mac), then compares every definition whose
+  text differs and exits 1 when a difference is unclassified; its docstring gives the model and
+  the rule of each item. **What a block of the model holds**: its writes and its terminator in
+  order, under a label that a walk from `entry` gives, so two swapped branch targets change it.
+  A load carries the writes that can reach it and write its storage, so a load may move past a
+  write into other storage and not past one into its own. Two storages are one unless both are
+  named objects (allocas, `%tmp` slots, parameters, `%ret.sret`, globals) or a local whose
+  address has not escaped at the load meets a pointer that a load gave. A call writes every
+  storage but a local that has not escaped and that it does not name; a print entry of `std.rt`
+  writes no global of another module. The first review of T-253 found four holes in a first
+  model that compared events in any order: swapped `br i1` targets (mutant M4 printed `false`
+  for `true` and was classified), a memcpy of the wrong size or alignment, a load moved past a
+  store into its own storage, and an extra store of zero. Measured on T-253 with main at
+  2574dc63 as `<before>` and the branch as `<after>`, one `<std-dir>` for both: 108819
+  definitions of 1281 modules differ, `llvm-diff` names 101827 of them, and none is
+  unclassified, on both hosts. Of the definitions that each mutant changed, none is classified:
+  50556 (M4, the targets of a `bool` switch swapped), 50990 (M5, the targets of a check
+  swapped), 11190 (`zeroext`), 116943 (`align`) and 606 (`sret`); so are the three edits
+  (`.tickets/evidence/T253/mutant_check.py`). The rules accept differences in text, and two rest
+  on facts about `std.rt` and not on the text (a print entry writes no global of the program;
+  the entry of a check kind, whose pointer arguments are global constants, reads no storage of
+  the function and no aggregate result; `panic` is no such entry, because its message can point
+  into a local), so the run corpus and `fixpoint` stay the witnesses of behavior. Review round 2
+  found four more holes by hand edit (a load inside a run named by a count of writes, a memcpy
+  source with no read tag, the fills of two exclusive branches moved to one memcpy, a store
+  moved across a `panic` that reads it) and one real difference of the FIR path (the padding of
+  a designated literal, which the oracle's `zero` rule accepted); the oracle refuses each now.
+  Review round 3 found three more by hand edit (a read inside a run named by its path and count
+  and not by its value, a memcpy source written on the back edge of a loop, a memset of a part
+  against a memset of the whole) and one more real difference (stale padding in a member of a
+  designated literal that a `%tmp` slot held), so the effect of a run now holds the padding of
+  each struct that it splits, and the FIR side may zero padding but never leave it stale
+  (`padding`). Over the run corpus the oracle exits 1 with three unclassified definitions,
+  `reads` of `run/structs/014_literal_reads_old_value` in each mode: that is the one difference
+  in behavior of `spec/fir.md` 12.5 (D6.3), and the test holds the output of the FIR path.
+- **`fort --fir-verify-report` runs rule V9 over a corpus without a panic** (T-253, D14.1): it
+  prints one line for each function that breaks a rule of `spec/fir.md` 10, its first
+  violation, and exits 0.
+  `.tickets/evidence/T253/v9_report.sh` runs it and `-S --fir-stats` over `test/lang`,
+  `src/fort`, `src/lsp` and `std` in the three modes.
 
 ## 7. What a test cannot see
 

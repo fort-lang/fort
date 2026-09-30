@@ -16,7 +16,12 @@
 /// library directory in src/fort/driver.ft.
 import capture;
 import containers;
+import diag;
 import driver;
+import fir;
+import fir_env;
+import fir_parse;
+import fir_verify;
 import std.io;
 import std.libc;
 import std.os;
@@ -114,6 +119,8 @@ fn every_flag_sets_its_own_option() void {
     assert(!opts.ast);
     assert(!opts.fir);
     assert(opts.fir_after.len == 0);
+    assert(!opts.fir_report);
+    assert(!opts.fir_stats);
 }
 
 // --index implies --check and --json, so it is the whole command line an
@@ -333,7 +340,7 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 24);
+    assert(capture.line_count(out) == 27);
     assert(str.find(out, "  --cfg <list>       set key=value pairs; repeatable\n") >= 0);
     assert(str.find(out, "  --help             print this help and exit\n") >= 0);
     assert(str.find(out, "  --fir              write the program's FIR to stdout and stop\n") >= 0);
@@ -341,6 +348,14 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.find(out, after) >= 0);
     string test = "  --fir-test         read a .fir test, run its passes and write the FIR\n";
     assert(str.find(out, test) >= 0);
+    assert(str.find(out, "  --fir-verify-report\n") >= 0);
+    string report = "write the first FIR violation of each function and stop\n";
+    i64 at = str.find(out, report);
+    // the description stands in the column of the others, 21 spaces after the start of the line
+    assert(at > 22 && out[cast(at, u64) - 22..cast(at, u64)] == "\n                     ");
+    assert(str.find(out, report) >= 0);
+    string stats = "  --fir-stats        after the build, write `lowered N of M` functions\n";
+    assert(str.find(out, stats) >= 0);
     // --help answers whatever follows it, and nothing else runs.
     assert(captured_err_is_empty());
 }
@@ -1142,6 +1157,359 @@ fn fir_of_a_program_with_a_type_error_exits_one() void {
     assert(out == "");
 }
 
+// ---- --fir-stats and --fir-verify-report ---------------------------------------------------
+
+// --fir-stats sets its own flag and nothing else. --fir-verify-report sets its own flag and --fir,
+// as --fir-after does, so a mode that does not combine with --fir does not combine with it.
+fn fir_stats_and_fir_verify_report_parse() void {
+    string[3] mut stats = {"fort", "--fir-stats", "entry.ft"};
+    driver.options mut a = driver.options_create();
+    defer driver.options_free(&a);
+    assert(driver.parse(&a, stats[0..3]) == driver.PARSE_OK);
+    assert(a.fir_stats && !a.fir && !a.fir_report && !a.emit_ir && !a.check);
+    string[3] mut report = {"fort", "--fir-verify-report", "entry.ft"};
+    driver.options mut b = driver.options_create();
+    defer driver.options_free(&b);
+    assert(driver.parse(&b, report[0..3]) == driver.PARSE_OK);
+    assert(b.fir && b.fir_report && !b.fir_stats && !b.check && b.fir_after.len == 0);
+    string fir_message = "--fir does not combine with --tokens, --ast, --check, --json or --index";
+    string[5] others = {"--check", "--tokens", "--ast", "--index", "--json"};
+    for (string other : others) {
+        string[4] mut argv = {"fort", "--fir-verify-report", other, "entry.ft"};
+        assert(run(argv[0..4]) == EXIT_USAGE);
+        assert(err_has(fir_message));
+    }
+    string[4] mut test = {"fort", "--fir-test", "--fir-verify-report", "t.fir"};
+    assert(run(test[0..4]) == EXIT_USAGE);
+    assert(err_has("--fir-test does not combine with --tokens, --ast, --check, --json"));
+    // The flags take no value.
+    string[3] mut valued = {"fort", "--fir-stats=1", "entry.ft"};
+    assert(run(valued[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown option '--fir-stats=1'\n"));
+}
+
+// --fir-stats counts what the emitter writes, so it combines with no mode that emits no module.
+// It combines with -S, -c and the two build modes.
+fn fir_stats_combines_only_with_a_build() void {
+    string message =
+        "--fir-stats does not combine with --tokens, --ast, --check, --index, --fir or --fir-test";
+    string[8] others = {"--tokens", "--ast", "--check", "--index", "--fir", "--fir-after=lower",
+                        "--fir-verify-report", "--fir-test"};
+    for (string other : others) {
+        string[4] mut argv = {"fort", "--fir-stats", other, "entry.ft"};
+        assert(run(argv[0..4]) == EXIT_USAGE);
+        string own err = captured_err();
+        defer del(err);
+        strbuf.str_buf mut want = strbuf.create();
+        defer strbuf.free(&want);
+        strbuf.append(&want, "fort: error: ");
+        strbuf.append(&want, message);
+        strbuf.append(&want, "\nusage: fort [options] entry.ft\n");
+        assert(err == strbuf.view(&want));
+    }
+    string[7] mut build = {"fort", "-S", "-c", "--release", "--no-bounds-check", "--fir-stats",
+                           "entry.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, build[0..7]) == driver.PARSE_OK);
+    assert(opts.fir_stats && opts.emit_ir && opts.compile_only && opts.release);
+}
+
+// A build writes each function through the FIR path when the lowering supports it, and through
+// the direct path otherwise (spec/fir.md 16.1). --fir-stats adds `lowered N of M` to stdout after
+// the module is written: N functions of the FIR path, of M definitions of fort functions, the C
+// `main` not counted. The empty runtime of this test lacks the print of `helper` in FIR_MIXED, so
+// the lowering refuses `helper`, and the direct path writes it.
+fn fir_stats_counts_the_functions_of_each_path() void {
+    write_file("fir_mixed.ft", FIR_MIXED);
+    string[6] mut argv = {"fort", "--fir-stats", "-S", "fir_mixed.ft", "-o", "fir_mixed.ll"};
+    assert(run(argv[0..6]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    assert(out == "lowered 1 of 2\n");
+    string own module = capture.text("fir_mixed.ll");
+    defer del(module);
+    // The FIR path keeps the scalar result of `main` in the alloca `%result` (spec/fir.md 12.1),
+    // and the direct path writes the print of `helper`, which the lowering refused.
+    string define = "define dso_local i32 @\"fir_mixed.main\"() #0 {\n";
+    i64 at = str.find(module, define);
+    assert(at >= 0);
+    string entry = "entry:\n  %result = alloca i32, align 4\n";
+    assert(str.starts_with(module[cast(at, u64) + define.len..], entry));
+    assert(str.find(module, "call void @\"std.rt.print_i64\"(i32 1, i64 %t0)\n") >= 0);
+    // Without the flag the run writes nothing to stdout and the same module.
+    string[5] mut plain = {"fort", "-S", "fir_mixed.ft", "-o", "fir_plain.ll"};
+    assert(run(plain[0..5]) == EXIT_OK);
+    string own quiet = captured_out();
+    defer del(quiet);
+    assert(quiet == "");
+    string own again = capture.text("fir_plain.ll");
+    defer del(again);
+    assert(again == module);
+}
+
+// A function whose check names a runtime entry that the closure lacks takes the direct path: the
+// lowering supports it, but rule V7 refuses its FIR. The empty runtime lacks `fail_overflow`, and
+// std_checks holds it, whose own definition is a function of the closure too.
+fn fir_stats_counts_a_check_with_no_runtime_entry_as_direct() void {
+    write_check_runtime();
+    write_file("fir_add.ft", FIR_ADD);
+    string[6] mut empty = {"fort", "--fir-stats", "-S", "fir_add.ft", "-o", "fir_add.ll"};
+    assert(run(empty[0..6]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own direct = captured_out();
+    defer del(direct);
+    assert(direct == "lowered 0 of 1\n");
+    // The FIR path runs the build-mode pass of each mode over both functions: --release removes
+    // the overflow check of `a + 3`, and the other two modes keep it.
+    string[9] mut held = {"fort", "--std-dir", "std_checks", "--fir-stats", "-S", "-S",
+                          "fir_add.ft", "-o", "fir_add.ll"};
+    for (string mode : MODES) {
+        held[5] = mode;
+        assert(run(held[0..9]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        string own both = captured_out();
+        defer del(both);
+        assert(both == "lowered 2 of 2\n");
+        string own module = capture.text("fir_add.ll");
+        defer del(module);
+        bool checked = str.find(module, "call void @\"std.rt.fail_overflow\"(ptr ") >= 0;
+        assert(checked == (mode != "--release"));
+        assert(str.find(module, "%result = alloca i32, align 4\n") >= 0);
+    }
+    // An entry of the name of the check with other parameters, as an old --std-dir may hold,
+    // fits no check either (fir_verify.entry_fits): `main` takes the direct path and nothing
+    // panics, while the entry itself is a function that the FIR path writes.
+    assert(libc.mkdir("std_old".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    write_lines("std_old/rt.ft", OLD_RUNTIME[..]);
+    string[8] mut old = {"fort", "--std-dir", "std_old", "--fir-stats", "-S", "fir_add.ft", "-o",
+                         "fir_add.ll"};
+    assert(run(old[0..8]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own mixed = captured_out();
+    defer del(mixed);
+    assert(mixed == "lowered 1 of 2\n");
+    // A program that the checker refuses writes no module and no count.
+    write_file("fir_bad.ft", "fn main() i32 {\n    return true;\n}\n");
+    string[4] mut bad = {"fort", "--fir-stats", "-S", "fir_bad.ft"};
+    assert(run(bad[0..4]) == EXIT_COMPILE_ERROR);
+    string own none = captured_out();
+    defer del(none);
+    assert(none == "");
+}
+
+// A runtime whose entry of the overflow check lacks the column parameter.
+string[4] OLD_RUNTIME = {
+    "fn fail_overflow(char* file, u32 line) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+};
+
+// The options of the three build modes: `-S` a second time stands for the default mode.
+string[3] MODES = {"-S", "--release", "--no-bounds-check"};
+
+// Two functions whose overflow checks name an entry that the empty runtime of this test lacks,
+// which rule V7 refuses (spec/fir.md 10), and a `main` that keeps every rule. No known source
+// program breaks rule V9 once T-210 makes the checker refuse a `switch` that a `break` leaves, so
+// fir_verify_report_holds_a_function_built_by_hand takes V9 through report_function.
+string[9] FIR_V7 = {
+    "fn f(i32 a) i32 {",
+    "    return a + 1;",
+    "}",
+    "fn g(i32 a) i32 {",
+    "    return a * 2;",
+    "}",
+    "fn main() i32 {",
+    "    return 0;",
+    "}",
+};
+
+// The two lines of --fir-verify-report for FIR_V7: the name of each function, and the first
+// violation, the check that stands at statement 1 of `bb0`.
+string[2] FIR_V7_LINES = {
+    "fir_v7.ft:1:4: fir.verify: V7 a kind with no runtime entry: fir_v7.f bb0 statement 1 (s1)\n",
+    "fir_v7.ft:4:4: fir.verify: V7 a kind with no runtime entry: fir_v7.g bb0 statement 1 (s1)\n",
+};
+
+// Writes the lines of `lines` to `path`, each ended by a newline.
+fn write_lines(string path, string@ lines) void {
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    for (string line : lines) {
+        strbuf.append(&src, line);
+        strbuf.push(&src, '\n');
+    }
+    write_file(path, strbuf.view(&src));
+}
+// --fir-verify-report writes one line for each function that breaks a rule, its first violation,
+// in source order, and exits 0 (spec/fir.md 16.5). A function that keeps every rule writes
+// nothing, and so does a function that the lowering does not support.
+fn fir_verify_report_writes_one_line_for_each_function() void {
+    write_lines("fir_v7.ft", FIR_V7[..]);
+    string[3] mut argv = {"fort", "--fir-verify-report", "fir_v7.ft"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    for (string line : FIR_V7_LINES) {
+        strbuf.append(&want, line);
+    }
+    assert(out == strbuf.view(&want));
+    // A function that breaks a rule after the lowering does not reach the build-mode pass, so
+    // the mode changes nothing here.
+    string[4] mut release = {"fort", "--fir-verify-report", "--release", "fir_v7.ft"};
+    assert(run(release[0..4]) == EXIT_OK);
+    string own released = captured_out();
+    defer del(released);
+    assert(released == out);
+    // --fir-after does not change the report.
+    string[4] mut after = {"fort", "--fir-verify-report", "--fir-after=lower", "fir_v7.ft"};
+    assert(run(after[0..4]) == EXIT_OK);
+    string own lowered = captured_out();
+    defer del(lowered);
+    assert(lowered == out);
+    write_lines("fir_calls.ft", FIR_CALLS[..]);
+    string[3] mut clean = {"fort", "--fir-verify-report", "fir_calls.ft"};
+    assert(run(clean[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own none = captured_out();
+    defer del(none);
+    assert(none == "");
+    write_file("fir_mixed.ft", FIR_MIXED);
+    string[3] mut mixed = {"fort", "--fir-verify-report", "fir_mixed.ft"};
+    assert(run(mixed[0..3]) == EXIT_OK);
+    string own refused = captured_out();
+    defer del(refused);
+    assert(refused == "");
+}
+
+// `if (c) { return 1; }` falling off the end of a function that returns a value: a path from
+// `bb0` reaches `unreachable`, which rule V9 refuses (test/fir/verify/v09_reachable.fir).
+string[12] FIR_V9_TEXT = {
+    "fn main.f(_1 (c): bool) -> i32 {\n",
+    "    bb0: {\n",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:5 s1;\n",
+    "    }\n",
+    "    bb1: {\n",
+    "        _0 = const i32 1 #3:16 s2;\n",
+    "        return #3:9 s2;\n",
+    "    }\n",
+    "    bb2: {\n",
+    "        unreachable #5:1 s0;\n",
+    "    }\n",
+    "}\n",
+};
+
+// driver.report_function, which --fir-verify-report runs on each function, writes the first
+// violation of a function at the location it is given: here V9, on a function built by hand.
+// A function that keeps every rule writes nothing, after the build-mode pass of each mode too.
+fn fir_verify_report_holds_a_function_built_by_hand() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    for (string line : FIR_V9_TEXT) {
+        strbuf.append(&text, line);
+    }
+    fir.module mut m = fir_parse.parse_module(&e.c.m.s, "t.fir", strbuf.view(&text),
+                                              fir_env.prelude(&e));
+    defer fir.module_free(&m);
+    assert(fir_env.errors(&e) == 0);
+    fir_verify.runtime rt = fir_verify.runtime_of(&e.c.ck);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    diag.loc at = diag.loc{"v9.ft", 1, 4, 1, 5};
+    driver.report_function(&m.funcs.items[0], &rt, at, false, false, &out);
+    assert(str.starts_with(strbuf.view(&out), "v9.ft:1:4: fir.verify: V9 a path from bb0 "));
+    assert(str.ends_with(strbuf.view(&out), "unreachable: main.f bb2 statement 0 (s0)\n"));
+    assert(capture.line_count(strbuf.view(&out)) == 1);
+    strbuf.clear(&out);
+    // A function that keeps every rule: bb0 returns 1.
+    strbuf.clear(&text);
+    for (string line : FIR_V9_TEXT[0..2]) {
+        strbuf.append(&text, line);
+    }
+    strbuf.append(&text, "        _0 = const i32 1 #3:16 s2;\n        return #3:9 s2;\n    }\n}\n");
+    fir.module mut good = fir_parse.parse_module(&e.c.m.s, "t.fir", strbuf.view(&text),
+                                                 fir_env.prelude(&e));
+    defer fir.module_free(&good);
+    bool[2] modes = {false, true};
+    for (bool mode : modes) {
+        driver.report_function(&good.funcs.items[0], &rt, at, mode, mode, &out);
+        assert(strbuf.view(&out) == "");
+    }
+}
+
+// The runtime of the bounds tests: the entry of the bounds check that `a[i]` makes.
+string[4] BOUNDS_RUNTIME = {
+    "fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+};
+
+string[5] FIR_INDEX = {
+    "fn main() i32 {",
+    "    i32[4] a = {1, 2, 3, 4};",
+    "    u64 mut i = 2;",
+    "    return a[i];",
+    "}",
+};
+
+// --no-bounds-check reaches the build-mode pass of the FIR path: the module that the FIR path
+// writes for `a[i]` calls `std.rt.fail_bounds` in the default mode and under --release, which
+// keeps bounds checks (D10.6), and does not under --no-bounds-check.
+fn no_bounds_check_reaches_the_build_mode_pass() void {
+    assert(libc.mkdir("std_bounds".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    write_lines("std_bounds/rt.ft", BOUNDS_RUNTIME[..]);
+    write_lines("fir_index.ft", FIR_INDEX[..]);
+    string[9] mut argv = {"fort", "--std-dir", "std_bounds", "--fir-stats", "-S", "-S",
+                          "fir_index.ft", "-o", "fir_index.ll"};
+    for (string mode : MODES) {
+        argv[5] = mode;
+        assert(run(argv[0..9]) == EXIT_OK);
+        string own count = captured_out();
+        defer del(count);
+        assert(count == "lowered 2 of 2\n");
+        string own module = capture.text("fir_index.ll");
+        defer del(module);
+        bool checked = str.find(module, "call void @\"std.rt.fail_bounds\"(i64 ") >= 0;
+        assert(checked == (mode != "--no-bounds-check"));
+    }
+}
+
+// The empty runtime of this test lacks the entry of the overflow check of FIR_ADD, which rule V7
+// refuses (spec/fir.md 10); std_checks holds it. A program that the checker refuses writes no line
+// and exits 1.
+fn fir_verify_report_names_a_check_with_no_runtime_entry() void {
+    write_check_runtime();
+    write_file("fir_add.ft", FIR_ADD);
+    string[3] mut argv = {"fort", "--fir-verify-report", "fir_add.ft"};
+    assert(run(argv[0..3]) == EXIT_OK);
+    string own out = captured_out();
+    defer del(out);
+    string v7 = "fir_add.ft:1:4: fir.verify: V7 a kind with no runtime entry: fir_add.main bb0";
+    assert(str.starts_with(out, v7));
+    assert(capture.line_count(out) == 1);
+    string[5] mut held = {"fort", "--std-dir", "std_checks", "--fir-verify-report", "fir_add.ft"};
+    assert(run(held[0..5]) == EXIT_OK);
+    string own none = captured_out();
+    defer del(none);
+    assert(none == "");
+    write_file("fir_bad.ft", "fn main() i32 {\n    return true;\n}\n");
+    string[3] mut bad = {"fort", "--fir-verify-report", "fir_bad.ft"};
+    assert(run(bad[0..3]) == EXIT_COMPILE_ERROR);
+    assert(err_has("fir_bad.ft:2:12: error: "));
+    string own nothing = captured_out();
+    defer del(nothing);
+    assert(nothing == "");
+}
+
 // ---- --fir-test ----------------------------------------------------------------------------
 
 // --fir-test sets its own flag, and the `.fir` file is the entry.
@@ -1505,6 +1873,14 @@ fn main() i32 {
     fir_reports_a_function_that_it_does_not_lower();
     fir_lowers_places_and_calls();
     fir_of_a_program_with_a_type_error_exits_one();
+    fir_stats_and_fir_verify_report_parse();
+    fir_stats_combines_only_with_a_build();
+    fir_stats_counts_the_functions_of_each_path();
+    fir_stats_counts_a_check_with_no_runtime_entry_as_direct();
+    fir_verify_report_writes_one_line_for_each_function();
+    fir_verify_report_holds_a_function_built_by_hand();
+    no_bounds_check_reaches_the_build_mode_pass();
+    fir_verify_report_names_a_check_with_no_runtime_entry();
     fir_test_parses_as_a_flag();
     fir_test_combines_with_no_other_mode();
     fir_test_of_the_pass_none_writes_the_module();

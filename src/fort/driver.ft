@@ -60,6 +60,11 @@ string FIR_TEST_NO_BOUNDS = "--no-bounds-check";
 string FIR_TEST_ALONE =
     "--fir-test does not combine with --tokens, --ast, --check, --json, --index or --fir";
 
+// The usage error of --fir-stats beside a mode that emits no module. --index sets --check, and
+// --fir-after and --fir-verify-report set --fir.
+string FIR_STATS_ALONE =
+    "--fir-stats does not combine with --tokens, --ast, --check, --index, --fir or --fir-test";
+
 // The module path of the prelude of a `.fir` test, which its function names start with.
 string FIR_TEST_MODULE = "main";
 
@@ -109,9 +114,11 @@ struct options {
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
     bool ast; // --ast: the entry file's syntax tree on stdout
-    bool fir; // --fir, or --fir-after: the program's FIR on stdout
+    bool fir; // --fir, --fir-after or --fir-verify-report: the program's FIR on stdout
     string fir_after; // the pass of --fir-after, empty without it
     bool fir_test; // --fir-test: the entry is a `.fir` test; run its passes and write the FIR
+    bool fir_report; // --fir-verify-report: the first violation of each function, not the FIR
+    bool fir_stats; // --fir-stats: after the build, `lowered N of M` on stdout
     containers.str_vec includes; // -I roots, searched in command-line order
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
@@ -160,6 +167,9 @@ fn help() void {
     println("  --fir              write the program's FIR to stdout and stop");
     println("  --fir-after=<pass> write the FIR after <pass>: lower or build-mode");
     println("  --fir-test         read a .fir test, run its passes and write the FIR");
+    println("  --fir-verify-report");
+    println("                     write the first FIR violation of each function and stop");
+    println("  --fir-stats        after the build, write `lowered N of M` functions");
     println("  --help             print this help and exit");
     println("  --version          print the compiler version and exit");
 }
@@ -286,8 +296,9 @@ fn parse_cfg(options mut* opts, string list) bool {
     return true;
 }
 
-// The options that carry no value: -S, -c, --release, --no-bounds-check,
-// --check, --json, --index, --tokens, --ast, --fir and --fir-test, each of which sets one flag.
+// The options that carry no value: -S, -c, --release, --no-bounds-check, --check, --json,
+// --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report and --fir-stats, each of
+// which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -318,6 +329,13 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--fir-test") {
         // the entry is a `.fir` test, not a program
         opts->fir_test = true;
+    } else if (arg == "--fir-verify-report") {
+        // --fir, with the report of the verifier in place of the FIR
+        opts->fir = true;
+        opts->fir_report = true;
+    } else if (arg == "--fir-stats") {
+        // counts the two paths of the emitter
+        opts->fir_stats = true;
     } else {
         return false;
     }
@@ -444,6 +462,12 @@ fn parse(options mut* opts, string@ args) i32 {
     if (opts->fir_test && (opts->tokens || opts->ast || opts->check || opts->json || opts->fir)) {
         // --fir-test reads a `.fir` test, which none of the other modes reads
         usage_error(FIR_TEST_ALONE);
+        return PARSE_ERROR;
+    }
+    if (opts->fir_stats
+        && (opts->tokens || opts->ast || opts->check || opts->fir || opts->fir_test)) {
+        // --fir-stats counts what the emitter writes, and none of these modes emits
+        usage_error(FIR_STATS_ALONE);
         return PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
@@ -1063,11 +1087,16 @@ fn front_end(session.session mut* s, options* opts, string program, analysis mut
 // An unsupported construct is a compile error with exit 1. Neither case sends partial IR to `--cc`.
 // The emitter is initialized at the address it is used at, since it stores the session it reports
 // through (gen.ft).
+// Each function goes through the FIR path when the lowering supports it, and through the direct
+// path otherwise (spec/fir.md 16.1). With --fir-stats, a module that was written adds the line
+// `lowered N of M` to stdout: N functions that the FIR path wrote, of M definitions of fort
+// functions, the C `main` excluded.
 fn emit_module(session.session mut* s, options* opts, analysis mut* an, string ir_path) i32 {
     gen.gen_options mut gopts = gen.gen_options{};
     gopts.release = opts->release;
     gopts.no_bounds_check = opts->no_bounds_check;
     gopts.target = opts->target;
+    gopts.fir = true;
     gen.emitter mut g = gen.emitter{};
     gen.gen_init(&g, s, gopts);
     defer gen.gen_free(&g);
@@ -1077,6 +1106,9 @@ fn emit_module(session.session mut* s, options* opts, analysis mut* an, string i
     if (!io.write_file(ir_path, strbuf.bytes(&g.out))) {
         error_path("cannot write", ir_path, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
+    }
+    if (opts->fir_stats) {
+        println("lowered ", g.lowered, " of ", g.functions);
     }
     return EXIT_OK;
 }
@@ -1186,6 +1218,64 @@ fn fir_entry(analysis mut* an, options* opts) i32 {
             fir.module_add_function(&m, move(f));
         } else {
             fir_lower.write_report(&why, &text);
+        }
+        i += 1;
+    }
+    print(strbuf.view(&text));
+    return EXIT_OK;
+}
+
+// Appends the line of the first violation of a rule of spec/fir.md 10 in `f` to `out`, when `f`
+// has one, and returns false: the location `at`, then the text of fir_verify.verify_report.
+// Returns true when `f` keeps every rule.
+fn report_violation(fir.func* f, fir_verify.runtime* rt, diag.loc at,
+                    strbuf.str_buf mut* out) bool {
+    strbuf.str_buf mut line = strbuf.create();
+    defer strbuf.free(&line);
+    if (fir_verify.verify_report(f, rt, &line)) {
+        return true;
+    }
+    strbuf.append(out, at.file);
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.line, u64));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.col, u64));
+    strbuf.append(out, ": ");
+    strbuf.append(out, strbuf.view(&line));
+    strbuf.push(out, '\n');
+    return false;
+}
+
+/// Runs the verifier in report mode on `f` (spec/fir.md 16.5): on `f` as it is, and then, when `f`
+/// keeps every rule, on the output of the build-mode pass for `release` and `no_bounds`. Appends
+/// the line of the first violation, at `at`, to `out`. So a function adds one line at most.
+fn report_function(fir.func mut* f, fir_verify.runtime* rt, diag.loc at, bool release,
+                   bool no_bounds, strbuf.str_buf mut* out) void {
+    if (report_violation(f, rt, at, out)) {
+        fir_passes.build_mode(f, release, no_bounds);
+        report_violation(f, rt, at, out);
+    }
+}
+
+// --fir-verify-report lowers each function of a checked program, as --fir does, and runs
+// report_function on it at the name of the function. The run writes one line to stdout for each
+// function that breaks a rule, its first violation, with one print, and exits 0. A function that
+// the lowering does not support writes nothing. --fir-after does not change the report.
+fn fir_report_entry(analysis mut* an, options* opts) i32 {
+    fir_verify.runtime rt = fir_verify.runtime_of(&an->ck);
+    gen.node_ref_vec mut decls = gen.node_ref_vec{};
+    defer gen.refs_free(&decls);
+    fir_lower.program_functions(&an->set, &decls);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < decls.len) {
+        ast.node* decl = gen.refs_at(&decls, i);
+        fir.func mut f = fir.func{};
+        fir_lower.report mut why = fir_lower.report{};
+        if (fir_lower.lower_function(&an->ck, decl, &f, &why)) {
+            report_function(&f, &rt, decl->name_loc, opts->release, opts->no_bounds_check, &text);
+            fir.func_free(&f);
         }
         i += 1;
     }
@@ -1440,6 +1530,10 @@ fn compile_entry(options* opts, string program) i32 {
     if (opts->check) {
         // --check stops after the front end, no module emitted
         return EXIT_OK;
+    }
+    if (opts->fir_report) {
+        // --fir-verify-report stops before the emitter, as --fir does
+        return fir_report_entry(&an, opts);
     }
     if (opts->fir) {
         // --fir stops before the emitter

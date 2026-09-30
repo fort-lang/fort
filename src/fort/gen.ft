@@ -123,11 +123,14 @@ struct gen_args {
     u64 count;
 }
 
-// The build mode and selected target the module is emitted in.
+// The build mode and selected target the module is emitted in, and the path of each function.
 struct gen_options {
     bool release;         // --release: wrapping arithmetic, no overwrite check
     bool no_bounds_check; // --no-bounds-check: no index or span branch
     string target;        // empty in emitter tests means the Linux target
+    // Whether gen_stmt tries the FIR path first for each function (spec/fir.md 16.1). The
+    // driver sets it. An emitter test that leaves it false tests the direct path alone.
+    bool fir;
 }
 
 // One local or parameter place: the symbol it belongs to and the name of its
@@ -259,6 +262,10 @@ struct emitter {
     strbuf.str_buf scratch; // the buffer those texts are built in
     modules.module* module; // the module being emitted
     bool failed;            // a construct the emitter cannot lower yet was reported
+
+    // ---- the paths of the functions (spec/fir.md 16.1), which --fir-stats prints ----
+    u64 functions; // the definitions of fort functions, the C `main` excluded
+    u64 lowered;   // those of them that the FIR path wrote
 }
 
 // ---- the three vectors ------------------------------------------------------------
@@ -538,6 +545,8 @@ fn reset_state(emitter mut* g) void {
     g->module = null;
     g->ck = null;
     g->failed = false;
+    g->functions = 0;
+    g->lowered = 0;
     u64 mut i = 0;
     while (i < IN_COUNT) {
         g->intrinsics[i] = false;

@@ -706,6 +706,10 @@ struct rvalue {
     types.node* ty;
     place place;
     bool is_mut;
+    // `aggregate zeroed T(...)`, the value of a designated literal: the translator zeroes the
+    // whole destination after it reads the operands, padding included, and writes no member
+    // that is `const zero` (spec/fir.md 6, 12.2).
+    bool zeroed;
     callee_kind callee;
     ast.sym* callee_sym;
     operand callee_op;
@@ -869,6 +873,14 @@ fn rvalue_aggregate_new(types.node* ty, u32 first, u32 len) rvalue {
     return rvalue{.kind = rvalue_kind.rv_aggregate, .ty = ty, .ops_first = first, .ops_len = len};
 }
 
+/// `aggregate zeroed T(...)`: rvalue_aggregate_new with the destination zeroed first, the value
+/// of a designated literal (spec/fir.md 6).
+fn rvalue_aggregate_zeroed(types.node* ty, u32 first, u32 len) rvalue {
+    rvalue mut r = rvalue_aggregate_new(ty, first, len);
+    r.zeroed = true;
+    return r;
+}
+
 // A call with the arguments `first` to `first + len - 1`.
 fn rvalue_call(callee_kind callee, u32 first, u32 len) rvalue {
     return rvalue{
@@ -982,6 +994,32 @@ fn rvalue_owns(func* f, rvalue r) bool {
 /// Nothing holds an aggregate as a value, so an operand of this type is a place.
 fn type_aggregate(types.node* t) bool {
     return gen.gen_is_aggregate(t);
+}
+
+/// Whether a value of type `t` holds padding: bytes that none of its scalars covers, between two
+/// fields, after the last field, or inside a field or an element. A store of each field leaves
+/// those bytes as they were, and `llvm.memset` and `llvm.memcpy` write them.
+fn type_padded(types.node* t) bool {
+    return covered_bytes(t) != types.type_sizeof(t);
+}
+
+// The bytes of a value of type `t` that its scalars cover. The count is at most the size of `t`,
+// which fits in a u64.
+fn covered_bytes(types.node* t) u64 {
+    if (t->kind == types.type_kind.k_array) {
+        return t->len * covered_bytes(t->elem);
+    }
+    if (t->kind != types.type_kind.k_struct) {
+        return types.type_sizeof(t);
+    }
+    u64 mut sum = 0;
+    u32 count = struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        sum += covered_bytes(struct_field_type(t, k));
+        k += 1;
+    }
+    return sum;
 }
 
 /// Whether the result of `r` is an aggregate, which only the right side of an assignment into a

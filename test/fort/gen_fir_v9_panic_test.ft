@@ -1,0 +1,70 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: fir.verify: V9 a path from bb0 reaches unreachable: main.f bb2 statement 0 (s0)
+//! stdout:
+//| the function keeps the other rules
+/// Checks that the FIR path of the emitter ends the compiler with a panic when a function breaks
+/// rule V9 of spec/fir.md 10: gen_stmt.emit_fir, which the emitter runs on each function that
+/// the lowering supports, runs the verifier with V9 on before the translator (spec/fir.md 3,
+/// 16.5). The emitter is set up so that the translator would write the function: only the
+/// verifier stops it, and the stderr directive holds the text of V9. No known source
+/// program breaks V9 once T-210 makes the checker refuse a `switch` that a `break` leaves, so the
+/// function is built by hand: `if (c) { return 1; }` falling off the end of a function that
+/// returns a value (test/fir/verify/v09_reachable.fir).
+import check_env;
+import fir;
+import fir_env;
+import fir_parse;
+import fir_verify;
+import gen;
+import gen_stmt;
+import std.strbuf;
+
+string[12] V9_TEXT = {
+    "fn main.f(_1 (c): bool) -> i32 {\n",
+    "    bb0: {\n",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2] #2:5 s1;\n",
+    "    }\n",
+    "    bb1: {\n",
+    "        _0 = const i32 1 #3:16 s2;\n",
+    "        return #3:9 s2;\n",
+    "    }\n",
+    "    bb2: {\n",
+    "        unreachable #5:1 s0;\n",
+    "    }\n",
+    "}\n",
+};
+
+fn main() i32 {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    for (string line : V9_TEXT) {
+        strbuf.append(&text, line);
+    }
+    fir.module mut m = fir_parse.parse_module(&e.c.m.s, "t.fir", strbuf.view(&text),
+                                              fir_env.prelude(&e));
+    defer fir.module_free(&m);
+    assert(fir_env.errors(&e) == 0);
+    assert(fir.module_function_count(&m) == 1);
+    fir_verify.runtime rt = fir_verify.runtime_of(&e.c.ck);
+    strbuf.str_buf mut report = strbuf.create();
+    defer strbuf.free(&report);
+    assert(!fir_verify.verify_report(fir.module_function_at(&m, 0), &rt, &report));
+    assert(strbuf.view(&report) ==
+           "fir.verify: V9 a path from bb0 reaches unreachable: main.f bb2 statement 0 (s0)");
+    println("the function keeps the other rules");
+    gen.emitter mut g = gen.emitter{};
+    gen.gen_options mut opts = gen.gen_options{};
+    opts.fir = true;
+    gen.gen_init(&g, &e.c.m.s, opts);
+    defer gen.gen_free(&g);
+    g.ck = &e.c.ck;
+    g.module = check_env.module_at(&e.c, "main");
+    gen_stmt.fir_path mut fp = gen_stmt.fir_path{.ck = &e.c.ck, .rt = rt};
+    gen_stmt.emit_fir(&g, &fp, move(m.funcs.items[0]));
+    return 0;
+}

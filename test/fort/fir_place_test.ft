@@ -2,8 +2,8 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
-/// Checks FIR places: the type of each place form, fixed storage, and the three answers of a
-/// place comparison.
+/// Checks FIR places: the type of each place form, fixed storage, the three answers of a place
+/// comparison, and the padding of a type.
 import diag;
 import fir;
 import fir_env;
@@ -417,6 +417,36 @@ fn an_index_on_a_span_or_string_that_a_projection_reaches_reads_memory() void {
     assert(rel(&x, cell, fir.place_local(x.outer_local)) == fir.place_rel.pc_may_overlap);
 }
 
+// ---- type_padded -----------------------------------------------------------------------
+
+// A struct has padding between two fields, and inside a field or an element; a scalar, a span, a
+// string and a struct whose fields fill it have none (D6.5, T-253 review round 3).
+fn padding_is_each_byte_that_no_scalar_covers() void {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    defer fir_env.close(&e);
+    types.table mut* tt = fir_env.tt(&e);
+    types.node* pair = fir_env.ty(&e, "pair");
+    // `pair` is i32 then u64: bytes 4 to 7 are padding.
+    assert(fir.type_padded(pair));
+    // `enum_member` is i32 then `char*`.
+    assert(fir.type_padded(fir_env.ty(&e, "enum_member")));
+    // `outer` holds a `pair`, whose padding is its padding.
+    assert(fir.type_padded(fir_env.ty(&e, "outer")));
+    // An array has the padding of its element.
+    assert(fir.type_padded(types.type_array(tt, pair, 3)));
+    assert(fir.type_padded(types.type_array(tt, pair, 1)));
+    // A pointer and a u64 fill `holder`, and a span and a string fill `viewer`.
+    assert(!fir.type_padded(fir_env.ty(&e, "holder")));
+    assert(!fir.type_padded(fir_env.ty(&e, "viewer")));
+    assert(!fir.type_padded(types.type_array(tt, fir_env.i32_ty(&e), 4)));
+    assert(!fir.type_padded(types.type_array(tt, fir_env.ty(&e, "holder"), 2)));
+    assert(!fir.type_padded(types.type_string(tt, false)));
+    assert(!fir.type_padded(types.type_span(tt, pair, false, false)));
+    assert(!fir.type_padded(fir_env.u64_ty(&e)));
+    assert(!fir.type_padded(fir_env.ty(&e, "color")));
+}
+
 fn main() i32 {
     a_local_has_the_type_of_the_local();
     a_global_has_the_type_of_its_symbol();
@@ -439,6 +469,7 @@ fn main() i32 {
     a_global_takes_projections_like_a_local();
     a_place_with_the_same_parts_in_another_order_is_not_equal();
     an_index_on_a_span_or_string_that_a_projection_reaches_reads_memory();
+    padding_is_each_byte_that_no_scalar_covers();
     println("ok");
     return 0;
 }

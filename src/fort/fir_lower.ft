@@ -1378,6 +1378,16 @@ fn constant_of(types.node* t, consts.cval v) fir.constant {
 // in a new temporary, read by `move _t` when it owns. A folded string constant goes into a
 // temporary, since a constant of an aggregate type fills a place and is no operand of one.
 fn aggregate_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
+    return built_operand(lw, n, false, out);
+}
+
+// aggregate_operand, where `zeroing` says that the direct path builds the value in its
+// destination: a member of a literal and the operand of a cast. Then a new temporary of a type
+// with padding is `const zero` first. The direct path leaves the padding of its destination as it
+// was, which is zero in a designated literal (D6.5), so the FIR path leaves zero padding wherever
+// the direct path does. A designated literal and a cast write the whole temporary, so they need
+// no zero first.
+fn built_operand(lowerer mut* lw, ast.node* n, bool zeroing, fir.operand mut* out) bool {
     if (n->kind == ast.ast_kind.k_call && (n->ann & check.ANN_MOVE) != 0) {
         return lower_move(lw, n, out);
     }
@@ -1390,11 +1400,28 @@ fn aggregate_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
         return true;
     }
     u32 t = fir.local_add(lw->f, n->ty, fir.local_kind.lk_temp, null, n->loc);
+    if (zeroing && fir.type_padded(n->ty) && !writes_whole(n)) {
+        fir.operand zero = fir.operand_const(fir.const_zero(n->ty));
+        assign(lw, fir.place_local(t), fir.rvalue_use(lw->f, zero), n->loc);
+    }
     if (!lower_into(lw, n, fir.place_local(t))) {
         return false;
     }
     *out = read_temp(t, n->ty);
     return true;
+}
+
+// Whether the value `n` writes every byte of its destination: a designated literal, `{.f = v}` or
+// `T{.f = v}`, which `llvm.memset` zeroes first, or a cast, which `llvm.memcpy` copies.
+fn writes_whole(ast.node* n) bool {
+    if (n->kind == ast.ast_kind.k_cast) {
+        return true;
+    }
+    ast.node* mut list = n;
+    if (n->kind == ast.ast_kind.k_struct_lit) {
+        list = n->b;
+    }
+    return list->kind == ast.ast_kind.k_brace_init && (list->flags & ast.FLAG_DESIGNATED) != 0;
 }
 
 // Whether the checker folded `n` to a string constant.
@@ -1752,7 +1779,11 @@ fn lower_into(lowerer mut* lw, ast.node* n, fir.place dst) bool {
     case ast.ast_kind.k_cast:
         // a cast between aggregate types carries or drops marks, and never adds `own` (D3.14)
         fir.operand mut a = fir.operand{};
-        if (!lower_operand(lw, n->a, &a)) {
+        if (!fir.type_aggregate(n->a->ty)) {
+            if (!lower_operand(lw, n->a, &a)) {
+                return false;
+            }
+        } else if (!built_operand(lw, n->a, true, &a)) {
             return false;
         }
         assign(lw, dst, fir.rvalue_cast(lw->f, n->ty, a), n->loc);
@@ -1826,7 +1857,8 @@ fn empty_literal(ast.node* n) bool {
 // Member `v` of a literal as an operand of its `aggregate` (spec/fir.md 9.4). A folded constant
 // stands as a constant: a string constant as `const "..."`, and an empty literal as `const zero
 // T`, which is also the operand of a field that a designated literal leaves out. Every other
-// member is an operand, a place for an aggregate type.
+// member is an operand, a place for an aggregate type, which a zeroed temporary holds when the
+// lowering builds it (built_operand).
 fn member_operand(lowerer mut* lw, ast.node* v, fir.operand mut* out) bool {
     if (string_constant(lw, v)) {
         string text = check.check_node_value(lw->ck, v).str;
@@ -1836,6 +1868,9 @@ fn member_operand(lowerer mut* lw, ast.node* v, fir.operand mut* out) bool {
     if (fir.type_aggregate(v->ty) && empty_literal(v)) {
         *out = fir.operand_const(fir.const_zero(v->ty));
         return true;
+    }
+    if (fir.type_aggregate(v->ty)) {
+        return built_operand(lw, v, true, out);
     }
     return lower_operand(lw, v, out);
 }
@@ -1856,8 +1891,9 @@ fn member_slot(ast.node* n, u64 i) u64 {
 
 // The brace initializer `n` of type `t` into `dst` (spec/fir.md 9.4, D6.5): `const zero T` for
 // `{}`, and else `aggregate T(...)` with one operand for each field or element, in declaration or
-// index order, and `const zero` for a field that a designated literal leaves out. The members run
-// in source order under the materialization rule (D6.3). The translator reads every operand before
+// index order, and `const zero` for a field that a designated literal leaves out. A designated
+// literal is `aggregate zeroed T(...)`, whose padding the translator zeroes. The members run in
+// source order under the materialization rule (D6.3). The translator reads every operand before
 // it writes `dst`, so a member that reads `dst` reads the old value (spec/fir.md 6).
 fn lower_literal(lowerer mut* lw, ast.node* n, types.node* t, fir.place dst, diag.loc at)
     bool {
@@ -1899,6 +1935,11 @@ fn lower_literal(lowerer mut* lw, ast.node* n, types.node* t, fir.place dst, dia
             fir.operand_push(lw->f, fir.operand_const(zero));
         }
         k += 1;
+    }
+    if ((n->flags & ast.FLAG_DESIGNATED) != 0) {
+        // the designated form zeroes the whole value, padding included, as the direct path does
+        assign(lw, dst, fir.rvalue_aggregate_zeroed(t, first, cast(slots, u32)), at);
+        return true;
     }
     assign(lw, dst, fir.rvalue_aggregate_new(t, first, cast(slots, u32)), at);
     return true;
