@@ -475,9 +475,12 @@ without a rewrite.
 
 ## 6. The host side
 
-- **The `darwin` gate uses the Darwin host** (T-147, T-152). The host needs clang-format 18
-  and clang-tidy 18 (`brew install llvm@18`, keg-only under `/opt/homebrew/opt/llvm@18/bin`,
-  where `CMakeLists.txt` looks first), because the gate runs `format-check` and `lint` there as
+- **The `darwin` gate uses the Darwin host** (T-147, T-152). The host links Homebrew `llvm@18`
+  into `/opt/homebrew/bin` (`brew install llvm@18`, then `brew unlink` of any other linked LLVM
+  and `brew link --force llvm@18`), so `clang`, `opt` (the default `FORT_OPT`), clang-format 18
+  and clang-tidy 18 are one LLVM, as in CI (T-268). The
+  lint needs version 18 (`cmake/dev_targets.cmake` looks under `/opt/homebrew/opt/llvm@18/bin`
+  first) because the gate runs `format-check` and `lint` there as
   on linux, and the lint configuration is clang 18's: clang-format 19 wraps one ternary of
   `bootstrap0/test/driver_test.c` differently and clang-tidy 19 adds checks the configuration
   does not name (measured 2026-09-25: 23 `readability-enum-initial-value` and 10
@@ -586,9 +589,15 @@ without a rewrite.
 - Every job checks out with `fetch-depth: 0`. Configure runs `git cat-file` and
   `git merge-base --is-ancestor` on the pin of `tools/bootstrap.ref`, and a shallow clone does
   not hold that commit.
-- `tools/ci_setup.sh <linux|darwin> [lint]` installs the tools. On Linux: `clang-18`, `llvm-18`
-  (for `opt-18`), `libclang-rt-18-dev` and ninja; `vm.mmap_rnd_bits=28`, because the clang 18
-  sanitizer runtimes cannot map their shadow memory at the runner kernel's default; and
-  `kernel.core_pattern=core`, as section 3 does for the VM. On Darwin: Homebrew `llvm@19`, linked
-  with `brew link --force`, so `/opt/homebrew/bin/opt`, the default `FORT_OPT`, exists as on the
-  dev Mac. `lint` adds clang-format 18 and clang-tidy 18.
+- **Every host uses LLVM 18 and no other** (T-268): it compiles, `opt` verifies, clang-format
+  and clang-tidy lint. The one exception is `asan-*` on Darwin, which uses Apple clang (section
+  5). `tools/ci_setup.sh <linux|darwin> [lint]` installs the tools. On Linux: the versioned
+  packages `clang-18`, `llvm-18` (for `opt-18`), `libclang-rt-18-dev` and ninja, and no
+  unversioned `clang` package; a link `/usr/local/bin/clang` to `/usr/bin/clang-18` gives the
+  name the presets, the driver's default `--cc` and the harness call; `vm.mmap_rnd_bits=28`,
+  because the clang 18 sanitizer runtimes cannot map their shadow memory at the runner kernel's
+  default; and `kernel.core_pattern=core`, as section 3 does for the VM. On Darwin: the script
+  unlinks every Homebrew LLVM the image linked (macOS 26 links `llvm@20`), installs `llvm@18`
+  and links it with `brew link --force`, so `/opt/homebrew/bin/clang` and `opt`, the default
+  `FORT_OPT`, are 18. `lint` adds clang-format 18 and clang-tidy 18 on Linux. Each host fails its
+  setup when `clang` or `opt` reports another version.

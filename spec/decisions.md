@@ -1308,6 +1308,9 @@ Sections:
   Apple's LLVM implements that probe on arm64: Homebrew clang 19.1.7 rejected it with
   `Unsupported stack probing method`. Apple clang 21 and clang 19.1.7 both accept `inline-asm` and
   emit the probes, so the default `--cc` of D14.3 can be any clang.
+  Amended 2026-09-30 (T-268): every host now uses LLVM 18. Homebrew clang 18.1.8 on arm64 Mac
+  accepts `inline-asm` and emits the same probe loop as clang 19.1.7 for a 100000-byte frame: a
+  4096-byte `sub sp` and a `str xzr, [sp]` per page before the remainder.
 
 ## D11 Build modes and the runtime contract
 

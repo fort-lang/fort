@@ -1,9 +1,10 @@
 #!/bin/bash
 # tools/ci_setup.sh <linux|darwin> [lint]: install the tools a CI job needs.
 #
-# The GitHub runners provide git, python3, cmake and node. This script adds the LLVM
-# toolchain that configure and the tests need. With `lint`, it also adds clang-format 18
-# and clang-tidy 18, because the lint configuration is that of clang 18.
+# The GitHub runners provide git, python3, cmake and node. This script adds LLVM 18, the
+# one LLVM of every host: it compiles, verifies with `opt`, and lints, because the lint
+# configuration is that of clang 18. With `lint`, it also adds clang-format 18 and
+# clang-tidy 18 on Linux; Homebrew llvm@18 holds them on Darwin.
 #
 # On Linux the script writes ASAN_SYMBOLIZER_PATH to $GITHUB_ENV when that file is set,
 # so the later steps of the job see it.
@@ -28,7 +29,7 @@ if [ "$#" -eq 2 ]; then
 fi
 
 setup_linux() {
-    local packages=(clang clang-18 llvm-18 libclang-rt-18-dev ninja-build)
+    local packages=(clang-18 llvm-18 libclang-rt-18-dev ninja-build)
     if [ "$lint" = yes ]; then
         packages+=(clang-format-18 clang-tidy-18)
     fi
@@ -55,26 +56,36 @@ setup_linux() {
         echo "ASAN_SYMBOLIZER_PATH=$symbolizer" >>"$GITHUB_ENV"
     fi
 
+    # The presets, the driver's default --cc and the test harness name `clang`. The link
+    # in /usr/local/bin, which precedes /usr/bin in PATH, makes that name clang 18
+    # whatever the image's default clang is.
+    sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+
     opt-18 --version | grep -q 'LLVM version 18\.'
+    clang --version | grep -q 'clang version 18\.'
 }
 
 setup_darwin() {
-    # The dev Mac links Homebrew llvm@19, so `clang` and the default FORT_OPT,
-    # /opt/homebrew/bin/opt, are LLVM 19. The runner gets the same links.
+    # Homebrew llvm@18 is linked into /opt/homebrew/bin, so `clang` and the default
+    # FORT_OPT, /opt/homebrew/bin/opt, are LLVM 18. The runner image links an LLVM of its
+    # own. The script unlinks every linked LLVM first: then `brew install` gives no
+    # warning, and no tool of another LLVM stays in /opt/homebrew/bin.
+    # cmake/dev_targets.cmake finds clang-format and clang-tidy under
+    # /opt/homebrew/opt/llvm@18/bin.
     # An auto-update and a check of the dependents of each installed formula cost
     # minutes in every job and change nothing that the job uses.
     export HOMEBREW_NO_AUTO_UPDATE=1
     export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
-    brew install llvm@19 ninja
-    brew link --overwrite --force llvm@19
-    if [ "$lint" = yes ]; then
-        # cmake/dev_targets.cmake finds the keg-only llvm@18 tools by their prefix.
-        brew install llvm@18
-    fi
+    local formula
+    for formula in $(brew list --formula | grep -E '^llvm(@[0-9]+)?$'); do
+        brew unlink "$formula" >/dev/null
+    done
+    brew install llvm@18 ninja
+    brew link --overwrite --force llvm@18
 
-    /opt/homebrew/bin/opt --version | grep -q 'LLVM version 19\.'
-    /opt/homebrew/bin/clang --version | grep -q 'clang version 19\.'
-    # The presets name `clang`, which must resolve to the Homebrew one, as on the dev Mac.
+    /opt/homebrew/bin/opt --version | grep -q 'LLVM version 18\.'
+    /opt/homebrew/bin/clang --version | grep -q 'clang version 18\.'
+    # The presets name `clang`, which must resolve to Homebrew's.
     if [ "$(command -v clang)" != /opt/homebrew/bin/clang ] && [ -n "${GITHUB_PATH:-}" ]; then
         echo /opt/homebrew/bin >>"$GITHUB_PATH"
     fi

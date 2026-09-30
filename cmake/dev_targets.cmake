@@ -17,8 +17,9 @@
 # bootstrap0/, so that the subdirectory sees the tools and the functions.
 
 # The lint configuration is clang 18's (.clang-format, .clang-tidy). The
-# versioned name wins where the host has one; the darwin host keeps llvm@18
-# keg-only under /opt/homebrew/opt/llvm@18, where the names are unversioned.
+# versioned name wins where the host has one; on darwin the names are
+# unversioned under /opt/homebrew/opt/llvm@18, the keg of Homebrew llvm@18,
+# which holds them whether or not llvm@18 is linked.
 # NO_CACHE, so that a tool installed later is found on the next configure.
 set(FORT_CLANG_18_HINTS /opt/homebrew/opt/llvm@18/bin)
 find_program(FORT_CLANG_FORMAT NAMES clang-format-18 clang-format
@@ -26,7 +27,7 @@ find_program(FORT_CLANG_FORMAT NAMES clang-format-18 clang-format
 find_program(FORT_RUN_CLANG_TIDY NAMES run-clang-tidy-18 run-clang-tidy
     HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
 # run-clang-tidy runs the `clang-tidy` of the PATH unless told otherwise, which
-# on the darwin host is a newer one; name the clang-tidy 18 beside it.
+# can be another version; name the clang-tidy 18 beside it.
 find_program(FORT_CLANG_TIDY NAMES clang-tidy-18 clang-tidy
     HINTS ${FORT_CLANG_18_HINTS} NO_CACHE)
 # clang-tidy does not find the SDK headers on its own as the darwin clang
