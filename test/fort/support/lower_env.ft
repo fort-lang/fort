@@ -15,10 +15,11 @@ import modules_env;
 import std.strbuf;
 
 // The count of the lines of RUNTIME.
-u64 RUNTIME_LINES = 47;
+u64 RUNTIME_LINES = 69;
 
 // The sandbox std/rt.ft: the runtime entry of each check kind with the parameters that std/rt.ft
-// gives it, and str_eq. A loop that never ends is the body of a `noreturn` entry.
+// gives it, str_eq, and the print functions with the member record of an enum table. A loop that
+// never ends is the body of a `noreturn` entry.
 string[RUNTIME_LINES] RUNTIME = {
     "fn fail_overflow(char* file, u32 line, u32 col) noreturn {",
     "    while (true) {",
@@ -66,6 +67,28 @@ string[RUNTIME_LINES] RUNTIME = {
     "}",
     "fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {",
     "    return false;",
+    "}",
+    "struct enum_member {",
+    "    i32 value;",
+    "    char* name;",
+    "}",
+    "fn print_i64(i32 fd, i64 v) void {",
+    "}",
+    "fn print_u64(i32 fd, u64 v) void {",
+    "}",
+    "fn print_bool(i32 fd, bool v) void {",
+    "}",
+    "fn print_char(i32 fd, char c) void {",
+    "}",
+    "fn print_ptr(i32 fd, void* p) void {",
+    "}",
+    "fn print_str(i32 fd, char* ptr, u64 len) void {",
+    "}",
+    "fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void {",
+    "}",
+    "fn print_f32(i32 fd, f32 v) void {",
+    "}",
+    "fn print_f64(i32 fd, f64 v) void {",
     "}",
 };
 
@@ -195,13 +218,19 @@ fn refused(env mut* e, string@ lines, string name) string {
     return refused_with(e, lines, name, true);
 }
 
-/// Holds `got` against the lines `want`, each ended by a newline. A difference prints both texts.
+/// Holds `got` against the lines `want`, each ended by a newline. A line that ends with `\`
+/// continues on the next entry, so that a line of FIR wider than a source line splits in two; no
+/// line of FIR ends with `\`. A difference prints both texts.
 fn expect(string got, string@ want) void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     for (string line : want) {
-        strbuf.append(&b, line);
-        strbuf.push(&b, '\n');
+        if (line.len > 0 && line[line.len - 1] == '\\') {
+            strbuf.append(&b, line[0..line.len - 1]);
+        } else {
+            strbuf.append(&b, line);
+            strbuf.push(&b, '\n');
+        }
     }
     if (got == strbuf.view(&b)) {
         return;
