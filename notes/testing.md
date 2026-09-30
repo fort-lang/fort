@@ -33,9 +33,10 @@ bullet at a time and without a rewrite.
   tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
   On linux each target runs as `tools/vm <target>`.
 - The merge gate is the `gate` target of the `debug` preset (`ninja -C build/<Host>/debug gate` on
-  both hosts): `check-all`, then the workflow -- configure, build, test -- of the `asan` and `ubsan`
-  presets. On darwin run `cmake --preset debug && cmake --build --preset debug --target gate`;
-  `tools/vm gate` does the same in the VM. The same tests register on both targets: the test graph
+  both hosts): `check-all`, then the workflow -- configure, build, test -- of the `asan-debug` and
+  `ubsan-debug` presets. On darwin run
+  `cmake --preset debug && cmake --build --preset debug --target gate`; `tools/vm gate` does the
+  same in the VM. The same tests register on both targets: the test graph
   has no target-only branch since 2026-09-25.
   **Never kill a guest process by pattern.** The VM is shared by every worktree, so
   `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as
@@ -362,7 +363,7 @@ bullet at a time and without a rewrite.
   under a test's, and the lint would then judge a file the harness never compiles (T-063).
   Without those roots `fort --index` reports
   `module 'containers' not found` and every name in the file goes unjudged, which it did until
-  T-079. **`test/fort` is not a leak oracle**: the gate's `asan` and `ubsan`
+  T-079. **`test/fort` is not a leak oracle**: the gate's `asan-debug` and `ubsan-debug`
   presets instrument the native compiler, not the x86-64 program the harness builds and runs under
   qemu, so a `del` a module forgets leaks silently through all three presets. A module that
   promises its allocations die with the value that owns them (D20.5) needs a witness of its own --

@@ -366,16 +366,17 @@ without a rewrite.
 ## 5. The build
 
 - Presets (`CMakePresets.json`, Ninja, clang unless noted): `debug`, `release` (Release, so every
-  stage of the chain gets `--release`; T-261), `asan`, `ubsan`, `msan`, `tsan` and `gcc`, and
-  `asan-release`, `ubsan-release` and `msan-release`, which add Release (T-266); the
-  sanitizer presets set `FORT_SANITIZER` for `cmake/sanitizers.cmake`, which instruments every
-  native target but never the cross-compiled runtime object. **The presets are the same on every
-  host** (2026-09-26): the host decides the target, and a preset the host cannot provide stops at
-  configure time with its reason -- `msan`, `msan-release` and `tsan` on darwin (no
-  MemorySanitizer or ThreadSanitizer for arm64 darwin), `gcc` where `gcc` is Apple clang. `asan`
-  and `asan-release` on darwin build with Apple clang (`/usr/bin/clang`, set in `CMakeLists.txt`
-  before `project()`), because the Homebrew clang 19 AddressSanitizer runtime hangs at exit on
-  darwin 25. `tools/vm workflow <preset>`
+  stage of the chain gets `--release`; T-261), `gcc`, and one preset for each sanitizer and build
+  type, named `<sanitizer>-<build type>`: `asan-debug`, `asan-release`, `ubsan-debug`,
+  `ubsan-release`, `msan-debug`, `msan-release`, `tsan-debug` and `tsan-release` (T-266, T-267).
+  A name without a sanitizer part has no sanitizer. The sanitizer presets set `FORT_SANITIZER`
+  for `cmake/sanitizers.cmake`, which instruments every native target but never the
+  cross-compiled runtime object. **The presets are the same on every host** (2026-09-26): the
+  host decides the target, and a preset the host cannot provide stops at configure time with its
+  reason -- `msan-*` and `tsan-*` on darwin (no MemorySanitizer or ThreadSanitizer for arm64
+  darwin), `gcc` where `gcc` is Apple clang. `asan-*` on darwin builds with Apple clang
+  (`/usr/bin/clang`, set in `CMakeLists.txt` before `project()`), because the Homebrew clang 19
+  AddressSanitizer runtime hangs at exit on darwin 25. `tools/vm workflow <preset>`
   configures, builds and runs ctest; build directories are `build/<Host>/<preset>` inside the
   worktree. `-Wall -Wextra -Wpedantic -Werror -Wshadow -Wvla -Wstrict-prototypes
   -Wmissing-prototypes -Wundef` apply to every C target.
@@ -522,9 +523,9 @@ without a rewrite.
   ```
 
   The darwin gate is the `gate` target of the `debug` preset (`notes/testing.md` 1): `check-all`,
-  then the `asan` and `ubsan` workflows, as on linux. The same tests register on both targets;
-  the gate excludes no corpus fixture. On darwin `asan` builds with Apple clang (section 5), and
-  LeakSanitizer does not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops
+  then the `asan-debug` and `ubsan-debug` workflows, as on linux. The same tests register on both
+  targets; the gate excludes no corpus fixture. On darwin `asan-*` builds with Apple clang
+  (section 5), and LeakSanitizer does not exist on arm64 darwin, so `cmake/sanitizers.cmake` drops
   `detect_leaks=1` there (measured 2026-09-25).
 
 - An ssh `ControlPath` under `os.tmpdir()` does not work on macOS: the host's temporary directory
@@ -574,9 +575,10 @@ without a rewrite.
   until its name joins that list or a job of its own; nothing reports the gap. Every `ctest` step
   passes `--no-tests=error`, so a label that selects no test fails the job.
 - `bootstrap0.yml`'s job `unit` runs the label `bootstrap0` under 8 presets on each Linux
-  runner and 6 on macOS (T-266): `debug`, `release`, and `asan`, `ubsan` and `msan` in Debug and
-  in Release (`<sanitizer>-release`). Darwin has no msan. tsan stays out of CI (the user,
-  T-261). The sanitizer flags set no `-O` level, so the build type decides it.
+  runner and 6 on macOS (T-266): `debug`, `release`, `asan-debug`, `asan-release`,
+  `ubsan-debug`, `ubsan-release`, `msan-debug` and `msan-release`. Darwin has no msan. tsan
+  stays out of CI (the user, T-261). The sanitizer flags set no `-O` level, so the build type
+  decides it.
 - The runners are `ubuntu-24.04`, `ubuntu-latest` and `macos-latest`. The Linux target is
   x86_64, the Linux runners are x86_64, and the Darwin runner is arm64, so each runner builds and
   runs its target natively. CI installs none of the qemu, binfmt and cross packages of section 3;

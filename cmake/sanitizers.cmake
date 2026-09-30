@@ -14,11 +14,12 @@ set_property(CACHE FORT_SANITIZER PROPERTY STRINGS "" address memory thread unde
 set(FORT_SANITIZER_TEST_ENV "")
 
 # The presets are the same on every host. MemorySanitizer and ThreadSanitizer do
-# not exist for arm64 darwin, so the msan and tsan presets stop here, at configure
+# not exist for arm64 darwin, so the msan-* and tsan-* presets stop here, at configure
 # time, and not at the first link.
 if(APPLE AND FORT_SANITIZER MATCHES "^(memory|thread)$")
     message(FATAL_ERROR
-        "FORT_SANITIZER=${FORT_SANITIZER} is not available on darwin; use asan or ubsan")
+        "FORT_SANITIZER=${FORT_SANITIZER} is not available on darwin; "
+        "use an asan-* or ubsan-* preset")
 endif()
 
 if(FORT_SANITIZER STREQUAL "")

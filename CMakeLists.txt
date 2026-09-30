@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # An address-sanitized build on darwin uses Apple clang: the AddressSanitizer
 # runtime of Homebrew clang 19 hangs at exit on darwin 25 (a five-line C program
-# did not return in 20 s, 2026-09-25). The asan preset names `clang` on both
+# did not return in 20 s, 2026-09-25). The asan presets name `clang` on both
 # hosts; this is the one place the choice differs. It must precede project().
 if(CMAKE_HOST_APPLE AND FORT_SANITIZER STREQUAL "address")
     set(CMAKE_C_COMPILER /usr/bin/clang CACHE FILEPATH "The C compiler" FORCE)
@@ -549,9 +549,9 @@ endif()
 # ---- the gate --------------------------------------------------------------------
 # `gate` is the merge gate of the selected target, run from this build directory:
 # `check-all`, then the workflow (configure, build, test) of each sanitizer preset of
-# the target: asan and ubsan, which both hosts provide. `tools/vm gate` runs it
+# the target: asan-debug and ubsan-debug, which both hosts provide. `tools/vm gate` runs it
 # under the debug preset in the VM.
-set(FORT_GATE_PRESETS asan ubsan)
+set(FORT_GATE_PRESETS asan-debug ubsan-debug)
 set(FORT_GATE_COMMANDS "")
 foreach(gate_preset IN LISTS FORT_GATE_PRESETS)
     list(APPEND FORT_GATE_COMMANDS
