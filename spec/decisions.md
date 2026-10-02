@@ -1418,7 +1418,12 @@ Sections:
   `main` calls `std.rt.args_init(argc, argv)`, which builds the `string@` of arguments from `argv`,
   then `std.rt.args()`, which writes that span into the frame of the emitted `main`. It then calls
   the entry module's `main` (D8.6): with the span when that `main` declares the parameter, and with
-  no argument when it does not. It then calls `std.rt.flush_all()` and returns `status & 0xFF`.
+  no argument when it does not. On return, it flushes runtime buffers.
+  It releases the runtime-owned argument headers before the final normal-exit boundary (D17.19).
+  Argument bytes remain borrowed from C startup storage. The entry returns `status & 0xFF`.
+  The compiler accounts for this generated sequence even when it lies outside source-function FIR.
+  `std.rt.exit` performs the same runtime cleanup before foreign process termination.
+  It does not execute caller defers or automatically delete user globals.
   The span goes by pointer, which is D9.9's internal convention for an aggregate parameter. The
   span in the frame of the emitted `main` is the caller-made copy of that convention, so no second
   copy exists. `toolchain.md` 5 fixes the runtime entry points and `toolchain.md` 6 the definition
@@ -1435,6 +1440,8 @@ Sections:
   entry module's `main` declared the parameter, then called that `main`. The T-088 amendment left
   `fort_entry` unchanged and gave no reason for it. The emitted `main` now calls the entry
   module's `main` itself and passes its own span, which D9.9 already makes the caller-made copy.
+  Amended 2026-10-02 (T-277): Normal exit previously flushed without an argument-storage cleanup
+  requirement. Final runtime cleanup now precedes the D17.19 obligation boundary.
 
 ### D11.7 How the print family writes a value
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
@@ -2457,6 +2464,58 @@ says ownership is "by convention", this section supersedes it.
   These rules add no annotation, unsafe construct, runtime identity data, or ABI change.
 - rationale: Finite summaries permit termination without accepting operations that lack proof.
   Separate witness classes prevent an imprecise state from claiming a concrete memory error.
+
+### D17.19 Global ownership and process boundaries
+- owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),
+  `stdlib.md` (2.1 and 3).
+- rule: A global retains storage across ordinary function returns.
+  Its initializer establishes its initial contents. Transfers preserve allocation identity.
+  A store must preserve or discharge old owning leaves after right-side effects.
+  Fields and elements of global aggregates retain their separate obligations.
+  Taking a global address creates no escape exemption.
+  Normal executable exit requires empty owning globals in the complete checked closure.
+  This includes runtime globals and live owned descendants reachable through global owners.
+  Runtime cleanup precedes the final obligation boundary. A call entry is not that boundary.
+  Generated startup creates the runtime argument owner before the source entry runs (D11.6).
+  Positive argc creates a header allocation. Nonpositive argc leaves the owner empty.
+  Normal entry return runs applicable source defers, flushes, and releases runtime argument storage.
+  The final boundary precedes the generated C return or a known foreign normal-exit operation.
+  `std.sys.exit` and `std.rt.exit` reach that boundary after ordered runtime cleanup.
+  Establish that cleanup from analyzed fort or generated effects. A runtime name proves no release.
+  Those exit functions do not execute caller defers or automatically delete user globals.
+  Residual allocation obligations in suspended caller storage also require discharge there.
+  Infer normal-termination requirements through fort wrappers and indirect fort targets.
+  A cleanup followed by exit differs from an exit followed by unreachable cleanup.
+  A source function return, including an ordinary call to a function named main, is not process
+  exit.
+  Libraries may retain owning globals between calls. Their summaries preserve those global states.
+  They provide explicit cleanup through ordinary callable fort functions.
+  Cleanup releases or transfers owned allocations and empties the library's owning global leaves.
+  Library checking uses the owning globals of its complete checked closure.
+  Foreign host storage outside that closure uses D17.13 trust.
+  The host calls cleanup after final library use and before unload or normal host termination.
+  Library checking uses symbolic global states and inputs. It infers caller requirements.
+  It does not invent a host call sequence, generated startup, or executable-exit boundary.
+  Foreign entries trust valid symbolic caller inputs under D17.13.
+  Analyze callback-local storage and all available fort effects normally.
+  Returned or retained borrows keep their source relations across ordinary returns.
+  Abort paths, including panic and runtime traps, require no cleanup.
+  The selected std.libc declarations exit(i32) noreturn and abort() noreturn establish normal and
+  abort termination, respectively. Compatible declarations of the same C symbol share that class.
+  Trust those standard conventions under foreign symbol interposition (D17.13).
+  Resolve function-value aliases before composing wrapper outcomes. Keep mixed outcomes distinct.
+  A noreturn type proves absence of caller return. It proves neither normal termination nor abort.
+  The defensive trap after a noreturn call does not classify the callee's termination.
+  Unresolved foreign process termination remains outside proof under D17.13.
+  Accepting such a call supplies no proof of normal-exit cleanup and no abort exemption.
+  Unknown fort bodies and targets receive no foreign exemption.
+  These rules add no annotations, contract syntax, contract database, destructors, or identity
+  tables.
+- rationale: Global storage survives a function return.
+  Executable normal exit ends its obligation.
+  Ordered runtime cleanup permits argument access during execution without a runtime-global
+  exemption.
+  Foreign trust permits ordinary FFI without claiming proof of hidden foreign process effects.
 
 ## D18 Float printing in the runtime
 

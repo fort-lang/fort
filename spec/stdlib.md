@@ -171,14 +171,20 @@ fn errno() i32
 fn env(string name, string mut* out) bool
 ```
 
-- `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
-  `code & 0xFF` (D11.6). Deferred statements of the calling function do not run. Implemented as
-  `rt.exit(code);`, the runtime entry point that flushes and ends the process
-  (`toolchain.md` 5.1). Ownership: none.
+- `exit`: flushes every runtime output buffer (D11.5), then releases runtime-owned argument-header
+  storage. It terminates the process with status code & 0xFF (D11.6).
+  Deferred statements of calling functions do not run.
+  The wrapper calls rt.exit(code), which performs that ordered runtime cleanup (toolchain.md 5.1).
+  Ownership: the final boundary requires empty owning globals, including runtime globals (D17.19).
+  Residual caller allocation obligations also require discharge there.
+  The runtime does not automatically delete user globals or caller owners.
 - `args`: returns the same `string@` that `main` received (D8.6, D11.6): `args()[0]` is the
   program name and every element is NUL-terminated. Implemented as `rt.args()`. Ownership: a
   view of storage the runtime owns (D17.3, D13.5); `string@`
   carries no `own`, so `del` of the span or of an element does not compile (D17.9).
+  The runtime owns the header allocation. Each string borrows its bytes from C argv.
+  The view remains valid through source execution and applicable source defers.
+  Final normal-exit cleanup releases its header storage (D17.19).
 - `errno`: the value of C `errno` for the calling thread, read through
   `libc.__errno_location()`. It is meaningful only after a library call has reported failure.
   Ownership: none.
@@ -1230,13 +1236,19 @@ fn exit(i32 status) noreturn;
 - `args`: the `string@` the runtime built from `argv` at process start (D11.6). It is the same
   span `main` receives, so `sys.args()` and `main`'s parameter are equal span for span. The
   result is a view (D17.3): the runtime keeps the storage, and the span carries no `own`.
+  The runtime owns the header allocation and borrows the argv bytes.
+  Final normal-exit cleanup releases that allocation after source execution and applicable defers
+  (D17.19).
 - `flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
   no-op otherwise. `io.close` and `io.flush` call it, as D11.5 specifies.
 - `flush_all`: writes out every runtime buffer. The library does not call it; it is
   there for programs that write through `libc.write` after printing (2.2), and the `main` the
   compiler emits calls it at exit (D11.6).
-- `exit`: flushes every runtime buffer and exits with `status & 0xFF`; `sys.exit` is a
-  call to it.
+- `exit`: flushes every runtime buffer, then releases runtime-owned argument-header storage.
+  It exits with status & 0xFF. sys.exit calls it.
+  It does not run caller defers or automatically delete user globals.
+  The final normal-exit boundary follows its cleanup effects (D17.19).
+  A noreturn return type does not supply an abort cleanup exemption.
 
 Three properties of the runtime the library also depends on: `del` frees by the pointer alone,
 with no header and no length check (D10.3, D17.9, used by 1.3); `own` changes no bits, so a

@@ -552,11 +552,33 @@ calls `std.rt.args_init`, which builds a `string@` of `argc` strings whose bytes
 entries, each NUL-terminated, then `std.rt.args`, which writes that span into the frame of the
 emitted `main`. The emitted `main` then calls `<entry>.main`: with the span by hidden pointer
 (section 9) when `main` declares the parameter, and with no argument when it does not. That span is
-the caller-made copy, so no second copy exists. It then calls `std.rt.flush_all` (D11.5) and returns
-`status & 0xFF` (`toolchain.md` 6 item 22). `args[0]` is the program name. The runtime keeps the
-span for the life of the process and hands it out through `std.rt.args()` (`stdlib.md` 3), so that
-`sys.args()` works in modules whose `main` takes no parameter. `sys.exit` (D13.2) is the other
-normal exit; a runtime error aborts (D11.4).
+the caller-made copy, so no second copy exists.
+On normal source entry return, the generated entry flushes runtime buffers (D11.5).
+It then releases the runtime-owned argument-header allocation.
+The final owning-global boundary precedes its status & 0xFF return (D17.19; toolchain.md 2.1 and 6).
+args[0] is the program name. The runtime lends the span through std.rt.args() (stdlib.md 3).
+sys.args() therefore works when source main takes no parameter.
+Argument views remain valid during source execution and applicable source defers.
+Their runtime-owned header storage ends at final normal-exit cleanup.
+The string bytes remain borrowed from C argv.
+The generated sequence requires analysis coverage even outside source-function FIR (D17.19).
+
+std.sys.exit and std.rt.exit provide the other known normal process-exit path.
+They flush and release runtime argument storage before foreign exit.
+They do not unwind caller scopes or automatically delete user globals.
+Check final global and suspended-caller obligations after those ordered cleanup effects (D17.19).
+A runtime error aborts and requires no cleanup (D11.4).
+A noreturn type alone does not distinguish normal process exit from abort.
+
+An ordinary source function return does not end global storage.
+This includes calls to functions named main outside generated executable startup.
+Libraries retain owning globals between calls and provide ordinary callable cleanup functions.
+Library checking retains symbolic global state and inferred caller requirements (D17.19).
+The checked library closure defines its owning-global set.
+The host invokes cleanup after final use and before unload or normal host termination.
+Foreign callbacks trust symbolic caller inputs under D17.13.
+Their local storage and available fort effects still receive ordinary ownership analysis.
+Hidden foreign process termination and host cleanup invocation remain outside library proof.
 
 ## 12. Worked examples
 
