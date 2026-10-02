@@ -4,6 +4,7 @@
 //| G04.3 G05.1 G05.2
 //| G06.3 cycle join and widening
 //| duplicate union records
+//| bottom duplicate normalization
 /// Tests conservative predecessor joins in both operand orders.
 import ownership_api;
 import ownership_events;
@@ -410,6 +411,73 @@ fn duplicate_proofs(ownership_api.services* svc) void {
     ownership_state.free(&left);
 }
 
+fn bottom_duplicates(ownership_api.services* svc) void {
+    ownership_state.state mut reaching = ownership_state.empty();
+    ownership_state.state mut bottom = ownership_state.bottom();
+    ownership_api.allocation_fact a = allocation(110, 110, 110);
+    ownership_state.append_allocations(&reaching, a);
+    ownership_api.source_fact mut storage = ownership_api.source_fact{};
+    storage.key = id(ownership_api.entity_kind.source, 110);
+    storage.kind = ownership_api.source_kind.heap;
+    storage.validity = ownership_api.validity_kind.live;
+    storage.allocation = a.key;
+    ownership_state.append_sources(&reaching, storage);
+    ownership_api.borrow_relation[1] mut loans = {};
+    loans[0].key = id(ownership_api.entity_kind.relation, 110);
+    loans[0].source = storage.key;
+    loans[0].range.key = id(ownership_api.entity_kind.region, 110);
+    loans[0].range.source = storage.key;
+    loans[0].representation_complete = true;
+    ownership_api.contents_fact mut value = contents(110, 110);
+    value.borrows = loans[..];
+    ownership_state.append_contents(&reaching, value);
+    ownership_state.append_contents(&reaching, value);
+    ownership_api.correlation relation = ownership_api.correlation{
+        id(ownership_api.entity_kind.guard, 110),
+        id(ownership_api.entity_kind.value, 110),
+        id(ownership_api.entity_kind.slot, 110)};
+    ownership_state.append_correlations(&reaching, relation);
+    ownership_state.append_correlations(&reaching, relation);
+    ownership_api.predicate_atom mut predicate = ownership_api.predicate_atom{};
+    predicate.key = id(ownership_api.entity_kind.predicate, 110);
+    predicate.kind = ownership_api.predicate_kind.equality;
+    ownership_state.append_predicates(&reaching, predicate);
+    ownership_state.append_predicates(&reaching, predicate);
+    ownership_api.guard_fact mut guard = ownership_api.guard_fact{};
+    guard.key = relation.guard;
+    ownership_state.append_guards(&reaching, guard);
+    ownership_state.append_guards(&reaching, guard);
+    ownership_api.limit_table mut bound = ownership_limits.production();
+    bound.p = 1;
+    bound.g = 3;
+    ownership_api.operation_position at = op(110);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut join_left = ownership_join.join(&bottom, &reaching, svc,
+        &bound, at, source);
+    ownership_state.state mut join_right = ownership_join.join(&reaching, &bottom, svc,
+        &bound, at, source);
+    ownership_state.state mut widen_left = ownership_join.widen(&bottom, &reaching, svc,
+        &bound, at, source);
+    ownership_state.state mut widen_right = ownership_join.widen(&reaching, &bottom, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&join_left, &join_right));
+    assert(ownership_state.equal(&join_left, &widen_left));
+    assert(ownership_state.equal(&widen_left, &widen_right));
+    assert(join_left.contents_len == 1 && join_left.correlations_len == 1);
+    assert(join_left.predicates_len == 1 && join_left.guards_len == 1);
+    assert(join_left.losses_len == 0 && join_left.allocations[0].obligation);
+    assert(join_left.sources[0].validity == ownership_api.validity_kind.live);
+    assert(join_left.contents[0].borrows.len == 1);
+    assert(join_left.contents[0].borrows[0].source.ordinal == 110);
+    assert(join_left.contents[0].borrows[0].representation_complete);
+    ownership_state.free(&widen_right);
+    ownership_state.free(&widen_left);
+    ownership_state.free(&join_right);
+    ownership_state.free(&join_left);
+    ownership_state.free(&bottom);
+    ownership_state.free(&reaching);
+}
+
 fn main() i32 {
     ownership_events.store mut events = ownership_events.store{};
     ownership_api.services mut svc = ownership_api.services{};
@@ -426,6 +494,8 @@ fn main() i32 {
     duplicate_union(&svc);
     duplicate_proofs(&svc);
     println("duplicate union records");
+    bottom_duplicates(&svc);
+    println("bottom duplicate normalization");
     ownership_events.free(&events);
     return 0;
 }

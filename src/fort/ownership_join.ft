@@ -636,6 +636,20 @@ fn dedup_guards(ownership_state.state mut* s) void {
     }
 }
 
+fn dedup_exact(ownership_state.state mut* s) void {
+    dedup_contents(s);
+    dedup_correlations(s);
+    dedup_predicates(s);
+    dedup_guards(s);
+}
+
+fn clone_reaching(ownership_state.state* input) ownership_state.state {
+    ownership_state.state mut out = ownership_state.clone(input);
+    dedup_exact(&out);
+    dedup_collision_facts(&out);
+    return out;
+}
+
 fn drop_conflicting_predicates(ownership_state.state mut* s,
     ownership_api.source_position at) void {
     u64 mut i = 0;
@@ -846,19 +860,16 @@ fn compose(ownership_state.state* a, ownership_state.state* b,
     if (valid) { charged = ownership_api.charge_work(svc, work, op, at); }
     else { charged.allowed = true; }
     if (valid && a->proof.kind == ownership_api.proof_kind.bottom && charged.allowed) {
-        return ownership_state.clone(b);
+        return clone_reaching(b);
     }
     if (valid && b->proof.kind == ownership_api.proof_kind.bottom && charged.allowed) {
-        return ownership_state.clone(a);
+        return clone_reaching(a);
     }
     ownership_state.state mut out = ownership_state.empty();
     merge_sources(&out, a, b);
     merge_allocations(&out, a, b);
     merge_rest(&out, a, b);
-    dedup_contents(&out);
-    dedup_correlations(&out);
-    dedup_predicates(&out);
-    dedup_guards(&out);
+    dedup_exact(&out);
     mark_collisions(&out, at);
     dedup_collision_facts(&out);
     drop_conflicting_predicates(&out, at);
