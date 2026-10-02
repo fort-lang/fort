@@ -1005,12 +1005,48 @@ fn exit_stops_at(exit_kind x, scope_kind kind) bool {
     }
 }
 
+// A terminating inner defer skips all defers in each crossed outer scope.
+// Keep their source and exit identities without lowering normal cleanup.
+fn range_suppress_scope(lowerer mut* lw, u64 depth, diag.loc at) void {
+    if (cast(lw->next_exit_occurrence, u64) >= fir.U32_LIMIT) {
+        panic("fir_lower.range_suppress_scope: too many exit occurrences");
+    }
+    lw->next_exit_occurrence += 1;
+    u32 occurrence = lw->next_exit_occurrence;
+    u64 first = lw->scopes.items[depth].defers_first;
+    u64 mut i = defers_end(lw, depth);
+    while (i > first) {
+        i -= 1;
+        ast.node* deferred = gen.refs_at(&lw->defers, i);
+        u32 context = next_defer_context(lw);
+        range_defer_context_candidate_add(&lw->range_candidates.deferred,
+            range_defer_context_candidate{context, lw->defer_context, occurrence,
+                                          deferred, at});
+        range_suppressed(lw, deferred->a, context, occurrence, at);
+    }
+}
+
 // The unwind of the exit `n` of the kind `x` (spec/fir.md 9.5): from the innermost scope outward,
 // the deferred statements of each scope, then its `dead` markers at the exit, until the scope that
 // the exit leaves, whose depth goes to *stop. False when the lowering refuses a deferred
 // statement. A deferred statement that ends the block stops the unwind, and the caller then
 // writes no terminator. The checker refuses an exit that no scope above the floor stops (D7.8).
 fn unwind(lowerer mut* lw, ast.node* n, exit_kind x, u64 mut* stop) bool {
+    u64 scope_count = lw->scopes.len;
+    u32 mut@ own saved_loans = new(u32, scope_count);
+    u64 mut save = 0;
+    while (save < scope_count) {
+        saved_loans[save] = lw->scopes.items[save].range_loan;
+        save += 1;
+    }
+    defer {
+        u64 mut restore = 0;
+        while (restore < scope_count && restore < lw->scopes.len) {
+            lw->scopes.items[restore].range_loan = saved_loans[restore];
+            restore += 1;
+        }
+        del(saved_loans);
+    }
     u64 mut depth = lw->scopes.len;
     while (depth > lw->floor) {
         depth -= 1;
@@ -1019,6 +1055,14 @@ fn unwind(lowerer mut* lw, ast.node* n, exit_kind x, u64 mut* stop) bool {
             return false;
         }
         if (terminated(lw)) {
+            u64 mut outer = depth;
+            while (outer > lw->floor) {
+                outer -= 1;
+                range_suppress_scope(lw, outer, n->loc);
+                if (exit_stops_at(x, lw->scopes.items[outer].kind)) {
+                    break;
+                }
+            }
             return true;
         }
         if (loan != 0) {
@@ -1028,6 +1072,7 @@ fn unwind(lowerer mut* lw, ast.node* n, exit_kind x, u64 mut* stop) bool {
         if (loan != 0) {
             range_boundary_record(lw, loan, fir.range_boundary_kind.loan_exit, n->loc);
             range_boundary_record(lw, loan, fir.range_boundary_kind.outer_cleanup, n->loc);
+            lw->scopes.items[depth].range_loan = 0;
         }
         if (exit_stops_at(x, lw->scopes.items[depth].kind)) {
             *stop = depth;

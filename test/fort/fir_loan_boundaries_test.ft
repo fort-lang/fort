@@ -118,6 +118,18 @@ fn defer_context(fir_lower.range_candidate_set* proposed,
     panic("range boundary test: missing deferred context");
 }
 
+fn capture_at(fir_lower.range_candidate_set* proposed, u32 source_line,
+              u32 exit_line) fir_lower.range_capture_candidate* {
+    u64 mut i = 0;
+    while (i < proposed->captures.len) {
+        fir_lower.range_capture_candidate* c = &proposed->captures.items[i];
+        if (c->occurrence.source.line == source_line &&
+            c->occurrence.exit_source.line == exit_line) { return c; }
+        i += 1;
+    }
+    panic("range boundary test: missing capture occurrence");
+}
+
 fn cleanup_at(fir.func* f, fir_lower.range_candidate_set* proposed, u32 loan,
               u32 line) void {
     fir.range_boundary* start = boundary(proposed, loan, fir.range_boundary_kind.body_cleanup,
@@ -469,6 +481,70 @@ fn return_cleanup_order() void {
     assert(fir.block_at(&f, outer->block)->term.kind == fir.term_kind.tk_return);
 }
 
+// The inner loan ends before a function-scope defer starts another range.
+fn return_function_deferred_range() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 y : values) { } }",
+        "    for (i32 x : values) {",
+        "        return;",
+        "    }",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    fir_lower.range_capture_candidate* inner = capture_at(&cs, 3, 0);
+    fir_lower.range_capture_candidate* deferred = capture_at(&cs, 2, 4);
+    assert(cs.captures.len == 3);
+    assert(!deferred->loan.parent_present);
+    fir.range_boundary* ended = boundary(&cs, inner->expansion,
+                                          fir.range_boundary_kind.loan_exit, 4);
+    fir.range_boundary* started = boundary(&cs, deferred->expansion,
+                                            fir.range_boundary_kind.capture, 2);
+    assert(ended->block == started->block && ended->position <= started->position);
+}
+
+// The outer body loan remains active when its defer starts a range after an inner return.
+fn return_outer_body_deferred_range() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn walk(i32[2] values) void {",
+        "    for (i32 outer : values) {",
+        "        defer { for (i32 y : values) { } }",
+        "        for (i32 inner : values) {",
+        "            return;",
+        "        }",
+        "    }",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    fir_lower.range_capture_candidate* outer = capture_at(&cs, 2, 0);
+    fir_lower.range_capture_candidate* inner = capture_at(&cs, 4, 0);
+    fir_lower.range_capture_candidate* deferred = capture_at(&cs, 3, 5);
+    assert(deferred->loan.parent_present);
+    assert(deferred->loan.parent == outer->expansion);
+    assert(deferred->loan.parent != inner->expansion);
+    fir.range_boundary* ended = boundary(&cs, inner->expansion,
+                                          fir.range_boundary_kind.loan_exit, 5);
+    fir.range_boundary* started = boundary(&cs, deferred->expansion,
+                                            fir.range_boundary_kind.capture, 3);
+    assert(ended->block == started->block && ended->position <= started->position);
+}
+
 // A terminating body has no normal cleanup boundary on its abort edge.
 fn abort_without_cleanup() void {
     lower_env.env mut e = lower_env.env{};
@@ -555,6 +631,37 @@ fn suppressed_defer() void {
     assert(!f.range_source_complete);
 }
 
+// An inner abort skips a function-scope defer on the crossed return path.
+fn suppressed_outer_defer() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    {",
+        "        defer panic(\"stop\");",
+        "        return;",
+        "    }",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.declarations.len == 1 && cs.captures.len == 0);
+    assert(cs.suppressions.len == 1 && cs.deferred.len == 2);
+    assert(cs.suppressions.items[0].source.line == 2);
+    assert(cs.suppressions.items[0].exit_source.line == 5);
+    fir_lower.range_defer_context_candidate* outer =
+        defer_context(&cs, cs.suppressions.items[0].context);
+    assert(outer->source_node->loc.line == 2 && outer->parent == 0);
+    assert(outer->exit_occurrence == cs.suppressions.items[0].exit_occurrence);
+    assert(cs.boundaries.len == 0 && !f.range_source_complete);
+}
+
 // A nested deferred range names the inner context and its outer context.
 fn nested_deferred_context() void {
     lower_env.env mut e = lower_env.env{};
@@ -630,12 +737,15 @@ fn main() i32 {
     switch_and_loop_break();
     break_done_path();
     return_cleanup_order();
+    return_function_deferred_range();
+    return_outer_body_deferred_range();
     abort_without_cleanup();
     zero_iterations();
     println("boundary groups 4 probes 9");
     capture_repeats();
     println("capture repeats 8");
     suppressed_defer();
+    suppressed_outer_defer();
     println("suppressed defer proposal");
     nested_deferred_context();
     println("nested deferred context");

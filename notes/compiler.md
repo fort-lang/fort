@@ -126,6 +126,9 @@ came here.
   A zero-iteration path has capture but does not enter the body. Nested loans name their parent.
   Each deferred lowering occurrence has its own expansion ID and exit occurrence.
   A context proposal maps its ID to the source `defer`, enclosing context, and exit occurrence.
+  Return unwind hides ended inner loans before it lowers enclosing defers. A range in an outer
+  body defer sees the active outer loan. A range in a function defer sees no ended loan.
+  A terminating inner defer records suppression for skipped defers in crossed outer scopes.
   A skipped defer records a suppression proposal with no capture. All proposals stay outside FIR.
   The producer frees unused proposals on each path. A caller owns returned proposals.
   Source completeness remains false until independent source correspondence validates them.
