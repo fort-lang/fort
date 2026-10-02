@@ -823,6 +823,7 @@ fn join(ownership_state.state* a, ownership_state.state* b,
         valid, op, at);
     if (!valid) { return out; }
     cover_bounds(&out, limits, at);
+    dedup_contents(&out);
     dedup_collision_facts(&out);
     return out;
 }
@@ -890,6 +891,21 @@ fn cover_regions(ownership_state.state mut* s, ownership_api.limit_table* limits
         used = plus_count(used, s->regions[i].partitions.len);
         i += 1;
     }
+    i = 0;
+    while (i < s->edges_len) {
+        used = plus_count(used, s->edges[i].range.partitions.len);
+        i += 1;
+    }
+    i = 0;
+    while (i < s->contents_len) {
+        u64 mut j = 0;
+        while (j < s->contents[i].borrows.len) {
+            used = plus_count(used, 1);
+            used = plus_count(used, s->contents[i].borrows[j].range.partitions.len);
+            j += 1;
+        }
+        i += 1;
+    }
     if (used <= limits->r && !has_bound_loss(s, ownership_api.limit_category.r)) {
         return;
     }
@@ -933,6 +949,26 @@ fn cover_regions(ownership_state.state mut* s, ownership_api.limit_table* limits
         s->edges[i].kind = ownership_api.edge_kind.residual;
         s->edges[i].place.residual = true;
         s->edges[i].range = blur_region(s, s->edges[i].range);
+        i += 1;
+    }
+    i = 0;
+    while (i < s->contents_len) {
+        ownership_api.borrow_relation@ old = s->contents[i].borrows;
+        if (old.len > 0) {
+            ownership_api.borrow_relation mut@ own pending =
+                new(ownership_api.borrow_relation, old.len);
+            u64 mut j = 0;
+            while (j < old.len) {
+                remember_loss(s, ownership_api.limit_category.r, limits->r, at,
+                    old[j].range.key);
+                pending[j] = old[j];
+                pending[j].range = blur_region(s, old[j].range);
+                pending[j].representation_complete = false;
+                j += 1;
+            }
+            s->contents[i].borrows = ownership_state.copy_borrows(s, pending[..]);
+            del(pending);
+        }
         i += 1;
     }
     i = 0;
@@ -1153,6 +1189,7 @@ fn widen(ownership_state.state* a, ownership_state.state* b,
     dedup_contents(&out);
     dedup_collision_facts(&out);
     cover_bounds(&out, limits, at);
+    dedup_contents(&out);
     dedup_collision_facts(&out);
     return out;
 }
