@@ -26,11 +26,11 @@ The files below stand in `spec/`. Each one implements the decisions it cites and
 | `spec/project-overview.md` | what fort is, the phases, and the reading order |
 | `spec/core-language.md` | statements, expressions, functions, and the core syntax |
 | `spec/type-system.md` | types, mutability, conversions and constants |
-| `spec/memory-model.md` | where values live, ownership, pointers, spans and the run-time checks |
+| `spec/memory-model.md` | storage, ownership proof, foreign trust, and runtime checks |
 | `spec/module-system.md` | modules, imports, name resolution and the C foreign function interface |
 | `spec/stdlib.md` | the standard library |
-| `spec/toolchain.md` | the command line, the build pipeline, diagnostics, the runtime, codegen |
-| `spec/fir.md` | FIR, the representation between the checker and the LLVM IR text (D19.8) |
+| `spec/toolchain.md` | options, staged ownership delivery, diagnostics, runtime, and codegen |
+| `spec/fir.md` | FIR, source and alias obligations, ordered effects, and LLVM translation (D19.8) |
 
 ## Engineering knowledge
 

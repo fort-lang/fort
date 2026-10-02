@@ -31,7 +31,8 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--target <triple>` | select the IR target; pass it to `--cc` (D14.1)              | see below  |
 | `--cfg <list>`      | add compile-time `key=value` pairs; repeatable (D21.1)      | none       |
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
-| `--check`           | run the front end only and stop (D20.1)                    | off        |
+| `--check`           | check source and selected ownership proof (D20.1)          | off        |
+| `--ownership-check` | select the ownership feature during delivery (D19.8)       | off        |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
 | `--index`           | fill the document's identifier index (D20.3)               | off        |
 | `--tokens`          | write the entry file's tokens to stdout and stop (D14.1)   | off        |
@@ -43,6 +44,15 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--fir-stats`       | after the build, write `lowered N of M` (D14.1)            | off        |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
+
+Ownership delivery selects the whole feature temporarily with --ownership-check (D19.8).
+This option selects the complete proof in check mode and build mode.
+It never exempts one operation, an imported fort module, or an available runtime body.
+Complete feature validation before migrating compiler, runtime, library, and LSP source.
+Use isolated source and FIR fixtures during feature development. Keep the ordinary gate unchanged
+while selection remains optional. After migration, require the analysis by default and remove
+--ownership-check. This staged contract does not claim current compiler completion.
+The proof adds no runtime ownership checks. It preserves the representations and ABI in section 6.
 
 - `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg` and `-Xcc` take the following argument;
   `-l<lib>` is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc`
@@ -312,6 +322,9 @@ Compilation is whole-program (D9.10):
    closure beside the entry file. The compiler loads it whether or not anything imports it (D9.10,
    D21.2, D21.3, section 5).
 3. Check every module in dependency order, imported modules first (exit 1).
+   When ownership analysis is selected, lower and verify the available fort bodies in the closure.
+   Infer summaries and check ownership obligations before build-mode transformations (D19.8).
+   This includes std.rt from std/rt.ft. A proof failure is a source error (exit 1).
 4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
    and stop.
 5. Run `<cc>` over that module once: it compiles and links in one invocation (D14.3), exit 2 on
@@ -338,7 +351,8 @@ Compilation is whole-program (D9.10):
 
 `--check` stops after step 3 (D20.1): it emits no module, creates no temporary directory, runs no
 `--cc`, and does not apply the entry-point rule of D8.6, since the file it is given is a module
-under inspection rather than a program.
+under inspection rather than a program. Selected ownership analysis uses symbolic inputs for
+available fort bodies. Check and build modes use the same ownership proof (D20.1, D19.8).
 
 - The temporary directory comes from `mkdtemp` under `$TMPDIR` (default `/tmp`) and is removed
   whether or not `--cc` succeeded.
@@ -385,12 +399,19 @@ the checks below is that `--cc` compiles the module with `-O2` instead of `-O1` 
 
 "Trap" is the runtime error contract of D11.4: flush, one line on stderr, `abort()`. "Wrap" is
 two's complement; "masked" means `count & (width - 1)`; "no check" means the store happens and
-the allocation the old value designated leaks (D17.11). Programs must not rely on wrapping or
+the allocation the old value designated would leak without the static proof (D17.11).
+Selected ownership analysis rejects a store that loses that obligation in all build modes (D19.8).
+Programs must not rely on wrapping or
 trapping for correctness (D11.1); the wrapping operators exist for code that needs wrap-around in
-both modes. `p[lo..hi]` on a raw pointer is never checked (D6.9), and the undefined behaviors of
-D10.7 are undefined in every mode.
+both modes. A raw-pointer span adds no runtime range check (D6.9).
+Fort storage still requires source and extent proof. Foreign storage uses D17.13 trust.
+The undefined behaviors of D10.7 remain undefined in every mode.
 
 ## 4. Diagnostics
+
+Ownership errors use the existing source diagnostic contract (D17.14, D20.1).
+Check mode and build mode report the same selected proof verdicts.
+JSON keeps its existing schema and includes the same error and note ranges (D20.2).
 
 Compile-time diagnostics (D14.2) are written to stderr. Each one starts with a header line:
 

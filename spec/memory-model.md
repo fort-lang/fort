@@ -117,8 +117,10 @@ lvalue, empties it: the pointer becomes `null`, the span or string `{null, 0}` (
 Emptying is not an assignment, so the binding need not be `mut`; an operand reached through an
 indirection (`*p`, `p->f`, `s[i]`) needs that level to be mutable, because the store is visible
 to everyone else who holds the pointer or span (D17.6). A zero operand is a no-op, so
-`del(buf); del(buf);` frees once, and a use after `del` dereferences `null` instead of freed
-memory (D17.9). On an rvalue operand `del` only frees.
+`del(buf); del(buf);` frees once (D17.9). Zero-value inspections remain legal.
+The proof rejects a proved empty-owner dereference and invalid use of a released borrow (D17.14).
+A zero-element allocation still requires release or transfer. Zero length does not mean empty.
+On an rvalue operand `del` only frees.
 
 | Operand                                            | Effect                                      |
 |----------------------------------------------------|---------------------------------------------|
@@ -140,7 +142,7 @@ memory (D17.9). On an rvalue operand `del` only frees.
 node mut* own n = new(node);
 del(n);                              // n == null afterwards
 del(n);                              // no-op
-n->value = 1;                        // dereferences null: a segfault, never a write to freed memory
+n->value = 1;                        // proof error: n is empty
 i32 mut@ own xs = new(i32, 8);
 i32@ view = xs;                      // lends: view designates the same elements (D17.4)
 del(view);                           // error: cannot del 'view': not an own type (D17.9)
@@ -260,6 +262,7 @@ its body. This rule also applies through aliases. The checker permits a fort cal
 ownership operation only when it proves that the operation preserves the collection storage.
 Element writes remain legal if they do not invalidate the collection storage.
 A loop that changes its collection storage uses `while`.
+The loan lasts for the whole loop body. Local last-use reasoning does not shorten it (D17.10).
 
 Structs and fixed arrays that contain an `own` reference by value are owning aggregates: they
 are moved like `own` references, returned from a local by an implicit move, and never `del`ed,
@@ -291,7 +294,10 @@ del(kids);                           // frees the slots; the remaining nodes mus
 `new(node mut*, 4)` yields `node mut* mut@ own`, slots that borrow; `new(node mut* own, 4)` yields
 `node mut* own mut@ own`, slots that own what is later moved into them (D17.3). Each spelling says
 what its slots reach, because `new` marks the storage it allocates and nothing below it (D10.2).
-The `cast` that adds `own` is reserved for memory from C (section 4.5).
+A cast never adds `own` (D3.14). Foreign memory gains ownership through an owning extern result
+(section 4.5, D17.13). Transfer preserves the allocation identity independently of its owner place.
+Heap views remain valid across transfer. Addresses of owner slots instead observe changed contents
+(D17.5, D17.6).
 
 ### 2.4 Cleanup idioms
 
@@ -443,23 +449,55 @@ exactly three things for ownership:
 
 ```fort
 u8 mut@ own mut buf = new(u8, 4);
-buf = new(u8, 8);                    // checked: overwriting owned value; release: the old buf leaks
+buf = new(u8, 8);                    // proof error: the previous allocation would be lost
 del(buf);
 buf = new(u8, 8);                    // fine: buf was {null, 0}
 u8 mut@ own other = move(buf);       // buf is {null, 0} again
 buf = move(other);                   // fine
 list mut l = {};
 l.head = new(node);                  // fine: zero-initialized field
-l = list{};                          // not checked: an aggregate assignment (D17.11); leaks
+l = list{};                          // proof error: the aggregate still has an owned leaf
 ```
 
-What is not tracked, exactly as in C (D10.7, D17.14): a view, or a copy of an `own` value made
-before a `move` or `del`, that is used after the allocation was freed; an `own` value that is never
-freed (a leak); and `del` of an `extern` result that is not the start of an allocation. The first
-and last are undefined behavior (section 8); a leak is merely a leak. The compile-time (linear)
-check that would make leaks and use after `move` errors is deferred (D15); `move` and `del` zero
-what they take so that those mistakes surface as `null` dereferences rather than as writes to freed
-memory.
+**Static proof (D17.14, D19.8).** The proof checks temporal storage and allocation ownership in
+all build modes. It checks old owning leaves after right-side effects, before their replacement.
+Runtime overwrite checks remain separate. Their removal supplies no proof of destination emptiness.
+
+Record place contents separately from source validity. Record allocation identity separately from
+the place that currently owns it. Release invalidates that allocation's borrows.
+Refilling the owner place does not revive earlier borrows. Copying a borrow preserves its source.
+Track retained sources through fields, elements, casts, globals, and available fort calls.
+Mutable aliases remain legal. Substitute aliases before applying ordered ownership effects.
+Taking an address or retaining a reference never removes these obligations.
+
+Release or transfer residual owned leaves before normal storage end.
+Keep `del` shallow. Release or transfer live owned descendants before their containing allocation.
+Local storage ends at its FIR dead marker. Temporary storage ends at its source-defined boundary.
+By-value parameter storage ends at normal return after deferred effects, even without a dead marker.
+Check residual parameter leaves and escaping borrows at that boundary.
+Symbolic caller storage remains separate from a borrowed parameter slot.
+A whole aggregate move transfers all fields. It does not rebase addresses into inline storage.
+Bind aggregate result storage to its actual caller destination, including argument and global
+aliases.
+Preserve the FIR order of result writes and deferred effects (`fir.md` 9.6 and 14).
+
+Permit release after a borrow's last semantic use. An unused dangling local alone requires no error.
+An escaping result or retained field preserves caller obligations beyond local last use.
+Permit a store that replaces a dead borrow without reading its previous value.
+Check each reaching path at the operation that needs proof. Different branch states alone are legal.
+Loops retain zero-iteration paths and obligations across iterations and scope exits.
+Normal return requires cleanup after deferred effects. Abort paths require no cleanup.
+Unknown call outcomes preserve possible normal continuations and their cleanup obligations.
+
+Executable owning globals must be empty at normal exit.
+Libraries retain ownership between calls and provide explicit cleanup (D17.14).
+These obligations cover memory. They add no resource type system for scalar handles.
+Foreign effects remain outside proof (section 4.5). The proof does not establish total memory
+safety.
+Existing bounds, nullability, arithmetic, data-race, layout, and ABI rules still apply (D10.7).
+The proof adds no runtime identity tracking, source exemptions, lifetime annotations, or unsafe
+syntax.
+`toolchain.md` 1 defines staged whole-feature selection and migration.
 
 ## 3. Pointers
 
@@ -512,16 +550,19 @@ del(w);                              // error: cannot del 'w': not an own type (
 del(o);                              // o == null; w now dangles
 ```
 
-`null` is the zero pointer and function-pointer value (D10.5). Dereferencing `null` or a dangling
-pointer is undefined behavior, in practice a segmentation fault (D10.5, D10.7).
+`null` is the zero pointer and function-pointer value (D10.5).
+The proof rejects invalid or unproved fort temporal storage access (D10.7, D17.14).
+Null dereference and foreign dangling-pointer access remain undefined behavior (D10.7, D17.13).
 
 ### 3.1 From a raw pointer to a span
 
 There is no pointer arithmetic (D10.4). The only way to view memory behind a raw pointer as
 elements is `p[lo..hi]`, which yields a `T@` (or `T mut@` from a `T mut*`) with `ptr` advanced
-by `lo` elements and `len == hi - lo`, performing no check at all (D6.9). The result is a view
-whether or not `p` is `own` (D17.3). It is the explicit unsafe escape for foreign memory: a
-range that extends beyond the object, or `hi < lo`, is undefined behavior (D10.7). Only the
+by `lo` elements and `len == hi - lo`, without a runtime range check (D6.9).
+The result is a view whether or not `p` is `own` (D17.3).
+For fort storage, prove a live source and sufficient extent for the range (D17.14).
+Foreign storage uses D17.13 trust. Foreign ranges beyond the object remain undefined behavior.
+The operation supplies no proof exemption. Only the
 two-bound form exists for pointers, because a pointer has no length; `p[lo..]`, `p[..hi]` and
 `p[..]` are errors, as is any span expression on a `void*` (D6.9).
 
@@ -621,7 +662,7 @@ other, and both are invalidated together when the storage goes away.
 i32 mut@ own a = new(i32, 4);
 i32 mut@ b = a[1..3];
 b[0] = 9;                            // a[1] == 9
-del(a);                              // b now dangles; using it is undefined (D10.7)
+del(a);                              // b now dangles; the proof rejects later semantic use
 ```
 
 A `move` changes which reference is responsible, not the allocation: views made before it stay
@@ -633,24 +674,26 @@ i32 mut@ own a = new(i32, 4);
 i32@ w = a;                          // a view
 i32 mut@ own c = move(a);            // a is {null, 0}; w still designates the elements
 i32 first = w[0];                    // fine
-del(c);                              // w now dangles (D10.7); a and c are {null, 0}
-i32 gone = a[0];                     // runtime error: index 0 out of range for length 0
+del(c);                              // w now dangles; a and c are {null, 0}
+i32 gone = a[0];                     // proof error: access through a proved empty owner
 ```
 
-Taking a span of a local array produces a span into the current frame. Returning it, storing it in a
-heap object, or keeping it past the block is undefined behavior, exactly as returning `&local` is
-in C; the compiler does not diagnose it (D6.7, D10.7).
+Taking a span of a local array produces a span into that array's storage.
+The proof rejects returned or retained borrows that outlive the storage (D6.7, D17.14).
+The same rule covers local addresses, inline aggregate fields, and by-value parameter storage.
+A borrowed parameter's slot and the symbolic caller storage it references have separate boundaries.
 
 ```fort
 fn window() i32@ {
     i32[4] mut a = {1, 2, 3, 4};
-    return a[1..3];                  // undefined: points into a frame that no longer exists
+    return a[1..3];                  // proof error: the local array storage ends at return
 }
 ```
 
 Copying a span copies the header only (D8.2); the elements are shared. A `for (T x : s)` loop
 evaluates `s` once before the loop and copies each element at the start of its iteration (D7.5),
-so replacing `s` inside the loop does not change what is iterated.
+and holds its header before the first iteration. The whole-body loan prohibits collection-storage
+invalidation, including through aliases and calls (D17.10).
 
 ### 4.4 Strings
 
@@ -722,6 +765,27 @@ a view (`p[0..n]`), so the pointer stays the one `own` value of the allocation (
 function whose result is owned on some calls only is declared in its borrowing form, and a fort
 function allocates the buffer (D17.13; `stdlib.md` 2.2 declares `realpath` so). `del` of an
 `extern` result that does not start an allocation is undefined (D10.7).
+
+An extern declaration is the implicit foreign trust boundary (D17.13).
+It requires no lifetime annotation, unsafe construct, compiler contract, or effect summary.
+Trust its declared ABI, types, ownership convention, storage validity, and extent.
+Check known fort argument sources before the call. Apply signature ownership transfers.
+An own argument transfers its obligation. A borrowed argument alone does not transfer ownership.
+An own result creates a fresh obligation under the declaration's uniqueness promise.
+A borrowed result has a trusted foreign source. Permit access and slicing without an inferred
+source relation or static allocation extent. Missing foreign bodies or summaries cause no error.
+This trust does not prove non-nullness, initialization, alignment, or foreign storage lifetime.
+Foreign callers and implementations must satisfy those requirements.
+
+Keep known fort ownership facts across the call. Missing summaries do not block later cleanup.
+Hidden foreign aliases, retention, releases, writes, and callbacks remain outside the proof.
+This is a proof limit, not evidence that foreign code has no effects.
+A foreign result can alias fort storage. Without a source relation, the proof cannot invalidate it
+when fort later releases that storage. Foreign buffer reuse and handle closure remain outside proof.
+Preserve foreign trust through copies, casts, fields, returns, and fort wrappers.
+Other fort sources keep their proof obligations. A raw cast cannot create foreign trust.
+Trust arguments supplied at foreign entry points. Analyze each fort callback body with symbolic
+caller storage and ordinary fort ownership rules (`fir.md` 14).
 
 ```fort
 extern fn malloc(u64 n) void mut* own;
@@ -817,7 +881,7 @@ the offending values of the failing check, written as signed decimals.
 | shift count                 | runtime error     | count taken modulo width | unchanged           |
 | division                    | runtime error     | runtime error            | unchanged           |
 | `new` count, size, failure  | runtime error     | runtime error            | unchanged           |
-| `own` overwrite (D17.11)    | runtime error     | no check: old value leaks| unchanged           |
+| `own` overwrite (D17.11)    | runtime error     | no runtime check        | unchanged           |
 | `assert`, `panic`           | runtime error     | runtime error            | unchanged           |
 | `noreturn` guard            | trap              | trap                     | unchanged           |
 
@@ -826,7 +890,7 @@ Notes:
 - Index and span checks compare unsigned: a signed index is sign-extended and a negative value
   becomes a huge unsigned number that fails the single comparison (D6.8). A constant index out of
   range for a fixed array is a compile error instead (D6.8). `p[lo..hi]` on a pointer is never
-  checked (D6.9).
+  runtime checked (D6.9). Fort raw-pointer spans still require static source and extent proof.
 - Overflow checks cover signed and unsigned integers alike, so `len - 1` on an empty span traps
   in checked mode (D11.1, D16). The wrapping operators exist so hashes and counters behave
   identically in both modes (D11.2). Programs must not rely on either overflow behavior (D11.1).
@@ -835,8 +899,9 @@ Notes:
 - Division checks apply at every width and in both modes (D6.13, D11.3).
 - `assert` is active in both modes; its message carries the source text of the argument (D12.2).
 - The overwrite check guards every store into an lvalue of `own` reference type, a declaration
-  included, and nothing else: `move`, `del` and aggregate assignments are never checked (D17.11,
-  section 2.5). A release build stores without looking, and the old allocation leaks.
+  included, and nothing else: `move`, `del` and aggregate assignments emit no runtime overwrite
+  check (D17.11, section 2.5). Release builds omit that check.
+  The selected static proof rejects stores that lose old owning leaves in all build modes.
 - The `noreturn` guard is `call void @llvm.trap()` followed by `unreachable`, emitted after the
   body of a `noreturn` function and after every call to one (D8.5, D19.7). It is reachable only
   when an `extern` declared `noreturn` returns anyway. Linux x86-64 raises SIGILL.
@@ -860,7 +925,7 @@ i32 e = a / zero;                    // runtime error: division by zero
 assert(s.len == 3);                  // passes
 assert(s.len == 4);                  // main.ft:15:1: assertion failed: s.len == 4
 u8 mut@ own mut buf = new(u8, 2);
-buf = new(u8, 4);                    // checked: overwriting owned value; release: the old buf leaks
+buf = new(u8, 4);                    // proof error: the previous allocation would be lost
 ```
 
 ## 7. The runtime-error contract
@@ -909,32 +974,30 @@ The runtime is `std.rt`, fort like the rest of the library (D13.1).
 
 ## 8. Undefined behavior
 
-Undefined behavior in v1 is limited to the following list; everything else is either defined or
-a diagnosed error (D10.7). None of these is detected.
+The ownership proof rejects invalid or unproved fort temporal storage operations (D10.7, D17.14).
+It rejects local storage escapes, use of released fort borrows, and proved empty-owner dereferences.
+It also checks cleanup and ownership transfer obligations. These are compile-time errors.
+Staged whole-feature selection follows `toolchain.md` 1 (D19.8).
 
-| Undefined behavior                             | Example                                    |
-|------------------------------------------------|--------------------------------------------|
-| a view or stale copy used after the free       | `i32@ v = a; del(a); i32 x = v[0];`       |
-| `del` of an `extern` result not at the start   | `del(p)` for a C `own` result inside a block |
-| dereferencing `null`                           | `node* q = null; i32 v = q->value;`        |
-| dereferencing a dangling pointer               | `fn f() i32* { i32 x = 1; return &x; }`    |
-| `p[lo..hi]` beyond the object                  | `i32 one = 0; i32@ s = (&one)[0..4];`     |
-| calling a null function pointer                | `fn () void f = null; f();`                 |
-| data races                                     | two threads from `extern` writing one `g`  |
+The following behavior remains undefined under D10.7. Foreign trust can hide these violations.
 
-Returning or storing a span of a local array is the span form of the dangling-pointer case
-(section 4.3). Reading an object after its `del` through any alias, including a copy of the
-`own` value made by lending before the `del` or `move`, is the first row (D10.7, D17.14). Use
-after `del` or `move` through the emptied reference itself is not in the list: it dereferences
-`null` or indexes a zero-length span, a segfault or a bounds error (D17.9); double `del`
-through one reference is a no-op (D17.9), and through two copies it is the first row. `del` of
-a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error (D17.9), and no
-cast adds `own` to such a value (D3.14). So the second row needs an `extern` that says `own` of
-a result that does not start an allocation. Not undefined and not detected: an `own` value that
-is never freed (D17.14).
+| Undefined behavior | Boundary |
+|---|---|
+| Foreign dangling result or hidden invalidation | Storage validity uses D17.13 trust. |
+| Foreign ownership duplication or invalid release | An own result must satisfy its declaration. |
+| Foreign own result inside an allocation | Del requires the allocation start. |
+| Foreign raw-pointer range beyond the object | Foreign extent uses D17.13 trust. |
+| Null dereference | Existing nullability rules still apply. |
+| Calling a null function pointer | The ownership proof adds no new null check. |
+| Data races | Foreign threads can race on shared storage. |
 
-Explicitly not undefined: there is no strict-aliasing rule. Reading an object through a pointer
-to another type of the same size is defined and yields the bit pattern (D10.7):
+The proof does not establish total memory safety. Bounds and arithmetic keep their existing rules.
+Double del through one emptied owner remains a no-op. Zero-value inspections remain legal (D17.9).
+Del of a view, sub-span, .ptr, stack address, or literal remains a type error.
+A cast never adds own or mut (D3.14).
+
+There is no strict-aliasing rule. Reading through another same-size type yields the bit pattern.
+The access still needs a live source and sufficient extent (D10.7, D17.14).
 
 ```fort
 f64 x = 1.0;
@@ -1133,9 +1196,8 @@ a `string own` from `take` (D13.2, D13.5).
 
 ## 10. Not in v1
 
-Arena allocators as a language feature, leak detection, use-after-free detection, alignment and
-packed attributes, and compile-time (linear) ownership tracking are outside v1; D15 lists the
-deferred features with the idiom to use for each. `own` records who frees, and `move` and `del`
-zero what they take (D17), so a leak stays a leak and a use after `move` or `del` is a `null`
-dereference rather than a write into freed memory (D17.14). The `extern` boundary reaches every
-C allocator and every C library in the meantime.
+Arena allocators as a language feature, alignment attributes, and packed attributes remain deferred
+(D15). The ownership proof belongs to v1 (D17.14, D19.8).
+A stricter prohibition on current zero-value inspections after move or del remains deferred.
+The proof does not add a general resource type system for scalar handles.
+The extern boundary keeps the foreign proof limits of section 4.5.
