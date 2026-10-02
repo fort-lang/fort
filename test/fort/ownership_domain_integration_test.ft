@@ -47,7 +47,7 @@ fn combined_teardown() void {
         assert(ownership_events.bind(&events, &bounds, &svc));
         ownership_api.operation_position at = op(cast(round + 1, u32));
         ownership_api.source_position source = ownership_api.source_position{};
-        ownership_state.state mut joined = ownership_join.join(&a, &b, &svc, at, source);
+        ownership_state.state mut joined = ownership_join.join(&a, &b, &svc, &bounds, at, source);
         assert(ownership_api.successful(joined.proof));
         assert(joined.allocations_len == 2);
         assert(joined.allocations[0].obligation && joined.allocations[1].obligation);
@@ -79,17 +79,17 @@ fn missing_services() void {
     ownership_api.services mut absent = ownership_api.services{};
     ownership_api.operation_position at = op(31);
     ownership_api.source_position source = ownership_api.source_position{};
+    ownership_api.limit_table bounds = ownership_limits.production();
     ownership_state.state mut no_budget = ownership_join.join(&live, &empty,
-        &absent, at, source);
+        &absent, &bounds, at, source);
     assert(no_budget.proof.kind == ownership_api.proof_kind.incomplete);
     assert(no_budget.proof.terminal.reason == ownership_api.incomplete_reason.missing_budget);
     assert(no_budget.allocations_len == 1 && no_budget.allocations[0].obligation);
     ownership_events.store mut events = ownership_events.store{};
-    ownership_api.limit_table bounds = ownership_limits.production();
     assert(ownership_events.bind(&events, &bounds, &absent));
     absent.event = null;
     ownership_state.state mut no_event = ownership_join.join(&live, &empty,
-        &absent, at, source);
+        &absent, &bounds, at, source);
     assert(no_event.proof.kind == ownership_api.proof_kind.incomplete);
     assert(no_event.proof.terminal.reason == ownership_api.incomplete_reason.missing_events);
     assert(no_event.allocations_len == 1 && no_event.allocations[0].obligation);
@@ -118,10 +118,17 @@ fn rejected_limits() void {
     assert(ownership_events.bind(&valid_events, &good, &svc));
     ownership_api.operation_position at = op(32);
     ownership_api.source_position source = ownership_api.source_position{};
+    u64 before_work = valid_events.budget.used.w;
+    ownership_state.state mut invalid_join = ownership_join.join(&live, &empty,
+        &svc, &bad, at, source);
+    assert(invalid_join.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(invalid_join.allocations_len == 1 && invalid_join.allocations[0].obligation);
     ownership_state.state mut invalid_widen = ownership_join.widen(&live, &empty,
         &svc, &bad, at, source);
     assert(invalid_widen.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
     assert(invalid_widen.allocations_len == 1 && invalid_widen.allocations[0].obligation);
+    assert(valid_events.budget.used.w == before_work);
+    ownership_state.free(&invalid_join);
     ownership_state.free(&invalid_widen);
     ownership_events.free(&valid_events);
     ownership_events.free(&version_events);
@@ -141,9 +148,10 @@ fn exhausted_work() void {
     assert(ownership_events.bind(&events, &bounds, &svc));
     ownership_api.operation_position at = op(33);
     ownership_api.source_position source = ownership_api.source_position{};
-    ownership_state.state mut first = ownership_join.join(&live, &empty, &svc, at, source);
+    ownership_state.state mut first = ownership_join.join(&live, &empty, &svc, &bounds, at, source);
     assert(ownership_api.successful(first.proof));
-    ownership_state.state mut second = ownership_join.join(&live, &empty, &svc, at, source);
+    ownership_state.state mut second = ownership_join.join(&live, &empty, &svc,
+        &bounds, at, source);
     assert(second.proof.kind == ownership_api.proof_kind.incomplete);
     assert(second.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
     assert(second.proof.terminal.limit.present);
@@ -169,15 +177,15 @@ fn boundary_states() void {
     ownership_api.operation_position at = op(34);
     ownership_api.source_position source = ownership_api.source_position{};
     ownership_state.state mut bottom_left = ownership_join.join(&unreachable, &live,
-        &svc, at, source);
+        &svc, &bounds, at, source);
     ownership_state.state mut bottom_right = ownership_join.join(&live, &unreachable,
-        &svc, at, source);
+        &svc, &bounds, at, source);
     assert(ownership_state.equal(&bottom_left, &live));
     assert(ownership_state.equal(&bottom_left, &bottom_right));
     ownership_state.state mut unknown_left = ownership_join.join(&unknown, &live,
-        &svc, at, source);
+        &svc, &bounds, at, source);
     ownership_state.state mut unknown_right = ownership_join.join(&live, &unknown,
-        &svc, at, source);
+        &svc, &bounds, at, source);
     assert(ownership_state.equal(&unknown_left, &unknown_right));
     assert(unknown_left.proof.kind == ownership_api.proof_kind.incomplete);
     assert(unknown_left.allocations_len == 1 && unknown_left.allocations[0].obligation);

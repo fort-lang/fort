@@ -56,6 +56,13 @@ fn op(u32 ordinal) ownership_api.operation_position {
     return out;
 }
 
+fn joined(ownership_state.state* a, ownership_state.state* b,
+    ownership_api.services* svc, ownership_api.operation_position at,
+    ownership_api.source_position source) ownership_state.state {
+    ownership_api.limit_table bounds = ownership_limits.production();
+    return ownership_join.join(a, b, svc, &bounds, at, source);
+}
+
 fn alternatives(ownership_api.services* svc) void {
     ownership_state.state mut a = ownership_state.empty();
     ownership_state.state mut b = ownership_state.empty();
@@ -68,8 +75,8 @@ fn alternatives(ownership_api.services* svc) void {
         id(ownership_api.entity_kind.guard, 1), at, source).applied);
     assert(ownership_state.weak_contents(&b, svc, contents(1, 4), slots[..],
         id(ownership_api.entity_kind.guard, 2), at, source).applied);
-    ownership_state.state mut ab = ownership_join.join(&a, &b, svc, at, source);
-    ownership_state.state mut ba = ownership_join.join(&b, &a, svc, at, source);
+    ownership_state.state mut ab = joined(&a, &b, svc, at, source);
+    ownership_state.state mut ba = joined(&b, &a, svc, at, source);
     assert(ownership_state.equal(&ab, &ba));
     ownership_api.state_view view = ownership_state.view(&ab);
     assert(ownership_api.successful(view.proof));
@@ -89,8 +96,8 @@ fn empty_and_live(ownership_api.services* svc) void {
     ownership_api.operation_position at = op(2);
     ownership_api.source_position source = ownership_api.source_position{};
     assert(ownership_state.add_allocation(&live, svc, fact, at, source).applied);
-    ownership_state.state mut ab = ownership_join.join(&empty, &live, svc, at, source);
-    ownership_state.state mut ba = ownership_join.join(&live, &empty, svc, at, source);
+    ownership_state.state mut ab = joined(&empty, &live, svc, at, source);
+    ownership_state.state mut ba = joined(&live, &empty, svc, at, source);
     assert(ownership_state.equal(&ab, &ba));
     assert(ownership_api.successful(ab.proof));
     assert(ab.allocations_len == 1 && ab.allocations[0].obligation);
@@ -120,8 +127,8 @@ fn released_source(ownership_api.services* svc) void {
     assert(ownership_state.add_source(&live, svc, storage, at, source).applied);
     ownership_state.state mut released = ownership_state.clone(&live);
     assert(ownership_state.release_member(&released, svc, fact.key, true, at, source).applied);
-    ownership_state.state mut ab = ownership_join.join(&live, &released, svc, at, source);
-    ownership_state.state mut ba = ownership_join.join(&released, &live, svc, at, source);
+    ownership_state.state mut ab = joined(&live, &released, svc, at, source);
+    ownership_state.state mut ba = joined(&released, &live, svc, at, source);
     assert(ownership_state.equal(&ab, &ba));
     assert(ab.sources_len == 1);
     assert(ab.sources[0].validity == ownership_api.validity_kind.unknown);
@@ -144,8 +151,8 @@ fn conflicting_owner(ownership_api.services* svc) void {
     ownership_api.allocation_fact second = allocation(7, 7, 2);
     assert(ownership_state.add_allocation(&left, svc, first, at, source).applied);
     assert(ownership_state.add_allocation(&right, svc, second, at, source).applied);
-    ownership_state.state mut ab = ownership_join.join(&left, &right, svc, at, source);
-    ownership_state.state mut ba = ownership_join.join(&right, &left, svc, at, source);
+    ownership_state.state mut ab = joined(&left, &right, svc, at, source);
+    ownership_state.state mut ba = joined(&right, &left, svc, at, source);
     assert(ownership_state.equal(&ab, &ba));
     assert(ab.allocations_len == 1 && ab.allocations[0].obligation);
     assert(ab.allocations[0].owner.place.residual);
@@ -190,8 +197,8 @@ fn conflicting_conditions(ownership_api.services* svc) void {
     ownership_state.append_guards(&right, guard);
     ownership_api.operation_position at = op(6);
     ownership_api.source_position source = ownership_api.source_position{};
-    ownership_state.state mut ab = ownership_join.join(&left, &right, svc, at, source);
-    ownership_state.state mut ba = ownership_join.join(&right, &left, svc, at, source);
+    ownership_state.state mut ab = joined(&left, &right, svc, at, source);
+    ownership_state.state mut ba = joined(&right, &left, svc, at, source);
     assert(ownership_state.equal(&ab, &ba));
     assert(ownership_api.successful(ab.proof));
     assert(ab.predicates_len == 0 && ab.guards_len == 0 && ab.losses_len == 2);
@@ -240,8 +247,8 @@ fn cycle(ownership_api.services* svc) void {
     e2.place = place(11);
     assert(ownership_state.add_edge(&left, svc, e1, at, source).applied);
     assert(ownership_state.add_edge(&right, svc, e2, at, source).applied);
-    ownership_state.state mut ab = ownership_join.join(&left, &right, svc, at, source);
-    ownership_state.state mut ba = ownership_join.join(&right, &left, svc, at, source);
+    ownership_state.state mut ab = joined(&left, &right, svc, at, source);
+    ownership_state.state mut ba = joined(&right, &left, svc, at, source);
     assert(ownership_state.equal(&ab, &ba));
     assert(ab.allocations_len == 2 && ab.nodes_len == 2 && ab.edges_len == 2);
     assert(ab.allocations[0].obligation && ab.allocations[1].obligation);
@@ -259,6 +266,44 @@ fn cycle(ownership_api.services* svc) void {
     ownership_state.free(&left);
 }
 
+fn one_sided_proofs(ownership_api.services* svc) void {
+    ownership_state.state mut left = ownership_state.empty();
+    ownership_state.state mut right = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(70, 70, 70);
+    ownership_state.append_allocations(&left, a);
+    ownership_state.append_allocations(&right, a);
+    ownership_api.predicate_atom mut predicate = ownership_api.predicate_atom{};
+    predicate.key = id(ownership_api.entity_kind.predicate, 70);
+    predicate.kind = ownership_api.predicate_kind.equality;
+    ownership_state.append_predicates(&left, predicate);
+    ownership_api.guard_fact mut guard = ownership_api.guard_fact{};
+    guard.key = id(ownership_api.entity_kind.guard, 70);
+    ownership_state.append_guards(&left, guard);
+    ownership_api.correlation relation = ownership_api.correlation{
+        guard.key, id(ownership_api.entity_kind.value, 70), a.key};
+    ownership_state.append_correlations(&left, relation);
+    ownership_api.shape_description mut shape = ownership_api.shape_description{};
+    shape.key = id(ownership_api.entity_kind.template, 70);
+    shape.acyclic_proved = true;
+    shape.separation_proved = true;
+    ownership_state.append_shapes(&left, shape);
+    ownership_api.operation_position at = op(70);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut ab = joined(&left, &right, svc, at, source);
+    ownership_state.state mut ba = joined(&right, &left, svc, at, source);
+    assert(ownership_state.equal(&ab, &ba));
+    assert(ab.allocations_len == 1 && ab.allocations[0].obligation);
+    assert(ab.predicates_len == 0 && ab.guards_len == 0);
+    assert(ab.correlations_len == 1 && ab.correlations[0].guard.ordinal == 70);
+    assert(ab.shapes_len == 1 && ab.shapes[0].residual);
+    assert(!ab.shapes[0].acyclic_proved && !ab.shapes[0].separation_proved);
+    assert(ab.losses_len == 3);
+    ownership_state.free(&ba);
+    ownership_state.free(&ab);
+    ownership_state.free(&right);
+    ownership_state.free(&left);
+}
+
 fn main() i32 {
     ownership_events.store mut events = ownership_events.store{};
     ownership_api.services mut svc = ownership_api.services{};
@@ -268,6 +313,7 @@ fn main() i32 {
     released_source(&svc);
     conflicting_owner(&svc);
     conflicting_conditions(&svc);
+    one_sided_proofs(&svc);
     println("G04.3 G05.1 G05.2");
     cycle(&svc);
     println("G06.3 cycle join and widening");

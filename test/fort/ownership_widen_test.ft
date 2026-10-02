@@ -3,6 +3,7 @@
 //! stdout:
 //| G04.4 G05.3 G05.4
 //| G07.4 G09.3
+//| R P G H residuals
 /// Tests residual widening with retained sources and obligations.
 import ownership_api;
 import ownership_events;
@@ -161,7 +162,9 @@ fn retained_range(ownership_api.services* svc) void {
     assert(ownership_state.equal(&ab, &ba));
     assert(ab.regions_len == 1 && ab.regions[0].residual);
     assert(ab.regions[0].partitions.len == 2);
-    assert(ab.regions[0].source.ordinal == 7 && ab.regions[0].extent.value == 9);
+    assert(ab.regions[0].source.ordinal == 7);
+    assert(ab.regions[0].extent.kind != ownership_api.fact_kind.exact);
+    assert(ab.regions[0].partitions[0].residual && ab.regions[0].partitions[1].residual);
     assert(ab.losses_len == 1 && ab.losses[0].category == ownership_api.limit_category.r);
     assert(ab.losses[0].relation.ordinal == 7);
     ownership_state.state mut repeat = ownership_join.widen(&ab, &left, svc,
@@ -200,6 +203,200 @@ fn zero_length(ownership_api.services* svc) void {
     ownership_state.free(&allocated);
 }
 
+fn has_loss(ownership_state.state* s, ownership_api.limit_category category) bool {
+    u64 mut i = 0;
+    while (i < s->losses_len) {
+        if (s->losses[i].category == category &&
+            s->losses[i].reason == ownership_api.incomplete_reason.work_limit) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn region_bound(ownership_api.services* svc) void {
+    ownership_state.state mut exact = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(30, 30, 4);
+    ownership_api.region mut selected = ownership_api.region{};
+    selected.key = id(ownership_api.entity_kind.region, 30);
+    selected.source = id(ownership_api.entity_kind.source, 30);
+    selected.extent.kind = ownership_api.fact_kind.exact;
+    selected.extent.value = 4;
+    ownership_api.source_fact mut storage = ownership_api.source_fact{};
+    storage.key = selected.source;
+    storage.kind = ownership_api.source_kind.heap;
+    storage.validity = ownership_api.validity_kind.live;
+    storage.allocation = a.key;
+    ownership_state.append_allocations(&exact, a);
+    ownership_state.append_regions(&exact, selected);
+    ownership_state.append_sources(&exact, storage);
+    ownership_api.limit_table mut bound = limits(4, 1);
+    ownership_api.operation_position at = op(30);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut residual = ownership_join.widen(&exact, &exact, svc,
+        &bound, at, source);
+    assert(has_loss(&residual, ownership_api.limit_category.r));
+    assert(residual.allocations[0].obligation && residual.allocations[0].owner.place.residual);
+    assert(residual.sources[0].validity == ownership_api.validity_kind.unknown);
+    assert(residual.regions[0].residual && residual.regions[0].source.ordinal == 30);
+    assert(residual.regions[0].extent.kind != ownership_api.fact_kind.exact);
+    ownership_state.state mut before = ownership_state.clone(&residual);
+    ownership_api.mutation_result release = ownership_state.release_member(&residual, svc,
+        a.key, true, at, source);
+    ownership_api.owner_location mut after = ownership_api.owner_location{};
+    after.place = place(31);
+    ownership_api.mutation_result transfer = ownership_state.transfer_owner(&residual, svc,
+        a.key, after, true, at, source);
+    assert(!release.applied && !transfer.applied);
+    assert(ownership_state.equal(&residual, &before));
+    ownership_state.state mut released = ownership_state.clone(&exact);
+    assert(ownership_state.release_member(&released, svc, a.key, true, at, source).applied);
+    ownership_state.state mut next = ownership_join.widen(&residual, &released, svc,
+        &bound, at, source);
+    assert(next.allocations[0].obligation && next.allocations[0].owner.place.residual);
+    assert(next.allocations[0].history.len == 1);
+    assert(next.regions[0].residual && has_loss(&next, ownership_api.limit_category.r));
+    ownership_state.state mut fixed = ownership_join.widen(&next, &released, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&next, &fixed));
+    ownership_state.free(&fixed);
+    ownership_state.free(&next);
+    ownership_state.free(&released);
+    ownership_state.free(&before);
+    ownership_state.free(&residual);
+    ownership_state.free(&exact);
+}
+
+fn predicate_bound(ownership_api.services* svc) void {
+    ownership_state.state mut exact = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(40, 40, 4);
+    ownership_state.append_allocations(&exact, a);
+    ownership_api.predicate_atom mut predicate = ownership_api.predicate_atom{};
+    predicate.kind = ownership_api.predicate_kind.equality;
+    predicate.key = id(ownership_api.entity_kind.predicate, 40);
+    ownership_state.append_predicates(&exact, predicate);
+    predicate.key = id(ownership_api.entity_kind.predicate, 41);
+    ownership_state.append_predicates(&exact, predicate);
+    ownership_api.limit_table mut bound = limits(4, 4);
+    bound.p = 1;
+    ownership_api.operation_position at = op(40);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut residual = ownership_join.widen(&exact, &exact, svc,
+        &bound, at, source);
+    assert(residual.predicates_len == 0 && has_loss(&residual, ownership_api.limit_category.p));
+    assert(residual.allocations[0].obligation);
+    ownership_state.state mut moved = ownership_state.clone(&exact);
+    ownership_api.owner_location mut after = ownership_api.owner_location{};
+    after.place = place(41);
+    assert(ownership_state.transfer_owner(&moved, svc, a.key, after, true, at, source).applied);
+    ownership_state.state mut next = ownership_join.widen(&residual, &moved, svc,
+        &bound, at, source);
+    assert(next.predicates_len == 0 && next.allocations[0].obligation);
+    assert(next.allocations[0].history.len == 1);
+    assert(has_loss(&next, ownership_api.limit_category.p));
+    ownership_state.state mut fixed = ownership_join.widen(&next, &moved, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&next, &fixed));
+    ownership_state.free(&fixed);
+    ownership_state.free(&next);
+    ownership_state.free(&moved);
+    ownership_state.free(&residual);
+    ownership_state.free(&exact);
+}
+
+fn guard_bound(ownership_api.services* svc) void {
+    ownership_state.state mut exact = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(50, 50, 4);
+    ownership_state.append_allocations(&exact, a);
+    ownership_api.contents_fact mut contents = ownership_api.contents_fact{};
+    contents.place = place(50);
+    contents.kind = ownership_api.contents_kind.reference;
+    contents.value_version = id(ownership_api.entity_kind.value, 50);
+    ownership_api.borrow_relation[1] mut borrows = {};
+    borrows[0].key = id(ownership_api.entity_kind.relation, 50);
+    borrows[0].source = id(ownership_api.entity_kind.source, 50);
+    borrows[0].representation_complete = true;
+    contents.borrows = borrows[..];
+    ownership_state.append_contents(&exact, contents);
+    ownership_api.guard_fact mut guard = ownership_api.guard_fact{};
+    guard.key = id(ownership_api.entity_kind.guard, 50);
+    ownership_state.append_guards(&exact, guard);
+    ownership_api.limit_table mut bound = limits(4, 4);
+    bound.g = 1;
+    ownership_api.operation_position at = op(50);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut residual = ownership_join.widen(&exact, &exact, svc,
+        &bound, at, source);
+    assert(has_loss(&residual, ownership_api.limit_category.g));
+    assert(residual.allocations[0].obligation && residual.guards_len == 0);
+    assert(residual.contents_len == 1 && residual.contents[0].place.residual);
+    assert(residual.contents[0].kind == ownership_api.contents_kind.unknown);
+    assert(residual.contents[0].borrows.len == 1);
+    assert(residual.contents[0].borrows[0].source.ordinal == 50);
+    assert(!residual.contents[0].borrows[0].representation_complete);
+    ownership_state.state mut before = ownership_state.clone(&residual);
+    ownership_api.place_path[1] aliases = {residual.contents[0].place};
+    ownership_api.mutation_result update = ownership_state.strong_contents(&residual,
+        svc, contents, aliases[..], true, at, source);
+    assert(!update.applied && ownership_state.equal(&before, &residual));
+    ownership_state.state mut moved = ownership_state.clone(&exact);
+    ownership_api.owner_location mut after = ownership_api.owner_location{};
+    after.place = place(51);
+    assert(ownership_state.transfer_owner(&moved, svc, a.key, after, true, at, source).applied);
+    ownership_state.state mut next = ownership_join.widen(&residual, &moved, svc,
+        &bound, at, source);
+    assert(next.allocations[0].obligation && next.allocations[0].history.len == 1);
+    assert(next.contents[0].place.residual && next.contents[0].borrows.len == 1);
+    assert(next.guards_len == 0 && has_loss(&next, ownership_api.limit_category.g));
+    ownership_state.state mut fixed = ownership_join.widen(&next, &moved, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&next, &fixed));
+    ownership_state.free(&fixed);
+    ownership_state.free(&next);
+    ownership_state.free(&moved);
+    ownership_state.free(&before);
+    ownership_state.free(&residual);
+    ownership_state.free(&exact);
+}
+
+fn shape_bound(ownership_api.services* svc) void {
+    ownership_state.state mut exact = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(60, 60, 4);
+    ownership_state.append_allocations(&exact, a);
+    ownership_api.entity_id[1] parameters = {a.key};
+    ownership_api.shape_description mut shape = ownership_api.shape_description{};
+    shape.key = id(ownership_api.entity_kind.template, 60);
+    shape.parameters = parameters[..];
+    shape.acyclic_proved = true;
+    shape.separation_proved = true;
+    ownership_state.append_shapes(&exact, shape);
+    ownership_api.limit_table mut bound = limits(4, 4);
+    bound.h = 1;
+    ownership_api.operation_position at = op(60);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut residual = ownership_join.widen(&exact, &exact, svc,
+        &bound, at, source);
+    assert(has_loss(&residual, ownership_api.limit_category.h));
+    assert(residual.allocations[0].obligation && residual.shapes[0].residual);
+    assert(!residual.shapes[0].acyclic_proved && !residual.shapes[0].separation_proved);
+    ownership_state.state mut released = ownership_state.clone(&exact);
+    assert(ownership_state.release_member(&released, svc, a.key, true, at, source).applied);
+    ownership_state.state mut next = ownership_join.widen(&residual, &released, svc,
+        &bound, at, source);
+    assert(next.allocations[0].obligation && next.allocations[0].history.len == 1);
+    assert(next.shapes[0].residual && !next.shapes[0].acyclic_proved);
+    assert(has_loss(&next, ownership_api.limit_category.h));
+    ownership_state.state mut fixed = ownership_join.widen(&next, &released, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&next, &fixed));
+    ownership_state.free(&fixed);
+    ownership_state.free(&next);
+    ownership_state.free(&released);
+    ownership_state.free(&residual);
+    ownership_state.free(&exact);
+}
+
 fn main() i32 {
     ownership_events.store mut events = ownership_events.store{};
     ownership_api.services mut svc = ownership_api.services{};
@@ -210,6 +407,11 @@ fn main() i32 {
     retained_range(&svc);
     zero_length(&svc);
     println("G07.4 G09.3");
+    region_bound(&svc);
+    predicate_bound(&svc);
+    guard_bound(&svc);
+    shape_bound(&svc);
+    println("R P G H residuals");
     ownership_events.free(&events);
     return 0;
 }
