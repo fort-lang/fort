@@ -13,6 +13,7 @@
 //| teardown ok
 //| reporting statuses ok
 //| reporting failure precedence ok
+//| report limit precedence ok
 /// Tests independent extension contracts and failures without production analyzer modules.
 import ownership_api;
 import ownership_keys;
@@ -480,6 +481,61 @@ fn failed_complete_event(void mut* opaque, ownership_api.event_request* req)
     return out;
 }
 
+fn scripted_renderer(void mut* opaque, ownership_api.diagnostic_request* req)
+    ownership_api.diagnostic_result {
+    ownership_api.diagnostic_result* scripted = cast(opaque, ownership_api.diagnostic_result*);
+    return *scripted;
+}
+
+fn report_limit_precedence() void {
+    ownership_diag_client.context mut ctx = ownership_diag_client.context{};
+    ownership_api.services mut svc = ownership_diag_client.service(&ctx);
+    ownership_api.diagnostic_result mut scripted = ownership_api.diagnostic_result{};
+    svc.renderer = scripted_renderer;
+    svc.renderer_context = cast(&scripted, void mut*);
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{};
+    req.verdict = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    req.verdict.terminal.operation.operation = 19;
+    scripted.rendered = true;
+    scripted.proof = ownership_api.incomplete(ownership_api.incomplete_reason.report_limit,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    scripted.proof.terminal.limit.present = true;
+    scripted.proof.terminal.limit.category = ownership_api.limit_category.v;
+    scripted.proof.terminal.limit.bound = 4;
+    ownership_api.proof_status valid = scripted.proof;
+    ownership_api.diagnostic_result mut shown = ownership_api.render(&svc, &req);
+    assert(shown.rendered && shown.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(shown.proof.failed && shown.proof.terminal.reason ==
+        ownership_api.incomplete_reason.report_limit);
+    ownership_api.proof_status[6] mut malformed = {};
+    malformed[0] = valid;
+    malformed[0].kind = ownership_api.proof_kind.complete;
+    malformed[0].failed = false;
+    malformed[1] = valid;
+    malformed[1].kind = ownership_api.proof_kind.complete;
+    malformed[2] = valid;
+    malformed[2].failed = false;
+    malformed[3] = valid;
+    malformed[3].terminal.limit.present = false;
+    malformed[4] = valid;
+    malformed[4].terminal.reason = ownership_api.incomplete_reason.work_limit;
+    malformed[5] = valid;
+    malformed[5].terminal.limit.category = ownership_api.limit_category.w;
+    u64 mut i = 0;
+    while (i < malformed.len) {
+        scripted.proof = malformed[i];
+        shown = ownership_api.render(&svc, &req);
+        assert(shown.rendered && shown.proof.kind == ownership_api.proof_kind.incomplete);
+        assert(shown.proof.failed && shown.proof.terminal.present);
+        assert(shown.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+        assert(shown.proof.terminal.operation.operation == 19);
+        i += 1;
+    }
+    assert(req.verdict.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    println("report limit precedence ok");
+}
+
 fn reporting_failure_precedence() void {
     ownership_diag_client.context mut ctx = ownership_diag_client.context{};
     ownership_api.services mut svc = ownership_diag_client.service(&ctx);
@@ -613,5 +669,6 @@ fn main() i32 {
     teardown();
     reporting_statuses();
     reporting_failure_precedence();
+    report_limit_precedence();
     return 0;
 }
