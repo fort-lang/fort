@@ -2164,11 +2164,18 @@ says ownership is "by convention", this section supersedes it.
   signature (D9.8). The owning form is a fort function that allocates the buffer itself:
   `std.libc` declares `realpath` with a `char mut*` buffer, and `std.os.real_path` allocates that
   buffer with `new`.
+  Foreign code is trusted. An `extern` declaration requires no `unsafe` construct, lifetime
+  annotation, or compiler contract. Trust the declared ABI, types, and ownership convention.
+  A missing foreign body or effect summary alone causes no ownership diagnostic.
+  The compiler may check known fort ownership facts at the call boundary.
+  Hidden foreign aliases, retention, releases, writes, and callbacks remain outside its proof.
 - history: Amended 2026-09-14 (T-086): `malloc` was declared `void* own`, because `void mut*` was
   not a type until D3.11 was amended.
   Amended 2026-09-29 (T-257): added the borrowing form for a C result that is owned on some calls
   only. A cast no longer adds `own` (D3.14), so an `extern` signature is the one way that C memory
   gets an owner.
+  Amended 2026-10-01 (T-271): the user accepts FFI as trusted. From this date, foreign-body
+  absence does not require compiler contracts or cause an incomplete ownership proof error.
 
 ### D17.14 What ownership does not track
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

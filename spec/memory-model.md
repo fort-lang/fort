@@ -187,6 +187,12 @@ node mut* own q = new(node);
 free(cast(move(q), void* own));      // also fine: the move empties q
 ```
 
+Foreign code is trusted (D17.13). An `extern` declaration needs no `unsafe` construct, lifetime
+annotation, or compiler contract. Trust its declared ABI, types, and ownership convention.
+A missing foreign body or effect summary alone causes no ownership diagnostic.
+The compiler may check known fort ownership facts at the call boundary.
+Hidden foreign aliases, retention, releases, writes, and callbacks remain outside its proof.
+
 ### 2.3 Ownership: `own`, `move` and lending
 
 Whether a reference is responsible for its allocation is part of its type. `T* own`, `void* own`,

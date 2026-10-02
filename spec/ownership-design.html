@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Proposed static ownership and borrow analysis for fort. No lifetime annotations, unsafe construct, or runtime ownership tracking.">
+<title>fort · Static ownership design</title>
+<style>
+:root { color-scheme: light; --ink:#182a3a; --muted:#506171; --line:#d5dde3; --paper:#f8f9fb; --accent:#174f76; --code:#eef2f5; --reject:#9c2525; --accept:#1c6550; }
+* { box-sizing:border-box; }
+html { scroll-padding-top:1.5rem; }
+body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.6 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+a { color:var(--accent); text-underline-offset:.18em; }
+.shell { display:grid; grid-template-columns:16rem minmax(0,58rem); gap:3rem; max-width:84rem; margin:auto; padding:3rem 2rem 5rem; }
+nav { position:sticky; top:2rem; align-self:start; max-height:calc(100vh - 4rem); overflow:auto; font-size:.86rem; }
+nav .brand { font:700 1.1rem ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.02em; margin:0 0 .2rem; }
+nav .sub { color:var(--muted); margin:0 0 1.5rem; }
+nav ol { padding:0; list-style:none; margin:0; }
+nav li { margin:.45rem 0; }
+nav a { text-decoration:none; display:block; padding:.18rem 0; }
+nav a:hover { text-decoration:underline; }
+main { min-width:0; }
+header { padding-bottom:2rem; border-bottom:2px solid var(--ink); }
+.kicker { color:var(--accent); text-transform:uppercase; font-size:.76rem; font-weight:700; letter-spacing:.12em; }
+h1 { font-size:clamp(2rem,4vw,3.3rem); line-height:1.15; letter-spacing:-.04em; margin:.6rem 0 1rem; max-width:18ch; }
+.lead { font-size:1.13rem; max-width:58ch; margin:0 0 1rem; }
+.meta { color:var(--muted); font: .8rem/1.7 ui-monospace,SFMono-Regular,Consolas,monospace; }
+section { margin:2.7rem 0; }
+h2 { font-size:1.4rem; line-height:1.25; margin:0 0 1.1rem; padding-bottom:.6rem; border-bottom:1px solid var(--line); }
+h3 { font-size:1.03rem; margin:1.5rem 0 .65rem; line-height:1.4; }
+p { margin:.6rem 0 .9rem; }
+ul,ol { padding-left:1.4rem; }
+li { margin:.35rem 0; }
+code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+code { font-size:.88em; }
+p code,li code,td code { background:var(--code); padding:.08em .28em; border-radius:3px; overflow-wrap:anywhere; }
+pre { margin:0; font-size:.8rem; line-height:1.6; tab-size:4; overflow:auto; padding:1.05rem 1.15rem; color:#173247; background:var(--code); border:1px solid var(--line); border-radius:4px; }
+pre code { font-size:inherit; }
+.table-wrap { overflow:auto; }
+table { border-collapse:collapse; width:100%; margin:1rem 0; font-size:.88rem; }
+th { text-align:left; color:var(--muted); font-size:.74rem; text-transform:uppercase; letter-spacing:.05em; background:#eaf0f4; }
+th,td { border-bottom:1px solid var(--line); padding:.65rem .75rem; vertical-align:top; }
+th:first-child { width:21%; }
+.notice { padding:.85rem 1rem; border-left:3px solid var(--accent); background:#edf3f7; }
+.notice p:last-child { margin-bottom:0; }
+.example { padding:1.2rem 0 1.7rem; border-bottom:1px solid var(--line); }
+.example h3 { margin:0 0 .55rem; }
+.number { color:var(--muted); margin-right:.6rem; font-variant-numeric:tabular-nums; }
+.sample { margin:1.2rem 0; }
+.sample-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.7rem; margin-bottom:.5rem; }
+.filename { font-size:.8rem; font-weight:600; overflow-wrap:anywhere; }
+.outcome { font-size:.68rem; font-weight:750; letter-spacing:.06em; text-transform:uppercase; padding:.2rem .55rem; border:1px solid; border-radius:3px; }
+.outcome.reject { color:var(--reject); background:#fff4f2; }
+.outcome.accept { color:var(--accept); background:#f0f7f3; }
+.label { font-size:.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin:.75rem 0 .4rem; font-weight:650; }
+.diagnostic { background:#fff8f6; border-left:3px solid #b6604e; color:#62352c; white-space:pre-wrap; overflow-wrap:anywhere; }
+.repair { font-size:.89rem; color:var(--muted); }
+.edge { margin:1.3rem 0; padding:0 0 1.1rem; border-bottom:1px solid var(--line); }
+.edge pre { margin:.7rem 0; }
+footer { border-top:2px solid var(--ink); padding-top:1rem; color:var(--muted); font-size:.8rem; }
+.skip { position:absolute; left:-9999px; top:0; }
+.skip:focus { left:1rem; top:1rem; background:white; padding:.5rem; z-index:1; }
+@media (max-width:850px) { .shell { display:block; padding:1.5rem 1rem 3rem; } nav { position:static; max-height:none; margin-bottom:2rem; } nav ol { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:1rem; } nav .sub { margin-bottom:.75rem; } h1 { max-width:none; } }
+@media (prefers-reduced-motion:no-preference) { html { scroll-behavior:smooth; } }
+@page { size:A4; margin:16mm; }
+@media print { body { background:white; font-size:10pt; line-height:1.45; } .shell { display:block; padding:0; max-width:none; } nav,.skip { display:none; } header { padding-bottom:1rem; } h1 { font-size:27pt; max-width:none; } section { margin:1.4rem 0; } h2,h3,.sample-head,.label { break-after:avoid; } pre { white-space:pre-wrap; overflow-wrap:anywhere; overflow:visible; font-size:8pt; padding:.6rem; break-inside:avoid; } table { font-size:8.5pt; } tr { break-inside:avoid; } .outcome { font-size:7pt; } a { color:inherit; } .notice { background:white; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to document</a>
+<div class="shell">
+<nav aria-label="Document sections">
+<p class="brand">fort / ownership</p>
+<p class="sub">Design proposal · T-271</p>
+<ol><li><a href="#contract">01 Proof contract</a></li><li><a href="#storage">02 Storage and ownership</a></li><li><a href="#transfer">03 FIR transfer rules</a></li><li><a href="#flow">04 Control flow and cleanup</a></li><li><a href="#calls">05 Function summaries</a></li><li><a href="#retention">06 Fields and retained references</a></li><li><a href="#extern">07 Extern boundary</a></li><li><a href="#diagnostics">08 Diagnostic contract</a></li><li><a href="#examples">09 20 examples</a></li><li><a href="#limits">10 Unresolved cases</a></li><li><a href="#delivery">11 Delivery and acceptance</a></li><li><a href="#references">12 Decision amendments</a></li></ol>
+</nav>
+<main id="main">
+<header>
+<p class="kicker">Compiler design / proposal</p>
+<h1>Static ownership across boundaries</h1>
+<p class="lead">Prove storage validity and ownership effects across calls, fields, and retained references. Reject invalid operations and incomplete proofs.</p>
+<p class="meta">fort · 2026-09-30 · source basis 414d8b7c<br>No lifetime annotations · No unsafe construct · No runtime ownership tracking</p>
+</header>
+
+<section id="contract">
+<h2>Proof contract</h2>
+<p><strong>Status: proposal.</strong> This document specifies the intended analysis. D17.13 records the accepted FFI trust rule. The remaining analysis rules remain proposals.</p>
+<p>The compiler proves temporal ownership obligations for fort operations in the checked import closure. Reject an operation when a reaching path violates its obligation.</p>
+<p>Reject a fort operation when the analysis cannot prove its obligation. Trusted FFI results and effects use the boundary rule below.</p>
+<ul>
+<li>Do not add source lifetime annotations or lifetime parameters.</li>
+<li>Do not add an <code>unsafe</code> keyword, block, function qualifier, or compiler proof-bypass option.</li>
+<li>Do not add allocation headers, generation counters, runtime ownership tables, or new ownership checks in generated code.</li>
+<li>Keep current mutable aliasing rules. Prove ownership effects even when writable references alias.</li>
+<li>Keep pointer, span, string, struct, and C ABI representations unchanged.</li>
+<li>Complete the feature before migrating existing source.</li>
+</ul>
+<p>Foreign implementations remain outside this proof. An extern declaration is the implicit foreign trust boundary. Its call requires no additional syntax.</p>
+<p>Trust foreign behavior and declared types. A missing foreign body or effect summary alone causes no ownership diagnostic.</p>
+<div class="notice"><p><strong>Coverage limit.</strong> The analysis targets dangling storage, lost ownership, invalid release, and invalid ownership transfer.</p>
+<p>It does not establish total memory safety. Existing bounds, nullability, arithmetic, data-race, and foreign-code rules still apply.</p></div>
+<p>Unfreed ownership at a normal scope exit is an error. Abort paths carry no cleanup requirement. Program-wide cleanup of owning globals remains unresolved.</p>
+<p>Allocation obligations cover memory, not file descriptors, sockets, or other scalar resources. This design adds no general resource type system.</p>
+</section>
+
+<section id="storage">
+<h2>Storage and ownership</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Place</td><td>A FIR local or global with field, element, or dereference projections. A place contains a value.</td></tr>
+<tr><td>Storage source</td><td>A stack object, heap allocation, static object, symbolic caller object, or trusted foreign object.</td></tr>
+<tr><td>Allocation identity</td><td>An analysis identity for heap storage. It is independent of the place that currently owns the allocation.</td></tr>
+<tr><td>Owning place</td><td>A reference place marked <code>own</code>, or an owning leaf within an aggregate.</td></tr>
+<tr><td>Borrow</td><td>A non-owning pointer, span, or string with possible storage sources and an offset or subrange where known.</td></tr>
+<tr><td>Obligation</td><td>A requirement to retain, release, or transfer an owned allocation on each normal path.</td></tr>
+<tr><td>Summary</td><td>An inferred relation between function inputs, memory effects, obligations, and outputs.</td></tr>
+</tbody></table></div>
+<p>Record place contents separately from source validity. A zero owner place contains no allocation. A released allocation remains invalid after another allocation enters that place.</p>
+<p>Keep possible source identities, ownership states, ranges, and witness locations. Separate the lifetime of a span header from its backing allocation.</p>
+<p>A heap pointer and an address of its owner slot have different sources. Moving the pointer preserves the heap source but not the old slot address.</p>
+<p>A stack object's lifetime ends at its FIR <code>dead</code> marker. A temporary's lifetime ends at its source-defined boundary.</p>
+<p>By-value parameter storage ends at each normal return, after deferred effects. Check residual owned parameter leaves even when FIR emits no <code>dead</code> marker.</p>
+<p>Reject returned or retained addresses into ended parameter storage. Ending a borrowed parameter's slot does not end the symbolic caller storage it references.</p>
+<p>Copies of borrows retain their source relations. Moving an aggregate transfers its owned leaves and borrowed fields. It does not rebase stack addresses.</p>
+<p>Track possible overlap between source regions and owner slots. Pointer equality alone does not establish distinct ownership or an allocation extent.</p>
+<p>Use finite graphs for recursive types and repeated allocation sites. Widening may lose precision; it must not remove ownership obligations.</p>
+<p>Strong updates require one proved destination. Weak updates preserve the alternatives of destinations that can overlap. Unknown fort effects preserve uncertainty.</p>
+<p>Do not identify successive allocations solely by their source expression. A loop can create multiple live allocations at the same expression.</p>
+</section>
+
+<section id="transfer">
+<h2>FIR transfer rules</h2>
+<p>Run the analysis on verified FIR before build-mode transformations. Read types, places, calls, moves, and deferred expansions from FIR.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Operation</th><th>Required facts and state change</th></tr></thead><tbody>
+<tr><td><code>alloc</code></td><td>Create a fresh allocation obligation. Record the element type and extent when available. Existing allocation failure paths abort.</td></tr>
+<tr><td>Borrow copy</td><td>Copy source relations without transferring ownership. Record retained relations for aggregate fields and elements.</td></tr>
+<tr><td><code>move</code></td><td>Transfer ownership and borrowed contents. Set the source place to zero. Preserve views into live heap storage.</td></tr>
+<tr><td><code>del</code></td><td>Require valid allocation ownership. Discharge that obligation, invalidate its allocation, and empty the operand place.</td></tr>
+<tr><td>Empty <code>del</code></td><td>Accept. No allocation exists to release. Keep the empty state.</td></tr>
+<tr><td>Owning assignment</td><td>Evaluate the right side first. Require the destination's previous ownership obligations to be empty or already transferred.</td></tr>
+<tr><td>Aggregate assignment</td><td>Apply ownership rules to the owned leaves. Do not discard fields hidden inside nested aggregates.</td></tr>
+<tr><td><code>addr</code></td><td>Produce a borrow of the addressed storage. Taking an address does not end tracking of that storage.</td></tr>
+<tr><td><code>slice</code>, <code>.ptr</code></td><td>Preserve the backing source and known offset or range. These operations do not transfer ownership.</td></tr>
+<tr><td><code>slice_ptr</code></td><td>Require a proved source and sufficient extent for fort storage. Trust foreign storage validity and extent. Add no runtime range check.</td></tr>
+<tr><td><code>cast</code></td><td>Preserve known sources and byte ranges. Type erasure does not erase an obligation. Integer reconstruction alone establishes no source.</td></tr>
+<tr><td>Memory access</td><td>Require live fort source storage and a valid extent. Trust foreign storage validity and extent. Keep existing type rules.</td></tr>
+<tr><td><code>call</code></td><td>Instantiate the summary with actual arguments and aliases. Apply effects in their proved order.</td></tr>
+<tr><td><code>dead</code></td><td>End stack storage. Report ownership obligations that remain in the dying place. Reject borrows that escape the storage boundary.</td></tr>
+</tbody></table></div>
+<p>Keep <code>del</code> shallow. Release or transfer owned descendants before deleting their containing allocation.</p>
+<p>A zero-element allocation still creates an ownership obligation. A zero-length owning span differs from an empty owner.</p>
+<p>Keep allocation ownership separate from access extent. A zero length alone does not prove that an owner has no allocation.</p>
+<p>A transferred descendant keeps its identity. Deleting the old container does not release that transferred allocation.</p>
+<p>Do not use a removed overwrite check as proof that a destination is empty. The static result must hold in release builds.</p>
+<p>Ordinary span bounds keep their current runtime checks. Raw-pointer spans into fort storage require static extent proof. Foreign storage uses FFI trust.</p>
+<p>Reading the zero value of an emptied owner remains legal. Comparisons with null and zero span lengths remain legal.</p>
+<p>Reject dereferencing an owner that the analysis proves empty. Reject semantic use of a borrow whose source is released.</p>
+<p>A store that replaces a dead borrow need not read its old value. Permit reinitialization from a valid source.</p>
+<p>Do not free storage through a borrowed reference. Existing type checks continue to reject adding <code>own</code> or <code>mut</code> through a cast.</p>
+</section>
+
+<section id="flow">
+<h2>Control flow and cleanup</h2>
+<p>Propagate abstract states along reachable FIR edges. Join possible source relations and ownership obligations. Retain witness locations for each failing alternative.</p>
+<p>Different branch states are legal when subsequent operations satisfy both states. Do not reject a join merely because one path has an empty owner.</p>
+<p>Refine direct null tests. Preserve the correlation between the selected branch and the tested place until an overlapping write changes that place.</p>
+<p>A known-null path carries no allocation obligation. Do not report a leak merely because an owning call can return null.</p>
+<p>Compute loop states to a fixed point. Keep the zero-iteration path. Do not promote untouched empty places to live places.</p>
+<p>Require each iteration to preserve or discharge the obligations that reach its next iteration. Check scopes crossed by break, continue, and return.</p>
+<p>Conditional expressions and short-circuit operands already have FIR edges. Analyze their moves through those edges instead of banning their syntax.</p>
+<p>Read deferred releases where FIR expands them. Apply reverse registration order. Check returned borrows after all deferred effects on that exit.</p>
+<p>Use borrow liveness to permit a release after the last semantic use. An unused dangling local alone does not require an error.</p>
+<p>An escaping fort result or retained fort field has a caller obligation. Local last-use analysis alone cannot discharge that obligation.</p>
+<p>Runtime failures, panic, and other abort paths do not run ordinary cleanup. Do not require them to discharge ownership obligations.</p>
+<p>Apply inferred call exit outcomes to reachable continuations. Remove a normal continuation only when the instantiated summary proves that no normal return occurs.</p>
+<p>Unknown or incomplete summaries keep a possible normal continuation. A function without a <code>noreturn</code> type can still have no normal return.</p>
+<p>Do not derive safety from a runtime check that a build mode removes. Static verdicts remain independent of release and bounds-check options.</p>
+<p>When a loop or recursive summary loses precision, report failure to prove the affected operation. Do not suppress further analysis by declaring it escaped.</p>
+</section>
+
+<section id="calls">
+<h2>Function summaries</h2>
+<p>Infer summaries from all available fort bodies in the import closure. No programmer-written lifetime relation is required.</p>
+<p>Use symbolic caller storage for borrowed parameters. Distinguish a by-value parameter's stack storage from heap storage that its fields reference.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Summary part</th><th>Required content</th></tr></thead><tbody>
+<tr><td>Preconditions</td><td>Live sources, required extents, empty output owners, and alias relations that the body requires.</td></tr>
+<tr><td>Owned inputs</td><td>Ownership consumed, released, returned, or stored through a parameter or global.</td></tr>
+<tr><td>Borrowed outputs</td><td>Source relations for returned pointers, spans, strings, fields, and output parameters.</td></tr>
+<tr><td>Retained inputs</td><td>Source relations that persist in fort fields, elements, or globals after an analyzed fort call.</td></tr>
+<tr><td>Memory effects</td><td>Reads, writes, releases, and transfers with the order needed for alias-sensitive obligations.</td></tr>
+<tr><td>Conditional effects</td><td>Relations between relevant return values, branch predicates, and output ownership or sources.</td></tr>
+<tr><td>Exit outcomes</td><td>Normal-return reachability, abort outcomes, and unknown outcomes, with relevant input conditions.</td></tr>
+<tr><td>Result storage</td><td>The caller destination for aggregate <code>_0</code>, including possible aliases with arguments and globals.</td></tr>
+<tr><td>Callbacks</td><td>Possible targets, invocation effects, borrowed argument sources, and known retention behavior.</td></tr>
+</tbody></table></div>
+<p>Instantiate symbols with caller places and source identities before applying effects. An own argument transfers ownership; a borrowed argument does not.</p>
+<p>Do not treat two formal parameters as distinct allocations. The caller can supply the same place through both parameters.</p>
+<p>Bind aggregate <code>_0</code> to the actual destination. Include its aliases with arguments and globals before applying result writes.</p>
+<p>In <code>s = f(&amp;s)</code>, result storage can alias an input. Do not model that result as private fresh storage.</p>
+<p>Check previous owner obligations at overlapping writes. Preserve FIR ordering of result writes, reads, and deferred effects.</p>
+<p>A pointer to an own slot permits summarized ownership changes in that slot. Taking the pointer must not disable overwrite or leak checks.</p>
+<p>Infer a returned borrow's sources independently for each possible result path. A borrowed input can become a returned borrow without becoming owned.</p>
+<p>Infer retained-source relations through intermediate fort calls. Preserve trusted foreign result classification through wrappers. Hidden foreign effects remain outside the proof.</p>
+<p>Compute summaries across recursive call groups to a fixed point. An incomplete recursive summary is unknown, not an empty effect set.</p>
+<p>For indirect calls, combine summaries of possible fort targets. Extern targets use FFI trust. An unknown fort target cannot establish a safe memory effect.</p>
+<p>Check a library body with symbolic inputs under <code>--check</code>. Inferred caller requirements belong to its summary.</p>
+<p>A local stack escape is invalid independently of caller inputs. Reject it in the callee. Report an unsatisfied caller requirement at the call.</p>
+<p>Summary graphs need relational state. Unordered may-read and may-free sets alone cannot prove Example 10.</p>
+<p>Keep summaries in the current analysis. Module-cache serialization remains outside this proposal.</p>
+</section>
+
+<section id="retention">
+<h2>Fields and retained references</h2>
+<p>A reference field holds a borrow source relation or an ownership obligation. Its containing object's lifetime does not extend its target's lifetime.</p>
+<p>Track relations through nested structs, fixed arrays, heap objects, and globals. Do not stop tracking when a value enters an element.</p>
+<p>Track borrowed fields when aggregates copy. Transfer owned fields when aggregates move. Record caller relations for returned aggregates.</p>
+<p>For unknown indices, retain possible overlap with the collection's element set. Prove distinct elements before applying independent destructive updates.</p>
+<p>Replacing vector backing storage invalidates views into the earlier allocation. A pointer to the vector object can remain valid.</p>
+<p>A retained string key depends on its character allocation. Copying the string header into a map does not make the characters owned.</p>
+<p>A pool view can refer to an allocation reachable through the pool's owned chain. Adding another block need not invalidate earlier block views.</p>
+<p>Releasing the pool invalidates views into the blocks it releases. Proving an unbounded chain release requires the recursive heap rules below.</p>
+<p>An aggregate can contain an owner and a view into its heap allocation. Moving both preserves that view while the allocation remains live.</p>
+<p>An aggregate can instead contain a view into its own stack fields. A move does not repair that stack address.</p>
+<p>Retained relations can end when a field is cleared or replaced. Dynamic containers need proof that no retained element still exposes the source.</p>
+</section>
+
+<section id="extern">
+<h2>Extern boundary</h2>
+<p>Accept FFI as trusted under D17.13. An extern declaration requires no unsafe construct, lifetime annotation, compiler contract, or effect summary.</p>
+<p>Trust the declared ABI, types, and ownership convention. Check known fort argument sources before the call.</p>
+<p>An own input leaves its fort source place. An own result creates a fresh obligation under the foreign declaration's uniqueness promise.</p>
+<p>A borrowed result has a trusted foreign source. Permit access and slicing without a proved source relation or statically established allocation extent.</p>
+<p>This trust does not prove non-nullness, initialization, alignment, or the foreign allocation's lifetime. Foreign callers and implementations must satisfy those requirements.</p>
+<p>Keep known fort ownership facts across the call. Missing foreign summaries do not invalidate those facts or block later cleanup.</p>
+<p>Apply ownership transfers expressed by the signature. A borrowed argument alone does not transfer ownership.</p>
+<p>Hidden foreign aliases, retention, releases, writes, and callbacks remain outside the proof. Do not infer that foreign code actually has no effects.</p>
+<p>A foreign result can alias fort storage. Without a source relation, later fort deletion cannot invalidate that result in the analysis.</p>
+<p>Preserve trusted foreign source classification through copies, casts, fields, returns, and fort wrappers. Keep other fort source relations checked.</p>
+<p>A raw cast alone cannot create foreign trust. Arbitrary integer-to-pointer casts remain subject to the fort proof rules.</p>
+<h3>Proof limit</h3>
+<p>FFI can violate the ownership proof. In particular, foreign code can return dangling pointers or release storage that fort still owns.</p>
+<p>Ordinary extern calls and their returned references need no compiler metadata. This version adds no compiler contract system.</p>
+<p>Optional foreign-function summaries can add checking in a future design. Their format, precedence, and handling of indirect calls remain unspecified.</p>
+</section>
+
+<section id="diagnostics">
+<h2>Diagnostic contract</h2>
+<p>Use the existing source diagnostic format from <code>spec/toolchain.md</code> section 4. Compilation errors exit 1.</p>
+<pre><code>&lt;file&gt;:&lt;line&gt;:&lt;column&gt;: error: &lt;message&gt;
+&lt;file&gt;:&lt;line&gt;:&lt;column&gt;: note: &lt;message&gt;</code></pre>
+<p>Columns count source bytes from 1. Attach notes to their error. Underline the source token or range that the diagnostic identifies.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Class</th><th>Report</th></tr></thead><tbody>
+<tr><td>Proved invalid use</td><td>Name the borrowed place and the release, move, or storage end that makes the access invalid.</td></tr>
+<tr><td>Path-dependent invalid use</td><td>Name the place and a reaching path that invalidates it. Keep that path's witness location.</td></tr>
+<tr><td>Unproved use</td><td>State that the compiler cannot prove live storage, extent, alias requirements, or completed cleanup.</td></tr>
+<tr><td>Lost ownership</td><td>Name the owning place at overwrite, release, or scope end. Note the source of its obligation.</td></tr>
+<tr><td>Unsatisfied call requirement</td><td>Report at the call. Note the relevant callee operation and substituted caller alias or source.</td></tr>
+<tr><td>Analysis limit</td><td>Report the unresolved operation and the precision limit. Do not claim that the program definitely has a memory error.</td></tr>
+</tbody></table></div>
+<p>The examples specify primary errors and relevant notes. Suppress dependent cascades for that operation while retaining other independent obligations.</p>
+<p>Proposed wording is not current compiler output. The current compiler does not implement this analysis.</p>
+<p>Check and build modes use the same ownership analysis. JSON keeps the existing diagnostic schema and includes the same error and note ranges.</p>
+<p>A stricter future rule can reject reads after move or del. It requires a separate place state without changing allocation identity or summary relations.</p>
+<p>That stricter rule breaks current zero inspections. Repeated empty del can remain legal under either rule.</p>
+</section>
+
+<section id="examples">
+<h2>20 examples</h2>
+<p>Each source block is a complete independent fort module. Check it without requiring main. Source line 1 is the first displayed line.</p>
+<p>Expected diagnostics describe the proposed analyzer. They do not report measured behavior of the current compiler.</p>
+<p>Examples 17 and 18 model container effects directly. They do not import a complete vector or map implementation.</p>
+<article class="example" id="example-01" data-example="1">
+<h3><span class="number">01</span>Local view after deletion</h3>
+<p>A view retains its allocation source after the owner becomes empty.</p>
+<div class="sample" data-file="ex01_local_view.ft">
+<div class="sample-head"><span class="filename">ex01_local_view.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn demo() i32 {
+    i32 mut* own p = new(i32);
+    i32* q = p;
+    del(p);
+    return *q;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex01_local_view.ft:5:13: error: use of &#x27;q&#x27; after its allocation was released
+        return *q;
+                ^
+ex01_local_view.ft:4:5: note: &#x27;p&#x27; released the allocation here
+        del(p);
+        ^~~
+ex01_local_view.ft:3:14: note: &#x27;q&#x27; borrows the allocation here
+        i32* q = p;
+                 ^</code></pre>
+</div>
+<p class="repair">Read q before del(p). A null test on p does not restore q.</p>
+</article>
+<article class="example" id="example-02" data-example="2">
+<h3><span class="number">02</span>View across an ownership transfer</h3>
+<p>A heap view follows the allocation. It does not depend on the current owner place.</p>
+<div class="sample" data-file="ex02_transfer.ft">
+<div class="sample-head"><span class="filename">ex02_transfer.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>fn demo() i32 {
+    i32 mut* own p = new(i32);
+    *p = 7;
+    i32* view = p;
+    i32 mut* own next = move(p);
+    i32 value = *view;
+    bool empty = p == null;
+    del(next);
+    return empty ? value : 0;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p><p class="repair">None.</p>
+</div>
+<p class="repair">The transfer empties p. The allocation remains live in next until del(next).</p>
+</article>
+<article class="example" id="example-03" data-example="3">
+<h3><span class="number">03</span>Release by the new owner</h3>
+<p>A consuming function can release an allocation that another local still borrows.</p>
+<div class="sample" data-file="ex03_consuming_call.ft">
+<div class="sample-head"><span class="filename">ex03_consuming_call.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn drop(i32* own p) void {
+    del(p);
+}
+fn demo() i32 {
+    i32 mut* own p = new(i32);
+    i32* view = p;
+    drop(move(p));
+    return *view;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex03_consuming_call.ft:8:13: error: use of &#x27;view&#x27; after its allocation was released
+        return *view;
+                ^~~~
+ex03_consuming_call.ft:7:5: note: this call releases the borrowed allocation
+        drop(move(p));
+        ^~~~
+ex03_consuming_call.ft:2:5: note: &#x27;drop&#x27; releases its owning parameter here
+        del(p);
+        ^~~</code></pre>
+</div>
+<p class="repair">A move preserves the view only while a subsequent owner keeps the allocation live.</p>
+</article>
+<article class="example" id="example-04" data-example="4">
+<h3><span class="number">04</span>Refilling an owner does not revive a view</h3>
+<p>A source place can hold different allocations at different execution points.</p>
+<div class="sample" data-file="ex04_refill.ft">
+<div class="sample-head"><span class="filename">ex04_refill.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn demo() i32 {
+    i32 mut* own mut p = new(i32);
+    i32* old = p;
+    del(p);
+    p = new(i32);
+    i32 value = *old;
+    del(move(p));
+    return value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex04_refill.ft:6:18: error: use of &#x27;old&#x27; after its allocation was released
+        i32 value = *old;
+                     ^~~
+ex04_refill.ft:4:5: note: the earlier allocation is released here
+        del(p);
+        ^~~</code></pre>
+</div>
+<p class="repair">Obtain a new view after the assignment. The first view still names the earlier allocation.</p>
+</article>
+<article class="example" id="example-05" data-example="5">
+<h3><span class="number">05</span>Returned local address</h3>
+<p>Local storage ends when the function exits.</p>
+<div class="sample" data-file="ex05_local_address.ft">
+<div class="sample-head"><span class="filename">ex05_local_address.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn bad() i32* {
+    i32 value = 7;
+    return &amp;value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex05_local_address.ft:3:12: error: returned view refers to local storage &#x27;value&#x27;
+        return &amp;value;
+               ^
+ex05_local_address.ft:2:9: note: &#x27;value&#x27; ends when this function returns
+        i32 value = 7;
+            ^~~~~</code></pre>
+</div>
+<p class="repair">Return the value, return ownership of a heap allocation, or return a view of caller storage.</p>
+</article>
+<article class="example" id="example-06" data-example="6">
+<h3><span class="number">06</span>Returned span of a local array</h3>
+<p>A span header can escape while its backing array cannot.</p>
+<div class="sample" data-file="ex06_local_span.ft">
+<div class="sample-head"><span class="filename">ex06_local_span.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn bad() u8@ {
+    u8[4] bytes = {1, 2, 3, 4};
+    return bytes[..];
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex06_local_span.ft:3:12: error: returned view refers to local storage &#x27;bytes&#x27;
+        return bytes[..];
+               ^~~~~
+ex06_local_span.ft:2:11: note: &#x27;bytes&#x27; ends when this function returns
+        u8[4] bytes = {1, 2, 3, 4};
+              ^~~~~</code></pre>
+</div>
+<p class="repair">The same rule applies to an address into a by-value array parameter.</p>
+</article>
+<article class="example" id="example-07" data-example="7">
+<h3><span class="number">07</span>Returned caller-backed view</h3>
+<p>The summary connects the result to the input allocation without a source annotation.</p>
+<div class="sample" data-file="ex07_borrowed_return.ft">
+<div class="sample-head"><span class="filename">ex07_borrowed_return.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>fn identity(i32* p) i32* {
+    return p;
+}
+fn demo() i32 {
+    i32 mut* own owner = new(i32);
+    *owner = 9;
+    i32* view = identity(owner);
+    i32 value = *view;
+    del(owner);
+    return value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p><p class="repair">None.</p>
+</div>
+<p class="repair">The caller must keep the source live until the last use of view.</p>
+</article>
+<article class="example" id="example-08" data-example="8">
+<h3><span class="number">08</span>Returned view invalidated by defer</h3>
+<p>The return expression runs before deferred releases. The resulting view must also survive those releases.</p>
+<div class="sample" data-file="ex08_deferred_return.ft">
+<div class="sample-head"><span class="filename">ex08_deferred_return.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn bad() i32* {
+    i32 mut* own p = new(i32);
+    defer del(p);
+    i32* view = p;
+    return view;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex08_deferred_return.ft:5:12: error: returned view refers to an allocation released at this exit
+        return view;
+               ^~~~
+ex08_deferred_return.ft:3:11: note: this deferred release runs before the caller receives the view
+        defer del(p);
+              ^~~</code></pre>
+</div>
+<p class="repair">Returning a local to an owning result type transfers ownership. A deferred del of the emptied source remains a no-op.</p>
+</article>
+<article class="example" id="example-09" data-example="9">
+<h3><span class="number">09</span>View retained in a field</h3>
+<p>The summary records the retained source and the destination field.</p>
+<div class="sample" data-file="ex09_retained_field.ft">
+<div class="sample-head"><span class="filename">ex09_retained_field.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>struct view_box {
+    i32* ptr;
+}
+fn remember(view_box mut* out, i32* value) void {
+    out-&gt;ptr = value;
+}
+fn demo() i32 {
+    i32 mut* own p = new(i32);
+    view_box mut saved = {};
+    remember(&amp;saved, p);
+    del(p);
+    return *saved.ptr;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex09_retained_field.ft:12:13: error: use of &#x27;saved.ptr&#x27; after its allocation was released
+        return *saved.ptr;
+                ^~~~~~~~~
+ex09_retained_field.ft:11:5: note: &#x27;p&#x27; released the allocation here
+        del(p);
+        ^~~
+ex09_retained_field.ft:10:5: note: this call stores a view of &#x27;p&#x27; in &#x27;saved.ptr&#x27;
+        remember(&amp;saved, p);
+        ^~~~~~~~</code></pre>
+</div>
+<p class="repair">Clearing or replacing saved.ptr before later use removes the old source relation.</p>
+</article>
+<article class="example" id="example-10" data-example="10">
+<h3><span class="number">10</span>Aliased call arguments</h3>
+<p>Apply caller aliases before evaluating callee effects. Parameter names do not establish distinct storage.</p>
+<div class="sample" data-file="ex10_call_alias.ft">
+<div class="sample-head"><span class="filename">ex10_call_alias.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>struct box {
+    i32 mut* own item;
+}
+fn release_then_read(box mut* a, box* b) i32 {
+    del(a-&gt;item);
+    return *b-&gt;item;
+}
+fn demo() i32 {
+    box mut value = {new(i32)};
+    return release_then_read(&amp;value, &amp;value);
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex10_call_alias.ft:10:12: error: call reads an owning place that the same call empties
+        return release_then_read(&amp;value, &amp;value);
+               ^~~~~~~~~~~~~~~~~
+ex10_call_alias.ft:5:5: note: &#x27;a-&gt;item&#x27; is released before the read
+        del(a-&gt;item);
+        ^~~
+ex10_call_alias.ft:6:13: note: the caller makes &#x27;a-&gt;item&#x27; and &#x27;b-&gt;item&#x27; the same place
+        return *b-&gt;item;
+                ^~~~~~~</code></pre>
+</div>
+<p class="repair">The callee summary requires the read allocation to survive the release. Distinct caller allocations can satisfy that requirement.</p>
+</article>
+<article class="example" id="example-11" data-example="11">
+<h3><span class="number">11</span>Ownership through an output parameter</h3>
+<p>Taking an owner place address does not stop tracking. The summary transfers the new allocation into that place.</p>
+<div class="sample" data-file="ex11_output_owner.ft">
+<div class="sample-head"><span class="filename">ex11_output_owner.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>fn fill(i32 mut* own mut* out) void {
+    *out = new(i32);
+    **out = 11;
+}
+fn demo() i32 {
+    i32 mut* own mut p = null;
+    fill(&amp;p);
+    i32 value = *p;
+    del(p);
+    return value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p><p class="repair">None.</p>
+</div>
+<p class="repair">fill requires an empty output owner. Calling it on a live owner reports an overwrite obligation.</p>
+</article>
+<article class="example" id="example-12" data-example="12">
+<h3><span class="number">12</span>Nested field after a partial move</h3>
+<p>Moving one owning field leaves the other fields available. The moved field contains its zero value.</p>
+<div class="sample" data-file="ex12_partial_move.ft">
+<div class="sample-head"><span class="filename">ex12_partial_move.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>struct inner {
+    i32 mut* own ptr;
+}
+struct outer {
+    inner part;
+    i32 tag;
+}
+fn demo() i32 {
+    outer mut value = {inner{new(i32)}, 3};
+    i32 mut* own taken = move(value.part.ptr);
+    i32 result = *value.part.ptr;
+    del(taken);
+    return result;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex12_partial_move.ft:11:19: error: cannot dereference &#x27;value.part.ptr&#x27;: the owning place is empty
+        i32 result = *value.part.ptr;
+                      ^~~~~~~~~~~~~~
+ex12_partial_move.ft:10:26: note: this move empties the field
+        i32 mut* own taken = move(value.part.ptr);
+                             ^~~~</code></pre>
+</div>
+<p class="repair">Reading value.tag or comparing value.part.ptr with null remains legal.</p>
+</article>
+<article class="example" id="example-13" data-example="13">
+<h3><span class="number">13</span>Shallow release with a live owned child</h3>
+<p>del releases only the outer allocation. It must not discard a live child ownership obligation.</p>
+<div class="sample" data-file="ex13_owned_child.ft">
+<div class="sample-head"><span class="filename">ex13_owned_child.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>struct node {
+    i32 mut* own child;
+}
+fn demo() void {
+    node mut* own parent = new(node);
+    parent-&gt;child = new(i32);
+    del(parent);
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex13_owned_child.ft:7:5: error: release loses the owned allocation in &#x27;parent-&gt;child&#x27;
+        del(parent);
+        ^~~
+ex13_owned_child.ft:6:21: note: the child ownership obligation starts here
+        parent-&gt;child = new(i32);
+                        ^~~</code></pre>
+</div>
+<p class="repair">Release or transfer parent-&gt;child before releasing parent. Borrowed child pointers do not create ownership obligations.</p>
+</article>
+<article class="example" id="example-14" data-example="14">
+<h3><span class="number">14</span>Owning aggregate overwrite</h3>
+<p>An aggregate assignment cannot discard ownership hidden in a field.</p>
+<div class="sample" data-file="ex14_aggregate_overwrite.ft">
+<div class="sample-head"><span class="filename">ex14_aggregate_overwrite.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>struct box {
+    i32 mut* own ptr;
+}
+fn demo() void {
+    box mut value = {new(i32)};
+    value = box{new(i32)};
+    del(value.ptr);
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex14_aggregate_overwrite.ft:6:11: error: assignment loses the owned allocation in &#x27;value.ptr&#x27;
+        value = box{new(i32)};
+              ^
+ex14_aggregate_overwrite.ft:5:22: note: the previous ownership obligation starts here
+        box mut value = {new(i32)};
+                         ^~~</code></pre>
+</div>
+<p class="repair">Release or transfer the old fields before assignment. Evaluate the right side before checking the destination, as D17.11 requires.</p>
+</article>
+<article class="example" id="example-15" data-example="15">
+<h3><span class="number">15</span>Release on one branch</h3>
+<p>A later use requires a live source on both reaching paths.</p>
+<div class="sample" data-file="ex15_conditional_release.ft">
+<div class="sample-head"><span class="filename">ex15_conditional_release.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn demo(bool release) i32 {
+    i32 mut* own p = new(i32);
+    i32* view = p;
+    if (release) {
+        del(p);
+    }
+    i32 value = *view;
+    del(p);
+    return value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex15_conditional_release.ft:7:18: error: &#x27;view&#x27; can refer to released storage on one path
+        i32 value = *view;
+                     ^~~~
+ex15_conditional_release.ft:5:9: note: this branch releases the source allocation
+            del(p);
+            ^~~</code></pre>
+</div>
+<p class="repair">Do not report an error merely because branch ownership states differ. Report the operation whose obligation a reaching path violates.</p>
+</article>
+<article class="example" id="example-16" data-example="16">
+<h3><span class="number">16</span>Loop-carried ownership</h3>
+<p>Each loop iteration preserves or discharges its ownership obligations.</p>
+<div class="sample" data-file="ex16_loop_transfer.ft">
+<div class="sample-head"><span class="filename">ex16_loop_transfer.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>fn demo(u64 n) i32 {
+    i32 mut* own mut current = null;
+    u64 mut i = 0;
+    while (i &lt; n) {
+        i32 mut* own next = new(i32);
+        del(current);
+        current = move(next);
+        i += 1;
+    }
+    i32 value = current == null ? 0 : *current;
+    del(current);
+    return value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p><p class="repair">None.</p>
+</div>
+<div class="sample" data-file="ex16_loop_leak.ft">
+<div class="sample-head"><span class="filename">ex16_loop_leak.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn bad(u64 n) void {
+    u64 mut i = 0;
+    while (i &lt; n) {
+        i32 mut* own p = new(i32);
+        i += 1;
+    }
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex16_loop_leak.ft:6:5: error: &#x27;p&#x27; still owns an allocation at the end of its scope
+        }
+        ^
+ex16_loop_leak.ft:4:26: note: the ownership obligation starts here
+            i32 mut* own p = new(i32);
+                             ^~~</code></pre>
+</div>
+<p class="repair">The empty entry state must not become live merely because a loop exists. A zero-iteration path remains empty.</p>
+</article>
+<article class="example" id="example-17" data-example="17">
+<h3><span class="number">17</span>Replacement of vector storage</h3>
+<p>A field summary distinguishes the vector object from its backing allocation.</p>
+<div class="sample" data-file="ex17_storage_growth.ft">
+<div class="sample-head"><span class="filename">ex17_storage_growth.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>struct buffer {
+    u8 mut@ own data;
+}
+fn grow(buffer mut* b) void {
+    u8 mut@ own next = new(u8, b-&gt;data.len + 1);
+    del(b-&gt;data);
+    b-&gt;data = move(next);
+}
+fn demo() u8 {
+    buffer mut b = {new(u8, 1)};
+    u8@ view = b.data;
+    grow(&amp;b);
+    u8 value = view[0];
+    del(b.data);
+    return value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex17_storage_growth.ft:13:16: error: use of &#x27;view&#x27; after its backing allocation was released
+        u8 value = view[0];
+                   ^~~~
+ex17_storage_growth.ft:12:5: note: this call replaces the backing allocation
+        grow(&amp;b);
+        ^~~~
+ex17_storage_growth.ft:6:5: note: the replacement releases the earlier allocation here
+        del(b-&gt;data);
+        ^~~</code></pre>
+</div>
+<p class="repair">Obtain a new view after grow. A real reserve function that may grow requires proof that its retaining path runs.</p>
+</article>
+<article class="example" id="example-18" data-example="18">
+<h3><span class="number">18</span>Retained string key</h3>
+<p>A borrowed key must keep its character allocation live while the map can read it.</p>
+<div class="sample" data-file="ex18_retained_key.ft">
+<div class="sample-head"><span class="filename">ex18_retained_key.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>struct entry {
+    string key;
+}
+fn put(entry mut* e, string key) void {
+    e-&gt;key = key;
+}
+fn demo() u8 {
+    u8 mut@ own bytes = new(u8, 2);
+    entry mut e = {};
+    put(&amp;e, cast(bytes, string));
+    del(bytes);
+    return cast(e.key[0], u8);
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex18_retained_key.ft:12:17: error: use of &#x27;e.key&#x27; after its character allocation was released
+        return cast(e.key[0], u8);
+                    ^~~~~
+ex18_retained_key.ft:11:5: note: the character allocation is released here
+        del(bytes);
+        ^~~
+ex18_retained_key.ft:10:5: note: this call retains the borrowed key
+        put(&amp;e, cast(bytes, string));
+        ^~~</code></pre>
+</div>
+<p class="repair">Keep the key owner live, clear the retained key, or change the container to own its keys. This example models retention only.</p>
+</article>
+<article class="example" id="example-19" data-example="19">
+<h3><span class="number">19</span>Trusted extern calls and results</h3>
+<p>Calls and borrowed results need no compiler contract. Foreign storage validity uses the declared FFI trust boundary.</p>
+<div class="sample" data-file="ex19_unknown_extern.ft">
+<div class="sample-head"><span class="filename">ex19_unknown_extern.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>extern fn foreign_view() u8*;
+fn demo() u8 {
+    u8* p = foreign_view();
+    return *p;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<p class="repair">None. The compiler trusts the foreign result. The foreign implementation must return valid storage for this access.</p>
+</div>
+<div class="sample" data-file="ex19_call_only.ft">
+<div class="sample-head"><span class="filename">ex19_call_only.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>extern fn foreign_view() u8*;
+fn demo() void {
+    foreign_view();
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p><p class="repair">None.</p>
+</div>
+<div class="sample" data-file="ex19_known_alias.ft">
+<div class="sample-head"><span class="filename">ex19_known_alias.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>extern fn copy_bytes(u8 mut* dst, u8* src, u64 n) u8 mut*;
+fn demo() u8 {
+    u8 mut@ own dst = new(u8, 1);
+    u8 mut@ own src = new(u8, 1);
+    src[0] = 5;
+    u8 mut* result = copy_bytes(dst.ptr, src.ptr, 1);
+    u8 value = *result;
+    del(src);
+    del(dst);
+    return value;
+}</code></pre>
+<p class="repair">The compiler trusts copy_bytes and its returned pointer. It requires no contract. Source and destination ownership remain with demo.</p>
+<p class="repair">This function copies one scalar byte. Its result uses foreign trust; the compiler does not infer that result aliases dst.</p>
+<p class="label">Expected diagnostics · proposed output</p><p class="repair">None.</p>
+</div>
+<p class="repair">An extern result declared own creates a fresh ownership obligation under D17.13. Its storage validity and extent use foreign trust.</p>
+</article>
+<article class="example" id="example-20" data-example="20">
+<h3><span class="number">20</span>Raw pointers do not erase proof obligations</h3>
+<p>A void pointer round trip preserves the source. Integer reconstruction does not establish a source.</p>
+<div class="sample" data-file="ex20_raw_preserved.ft">
+<div class="sample-head"><span class="filename">ex20_raw_preserved.ft</span><span class="outcome accept">Accept</span></div>
+<pre class="source"><code>fn demo() u8 {
+    u8 mut@ own bytes = new(u8, 4);
+    void mut* raw = cast(bytes.ptr, void mut*);
+    u8 mut* p = cast(raw, u8 mut*);
+    u8 mut@ view = p[0..4];
+    view[0] = 6;
+    u8 value = view[0];
+    del(bytes);
+    return value;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p><p class="repair">None.</p>
+</div>
+<div class="sample" data-file="ex20_raw_lost.ft">
+<div class="sample-head"><span class="filename">ex20_raw_lost.ft</span><span class="outcome reject">Reject</span></div>
+<pre class="source"><code>fn bad(u64 bits) u8 {
+    u8* p = cast(bits, u8*);
+    return *p;
+}</code></pre>
+<p class="label">Expected diagnostics · proposed output</p>
+<pre class="diagnostic"><code>ex20_raw_lost.ft:3:13: error: cannot prove that &#x27;p&#x27; designates live storage
+        return *p;
+                ^
+ex20_raw_lost.ft:2:13: note: this integer-to-pointer cast has no proved storage source
+        u8* p = cast(bits, u8*);
+                ^~~~</code></pre>
+</div>
+<p class="repair">Raw pointer slices into fort storage require a proved extent and range. bytes.ptr[0..5] fails when bytes has four elements.</p>
+</article>
+</section>
+
+<section id="limits">
+<h2>Unresolved cases and proof limits</h2>
+<p>These 12 entries contain nine unresolved fort cases and three FFI proof limits. Hidden foreign behavior remains outside the proof.</p>
+<p>Reject fort operations where missing information prevents proof. Apply FFI trust to foreign proof limits. The excerpts are not complete test files.</p>
+<div class="edge"><h3>U1. Recursive heap cleanup</h3>
+<pre><code>node mut* own next = move(current-&gt;next);
+del(current);
+current = move(next);</code></pre>
+<p><strong>Missing:</strong> a finite heap model that proves an unbounded owned chain empties without merging distinct live obligations.</p>
+<p><strong>Consequence:</strong> the intended list and pool idioms need inductive cleanup proof. An allocation-site set alone cannot establish it.</p></div>
+<div class="edge"><h3>U2. Dynamic element identity</h3>
+<pre><code>node* view = slots[i];
+del(slots[j]);
+use(view);</code></pre>
+<p><strong>Missing:</strong> index equality, inequality, range partitions, and ownership state for unbounded elements.</p>
+<p><strong>Consequence:</strong> reject the use when i and j may select the same allocation. Do not assume distinct indices imply distinct targets.</p></div>
+<div class="edge"><h3>U3. Bytewise writes to reference fields</h3>
+<pre><code>copy_bytes(cast(&amp;dst, u8 mut*), cast(&amp;src, u8*), sizeof(box));</code></pre>
+<p><strong>Missing:</strong> a representation-aware rule for copies, overlaps, partial writes, and padding around borrowed or owning fields.</p>
+<p><strong>Consequence:</strong> fort bytewise writes need representation-aware proof. Foreign bytewise writes use FFI trust; hidden ownership duplication remains outside the proof.</p></div>
+<div class="edge"><h3>U4. Unknown extern retention and global access</h3>
+<pre><code>foreign_keep(view);
+del(owner);</code></pre>
+<p><strong>Outside proof:</strong> hidden foreign retention and global access.</p>
+<p><strong>Consequence:</strong> accept foreign_keep and subsequent del(owner) when known fort obligations permit it. Foreign use of the retained view can then dangle.</p></div>
+<div class="edge"><h3>U5. Foreign buffer invalidation</h3>
+<pre><code>char* first = foreign_text();
+foreign_text();
+use(first);</code></pre>
+<p><strong>Outside proof:</strong> reused buffers, handle closure, and library-managed storage validity.</p>
+<p><strong>Consequence:</strong> accept use(first) under FFI trust. The foreign implementation must keep the result valid; the compiler does not prove it.</p></div>
+<div class="edge"><h3>U6. Callback sources and indirect targets</h3>
+<pre><code>foreign_sort(base, count, width, compare);</code></pre>
+<p><strong>Outside proof:</strong> foreign callback timing, argument validity, and retention.</p>
+<p><strong>Consequence:</strong> trust arguments supplied at foreign entry points. Analyze each fort callback body with symbolic caller storage and ordinary fort ownership rules.</p></div>
+<div class="edge"><h3>U7. Returned self-references</h3>
+<pre><code>value.view = &amp;value.inline_field;
+return value;</code></pre>
+<p><strong>Missing:</strong> precise treatment of aggregate result storage and borrowed addresses into copied or moved stack values.</p>
+<p><strong>Consequence:</strong> reject the escaping inline-field address. A view into separately owned heap storage can follow the transferred allocation.</p></div>
+<div class="edge"><h3>U8. Analysis precision and termination</h3>
+<pre><code>return choose ? left(field(next)) : right(field(previous));</code></pre>
+<p><strong>Missing:</strong> access-path widening, relational predicates, recursive summary termination, and resource limits.</p>
+<p><strong>Consequence:</strong> publish measured limits and report incomplete proof. Never terminate analysis by accepting the affected operation.</p></div>
+<div class="edge"><h3>U9. Owning globals at program exit</h3>
+<pre><code>GLOBAL = move(local);
+return 0;</code></pre>
+<p><strong>Missing:</strong> the final obligation boundary for reachable owning globals and library entry points.</p>
+<p><strong>Consequence:</strong> distinguish lost local ownership from transferred global ownership. Do not claim program-wide leak detection before this rule exists.</p></div>
+<div class="edge"><h3>U10. Pointer identity reconstructed from integers</h3>
+<pre><code>u64 bits = cast(pointer, u64);
+u8* restored = cast(bits, u8*);</code></pre>
+<p><strong>Missing:</strong> whether exact unmodified round trips may retain provenance and which arithmetic destroys that relation.</p>
+<p><strong>Consequence:</strong> the first version rejects access through restored unless it retains a proved source. Arbitrary integer bits never establish ownership.</p></div>
+<div class="edge"><h3>U11. Borrows into zero-length or interior allocations</h3>
+<pre><code>u8* tail = bytes[bytes.len..bytes.len].ptr;</code></pre>
+<p><strong>Missing:</strong> access rules for empty spans, end pointers, and alignment changes within fort storage.</p>
+<p><strong>Consequence:</strong> distinguish a live allocation from an accessible byte. A non-null pointer does not prove a nonempty range.</p></div>
+<div class="edge"><h3>U12. Source evaluation order</h3>
+<pre><code>items[change_owner(&amp;items)]</code></pre>
+<p><strong>Missing:</strong> the rulings tracked by T-262 and T-263 for span-header reads and range-loop length reads.</p>
+<p><strong>Consequence:</strong> analyze the FIR order that the compiler emits. Do not establish source-level guarantees from an unratified evaluation order.</p></div>
+</section>
+
+<section id="delivery">
+<h2>Delivery and acceptance</h2>
+<p>This artifact is the deliverable of T-271. It does not implement compiler analysis. D17.13 records FFI trust; the remaining analysis rules require ratification.</p>
+<ol>
+<li>Ratify exact ownership rules and resolve implementation-blocking cases above.</li>
+<li>Implement place and allocation analysis, then function summaries and retained-source relations.</li>
+<li>Implement the trusted FFI boundary and ownership diagnostic integration. Require no foreign-function contracts.</li>
+<li>Complete feature validation before migrating existing compiler, runtime, library, and LSP source.</li>
+<li>After migration, require checks in native gates and the self-hosting fixpoint.</li>
+</ol>
+<p>Use temporary <code>--ownership-check</code> selection during feature development. It is a rollout option, not an operation-level proof exemption.</p>
+<p>The selected analysis checks the import closure, including available runtime bodies. Do not silently exempt an imported fort module.</p>
+<p>Before migration, use isolated FIR and source fixtures to validate the feature. Keep the ordinary gate unchanged while feature selection remains optional.</p>
+<p>After migration, enable the analysis by default and remove the temporary selection option.</p>
+<h3>Compiler acceptance</h3>
+<ul>
+<li>Pair rejected cases with valid transfers, cleanup, reinitialization, and last-use cases.</li>
+<li>Require identical ownership verdicts across build modes.</li>
+<li>Mutation-test release invalidation, ownership transfer, caller alias substitution, retained references, FFI trust classification, and cleanup obligations.</li>
+<li>Count tested cases and rejected mutants. Record commands and source SHAs in ticket logs.</li>
+<li>Compare accepted-program IR. Confirm unchanged representation and no runtime ownership tracking.</li>
+<li>Run independent read-only review and the required merge gates.</li>
+</ul>
+<h3>Artifact validation</h3>
+<p>The document contains 20 example groups. Source fixtures contain no lifetime annotation and no new language keyword.</p>
+<p>Validate example syntax and current type rules separately from proposed ownership verdicts. Validate diagnostic coordinates against the displayed source.</p>
+<p>Validate HTML structure, anchor links, narrow-screen layout, and print layout. Compiler acceptance of a fixture does not prove its proposed verdict.</p>
+</section>
+
+<section id="references">
+<h2>Decision amendments</h2>
+<p>The current decision log and grammar remain normative. D17.13 records trusted FFI. This document proposes the other amendments below without applying them.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Source</th><th>Current rule and proposed change</th></tr></thead><tbody>
+<tr><td><a href="decisions.md">D6.7</a></td><td>Current: local-address returns have no diagnostic. Proposed: reject escaped local storage.</td></tr>
+<tr><td><a href="decisions.md">D6.9</a></td><td>Keep trusted foreign-memory operations. Proposed: require a proved source and sufficient static extent for fort storage.</td></tr>
+<tr><td><a href="decisions.md">D10.7</a></td><td>Current: dangling views belong to undefined behavior. Proposed: reject fort operations with invalid or unproved temporal storage.</td></tr>
+<tr><td><a href="decisions.md">D15</a></td><td>Current: linear ownership checking is deferred. Proposed: introduce the FIR ownership analysis.</td></tr>
+<tr><td><a href="decisions.md">D17.4–D17.14</a></td><td>Keep lending, transfer, shallow deletion, zero values, and extern ownership conventions. Replace untracked borrows and leaks with explicit proof obligations.</td></tr>
+<tr><td><a href="decisions.md">D19.8</a>; <a href="fir.md">FIR 14</a></td><td>Replace permanent escape-based loss of checking with alias, source, and effect analysis. Run the analysis before build-mode passes.</td></tr>
+<tr><td><a href="decisions.md">D20.1</a></td><td>Current: check mode stops at the front end. Proposed: include FIR ownership analysis without generating LLVM or invoking the C compiler.</td></tr>
+<tr><td><a href="grammar.md">Grammar</a></td><td>Keep source syntax unchanged. Add no lifetime annotation and no unsafe construct.</td></tr>
+<tr><td><a href="toolchain.md">Toolchain 4</a></td><td>Keep diagnostic positions, text rendering, JSON records, and exit status. Add the ownership diagnostic families.</td></tr>
+</tbody></table></div>
+<p>Also update <a href="memory-model.md">the memory model</a>, <a href="type-system.md">the type system</a>, and <a href="core-language.md">the core language</a> after ratification.</p>
+<p>Compiler evidence for this proposal comes from reading <code>fir.ft</code>, <code>fir_lower.ft</code>, <code>fir_flow.ft</code>, and the existing ownership checker.</p>
+<p>Library evidence includes vector storage replacement, retained map keys, and the compiler pool's owned block chain.</p>
+</section>
+
+<footer><p>Proposed design. The current decision log and grammar take precedence. This artifact contains no compiler implementation.</p></footer>
+</main>
+</div>
+</body>
+</html>
