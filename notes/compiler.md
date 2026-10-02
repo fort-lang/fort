@@ -297,6 +297,15 @@ came here.
   A weak update preserves unselected contents and conditional ownership obligations.
   It must not discharge all candidate allocations for one selected release.
   Whole aggregate moves transfer all fields. Projected moves empty only their selected subobject.
+  `ownership_places` walks only inline struct fields and fixed-array elements.
+  It stops at each reference leaf, including a reference to a recursive type.
+  Its caller resolves heap indirection to a canonical storage root before a strong update.
+  Its caller substitutes aliases before it treats different storage roots as disjoint.
+  A copied or moved borrow names its new containing field and keeps its original source.
+  Each selected borrowed leaf needs a live source before a copy or move.
+  A moved or released owning leaf has an empty-owner fact with exact zero length.
+  A delegated aggregate failure keeps the mapped event key and its exhaustion data.
+  The module changes a cloned state first. A failed later mutation leaves the input state unchanged.
   Neither move rebases an inline address. Abstract temporary ownership ends on transfer even when
   LLVM omits generated source clearing. Normal return ends by-value parameter storage after defer,
   including parameter copies without dead markers. Symbolic caller sources have separate lifetimes.
