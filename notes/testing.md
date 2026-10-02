@@ -298,6 +298,10 @@ bullet at a time and without a rewrite.
 
 ## 4. fort module tests
 
+- **An exported compiler helper can have test clients outside the focused selection.**
+  A range-capture CI run found an old prescan call in `fir_lower_local_panic_test.ft`.
+  After changing an exported `fir_lower` helper, search its callers and run the full module
+  corpus or its closure lint before handoff. A focused `fir_loan_*` run did not compile that client.
 - **A `test/fort` suite that checks two sources must reopen its environment between them.** A
   module set answers a path it has already loaded from the tree that load left, so a second
   `check_env.check_src` over one environment silently re-checks the first source and its

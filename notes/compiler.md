@@ -118,6 +118,17 @@ came here.
   Later pointer writes therefore cannot retarget the candidate's original place.
   Selected range nodes have declaration IDs; repeated deferred lowering has separate expansion IDs.
   Production releases unused candidates. No candidate enters verified FIR or proves source coverage.
+- **Range lowering records inactive operation-gap boundary proposals** (D17.10, `spec/fir.md` 9.5).
+  The lowering records capture after collection evaluation and body entry before `live(x)`.
+  It records body cleanup after body defers, loan exit after local `dead` markers, and outer cleanup
+  before the next outer effect. A switch break keeps the range loan active. Continue, loop break,
+  return, and fall-off close the body loan on their own paths. An abort has no normal exit triple.
+  A zero-iteration path has capture but does not enter the body. Nested loans name their parent.
+  Each deferred lowering occurrence has its own expansion ID and exit occurrence.
+  A context proposal maps its ID to the source `defer`, enclosing context, and exit occurrence.
+  A skipped defer records a suppression proposal with no capture. All proposals stay outside FIR.
+  The producer frees unused proposals on each path. A caller owns returned proposals.
+  Source completeness remains false until independent source correspondence validates them.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a
