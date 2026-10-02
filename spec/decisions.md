@@ -692,11 +692,18 @@ Sections:
   including any index and its bounds check, is computed before the right-hand side; compound
   assignment computes the target once. Temporaries live until the end of the enclosing statement.
   An aggregate literal reads every member before the destination changes, so `s = pair{s.b, s.a}`
-  swaps the two fields.
+  swaps the two fields. An index evaluates its base to determine its value or storage, then its
+  index.
+  A span or `string` index reads a stored base header after the index. A span expression evaluates
+  its base, then evaluates its explicit lower and upper bounds in that order.
+  It reads a stored span or `string` base header after those bounds. An absent upper bound uses
+  the length from that read. A base rvalue keeps the header produced during base evaluation.
+  The span or `string` operation checks bounds after it reads the header.
 - history: Amended 2026-09-28 (T-209): the rule said nothing about a literal that reads its own
   destination, and the emitter wrote such a literal member by member, so `s = pair{s.b, s.a}`
   gave `s.b, s.b`. The user ruled for the swap. The emitter keeps the old behavior until the FIR
-  migration replaces it (`fir.md` 12.5).
+  migration replaces it (`fir.md` 12.5). Amended 2026-10-02: the user selected the
+  existing order for a stored span or `string` header after the index or explicit bounds.
 
 ### D6.4 The cast form
 - owner: `core-language.md` (Expressions).
