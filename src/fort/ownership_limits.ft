@@ -1,0 +1,237 @@
+/// Counts finite ownership analysis work and bounded facts.
+import ownership_api;
+import ownership_keys;
+
+// Version 1 values apply to the scopes in ownership_api.scope_of.
+// T-278 turns a precision refusal into a residual fact before it decides an obligation.
+// Required work uses ownership_api.charge and stops before output mutation on refusal.
+u64 PRODUCTION_D = 16;
+u64 PRODUCTION_R = 256;
+u64 PRODUCTION_P = 128;
+u64 PRODUCTION_G = 128;
+u64 PRODUCTION_H = 64;
+u64 PRODUCTION_T = 64;
+u64 PRODUCTION_E = 256;
+u64 PRODUCTION_W = 65536;
+u64 PRODUCTION_V = 512;
+
+struct meter {
+    ownership_api.limit_table bounds;
+    ownership_api.used_counts used;
+    bool configured;
+}
+
+/// Returns the versioned production table.
+fn production() ownership_api.limit_table {
+    return ownership_api.limit_table{ownership_api.LIMIT_VERSION, PRODUCTION_D, PRODUCTION_R,
+        PRODUCTION_P, PRODUCTION_G, PRODUCTION_H, PRODUCTION_T, PRODUCTION_E, PRODUCTION_W,
+        PRODUCTION_V};
+}
+
+/// Configures a meter only when each bound is positive and the version is supported.
+fn configure(meter mut* m, ownership_api.limit_table* limits) bool {
+    ownership_api.limit_table selected = *limits;
+    if (!ownership_api.valid_limits(&selected)) { return false; }
+    *m = meter{};
+    m->bounds = selected;
+    m->configured = true;
+    return true;
+}
+
+fn bound(ownership_api.limit_table* t, ownership_api.limit_category c) u64 {
+    switch (c) {
+    case ownership_api.limit_category.d: return t->d;
+    case ownership_api.limit_category.r: return t->r;
+    case ownership_api.limit_category.p: return t->p;
+    case ownership_api.limit_category.g: return t->g;
+    case ownership_api.limit_category.h: return t->h;
+    case ownership_api.limit_category.t: return t->t;
+    case ownership_api.limit_category.e: return t->e;
+    case ownership_api.limit_category.w: return t->w;
+    case ownership_api.limit_category.v: return t->v;
+    }
+}
+
+fn used(ownership_api.used_counts* t, ownership_api.limit_category c) u64 {
+    switch (c) {
+    case ownership_api.limit_category.d: return t->d;
+    case ownership_api.limit_category.r: return t->r;
+    case ownership_api.limit_category.p: return t->p;
+    case ownership_api.limit_category.g: return t->g;
+    case ownership_api.limit_category.h: return t->h;
+    case ownership_api.limit_category.t: return t->t;
+    case ownership_api.limit_category.e: return t->e;
+    case ownership_api.limit_category.w: return t->w;
+    case ownership_api.limit_category.v: return t->v;
+    }
+}
+
+fn add(ownership_api.used_counts mut* t, ownership_api.limit_category c, u64 n) void {
+    switch (c) {
+    case ownership_api.limit_category.d: t->d += n;
+    case ownership_api.limit_category.r: t->r += n;
+    case ownership_api.limit_category.p: t->p += n;
+    case ownership_api.limit_category.g: t->g += n;
+    case ownership_api.limit_category.h: t->h += n;
+    case ownership_api.limit_category.t: t->t += n;
+    case ownership_api.limit_category.e: t->e += n;
+    case ownership_api.limit_category.w: t->w += n;
+    case ownership_api.limit_category.v: t->v += n;
+    }
+}
+
+fn precision(ownership_api.limit_category c) bool {
+    return c != ownership_api.limit_category.w && c != ownership_api.limit_category.v;
+}
+
+fn invalid(ownership_api.charge_request* req) ownership_api.charge_result {
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        req->operation, req->source);
+    return out;
+}
+
+fn valid_request(ownership_api.charge_request* req) bool {
+    if (!ownership_keys.canonical_charges(req)) { return false; }
+    u64 mut i = 0;
+    while (i < req->items.len) {
+        if (req->items[i].category == ownership_api.limit_category.w &&
+            req->items[i].amount != 1) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+/// Checks every item before it changes any counter. A precision refusal is not a verdict.
+fn try_charge(meter mut* m, ownership_api.charge_request* req) ownership_api.charge_result {
+    if (!m->configured || !ownership_api.valid_limits(&m->bounds) ||
+        !valid_request(req)) { return invalid(req); }
+    u64 mut i = 0;
+    while (i < req->items.len) {
+        ownership_api.charge_item item = req->items[i];
+        u64 count = used(&m->used, item.category);
+        u64 max = bound(&m->bounds, item.category);
+        bool saturated = item.amount > ownership_api.U64_MAX - count;
+        if (saturated || count > max || item.amount > max - count) {
+            ownership_api.charge_result mut out = ownership_api.charge_result{};
+            out.limit.present = true;
+            out.limit.category = item.category;
+            out.limit.scope = item.scope;
+            out.limit.work = req->work;
+            out.limit.used = count;
+            out.limit.bound = max;
+            out.limit.attempted = item.amount;
+            out.limit.operation = req->operation;
+            out.limit.source = req->source;
+            out.limit.saturated = saturated;
+            if (precision(item.category)) {
+                out.proof.kind = ownership_api.proof_kind.complete;
+            } else {
+                ownership_api.incomplete_reason reason = item.category ==
+                    ownership_api.limit_category.v ? ownership_api.incomplete_reason.report_limit :
+                    ownership_api.incomplete_reason.work_limit;
+                out.proof = ownership_api.incomplete(reason, req->operation, req->source);
+                out.proof.terminal.limit = out.limit;
+            }
+            return out;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < req->items.len) {
+        add(&m->used, req->items[i].category, req->items[i].amount);
+        i += 1;
+    }
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    out.allowed = true;
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+/// Supplies the frozen budget callback. The caller keeps the meter live.
+fn callback(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    if (opaque == null) { return invalid(req); }
+    return try_charge(cast(opaque, meter mut*), req);
+}
+
+/// Records a precision loss without claiming that an obligation failed.
+fn lost(ownership_api.exhaustion* limit, ownership_api.entity_id relation)
+    ownership_api.lost_fact {
+    ownership_api.lost_fact mut out = ownership_api.lost_fact{};
+    if (!limit->present || !precision(limit->category)) { return out; }
+    out.category = limit->category;
+    out.bound = limit->bound;
+    out.first_source = limit->source;
+    out.relation = relation;
+    return out;
+}
+
+fn request_order(ownership_api.charge_request* a, ownership_api.charge_request* b) i32 {
+    i32 mut c = ownership_keys.operation(a->operation, b->operation);
+    if (c != 0) { return c; }
+    c = ownership_keys.category(a->items[0].category, b->items[0].category);
+    if (c != 0) { return c; }
+    if (cast(a->work, u32) < cast(b->work, u32)) { return -1; }
+    if (cast(a->work, u32) > cast(b->work, u32)) { return 1; }
+    c = ownership_keys.source(a->source, b->source);
+    if (c != 0) { return c; }
+    u64 mut i = 0;
+    while (i < a->items.len && i < b->items.len) {
+        c = ownership_keys.category(a->items[i].category, b->items[i].category);
+        if (c != 0) { return c; }
+        if (cast(a->items[i].scope, u32) < cast(b->items[i].scope, u32)) { return -1; }
+        if (cast(a->items[i].scope, u32) > cast(b->items[i].scope, u32)) { return 1; }
+        if (a->items[i].amount < b->items[i].amount) { return -1; }
+        if (a->items[i].amount > b->items[i].amount) { return 1; }
+        i += 1;
+    }
+    if (a->items.len < b->items.len) { return -1; }
+    if (a->items.len > b->items.len) { return 1; }
+    return 0;
+}
+
+/// Charges an input batch in canonical operation order, independent of insertion order.
+fn charge_batch(meter mut* m, ownership_api.charge_request@ input)
+    ownership_api.charge_result {
+    if (!m->configured || !ownership_api.valid_limits(&m->bounds)) {
+        ownership_api.charge_request empty = ownership_api.charge_request{};
+        return invalid(&empty);
+    }
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!valid_request(&input[i])) { return invalid(&input[i]); }
+        i += 1;
+    }
+    if (input.len == 0) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.allowed = true;
+        out.proof.kind = ownership_api.proof_kind.complete;
+        return out;
+    }
+    ownership_api.charge_request mut@ own sorted = new(ownership_api.charge_request, input.len);
+    i = 0;
+    while (i < input.len) {
+        sorted[i] = input[i];
+        i += 1;
+    }
+    i = 1;
+    while (i < sorted.len) {
+        ownership_api.charge_request item = sorted[i];
+        u64 mut j = i;
+        while (j > 0 && request_order(&item, &sorted[j - 1]) < 0) {
+            sorted[j] = sorted[j - 1];
+            j -= 1;
+        }
+        sorted[j] = item;
+        i += 1;
+    }
+    ownership_api.charge_result mut last = ownership_api.charge_result{};
+    i = 0;
+    while (i < sorted.len) {
+        last = try_charge(m, &sorted[i]);
+        if (!last.allowed) { break; }
+        i += 1;
+    }
+    del(sorted);
+    return last;
+}

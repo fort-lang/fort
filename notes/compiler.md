@@ -546,6 +546,7 @@ came here.
   A noreturn type proves no caller return. It proves neither abort nor completed process cleanup.
   `spec/toolchain.md` 4.2 separates validated invalidity witnesses from abstract possibility.
   Keep proof events independent of rendered diagnostic limits. Suppression cannot change a verdict.
+  The T-317 event store owns its meter because teardown releases caller state before event storage.
   The seven A01-A07 traces have read evidence. They do not measure current compiler acceptance.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`

@@ -1,0 +1,408 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| copied events ok
+//| canonical report limit ok
+//| replacement accounting ok
+//| missing handlers ok
+//| rendered limit ok
+//| witness limit ok
+//| canonical prefix gap ok
+//| moved context guard ok
+//| conflicting event keys ok
+/// Tests copied event storage and the reserved report failure.
+import ownership_api;
+import ownership_events;
+import ownership_keys;
+import ownership_limits;
+
+fn limits(u64 v) ownership_api.limit_table {
+    return ownership_api.limit_table{ownership_api.LIMIT_VERSION, 8, 8, 8, 8, 8, 8, 8, 8, v};
+}
+
+fn complete() ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.proof_status{};
+    out.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn event(u32 id) ownership_api.event_descriptor {
+    ownership_api.event_descriptor mut out = ownership_api.event_descriptor{};
+    out.key.kind = ownership_api.entity_kind.event;
+    out.key.ordinal = id;
+    out.operation.function.declaration.module = 1;
+    out.operation.function.declaration.declaration = 3;
+    out.operation.block = 2;
+    out.operation.operation = id;
+    out.source = ownership_api.source_position{1, 2, id + 10, 4, id + 10, 9};
+    out.kind = ownership_api.event_kind.incomplete_proof;
+    out.evidence = ownership_api.evidence_kind.abstract_possibility;
+    out.reason = ownership_api.incomplete_reason.unknown_effect;
+    out.relation.kind = ownership_api.entity_kind.relation;
+    out.relation.ordinal = 20 + id;
+    return out;
+}
+
+fn copied() void {
+    ownership_api.limit_table table = limits(8);
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    {
+        char[5] mut text = {'a', 'l', 'i', 'v', 'e'};
+        char[4] mut note_a = {'l', 'e', 'n', 'd'};
+        char[7] mut note_b = {'r', 'e', 'l', 'e', 'a', 's', 'e'};
+        ownership_api.projection[1] mut source = {};
+        ownership_api.projection[1] mut owner = {};
+        source[0].kind = ownership_api.projection_kind.field;
+        source[0].field = 7;
+        owner[0].kind = ownership_api.projection_kind.fixed_index;
+        owner[0].index.kind = ownership_api.fact_kind.exact;
+        owner[0].index.value = 3;
+        ownership_api.entity_id[2] mut conditions = {};
+        conditions[0].kind = ownership_api.entity_kind.guard;
+        conditions[0].ordinal = 9;
+        conditions[1].kind = ownership_api.entity_kind.guard;
+        conditions[1].ordinal = 2;
+        ownership_api.witness_link[2] mut witnesses = {};
+        witnesses[0].key.kind = ownership_api.entity_kind.witness;
+        witnesses[0].key.ordinal = 8;
+        witnesses[0].validated = true;
+        witnesses[0].summary.declaration.declaration = 10;
+        witnesses[1].key.kind = ownership_api.entity_kind.witness;
+        witnesses[1].key.ordinal = 1;
+        witnesses[1].validated = true;
+        witnesses[1].predecessor = witnesses[0].key;
+        ownership_api.event_note[2] mut notes = {};
+        notes[0].role = ownership_api.note_role.release;
+        notes[0].text = cast(note_b[..], string);
+        notes[1].role = ownership_api.note_role.lending;
+        notes[1].text = cast(note_a[..], string);
+        ownership_api.event_descriptor mut input = event(4);
+        input.kind = ownership_api.event_kind.invalid_use;
+        input.evidence = ownership_api.evidence_kind.validated_path;
+        input.source_path.projections = source[..];
+        input.owner_path.projections = owner[..];
+        input.conditions = conditions[..];
+        input.witnesses = witnesses[..];
+        input.notes = notes[..];
+        input.text = cast(text[..], string);
+        ownership_api.event_request req = ownership_api.event_request{input, complete()};
+        ownership_api.event_result result = ownership_api.record_event(&svc, &req);
+        assert(result.retained && ownership_api.successful(result.proof));
+        assert(events.budget.used.v == 3 && events.event_used == 3 && events.len == 1);
+        ownership_api.event_result repeated = ownership_api.record_event(&svc, &req);
+        assert(repeated.retained && events.budget.used.v == 3 && events.len == 1);
+        text[0] = 'x';
+        note_a[0] = 'x';
+        note_b[0] = 'x';
+        source[0].field = 99;
+        owner[0].index.value = 99;
+        conditions[0].ordinal = 99;
+        witnesses[0].key.ordinal = 99;
+        notes[0].role = ownership_api.note_role.allocation;
+    }
+    ownership_api.event_descriptor* saved = ownership_events.at(&events, 0);
+    assert(saved->text == "alive");
+    assert(saved->source_path.projections[0].field == 7);
+    assert(saved->owner_path.projections[0].index.value == 3);
+    assert(saved->conditions[0].ordinal == 2 && saved->conditions[1].ordinal == 9);
+    assert(saved->witnesses[0].key.ordinal == 1 && saved->witnesses[1].key.ordinal == 8);
+    assert(saved->witnesses[0].predecessor.kind == ownership_api.entity_kind.witness);
+    assert(saved->witnesses[1].summary.declaration.declaration == 10);
+    assert(saved->notes[0].role == ownership_api.note_role.lending);
+    assert(saved->notes[0].text == "lend" && saved->notes[1].text == "release");
+    assert(saved->evidence == ownership_api.evidence_kind.validated_path);
+    assert(saved->source.line == 14 && saved->operation.operation == 4);
+    ownership_events.free(&events);
+    assert(events.len == 0 && events.budget.used.v == 0);
+    println("copied events ok");
+}
+
+fn run_batch(bool reverse, ownership_api.entity_id mut* first,
+    ownership_api.terminal_failure mut* terminal, u64 mut* count) void {
+    ownership_api.limit_table table = limits(3);
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.event_descriptor[3] mut input = {event(1), event(2), event(3)};
+    ownership_api.witness_link[1] mut link = {};
+    link[0].key.kind = ownership_api.entity_kind.witness;
+    link[0].key.ordinal = 2;
+    if (reverse) {
+        input[0] = event(3);
+        input[1] = event(2);
+        input[2] = event(1);
+        input[2].witnesses = link[..];
+    } else {
+        input[0].witnesses = link[..];
+    }
+    ownership_api.proof_status verdict = ownership_events.record_batch(&events, &svc, input[..],
+        complete());
+    assert(!ownership_api.successful(verdict) && verdict.failed);
+    assert(verdict.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(events.len == 2 && events.budget.used.v == 3 && events.event_used == 3);
+    assert(ownership_events.at(&events, 0)->key.ordinal == 1);
+    assert(ownership_events.at(&events, 1)->key.ordinal == 2);
+    assert(ownership_events.at(&events, 1)->evidence ==
+        ownership_api.evidence_kind.abstract_possibility);
+    assert(events.terminal.present && events.terminal.limit.present);
+    assert(events.terminal.limit.category == ownership_api.limit_category.v);
+    assert(events.terminal.limit.used == 3 && events.terminal.limit.bound == 3);
+    assert(events.terminal.limit.attempted == 1);
+    assert(events.terminal.operation.operation == 3 && events.terminal.source.line == 13);
+    ownership_api.diagnostic_request mut diagnostic = ownership_api.diagnostic_request{};
+    diagnostic.verdict = verdict;
+    ownership_api.diagnostic_result suppressed = ownership_api.render(&svc, &diagnostic);
+    assert(!suppressed.rendered && suppressed.proof.failed);
+    assert(!ownership_api.successful(suppressed.proof));
+    *first = ownership_events.at(&events, 0)->key;
+    *terminal = events.terminal;
+    *count = events.budget.used.v;
+    ownership_events.free(&events);
+}
+
+fn canonical() void {
+    ownership_api.entity_id mut first_a = ownership_api.entity_id{};
+    ownership_api.entity_id mut first_b = ownership_api.entity_id{};
+    ownership_api.terminal_failure mut terminal_a = ownership_api.terminal_failure{};
+    ownership_api.terminal_failure mut terminal_b = ownership_api.terminal_failure{};
+    u64 mut used_a = 0;
+    u64 mut used_b = 0;
+    run_batch(false, &first_a, &terminal_a, &used_a);
+    run_batch(true, &first_b, &terminal_b, &used_b);
+    assert(ownership_keys.entity(first_a, first_b) == 0);
+    assert(ownership_keys.operation(terminal_a.operation, terminal_b.operation) == 0);
+    assert(ownership_keys.source(terminal_a.source, terminal_b.source) == 0);
+    assert(used_a == 3 && used_b == 3);
+    println("canonical report limit ok");
+}
+
+fn replacement() void {
+    ownership_api.limit_table table = limits(2);
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.event_descriptor[3] input = {event(3), event(2), event(1)};
+    ownership_api.proof_status mut current = complete();
+    u64 mut i = 0;
+    while (i < input.len) {
+        ownership_api.event_request req = ownership_api.event_request{input[i], current};
+        ownership_api.event_result result = ownership_api.record_event(&svc, &req);
+        assert(result.retained);
+        if (i < 2) { assert(ownership_api.successful(result.proof)); }
+        else {
+            assert(result.proof.failed && result.proof.terminal.present);
+            assert(result.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+            assert(result.proof.terminal.operation.operation == 3);
+        }
+        current = result.proof;
+        i += 1;
+    }
+    ownership_api.event_request repeated = ownership_api.event_request{input[2], complete()};
+    ownership_api.event_result still_failed = ownership_api.record_event(&svc, &repeated);
+    assert(still_failed.retained && still_failed.proof.failed &&
+        still_failed.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(events.len == 2 && events.budget.used.v == 2 && events.event_used == 2);
+    assert(ownership_events.at(&events, 0)->key.ordinal == 1);
+    assert(ownership_events.at(&events, 1)->key.ordinal == 2);
+    assert(events.terminal.present && events.terminal.operation.operation == 3);
+    assert(events.terminal.limit.used == 2 && events.terminal.limit.bound == 2);
+    ownership_events.free(&events);
+    println("replacement accounting ok");
+}
+
+fn missing() void {
+    ownership_api.limit_table table = limits(1);
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.event_request mut req = ownership_api.event_request{event(1), complete()};
+    req.current = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        req.event.operation, req.event.source);
+    svc.budget = null;
+    ownership_api.event_result no_budget = ownership_api.record_event(&svc, &req);
+    assert(!no_budget.retained && no_budget.proof.failed);
+    assert(no_budget.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    svc.budget = ownership_limits.callback;
+    svc.event = null;
+    ownership_api.event_result no_event = ownership_api.record_event(&svc, &req);
+    assert(!no_event.retained && no_event.proof.failed);
+    assert(no_event.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(events.len == 0 && events.budget.used.v == 0);
+    ownership_events.free(&events);
+    println("missing handlers ok");
+}
+
+fn rendered() void {
+    ownership_api.limit_table table = limits(1);
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.operation_position mut op = ownership_api.operation_position{};
+    op.operation = 6;
+    ownership_api.source_position source = ownership_api.source_position{1, 2, 21, 4, 21, 7};
+    ownership_api.charge_result first = ownership_events.charge_rendered(&events, op, source);
+    ownership_api.charge_result second = ownership_events.charge_rendered(&events, op, source);
+    assert(first.allowed && !second.allowed && second.proof.failed);
+    assert(events.budget.used.v == 1 && events.rendered == 1 && events.len == 0);
+    assert(events.terminal.present && events.terminal.reason ==
+        ownership_api.incomplete_reason.report_limit);
+    assert(events.terminal.source.line == 21 && events.terminal.limit.used == 1);
+    ownership_events.free(&events);
+    println("rendered limit ok");
+}
+
+fn witness_limit() void {
+    ownership_api.limit_table table = limits(1);
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.witness_link[1] mut links = {};
+    links[0].key.kind = ownership_api.entity_kind.witness;
+    links[0].validated = true;
+    ownership_api.event_descriptor mut input = event(7);
+    input.kind = ownership_api.event_kind.invalid_use;
+    input.evidence = ownership_api.evidence_kind.validated_path;
+    input.witnesses = links[..];
+    ownership_api.event_request req = ownership_api.event_request{input, complete()};
+    ownership_api.event_result result = ownership_api.record_event(&svc, &req);
+    assert(!result.retained && result.proof.failed && !ownership_api.successful(result.proof));
+    assert(result.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(events.len == 0 && events.budget.used.v == 0);
+    assert(events.terminal.present && events.terminal.limit.attempted == 2);
+    assert(events.terminal.operation.operation == 7);
+    ownership_events.free(&events);
+    println("witness limit ok");
+}
+
+fn prefix_gap() void {
+    ownership_api.limit_table table = limits(3);
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.witness_link[1] links = {};
+    ownership_api.event_descriptor[3] mut input = {event(3), event(2), event(1)};
+    input[1].witnesses = links[..];
+    input[2].witnesses = links[..];
+    ownership_api.proof_status verdict = ownership_events.record_batch(&events, &svc,
+        input[..], complete());
+    assert(verdict.failed && verdict.terminal.reason ==
+        ownership_api.incomplete_reason.report_limit);
+    assert(verdict.terminal.operation.operation == 2 && verdict.terminal.source.line == 12);
+    assert(verdict.terminal.limit.used == 2 && verdict.terminal.limit.attempted == 2);
+    assert(events.len == 1 && events.budget.used.v == 2);
+    assert(ownership_events.at(&events, 0)->key.ordinal == 1);
+    ownership_events.free(&events);
+    println("canonical prefix gap ok");
+}
+
+fn moved_context() void {
+    ownership_api.limit_table table = limits(1);
+    ownership_events.store mut original = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&original, &table, &svc));
+    ownership_events.store mut relocated = move(original);
+    ownership_api.event_request req = ownership_api.event_request{event(1), complete()};
+    ownership_api.event_result stale = ownership_api.record_event(&svc, &req);
+    assert(!stale.retained && stale.proof.failed);
+    assert(relocated.len == 0 && relocated.budget.used.v == 0);
+    assert(ownership_events.bind(&relocated, &table, &svc));
+    ownership_api.event_result current = ownership_api.record_event(&svc, &req);
+    assert(current.retained && ownership_api.successful(current.proof));
+    assert(relocated.len == 1 && relocated.budget.used.v == 1);
+    ownership_events.free(&relocated);
+    ownership_api.charge_result after = ownership_api.charge_work(&svc,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(!after.allowed && after.proof.failed);
+    println("moved context guard ok");
+}
+
+fn conflicting_keys() void {
+    u32 mut mode = 0;
+    while (mode < 5) {
+        ownership_api.limit_table table = limits(4);
+        ownership_events.store mut events = ownership_events.store{};
+        ownership_api.services mut svc = ownership_api.services{};
+        assert(ownership_events.bind(&events, &table, &svc));
+        ownership_api.witness_link[1] mut old_witness = {};
+        old_witness[0].key.kind = ownership_api.entity_kind.witness;
+        old_witness[0].key.ordinal = 5;
+        ownership_api.witness_link[1] mut new_witness = {};
+        new_witness[0] = old_witness[0];
+        new_witness[0].key.ordinal = 6;
+        ownership_api.event_descriptor mut first = event(4);
+        first.text = "first";
+        first.witnesses = old_witness[..];
+        ownership_api.event_request before = ownership_api.event_request{first, complete()};
+        ownership_api.event_result stored = ownership_api.record_event(&svc, &before);
+        assert(stored.retained && ownership_api.successful(stored.proof));
+        ownership_api.event_descriptor mut different = first;
+        if (mode == 0) { different.source.line = 7; }
+        if (mode == 1) { different.kind = ownership_api.event_kind.invalid_use; }
+        if (mode == 2) { different.text = "other"; }
+        if (mode == 3) { different.witnesses = new_witness[..]; }
+        if (mode == 4) { different.reason = ownership_api.incomplete_reason.missing_path; }
+        ownership_api.proof_status mut incoming = complete();
+        if (mode == 4) {
+            incoming = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+                different.operation, different.source);
+        }
+        ownership_api.event_request after = ownership_api.event_request{different, incoming};
+        ownership_api.event_result conflict = ownership_api.record_event(&svc, &after);
+        assert(conflict.retained && conflict.proof.failed &&
+            conflict.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+        if (mode == 4) {
+            assert(after.current.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+        }
+        assert(events.len == 1 && events.budget.used.v == 2 && events.event_used == 2);
+        assert(events.terminal.present && events.terminal.reason ==
+            ownership_api.incomplete_reason.invalid_input);
+        if (mode == 0) { assert(events.terminal.source.line == 7); }
+        else { assert(events.terminal.source.line == 14); }
+        ownership_api.event_descriptor* prior = ownership_events.at(&events, 0);
+        assert(prior->source.line == 14 && prior->kind ==
+            ownership_api.event_kind.incomplete_proof);
+        assert(prior->text == "first" && prior->witnesses[0].key.ordinal == 5);
+        assert(prior->reason == ownership_api.incomplete_reason.unknown_effect);
+        ownership_events.free(&events);
+        mode += 1;
+    }
+    mode = 0;
+    while (mode < 2) {
+        ownership_api.limit_table table = limits(2);
+        ownership_events.store mut events = ownership_events.store{};
+        ownership_api.services mut svc = ownership_api.services{};
+        assert(ownership_events.bind(&events, &table, &svc));
+        ownership_api.event_descriptor[2] mut input = {event(4), event(4)};
+        input[0].text = "first";
+        input[1].text = "other";
+        if (mode == 1) {
+            input[0].text = "other";
+            input[1].text = "first";
+        }
+        ownership_api.proof_status verdict = ownership_events.record_batch(&events, &svc,
+            input[..], complete());
+        assert(verdict.failed && verdict.terminal.present &&
+            verdict.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+        assert(events.len == 1 && events.budget.used.v == 1);
+        assert(ownership_events.at(&events, 0)->text == input[0].text);
+        ownership_events.free(&events);
+        mode += 1;
+    }
+    println("conflicting event keys ok");
+}
+
+fn main() i32 {
+    copied();
+    canonical();
+    replacement();
+    missing();
+    rendered();
+    witness_limit();
+    prefix_gap();
+    moved_context();
+    conflicting_keys();
+    return 0;
+}

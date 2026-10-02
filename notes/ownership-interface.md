@@ -235,10 +235,13 @@ T-316 submits borrowed event descriptors. It allocates or frees no T-317 event s
 An absent event service or a rejected event leaves an inline failed verdict.
 A reporting callback cannot replace a non-success input kind with complete proof.
 This rule applies independently from `failed`. An accepted report retains the input terminal record.
+A callback's new incomplete failure takes precedence over an incomplete input status.
+An accepted complete callback retains an incomplete input status, even if it sets `failed`.
 Report suppression changes no state or obligation.
 A missing reporting service returns incomplete proof and retains any existing terminal record.
 The existing terminal record takes precedence over the new missing-service reason.
 V refusal returns incomplete failed proof with `report_limit` in the fixed terminal record.
+An insertion that evicts an event returns this failure to its caller.
 This new report failure takes precedence over the earlier result status and terminal record.
 The immutable request retains its earlier analysis status.
 V refusal establishes no successful proof.
