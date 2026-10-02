@@ -814,9 +814,13 @@ Sections:
   `++`, `--`, a call, or empty; `for (;;)` is legal. The induction variable must be declared `mut`
   like any other (`for (i32 mut i = 0; i < n; i++)`); there is no exception. Range loop `for (T x :
   coll) { }` and `for (T mut x : coll) { }` where `coll` is a fixed array, span or string expression
-  evaluated once before the loop (a fixed array is copied as a value); `x` is a fresh copy of each
-  element, taken at the start of its iteration. `break` and `continue` target the innermost
-  enclosing loop (`continue` in a `for` runs `step`). There is no labeled `break`.
+  evaluated once before the loop. A span or string header is read once at entry, including its
+  pointer and length. A fixed array that owns nothing is copied as a value. An owning fixed array
+  lends its storage (D17.10). `x` is a fresh copy of each element at the start of its iteration.
+  `break` and `continue` target the innermost enclosing loop (`continue` in a `for` runs `step`).
+  There is no labeled `break`.
+- history: Amended 2026-10-01 (T-263): A span or string header is read once before the loop.
+  The previous lowering read an owning header again at each iteration.
 
 ### D7.6 The switch statement
 - owner: `core-language.md` (Statements).
@@ -2113,12 +2117,26 @@ says ownership is "by convention", this section supersedes it.
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
-- rule: Loops. The collection expression of a range `for` lends: an owning collection (an `own`
-  span, or an owning fixed array) is iterated in place, never moved or copied. The loop variable's
-  type is the element type with its outermost `own` removed (`for (node mut* c : kids)` over `node
-  mut* own mut@ own kids`); declaring it `own` is an error, and elements that are owning aggregates
-  cannot be copied into a loop variable at all, so such a collection is iterated by index. Moving an
-  element out is written explicitly, `move(kids[i])`.
+- rule: A range `for` lends its collection storage.
+  An owning span, `string own`, or owning fixed array never moves that storage.
+  The loop never copies elements as owning values.
+  A span or string lends through a header copy without its outermost `own`.
+  The loop holds that header before its first iteration (D7.5).
+  The checker refuses `del`, assignment, and `move` of the collection or containing storage inside
+  the loop body. This rule also applies through aliases.
+  The checker permits a fort call or another ownership operation only when it proves that the
+  operation preserves the collection storage.
+  Element writes remain legal if they do not invalidate the collection storage.
+  A loop that changes its collection storage uses `while`.
+  The loop variable's type is the element type without its outermost `own`.
+  For `node mut* own mut@ own kids`, the variable is `node mut* c` in `for (node mut* c : kids)`.
+  An `own` loop variable is an error.
+  The checker refuses owning aggregate elements, because a loop variable cannot copy them without
+  `move`. Iterate those collections by index.
+  Moving an element out is explicit: `move(kids[i])`.
+- history: Amended 2026-10-01 (T-263): The loop holds a lent header before its first iteration.
+  The checker refuses operations that invalidate the collection storage inside the body.
+  The previous rule lent an owning collection in its original place without this refusal.
 
 ### D17.11 The overwrite check
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

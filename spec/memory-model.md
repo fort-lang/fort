@@ -253,6 +253,14 @@ fn take(node* own@ view, node* own mut@ slots, node mut* own mut@ all) void {
 }
 ```
 
+A range `for` lends its collection storage for the whole loop (D7.5, D17.10).
+The loop reads a span or string header once at entry, including its pointer and length.
+The checker refuses `del`, assignment, and `move` of the collection or containing storage inside
+its body. This rule also applies through aliases. The checker permits a fort call or another
+ownership operation only when it proves that the operation preserves the collection storage.
+Element writes remain legal if they do not invalidate the collection storage.
+A loop that changes its collection storage uses `while`.
+
 Structs and fixed arrays that contain an `own` reference by value are owning aggregates: they
 are moved like `own` references, returned from a local by an implicit move, and never `del`ed,
 because `del` is shallow and a struct frees its own fields (D17.7). Functions therefore take

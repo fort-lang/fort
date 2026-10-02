@@ -1098,13 +1098,12 @@ fn lower_for(lowerer mut* lw, ast.node* n) bool {
     return close_scope(lw, end_of(n));
 }
 
-// The place that a range `for` walks, in *out (D17.10). An owning collection stays in its place,
-// and the loop lends it. When that place reads memory to find its storage, its address is held
-// first, since D7.5 evaluates the collection once and the body can change what the place reads.
-// Any other collection goes into a new temporary of its type: a fixed array is copied as a value
-// (D7.5).
+// The collection storage of a range `for` (D7.5, D17.10). An owning fixed array stays
+// in its place. A span or string header goes into a temporary with `own` removed.
+// The header copy lends the storage and holds its pointer and length before the loop.
+// Another fixed array goes into a value copy.
 fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out) bool {
-    if (fir.type_owning(coll->ty)) {
+    if (fir.type_owning(coll->ty) && coll->ty->kind == types.type_kind.k_array) {
         fir.place mut p = fir.place{};
         if (!lower_place(lw, coll, &p)) {
             return false;
@@ -1112,8 +1111,17 @@ fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out) bool {
         *out = hold_base(lw, p, true, coll->loc);
         return true;
     }
-    u32 t = fir.local_add(lw->f, coll->ty, fir.local_kind.lk_temp, null, coll->loc);
+    types.node* ty = lent_type(lw, coll->ty);
+    u32 t = fir.local_add(lw->f, ty, fir.local_kind.lk_temp, null, coll->loc);
     *out = fir.place_local(t);
+    if (fir.type_owning(coll->ty)) {
+        fir.place mut p = fir.place{};
+        if (!lower_place(lw, coll, &p)) {
+            return false;
+        }
+        assign(lw, *out, fir.rvalue_use(lw->f, fir.operand_copy(p)), coll->loc);
+        return true;
+    }
     return lower_into(lw, coll, *out);
 }
 

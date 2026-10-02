@@ -997,13 +997,20 @@ for (;;) { break; }                        // ok
 ### 6.4 Range `for` (D7.5, D17.10)
 
 `for (T x : coll) { }` and `for (T mut x : coll) { }`: `coll` is a fixed array, span or string
-expression, evaluated once before the first iteration; a fixed array that owns nothing is
+expression, evaluated once before the first iteration. The loop reads a span or string header
+once at entry, including its pointer and length. A fixed array that owns nothing is
 evaluated as a value, so the loop iterates over a copy. `x` is a fresh copy of each element in
 order, taken at the start of its iteration. `T` is the element type (`char` for a string); `mut`
 makes the copy assignable without affecting the collection. The loop lends its collection
-(D17.10): an owning collection, an `own` span or an owning fixed array, is iterated in place
-and is never moved or copied; `T` is the element type without its outermost `own`, and an `own`
-range variable is an error. Moving an element out is explicit,
+(D17.10): an owning span, owning string, or owning fixed array lends its storage
+and never moves its storage. A span or string lends through a header copy without its outermost
+`own`. The checker refuses `del`, assignment, and `move` of the collection or containing storage
+inside the body, including operations through aliases. The checker permits a fort call or another
+ownership operation only when it proves that the operation preserves the collection storage.
+Element writes remain legal if they do not invalidate the collection storage.
+A loop that changes its collection storage uses `while`.
+`T` is the element type without its outermost `own`, and an `own` range variable is an error.
+Moving an element out is explicit,
 `move(kids[i])` in an index loop. A range over elements that are owning aggregates (3.9) is an
 error, since the copy could not be made without `move`; iterate by index and take `&a[i]`.
 `break` and `continue` work as in other loops.

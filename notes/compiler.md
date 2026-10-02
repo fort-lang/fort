@@ -100,6 +100,17 @@ came here.
   on an rvalue. `check_emptiable` reads the operand of `move` and `del` through `empty_of`, and
   the linear check (T-182) will read the same bits to judge emptiability on the tree (T-260).
   bootstrap-0 writes neither bit, because the freeze (section 8) leaves the C unchanged.
+- **A range loop holds a span or string header once** (T-263, D7.5, D17.10).
+  `fir_lower.range_collection` copies the header into a lent temporary before the loop head.
+  An owning fixed array still lends its original storage. `check_stmt.check_range_writes` checks
+  the resolved body for assignment, `del`, `move`, and implicit return moves of collection storage.
+  The check includes containing paths and local reference initializers. Scalar element writes
+  remain legal. This AST check has no alias dataflow or call-effect analysis. It conservatively
+  refuses fort calls and other ownership writes during a range loan. An owning element can own
+  the object that contains the collection. Its release can therefore free the collection storage.
+  Trusted extern calls retain their D17.13 contracts. T-291 replaces the temporary refusal with
+  inferred loan proof. T-292 accepts proven safe helpers and refuses helpers that free storage.
+  The T-263 ticket records the probes and the cost. Do not treat this AST check as exact loan proof.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a
@@ -508,8 +519,9 @@ came here.
   a later `break` into a jump to the wrong block. The verifier does not see it, because that block
   is a block of the function. A text test sees it: `a_clause_is_a_case_scope_inside_a_loop` holds
   a `break` after a `switch`, and a mutant that never closes a scope fails it. A range `for` over
-  an owning collection whose place reads memory (`h->items`) holds `_a = addr(p)` before the
-  loop, because D7.5 evaluates the collection once and the body can change `h`. T-242 moved
+  an owning collection whose place reads memory (`h->items`) held `_a = addr(p)` before the
+  loop in T-242. T-263 instead holds a lent span or string header before the loop (D7.5, D17.10).
+  An owning fixed array still holds its address when its place reads memory. T-242 moved
   `fort --fir` over the run programs from 30161 lowered functions to 37947, with no panic. The
   first program that rule V9 refused was T-210's: a `break` left a `switch` that D8.4 then
   counted as terminating. Since T-210 the checker refuses that program with `missing return`,
