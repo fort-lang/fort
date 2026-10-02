@@ -2320,6 +2320,42 @@ says ownership is "by convention", this section supersedes it.
   Amended 2026-10-01 (T-272): The previous rule deferred leak and dangling-view proof and left
   escaped fort storage untracked.
 
+### D17.15 Place identity and aggregate storage
+- owner: `memory-model.md` (2.6), `fir.md` (5.5 and 9.6), `type-system.md` (8.5).
+- rule: The proof separates storage slots, pointed-to sources, and allocation identities.
+  A slot has an object identity and a projected storage region.
+  Bind a dynamic index to its value at the operation. Reassigning its local changes that value.
+  Instantiate caller aliases before comparing storage or applying effects.
+  Equal index values select equal slots only through the same proved backing storage.
+  Different indices can prove disjoint element slots through proved non-overlapping regions.
+  They never prove different pointees or allocations by themselves.
+  Use finite equality, inequality, and range partitions for dynamic elements.
+  A strong update requires one proved concrete destination region in each represented state.
+  Apply the update to aliases of that region. Keep other regions unchanged.
+  A weak update retains possible selected destinations and their guarded alternatives.
+  It preserves unselected contents, live allocation obligations, and possible invalidation.
+  Check an operation's obligations for each feasible destination. Imprecision supplies no exemption.
+  Track nested owning leaves and borrowed fields through projected and whole-value operations.
+  A projected move empties only its selected place. A whole move transfers the complete value.
+  Both preserve heap allocation identities. Neither rebases an inline storage address.
+  A slot address remains valid while its slot storage lives. It observes updated slot contents.
+  End by-value parameter slots at normal return after deferred effects, without requiring dead
+  markers.
+  Check their residual owned leaves. Reject returned or retained borrows into those ending slots.
+  Symbolic owning inputs admit live obligations. Current empty callers do not remove those inputs.
+  Preserve separate symbolic caller sources referenced by borrowed parameter values.
+  Bind aggregate _0 to the actual caller destination, including argument and global aliases.
+  At each destructive result write, check previous overlapping owner obligations after operand
+  effects.
+  Do not assume fresh result storage. Preserve return, holding-temporary, and deferred-effect order.
+  Check returned borrows against their original sources after deferred effects.
+  Abstract transfer empties fixed temporary ownership even when generated code omits source
+  clearing.
+- rationale: Slot separation prevents false pointee separation and false inline-address relocation.
+  Ordered result effects preserve caller ownership when result storage aliases input storage.
+- history: Note 2026-10-02 (T-273): This entry refines D17.14 with dynamic places and aggregate
+  storage boundaries. It changes no representation, runtime instruction, or calling convention.
+
 ## D18 Float printing in the runtime
 
 Names the entry points that produce D11.7's float text and settles what D11.7 leaves to the runtime.
