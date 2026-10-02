@@ -884,10 +884,14 @@ bullet at a time and without a rewrite.
   The path is relative to the top of the worktree, so two worktrees that hold the same scopes give
   the same md5. An absolute path gives two md5s for one answer, and the second reader then builds
   a dump of their own (T-104, its review).
-  **Set `PYTHONDONTWRITEBYTECODE=1` for a hand run of a Python suite you are mutating.** T-104 ran
-  two mutants of one file within a few seconds and read the same three failures for both, because
-  the second run loaded the `__pycache__` of the first. CMake sets the variable for every Python
-  ctest, so the gate never meets it; a hand run does.
+  **Set `PYTHONDONTWRITEBYTECODE=1` to stop cache writes during a Python test run.** CMake sets
+  this variable for Python ctests. This variable and `-B` do not stop cache reads.
+  T-104 reads the first mutant's cache after changing the source within a few seconds.
+  T-309 measures cached `CORPUS_FILES = 817` while the current source says 831.
+  Both have modification time 1790941933 and source size 35741 bytes.
+  Python accepts the timestamp-based cache because these header values match.
+  Load current source with `compile` and `exec` for count measurements.
+  Keep cache files that another process can use.
 - The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no build
   step. Its logic lives in `editors/vscode/lib/check.js`, which never `require('vscode')`, so Node's
   built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
