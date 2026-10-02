@@ -1,0 +1,1388 @@
+/// Stores finite ownership facts without changing emitted program data.
+import ownership_api;
+import ownership_keys;
+
+u64 U64_MAX = 18446744073709551615;
+
+// Each block owns one copied nested slice. Fact records borrow these slices.
+struct slice_block {
+    ownership_api.projection mut@ own projections;
+    ownership_api.layout_leaf mut@ own leaves;
+    ownership_api.region_partition mut@ own partitions;
+    ownership_api.borrow_relation mut@ own borrows;
+    ownership_api.history_fact mut@ own history;
+    ownership_api.entity_id mut@ own entities;
+    slice_block mut* own next;
+}
+
+struct state {
+    ownership_api.contents_fact mut@ own contents;
+    u64 contents_len;
+    ownership_api.source_fact mut@ own sources;
+    u64 sources_len;
+    ownership_api.allocation_fact mut@ own allocations;
+    u64 allocations_len;
+    ownership_api.region mut@ own regions;
+    u64 regions_len;
+    ownership_api.graph_node mut@ own nodes;
+    u64 nodes_len;
+    ownership_api.graph_edge mut@ own edges;
+    u64 edges_len;
+    ownership_api.shape_description mut@ own shapes;
+    u64 shapes_len;
+    ownership_api.predicate_atom mut@ own predicates;
+    u64 predicates_len;
+    ownership_api.guard_fact mut@ own guards;
+    u64 guards_len;
+    ownership_api.correlation mut@ own correlations;
+    u64 correlations_len;
+    ownership_api.lost_fact mut@ own losses;
+    u64 losses_len;
+    slice_block mut* own blocks;
+    ownership_api.proof_status proof;
+}
+
+fn empty() state {
+    state mut s = state{};
+    s.proof.kind = ownership_api.proof_kind.complete;
+    return s;
+}
+
+fn unknown() state {
+    return state{};
+}
+
+fn bottom() state {
+    state mut s = state{};
+    s.proof.kind = ownership_api.proof_kind.bottom;
+    return s;
+}
+
+fn view(state* s) ownership_api.state_view {
+    ownership_api.state_view mut out = ownership_api.state_view{};
+    out.contents = s->contents[0..s->contents_len];
+    out.sources = s->sources[0..s->sources_len];
+    out.allocations = s->allocations[0..s->allocations_len];
+    out.regions = s->regions[0..s->regions_len];
+    out.nodes = s->nodes[0..s->nodes_len];
+    out.edges = s->edges[0..s->edges_len];
+    out.shapes = s->shapes[0..s->shapes_len];
+    out.predicates = s->predicates[0..s->predicates_len];
+    out.guards = s->guards[0..s->guards_len];
+    out.correlations = s->correlations[0..s->correlations_len];
+    out.losses = s->losses[0..s->losses_len];
+    out.proof = s->proof;
+    return out;
+}
+
+fn free(state mut* s) void {
+    slice_block mut* own mut b = move(s->blocks);
+    while (b != null) {
+        slice_block mut* own next = move(b->next);
+        del(b->projections);
+        del(b->leaves);
+        del(b->partitions);
+        del(b->borrows);
+        del(b->history);
+        del(b->entities);
+        del(b);
+        b = move(next);
+    }
+    del(s->contents);
+    del(s->sources);
+    del(s->allocations);
+    del(s->regions);
+    del(s->nodes);
+    del(s->edges);
+    del(s->shapes);
+    del(s->predicates);
+    del(s->guards);
+    del(s->correlations);
+    del(s->losses);
+    *s = state{};
+}
+
+fn destroy(void mut* opaque) void {
+    state mut* s = cast(opaque, state mut*);
+    free(s);
+}
+
+fn handle(state mut* s) ownership_api.state_handle {
+    return ownership_api.state_handle{cast(s, void mut*), destroy};
+}
+
+fn grown(u64 cap, u64 need) u64 {
+    if (need <= cap) { return cap; }
+    u64 mut next = cap < 8 ? 8 : cap;
+    while (next < need) {
+        if (next > U64_MAX / 2) { return need; }
+        next *= 2;
+    }
+    return next;
+}
+
+fn keep(state mut* s, slice_block mut* own b) void {
+    b->next = move(s->blocks);
+    s->blocks = move(b);
+}
+
+fn copy_projections(state mut* s, ownership_api.projection@ input)
+    ownership_api.projection@ {
+    if (input.len == 0) { ownership_api.projection@ none = {}; return none; }
+    slice_block mut* own b = new(slice_block);
+    b->projections = new(ownership_api.projection, input.len);
+    u64 mut i = 0;
+    while (i < input.len) { b->projections[i] = input[i]; i += 1; }
+    ownership_api.projection@ out = b->projections[..];
+    keep(s, move(b));
+    return out;
+}
+
+fn copy_leaves(state mut* s, ownership_api.layout_leaf@ input)
+    ownership_api.layout_leaf@ {
+    if (input.len == 0) { ownership_api.layout_leaf@ none = {}; return none; }
+    slice_block mut* own b = new(slice_block);
+    b->leaves = new(ownership_api.layout_leaf, input.len);
+    u64 mut i = 0;
+    while (i < input.len) { b->leaves[i] = input[i]; i += 1; }
+    ownership_api.layout_leaf@ out = b->leaves[..];
+    keep(s, move(b));
+    return out;
+}
+
+fn copy_partitions(state mut* s, ownership_api.region_partition@ input)
+    ownership_api.region_partition@ {
+    if (input.len == 0) { ownership_api.region_partition@ none = {}; return none; }
+    slice_block mut* own b = new(slice_block);
+    b->partitions = new(ownership_api.region_partition, input.len);
+    u64 mut i = 0;
+    while (i < input.len) { b->partitions[i] = input[i]; i += 1; }
+    ownership_api.region_partition@ out = b->partitions[..];
+    keep(s, move(b));
+    return out;
+}
+
+fn copy_entities(state mut* s, ownership_api.entity_id@ input)
+    ownership_api.entity_id@ {
+    if (input.len == 0) { ownership_api.entity_id@ none = {}; return none; }
+    slice_block mut* own b = new(slice_block);
+    b->entities = new(ownership_api.entity_id, input.len);
+    u64 mut i = 0;
+    while (i < input.len) { b->entities[i] = input[i]; i += 1; }
+    ownership_api.entity_id@ out = b->entities[..];
+    keep(s, move(b));
+    return out;
+}
+
+fn copy_place(state mut* s, ownership_api.place_path input) ownership_api.place_path {
+    ownership_api.place_path mut out = input;
+    out.projections = copy_projections(s, input.projections);
+    return out;
+}
+
+fn copy_region(state mut* s, ownership_api.region input) ownership_api.region {
+    ownership_api.region mut out = input;
+    out.leaves = copy_leaves(s, input.leaves);
+    out.partitions = copy_partitions(s, input.partitions);
+    return out;
+}
+
+fn copy_borrow(state mut* s, ownership_api.borrow_relation input)
+    ownership_api.borrow_relation {
+    ownership_api.borrow_relation mut out = input;
+    out.containing = copy_place(s, input.containing);
+    out.range = copy_region(s, input.range);
+    return out;
+}
+
+fn copy_borrows(state mut* s, ownership_api.borrow_relation@ input)
+    ownership_api.borrow_relation@ {
+    if (input.len == 0) { ownership_api.borrow_relation@ none = {}; return none; }
+    slice_block mut* own b = new(slice_block);
+    b->borrows = new(ownership_api.borrow_relation, input.len);
+    u64 mut i = 0;
+    while (i < input.len) { b->borrows[i] = copy_borrow(s, input[i]); i += 1; }
+    ownership_api.borrow_relation@ out = b->borrows[..];
+    keep(s, move(b));
+    return out;
+}
+
+fn copy_contents(state mut* s, ownership_api.contents_fact input)
+    ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = input;
+    out.place = copy_place(s, input.place);
+    out.borrows = copy_borrows(s, input.borrows);
+    return out;
+}
+
+fn copy_owner(state mut* s, ownership_api.owner_location input)
+    ownership_api.owner_location {
+    ownership_api.owner_location mut out = input;
+    out.place = copy_place(s, input.place);
+    return out;
+}
+
+fn copy_history(state mut* s, ownership_api.history_fact input)
+    ownership_api.history_fact {
+    ownership_api.history_fact mut out = input;
+    out.before = copy_owner(s, input.before);
+    out.after = copy_owner(s, input.after);
+    return out;
+}
+
+fn copy_histories(state mut* s, ownership_api.history_fact@ input)
+    ownership_api.history_fact@ {
+    if (input.len == 0) { ownership_api.history_fact@ none = {}; return none; }
+    slice_block mut* own b = new(slice_block);
+    b->history = new(ownership_api.history_fact, input.len);
+    u64 mut i = 0;
+    while (i < input.len) { b->history[i] = copy_history(s, input[i]); i += 1; }
+    ownership_api.history_fact@ out = b->history[..];
+    keep(s, move(b));
+    return out;
+}
+
+fn copy_allocation(state mut* s, ownership_api.allocation_fact input)
+    ownership_api.allocation_fact {
+    ownership_api.allocation_fact mut out = input;
+    out.owner = copy_owner(s, input.owner);
+    out.history = copy_histories(s, input.history);
+    return out;
+}
+
+fn copy_edge(state mut* s, ownership_api.graph_edge input) ownership_api.graph_edge {
+    ownership_api.graph_edge mut out = input;
+    out.place = copy_place(s, input.place);
+    out.range = copy_region(s, input.range);
+    return out;
+}
+
+fn copy_shape(state mut* s, ownership_api.shape_description input)
+    ownership_api.shape_description {
+    ownership_api.shape_description mut out = input;
+    out.parameters = copy_entities(s, input.parameters);
+    out.clauses = copy_entities(s, input.clauses);
+    out.descendants = copy_entities(s, input.descendants);
+    return out;
+}
+
+fn copy_guard(state mut* s, ownership_api.guard_fact input) ownership_api.guard_fact {
+    ownership_api.guard_fact mut out = input;
+    out.positive = copy_entities(s, input.positive);
+    out.negative = copy_entities(s, input.negative);
+    return out;
+}
+
+fn append_contents(state mut* s, ownership_api.contents_fact input) void {
+    if (s->contents_len == U64_MAX) { panic("ownership_state.contents: capacity overflow"); }
+    u64 need = s->contents_len + 1;
+    if (need > s->contents.len) {
+        u64 cap = grown(s->contents.len, need);
+        ownership_api.contents_fact mut@ own bigger = new(ownership_api.contents_fact, cap);
+        u64 mut i = 0;
+        while (i < s->contents_len) { bigger[i] = s->contents[i]; i += 1; }
+        del(s->contents);
+        s->contents = move(bigger);
+    }
+    s->contents[s->contents_len] = copy_contents(s, input);
+    s->contents_len += 1;
+}
+
+fn append_sources(state mut* s, ownership_api.source_fact input) void {
+    if (s->sources_len == U64_MAX) { panic("ownership_state.sources: capacity overflow"); }
+    u64 need = s->sources_len + 1;
+    if (need > s->sources.len) {
+        u64 cap = grown(s->sources.len, need);
+        ownership_api.source_fact mut@ own bigger = new(ownership_api.source_fact, cap);
+        u64 mut i = 0;
+        while (i < s->sources_len) { bigger[i] = s->sources[i]; i += 1; }
+        del(s->sources);
+        s->sources = move(bigger);
+    }
+    s->sources[s->sources_len] = input;
+    s->sources_len += 1;
+}
+
+fn append_allocations(state mut* s, ownership_api.allocation_fact input) void {
+    if (s->allocations_len == U64_MAX) { panic("ownership_state.allocations: capacity overflow"); }
+    u64 need = s->allocations_len + 1;
+    if (need > s->allocations.len) {
+        u64 cap = grown(s->allocations.len, need);
+        ownership_api.allocation_fact mut@ own bigger = new(ownership_api.allocation_fact, cap);
+        u64 mut i = 0;
+        while (i < s->allocations_len) { bigger[i] = s->allocations[i]; i += 1; }
+        del(s->allocations);
+        s->allocations = move(bigger);
+    }
+    s->allocations[s->allocations_len] = copy_allocation(s, input);
+    s->allocations_len += 1;
+}
+
+fn append_regions(state mut* s, ownership_api.region input) void {
+    if (s->regions_len == U64_MAX) { panic("ownership_state.regions: capacity overflow"); }
+    u64 need = s->regions_len + 1;
+    if (need > s->regions.len) {
+        u64 cap = grown(s->regions.len, need);
+        ownership_api.region mut@ own bigger = new(ownership_api.region, cap);
+        u64 mut i = 0;
+        while (i < s->regions_len) { bigger[i] = s->regions[i]; i += 1; }
+        del(s->regions);
+        s->regions = move(bigger);
+    }
+    s->regions[s->regions_len] = copy_region(s, input);
+    s->regions_len += 1;
+}
+
+fn append_nodes(state mut* s, ownership_api.graph_node input) void {
+    if (s->nodes_len == U64_MAX) { panic("ownership_state.nodes: capacity overflow"); }
+    u64 need = s->nodes_len + 1;
+    if (need > s->nodes.len) {
+        u64 cap = grown(s->nodes.len, need);
+        ownership_api.graph_node mut@ own bigger = new(ownership_api.graph_node, cap);
+        u64 mut i = 0;
+        while (i < s->nodes_len) { bigger[i] = s->nodes[i]; i += 1; }
+        del(s->nodes);
+        s->nodes = move(bigger);
+    }
+    s->nodes[s->nodes_len] = input;
+    s->nodes_len += 1;
+}
+
+fn append_edges(state mut* s, ownership_api.graph_edge input) void {
+    if (s->edges_len == U64_MAX) { panic("ownership_state.edges: capacity overflow"); }
+    u64 need = s->edges_len + 1;
+    if (need > s->edges.len) {
+        u64 cap = grown(s->edges.len, need);
+        ownership_api.graph_edge mut@ own bigger = new(ownership_api.graph_edge, cap);
+        u64 mut i = 0;
+        while (i < s->edges_len) { bigger[i] = s->edges[i]; i += 1; }
+        del(s->edges);
+        s->edges = move(bigger);
+    }
+    s->edges[s->edges_len] = copy_edge(s, input);
+    s->edges_len += 1;
+}
+
+fn append_shapes(state mut* s, ownership_api.shape_description input) void {
+    if (s->shapes_len == U64_MAX) { panic("ownership_state.shapes: capacity overflow"); }
+    u64 need = s->shapes_len + 1;
+    if (need > s->shapes.len) {
+        u64 cap = grown(s->shapes.len, need);
+        ownership_api.shape_description mut@ own bigger = new(ownership_api.shape_description, cap);
+        u64 mut i = 0;
+        while (i < s->shapes_len) { bigger[i] = s->shapes[i]; i += 1; }
+        del(s->shapes);
+        s->shapes = move(bigger);
+    }
+    s->shapes[s->shapes_len] = copy_shape(s, input);
+    s->shapes_len += 1;
+}
+
+fn append_predicates(state mut* s, ownership_api.predicate_atom input) void {
+    if (s->predicates_len == U64_MAX) { panic("ownership_state.predicates: capacity overflow"); }
+    u64 need = s->predicates_len + 1;
+    if (need > s->predicates.len) {
+        u64 cap = grown(s->predicates.len, need);
+        ownership_api.predicate_atom mut@ own bigger = new(ownership_api.predicate_atom, cap);
+        u64 mut i = 0;
+        while (i < s->predicates_len) { bigger[i] = s->predicates[i]; i += 1; }
+        del(s->predicates);
+        s->predicates = move(bigger);
+    }
+    s->predicates[s->predicates_len] = input;
+    s->predicates_len += 1;
+}
+
+fn append_guards(state mut* s, ownership_api.guard_fact input) void {
+    if (s->guards_len == U64_MAX) { panic("ownership_state.guards: capacity overflow"); }
+    u64 need = s->guards_len + 1;
+    if (need > s->guards.len) {
+        u64 cap = grown(s->guards.len, need);
+        ownership_api.guard_fact mut@ own bigger = new(ownership_api.guard_fact, cap);
+        u64 mut i = 0;
+        while (i < s->guards_len) { bigger[i] = s->guards[i]; i += 1; }
+        del(s->guards);
+        s->guards = move(bigger);
+    }
+    s->guards[s->guards_len] = copy_guard(s, input);
+    s->guards_len += 1;
+}
+
+fn append_correlations(state mut* s, ownership_api.correlation input) void {
+    if (s->correlations_len == U64_MAX) {
+        panic("ownership_state.correlations: capacity overflow");
+    }
+    u64 need = s->correlations_len + 1;
+    if (need > s->correlations.len) {
+        u64 cap = grown(s->correlations.len, need);
+        ownership_api.correlation mut@ own bigger = new(ownership_api.correlation, cap);
+        u64 mut i = 0;
+        while (i < s->correlations_len) { bigger[i] = s->correlations[i]; i += 1; }
+        del(s->correlations);
+        s->correlations = move(bigger);
+    }
+    s->correlations[s->correlations_len] = input;
+    s->correlations_len += 1;
+}
+
+fn append_losses(state mut* s, ownership_api.lost_fact input) void {
+    if (s->losses_len == U64_MAX) { panic("ownership_state.losses: capacity overflow"); }
+    u64 need = s->losses_len + 1;
+    if (need > s->losses.len) {
+        u64 cap = grown(s->losses.len, need);
+        ownership_api.lost_fact mut@ own bigger = new(ownership_api.lost_fact, cap);
+        u64 mut i = 0;
+        while (i < s->losses_len) { bigger[i] = s->losses[i]; i += 1; }
+        del(s->losses);
+        s->losses = move(bigger);
+    }
+    s->losses[s->losses_len] = input;
+    s->losses_len += 1;
+}
+
+struct charge_counts {
+    u64 d;
+    u64 r;
+    u64 p;
+    u64 g;
+    u64 h;
+    u64 e;
+    u64 w;
+}
+
+fn plus_count(u64 a, u64 b) u64 {
+    if (b > U64_MAX - a) { return U64_MAX; }
+    return a + b;
+}
+
+fn place_depth(ownership_api.place_path path) u64 {
+    return path.projections.len;
+}
+
+fn region_count(ownership_api.region range) u64 {
+    if (range.key.kind == ownership_api.entity_kind.none) { return 0; }
+    return plus_count(1, range.partitions.len);
+}
+
+fn contents_counts(ownership_api.contents_fact fact) charge_counts {
+    charge_counts mut c = charge_counts{};
+    c.d = place_depth(fact.place);
+    c.g = 1;
+    c.w = 1;
+    u64 mut i = 0;
+    while (i < fact.borrows.len) {
+        c.d = plus_count(c.d, place_depth(fact.borrows[i].containing));
+        c.r = plus_count(c.r, region_count(fact.borrows[i].range));
+        i += 1;
+    }
+    return c;
+}
+
+fn allocation_counts(ownership_api.allocation_fact fact) charge_counts {
+    charge_counts mut c = charge_counts{};
+    c.d = place_depth(fact.owner.place);
+    c.r = 1;
+    c.e = fact.history.len;
+    c.w = 1;
+    u64 mut i = 0;
+    while (i < fact.history.len) {
+        c.d = plus_count(c.d, place_depth(fact.history[i].before.place));
+        c.d = plus_count(c.d, place_depth(fact.history[i].after.place));
+        i += 1;
+    }
+    return c;
+}
+
+fn require_counts(state mut* s, ownership_api.services* svc,
+    charge_counts counts, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    ownership_api.mutation_result mut out = ownership_api.mutation_result{};
+    out.proof = s->proof;
+    if (!ownership_api.successful(s->proof)) { return out; }
+    if (counts.d == 0 && counts.r == 0 && counts.p == 0 && counts.g == 0 &&
+        counts.h == 0 && counts.e == 0 && counts.w == 0) {
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input, op, at);
+        return out;
+    }
+    ownership_api.charge_item[7] mut items = {};
+    u64 mut count = 0;
+    if (counts.d > 0) {
+        items[count] = ownership_api.charge_item{ownership_api.limit_category.d,
+            ownership_api.limit_scope.path, counts.d};
+        count += 1;
+    }
+    if (counts.r > 0) {
+        items[count] = ownership_api.charge_item{ownership_api.limit_category.r,
+            ownership_api.limit_scope.state, counts.r};
+        count += 1;
+    }
+    if (counts.p > 0) {
+        items[count] = ownership_api.charge_item{ownership_api.limit_category.p,
+            ownership_api.limit_scope.state, counts.p};
+        count += 1;
+    }
+    if (counts.g > 0) {
+        items[count] = ownership_api.charge_item{ownership_api.limit_category.g,
+            ownership_api.limit_scope.state, counts.g};
+        count += 1;
+    }
+    if (counts.h > 0) {
+        items[count] = ownership_api.charge_item{ownership_api.limit_category.h,
+            ownership_api.limit_scope.computation, counts.h};
+        count += 1;
+    }
+    if (counts.e > 0) {
+        items[count] = ownership_api.charge_item{ownership_api.limit_category.e,
+            ownership_api.limit_scope.function, counts.e};
+        count += 1;
+    }
+    if (counts.w > 0) {
+        items[count] = ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, counts.w};
+        count += 1;
+    }
+    ownership_api.charge_request req = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, op, at, items[0..count]};
+    ownership_api.charge_result charged = ownership_api.charge(svc, &req);
+    if (!charged.allowed) {
+        out.proof = charged.proof;
+        if (charged.limit.present &&
+            charged.proof.terminal.reason == ownership_api.incomplete_reason.work_limit &&
+            charged.limit.category != ownership_api.limit_category.w &&
+            charged.limit.category != ownership_api.limit_category.v) {
+            out.precision_lost = true;
+            out.loss.category = charged.limit.category;
+            out.loss.bound = charged.limit.bound;
+            out.loss.first_source = at;
+            out.loss.relation.function = op.function;
+            out.loss.relation.kind = ownership_api.entity_kind.relation;
+            out.loss.relation.ordinal = op.operation;
+            out.loss.reason = ownership_api.incomplete_reason.work_limit;
+            return out;
+        }
+        out.proof = report_failure(svc, out.proof, op, at);
+        return out;
+    }
+    out.applied = true;
+    return out;
+}
+
+fn require_charge(state mut* s, ownership_api.services* svc,
+    ownership_api.limit_category category, u64 amount,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.mutation_result {
+    charge_counts mut counts = charge_counts{};
+    if (category == ownership_api.limit_category.r) { counts.r = amount; }
+    if (category == ownership_api.limit_category.p) { counts.p = amount; }
+    if (category == ownership_api.limit_category.g) { counts.g = amount; }
+    if (category == ownership_api.limit_category.h) { counts.h = amount; }
+    counts.w = 1;
+    if (category == ownership_api.limit_category.w) { counts.w = amount; }
+    return require_counts(s, svc, counts, op, at);
+}
+
+fn report_failure(ownership_api.services* svc, ownership_api.proof_status proof,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.proof_status {
+    ownership_api.event_descriptor mut event = ownership_api.event_descriptor{};
+    event.key.function = op.function;
+    event.key.kind = ownership_api.entity_kind.event;
+    event.key.ordinal = op.operation;
+    event.operation = op;
+    event.source = at;
+    event.kind = ownership_api.event_kind.incomplete_proof;
+    if (proof.terminal.reason == ownership_api.incomplete_reason.work_limit) {
+        event.kind = ownership_api.event_kind.work_failure;
+    }
+    event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    event.reason = proof.terminal.reason;
+    event.relation = proof.terminal.relation;
+    event.text = "ownership state cannot prove the requested update";
+    ownership_api.event_request request = ownership_api.event_request{event, proof};
+    ownership_api.event_result result = ownership_api.record_event(svc, &request);
+    return result.proof;
+}
+
+fn bad_selection(state mut* s, ownership_api.services* svc,
+    ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    ownership_api.mutation_result mut out = ownership_api.mutation_result{};
+    if (!ownership_api.successful(s->proof)) { out.proof = s->proof; return out; }
+    out.proof = ownership_api.incomplete(
+        ownership_api.incomplete_reason.missing_correspondence, op, at);
+    out.proof = report_failure(svc, out.proof, op, at);
+    return out;
+}
+
+fn add_contents(state mut* s, ownership_api.services* svc,
+    ownership_api.contents_fact fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    ownership_api.mutation_result result = require_counts(s, svc, contents_counts(fact), op, at);
+    if (!result.applied) { return result; }
+    append_contents(s, fact);
+    return result;
+}
+
+fn add_source(state mut* s, ownership_api.services* svc,
+    ownership_api.source_fact fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    if (source_index(s, fact.key) != U64_MAX) { return bad_selection(s, svc, op, at); }
+    ownership_api.mutation_result result = require_charge(
+        s, svc, ownership_api.limit_category.r, 1, op, at);
+    if (!result.applied) { return result; }
+    append_sources(s, fact);
+    return result;
+}
+
+fn add_allocation(state mut* s, ownership_api.services* svc,
+    ownership_api.allocation_fact fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    if (allocation_index(s, fact.key) != U64_MAX) { return bad_selection(s, svc, op, at); }
+    ownership_api.mutation_result result = require_counts(s, svc, allocation_counts(fact), op, at);
+    if (!result.applied) { return result; }
+    append_allocations(s, fact);
+    return result;
+}
+
+fn add_region(state mut* s, ownership_api.services* svc,
+    ownership_api.region fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    u64 mut i = 0;
+    while (i < s->regions_len) {
+        if (same_entity(s->regions[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
+        i += 1;
+    }
+    charge_counts mut counts = charge_counts{};
+    counts.r = region_count(fact);
+    counts.w = 1;
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    append_regions(s, fact);
+    return result;
+}
+
+fn add_node(state mut* s, ownership_api.services* svc,
+    ownership_api.graph_node fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    u64 mut i = 0;
+    while (i < s->nodes_len) {
+        if (same_entity(s->nodes[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
+        i += 1;
+    }
+    ownership_api.mutation_result result = require_charge(
+        s, svc, ownership_api.limit_category.r, 1, op, at);
+    if (!result.applied) { return result; }
+    append_nodes(s, fact);
+    return result;
+}
+
+fn add_edge(state mut* s, ownership_api.services* svc,
+    ownership_api.graph_edge fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    u64 mut i = 0;
+    while (i < s->edges_len) {
+        if (same_entity(s->edges[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
+        i += 1;
+    }
+    charge_counts mut counts = charge_counts{};
+    counts.d = place_depth(fact.place);
+    counts.r = region_count(fact.range);
+    counts.h = 1;
+    counts.w = 1;
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    append_edges(s, fact);
+    return result;
+}
+
+fn add_shape(state mut* s, ownership_api.services* svc,
+    ownership_api.shape_description fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    u64 mut i = 0;
+    while (i < s->shapes_len) {
+        if (same_entity(s->shapes[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
+        i += 1;
+    }
+    charge_counts mut counts = charge_counts{};
+    counts.h = plus_count(1, plus_count(fact.parameters.len,
+        plus_count(fact.clauses.len, fact.descendants.len)));
+    counts.w = 1;
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    append_shapes(s, fact);
+    return result;
+}
+
+fn add_predicate(state mut* s, ownership_api.services* svc,
+    ownership_api.predicate_atom fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    u64 mut i = 0;
+    while (i < s->predicates_len) {
+        if (same_entity(s->predicates[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
+        i += 1;
+    }
+    ownership_api.mutation_result result = require_charge(
+        s, svc, ownership_api.limit_category.p, 1, op, at);
+    if (!result.applied) { return result; }
+    append_predicates(s, fact);
+    return result;
+}
+
+fn add_guard(state mut* s, ownership_api.services* svc,
+    ownership_api.guard_fact fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    u64 mut i = 0;
+    while (i < s->guards_len) {
+        if (same_entity(s->guards[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
+        i += 1;
+    }
+    ownership_api.mutation_result result = require_charge(
+        s, svc, ownership_api.limit_category.g, 1, op, at);
+    if (!result.applied) { return result; }
+    append_guards(s, fact);
+    return result;
+}
+
+fn add_correlation(state mut* s, ownership_api.services* svc,
+    ownership_api.correlation fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    ownership_api.mutation_result result = require_charge(
+        s, svc, ownership_api.limit_category.g, 1, op, at);
+    if (!result.applied) { return result; }
+    append_correlations(s, fact);
+    return result;
+}
+
+fn add_loss(state mut* s, ownership_api.services* svc,
+    ownership_api.lost_fact fact, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    ownership_api.mutation_result result = require_charge(
+        s, svc, ownership_api.limit_category.w, 1, op, at);
+    if (!result.applied) { return result; }
+    append_losses(s, fact);
+    return result;
+}
+
+fn same_entity(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    return ownership_keys.entity(a, b) == 0;
+}
+
+fn same_scalar(ownership_api.scalar_fact a, ownership_api.scalar_fact b) bool {
+    return a.kind == b.kind && a.value == b.value && same_entity(a.symbol, b.symbol);
+}
+
+fn same_projection(ownership_api.projection a, ownership_api.projection b) bool {
+    return a.kind == b.kind && a.field == b.field && same_scalar(a.index, b.index) &&
+        same_entity(a.captured_version, b.captured_version);
+}
+
+fn same_place(ownership_api.place_path a, ownership_api.place_path b) bool {
+    if (!same_entity(a.root, b.root) || a.residual != b.residual ||
+        a.projections.len != b.projections.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.projections.len) {
+        if (!same_projection(a.projections[i], b.projections[i])) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_window(ownership_api.byte_window a, ownership_api.byte_window b) bool {
+    return same_scalar(a.begin, b.begin) && same_scalar(a.end, b.end) &&
+        a.arithmetic_proved == b.arithmetic_proved;
+}
+
+fn same_leaf(ownership_api.layout_leaf a, ownership_api.layout_leaf b) bool {
+    return same_window(a.bytes, b.bytes) && a.ty == b.ty && a.owning == b.owning &&
+        a.padding == b.padding;
+}
+
+fn same_partition(ownership_api.region_partition a, ownership_api.region_partition b) bool {
+    return same_entity(a.key, b.key) && same_entity(a.membership, b.membership) &&
+        same_window(a.bytes, b.bytes) && a.residual == b.residual;
+}
+
+fn same_region(ownership_api.region a, ownership_api.region b) bool {
+    if (!same_entity(a.key, b.key) || !same_entity(a.source, b.source) ||
+        !same_scalar(a.offset, b.offset) || !same_window(a.access, b.access) ||
+        !same_scalar(a.extent, b.extent) || a.alignment != b.alignment ||
+        a.layout != b.layout || a.residual != b.residual ||
+        a.leaves.len != b.leaves.len || a.partitions.len != b.partitions.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.leaves.len) {
+        if (!same_leaf(a.leaves[i], b.leaves[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a.partitions.len) {
+        if (!same_partition(a.partitions[i], b.partitions[i])) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_source(ownership_api.source_fact a, ownership_api.source_fact b) bool {
+    return same_entity(a.key, b.key) && a.kind == b.kind && a.validity == b.validity &&
+        same_entity(a.allocation, b.allocation) &&
+        ownership_keys.operation(a.boundary, b.boundary) == 0;
+}
+
+fn same_borrow(ownership_api.borrow_relation a, ownership_api.borrow_relation b) bool {
+    return same_entity(a.key, b.key) && same_entity(a.value_version, b.value_version) &&
+        same_place(a.containing, b.containing) && same_entity(a.source, b.source) &&
+        same_region(a.range, b.range) &&
+        a.representation_complete == b.representation_complete;
+}
+
+fn same_contents(ownership_api.contents_fact a, ownership_api.contents_fact b) bool {
+    if (!same_place(a.place, b.place) || a.kind != b.kind ||
+        !same_entity(a.value_version, b.value_version) ||
+        !same_scalar(a.span_length, b.span_length) || a.owner_empty != b.owner_empty ||
+        a.borrows.len != b.borrows.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.borrows.len) {
+        if (!same_borrow(a.borrows[i], b.borrows[i])) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_count(ownership_api.multiplicity a, ownership_api.multiplicity b) bool {
+    return a.zero == b.zero && a.one == b.one && a.many == b.many;
+}
+
+fn same_owner(ownership_api.owner_location a, ownership_api.owner_location b) bool {
+    return same_place(a.place, b.place) && a.detached == b.detached &&
+        a.transfer_pending == b.transfer_pending;
+}
+
+fn same_history(ownership_api.history_fact a, ownership_api.history_fact b) bool {
+    return same_entity(a.allocation, b.allocation) &&
+        ownership_keys.operation(a.operation, b.operation) == 0 &&
+        ownership_keys.source(a.source, b.source) == 0 && a.kind == b.kind &&
+        same_owner(a.before, b.before) && same_owner(a.after, b.after);
+}
+
+fn same_allocation(ownership_api.allocation_fact a, ownership_api.allocation_fact b) bool {
+    if (!same_entity(a.key, b.key) || !same_entity(a.site, b.site) ||
+        a.validity != b.validity || !same_count(a.count, b.count) ||
+        a.obligation != b.obligation || !same_owner(a.owner, b.owner) ||
+        !same_scalar(a.logical_length, b.logical_length) ||
+        a.history.len != b.history.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.history.len) {
+        if (!same_history(a.history[i], b.history[i])) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_node(ownership_api.graph_node a, ownership_api.graph_node b) bool {
+    return same_entity(a.key, b.key) && same_entity(a.allocation, b.allocation) &&
+        same_entity(a.structural_template, b.structural_template) && a.residual == b.residual;
+}
+
+fn same_edge(ownership_api.graph_edge a, ownership_api.graph_edge b) bool {
+    return same_entity(a.key, b.key) && same_entity(a.from, b.from) &&
+        same_entity(a.to, b.to) && a.kind == b.kind && same_place(a.place, b.place) &&
+        same_region(a.range, b.range);
+}
+
+fn same_entities(ownership_api.entity_id@ a, ownership_api.entity_id@ b) bool {
+    if (a.len != b.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.len) { if (!same_entity(a[i], b[i])) { return false; } i += 1; }
+    return true;
+}
+
+fn same_shape(ownership_api.shape_description a, ownership_api.shape_description b) bool {
+    return same_entity(a.key, b.key) && same_entities(a.parameters, b.parameters) &&
+        same_entities(a.clauses, b.clauses) && same_entities(a.descendants, b.descendants) &&
+        a.acyclic_proved == b.acyclic_proved &&
+        a.separation_proved == b.separation_proved && a.residual == b.residual;
+}
+
+fn same_predicate(ownership_api.predicate_atom a, ownership_api.predicate_atom b) bool {
+    return same_entity(a.key, b.key) && a.kind == b.kind &&
+        same_entity(a.left, b.left) && same_entity(a.right, b.right) &&
+        same_scalar(a.lower, b.lower) && same_scalar(a.upper, b.upper);
+}
+
+fn same_guard(ownership_api.guard_fact a, ownership_api.guard_fact b) bool {
+    return same_entity(a.key, b.key) && same_entities(a.positive, b.positive) &&
+        same_entities(a.negative, b.negative);
+}
+
+fn same_correlation(ownership_api.correlation a, ownership_api.correlation b) bool {
+    return same_entity(a.guard, b.guard) && same_entity(a.value_version, b.value_version) &&
+        same_entity(a.relation, b.relation);
+}
+
+fn same_loss(ownership_api.lost_fact a, ownership_api.lost_fact b) bool {
+    return a.category == b.category && a.bound == b.bound &&
+        ownership_keys.source(a.first_source, b.first_source) == 0 &&
+        same_entity(a.relation, b.relation) && a.reason == b.reason;
+}
+
+fn same_exhaustion(ownership_api.exhaustion a, ownership_api.exhaustion b) bool {
+    return a.present == b.present && a.category == b.category && a.scope == b.scope &&
+        a.work == b.work && a.used == b.used && a.bound == b.bound &&
+        a.attempted == b.attempted &&
+        ownership_keys.operation(a.operation, b.operation) == 0 &&
+        ownership_keys.source(a.source, b.source) == 0 && a.saturated == b.saturated;
+}
+
+fn same_proof(ownership_api.proof_status a, ownership_api.proof_status b) bool {
+    return a.kind == b.kind && a.failed == b.failed &&
+        a.terminal.present == b.terminal.present &&
+        a.terminal.reason == b.terminal.reason &&
+        ownership_keys.operation(a.terminal.operation, b.terminal.operation) == 0 &&
+        ownership_keys.source(a.terminal.source, b.terminal.source) == 0 &&
+        same_entity(a.terminal.relation, b.terminal.relation) &&
+        same_exhaustion(a.terminal.limit, b.terminal.limit);
+}
+
+// Clone copies active records and nested slices. It does not follow graph edges.
+fn clone(state* input) state {
+    state mut out = empty();
+    out.proof = input->proof;
+    u64 mut contents_i = 0;
+    while (contents_i < input->contents_len) {
+        append_contents(&out, input->contents[contents_i]);
+        contents_i += 1;
+    }
+    u64 mut sources_i = 0;
+    while (sources_i < input->sources_len) {
+        append_sources(&out, input->sources[sources_i]);
+        sources_i += 1;
+    }
+    u64 mut allocations_i = 0;
+    while (allocations_i < input->allocations_len) {
+        append_allocations(&out, input->allocations[allocations_i]);
+        allocations_i += 1;
+    }
+    u64 mut regions_i = 0;
+    while (regions_i < input->regions_len) {
+        append_regions(&out, input->regions[regions_i]);
+        regions_i += 1;
+    }
+    u64 mut nodes_i = 0;
+    while (nodes_i < input->nodes_len) {
+        append_nodes(&out, input->nodes[nodes_i]);
+        nodes_i += 1;
+    }
+    u64 mut edges_i = 0;
+    while (edges_i < input->edges_len) {
+        append_edges(&out, input->edges[edges_i]);
+        edges_i += 1;
+    }
+    u64 mut shapes_i = 0;
+    while (shapes_i < input->shapes_len) {
+        append_shapes(&out, input->shapes[shapes_i]);
+        shapes_i += 1;
+    }
+    u64 mut predicates_i = 0;
+    while (predicates_i < input->predicates_len) {
+        append_predicates(&out, input->predicates[predicates_i]);
+        predicates_i += 1;
+    }
+    u64 mut guards_i = 0;
+    while (guards_i < input->guards_len) {
+        append_guards(&out, input->guards[guards_i]);
+        guards_i += 1;
+    }
+    u64 mut correlations_i = 0;
+    while (correlations_i < input->correlations_len) {
+        append_correlations(&out, input->correlations[correlations_i]);
+        correlations_i += 1;
+    }
+    u64 mut losses_i = 0;
+    while (losses_i < input->losses_len) {
+        append_losses(&out, input->losses[losses_i]);
+        losses_i += 1;
+    }
+    return out;
+}
+
+// Equality compares facts, not allocation addresses or insertion order.
+fn equal(state* a, state* b) bool {
+    if (!same_proof(a->proof, b->proof)) { return false; }
+    if (a->contents_len != b->contents_len) { return false; }
+    u64 mut contents_i = 0;
+    while (contents_i < a->contents_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->contents_len) {
+            if (same_contents(a->contents[contents_i], a->contents[j])) { left += 1; }
+            if (same_contents(a->contents[contents_i], b->contents[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        contents_i += 1;
+    }
+    if (a->sources_len != b->sources_len) { return false; }
+    u64 mut sources_i = 0;
+    while (sources_i < a->sources_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->sources_len) {
+            if (same_source(a->sources[sources_i], a->sources[j])) { left += 1; }
+            if (same_source(a->sources[sources_i], b->sources[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        sources_i += 1;
+    }
+    if (a->allocations_len != b->allocations_len) { return false; }
+    u64 mut allocations_i = 0;
+    while (allocations_i < a->allocations_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->allocations_len) {
+            if (same_allocation(a->allocations[allocations_i], a->allocations[j])) { left += 1; }
+            if (same_allocation(a->allocations[allocations_i], b->allocations[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        allocations_i += 1;
+    }
+    if (a->regions_len != b->regions_len) { return false; }
+    u64 mut regions_i = 0;
+    while (regions_i < a->regions_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->regions_len) {
+            if (same_region(a->regions[regions_i], a->regions[j])) { left += 1; }
+            if (same_region(a->regions[regions_i], b->regions[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        regions_i += 1;
+    }
+    if (a->nodes_len != b->nodes_len) { return false; }
+    u64 mut nodes_i = 0;
+    while (nodes_i < a->nodes_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->nodes_len) {
+            if (same_node(a->nodes[nodes_i], a->nodes[j])) { left += 1; }
+            if (same_node(a->nodes[nodes_i], b->nodes[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        nodes_i += 1;
+    }
+    if (a->edges_len != b->edges_len) { return false; }
+    u64 mut edges_i = 0;
+    while (edges_i < a->edges_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->edges_len) {
+            if (same_edge(a->edges[edges_i], a->edges[j])) { left += 1; }
+            if (same_edge(a->edges[edges_i], b->edges[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        edges_i += 1;
+    }
+    if (a->shapes_len != b->shapes_len) { return false; }
+    u64 mut shapes_i = 0;
+    while (shapes_i < a->shapes_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->shapes_len) {
+            if (same_shape(a->shapes[shapes_i], a->shapes[j])) { left += 1; }
+            if (same_shape(a->shapes[shapes_i], b->shapes[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        shapes_i += 1;
+    }
+    if (a->predicates_len != b->predicates_len) { return false; }
+    u64 mut predicates_i = 0;
+    while (predicates_i < a->predicates_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->predicates_len) {
+            if (same_predicate(a->predicates[predicates_i], a->predicates[j])) { left += 1; }
+            if (same_predicate(a->predicates[predicates_i], b->predicates[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        predicates_i += 1;
+    }
+    if (a->guards_len != b->guards_len) { return false; }
+    u64 mut guards_i = 0;
+    while (guards_i < a->guards_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->guards_len) {
+            if (same_guard(a->guards[guards_i], a->guards[j])) { left += 1; }
+            if (same_guard(a->guards[guards_i], b->guards[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        guards_i += 1;
+    }
+    if (a->correlations_len != b->correlations_len) { return false; }
+    u64 mut correlations_i = 0;
+    while (correlations_i < a->correlations_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->correlations_len) {
+            if (same_correlation(a->correlations[correlations_i], a->correlations[j])) {
+                left += 1;
+            }
+            if (same_correlation(a->correlations[correlations_i], b->correlations[j])) {
+                right += 1;
+            }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        correlations_i += 1;
+    }
+    if (a->losses_len != b->losses_len) { return false; }
+    u64 mut losses_i = 0;
+    while (losses_i < a->losses_len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a->losses_len) {
+            if (same_loss(a->losses[losses_i], a->losses[j])) { left += 1; }
+            if (same_loss(a->losses[losses_i], b->losses[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        losses_i += 1;
+    }
+    return true;
+}
+
+fn has_residual(ownership_api.place_path p) bool {
+    if (p.residual) { return true; }
+    u64 mut i = 0;
+    while (i < p.projections.len) {
+        if (p.projections[i].kind == ownership_api.projection_kind.residual) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn selected(ownership_api.place_path p, ownership_api.place_path@ aliases) bool {
+    u64 mut i = 0;
+    while (i < aliases.len) {
+        if (same_place(p, aliases[i])) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// The caller proves that all aliases name one concrete destination.
+fn strong_contents(state mut* s, ownership_api.services* svc,
+    ownership_api.contents_fact fact, ownership_api.place_path@ aliases, bool unique,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.mutation_result {
+    if (!unique || aliases.len == 0) { return bad_selection(s, svc, op, at); }
+    u64 mut i = 0;
+    while (i < aliases.len) {
+        if (has_residual(aliases[i])) { return bad_selection(s, svc, op, at); }
+        u64 mut j = i + 1;
+        while (j < aliases.len) {
+            if (same_place(aliases[i], aliases[j])) { return bad_selection(s, svc, op, at); }
+            j += 1;
+        }
+        i += 1;
+    }
+    charge_counts mut counts = contents_counts(fact);
+    counts.g = 0;
+    counts.d = 0;
+    counts.r = 0;
+    i = 0;
+    while (i < aliases.len) {
+        ownership_api.contents_fact mut next = fact;
+        next.place = aliases[i];
+        charge_counts part = contents_counts(next);
+        counts.d = plus_count(counts.d, part.d);
+        counts.r = plus_count(counts.r, part.r);
+        i += 1;
+    }
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    i = 0;
+    while (i < s->contents_len) {
+        if (selected(s->contents[i].place, aliases)) {
+            u64 mut j = i + 1;
+            while (j < s->contents_len) { s->contents[j - 1] = s->contents[j]; j += 1; }
+            s->contents_len -= 1;
+        } else { i += 1; }
+    }
+    i = 0;
+    while (i < aliases.len) {
+        ownership_api.contents_fact mut next = fact;
+        next.place = aliases[i];
+        append_contents(s, next);
+        i += 1;
+    }
+    return result;
+}
+
+// Each candidate retains its old contents and a guarded new alternative.
+fn weak_contents(state mut* s, ownership_api.services* svc,
+    ownership_api.contents_fact fact, ownership_api.place_path@ candidates,
+    ownership_api.entity_id guard, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    if (candidates.len == 0 || guard.kind != ownership_api.entity_kind.guard) {
+        return bad_selection(s, svc, op, at);
+    }
+    charge_counts mut counts = charge_counts{};
+    counts.g = candidates.len;
+    counts.w = 1;
+    u64 mut j = 0;
+    while (j < candidates.len) {
+        ownership_api.contents_fact mut candidate = fact;
+        candidate.place = candidates[j];
+        charge_counts part = contents_counts(candidate);
+        counts.d = plus_count(counts.d, part.d);
+        counts.r = plus_count(counts.r, part.r);
+        j += 1;
+    }
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    u64 mut i = 0;
+    while (i < candidates.len) {
+        ownership_api.contents_fact mut next = fact;
+        next.place = candidates[i];
+        append_contents(s, next);
+        append_correlations(s, ownership_api.correlation{guard, fact.value_version,
+            candidates[i].root});
+        i += 1;
+    }
+    return result;
+}
+
+fn source_index(state* s, ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < s->sources_len) {
+        if (same_entity(s->sources[i].key, key)) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+
+fn allocation_index(state* s, ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (same_entity(s->allocations[i].key, key)) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+
+// Ending slot storage changes only its source validity.
+fn end_source(state mut* s, ownership_api.services* svc,
+    ownership_api.entity_id key, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    u64 i = source_index(s, key);
+    if (i == U64_MAX) { return bad_selection(s, svc, op, at); }
+    charge_counts mut counts = charge_counts{};
+    counts.e = 1;
+    counts.w = 1;
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    s->sources[i].validity = ownership_api.validity_kind.ended;
+    return result;
+}
+
+fn append_history(state mut* s, ownership_api.allocation_fact mut* a,
+    ownership_api.history_fact entry) void {
+    if (a->history.len == U64_MAX) { panic("ownership_state.history: capacity overflow"); }
+    u64 len = a->history.len;
+    ownership_api.history_fact mut@ own pending = new(ownership_api.history_fact, len + 1);
+    u64 mut i = 0;
+    while (i < len) { pending[i] = a->history[i]; i += 1; }
+    pending[len] = entry;
+    a->history = copy_histories(s, pending[..]);
+    del(pending);
+}
+
+// This mutator records a selected transfer. It does not move slot storage.
+fn transfer_owner(state mut* s, ownership_api.services* svc,
+    ownership_api.entity_id key, ownership_api.owner_location after, bool selected_one,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.mutation_result {
+    u64 i = allocation_index(s, key);
+    if (!selected_one || i == U64_MAX || !s->allocations[i].obligation ||
+        s->allocations[i].validity != ownership_api.validity_kind.live ||
+        !s->allocations[i].count.one || s->allocations[i].count.zero ||
+        s->allocations[i].count.many) {
+        return bad_selection(s, svc, op, at);
+    }
+    charge_counts mut counts = charge_counts{};
+    counts.d = plus_count(place_depth(s->allocations[i].owner.place),
+        place_depth(after.place));
+    counts.e = 1;
+    counts.w = 1;
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    ownership_api.owner_location before = s->allocations[i].owner;
+    append_history(s, &s->allocations[i], ownership_api.history_fact{
+        key, op, at, ownership_api.effect_kind.transfer, before, after});
+    s->allocations[i].owner = copy_owner(s, after);
+    return result;
+}
+
+// The caller proves the selected member's owned leaves empty.
+fn release_member(state mut* s, ownership_api.services* svc,
+    ownership_api.entity_id key, bool leaves_empty_proved,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.mutation_result {
+    u64 i = allocation_index(s, key);
+    if (!leaves_empty_proved || i == U64_MAX || !s->allocations[i].obligation ||
+        s->allocations[i].validity != ownership_api.validity_kind.live ||
+        s->allocations[i].count.zero ||
+        (!s->allocations[i].count.one && !s->allocations[i].count.many)) {
+        return bad_selection(s, svc, op, at);
+    }
+    charge_counts mut counts = charge_counts{};
+    counts.d = place_depth(s->allocations[i].owner.place);
+    counts.e = 1;
+    counts.w = 1;
+    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    if (!result.applied) { return result; }
+    bool had_one = s->allocations[i].count.one;
+    bool had_many = s->allocations[i].count.many;
+    ownership_api.owner_location before = s->allocations[i].owner;
+    ownership_api.owner_location after = ownership_api.owner_location{};
+    append_history(s, &s->allocations[i], ownership_api.history_fact{
+        key, op, at, ownership_api.effect_kind.release, before, after});
+    s->allocations[i].count.zero = had_one;
+    s->allocations[i].count.one = had_many;
+    s->allocations[i].count.many = had_many;
+    if (!had_many) {
+        s->allocations[i].obligation = false;
+        s->allocations[i].validity = ownership_api.validity_kind.released;
+        s->allocations[i].owner = after;
+    }
+    u64 mut j = 0;
+    while (j < s->sources_len) {
+        if (same_entity(s->sources[j].allocation, key)) {
+            if (!had_many) {
+                s->sources[j].validity = ownership_api.validity_kind.released;
+            } else if (s->sources[j].validity == ownership_api.validity_kind.live) {
+                s->sources[j].validity = ownership_api.validity_kind.unknown;
+            }
+        }
+        j += 1;
+    }
+    return result;
+}

@@ -8,7 +8,7 @@ FIR imports neither module. T-291 owns the production adapter and registration.
 
 ## Concrete definition and storage owners
 
-The API defines 73 concrete records in 19 families. It also defines 24 enum types.
+The API defines 74 concrete records in 19 families. It also defines 24 enum types.
 A family is a planning group. It is not a struct count.
 T-315 owns each record definition below. The storage column names the production storage owner.
 The caller owns request records, result records, and borrowed descriptor headers.
@@ -48,6 +48,7 @@ Test `ownership_env` owns its synthetic input copies instead of T-291.
 |  | `lost_fact` | 1 | T-316 |
 | Status | `terminal_failure` | 1 | caller |
 |  | `proof_status` | 1 | caller |
+|  | `mutation_result` | 1 | caller |
 | Ordered effects | `ordering_constraint` | 1 | caller |
 |  | `ordered_effect` | 1 | caller |
 | Aliases | `alias_binding` | 1 | caller |
@@ -97,6 +98,9 @@ Test `ownership_env` owns its synthetic input copies instead of T-291.
 `graph_result` borrows its graph service's output store. `ffi_result` borrows its FFI output store.
 `global_result` borrows its global service's output store. Each service owns that output store.
 `transfer_result.retained` borrows caller state. `event_result` transfers no event-store storage.
+`mutation_result` reports a state update. It owns no state storage.
+A precision refusal returns a loss fact and leaves state unchanged.
+The caller forms a sound residual before it uses the refused result.
 A callback owns no caller request, checked symbol, checked type, or caller state merely through use.
 
 ## Module owners and import direction

@@ -1,0 +1,264 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| G06.1 G06.2 G08.1 G08.2
+/// Tests cyclic state copies and state-owned nested storage.
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+import heap;
+
+struct address_sample {
+    u64[18] address;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* req)
+    ownership_api.charge_result {
+    assert(ownership_keys.canonical_charges(req));
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    out.allowed = true;
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = req->current;
+    return out;
+}
+
+fn services() ownership_api.services {
+    ownership_api.services mut out = ownership_api.services{};
+    out.budget = budget;
+    out.event = event;
+    return out;
+}
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    ownership_api.entity_id mut out = ownership_api.entity_id{};
+    out.kind = kind;
+    out.ordinal = ordinal;
+    return out;
+}
+
+fn place(u32 ordinal, ownership_api.projection@ projections)
+    ownership_api.place_path {
+    ownership_api.place_path mut out = ownership_api.place_path{};
+    out.root = id(ownership_api.entity_kind.slot, ordinal);
+    out.projections = projections;
+    return out;
+}
+
+fn build(ownership_state.state mut* s) void {
+    ownership_api.services svc = services();
+    ownership_api.operation_position op = ownership_api.operation_position{};
+    ownership_api.source_position at = ownership_api.source_position{};
+    ownership_api.projection[1] mut projections = {};
+    projections[0].kind = ownership_api.projection_kind.field;
+    projections[0].field = 7;
+    ownership_api.layout_leaf[1] mut leaves = {};
+    leaves[0].owning = true;
+    ownership_api.region_partition[1] mut partitions = {};
+    partitions[0].key = id(ownership_api.entity_kind.region, 11);
+    partitions[0].residual = true;
+    ownership_api.region mut range = ownership_api.region{};
+    range.key = id(ownership_api.entity_kind.region, 1);
+    range.source = id(ownership_api.entity_kind.source, 1);
+    range.leaves = leaves[..];
+    range.partitions = partitions[..];
+    ownership_api.borrow_relation[1] mut borrows = {};
+    borrows[0].key = id(ownership_api.entity_kind.relation, 1);
+    borrows[0].source = range.source;
+    borrows[0].containing = place(1, projections[..]);
+    borrows[0].range = range;
+    ownership_api.contents_fact mut contents = ownership_api.contents_fact{};
+    contents.place = place(1, projections[..]);
+    contents.kind = ownership_api.contents_kind.reference;
+    contents.borrows = borrows[..];
+    ownership_state.add_contents(s, &svc, contents, op, at);
+    ownership_state.add_region(s, &svc, range, op, at);
+    ownership_api.history_fact[1] mut history = {};
+    history[0].allocation = id(ownership_api.entity_kind.allocation, 1);
+    history[0].kind = ownership_api.effect_kind.transfer;
+    history[0].before.place = place(1, projections[..]);
+    history[0].after.place = place(2, projections[..]);
+    ownership_api.allocation_fact mut a = ownership_api.allocation_fact{};
+    a.key = history[0].allocation;
+    a.site = id(ownership_api.entity_kind.allocation, 9);
+    a.count.one = true;
+    a.obligation = true;
+    a.validity = ownership_api.validity_kind.live;
+    a.owner.place = history[0].after.place;
+    a.history = history[..];
+    ownership_state.add_allocation(s, &svc, a, op, at);
+    ownership_api.entity_id[2] mut nodes = {
+        id(ownership_api.entity_kind.graph_node, 1),
+        id(ownership_api.entity_kind.graph_node, 2)};
+    ownership_api.graph_node mut left = ownership_api.graph_node{};
+    left.key = nodes[0];
+    left.allocation = a.key;
+    ownership_api.graph_node mut right = ownership_api.graph_node{};
+    right.key = nodes[1];
+    right.allocation = a.key;
+    ownership_state.add_node(s, &svc, left, op, at);
+    ownership_state.add_node(s, &svc, right, op, at);
+    ownership_api.graph_edge mut edge = ownership_api.graph_edge{};
+    edge.key = id(ownership_api.entity_kind.graph_node, 3);
+    edge.from = nodes[0];
+    edge.to = nodes[1];
+    edge.kind = ownership_api.edge_kind.borrowed;
+    edge.place = place(1, projections[..]);
+    edge.range = range;
+    ownership_state.add_edge(s, &svc, edge, op, at);
+    edge.key = id(ownership_api.entity_kind.graph_node, 4);
+    edge.from = nodes[1];
+    edge.to = nodes[0];
+    ownership_state.add_edge(s, &svc, edge, op, at);
+    ownership_api.shape_description mut shape = ownership_api.shape_description{};
+    shape.key = id(ownership_api.entity_kind.template, 1);
+    shape.parameters = nodes[..];
+    shape.clauses = nodes[0..1];
+    shape.descendants = nodes[1..2];
+    shape.residual = true;
+    ownership_state.add_shape(s, &svc, shape, op, at);
+    ownership_api.guard_fact mut guard = ownership_api.guard_fact{};
+    guard.key = id(ownership_api.entity_kind.guard, 1);
+    guard.positive = nodes[0..1];
+    guard.negative = nodes[1..2];
+    ownership_state.add_guard(s, &svc, guard, op, at);
+    ownership_api.source_fact mut source = ownership_api.source_fact{};
+    source.key = range.source;
+    source.kind = ownership_api.source_kind.heap;
+    source.validity = ownership_api.validity_kind.live;
+    source.allocation = a.key;
+    ownership_state.add_source(s, &svc, source, op, at);
+    ownership_api.predicate_atom mut predicate = ownership_api.predicate_atom{};
+    predicate.key = id(ownership_api.entity_kind.predicate, 1);
+    predicate.kind = ownership_api.predicate_kind.separation;
+    predicate.left = nodes[0];
+    predicate.right = nodes[1];
+    ownership_state.add_predicate(s, &svc, predicate, op, at);
+    ownership_api.correlation corr = ownership_api.correlation{
+        guard.key, id(ownership_api.entity_kind.value, 1), predicate.key};
+    ownership_state.add_correlation(s, &svc, corr, op, at);
+    ownership_api.lost_fact mut loss = ownership_api.lost_fact{};
+    loss.category = ownership_api.limit_category.r;
+    loss.reason = ownership_api.incomplete_reason.work_limit;
+    ownership_state.add_loss(s, &svc, loss, op, at);
+    projections[0].field = 999;
+    leaves[0].owning = false;
+    partitions[0].residual = false;
+    history[0].kind = ownership_api.effect_kind.release;
+    nodes[0].ordinal = 999;
+    ownership_api.state_view v = ownership_state.view(s);
+    assert(v.contents[0].place.projections[0].field == 7);
+    assert(v.regions[0].leaves[0].owning);
+    assert(v.regions[0].partitions[0].residual);
+    assert(v.allocations[0].history[0].kind == ownership_api.effect_kind.transfer);
+    assert(v.shapes[0].parameters[0].ordinal == 1);
+}
+
+fn round() address_sample {
+    ownership_state.state mut s = ownership_state.empty();
+    build(&s);
+    ownership_api.state_view sampled = ownership_state.view(&s);
+    address_sample mut addresses = address_sample{};
+    addresses.address[0] = cast(sampled.contents[0].place.projections.ptr, u64);
+    addresses.address[1] = cast(sampled.regions[0].leaves.ptr, u64);
+    addresses.address[2] = cast(sampled.regions[0].partitions.ptr, u64);
+    addresses.address[3] = cast(sampled.contents[0].borrows.ptr, u64);
+    addresses.address[4] = cast(sampled.allocations[0].history.ptr, u64);
+    addresses.address[5] = cast(sampled.shapes[0].parameters.ptr, u64);
+    addresses.address[6] = cast(s.blocks, u64);
+    addresses.address[7] = cast(s.contents.ptr, u64);
+    addresses.address[8] = cast(s.sources.ptr, u64);
+    addresses.address[9] = cast(s.allocations.ptr, u64);
+    addresses.address[10] = cast(s.regions.ptr, u64);
+    addresses.address[11] = cast(s.nodes.ptr, u64);
+    addresses.address[12] = cast(s.edges.ptr, u64);
+    addresses.address[13] = cast(s.shapes.ptr, u64);
+    addresses.address[14] = cast(s.predicates.ptr, u64);
+    addresses.address[15] = cast(s.guards.ptr, u64);
+    addresses.address[16] = cast(s.correlations.ptr, u64);
+    addresses.address[17] = cast(s.losses.ptr, u64);
+    u64 mut k = 0;
+    while (k < addresses.address.len) { assert(addresses.address[k] != 0); k += 1; }
+    ownership_state.state mut copy = ownership_state.clone(&s);
+    assert(ownership_state.equal(&s, &copy));
+    ownership_api.graph_node node = copy.nodes[0];
+    copy.nodes[0] = copy.nodes[1];
+    copy.nodes[1] = node;
+    ownership_api.graph_edge edge = copy.edges[0];
+    copy.edges[0] = copy.edges[1];
+    copy.edges[1] = edge;
+    assert(ownership_state.equal(&s, &copy));
+    ownership_api.services svc = services();
+    ownership_api.lost_fact mut loss = ownership_api.lost_fact{};
+    loss.category = ownership_api.limit_category.p;
+    loss.reason = ownership_api.incomplete_reason.work_limit;
+    ownership_state.add_loss(&copy, &svc, loss,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!ownership_state.equal(&s, &copy));
+    ownership_api.state_view original = ownership_state.view(&s);
+    assert(original.nodes.len == 2 && original.edges.len == 2);
+    assert(original.edges[0].to.ordinal == 2 && original.edges[1].to.ordinal == 1);
+    ownership_state.free(&s);
+    ownership_api.state_view independent = ownership_state.view(&copy);
+    assert(independent.contents[0].place.projections[0].field == 7);
+    assert(independent.allocations[0].history[0].kind == ownership_api.effect_kind.transfer);
+    assert(independent.shapes[0].parameters[0].ordinal == 1);
+    assert(independent.losses.len == 2);
+    ownership_state.free(&copy);
+    ownership_state.free(&copy);
+    return addresses;
+}
+
+fn clone_first() void {
+    ownership_state.state mut original = ownership_state.empty();
+    build(&original);
+    ownership_state.state mut copy = ownership_state.clone(&original);
+    assert(ownership_state.equal(&original, &copy));
+    ownership_state.free(&copy);
+    ownership_api.state_view view = ownership_state.view(&original);
+    assert(view.contents[0].place.projections[0].field == 7);
+    assert(view.allocations[0].history[0].kind == ownership_api.effect_kind.transfer);
+    assert(view.shapes[0].parameters[0].ordinal == 1);
+    assert(view.nodes.len == 2 && view.edges.len == 2);
+    ownership_state.free(&original);
+}
+
+fn main() i32 {
+    clone_first();
+    u64 mut warm = 0;
+    while (warm < 4) { round(); warm += 1; }
+    address_sample first = round();
+    u64 system_before = heap.system_view();
+    u64 mut best_system = 18446744073709551615;
+    u64[18] mut best_address = {};
+    u64 mut i = 0;
+    while (i < best_address.len) {
+        best_address[i] = 18446744073709551615;
+        i += 1;
+    }
+    u64 mut trial = 0;
+    while (trial < 16) {
+        address_sample later = round();
+        u64 system_now = heap.system_view();
+        u64 ds = heap.distance(system_before, system_now);
+        if (ds < best_system) { best_system = ds; }
+        i = 0;
+        while (i < best_address.len) {
+            u64 distance = heap.distance(first.address[i], later.address[i]);
+            if (distance < best_address[i]) { best_address[i] = distance; }
+            i += 1;
+        }
+        trial += 1;
+    }
+    if (heap.ADDRESS_IS_A_VIEW) {
+        i = 0;
+        while (i < best_address.len) { assert(best_address[i] == 0); i += 1; }
+    } else { assert(best_system < 256); }
+    println("G06.1 G06.2 G08.1 G08.2");
+    return 0;
+}

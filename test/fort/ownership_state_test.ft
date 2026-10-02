@@ -1,0 +1,541 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| G01.1 G01.2 G02.1 G02.2 G02.3
+//| G03.1 G03.2 G03.3 G04.1 G04.2
+//| G07.1 G07.2 G07.3 G09.1 G09.2
+//| callback limits ok
+/// Tests finite ownership facts and charged state updates.
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+
+struct service_context {
+    bool deny;
+    bool deny_work;
+    bool refuse_events;
+    u64 calls;
+    u64 events;
+    ownership_api.limit_category first;
+    ownership_api.event_kind last_event;
+    ownership_api.incomplete_reason last_reason;
+    ownership_api.charge_item[7] last;
+    u64 last_len;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* req)
+    ownership_api.charge_result {
+    service_context mut* ctx = cast(opaque, service_context mut*);
+    assert(ownership_keys.canonical_charges(req));
+    ctx->calls += 1;
+    ctx->first = req->items[0].category;
+    ctx->last_len = req->items.len;
+    u64 mut i = 0;
+    while (i < req->items.len) { ctx->last[i] = req->items[i]; i += 1; }
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    if (ctx->deny) {
+        u64 limit_index = ctx->deny_work ? req->items.len - 1 : 0;
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+            req->operation, req->source);
+        out.limit.present = true;
+        out.limit.category = req->items[limit_index].category;
+        out.limit.scope = req->items[limit_index].scope;
+        out.limit.bound = 1;
+        out.limit.used = 1;
+        out.limit.attempted = req->items[limit_index].amount;
+        return out;
+    }
+    out.allowed = true;
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    service_context mut* ctx = cast(opaque, service_context mut*);
+    ctx->events += 1;
+    ctx->last_event = req->event.kind;
+    ctx->last_reason = req->event.reason;
+    assert(req->current.failed && req->current.terminal.present);
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = req->current;
+    out.retained = !ctx->refuse_events;
+    return out;
+}
+
+fn services(service_context mut* ctx) ownership_api.services {
+    ownership_api.services mut out = ownership_api.services{};
+    out.budget_context = cast(ctx, void mut*);
+    out.event_context = cast(ctx, void mut*);
+    out.budget = budget;
+    out.event = event;
+    return out;
+}
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    ownership_api.entity_id mut out = ownership_api.entity_id{};
+    out.kind = kind;
+    out.ordinal = ordinal;
+    return out;
+}
+
+fn place(u32 ordinal) ownership_api.place_path {
+    ownership_api.place_path mut out = ownership_api.place_path{};
+    out.root = id(ownership_api.entity_kind.slot, ordinal);
+    return out;
+}
+
+fn source(u32 ordinal, ownership_api.source_kind kind,
+    ownership_api.entity_id allocation) ownership_api.source_fact {
+    ownership_api.source_fact mut out = ownership_api.source_fact{};
+    out.key = id(ownership_api.entity_kind.source, ordinal);
+    out.kind = kind;
+    out.validity = ownership_api.validity_kind.live;
+    out.allocation = allocation;
+    return out;
+}
+
+fn allocation(u32 ordinal, u32 site, u64 length) ownership_api.allocation_fact {
+    ownership_api.allocation_fact mut out = ownership_api.allocation_fact{};
+    out.key = id(ownership_api.entity_kind.allocation, ordinal);
+    out.site = id(ownership_api.entity_kind.allocation, site);
+    out.validity = ownership_api.validity_kind.live;
+    out.count.one = true;
+    out.obligation = true;
+    out.owner.place = place(ordinal);
+    out.logical_length.kind = ownership_api.fact_kind.exact;
+    out.logical_length.value = cast(length, i64);
+    return out;
+}
+
+fn contents(u32 slot, u32 version) ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = ownership_api.contents_fact{};
+    out.place = place(slot);
+    out.kind = ownership_api.contents_kind.reference;
+    out.value_version = id(ownership_api.entity_kind.value, version);
+    return out;
+}
+
+fn g01() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_state.state mut unknown = ownership_state.unknown();
+    ownership_state.state mut bottom = ownership_state.bottom();
+    assert(!ownership_state.equal(&s, &unknown));
+    assert(!ownership_state.equal(&s, &bottom));
+    assert(!ownership_state.equal(&unknown, &bottom));
+    ownership_state.free(&unknown);
+    ownership_state.free(&bottom);
+    ownership_api.contents_fact mut zero = contents(1, 1);
+    zero.kind = ownership_api.contents_kind.empty_owner;
+    zero.owner_empty = true;
+    ownership_state.add_contents(&s, &svc, zero,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(ownership_state.view(&s).allocations.len == 0);
+    ownership_api.allocation_fact a = allocation(2, 3, 1);
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.release_member(&s, &svc, a.key, true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view mut v = ownership_state.view(&s);
+    assert(v.contents[0].owner_empty && v.allocations[0].history.len == 1);
+    assert(v.allocations[0].validity == ownership_api.validity_kind.released);
+    ownership_api.contents_fact next = contents(1, 2);
+    ownership_api.place_path[1] aliases = {place(1)};
+    ownership_state.strong_contents(&s, &svc, next, aliases[..], true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    v = ownership_state.view(&s);
+    assert(v.contents.len == 1 && v.contents[0].value_version.ordinal == 2);
+    assert(v.allocations[0].validity == ownership_api.validity_kind.released);
+    ownership_state.free(&s);
+}
+
+fn g02() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_api.source_fact slot = source(1, ownership_api.source_kind.stack,
+        ownership_api.entity_id{});
+    ownership_api.allocation_fact a = allocation(2, 2, 1);
+    ownership_api.source_fact heap = source(2, ownership_api.source_kind.heap, a.key);
+    ownership_api.source_fact caller = source(3, ownership_api.source_kind.symbolic_caller,
+        ownership_api.entity_id{});
+    ownership_state.add_source(&s, &svc, slot,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_source(&s, &svc, heap,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_source(&s, &svc, caller,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.owner_location mut after = ownership_api.owner_location{};
+    after.place = place(9);
+    after.detached = true;
+    ownership_state.transfer_owner(&s, &svc, a.key, after, true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.end_source(&s, &svc, slot.key,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view mut v = ownership_state.view(&s);
+    assert(v.sources[0].validity == ownership_api.validity_kind.ended);
+    assert(v.sources[1].validity == ownership_api.validity_kind.live);
+    assert(v.sources[2].validity == ownership_api.validity_kind.live);
+    assert(v.allocations[0].owner.place.root.ordinal == 9);
+    assert(v.allocations[0].owner.detached);
+    assert(v.allocations[0].obligation && v.allocations[0].history.len == 1);
+    ownership_state.free(&s);
+}
+
+fn g03() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(1, 9, 1);
+    ownership_api.allocation_fact b = allocation(2, 9, 1);
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_allocation(&s, &svc, b,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view mut v = ownership_state.view(&s);
+    assert(v.allocations.len == 2 && v.allocations[0].site.ordinal == 9);
+    assert(v.allocations[1].site.ordinal == 9 && v.allocations[0].key.ordinal !=
+        v.allocations[1].key.ordinal);
+    ownership_state.state mut many = ownership_state.empty();
+    ownership_api.allocation_fact mut group = allocation(3, 9, 1);
+    group.count.one = false;
+    group.count.many = true;
+    ownership_state.add_allocation(&many, &svc, group,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.source_fact related = source(3, ownership_api.source_kind.heap, group.key);
+    ownership_api.source_fact mut prior = source(4, ownership_api.source_kind.heap, group.key);
+    prior.validity = ownership_api.validity_kind.released;
+    ownership_api.source_fact other = source(5, ownership_api.source_kind.heap, a.key);
+    ownership_state.add_source(&many, &svc, related,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_source(&many, &svc, prior,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_source(&many, &svc, other,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.borrow_relation[1] mut borrows = {};
+    borrows[0].key = id(ownership_api.entity_kind.relation, 3);
+    borrows[0].source = related.key;
+    borrows[0].range.source = related.key;
+    ownership_api.contents_fact mut borrowed = contents(3, 3);
+    borrowed.borrows = borrows[..];
+    ownership_state.add_contents(&many, &svc, borrowed,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!ownership_state.equal(&s, &many));
+    ownership_state.release_member(&many, &svc, group.key, true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view grouped = ownership_state.view(&many);
+    assert(grouped.allocations[0].obligation && grouped.allocations[0].count.one);
+    assert(grouped.allocations[0].count.many && !grouped.allocations[0].count.zero);
+    assert(grouped.allocations[0].history.len == 1);
+    assert(grouped.sources[0].validity == ownership_api.validity_kind.unknown);
+    assert(grouped.sources[1].validity == ownership_api.validity_kind.released);
+    assert(grouped.sources[2].validity == ownership_api.validity_kind.live);
+    assert(grouped.contents[0].borrows[0].source.ordinal == 3);
+    assert(grouped.contents[0].borrows[0].range.source.ordinal == 3);
+
+    ownership_state.state mut choices = ownership_state.empty();
+    ownership_api.allocation_fact mut left = allocation(6, 9, 1);
+    ownership_api.allocation_fact mut right = allocation(7, 9, 1);
+    left.count.zero = true;
+    right.count.zero = true;
+    ownership_state.add_allocation(&choices, &svc, left,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_allocation(&choices, &svc, right,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.source_fact mut left_source = source(6, ownership_api.source_kind.heap, left.key);
+    ownership_api.source_fact mut right_source =
+        source(7, ownership_api.source_kind.heap, right.key);
+    left_source.validity = ownership_api.validity_kind.unknown;
+    right_source.validity = ownership_api.validity_kind.unknown;
+    ownership_state.add_source(&choices, &svc, left_source,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_source(&choices, &svc, right_source,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.entity_id[1] positive = {left.key};
+    ownership_api.entity_id[1] negative = {right.key};
+    ownership_api.guard_fact mut guard = ownership_api.guard_fact{};
+    guard.key = id(ownership_api.entity_kind.guard, 3);
+    guard.positive = positive[..];
+    guard.negative = negative[..];
+    ownership_state.add_guard(&choices, &svc, guard,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.borrow_relation[1] mut left_borrow = {};
+    ownership_api.borrow_relation[1] mut right_borrow = {};
+    left_borrow[0].source = left_source.key;
+    right_borrow[0].source = right_source.key;
+    ownership_api.contents_fact mut left_value = contents(6, 6);
+    ownership_api.contents_fact mut right_value = contents(6, 7);
+    left_value.borrows = left_borrow[..];
+    right_value.borrows = right_borrow[..];
+    ownership_state.add_contents(&choices, &svc, left_value,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_contents(&choices, &svc, right_value,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_correlation(&choices, &svc,
+        ownership_api.correlation{guard.key, left_value.value_version, left_source.key},
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_correlation(&choices, &svc,
+        ownership_api.correlation{guard.key, right_value.value_version, right_source.key},
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view alternatives = ownership_state.view(&choices);
+    assert(alternatives.allocations.len == 2 && alternatives.guards.len == 1);
+    assert(alternatives.allocations[0].count.zero && alternatives.allocations[0].count.one);
+    assert(!alternatives.allocations[0].count.many && !alternatives.allocations[1].count.many);
+    assert(alternatives.guards[0].positive[0].ordinal == 6);
+    assert(alternatives.guards[0].negative[0].ordinal == 7);
+    assert(alternatives.contents.len == 2 && alternatives.correlations.len == 2);
+    assert(alternatives.contents[0].borrows[0].source.ordinal == 6);
+    assert(alternatives.contents[1].borrows[0].source.ordinal == 7);
+    assert(!ownership_state.equal(&choices, &many));
+    ownership_state.free(&s);
+    ownership_state.free(&many);
+    ownership_state.free(&choices);
+}
+
+fn g04() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_state.add_contents(&s, &svc, contents(1, 1),
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_contents(&s, &svc, contents(2, 1),
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_contents(&s, &svc, contents(3, 7),
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.allocation_fact owned = allocation(8, 8, 1);
+    ownership_state.add_allocation(&s, &svc, owned,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.source_fact mut released = source(8, ownership_api.source_kind.heap,
+        id(ownership_api.entity_kind.allocation, 9));
+    released.validity = ownership_api.validity_kind.released;
+    ownership_state.add_source(&s, &svc, released,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.place_path[2] aliases = {place(1), place(2)};
+    ownership_state.strong_contents(&s, &svc, contents(1, 2), aliases[..], true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view mut v = ownership_state.view(&s);
+    assert(v.contents.len == 3);
+    assert(v.contents[0].place.root.ordinal == 3);
+    assert(v.contents[1].value_version.ordinal == 2);
+    assert(v.contents[2].value_version.ordinal == 2);
+    ownership_api.place_path[2] candidates = {place(1), place(3)};
+    ownership_api.entity_id guard = id(ownership_api.entity_kind.guard, 1);
+    ownership_state.weak_contents(&s, &svc, contents(1, 4), candidates[..], guard,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    v = ownership_state.view(&s);
+    assert(v.contents.len == 5 && v.correlations.len == 2);
+    assert(v.contents[0].value_version.ordinal == 7);
+    assert(v.contents[1].value_version.ordinal == 2);
+    assert(v.contents[3].value_version.ordinal == 4);
+    assert(v.allocations[0].obligation);
+    assert(v.sources[0].validity == ownership_api.validity_kind.released);
+    ownership_state.free(&s);
+}
+
+fn selection_failures() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_state.add_contents(&s, &svc, contents(1, 1),
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.place_path[1] candidates = {place(1)};
+    ownership_api.mutation_result p = ownership_state.strong_contents(&s, &svc,
+        contents(1, 2), candidates[..], false,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(p.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(ownership_state.view(&s).contents.len == 1);
+    assert(ownership_state.view(&s).contents[0].value_version.ordinal == 1);
+    assert(ownership_state.view(&s).proof.kind == ownership_api.proof_kind.complete);
+    assert(ctx.events == 1 && ctx.last_event == ownership_api.event_kind.incomplete_proof);
+    assert(ctx.last_reason == ownership_api.incomplete_reason.missing_correspondence);
+    ownership_state.free(&s);
+}
+
+fn refusal_preserves_state() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(1, 1, 1);
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.state mut before = ownership_state.clone(&s);
+    ctx.deny = true;
+    ownership_api.source_fact fresh = source(1, ownership_api.source_kind.heap, a.key);
+    ownership_api.mutation_result mut p = ownership_state.add_source(&s, &svc, fresh,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!p.applied && p.precision_lost && p.loss.category == ownership_api.limit_category.r);
+    assert(ownership_state.equal(&s, &before) && ctx.events == 0);
+    ctx.deny_work = true;
+    p = ownership_state.add_source(&s, &svc, fresh,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!p.applied && !p.precision_lost);
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(ownership_state.equal(&s, &before) && ctx.events == 1);
+    ctx.deny = false;
+    ctx.refuse_events = true;
+    ownership_api.place_path[1] aliases = {place(1)};
+    p = ownership_state.strong_contents(&s, &svc, contents(1, 2), aliases[..], false,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(ownership_state.equal(&s, &before) && ctx.events == 2);
+    ownership_state.free(&before);
+    ownership_state.free(&s);
+}
+
+fn g07() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_api.source_fact header = source(1, ownership_api.source_kind.stack,
+        ownership_api.entity_id{});
+    ownership_api.allocation_fact a = allocation(1, 1, 0);
+    ownership_api.source_fact backing = source(2, ownership_api.source_kind.heap, a.key);
+    ownership_state.add_source(&s, &svc, header,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.add_source(&s, &svc, backing,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.region mut r = ownership_api.region{};
+    r.key = id(ownership_api.entity_kind.region, 1);
+    r.source = backing.key;
+    r.offset.kind = ownership_api.fact_kind.exact;
+    r.offset.value = 5;
+    r.extent.kind = ownership_api.fact_kind.exact;
+    r.extent.value = 0;
+    r.access.begin.kind = ownership_api.fact_kind.exact;
+    r.access.begin.value = 5;
+    r.access.end.kind = ownership_api.fact_kind.exact;
+    r.access.end.value = 5;
+    r.access.arithmetic_proved = true;
+    r.alignment = 16;
+    ownership_state.add_region(&s, &svc, r,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.projection[1] mut index = {};
+    index[0].kind = ownership_api.projection_kind.captured_index;
+    index[0].index.kind = ownership_api.fact_kind.exact;
+    index[0].index.value = 3;
+    index[0].captured_version = id(ownership_api.entity_kind.value, 5);
+    ownership_api.contents_fact mut selected = contents(5, 5);
+    selected.place.projections = index[..];
+    ownership_state.add_contents(&s, &svc, selected,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(ctx.last_len == 3 && ctx.last[0].category == ownership_api.limit_category.d);
+    assert(ctx.last[0].amount == 1 && ctx.last[1].category == ownership_api.limit_category.g);
+    assert(ctx.last[2].category == ownership_api.limit_category.w);
+    index[0].index.value = 9;
+    ownership_state.end_source(&s, &svc, header.key,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view mut v = ownership_state.view(&s);
+    assert(v.sources[0].validity == ownership_api.validity_kind.ended);
+    assert(v.sources[1].validity == ownership_api.validity_kind.live);
+    assert(v.regions[0].offset.value == 5);
+    assert(v.contents[0].place.projections[0].index.value == 3);
+    assert(v.contents[0].place.projections[0].captured_version.ordinal == 5);
+    assert(v.regions[0].access.begin.value == v.regions[0].access.end.value);
+    assert(v.regions[0].alignment == 16 && v.regions[0].extent.value == 0);
+    ownership_state.free(&s);
+}
+
+fn g09() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_api.contents_fact mut zero = contents(1, 1);
+    zero.kind = ownership_api.contents_kind.empty_owner;
+    zero.owner_empty = true;
+    ownership_state.add_contents(&s, &svc, zero,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.allocation_fact a = allocation(2, 2, 0);
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.state_view mut v = ownership_state.view(&s);
+    assert(v.contents[0].owner_empty && v.allocations[0].obligation);
+    assert(v.allocations[0].logical_length.value == 0);
+    assert(v.allocations[0].count.one && !v.allocations[0].count.zero);
+    ownership_state.release_member(&s, &svc, a.key, true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(ownership_state.view(&s).allocations[0].history.len == 1);
+    ownership_state.free(&s);
+}
+
+fn callbacks() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services mut svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(1, 1, 1);
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    svc.event = null;
+    ownership_api.source_fact fresh = source(1, ownership_api.source_kind.heap, a.key);
+    ownership_api.mutation_result mut p = ownership_state.add_source(&s, &svc, fresh,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(p.proof.kind == ownership_api.proof_kind.incomplete && p.proof.failed);
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.missing_events);
+    assert(ownership_state.view(&s).allocations.len == 1 && ctx.calls == 1);
+    assert(ctx.events == 0);
+    assert(ownership_state.view(&s).allocations[0].obligation);
+    assert(ownership_state.view(&s).sources.len == 0);
+    ownership_state.free(&s);
+    s = ownership_state.empty();
+    svc = services(&ctx);
+    ctx.deny = true;
+    p = ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!p.applied && p.precision_lost);
+    assert(p.loss.category == ownership_api.limit_category.r);
+    assert(ownership_state.view(&s).proof.kind == ownership_api.proof_kind.complete);
+    assert(ownership_state.view(&s).allocations.len == 0 && ctx.calls == 2);
+    assert(ctx.events == 0);
+    ownership_state.free(&s);
+    s = ownership_state.empty();
+    ctx.deny_work = true;
+    p = ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(!p.applied && !p.precision_lost);
+    assert(ownership_state.view(&s).allocations.len == 0 && ctx.calls == 3);
+    assert(ctx.first == ownership_api.limit_category.r);
+    assert(ctx.events == 1 && ctx.last_event == ownership_api.event_kind.work_failure);
+    assert(ctx.last_reason == ownership_api.incomplete_reason.work_limit);
+    ownership_state.free(&s);
+    s = ownership_state.empty();
+    ctx.deny = false;
+    ctx.deny_work = false;
+    svc = services(&ctx);
+    ownership_state.add_allocation(&s, &svc, a,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_state.state mut before = ownership_state.clone(&s);
+    svc.budget = null;
+    p = ownership_state.add_source(&s, &svc,
+        source(1, ownership_api.source_kind.heap, a.key),
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.missing_budget);
+    assert(!p.applied && !p.precision_lost);
+    assert(ownership_state.equal(&s, &before));
+    assert(ownership_state.view(&s).allocations[0].obligation);
+    assert(ownership_state.view(&s).sources.len == 0);
+    ownership_state.free(&before);
+    ownership_state.free(&s);
+}
+
+fn main() i32 {
+    g01();
+    g02();
+    println("G01.1 G01.2 G02.1 G02.2 G02.3");
+    g03();
+    g04();
+    selection_failures();
+    println("G03.1 G03.2 G03.3 G04.1 G04.2");
+    g07();
+    g09();
+    println("G07.1 G07.2 G07.3 G09.1 G09.2");
+    callbacks();
+    refusal_preserves_state();
+    println("callback limits ok");
+    return 0;
+}
