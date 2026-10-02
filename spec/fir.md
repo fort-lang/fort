@@ -1314,6 +1314,199 @@ Whole-feature selection and migration follow `toolchain.md` 1 (D19.8).
 The complete ownership feature requires place, heap, raw-region, convergence, and global-boundary
 rules. This base contract makes no compiler-completion claim.
 
+### 14.1 Finite ownership analysis and outcomes (D17.18)
+
+**Abstract meaning.** A state represents possible concrete storage states and execution prefixes.
+Bottom represents no reaching execution. Unknown represents missing information, not empty storage.
+An operation needs proof for each represented feasible alternative that reaches it.
+No successful operation can rely on an alternative that the analysis omitted without proof.
+Keep input requirements separate from facts established by the function body.
+An inferred caller requirement cannot repair an intrinsic callee error or an unresolved analysis.
+
+**Finite domain.** Construct keys from the complete checked closure before solving summaries.
+Keys use declarations, FIR positions, types, symbolic inputs, and bounded structural templates.
+Do not create a new key for each loop iteration, call depth, or concrete allocation.
+The implementation publishes a finite positive bound for each category below.
+These bounds control analysis precision. They add no source-language size restriction.
+
+| Bound | Bounded content |
+|---|---|
+| D | Access-path projection depth, including recursive pointer traversals. |
+| R | Distinguished regions, allocation representatives, and region partitions per state. |
+| P | Predicate atoms, including nullness, equality, inequality, and range membership. |
+| G | Guarded alternatives per state, including ownership and source correlations. |
+| H | Structural predicate templates and their bounded parameters. |
+| T | Explicit indirect target alternatives per call. |
+| E | Ordered summary-effect nodes and symbolic summary relations per function. |
+| W | Counted transfer, join, widening, substitution, and summary-solver work. |
+| V | Retained proof events, witness links, and rendered diagnostic records. |
+
+Keep slot contents, source validity, allocation obligations, and borrowed-source relations separate
+(D17.15). Keep allocation validity and obligation location as independent facts.
+A transfer changes the obligation location. It does not end the allocation source.
+Summary groups retain simultaneous multiplicity separately from alternative sources (D17.16).
+Multiplicity uses zero, one, and many; many means at least two simultaneous allocations.
+A state can represent a set of these three counts. Joining zero and one retains both alternatives.
+Releasing one member of many leaves one or many. It never proves the group empty.
+An inductive shape proof can discharge a whole region only under memory model 2.7.
+Preserve transferred regions and detached obligations outside that proof's discharged region.
+
+Predicate keys bind dynamic index values at the operation, not merely their mutable local names.
+A loop merge that loses that value identity adds possible equality and overlap.
+It cannot establish a strong update. Bounded index partitions include an explicit residual region.
+Every possible selected element belongs to a retained partition or its residual region.
+Use bounded numeric endpoints and unknown bounds. Do not unroll arithmetic into new symbolic keys.
+Keep trusted foreign classification separate from an unknown fort source or target (D17.13).
+
+**Joins and widening.** Order states by represented possibility: a larger state represents at least
+all executions of a smaller state. A join contains both predecessors, including their conditions.
+Possible sources, effects, invalidation, and obligations combine by union or a sound abstraction.
+A universal fact survives only if it holds in all represented alternatives.
+Null tests refine a matching value version until an overlapping write invalidates that correlation.
+An empty owner on one predecessor alone causes no error and supplies no proof about other paths.
+
+Transfer functions are monotone in this order. They model the exact operation before abstraction.
+A proved release or transfer can discharge its selected obligation. A join cannot discharge it.
+Require one proved destination in each alternative before a strong update (D17.15).
+An unknown destination keeps selected and unselected alternatives through a weak update.
+
+At bound D, replace the longer path with a residual tail that covers every omitted projection.
+That tail can overlap earlier regions unless a retained structural predicate proves separation.
+At bounds R, P, G, H, T, or E, merge alternatives into a covering residual description.
+Do not drop a possible source, live obligation, release event, or required ordering constraint.
+Unknown effect order cannot prove that a read precedes a possibly aliasing release.
+Record the lost fact and its source location. Preserve independent facts that still have proof.
+A widened state never marks storage escaped, foreign, empty, or released merely to end analysis.
+
+Use fixed predicate vocabularies and canonical region and shape keys after widening.
+Widening retains its residual descriptions at later iterations. It does not create longer paths.
+Witness links use finite event keys and summary references, not an expanded recursive call stack.
+If a witness limit loses the proof of feasibility, classify the event as incomplete proof.
+These restrictions give a finite state space and prevent endless key generation.
+
+**Loops and recursive summaries.** Solve loops from their entry states, including zero iterations.
+Join back-edge contributions until the state stops changing under the bounded domain.
+Preserve obligations at break, continue, return, and storage end.
+Check effects on all finite execution prefixes, including prefixes of infinite executions.
+An infinite execution has no final normal-exit boundary merely because the solver stops iterating.
+
+Compute call-graph components and target sets in canonical order.
+Within a recursive component, use bounded symbolic inputs, result storage, globals, and alias cases.
+Infer guarded requirements, ordered effects, retained sources, results, and outcomes together.
+A provisional may-summary can start at bottom for fixed-point computation only.
+No caller can use that provisional bottom as proof of absent effects or absent return.
+Keep dependencies on an unresolved recursive call explicit until the component reaches a fixed
+point and validates its coverage and obligations.
+
+A complete summary covers each admitted input condition, target, and finite effect or exit path.
+It includes observable prefixes of recursion that never returns.
+Validate recursive shape arguments under memory model 2.7; recursion alone proves no cleanup.
+A stable provisional table with unresolved dependencies is still incomplete.
+Export unknown for those dependencies and report affected unproved obligations.
+The finite domain guarantees stabilization or a counted-budget error, not acceptance of all inputs.
+
+**Exit outcomes.** Conditions partition ordinary function return, known normal process termination,
+abort, and unresolved foreign termination. Memory model 2.9 defines their boundary requirements.
+Keep divergence separate from a terminating outcome. It supplies no normal-return cleanup result.
+Unknown fort outcomes represent unresolved possible outcomes and retain a possible proof
+continuation with caller obligations. This continuation adds no FIR block or LLVM edge.
+A complete instantiated summary can remove a caller-return continuation only by proving no return.
+An incomplete summary cannot remove an existing caller continuation or its cleanup obligations.
+A verified noreturn type supplies its existing no-return fact (D8.5). It supplies no abort proof.
+Retain possible normal-process-termination requirements while fort outcome analysis is incomplete.
+A following defensive trap proves nothing about the callee's termination class.
+Do not confuse missing fort effects with trusted foreign effects.
+Compose mixed target outcomes under their conditions, including actual aliases and result values.
+An abort alternative needs no cleanup. It cannot remove a normal alternative's obligations.
+
+**Deterministic limits.** Use a versioned table of numeric implementation bounds.
+Publish its values and measured effects with reproduction commands before feature qualification.
+The same compiler, checked input closure, target configuration, and table give the same verdict,
+primary errors, notes, and limit locations.
+Check and build use the same proof inputs and boundaries.
+Release and bounds-check options do not change this analysis (D19.8).
+
+Schedule functions by canonical module and declaration keys, blocks by FIR number, and operations
+by their position. Sort set alternatives and work queues by their keys.
+Use a fixed category order for budget charges and a fixed tie order for simultaneous limits.
+Define a work unit for each category. Record the used count and bound at exhaustion.
+Do not use elapsed time, available memory, address order, or thread arrival as a proof budget.
+Numeric counter saturation means exhaustion. It never wraps to a fresh budget.
+
+A precision limit marks only the facts that its abstraction loses.
+If retained facts still prove an obligation, accept that operation without a limit error.
+Otherwise emit incomplete proof at the operation that needs the missing fact.
+A work-budget failure stops the affected computation and marks its output incomplete.
+Preserve known obligations and witnesses. Other computations can continue within their budgets.
+Emit a budget error even when no later source use consumes the incomplete output.
+If V prevents normal event storage, retain one terminal incomplete-proof record in reserved space.
+Compilation cannot succeed with a suppressed or unrecorded incomplete result.
+Use toolchain 4.2 for witness classes, event content, stable ordering, and cascade suppression.
+
+**Seven analysis traces.** A01 to A07 specify states, transitions, and verdicts.
+Their small bounds are trace inputs, not numeric production defaults.
+A names a concrete allocation. P names symbolic caller storage.
+These traces are design arguments. They are not current compiler probe results.
+
+A01: Access-path growth. Set D = 2. Successive traversals name p, p.next, and p.next.next.
+A third traversal maps p.next.next.next to the residual tail p.next.next.*.
+A fourth traversal remains in that tail. The access-path key set now stops growing.
+Keep any owned descendants, released sources, and borrow relations that enter the tail.
+Without a retained live-source invariant, dereferencing the tail gives incomplete proof.
+Expected reason: cannot prove live storage after access-path widening.
+
+A02: Loop multiplicity. Each iteration links a fresh site-S allocation into owned chain root p.
+Earlier iterations remain live through owned edges.
+The entry count is zero. One iteration gives one. Two iterations give many.
+The joined loop state is {zero, one, many}; another iteration leaves that set unchanged.
+If a branch releases one selected allocation, many leaves {one, many}, not zero.
+A normal scope end that loses those remaining owners rejects the path with a validated witness.
+Two concrete iterations witness at least one residual allocation after one release.
+A separate complete chain-drain invariant can prove empty without counting concrete iterations.
+
+A03: Recursive convergence. Let f(P,b) return P when b is true; otherwise it calls g(P,true).
+Let g(P,b) call f(P,b). Neither function changes P or its storage.
+Use simultaneous rounds. Write Nf and Ng for their discovered normal-return conditions.
+Round 0 gives (false, false). Round 1 gives (b, false). Round 2 gives (b, b).
+Round 3 gives (true, b). Round 4 gives (true, true). Round 5 changes nothing.
+Each discovered result preserves source P. Provisional missing returns remove no continuation.
+Complete path coverage at the fixed point proves that both results designate caller storage P.
+Accept each return with its live-source requirement. Ending a parameter slot does not end P.
+
+A04: Target growth. Set T = 2. A call first has {keep}, then {keep, release}.
+A third fort target produces {keep, release, residual-fort-targets}.
+The residual alternative covers the third target and later matching fort alternatives.
+It remains fort. It supplies neither foreign trust nor an empty effect set.
+Keep the known release alternative and its source event. Do not discard its possible invalidation.
+Without complete substituted effects and conditions, a later dependent read gives incomplete proof.
+Expected reason: cannot prove the call preserves the read's source for all possible fort targets.
+A target-set entry alone is not a validated concrete reaching-path witness.
+
+A05: Work exhaustion. Set the transfer-work bound W = 2 for this trace.
+Operation 1 allocates A into p. Operation 2 lends view(A) into v.
+Operation 3 proposes del(p). Charging its transfer needs work unit 3 and exceeds the bound.
+Do not pretend that del ran, that A became empty, or that later code cannot return.
+Keep A's obligation and v's source relation. Mark the remaining effects and outcomes incomplete.
+Reject with used = 2, bound = 2, and the attempted operation as the limit location.
+Do not claim a leak or use-after-free from this unexecuted abstract transfer.
+
+A06: Unknown recursive exit. The caller owns A and calls an unresolved recursive component.
+The component has no complete normal-return, abort, or normal-process-exit summary.
+Retain a possible return continuation carrying A's possible residual obligation.
+If the following caller return lacks cleanup, its cleanup proof is incomplete.
+Report cannot prove completed cleanup at that return; note the unresolved recursive call.
+Missing return entries prove no abort or divergence.
+A recursive component that reaches a complete no-return proof can remove the return continuation.
+It must still apply any proved normal-process-termination requirements.
+
+A07: Mixed outcomes. The caller owns A. Under c, a complete target summary returns without change.
+Under !c, another complete target summary aborts. A deferred del(p) belongs to caller return.
+The normal continuation has condition c and retains A until that deferred del releases it.
+The abort alternative has condition !c and requires no ordinary cleanup.
+Accept the complete cleanup trace. Removing defer makes the normal path lose A at return.
+Condition c and that ordered return path validate the lost-ownership witness.
+Replacing the abort target with known normal process termination instead applies memory model 2.9.
+
 ## 15. Extending the language
 
 The ownership proof of section 14 uses FIR places, moves, storage boundaries, and ordered effects
