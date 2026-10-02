@@ -1,0 +1,725 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| 18 ownership diagnostic groups ok
+/// Checks text and JSON diagnostics from supplied ownership events.
+import capture;
+import diag;
+import json;
+import ownership_api;
+import ownership_diag;
+import ownership_events;
+import std.io;
+import std.str;
+import std.strbuf;
+
+fn file(void mut* context, ownership_api.source_position at) string {
+    if (at.file == 2) { return "lib.ft"; }
+    return "case.ft";
+}
+
+fn position(u32 file_id, u32 line, u32 col, u32 end_col)
+    ownership_api.source_position {
+    return ownership_api.source_position{1, file_id, line, col, line, end_col};
+}
+
+fn event(ownership_api.event_kind kind, ownership_api.evidence_kind evidence,
+    u32 line, string label) ownership_api.event_descriptor {
+    ownership_api.event_descriptor mut out = ownership_api.event_descriptor{};
+    out.key.kind = ownership_api.entity_kind.event;
+    out.key.ordinal = line;
+    out.operation.function.declaration.module = 1;
+    out.operation.function.declaration.declaration = 1;
+    out.operation.operation = line;
+    out.source = position(1, line, 5, 9);
+    out.kind = kind;
+    out.evidence = evidence;
+    out.text = label;
+    out.relation.kind = ownership_api.entity_kind.relation;
+    out.relation.ordinal = line;
+    return out;
+}
+
+fn output(diag.sink* s, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    json.writer mut j = json.writer{};
+    json.json_init(&j, out);
+    diag.write_json(s, &j);
+    return strbuf.view(out);
+}
+
+fn equal_parts(string actual, string@ parts) bool {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    u64 mut i = 0;
+    while (i < parts.len) {
+        strbuf.append(&out, parts[i]);
+        i += 1;
+    }
+    return actual == strbuf.view(&out);
+}
+
+fn setup(ownership_diag.renderer mut* rend, diag.sink mut* s,
+    ownership_events.store mut* evs, ownership_api.services mut* svc, u64 v) void {
+    ownership_api.limit_table bounds = ownership_api.limit_table{
+        ownership_api.LIMIT_VERSION, 8, 8, 8, 8, 8, 8, 8, 8, v};
+    assert(ownership_events.bind(evs, &bounds, svc));
+    ownership_diag.bind(rend, s, evs, null, file, svc);
+}
+
+fn check_one(ownership_api.event_descriptor item, string text, string@ expected_json,
+    string@ expected_text) void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 32);
+    ownership_api.event_descriptor[1] items = {item};
+    ownership_api.proof_status mut verdict = ownership_api.proof_status{};
+    verdict.kind = ownership_api.proof_kind.incomplete;
+    verdict.failed = true;
+    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..], verdict};
+    i32 saved = capture.begin(io.STDERR, "ownership.txt");
+    ownership_api.diagnostic_result mut result = ownership_api.render(&svc, &req);
+    capture.end(io.STDERR, saved);
+    string own got = capture.text("ownership.txt");
+    defer del(got);
+    assert(result.rendered);
+    assert(result.proof.failed);
+    assert(diag.count(&s) == 1);
+    assert(evs.rendered == diag.record_count(&s));
+    assert(evs.budget.used.v == evs.rendered);
+    assert(diag.record_at(&s, 0).msg == text);
+    assert(equal_parts(got, expected_text));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    assert(equal_parts(output(&s, &out), expected_json));
+}
+
+fn proved_use() void {
+    ownership_api.event_descriptor item = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 8, "view");
+    string[3] json_parts_1 = {
+        "[{\"file\":\"case.ft\",\"line\":8,\"col\":5,\"end_line\":8,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"invalid use of 'view'\",\"notes\":",
+        "[]}]"
+    };
+    string[1] text_parts_1 = {
+        "case.ft:8:5: error: invalid use of 'view'\n"
+    };
+    check_one(item, "invalid use of 'view'", json_parts_1[..], text_parts_1[..]);
+}
+
+fn path_use() void {
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.validated_path, 8, "view");
+    ownership_api.witness_link[1] mut witnesses = {};
+    witnesses[0].validated = true;
+    item.witnesses = witnesses[..];
+    ownership_api.event_note[1] notes = {ownership_api.event_note{
+        ownership_api.note_role.release, position(1, 4, 3, 6),
+        ownership_api.entity_id{}, "storage released here"}};
+    item.notes = notes[..];
+    string[4] json_parts_2 = {
+        "[{\"file\":\"case.ft\",\"line\":8,\"col\":5,\"end_line\":8,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"invalid use of 'view' on this path",
+        "\",\"notes\":[{\"file\":\"case.ft\",\"line\":4,\"col\":3,\"end_line\":4,",
+        "\"end_col\":6,\"message\":\"storage released here\"}]}]"
+    };
+    string[2] text_parts_2 = {
+        "case.ft:8:5: error: invalid use of 'view' on this path\ncase.ft:4:3: not",
+        "e: storage released here\n"
+    };
+    check_one(item, "invalid use of 'view' on this path", json_parts_2[..], text_parts_2[..]);
+}
+
+fn incomplete() void {
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.abstract_possibility, 8,
+        "that 'view' designates live storage");
+    item.precision.category = ownership_api.limit_category.d;
+    item.precision.bound = 2;
+    item.precision.first_source = position(1, 4, 13, 17);
+    string[5] json_parts_3 = {
+        "[{\"file\":\"case.ft\",\"line\":8,\"col\":5,\"end_line\":8,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"cannot prove that 'view' designate",
+        "s live storage\",\"notes\":[{\"file\":\"case.ft\",\"line\":4,\"col\":13,",
+        "\"end_line\":4,\"end_col\":17,\"message\":\"access-path depth 2 loses th",
+        "e required source relation here\"}]}]"
+    };
+    string[3] text_parts_3 = {
+        "case.ft:8:5: error: cannot prove that 'view' designates live storage\nca",
+        "se.ft:4:13: note: access-path depth 2 loses the required source relation",
+        " here\n"
+    };
+    check_one(item, "cannot prove that 'view' designates live storage",
+        json_parts_3[..], text_parts_3[..]);
+    item.precision = ownership_api.lost_fact{};
+    item.evidence = ownership_api.evidence_kind.validated_path;
+    string[3] json_parts_4 = {
+        "[{\"file\":\"case.ft\",\"line\":8,\"col\":5,\"end_line\":8,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"cannot prove that 'view' designate",
+        "s live storage\",\"notes\":[]}]"
+    };
+    string[1] text_parts_4 = {
+        "case.ft:8:5: error: cannot prove that 'view' designates live storage\n"
+    };
+    check_one(item, "cannot prove that 'view' designates live storage",
+        json_parts_4[..], text_parts_4[..]);
+}
+
+fn lost_owner() void {
+    ownership_api.event_descriptor item = event(ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional, 12, "buffer");
+    string[3] json_parts_5 = {
+        "[{\"file\":\"case.ft\",\"line\":12,\"col\":5,\"end_line\":12,\"end_col\"",
+        ":9,\"severity\":\"error\",\"message\":\"lost ownership of 'buffer'\",\"n",
+        "otes\":[]}]"
+    };
+    string[1] text_parts_5 = {
+        "case.ft:12:5: error: lost ownership of 'buffer'\n"
+    };
+    check_one(item, "lost ownership of 'buffer'", json_parts_5[..], text_parts_5[..]);
+}
+
+fn caller_requirement() void {
+    ownership_api.event_descriptor item = event(ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.unconditional, 15, "arg");
+    string[3] json_parts_6 = {
+        "[{\"file\":\"case.ft\",\"line\":15,\"col\":5,\"end_line\":15,\"end_col\"",
+        ":9,\"severity\":\"error\",\"message\":\"caller requirement fails for 'ar",
+        "g'\",\"notes\":[]}]"
+    };
+    string[1] text_parts_6 = {
+        "case.ft:15:5: error: caller requirement fails for 'arg'\n"
+    };
+    check_one(item, "caller requirement fails for 'arg'", json_parts_6[..], text_parts_6[..]);
+}
+
+fn resource_limit() void {
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.work_failure,
+        ownership_api.evidence_kind.abstract_possibility, 9, "");
+    item.limit.category = ownership_api.limit_category.w;
+    item.limit.bound = 2;
+    item.limit.used = 2;
+    string[5] json_parts_7 = {
+        "[{\"file\":\"case.ft\",\"line\":9,\"col\":5,\"end_line\":9,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"ownership analysis exceeds the tra",
+        "nsfer-work bound 2\",\"notes\":[{\"file\":\"case.ft\",\"line\":9,\"col\"",
+        ":5,\"end_line\":9,\"end_col\":9,\"message\":\"2 work units complete; thi",
+        "s operation needs another work unit\"}]}]"
+    };
+    string[3] text_parts_7 = {
+        "case.ft:9:5: error: ownership analysis exceeds the transfer-work bound 2",
+        "\ncase.ft:9:5: note: 2 work units complete; this operation needs another",
+        " work unit\n"
+    };
+    check_one(item, "ownership analysis exceeds the transfer-work bound 2",
+        json_parts_7[..], text_parts_7[..]);
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 32);
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{};
+    req.verdict = ownership_api.incomplete(ownership_api.incomplete_reason.report_limit,
+        item.operation, item.source);
+    req.verdict.terminal.limit.present = true;
+    req.verdict.terminal.limit.category = ownership_api.limit_category.v;
+    req.verdict.terminal.limit.used = 3;
+    req.verdict.terminal.limit.bound = 3;
+    ownership_api.diagnostic_result result = ownership_diag.callback(
+        cast(&rend, void mut*), &req);
+    assert(result.rendered && result.proof.failed && diag.count(&s) == 1);
+    assert(diag.record_at(&s, 0).msg ==
+        "cannot prove complete ownership reporting within the report bound 3");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string[3] json_result_1 = {
+        "[{\"file\":\"case.ft\",\"line\":9,\"col\":5,\"end_line\":9,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"cannot prove complete ownership re",
+        "porting within the report bound 3\",\"notes\":[]}]"
+    };
+    assert(equal_parts(output(&s, &out), json_result_1[..]));
+}
+
+fn two_independent() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 32);
+    ownership_api.event_descriptor[2] items = {
+        event(ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.unconditional, 12, "buffer"),
+        event(ownership_api.event_kind.invalid_use,
+            ownership_api.evidence_kind.unconditional, 8, "view")};
+    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..],
+        ownership_api.proof_status{}};
+    i32 saved = capture.begin(io.STDERR, "ownership.txt");
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    capture.end(io.STDERR, saved);
+    string own got = capture.text("ownership.txt");
+    defer del(got);
+    string[2] text_parts = {
+        "case.ft:8:5: error: invalid use of 'view'\n",
+        "case.ft:12:5: error: lost ownership of 'buffer'\n"};
+    assert(equal_parts(got, text_parts[..]));
+    assert(diag.count(&s) == 2);
+    assert(diag.record_at(&s, 0).loc.line == 8);
+    assert(diag.record_at(&s, 1).loc.line == 12);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string[5] json_result_2 = {
+        "[{\"file\":\"case.ft\",\"line\":8,\"col\":5,\"end_line\":8,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"invalid use of 'view'\",\"notes\":",
+        "[]},{\"file\":\"case.ft\",\"line\":12,\"col\":5,\"end_line\":12,\"end_co",
+        "l\":9,\"severity\":\"error\",\"message\":\"lost ownership of 'buffer'\",",
+        "\"notes\":[]}]"
+    };
+    assert(equal_parts(output(&s, &out), json_result_2[..]));
+}
+
+fn dependent_cascade() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    diag.set_text(&s, true);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 32);
+    ownership_api.event_descriptor[2] mut items = {
+        event(ownership_api.event_kind.invalid_use,
+            ownership_api.evidence_kind.validated_path, 8, "view"),
+        event(ownership_api.event_kind.incomplete_proof,
+            ownership_api.evidence_kind.abstract_possibility, 8, "that view is live")};
+    items[1].operation = items[0].operation;
+    items[1].relation = items[0].relation;
+    ownership_api.witness_link[1] mut witnesses = {};
+    witnesses[0].validated = true;
+    items[0].witnesses = witnesses[..];
+    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..],
+        ownership_api.proof_status{}};
+    i32 saved = capture.begin(io.STDERR, "ownership.txt");
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    capture.end(io.STDERR, saved);
+    string own got = capture.text("ownership.txt");
+    defer del(got);
+    assert(got == "case.ft:8:5: error: invalid use of 'view' on this path\n");
+    assert(diag.count(&s) == 1);
+    assert(diag.record_at(&s, 0).msg == "invalid use of 'view' on this path");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string[3] json_result_3 = {
+        "[{\"file\":\"case.ft\",\"line\":8,\"col\":5,\"end_line\":8,\"end_col\":9",
+        ",\"severity\":\"error\",\"message\":\"invalid use of 'view' on this path",
+        "\",\"notes\":[]}]"
+    };
+    assert(equal_parts(output(&s, &out), json_result_3[..]));
+}
+
+fn utf8_byte_column() void {
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility, 18, "that value is live");
+    item.source = position(1, 18, 7, 8);
+    string[3] json_parts_8 = {
+        "[{\"file\":\"case.ft\",\"line\":18,\"col\":7,\"end_line\":18,\"end_col\"",
+        ":8,\"severity\":\"error\",\"message\":\"cannot prove that value is live",
+        "\",\"notes\":[]}]"
+    };
+    string[1] text_parts_8 = {
+        "case.ft:18:7: error: cannot prove that value is live\n"
+    };
+    check_one(item, "cannot prove that value is live", json_parts_8[..], text_parts_8[..]);
+    strbuf.str_buf mut underline = strbuf.create();
+    defer strbuf.free(&underline);
+    diag.loc at = diag.loc_range("case.ft", 1, 7, 1, 8);
+    assert(diag.render(&underline, "// \xc3\xa9 view\n", at));
+    assert(strbuf.view(&underline) == "    // \xc3\xa9 view\n          ^\n");
+}
+
+fn imported_callee_note() void {
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.unconditional, 20, "arg");
+    ownership_api.event_note[1] notes = {ownership_api.event_note{
+        ownership_api.note_role.callee, position(2, 3, 2, 6),
+        ownership_api.entity_id{}, "callee reads this borrowed value"}};
+    item.notes = notes[..];
+    string[4] json_parts_9 = {
+        "[{\"file\":\"case.ft\",\"line\":20,\"col\":5,\"end_line\":20,\"end_col\"",
+        ":9,\"severity\":\"error\",\"message\":\"caller requirement fails for 'ar",
+        "g'\",\"notes\":[{\"file\":\"lib.ft\",\"line\":3,\"col\":2,\"end_line\":3",
+        ",\"end_col\":6,\"message\":\"callee reads this borrowed value\"}]}]"
+    };
+    string[2] text_parts_9 = {
+        "case.ft:20:5: error: caller requirement fails for 'arg'\nlib.ft:3:2: not",
+        "e: callee reads this borrowed value\n"
+    };
+    check_one(item, "caller requirement fails for 'arg'", json_parts_9[..], text_parts_9[..]);
+    ownership_api.event_note[2] reversed = {
+        notes[0], ownership_api.event_note{ownership_api.note_role.allocation,
+            position(1, 2, 4, 7), ownership_api.entity_id{}, "owner allocated here"}};
+    item.notes = reversed[..];
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 32);
+    ownership_api.event_descriptor[1] items = {item};
+    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..],
+        ownership_api.proof_status{}};
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    assert(diag.record_count(&s) == 3);
+    assert(diag.record_at(&s, 1).msg == "owner allocated here");
+    assert(diag.record_at(&s, 2).msg == "callee reads this borrowed value");
+}
+
+fn path_owner_and_caller() void {
+    ownership_api.witness_link[1] mut witness = {};
+    witness[0].validated = true;
+    ownership_api.event_descriptor mut owner = event(ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.validated_path, 23, "buffer");
+    owner.witnesses = witness[..];
+    string[3] owner_json = {
+        "[{\"file\":\"case.ft\",\"line\":23,\"col\":5,\"end_line\":23,",
+        "\"end_col\":9,\"severity\":\"error\",\"message\":\"lost ownership of",
+        " 'buffer' on this path\",\"notes\":[]}]"};
+    string[1] owner_text = {
+        "case.ft:23:5: error: lost ownership of 'buffer' on this path\n"};
+    check_one(owner, "lost ownership of 'buffer' on this path",
+        owner_json[..], owner_text[..]);
+    ownership_api.event_descriptor mut caller = event(
+        ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.validated_path, 24, "arg");
+    caller.witnesses = witness[..];
+    string[3] caller_json = {
+        "[{\"file\":\"case.ft\",\"line\":24,\"col\":5,\"end_line\":24,",
+        "\"end_col\":9,\"severity\":\"error\",\"message\":\"caller requirement",
+        " fails for 'arg' on this path\",\"notes\":[]}]"};
+    string[1] caller_text = {
+        "case.ft:24:5: error: caller requirement fails for 'arg' on this path\n"};
+    check_one(caller, "caller requirement fails for 'arg' on this path",
+        caller_json[..], caller_text[..]);
+}
+
+fn false_witness_and_residual() void {
+    ownership_api.witness_link[2] mut witnesses = {};
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.validated_path, 25, "that source is live");
+    item.witnesses = witnesses[..];
+    string[3] expected_json = {
+        "[{\"file\":\"case.ft\",\"line\":25,\"col\":5,\"end_line\":25,",
+        "\"end_col\":9,\"severity\":\"error\",\"message\":\"cannot prove that",
+        " source is live\",\"notes\":[]}]"};
+    string[1] expected_text = {
+        "case.ft:25:5: error: cannot prove that source is live\n"};
+    check_one(item, "cannot prove that source is live",
+        expected_json[..], expected_text[..]);
+    witnesses[0].validated = true;
+    item.source_path.residual = true;
+    check_one(item, "cannot prove that source is live",
+        expected_json[..], expected_text[..]);
+}
+
+fn independent_terminal_and_reason() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 16);
+    ownership_api.event_descriptor first = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 8, "view");
+    ownership_api.event_descriptor second = event(ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility, 22, "that cleanup completes");
+    ownership_api.event_descriptor[1] items = {first};
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{items[..],
+        ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            second.operation, second.source)};
+    req.verdict.terminal.relation = second.relation;
+    ownership_api.diagnostic_result mut result = ownership_api.render(&svc, &req);
+    assert(result.rendered && result.proof.failed && diag.count(&s) == 2);
+    assert(diag.record_at(&s, 0).msg == "invalid use of 'view'");
+    assert(diag.record_at(&s, 1).msg == "cannot prove the ownership requirement here");
+    assert(diag.record_at(&s, 1).loc.line == 22);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string json_text = output(&s, &out);
+    assert(str.find(json_text, "\"line\":22,\"col\":5") >= 0);
+    diag.reset(&s);
+    ownership_api.event_descriptor mut uncertain = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.abstract_possibility, 26, "that source is live");
+    uncertain.reason = ownership_api.incomplete_reason.unknown_effect;
+    ownership_api.event_descriptor[1] uncertain_items = {uncertain};
+    req.events = uncertain_items[..];
+    req.verdict = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+        uncertain.operation, uncertain.source);
+    req.verdict.terminal.relation = uncertain.relation;
+    result = ownership_api.render(&svc, &req);
+    assert(result.rendered && result.proof.failed && diag.count(&s) == 2);
+    assert(diag.record_at(&s, 0).msg == "cannot prove that source is live");
+    assert(diag.record_at(&s, 1).msg == "cannot prove the ownership requirement here");
+}
+
+fn rendered_v_refusal() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 1);
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 28, "view");
+    item.reason = ownership_api.incomplete_reason.unknown_effect;
+    ownership_api.event_note[1] notes = {ownership_api.event_note{
+        ownership_api.note_role.release, position(1, 27, 3, 6),
+        ownership_api.entity_id{}, "storage released here"}};
+    item.notes = notes[..];
+    ownership_api.event_descriptor[1] items = {item};
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{items[..],
+        ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            item.operation, item.source)};
+    req.verdict.terminal.relation = item.relation;
+    ownership_api.diagnostic_result mut result = ownership_api.render(&svc, &req);
+    assert(result.rendered && result.proof.failed);
+    assert(result.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(result.proof.terminal.limit.present &&
+        result.proof.terminal.limit.category == ownership_api.limit_category.v);
+    assert(req.verdict.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(evs.rendered == 1 && evs.budget.used.v == 1);
+    assert(diag.count(&s) == 2 && diag.record_count(&s) == 2);
+    assert(diag.record_at(&s, 0).msg == "invalid use of 'view'");
+    assert(diag.record_at(&s, 1).msg ==
+        "cannot prove complete ownership reporting within the report bound 1");
+    diag.sink mut s2 = diag.create();
+    defer diag.free(&s2);
+    ownership_diag.renderer mut rend2 = ownership_diag.renderer{};
+    ownership_api.services mut svc2 = ownership_api.services{};
+    ownership_events.store mut evs2 = ownership_events.store{};
+    defer ownership_events.free(&evs2);
+    setup(&rend2, &s2, &evs2, &svc2, 1);
+    ownership_api.proof_status mut complete = ownership_api.proof_status{};
+    complete.kind = ownership_api.proof_kind.complete;
+    ownership_api.event_descriptor stored = event(ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 29, "view");
+    ownership_api.event_request request = ownership_api.event_request{stored, complete};
+    assert(ownership_api.record_event(&svc2, &request).retained);
+    ownership_api.event_descriptor[1] stored_items = {stored};
+    ownership_api.diagnostic_request req2 = ownership_api.diagnostic_request{stored_items[..],
+        ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            stored.operation, stored.source)};
+    result = ownership_api.render(&svc2, &req2);
+    assert(result.rendered && result.proof.terminal.reason ==
+        ownership_api.incomplete_reason.report_limit);
+    assert(evs2.rendered == 0 && evs2.budget.used.v == 1);
+    assert(diag.count(&s2) == 1 && diag.record_count(&s2) == 1);
+    assert(diag.record_at(&s2, 0).msg ==
+        "cannot prove complete ownership reporting within the report bound 1");
+}
+
+fn retained_budget_and_fallback() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 16);
+    ownership_api.event_descriptor mut uncertain = event(
+        ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.abstract_possibility, 30, "that source is live");
+    uncertain.reason = ownership_api.incomplete_reason.work_limit;
+    ownership_api.event_descriptor mut budget = event(ownership_api.event_kind.work_failure,
+        ownership_api.evidence_kind.abstract_possibility, 30, "");
+    budget.key.ordinal = 31;
+    budget.reason = ownership_api.incomplete_reason.work_limit;
+    budget.operation = uncertain.operation;
+    budget.relation = uncertain.relation;
+    budget.limit.present = true;
+    budget.limit.category = ownership_api.limit_category.w;
+    budget.limit.used = 2;
+    budget.limit.bound = 2;
+    ownership_api.event_note[1] notes = {ownership_api.event_note{
+        ownership_api.note_role.callee, position(2, 4, 2, 6),
+        ownership_api.entity_id{}, "callee needs one more transfer"}};
+    budget.notes = notes[..];
+    ownership_api.event_descriptor[2] items = {uncertain, budget};
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{items[..],
+        ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+            budget.operation, budget.source)};
+    req.verdict.terminal.relation = budget.relation;
+    req.verdict.terminal.limit = budget.limit;
+    ownership_api.diagnostic_result result = ownership_api.render(&svc, &req);
+    assert(result.rendered && result.proof.failed && diag.count(&s) == 1);
+    assert(diag.record_count(&s) == 3 && evs.rendered == 3);
+    assert(diag.record_at(&s, 0).msg ==
+        "ownership analysis exceeds the transfer-work bound 2");
+    assert(diag.record_at(&s, 1).msg == "callee needs one more transfer");
+    assert(diag.record_at(&s, 1).loc.file == "lib.ft");
+    assert(diag.record_at(&s, 2).msg ==
+        "2 work units complete; this operation needs another work unit");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    string json_text = output(&s, &out);
+    assert(str.find(json_text, "\"message\":\"callee needs one more transfer\"") >= 0);
+}
+
+fn file_with_context(void mut* opaque, ownership_api.source_position at) string {
+    u64 mut* calls = cast(opaque, u64 mut*);
+    *calls += 1;
+    return "origin.ft";
+}
+
+fn callback_boundary() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 8);
+    u64 mut calls = 0;
+    ownership_diag.bind(&rend, &s, &evs, cast(&calls, void mut*), file_with_context, &svc);
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility, 31, "that storage is live");
+    item.source = ownership_api.source_position{};
+    ownership_api.event_descriptor[1] items = {item};
+    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..],
+        ownership_api.proof_status{}};
+    ownership_api.diagnostic_result missing = ownership_diag.callback(null, &req);
+    assert(!missing.rendered && missing.proof.failed && diag.count(&s) == 0);
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    assert(calls == 1 && diag.count(&s) == 1);
+    assert(diag.record_at(&s, 0).loc.file == "origin.ft");
+    assert(diag.record_at(&s, 0).loc.line == 1 && diag.record_at(&s, 0).loc.col == 1);
+    assert(diag.record_at(&s, 0).loc.end_line == 1 &&
+        diag.record_at(&s, 0).loc.end_col == 1);
+}
+
+fn canonical_order_ties() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 16);
+    ownership_api.event_descriptor mut relation_one = event(
+        ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 1, "first");
+    relation_one.operation.operation = 1;
+    relation_one.relation.ordinal = 1;
+    ownership_api.event_descriptor mut relation_two = event(
+        ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 1, "second");
+    relation_two.operation.operation = 1;
+    relation_two.relation.ordinal = 2;
+    ownership_api.event_descriptor mut operation_two = event(
+        ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 1, "third");
+    operation_two.operation.operation = 2;
+    ownership_api.event_descriptor mut function_two = event(
+        ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 1, "fourth");
+    function_two.operation.function.declaration.declaration = 2;
+    ownership_api.event_descriptor mut module_two = event(
+        ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional, 1, "fifth");
+    module_two.operation.function.declaration.module = 2;
+    module_two.source.module = 2;
+    ownership_api.event_descriptor[5] items = {module_two, function_two,
+        operation_two, relation_two, relation_one};
+    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..],
+        ownership_api.proof_status{}};
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    assert(diag.count(&s) == 5 && evs.rendered == 5);
+    assert(diag.record_at(&s, 0).msg == "invalid use of 'first'");
+    assert(diag.record_at(&s, 1).msg == "invalid use of 'second'");
+    assert(diag.record_at(&s, 2).msg == "invalid use of 'third'");
+    assert(diag.record_at(&s, 3).msg == "invalid use of 'fourth'");
+    assert(diag.record_at(&s, 4).msg == "invalid use of 'fifth'");
+}
+
+fn all_note_roles() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 16);
+    ownership_api.event_note[10] notes = {
+        ownership_api.event_note{ownership_api.note_role.precision_loss,
+            position(1, 10, 2, 3), ownership_api.entity_id{}, "precision"},
+        ownership_api.event_note{ownership_api.note_role.defer_exit,
+            position(1, 9, 2, 3), ownership_api.entity_id{}, "exit"},
+        ownership_api.event_note{ownership_api.note_role.defer_registration,
+            position(1, 8, 2, 3), ownership_api.entity_id{}, "registration"},
+        ownership_api.event_note{ownership_api.note_role.substitution,
+            position(1, 7, 2, 3), ownership_api.entity_id{}, "substitution"},
+        ownership_api.event_note{ownership_api.note_role.callee,
+            position(1, 6, 2, 3), ownership_api.entity_id{}, "callee"},
+        ownership_api.event_note{ownership_api.note_role.storage_end,
+            position(1, 5, 2, 3), ownership_api.entity_id{}, "storage end"},
+        ownership_api.event_note{ownership_api.note_role.transfer,
+            position(1, 4, 2, 3), ownership_api.entity_id{}, "transfer"},
+        ownership_api.event_note{ownership_api.note_role.release,
+            position(1, 3, 2, 3), ownership_api.entity_id{}, "release"},
+        ownership_api.event_note{ownership_api.note_role.lending,
+            position(1, 2, 2, 3), ownership_api.entity_id{}, "lending"},
+        ownership_api.event_note{ownership_api.note_role.allocation,
+            position(1, 1, 2, 3), ownership_api.entity_id{}, "allocation"}};
+    ownership_api.event_descriptor mut item = event(ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional, 32, "owner");
+    item.notes = notes[..];
+    ownership_api.event_descriptor[1] items = {item};
+    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..],
+        ownership_api.proof_status{}};
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    assert(diag.count(&s) == 1 && diag.record_count(&s) == 11);
+    assert(evs.rendered == 11 && evs.budget.used.v == 11);
+    string[10] expected = {"allocation", "lending", "release", "transfer", "storage end",
+        "callee", "substitution", "registration", "exit", "precision"};
+    u64 mut i = 0;
+    while (i < expected.len) {
+        assert(diag.record_at(&s, i + 1).msg == expected[i]);
+        assert(diag.record_at(&s, i + 1).loc.line == cast(i, u32) + 1);
+        i += 1;
+    }
+}
+
+fn main() i32 {
+    proved_use();
+    path_use();
+    incomplete();
+    lost_owner();
+    caller_requirement();
+    resource_limit();
+    two_independent();
+    dependent_cascade();
+    utf8_byte_column();
+    imported_callee_note();
+    path_owner_and_caller();
+    false_witness_and_residual();
+    independent_terminal_and_reason();
+    rendered_v_refusal();
+    retained_budget_and_fallback();
+    callback_boundary();
+    canonical_order_ties();
+    all_note_roles();
+    println("18 ownership diagnostic groups ok");
+    return 0;
+}

@@ -1,0 +1,335 @@
+/// Renders ownership proof events through the compiler diagnostic sink.
+import diag;
+import ownership_api;
+import ownership_events;
+import ownership_keys;
+import std.strbuf;
+
+struct renderer {
+    diag.sink mut* sink;
+    ownership_events.store mut* events;
+    void mut* file_context;
+    fn (void mut*, ownership_api.source_position) string file;
+}
+
+fn bind(renderer mut* r, diag.sink mut* s, ownership_events.store mut* events,
+    void mut* file_context,
+    fn (void mut*, ownership_api.source_position) string file,
+    ownership_api.services mut* svc) void {
+    r->sink = s;
+    r->events = events;
+    r->file_context = file_context;
+    r->file = file;
+    svc->renderer_context = cast(r, void mut*);
+    svc->renderer = callback;
+}
+
+fn location(renderer* r, ownership_api.source_position at) diag.loc {
+    string mut file = "";
+    if (r->file != null) { file = r->file(r->file_context, at); }
+    if (at.line == 0 || at.col == 0) { return diag.loc_make(file, 1, 1); }
+    return diag.loc_range(file, at.line, at.col, at.end_line, at.end_col);
+}
+
+fn category(ownership_api.limit_category kind) string {
+    switch (kind) {
+    case ownership_api.limit_category.d: return "access-path depth";
+    case ownership_api.limit_category.r: return "region";
+    case ownership_api.limit_category.p: return "predicate";
+    case ownership_api.limit_category.g: return "identity";
+    case ownership_api.limit_category.h: return "shape template";
+    case ownership_api.limit_category.t: return "target alternative";
+    case ownership_api.limit_category.e: return "effect";
+    case ownership_api.limit_category.w: return "transfer-work";
+    case ownership_api.limit_category.v: return "report";
+    }
+}
+
+fn append_quoted(strbuf.str_buf mut* out, string name) void {
+    if (name.len == 0) { return; }
+    strbuf.append(out, " '");
+    strbuf.append(out, name);
+    strbuf.push(out, '\'');
+}
+
+fn proved(ownership_api.event_descriptor* event) bool {
+    if (event->source_path.residual || event->owner_path.residual) { return false; }
+    bool mut valid = event->evidence == ownership_api.evidence_kind.unconditional;
+    if (event->evidence == ownership_api.evidence_kind.validated_path) {
+        u64 mut i = 0;
+        while (i < event->witnesses.len) {
+            if (event->witnesses[i].validated) { valid = true; }
+            i += 1;
+        }
+    }
+    return valid;
+}
+
+fn rendered_class(ownership_api.event_descriptor* event) ownership_api.event_kind {
+    if (event->kind == ownership_api.event_kind.work_failure) {
+        return ownership_api.event_kind.work_failure;
+    }
+    if (event->kind == ownership_api.event_kind.incomplete_proof || !proved(event)) {
+        return ownership_api.event_kind.incomplete_proof;
+    }
+    return event->kind;
+}
+
+fn message(strbuf.str_buf mut* out, ownership_api.event_descriptor* event) void {
+    bool established = proved(event);
+    if (event->kind == ownership_api.event_kind.invalid_use && established) {
+        strbuf.append(out, "invalid use of");
+        append_quoted(out, event->text);
+        if (event->evidence == ownership_api.evidence_kind.validated_path) {
+            strbuf.append(out, " on this path");
+        }
+    } else if (event->kind == ownership_api.event_kind.lost_ownership && established) {
+        strbuf.append(out, "lost ownership of");
+        append_quoted(out, event->text);
+        if (event->evidence == ownership_api.evidence_kind.validated_path) {
+            strbuf.append(out, " on this path");
+        }
+    } else if (event->kind == ownership_api.event_kind.caller_requirement && established) {
+        strbuf.append(out, "caller requirement fails for");
+        append_quoted(out, event->text);
+        if (event->evidence == ownership_api.evidence_kind.validated_path) {
+            strbuf.append(out, " on this path");
+        }
+    } else if (event->kind == ownership_api.event_kind.work_failure &&
+        event->limit.category == ownership_api.limit_category.v) {
+        strbuf.append(out, "cannot prove complete ownership reporting within the report bound ");
+        strbuf.append_u64(out, event->limit.bound);
+    } else if (event->kind == ownership_api.event_kind.work_failure) {
+        strbuf.append(out, "ownership analysis exceeds the ");
+        strbuf.append(out, category(event->limit.category));
+        strbuf.append(out, " bound ");
+        strbuf.append_u64(out, event->limit.bound);
+    } else {
+        strbuf.append(out, "cannot prove");
+        if (event->text.len > 0) {
+            strbuf.push(out, ' ');
+            strbuf.append(out, event->text);
+        } else {
+            strbuf.append(out, " the ownership requirement here");
+        }
+    }
+}
+
+fn charge_record(renderer* r, ownership_api.event_descriptor* event,
+    ownership_api.source_position at, ownership_api.charge_result mut* result) bool {
+    if (r->events == null) {
+        result->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_events,
+            event->operation, at);
+        return false;
+    }
+    *result = ownership_events.charge_rendered(r->events, event->operation, at);
+    return result->allowed;
+}
+
+fn render_one(renderer* r, ownership_api.event_descriptor* event,
+    ownership_api.charge_result mut* refusal) bool {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    message(&out, event);
+    if (!charge_record(r, event, event->source, refusal)) { return false; }
+    diag.error(r->sink, location(r, event->source), strbuf.view(&out));
+    ownership_api.event_note mut@ own notes = new(ownership_api.event_note, event->notes.len);
+    defer del(notes);
+    u64 mut i = 0;
+    while (i < notes.len) {
+        notes[i] = event->notes[i];
+        i += 1;
+    }
+    i = 1;
+    while (i < notes.len) {
+        ownership_api.event_note item = notes[i];
+        u64 mut j = i;
+        while (j > 0 && ownership_keys.note(&item, &notes[j - 1]) < 0) {
+            notes[j] = notes[j - 1];
+            j -= 1;
+        }
+        notes[j] = item;
+        i += 1;
+    }
+    i = 0;
+    while (i < notes.len) {
+        ownership_api.event_note note = notes[i];
+        if (!charge_record(r, event, note.source, refusal)) { return false; }
+        diag.note(r->sink, location(r, note.source), note.text);
+        i += 1;
+    }
+    if (event->precision.first_source.line > 0 ||
+        event->precision.reason != ownership_api.incomplete_reason.none) {
+        strbuf.clear(&out);
+        strbuf.append(&out, category(event->precision.category));
+        strbuf.push(&out, ' ');
+        strbuf.append_u64(&out, event->precision.bound);
+        strbuf.append(&out, " loses the required source relation here");
+        if (!charge_record(r, event, event->precision.first_source, refusal)) { return false; }
+        diag.note(r->sink, location(r, event->precision.first_source), strbuf.view(&out));
+    }
+    if (event->kind == ownership_api.event_kind.work_failure) {
+        strbuf.clear(&out);
+        strbuf.append_u64(&out, event->limit.used);
+        if (event->limit.category == ownership_api.limit_category.v) {
+            strbuf.append(&out, " report units complete; another diagnostic exceeds the bound");
+        } else {
+            strbuf.append(&out, " work units complete; this operation needs another work unit");
+        }
+        if (!charge_record(r, event, event->source, refusal)) { return false; }
+        diag.note(r->sink, location(r, event->source), strbuf.view(&out));
+    }
+    return true;
+}
+
+fn render_reserved(renderer* r, ownership_api.source_position at, u64 bound) void {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    strbuf.append(&out, "cannot prove complete ownership reporting within the report bound ");
+    strbuf.append_u64(&out, bound);
+    diag.error(r->sink, location(r, at), strbuf.view(&out));
+}
+
+fn same_cause(ownership_api.event_descriptor* a, ownership_api.event_descriptor* b) bool {
+    if (ownership_keys.operation(a->operation, b->operation) != 0 ||
+        ownership_keys.entity(a->relation, b->relation) != 0 || a->reason != b->reason) {
+        return false;
+    }
+    if (a->kind == ownership_api.event_kind.work_failure &&
+        b->kind == ownership_api.event_kind.work_failure) {
+        return a->limit.category == b->limit.category;
+    }
+    return true;
+}
+
+fn terminal_matches(ownership_api.event_descriptor* event,
+    ownership_api.terminal_failure terminal) bool {
+    return terminal.present && event->reason == terminal.reason &&
+        ownership_keys.operation(event->operation, terminal.operation) == 0 &&
+        ownership_keys.entity(event->relation, terminal.relation) == 0;
+}
+
+fn represents_terminal(ownership_api.event_descriptor* event,
+    ownership_api.terminal_failure terminal) bool {
+    if (!terminal_matches(event, terminal)) { return false; }
+    if (!terminal.limit.present) {
+        return rendered_class(event) == ownership_api.event_kind.incomplete_proof;
+    }
+    return event->kind == ownership_api.event_kind.work_failure &&
+        event->limit.category == terminal.limit.category &&
+        event->limit.used == terminal.limit.used && event->limit.bound == terminal.limit.bound;
+}
+
+fn callback(void mut* opaque, ownership_api.diagnostic_request* req)
+    ownership_api.diagnostic_result {
+    ownership_api.diagnostic_result mut result = ownership_api.diagnostic_result{};
+    result.proof = req->verdict;
+    if (opaque == null) {
+        result.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_renderer,
+            ownership_api.operation_position{}, ownership_api.source_position{});
+        return result;
+    }
+    renderer* r = cast(opaque, renderer*);
+    if (r->sink == null) {
+        result.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_renderer,
+            ownership_api.operation_position{}, ownership_api.source_position{});
+        return result;
+    }
+    if (r->events == null) {
+        result.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_events,
+            ownership_api.operation_position{}, ownership_api.source_position{});
+        return result;
+    }
+    bool mut terminal_event = req->verdict.terminal.present;
+    u64 mut i = 0;
+    while (i < req->events.len) {
+        if (represents_terminal(&req->events[i], req->verdict.terminal)) {
+            terminal_event = false;
+            break;
+        }
+        i += 1;
+    }
+    u64 mut count = req->events.len;
+    if (terminal_event) { count += 1; }
+    ownership_api.event_descriptor mut@ own sorted = new(ownership_api.event_descriptor, count);
+    defer del(sorted);
+    bool mut@ own synthetic = new(bool, count);
+    defer del(synthetic);
+    i = 0;
+    while (i < req->events.len) {
+        sorted[i] = req->events[i];
+        i += 1;
+    }
+    if (terminal_event) {
+        ownership_api.event_descriptor mut terminal = ownership_api.event_descriptor{};
+        terminal.kind = req->verdict.terminal.limit.present ?
+            ownership_api.event_kind.work_failure : ownership_api.event_kind.incomplete_proof;
+        terminal.reason = req->verdict.terminal.reason;
+        terminal.operation = req->verdict.terminal.operation;
+        terminal.source = req->verdict.terminal.source;
+        terminal.relation = req->verdict.terminal.relation;
+        terminal.limit = req->verdict.terminal.limit;
+        sorted[i] = terminal;
+        synthetic[i] = true;
+    }
+    i = 1;
+    while (i < sorted.len) {
+        ownership_api.event_descriptor item = sorted[i];
+        bool is_synthetic = synthetic[i];
+        u64 mut j = i;
+        while (j > 0 && ownership_keys.event(&item, &sorted[j - 1]) < 0) {
+            sorted[j] = sorted[j - 1];
+            synthetic[j] = synthetic[j - 1];
+            j -= 1;
+        }
+        sorted[j] = item;
+        synthetic[j] = is_synthetic;
+        i += 1;
+    }
+    i = 0;
+    while (i < sorted.len) {
+        bool mut dependent = false;
+        ownership_api.event_kind cls = rendered_class(&sorted[i]);
+        u64 mut j = 0;
+        while (j < sorted.len) {
+            if (j != i && same_cause(&sorted[j], &sorted[i])) {
+                ownership_api.event_kind other = rendered_class(&sorted[j]);
+                if ((cls == ownership_api.event_kind.incomplete_proof &&
+                     (other == ownership_api.event_kind.work_failure || j < i)) ||
+                    (j < i && cls == other)) {
+                    dependent = true;
+                    break;
+                }
+            }
+            j += 1;
+        }
+        if (!dependent) {
+            if (synthetic[i] && sorted[i].limit.present &&
+                sorted[i].limit.category == ownership_api.limit_category.v) {
+                render_reserved(r, sorted[i].source, sorted[i].limit.bound);
+            } else {
+                ownership_api.charge_result mut refusal = ownership_api.charge_result{};
+                if (!render_one(r, &sorted[i], &refusal)) {
+                    result.proof = refusal.proof;
+                    if (refusal.limit.present &&
+                        refusal.limit.category == ownership_api.limit_category.v) {
+                        result.proof = ownership_api.incomplete(
+                            ownership_api.incomplete_reason.report_limit,
+                            sorted[i].operation, refusal.limit.source);
+                        result.proof.terminal.limit = refusal.limit;
+                        render_reserved(r, refusal.limit.source, refusal.limit.bound);
+                        result.rendered = true;
+                    }
+                    return result;
+                }
+            }
+            result.rendered = true;
+        }
+        i += 1;
+    }
+    if (result.rendered && !result.proof.failed) {
+        result.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            ownership_api.operation_position{}, ownership_api.source_position{});
+    }
+    return result;
+}
