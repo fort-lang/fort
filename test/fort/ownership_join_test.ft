@@ -3,6 +3,7 @@
 //! stdout:
 //| G04.3 G05.1 G05.2
 //| G06.3 cycle join and widening
+//| duplicate union records
 /// Tests conservative predecessor joins in both operand orders.
 import ownership_api;
 import ownership_events;
@@ -304,6 +305,76 @@ fn one_sided_proofs(ownership_api.services* svc) void {
     ownership_state.free(&left);
 }
 
+fn duplicate_union(ownership_api.services* svc) void {
+    ownership_state.state mut left = ownership_state.empty();
+    ownership_state.state mut right = ownership_state.empty();
+    ownership_state.state mut later = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(90, 90, 90);
+    ownership_state.append_allocations(&left, a);
+    ownership_state.append_allocations(&right, a);
+    ownership_state.append_allocations(&later, a);
+    ownership_api.contents_fact first = contents(90, 90);
+    ownership_api.contents_fact second = contents(91, 91);
+    ownership_state.append_contents(&left, first);
+    ownership_state.append_contents(&left, first);
+    ownership_state.append_contents(&right, first);
+    ownership_state.append_contents(&later, second);
+    ownership_api.limit_table mut bound = ownership_limits.production();
+    bound.g = 2;
+    ownership_api.operation_position at = op(90);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut ab = ownership_join.join(&left, &right, svc,
+        &bound, at, source);
+    ownership_state.state mut ba = ownership_join.join(&right, &left, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&ab, &ba));
+    assert(ab.contents_len == 1 && ab.allocations[0].obligation);
+    ownership_state.state mut next_ab = ownership_join.join(&ab, &later, svc,
+        &bound, at, source);
+    ownership_state.state mut next_ba = ownership_join.join(&ba, &later, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&next_ab, &next_ba));
+    assert(next_ab.contents_len == 2 && next_ab.losses_len == 0);
+    ownership_state.free(&next_ba);
+    ownership_state.free(&next_ab);
+    ownership_state.free(&ba);
+    ownership_state.free(&ab);
+    ownership_state.free(&later);
+    ownership_state.free(&right);
+    ownership_state.free(&left);
+
+    ownership_state.state mut corr_left = ownership_state.empty();
+    ownership_state.state mut corr_right = ownership_state.empty();
+    ownership_state.state mut corr_later = ownership_state.empty();
+    ownership_api.correlation first_corr = ownership_api.correlation{
+        id(ownership_api.entity_kind.guard, 90),
+        id(ownership_api.entity_kind.value, 90),
+        id(ownership_api.entity_kind.slot, 90)};
+    ownership_api.correlation second_corr = ownership_api.correlation{
+        id(ownership_api.entity_kind.guard, 91),
+        id(ownership_api.entity_kind.value, 91),
+        id(ownership_api.entity_kind.slot, 91)};
+    ownership_state.append_correlations(&corr_left, first_corr);
+    ownership_state.append_correlations(&corr_left, first_corr);
+    ownership_state.append_correlations(&corr_right, first_corr);
+    ownership_state.append_correlations(&corr_later, second_corr);
+    ownership_state.state mut corr_ab = ownership_join.join(&corr_left, &corr_right,
+        svc, &bound, at, source);
+    ownership_state.state mut corr_ba = ownership_join.join(&corr_right, &corr_left,
+        svc, &bound, at, source);
+    assert(ownership_state.equal(&corr_ab, &corr_ba));
+    assert(corr_ab.correlations_len == 1);
+    ownership_state.state mut corr_next = ownership_join.join(&corr_ab, &corr_later,
+        svc, &bound, at, source);
+    assert(corr_next.correlations_len == 2 && corr_next.losses_len == 0);
+    ownership_state.free(&corr_next);
+    ownership_state.free(&corr_ba);
+    ownership_state.free(&corr_ab);
+    ownership_state.free(&corr_later);
+    ownership_state.free(&corr_right);
+    ownership_state.free(&corr_left);
+}
+
 fn main() i32 {
     ownership_events.store mut events = ownership_events.store{};
     ownership_api.services mut svc = ownership_api.services{};
@@ -317,6 +388,8 @@ fn main() i32 {
     println("G04.3 G05.1 G05.2");
     cycle(&svc);
     println("G06.3 cycle join and widening");
+    duplicate_union(&svc);
+    println("duplicate union records");
     ownership_events.free(&events);
     return 0;
 }
