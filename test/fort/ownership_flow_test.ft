@@ -27,6 +27,23 @@ struct fixture {
     u64 events;
 }
 
+struct event_order {
+    u64 len;
+    u32[8] keys;
+}
+
+fn ordered_event(void mut* opaque, ownership_api.event_request* request)
+    ownership_api.event_result {
+    event_order mut* order = cast(opaque, event_order mut*);
+    assert(order->len < order->keys.len);
+    order->keys[order->len] = request->event.key.ordinal;
+    order->len += 1;
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = request->current;
+    out.retained = true;
+    return out;
+}
+
 fn event(void mut* opaque, ownership_api.event_request* request)
     ownership_api.event_result {
     u64 mut* count = cast(opaque, u64 mut*);
@@ -410,7 +427,7 @@ fn loop_zero_path_keeps_owner() void {
     types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
     types.node* owner = types.type_ptr(tt, integer, true, true);
     types.node* boolean = types.type_prim(tt, prim.prim_kind.prim_bool);
-    types.node*[2] params = {owner, boolean};
+    types.node*[3] params = {owner, boolean, owner};
     types.node* signature = types.type_fn(tt, types.type_void(tt), params[..], false);
     fir.func mut function = fir.func_new(tt, null, signature);
     defer fir.func_free(&function);
@@ -431,6 +448,8 @@ fn loop_zero_path_keeps_owner() void {
     defer ownership_local_env.free(&e);
     ownership_local_env.add_stack(&e, 1);
     assert(ownership_api.successful(ownership_local_env.alloc(&e, 1, 1, 101, 1)));
+    ownership_local_env.add_stack(&e, 3);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e, 3, 2, 102, 1)));
     ownership_flow.step[1] mut steps = {
         local_step(&e, ownership_transfer.action.release, 1, 2, 0, 0),
     };
@@ -438,22 +457,39 @@ fn loop_zero_path_keeps_owner() void {
     ownership_flow.program mut input = input_of(&f, &function, &e.state);
     input.services = &e.service;
     input.steps = steps[..];
-    ownership_flow.parameter[1] params_input = {
+    ownership_flow.parameter[2] params_input = {
         ownership_flow.parameter{slot(1).root, id(ownership_api.entity_kind.source, 1)},
+        ownership_flow.parameter{slot(3).root, id(ownership_api.entity_kind.source, 3)},
     };
     input.parameters = params_input[..];
-    ownership_flow.event_binding[1] events = {
+    ownership_flow.event_binding[2] events = {
         flow_event(ownership_api.operation_position{.block = 3, .terminator = true},
             ownership_api.event_kind.lost_ownership,
             id(ownership_api.entity_kind.allocation, 1), 1),
+        flow_event(ownership_api.operation_position{.block = 3, .terminator = true},
+            ownership_api.event_kind.lost_ownership,
+            id(ownership_api.entity_kind.allocation, 2), 2),
     };
     input.events = events[..];
+    event_order mut order = event_order{};
+    e.service.event_context = cast(&order, void mut*);
+    e.service.event = ordered_event;
     ownership_flow.analysis mut result = ownership_flow.solve(&input);
-    assert(result.failures == 1 && result.normal_returns == 2);
+    assert(result.failures == 3);
+    assert(result.normal_returns == 2);
+    assert(order.len == 3);
     assert(result.blocks[1].len == 2 && result.blocks[3].len == 2);
+    u32[3] first_order = {order.keys[0], order.keys[1], order.keys[2]};
+    order.len = 0;
     ownership_flow.analysis mut again = ownership_flow.solve(&input);
     assert(again.failures == result.failures &&
         again.normal_returns == result.normal_returns && again.transfers == result.transfers);
+    assert(order.len == 3);
+    u64 mut key = 0;
+    while (key < order.len) {
+        assert(order.keys[key] == first_order[key]);
+        key += 1;
+    }
     u64 mut b = 0;
     while (b < result.blocks.len) {
         assert(result.blocks[b].len == again.blocks[b].len);
