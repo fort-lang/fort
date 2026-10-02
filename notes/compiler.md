@@ -297,6 +297,23 @@ came here.
   leaves after operand effects. With a holding temporary, check the actual result destination at the
   final write after defer. The 17 normative traces in memory model 2.6 are design evidence, not
   compiler probes.
+- **Raw storage retains its typed source facts** (T-275, D17.17).
+  `spec/memory-model.md` 2.8 defines source objects, byte offsets, access windows, alignment, and
+  reference representation effects. Pointer casts preserve those facts through void pointers.
+  Typed subobject windows do not grow when a cast erases the pointee type.
+  Raw ranges require proved bounds and sufficient extent. Extents can remain symbolic.
+  Integer reconstruction supplies no source proof, including an exact unmodified u64 round trip.
+  Infer complete borrow copies from ordered byte effects after actual alias substitution.
+  Partial representations need proof before a reference read or escape.
+  Destructive overlapping owner writes require the old obligation empty or transferred first.
+  Raw byte copying supplies no semantic move. Encoded owner bits in a byte buffer create no owner.
+  Generated copies that implement move instead transfer the owning operand's original obligation.
+  Type erasure does not hide owned descendants from shallow del.
+  Zero-element allocations retain ownership with zero logical access extent.
+  Foreign byte effects remain outside proof under D17.13. Known allocation release still invalidates
+  related borrows, even when foreign extent trust remains available.
+  The 12 normative traces are design evidence. They do not establish compiler implementation.
+  These rules change no layout, ABI, emitted instruction, arithmetic operator, or runtime check.
 - **An emitter that copies a value and then clears its source needs an intermediate.** `move(lv)`
   writes into a destination the emitter cannot prove distinct from the operand (`s = move(s)`,
   `*p = move(*q)`, `v[i] = move(v[j])`), so it reads into a register or a `%tmpK` slot first and

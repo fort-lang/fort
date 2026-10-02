@@ -2384,6 +2384,54 @@ says ownership is "by convention", this section supersedes it.
 - rationale: Allocation-site sets cannot count concurrent obligations or prove complete chain
   cleanup. Inductive predicates retain those facts in a finite state.
 
+### D17.17 Raw storage and reference representations
+- owner: `memory-model.md` (2.8), `type-system.md` (9.2).
+- rule: Raw fort references retain their source, byte offset, access window, and alignment facts.
+  Type erasure does not erase the original storage layout or its nested owning leaves.
+  Distinguish the storage containing a reference from the storage that reference designates.
+  A pointer cast changes neither source validity nor the permitted access window.
+  A void-pointer round trip preserves these facts. No cast creates ownership or foreign trust.
+  For a raw fort range, prove ordered nonnegative bounds and sufficient live storage.
+  Check offset and size calculations without using wrapped results as extent proof.
+  Extents can remain symbolic. Bind them to their captured allocation or view lengths.
+  A fort typed access also requires enough accessible bytes and the required alignment.
+  A cast itself adds no runtime alignment or range check.
+  Ordinary span bounds retain their existing runtime checks (D6.9, D10.6).
+  A complete borrowed representation copy preserves its original source and range relations.
+  Infer that effect from the actual ordered reads and writes, including caller aliases.
+  Partial reference writes preserve only the representation facts that their byte effects prove.
+  Reject a later reference use or escape when its complete representation remains unproved.
+  Before an overlapping write discards an owning leaf, prove its old obligation empty or
+  transferred.
+  A raw byte copy is not a semantic move. It cannot create a second owner.
+  A complete copy that implements a semantic move transfers the original obligation once.
+  Owner bits in a scalar byte buffer supply no transferable obligation or owning place.
+  A later byte clear cannot repair an earlier invalid ownership duplication or loss.
+  Byte interpretation cannot add mutability or bypass ownership conversion rules (D3.14).
+  Padding supplies no reference source or ownership obligation.
+  Preserve actual overlap and read order.
+  Assume a source snapshot only when the operation proves it.
+  Integer-to-pointer conversion alone supplies no storage source, even after an exact u64 round
+  trip.
+  Integer arithmetic and equal address bits supply no replacement source proof.
+  The type system still permits the conversion. Reject memory operations that require its unproved
+  source.
+  A zero-length view and an end pointer permit no element access.
+  An empty ordinary span can have no backing storage. A raw range still requires its source proof.
+  A zero-element allocation retains its release or transfer obligation and zero logical extent.
+  The runtime's minimum physical allocation size supplies no additional accessible element.
+  Del stays shallow. Type erasure does not remove residual owned descendants.
+  D17.13 permits foreign access without a static extent. Hidden foreign byte effects remain outside
+  proof.
+  Preserve that trust through reference copies and casts. Integer bits do not acquire foreign trust.
+  Foreign extent trust does not override a known allocation's release or transfer state.
+  Other known fort source relations retain their obligations at the foreign boundary.
+- rationale: Reference bytes carry source relations separately from ownership transfer obligations.
+  A byte pattern alone proves neither a live source nor a right to release an allocation.
+- history: Note 2026-10-02 (T-275): This entry refines the raw-storage obligations of D17.14.
+  It uses conservative rejection for integer reconstruction without a broader user ruling.
+  It changes no representation, runtime instruction, arithmetic operator, or calling convention.
+
 ## D18 Float printing in the runtime
 
 Names the entry points that produce D11.7's float text and settles what D11.7 leaves to the runtime.
