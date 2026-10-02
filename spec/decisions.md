@@ -1593,8 +1593,9 @@ Sections:
   the FIR one line to stdout for each function that breaks a rule of `spec/fir.md` 10, its first
   violation after the lowering or after the build-mode pass of the selected mode, then exits 0;
   `--fir-after` does not change the report), `--fir-stats` (after a build writes its module,
-  write the line `lowered N of M` to stdout: N functions that the FIR path wrote of M
-  definitions of fort functions, `spec/fir.md` 16.1; combining it with `--tokens`, `--ast`,
+  write the line `lowered N of M` to stdout: N functions that the translator wrote of M
+  definitions of fort functions, and N equals M, because a function that the translator does
+  not write is a compile error, `spec/fir.md` 9.8; combining it with `--tokens`, `--ast`,
   `--check`, `--index`, `--fir` or `--fir-test` is a usage error), `--help`, `--version`.
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
@@ -1645,6 +1646,9 @@ Sections:
   Amended 2026-09-30 (T-253): `--fir-verify-report` and `--fir-stats` did not exist. They are the
   measurements of the migration (`spec/fir.md` 16.1, 16.5): the report runs rule V9 over a
   corpus without a panic, and the count gives the share of functions that the FIR path writes.
+  Amended 2026-10-01 (T-255): `--fir-stats` counted "N functions that the FIR path wrote", and
+  N was less than M when the direct path wrote a function. T-255 deleted the direct path, so a
+  module that a build writes has N equal to M; the flag stays for `tools/ir_snapshot.sh`.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.
@@ -2268,22 +2272,27 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 ### D19.1 One textual LLVM IR module
 - owner: `toolchain.md` (6, the IR contract).
 - rule: The compiler emits one textual LLVM IR module (`.ll`, LLVM 18 syntax, opaque pointers) for
-  the whole program (D9.10), built by string appending, and hands it to clang (D14.3). The direct
-  path of the emitter appends in one forward pass over the checked tree. The translator of D19.8
-  scans a FIR function once to classify its locals and then appends in one forward pass over it. The
-  compiler never links libLLVM or calls its C or C++ API: the bootstrap stays a dependency-free C11
-  program and the self-hosted compiler needs no foreign bindings. The module carries `target triple
-  = "x86_64-unknown-linux-gnu"` for Linux or the selected `arm64-apple-macosxM.m.p` for Mac. It
-  carries no datalayout, module flags, comments or `source_filename`. Clang derives the target
-  layout from the selected triple. Every emitted module must pass `opt -passes=verify`; the
-  language-test harness checks that (`run_tests.py --verify-ir`) and the emitter suites verify each
-  module they emit. The goldens of `bootstrap0/test/gen_module_test.c` are the reference for the
-  form of a module until the contract below says otherwise.
+  the whole program (D9.10), built by string appending, and hands it to clang (D14.3). The
+  translator of D19.8 writes each function: it scans a FIR function once to classify its locals and
+  then appends in one forward pass over it. The compiler never links libLLVM or calls its C or C++
+  API: the bootstrap stays a dependency-free C11 program and the self-hosted compiler needs no
+  foreign bindings. The module carries `target triple = "x86_64-unknown-linux-gnu"` for Linux or the
+  selected `arm64-apple-macosxM.m.p` for Mac. It carries no datalayout, module flags, comments or
+  `source_filename`. Clang derives the target layout from the selected triple. Every emitted module
+  must pass `opt -passes=verify`; the language-test harness checks that (`run_tests.py --verify-ir`)
+  and the emitter suites verify each module they emit. The goldens of
+  `bootstrap0/test/gen_module_test.c` are the reference for the form of a module until the contract
+  below says otherwise.
 - history: Amended 2026-09-15 (T-140): Mac IR uses the selected Apple triple without a datalayout.
   Amended 2026-09-25 (the user): the hand-written samples under `test/ir/` and the pipeline test
   that ran them were retired; until then they were the reference for the form of a module.
   Amended 2026-09-28 (T-209): the module was built "in one forward pass" over the checked tree
   alone. D19.8 adds FIR, and the translator appends from it.
+  Amended 2026-09-30 (T-255): the rule said that the direct path of the emitter appends in one
+  forward pass over the checked tree. T-255 deleted the direct path, and the translator writes
+  every function. The same day `toolchain.md` 6 item 1 dropped "in one forward pass", item 10
+  dropped the sentence that the tree walk never has to know its predecessors and named the
+  blocks by FIR block number, and section 8 replaced the direct path with the pipeline of FIR.
 
 ### D19.2 Type mapping
 - owner: `toolchain.md` (6, the IR contract).
@@ -2312,12 +2321,14 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   never loaded or stored as one value, so the emitter never writes `insertvalue` or `extractvalue`
   on a fort aggregate (its only `extractvalue` takes apart the `{iN, i1}` that an overflow intrinsic
   returns, D19.6). Copying an aggregate is `llvm.memcpy`, zeroing one is `llvm.memset` and reaching
-  a field or element is `getelementptr`. This is D9.9's model spelled in IR, and it is what keeps
-  code generation one tree walk with a destination place per expression (D19.1). The lowering of
-  D19.8 is that walk, and FIR keeps the same model: a FIR local of aggregate type is a place, and
-  an operand of aggregate type names a place.
+  a field or element is `getelementptr`. This is D9.9's model spelled in IR. The lowering of D19.8
+  keeps the same model: a FIR local of aggregate type is a place, and an operand of aggregate type
+  names a place.
 - history: Amended 2026-09-10: spans were called slices (D3.5). Amended 2026-09-28 (T-209): the
-  walk wrote LLVM text directly; D19.8 makes it write FIR.
+  walk wrote LLVM text directly; D19.8 makes it write FIR. Amended 2026-09-30 (T-255): the rule
+  said that this model keeps code generation "one tree walk with a destination place per
+  expression (D19.1)", and that the lowering is that walk. T-255 deleted the direct path, which
+  was the tree walk.
 
 ### D19.4 Entry-block allocas and SSA discipline
 - owner: `toolchain.md` (6, the IR contract).
@@ -2354,14 +2365,15 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   module comparison of two distinct stages narrows the gap, and no comparison this rule requires
   holds two runs of one compiler against each other. Hence: every value, parameter and block is
   named, so LLVM never numbers anything implicitly; per function and reset at each definition,
-  instruction results are `%t<N>` in emission order, blocks are `%L<N>` in creation order with the
-  entry block always literally `entry`, locals are `%<ident>.<slot>` by the local's index in the
-  function, parameters arrive as `%<ident>.in`, an aggregate result pointer is `%ret.sret` and
-  compiler-made places are `%tmp<K>` from a third per-function counter. A name that embeds a fort
-  identifier always contains a dot and a name the compiler invents never does, which is what makes
-  collisions impossible: an identifier cannot contain a dot (D2.3), so a local named `tmp` is
-  `%tmp.0` and never `%tmp0`, and `%ret.sret` cannot be a local named `ret`, whose names are
-  `%ret.<slot>` and `%ret.in`. Module-level counters (`@.str.<N>`, `@.file.<N>`) are assigned on
+  instruction results are `%t<N>` in emission order, blocks are `%L<N>` by FIR block number with
+  FIR block 0 always literally `entry` and the failure blocks numbered after the last FIR block in
+  the order of the blocks that make them (`fir.md` 12.4), locals are `%<ident>.<slot>` by the
+  local's index in the function, parameters arrive as `%<ident>.in`, an aggregate result pointer is
+  `%ret.sret` and compiler-made places are `%tmp<K>` from a third per-function counter. A name that
+  embeds a fort identifier always contains a dot and a name the compiler invents never does, which
+  is what makes collisions impossible: an identifier cannot contain a dot (D2.3), so a local named
+  `tmp` is `%tmp.0` and never `%tmp0`, and `%ret.sret` cannot be a local named `ret`, whose names
+  are `%ret.<slot>` and `%ret.in`. Module-level counters (`@.str.<N>`, `@.file.<N>`) are assigned on
   first use and never deduplicated by content; enum tables are keyed by the mangled name. Order is
   by construction and never by iteration over a hash table: modules in dependency order,
   declarations in source order, runtime declarations in the fixed order of `toolchain.md` 5.1,
@@ -2429,6 +2441,9 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   without `--no-bounds-check`. The user ruled on 2026-09-29.
   `--no-bounds-check` removes the index and span checks from the stage binaries, so a stage3
   built with it is a different program that must reproduce itself too.
+  Amended 2026-09-30 (T-255): blocks were `%L<N>` "in creation order", the order in which the
+  direct path created them. T-255 deleted the direct path, and the translator names each block by
+  its FIR block number.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).
@@ -2474,9 +2489,9 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   FIR construct to LLVM text, chooses the LLVM instruction from the fort types, and makes the
   choices that depend on the target; it does not read the build mode. A feature of the language that
   is not in the core of FIR lowers into it, so the translator and the analyses do not change for it;
-  a feature that needs a new projection or constant extends the core once. Until the migration of
-  `fir.md` 16 ends, the direct path of the emitter writes each function that the lowering does not
-  support.
+  a feature that needs a new projection or constant extends the core once. A function that the
+  lowering does not support, or that needs a `std.rt` entry that the closure lacks for a check
+  that the selected mode keeps, is a compile error (`fir.md` 9.8).
 - rationale: two passes derived one fact from the tree four times, and each time nothing compared
   the two answers: the parameter types of a runtime entry (T-072), lvalue-ness (T-193), whether a
   body can fall off its end, and the expansion of deferred statements. One lowering derives each
@@ -2484,6 +2499,11 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   and explicit moves is also where the features D15 defers need the least change: the user
   chose it over a model of the LLVM output on 2026-09-28, because the latter read like LLVM and
   gave only checks of the emitter's own text.
+- history: Amended 2026-09-30 (T-255): the rule said that until the migration of `fir.md` 16
+  ends, the direct path of the emitter writes each function that the lowering does not support.
+  T-255 deleted the direct path. The same day the rule gained the compile error for a function
+  that needs a `std.rt` entry that the closure lacks for a check that the selected mode keeps;
+  until then the direct path wrote such a function and called the missing entry.
 
 ## D20 Editor support
 

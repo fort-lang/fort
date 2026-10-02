@@ -6,8 +6,8 @@
 //| span ok
 //| sret ok
 //| ok
-/// Checks IR for nested arrays and spans. The cases cover types, dimension GEPs, bounds checks,
-/// and copies.
+/// Checks the IR that the FIR translator writes for nested arrays and spans. The cases cover
+/// types, dimension GEPs, bounds checks, and copies.
 import check_env;
 import gen_env;
 import types;
@@ -16,10 +16,11 @@ import std.strbuf;
 //
 // The expected text has a different source from the text in other emitter suites.
 // bootstrap-0 refuses a second array or span level, so it produces no reference output. The
-// expected blocks follow the emitter and LLVM contracts. A GEP into `[N x T]` takes the array
-// index after the object index. Two other tests check the same rules from another side:
-// run/errors/028 to 030 run the checks. run/ffi/011_multidim_layout.ft holds every stride
-// against C's own sizeof and offsetof, which is the only shape that sees a stride error at all.
+// expected blocks are the text that the FIR translator writes for `main` (gen_env.main_text),
+// held against the emitter and LLVM contracts. A GEP into `[N x T]` takes the array index after
+// the object index. Two other tests check the same rules from another side: run/errors/028 to
+// 030 run the checks. run/ffi/011_multidim_layout.ft holds every stride against C's own sizeof
+// and offsetof, which is the only shape that sees a stride error at all.
 
 string GRID = "    i32[2][3] mut m = {};";
 string I = "    i32 mut i = 1;";
@@ -33,21 +34,28 @@ fn each_dimension_is_indexed_and_checked_on_its_own() void {
     defer gen_env.close(&e);
     string[4] mut lines = {GRID, I, J, "    i32 mut a = m[i][j];"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.emit_value(&e, "a");
-    // The outer index is checked against 2 and strides over a whole row. The
-    // inner one is checked against 3 inside the block the first check fell
-    // into, and strides over an i32. The row's address is the base of the
-    // second GEP, whose type is the row's own.
-    gen_env.join8(&e, "  %t0 = load i32, ptr %i.1, align 4\n",
-                  "  %t1 = sext i32 %t0 to i64\n", "  %t2 = icmp uge i64 %t1, 2\n",
-                  "  br i1 %t2, label %L1, label %L0\n\nL0:\n",
-                  "  %t3 = getelementptr inbounds [2 x [3 x i32]], ptr %m.0, i64 0, i64 %t1\n",
-                  "  %t4 = load i32, ptr %j.2, align 4\n", "  %t5 = sext i32 %t4 to i64\n",
-                  "  %t6 = icmp uge i64 %t5, 3\n");
-    gen_env.join_more(&e, "  br i1 %t6, label %L3, label %L2\n\nL2:\n");
-    gen_env.join_more(&e, "  %t7 = getelementptr inbounds [3 x i32], ptr %t3, i64 0, i64 %t5\n");
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join_more(&e, "  %t8 = load i32, ptr %t7, align 4\n"));
+    // The outer index is checked against 2 and the inner one against 3, in the
+    // block the first check falls into. Then the outer GEP strides over a whole
+    // row, and the inner one, whose base is the row's address and whose type
+    // is the row's own, strides over an i32.
+    string[15] want = {
+        "  %t0 = load i32, ptr %i.1, align 4\n",
+        "  %t1 = sext i32 %t0 to i64\n",
+        "  %t2 = icmp uge i64 %t1, 2\n",
+        "  br i1 %t2, label %L3, label %L1\n",
+        "\n",
+        "L1:\n",
+        "  %t3 = load i32, ptr %j.2, align 4\n",
+        "  %t4 = sext i32 %t3 to i64\n",
+        "  %t5 = icmp uge i64 %t4, 3\n",
+        "  br i1 %t5, label %L4, label %L2\n",
+        "\n",
+        "L2:\n",
+        "  %t6 = getelementptr inbounds [2 x [3 x i32]], ptr %m.0, i64 0, i64 %t1\n",
+        "  %t7 = getelementptr inbounds [3 x i32], ptr %t6, i64 0, i64 %t4\n",
+        "  %t8 = load i32, ptr %t7, align 4\n",
+    };
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }
 
 fn the_second_check_fails_to_its_own_block() void {
@@ -56,17 +64,19 @@ fn the_second_check_fails_to_its_own_block() void {
     defer gen_env.close(&e);
     string[4] mut lines = {GRID, I, J, "    i32 mut a = m[i][j];"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.emit_value(&e, "a");
     // Each dimension has a failure block of its own. Each
     // diagnostic names its checked length and `[` column.
     // The outer column is 18, and the inner column is 21.
-    gen_env.expect_text(
-        gen_env.fail(&e),
-        gen_env.join8(&e, "\nL1:\n",
-                      "  call void @\"std.rt.fail_bounds\"(i64 %t1, i64 2, ptr @.file.0, ",
-                      "i32 5, i32 18)\n", "  unreachable\n", "\nL3:\n",
-                      "  call void @\"std.rt.fail_bounds\"(i64 %t5, i64 3, ptr @.file.0, ",
-                      "i32 5, i32 21)\n", "  unreachable\n"));
+    string[7] want = {
+        "L3:\n",
+        "  call void @\"std.rt.fail_bounds\"(i64 %t1, i64 2, ptr @.file.0, i32 5, i32 18)\n",
+        "  unreachable\n",
+        "\n",
+        "L4:\n",
+        "  call void @\"std.rt.fail_bounds\"(i64 %t4, i64 3, ptr @.file.0, i32 5, i32 21)\n",
+        "  unreachable\n",
+    };
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }
 
 fn a_literal_index_is_checked_at_each_rank_too() void {
@@ -75,18 +85,26 @@ fn a_literal_index_is_checked_at_each_rank_too() void {
     defer gen_env.close(&e);
     string[2] mut lines = {GRID, "    i32 mut a = m[1][2];"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.emit_value(&e, "a");
     // The emitter writes a comparison for every index, including a literal.
     // It folds nothing, and LLVM removes the two comparisons below. What
     // changes with the rank is the type of the GEP and the length compared.
-    gen_env.join8(&e, "  %t0 = sext i32 1 to i64\n", "  %t1 = icmp uge i64 %t0, 2\n",
-                  "  br i1 %t1, label %L1, label %L0\n\nL0:\n",
-                  "  %t2 = getelementptr inbounds [2 x [3 x i32]], ptr %m.0, i64 0, i64 %t0\n",
-                  "  %t3 = sext i32 2 to i64\n", "  %t4 = icmp uge i64 %t3, 3\n",
-                  "  br i1 %t4, label %L3, label %L2\n\nL2:\n",
-                  "  %t5 = getelementptr inbounds [3 x i32], ptr %t2, i64 0, i64 %t3\n");
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join_more(&e, "  %t6 = load i32, ptr %t5, align 4\n"));
+    string[14] want = {
+        "  %t0 = sext i32 1 to i64\n",
+        "  %t1 = icmp uge i64 %t0, 2\n",
+        "  br i1 %t1, label %L3, label %L1\n",
+        "\n",
+        "L1:\n",
+        "  %t2 = sext i32 2 to i64\n",
+        "  %t3 = icmp uge i64 %t2, 3\n",
+        "  br i1 %t3, label %L4, label %L2\n",
+        "\n",
+        "L2:\n",
+        "  %t4 = getelementptr inbounds [2 x [3 x i32]], ptr %m.0, i64 0, i64 %t0\n",
+        "  %t5 = getelementptr inbounds [3 x i32], ptr %t4, i64 0, i64 %t2\n",
+        "  %t6 = load i32, ptr %t5, align 4\n",
+        "  store i32 %t6, ptr %a.1, align 4\n",
+    };
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }
 
 // ---- the copy ------------------------------------------------------------------------
@@ -97,11 +115,10 @@ fn a_whole_nested_array_copies_every_byte() void {
     defer gen_env.close(&e);
     string[2] mut lines = {GRID, "    i32[2][3] mut b = m;"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.into_text(&e, "b");
     // an aggregate lands in its destination through one memcpy of
     // the whole type, which is 24 bytes here, six elements of four.
-    gen_env.expect_text(
-        gen_env.body(&e),
+    gen_env.expect_in(
+        gen_env.main_text(&e),
         gen_env.join2(&e, "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %b.1, ptr align 4 ",
                       "%m.0, i64 24, i1 false)\n"));
     assert(types.type_sizeof(gen_env.type_of(&e, "b")) == 24);
@@ -113,14 +130,19 @@ fn one_row_copies_the_row_alone() void {
     defer gen_env.close(&e);
     string[2] mut lines = {GRID, "    i32[3] mut r = m[1];"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.into_text(&e, "r");
     // The row is 12 bytes and the copy is of the row, not of the array it came
     // out of.
-    gen_env.join5(&e, "  %t0 = sext i32 1 to i64\n", "  %t1 = icmp uge i64 %t0, 2\n",
-                  "  br i1 %t1, label %L1, label %L0\n\nL0:\n",
-                  "  %t2 = getelementptr inbounds [2 x [3 x i32]], ptr %m.0, i64 0, i64 %t0\n",
-                  "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %r.1, ptr align 4 %t2, ");
-    gen_env.expect_text(gen_env.body(&e), gen_env.join_more(&e, "i64 12, i1 false)\n"));
+    string[8] want = {
+        "  %t0 = sext i32 1 to i64\n",
+        "  %t1 = icmp uge i64 %t0, 2\n",
+        "  br i1 %t1, label %L2, label %L1\n",
+        "\n",
+        "L1:\n",
+        "  %t2 = getelementptr inbounds [2 x [3 x i32]], ptr %m.0, i64 0, i64 %t0\n",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %r.1, ptr align 4 %t2, ",
+        "i64 12, i1 false)\n",
+    };
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
     assert(types.type_sizeof(gen_env.type_of(&e, "r")) == 12);
 }
 
@@ -133,25 +155,37 @@ fn a_span_of_arrays_strides_by_the_row() void {
     string[3] mut lines = {"    i32[3] mut@ own g = new(i32[3], 2);", I,
                            "    i32 mut a = g[i][0];"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.emit_value(&e, "a");
-    // The length comes from the header, followed by the pointer. The second
-    // rank uses an array GEP over the row that the first rank reached.
-    gen_env.join8(&e, "  %t0 = load i32, ptr %i.1, align 4\n",
-                  "  %t1 = sext i32 %t0 to i64\n",
-                  "  %t2 = getelementptr inbounds %fort.span, ptr %g.0, i32 0, i32 1\n",
-                  "  %t3 = load i64, ptr %t2, align 8\n", "  %t4 = icmp uge i64 %t1, %t3\n",
-                  "  br i1 %t4, label %L1, label %L0\n\nL0:\n",
-                  "  %t5 = getelementptr inbounds %fort.span, ptr %g.0, i32 0, i32 0\n",
-                  "  %t6 = load ptr, ptr %t5, align 8\n");
-    // The element GEP names the element type and takes one index, so it
-    // strides by the 12 bytes of one row.
-    gen_env.join_more(&e, "  %t7 = getelementptr inbounds [3 x i32], ptr %t6, i64 %t1\n");
-    gen_env.join_more(&e, "  %t8 = sext i32 0 to i64\n");
-    gen_env.join_more(&e, "  %t9 = icmp uge i64 %t8, 3\n");
-    gen_env.join_more(&e, "  br i1 %t9, label %L3, label %L2\n\nL2:\n");
-    gen_env.join_more(&e, "  %t10 = getelementptr inbounds [3 x i32], ptr %t7, i64 0, i64 %t8\n");
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join_more(&e, "  %t11 = load i32, ptr %t10, align 4\n"));
+    // The length comes from the header, and the check reads it once more as the
+    // length it reports. The second rank is checked against the row's 3. Then
+    // the pointer comes from the header, and the second rank uses an array GEP
+    // over the row that the first rank reached.
+    string[22] want = {
+        "  %t8 = load i32, ptr %i.1, align 4\n",
+        "  %t9 = sext i32 %t8 to i64\n",
+        "  %t10 = getelementptr inbounds %fort.span, ptr %g.0, i32 0, i32 1\n",
+        "  %t11 = load i64, ptr %t10, align 8\n",
+        "  %t12 = icmp uge i64 %t9, %t11\n",
+        "  %t13 = getelementptr inbounds %fort.span, ptr %g.0, i32 0, i32 1\n",
+        "  %t14 = load i64, ptr %t13, align 8\n",
+        "  br i1 %t12, label %L7, label %L3\n",
+        "\n",
+        "L3:\n",
+        "  %t15 = sext i32 0 to i64\n",
+        "  %t16 = icmp uge i64 %t15, 3\n",
+        "  br i1 %t16, label %L8, label %L4\n",
+        "\n",
+        "L4:\n",
+        "  %t17 = getelementptr inbounds %fort.span, ptr %g.0, i32 0, i32 0\n",
+        "  %t18 = load ptr, ptr %t17, align 8\n",
+        // The element GEP names the element type and takes one index, so it
+        // strides by the 12 bytes of one row.
+        "  %t19 = getelementptr inbounds [3 x i32], ptr %t18, i64 %t9\n",
+        "  %t20 = getelementptr inbounds [3 x i32], ptr %t19, i64 0, i64 %t15\n",
+        "  %t21 = load i32, ptr %t20, align 4\n",
+        "  store i32 %t21, ptr %a.2, align 4\n",
+        "  store i32 0, ptr %result, align 4\n",
+    };
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }
 
 fn the_element_type_of_that_span_is_the_row() void {
@@ -180,22 +214,32 @@ fn an_array_of_spans_strides_by_the_header() void {
                            "    i32 mut@[2] mut rows = {a[0..3], a[1..3]};",
                            "    i32 mut b = rows[1][0];"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.emit_value(&e, "b");
     // The outer index walks an `[2 x %fort.span]`, so it strides by the 16
     // bytes of one header. The inner one reads the length and the
     // pointer out of the header it reached.
-    gen_env.join8(&e, "  %t0 = sext i32 1 to i64\n", "  %t1 = icmp uge i64 %t0, 2\n",
-                  "  br i1 %t1, label %L1, label %L0\n\nL0:\n",
-                  "  %t2 = getelementptr inbounds [2 x %fort.span], ptr %rows.1, i64 0, i64 %t0\n",
-                  "  %t3 = sext i32 0 to i64\n",
-                  "  %t4 = getelementptr inbounds %fort.span, ptr %t2, i32 0, i32 1\n",
-                  "  %t5 = load i64, ptr %t4, align 8\n", "  %t6 = icmp uge i64 %t3, %t5\n");
-    gen_env.join_more(&e, "  br i1 %t6, label %L3, label %L2\n\nL2:\n");
-    gen_env.join_more(&e, "  %t7 = getelementptr inbounds %fort.span, ptr %t2, i32 0, i32 0\n");
-    gen_env.join_more(&e, "  %t8 = load ptr, ptr %t7, align 8\n");
-    gen_env.join_more(&e, "  %t9 = getelementptr inbounds i32, ptr %t8, i64 %t3\n");
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join_more(&e, "  %t10 = load i32, ptr %t9, align 4\n"));
+    string[20] want = {
+        "  %t23 = sext i32 1 to i64\n",
+        "  %t24 = icmp uge i64 %t23, 2\n",
+        "  br i1 %t24, label %L7, label %L3\n",
+        "\n",
+        "L3:\n",
+        "  %t25 = sext i32 0 to i64\n",
+        "  %t26 = getelementptr inbounds [2 x %fort.span], ptr %rows.1, i64 0, i64 %t23\n",
+        "  %t27 = getelementptr inbounds %fort.span, ptr %t26, i32 0, i32 1\n",
+        "  %t28 = load i64, ptr %t27, align 8\n",
+        "  %t29 = icmp uge i64 %t25, %t28\n",
+        "  %t30 = getelementptr inbounds [2 x %fort.span], ptr %rows.1, i64 0, i64 %t23\n",
+        "  %t31 = getelementptr inbounds %fort.span, ptr %t30, i32 0, i32 1\n",
+        "  %t32 = load i64, ptr %t31, align 8\n",
+        "  br i1 %t29, label %L8, label %L4\n",
+        "\n",
+        "L4:\n",
+        "  %t33 = getelementptr inbounds [2 x %fort.span], ptr %rows.1, i64 0, i64 %t23\n",
+        "  %t34 = getelementptr inbounds %fort.span, ptr %t33, i32 0, i32 0\n",
+        "  %t35 = load ptr, ptr %t34, align 8\n",
+        "  %t36 = getelementptr inbounds i32, ptr %t35, i64 %t25\n",
+    };
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }
 
 fn a_span_of_spans_strides_by_the_header_too() void {
@@ -207,26 +251,40 @@ fn a_span_of_spans_strides_by_the_header_too() void {
                            "    i32 mut@ mut@ view = rows[0..2];",
                            "    i32 mut c = view[1][0];"};
     assert(gen_env.open_lines(&e, lines[..]));
-    gen_env.emit_value(&e, "c");
     // The element of the outer span is itself a `%fort.span`. The element GEP
     // names that type and strides by 16 bytes.
-    gen_env.join8(&e, "  %t0 = sext i32 1 to i64\n",
-                  "  %t1 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 1\n",
-                  "  %t2 = load i64, ptr %t1, align 8\n", "  %t3 = icmp uge i64 %t0, %t2\n",
-                  "  br i1 %t3, label %L1, label %L0\n\nL0:\n",
-                  "  %t4 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 0\n",
-                  "  %t5 = load ptr, ptr %t4, align 8\n",
-                  "  %t6 = getelementptr inbounds %fort.span, ptr %t5, i64 %t0\n");
-    gen_env.join_more(&e, "  %t7 = sext i32 0 to i64\n");
-    gen_env.join_more(&e, "  %t8 = getelementptr inbounds %fort.span, ptr %t6, i32 0, i32 1\n");
-    gen_env.join_more(&e, "  %t9 = load i64, ptr %t8, align 8\n");
-    gen_env.join_more(&e, "  %t10 = icmp uge i64 %t7, %t9\n");
-    gen_env.join_more(&e, "  br i1 %t10, label %L3, label %L2\n\nL2:\n");
-    gen_env.join_more(&e, "  %t11 = getelementptr inbounds %fort.span, ptr %t6, i32 0, i32 0\n");
-    gen_env.join_more(&e, "  %t12 = load ptr, ptr %t11, align 8\n");
-    gen_env.join_more(&e, "  %t13 = getelementptr inbounds i32, ptr %t12, i64 %t7\n");
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join_more(&e, "  %t14 = load i32, ptr %t13, align 4\n"));
+    string[29] want = {
+        "  %t32 = sext i32 1 to i64\n",
+        "  %t33 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 1\n",
+        "  %t34 = load i64, ptr %t33, align 8\n",
+        "  %t35 = icmp uge i64 %t32, %t34\n",
+        "  %t36 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 1\n",
+        "  %t37 = load i64, ptr %t36, align 8\n",
+        "  br i1 %t35, label %L9, label %L4\n",
+        "\n",
+        "L4:\n",
+        "  %t38 = sext i32 0 to i64\n",
+        "  %t39 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 0\n",
+        "  %t40 = load ptr, ptr %t39, align 8\n",
+        "  %t41 = getelementptr inbounds %fort.span, ptr %t40, i64 %t32\n",
+        "  %t42 = getelementptr inbounds %fort.span, ptr %t41, i32 0, i32 1\n",
+        "  %t43 = load i64, ptr %t42, align 8\n",
+        "  %t44 = icmp uge i64 %t38, %t43\n",
+        "  %t45 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 0\n",
+        "  %t46 = load ptr, ptr %t45, align 8\n",
+        "  %t47 = getelementptr inbounds %fort.span, ptr %t46, i64 %t32\n",
+        "  %t48 = getelementptr inbounds %fort.span, ptr %t47, i32 0, i32 1\n",
+        "  %t49 = load i64, ptr %t48, align 8\n",
+        "  br i1 %t44, label %L10, label %L5\n",
+        "\n",
+        "L5:\n",
+        "  %t50 = getelementptr inbounds %fort.span, ptr %view.2, i32 0, i32 0\n",
+        "  %t51 = load ptr, ptr %t50, align 8\n",
+        "  %t52 = getelementptr inbounds %fort.span, ptr %t51, i64 %t32\n",
+        "  %t53 = getelementptr inbounds %fort.span, ptr %t52, i32 0, i32 0\n",
+        "  %t54 = load ptr, ptr %t53, align 8\n",
+    };
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }
 
 // ---- aggregate results --------------------------------------------------------------

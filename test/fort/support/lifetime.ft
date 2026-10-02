@@ -28,8 +28,8 @@
 //
 // Neither view sees a leak of a block above 128 KB. glibc serves such an
 // allocation by mmap, so the system view does not move. Such a large round
-// also makes the block view unsuitable. The emitter module is 226998 bytes,
-// and its module buffer is an mmap block. Removing that buffer's release is
+// also makes the block view unsuitable. The emitter module is 155159 bytes
+// on T-255's tree, and its module buffer is an mmap block. Removing that buffer's release is
 // invisible to the emitter test. The closure mode emits about two kilobytes
 // and is the witness of that one release. So a release is held by the mode
 // whose round keeps it inside the heap.
@@ -40,9 +40,12 @@
 // program also prevents an earlier mode from fragmenting its heap. The loop
 // is the first action because the probe measures allocator behavior.
 //
-// The six modes contain 46 measured releases. Deleting 45 releases makes at
-// least one test fail. `slots_free` in gen.gen_free fails only when the call
-// in gen.function_begin is also absent, so that pair is one measurement.
+// The six modes contained 46 measured releases on T-118's tree. Deleting 45 of
+// them made at least one test fail. `slots_free` in gen.gen_free failed only
+// when the call in gen.function_begin was also absent, so that pair was one
+// measurement. T-255 deleted `slots_free`, `scopes_free` and the release of
+// `defers` with the direct path. The 43 releases that remain each made a test
+// fail then, and T-255 did not measure them again.
 //
 // This module uses no function-pointer dispatch table. A repeated analysis
 // must not grow the heap.
@@ -50,8 +53,10 @@
 import capture;
 import driver;
 import heap;
+import lower_env;
 import std.io;
 import std.libc;
+import std.strbuf;
 import std.sys;
 
 // The rounds of a front-end mode, and the distance in bytes that fails it.
@@ -91,7 +96,7 @@ fn measure(string@ args) u64 {
 // 32-byte probe gets lands where one of those chunks starts. It moved through
 // a range of 450 KB over rounds that leaked nothing, and no window or cycle
 // makes it repeat. The system view is the view that answers for that mode, and it
-// answers for all of it. Each of the sixteen releases exceeds
+// answers for all of it. Each of the thirteen gen.gen_free releases exceeds
 // one kilobyte per round. A missing release therefore moves
 // the system view by hundreds of kilobytes. The block view remains
 // enabled for four front-end modes and index mode. It
@@ -168,4 +173,18 @@ fn write_file(string path, string text) void {
 fn write_runtime() void {
     assert(libc.mkdir("std".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
     write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
+}
+
+// The same with lower_env.RUNTIME as `std/rt.ft`: the runtime entry of each check kind, str_eq
+// and the print functions. A mode that emits a module needs it for a program with a check or a
+// print, because the emitter refuses a function whose check or print has no runtime function.
+fn write_check_runtime() void {
+    assert(libc.mkdir("std".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : lower_env.RUNTIME) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    write_file("std/rt.ft", strbuf.view(&b));
 }

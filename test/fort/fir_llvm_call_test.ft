@@ -9,7 +9,6 @@
 /// pointer of an aggregate result on the definition and at the call, the caller-made copy of an
 /// aggregate argument, a call through a function pointer, the fixed and the variadic extern with
 /// `#3` and their `declare` lines, and one call of each runtime entry that the lowering names.
-/// Each text is held against the direct path's where spec/fir.md 12.5 lists no difference.
 import fir;
 import fir_llvm;
 import gen;
@@ -85,7 +84,7 @@ string[62] SOURCE = {
 // ---- signatures ---------------------------------------------------------------------------------
 
 // A `bool` result carries `zeroext`, a `u8` parameter `zeroext` and an `i16` parameter `signext`,
-// on the definition and at the call, as the direct path writes them.
+// on the definition and at the call.
 fn a_narrow_call_extends_its_result_and_its_arguments() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -112,14 +111,11 @@ fn a_narrow_call_extends_its_result_and_its_arguments() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_narrow", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "call_narrow", want[0..2]);
-    llvm_env.in_direct(&e, "call_narrow", want[4..11]);
     string[1] callee = {
         "define dso_local zeroext i1 @\"main.narrow\"(i8 zeroext %a.in, i16 signext %b.in) #0 {",
     };
     string whole = llvm_env.lowered_whole(&e, SOURCE[..], "narrow", pass_env.CHECKED);
     assert(whole[0..callee[0].len] == callee[0]);
-    llvm_env.in_direct(&e, "narrow", callee[..]);
 }
 
 // An aggregate result is a leading `ptr sret(%T)` on the definition and at each call: the address
@@ -159,14 +155,11 @@ fn an_aggregate_result_and_an_aggregate_argument() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "use_pair", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "use_pair", want[6..7]);
-    llvm_env.in_direct(&e, "use_pair", want[12..15]);
     string[2] callee = {
         "define dso_local void @\"main.make\"(ptr sret(%struct.main.pair) %ret.sret, i32 %x.in) \\",
         "#0 {",
     };
     string whole = llvm_env.lowered_whole(&e, SOURCE[..], "make", pass_env.CHECKED);
-    llvm_env.in_direct(&e, "make", callee[..]);
     string head = llvm_env.joined(&e, callee[..]);
     assert(whole[0..head.len] == head);
 }
@@ -193,13 +186,11 @@ fn a_wide_result_takes_sret_too() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_wide", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "call_wide", want[3..7]);
     string[1] callee = {
         "define dso_local void @\"main.wide\"(ptr sret(%struct.main.big) %ret.sret) #0 {",
     };
     string whole = llvm_env.lowered_whole(&e, SOURCE[..], "wide", pass_env.CHECKED);
     assert(whole[0..callee[0].len] == callee[0]);
-    llvm_env.in_direct(&e, "wide", callee[..]);
 }
 
 // The address of the place of an aggregate result is the `sret` pointer, and the translator
@@ -231,7 +222,6 @@ fn the_result_address_comes_after_the_arguments() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "fill", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "fill", want[3..7]);
 }
 
 // A call through a function pointer reads the callee before the arguments and writes the call type
@@ -263,8 +253,6 @@ fn a_call_through_a_pointer_writes_its_type() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "through", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "through", want[0..1]);
-    llvm_env.in_direct(&e, "through", want[3..14]);
 }
 
 // `move s` into an owning aggregate parameter copies `s` into a new `%tmp` slot, the caller-made
@@ -292,7 +280,6 @@ fn a_moved_argument_is_copied_then_zeroed() void {
     };
     llvm_env.expect(&e, llvm_env.lowered_whole(&e, SOURCE[..], "nothing", pass_env.CHECKED),
                     body[..]);
-    llvm_env.expect(&e, llvm_env.direct(&e, "nothing"), body[..]);
 }
 
 // ---- externs ------------------------------------------------------------------------------------
@@ -330,13 +317,11 @@ fn an_extern_call_carries_its_c_form() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "c_calls", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "c_calls", want[0..1]);
-    llvm_env.in_direct(&e, "c_calls", want[3..17]);
 }
 
 // The extern list of the FIR module drives the `declare` lines: first-use order, `...` for the
 // variadic tail, the extension attributes, and `nobuiltin` on each. `#3` is the only group that an
-// extern call adds. The direct path declares the same three.
+// extern call adds.
 fn the_extern_list_drives_the_declarations() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -358,7 +343,6 @@ fn the_extern_list_drives_the_declarations() void {
         "attributes #3 = { nobuiltin }",
     };
     llvm_env.expect(&e, llvm_env.module_tail(&e), want[..]);
-    llvm_env.in_direct_module(&e, "c_calls", want[0..3]);
 }
 
 // The source of an entry module whose `main` takes the argument span.
@@ -370,7 +354,7 @@ string[3] ENTRY = {
 
 // A module that names the entry module's `main` gets the C `main` after its functions
 // (spec/fir.md 5.1, toolchain.md 6 item 22): it builds the span in its own frame and passes it
-// as the caller-made copy, through the signature map. The direct path writes the same definition.
+// as the caller-made copy, through the signature map.
 fn the_module_writes_the_c_main() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -397,9 +381,10 @@ fn the_module_writes_the_c_main() void {
     llvm_env.verified(&e, got);
     llvm_env.contains(&e, got, head[..]);
     llvm_env.contains(&e, got, want[..]);
-    strbuf.clear(&e.d.funcs);
-    gen.gen_main(&e.d, m.main);
-    llvm_env.expect(&e, strbuf.view(&e.d.funcs), want[..]);
+    // gen_main alone writes the same definition
+    strbuf.clear(&e.g.funcs);
+    gen.gen_main(&e.g, m.main);
+    llvm_env.expect(&e, strbuf.view(&e.g.funcs), want[..]);
 }
 
 // ---- the runtime entries ------------------------------------------------------------------------
@@ -434,8 +419,7 @@ string[26] RUNTIME = {
 };
 
 // The print family calls each entry of std.rt through the signature map: `i1 zeroext` for a
-// `bool`, `i8 zeroext` for a `char`, the enum table and its count, and the newline. The whole
-// definition is the direct path's.
+// `bool`, `i8 zeroext` for a `char`, the enum table and its count, and the newline.
 fn each_print_entry_is_a_fort_call() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -491,7 +475,6 @@ fn each_print_entry_is_a_fort_call() void {
     string got = llvm_env.lowered_whole(&e, RUNTIME[..], "show", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.expect2(&e, llvm_env.direct(&e, "show"), want[..], tail[..]);
 }
 
 // A string equality calls `std.rt.str_eq`, whose `bool` result is `zeroext i1` at the call.
@@ -522,8 +505,6 @@ fn a_string_equality_calls_str_eq() void {
     string got = llvm_env.lowered_whole(&e, RUNTIME[..], "same", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "same", want[0..1]);
-    llvm_env.in_direct(&e, "same", want[3..12]);
 }
 
 // The shift check reports the count as `i64` and the type name as `bytes`; the masked shift of the
@@ -561,7 +542,6 @@ fn a_shift_check_calls_fail_shift() void {
     string got = llvm_env.lowered_whole(&e, RUNTIME[..], "shift", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "shift", want[0..1]);
 }
 
 // The division reports no operand: its zero check and its overflow check each take a failure
@@ -610,8 +590,6 @@ fn a_division_calls_fail_div_zero_and_fail_div_overflow() void {
     string got = llvm_env.lowered_whole(&e, RUNTIME[..], "quot", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "quot", want[28..30]);
-    llvm_env.in_direct(&e, "quot", want[32..34]);
 }
 
 // A span expression checks both bounds with one branch and reports `lo`, `hi` and the length; the
@@ -661,7 +639,6 @@ fn a_span_check_calls_fail_span() void {
     string got = llvm_env.lowered_whole(&e, RUNTIME[..], "part", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "part", want[0..9]);
 }
 
 // `new(i32, m)` with a signed count checks it with `alloc_count`; the header is built in a `%tmp`
@@ -716,8 +693,6 @@ fn an_allocation_calls_fail_alloc_count() void {
     string got = llvm_env.lowered_whole(&e, RUNTIME[..], "many", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "many", want[32..34]);
-    llvm_env.in_direct(&e, "many", tail[1..3]);
 }
 
 fn main() i32 {

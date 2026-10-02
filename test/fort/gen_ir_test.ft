@@ -6,9 +6,9 @@
 //| data ok
 //| slots ok
 //| ok
-/// Checks instruction shapes from src/fort/gen.ft. These include GEP forms,
-/// span headers, aggregate copies, blocks, switches, checks, private data,
-/// runtime calls, and stack slots.
+/// Checks instruction shapes from src/fort/gen.ft, which the FIR translator writes through. These
+/// include GEP forms, span headers, aggregate copies, blocks, switches, failure blocks, private
+/// data, runtime calls, and compiler temporaries.
 import ast;
 import diag;
 import gen;
@@ -96,20 +96,18 @@ fn a_field_is_reached_with_two_i32_indices() void {
 
 // ---- the span header --------------------------------------------------------
 
-fn the_pointer_is_field_zero_and_the_length_field_one() void {
+// One layout, spelled once, for every span and every `string`. The translator reads the length,
+// field 1, as a place of its own (fir_llvm_call_test.ft, the print of a `string`).
+fn the_pointer_is_field_zero_of_a_header() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
-    // One layout, spelled once, for every span and every `string`.
     gen.gen_span_ptr(&e.g, ptr_to("%s.0"));
-    gen.gen_span_len(&e.g, ptr_to("%s.0"));
     gen_env.expect_text(
         gen_env.body(&e),
-        gen_env.join4(&e,
+        gen_env.join2(&e,
                       "  %t0 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n",
-                      "  %t1 = load ptr, ptr %t0, align 8\n",
-                      "  %t2 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n",
-                      "  %t3 = load i64, ptr %t2, align 8\n"));
+                      "  %t1 = load ptr, ptr %t0, align 8\n"));
 }
 
 fn a_header_is_written_pointer_first() void {
@@ -184,31 +182,15 @@ fn the_zero_value_of_an_owner_is_null_or_a_memset() void {
 
 // ---- blocks -----------------------------------------------------------------
 
-fn blocks_are_numbered_in_creation_order() void {
+// A label names the block by the number its caller gives, which the translator takes from the
+// FIR block (spec/fir.md 12.4).
+fn a_branch_ends_a_block_and_a_label_opens_one() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
-    // `%L<N>` in creation order, the entry block excepted, and the counter is
-    // per function.
-    assert(gen.gen_label(&e.g) == 0);
-    assert(gen.gen_label(&e.g) == 1);
-    gen_env.begin(&e);
-    assert(gen.gen_label(&e.g) == 0);
-}
-
-fn a_branch_terminates_the_block_and_a_label_opens_a_fresh_one() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(!e.g.terminated);
     gen.gen_br(&e.g, 1);
-    // The emitter records that nothing can be written
-    // after a terminator, which `opt` does not reject.
-    assert(e.g.terminated);
     gen.gen_block_begin(&e.g, 1);
-    assert(!e.g.terminated);
     gen.gen_br_cond(&e.g, operand("i1", "%c"), 2, 3);
-    assert(e.g.terminated);
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join3(&e, "  br label %L1\n", "\nL1:\n",
                                       "  br i1 %c, label %L2, label %L3\n"));
@@ -221,11 +203,9 @@ fn a_switch_is_one_terminator_written_over_several_lines() void {
     // the case list is indented one level further than an
     // instruction and the `]` stands where an instruction does.
     gen.gen_switch_begin(&e.g, operand("i32", "%v"), 9);
-    assert(!e.g.terminated);
     gen.gen_switch_case(&e.g, operand("i32", "0"), 1);
     gen.gen_switch_case(&e.g, operand("i32", "1"), 2);
     gen.gen_switch_end(&e.g);
-    assert(e.g.terminated);
     gen_env.expect_text(gen_env.body(&e),
                         gen_env.join4(&e, "  switch i32 %v, label %L9 [\n",
                                       "    i32 0, label %L1\n", "    i32 1, label %L2\n",
@@ -234,48 +214,6 @@ fn a_switch_is_one_terminator_written_over_several_lines() void {
 
 // ---- the checks and their failure blocks -----------------------------------------------
 
-fn a_check_allocates_its_continuation_before_its_failure_block() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
-    gen.gen_args_add(&args, operand("i64", "%i"));
-    gen.gen_check(&e.g, operand("i1", "%bad"), true, runtime_sig.rt_entry.rt_fail_bounds, &args,
-                  where_at());
-    // The continuation is allocated first, so the branch names the failure
-    // block second and the numbering of a nest of checks is stable.
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join2(&e, "  br i1 %bad, label %L1, label %L0\n", "\nL0:\n"));
-    // The failure block is held apart and emitted after every normal block.
-    gen_env.expect_text(
-        gen_env.fail(&e),
-        gen_env.join3(&e, "\nL1:\n",
-                      "  call void @\"std.rt.fail_bounds\"(i64 %i, ptr @.file.0, i32 7, i32 3)\n",
-                      "  unreachable\n"));
-    // no attribute is put on a failure call site.
-    string text = gen_env.fail(&e);
-    u64 mut i = 0;
-    while (i < text.len) {
-        assert(text[i] != '#');
-        i += 1;
-    }
-}
-
-fn assert_branches_the_other_way_because_its_operand_is_the_success() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
-    // `assert`'s operand is already the success condition, so the
-    // continuation comes first in the branch.
-    gen.gen_check(&e.g, operand("i1", "%ok"), false, runtime_sig.rt_entry.rt_assert_fail, &args,
-                  where_at());
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join2(&e, "  br i1 %ok, label %L0, label %L1\n", "\nL0:\n"));
-}
-
 fn a_failure_block_no_branch_reaches_is_written_the_same_way() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -283,7 +221,7 @@ fn a_failure_block_no_branch_reaches_is_written_the_same_way() void {
     // The default of a `switch` over an enum with no `default` clause arrives
     // by the switch's own default edge. So the block is emitted with no
     // branch of its own.
-    u64 label = gen.gen_label(&e.g);
+    u64 label = 0;
     gen.gen_args mut args = gen.gen_args_init();
     defer gen.gen_args_free(&args);
     gen.gen_args_add(&args, operand("i32", "%v"));
@@ -294,6 +232,13 @@ fn a_failure_block_no_branch_reaches_is_written_the_same_way() void {
         gen_env.join3(&e, "\nL0:\n",
                       "  call void @\"std.rt.fail_enum\"(i32 %v, ptr @.file.0, i32 7, i32 3)\n",
                       "  unreachable\n"));
+    // no attribute is put on a failure call site.
+    string text = gen_env.fail(&e);
+    u64 mut i = 0;
+    while (i < text.len) {
+        assert(text[i] != '#');
+        i += 1;
+    }
 }
 
 // ---- the private data ----------------------------------------------------------
@@ -410,35 +355,6 @@ fn an_argument_carries_its_extension_attribute_between_type_and_value() void {
 
 // ---- slots and compiler temporaries ---------------------------------------------
 
-fn a_local_is_named_after_itself_and_its_position() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_shapes(&e));
-    // `%<ident>.<k>`, so two locals of one name in two scopes are two
-    // storages, and the place of a local is the slot gen_function made.
-    gen.gen_place p = gen_env.place_of(&e, "v_arr");
-    gen_env.expect_text(p.addr.val, "%v_arr.0");
-    gen_env.expect_text(p.addr.ty, "ptr");
-    gen_env.expect_text(gen_env.place_of(&e, "v_span").addr.val, "%v_span.1");
-    // The place carries the declaration's own type: a place is storage, not
-    // the expression that reached it.
-    assert(p.ty == gen_env.type_of(&e, "v_arr"));
-}
-
-fn a_parameter_arrives_under_its_incoming_name() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_shapes(&e));
-    ast.sym* s = gen_env.sym_main(&e, "main");
-    // an aggregate parameter's place is the caller-made copy the
-    // incoming pointer designates, so its name is `%<ident>.in`. A scalar
-    // one is stored into a slot of its own.
-    gen_env.expect_text(gen.slot_name(&e.g, s, 2, false), "%main.2");
-    gen_env.expect_text(gen.slot_name(&e.g, s, 0, true), "%main.in");
-}
-
 fn a_compiler_temporary_is_an_alloca_in_the_entry_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -478,17 +394,14 @@ fn main() i32 {
     an_array_element_is_reached_with_two_indices();
     an_element_behind_a_pointer_is_reached_with_one();
     a_field_is_reached_with_two_i32_indices();
-    the_pointer_is_field_zero_and_the_length_field_one();
+    the_pointer_is_field_zero_of_a_header();
     a_header_is_written_pointer_first();
     an_aggregate_is_copied_with_a_memcpy_of_its_own_size();
     a_place_is_zeroed_with_a_memset();
     the_zero_value_of_an_owner_is_null_or_a_memset();
     println("shapes ok");
-    blocks_are_numbered_in_creation_order();
-    a_branch_terminates_the_block_and_a_label_opens_a_fresh_one();
+    a_branch_ends_a_block_and_a_label_opens_one();
     a_switch_is_one_terminator_written_over_several_lines();
-    a_check_allocates_its_continuation_before_its_failure_block();
-    assert_branches_the_other_way_because_its_operand_is_the_success();
     a_failure_block_no_branch_reaches_is_written_the_same_way();
     println("blocks ok");
     a_file_is_numbered_once_however_often_it_is_named();
@@ -499,8 +412,6 @@ fn main() i32 {
     a_runtime_call_with_a_value_names_a_temporary();
     an_argument_carries_its_extension_attribute_between_type_and_value();
     println("data ok");
-    a_local_is_named_after_itself_and_its_position();
-    a_parameter_arrives_under_its_incoming_name();
     a_compiler_temporary_is_an_alloca_in_the_entry_block();
     an_unlowered_construct_is_a_diagnostic_and_never_wrong_code();
     println("slots ok");

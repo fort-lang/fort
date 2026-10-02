@@ -1,7 +1,6 @@
 /// Provides the environment of the tests of the FIR translator. It checks a fort source in the
 /// sandbox of lower_env and lowers one function of it, or parses a FIR text against a prelude,
-/// then translates the function with fir_llvm and gives the text. It also emits the same function
-/// with the direct path, so that a test holds the two texts against each other.
+/// then translates the function with fir_llvm and gives the text.
 //
 // Two forms of a translation. `translate` gives the body alone: `entry:`, the allocas, the stores
 // of the parameters, and the statements of each block in number order, with the line `L<n>:`
@@ -15,19 +14,17 @@ import fir_lower;
 import gen;
 import gen_data;
 import gen_env;
-import gen_stmt;
 import lower_env;
 import pass_env;
 import std.str;
 import std.strbuf;
 
-/// The sandbox of lower_env, the emitter of the translator, the emitter of the direct path, and
-/// the buffers of the texts. It must stay at the address that open filled, because each emitter
-/// points into the session of the sandbox.
+/// The sandbox of lower_env, the emitter of the translator, and the buffers of the texts. It must
+/// stay at the address that open filled, because the emitter points into the session of the
+/// sandbox.
 struct env {
     lower_env.env low;
     gen.emitter g;
-    gen.emitter d;
     strbuf.str_buf text;
     strbuf.str_buf want;
     strbuf.str_buf text2;
@@ -36,25 +33,21 @@ struct env {
 fn open(env mut* e) void {
     lower_env.open(&e->low);
     gen.gen_init(&e->g, &e->low.c.m.s, gen.gen_options{});
-    gen.gen_init(&e->d, &e->low.c.m.s, gen.gen_options{});
 }
 
 fn close(env mut* e) void {
     gen.gen_free(&e->g);
-    gen.gen_free(&e->d);
     strbuf.free(&e->text);
     strbuf.free(&e->want);
     strbuf.free(&e->text2);
     lower_env.close(&e->low);
 }
 
-// Makes both emitters fresh in the mode `m`, so that each numbers its data from 0.
+// Makes the emitter fresh in the mode `m`, so that it numbers its data from 0.
 fn reset(env mut* e, pass_env.mode m) void {
     gen.gen_free(&e->g);
-    gen.gen_free(&e->d);
-    gen.gen_options opts = gen.gen_options{m.release, m.no_bounds, "", false};
+    gen.gen_options opts = gen.gen_options{m.release, m.no_bounds, ""};
     gen.gen_init(&e->g, &e->low.c.m.s, opts);
-    gen.gen_init(&e->d, &e->low.c.m.s, opts);
 }
 
 /// Checks `lines` with the runtime of lower_env and lowers the function `name`. The verifier, the
@@ -79,16 +72,14 @@ fn parse(env mut* e, string@ prelude, string@ text) fir.module {
     return m;
 }
 
-// The per-function reset of gen.function_begin that the translator needs: the three
-// counters, the three buffers, and the flags.
+// The per-function reset of gen.function_begin that the translator needs: the two counters, the
+// three buffers, and the flag of a gen_todo.
 fn begin(gen.emitter mut* g) void {
     g->temps = 0;
-    g->labels = 0;
     g->tmps = 0;
     strbuf.clear(&g->allocas);
     strbuf.clear(&g->body);
     strbuf.clear(&g->fail);
-    g->terminated = false;
     g->failed = false;
 }
 
@@ -165,7 +156,7 @@ fn verified(env mut* e, string text) void {
 fn module_tail(env mut* e) string {
     strbuf.clear(&e->g.funcs);
     gen_data.gen_finish(&e->g);
-    string all = gen.gen_text(&e->g);
+    string all = strbuf.view(&e->g.out);
     i64 at = str.find(all, "\n\n");
     strbuf.clear(&e->text);
     if (at >= 0) {
@@ -179,16 +170,6 @@ fn lowered(env mut* e, string@ lines, string name, pass_env.mode m) string {
     fir.func mut f = lower(e, lines, name, m);
     defer fir.func_free(&f);
     return translate(e, &f);
-}
-
-/// Emits the function `name` of the source that the last `lower` checked with the direct path,
-/// in its mode, and gives the definition. The text is valid until the next call.
-fn direct(env mut* e, string name) string {
-    e->d.ck = &e->low.c.ck;
-    e->d.module = check_env.module_at(&e->low.c, "main");
-    strbuf.clear(&e->d.funcs);
-    gen_stmt.gen_function(&e->d, lower_env.decl(&e->low, name));
-    return strbuf.view(&e->d.funcs);
 }
 
 // Joins `lines` into e->want, each ended by a newline. A line that ends with `\` continues on the
@@ -240,21 +221,6 @@ fn expect3(env mut* e, string got, string@ a, string@ b, string@ c) void {
     panic("llvm_env.expect3: the text differs");
 }
 
-/// Holds that the lines `want` stand, together and in order, in the definition that the direct
-/// path writes for the function `name` of the last source.
-fn in_direct(env mut* e, string name, string@ want) void {
-    string d = direct(e, name);
-    string text = joined(e, want);
-    if (str.find(d, text) >= 0) {
-        return;
-    }
-    eprintln("llvm_env: the direct path lacks");
-    eprint(text);
-    eprintln("llvm_env: its definition");
-    eprint(d);
-    panic("llvm_env.in_direct: the direct path writes other text");
-}
-
 /// Holds that the lines `want` stand, together and in order, in `got`.
 fn contains(env mut* e, string got, string@ want) void {
     string text = joined(e, want);
@@ -266,22 +232,6 @@ fn contains(env mut* e, string got, string@ want) void {
     eprintln("llvm_env: the text");
     eprint(got);
     panic("llvm_env.contains: the lines are not in the text");
-}
-
-/// Holds that the lines `want` stand, together and in order, in the module that the direct path
-/// assembles after it emits the function `name` of the last source.
-fn in_direct_module(env mut* e, string name, string@ want) void {
-    direct(e, name);
-    gen_data.gen_finish(&e->d);
-    string text = joined(e, want);
-    if (str.find(gen.gen_text(&e->d), text) >= 0) {
-        return;
-    }
-    eprintln("llvm_env: the direct module lacks");
-    eprint(text);
-    eprintln("llvm_env: its text");
-    eprint(gen.gen_text(&e->d));
-    panic("llvm_env.in_direct_module: the direct path writes other text");
 }
 
 /// The storage of local `n` of `f`, as fir_llvm classifies it.

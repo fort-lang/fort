@@ -1,0 +1,276 @@
+/// Emits the LLVM IR module of a checked program: the named types, the data, each function through
+/// FIR, and the C `main` (spec/fir.md 3, spec/toolchain.md 6).
+
+import ast;
+import check;
+import fir;
+import fir_llvm;
+import fir_lower;
+import fir_passes;
+import fir_verify;
+import gen;
+import gen_data;
+import modules;
+import std.strbuf;
+import types;
+
+// Whether `fn_node` defines a function that the emitter writes: its symbol is a checked function.
+fn emits(ast.node* fn_node) bool {
+    ast.sym* s = fn_node->sym;
+    return s != null && !s->error && s->ty != null && s->ty->kind == types.type_kind.k_fn;
+}
+
+// ---- the functions (spec/fir.md 3) ------------------------------------------
+
+/// What the lowering of one program reads: the checker, which the lowering takes as `mut`, and
+/// the runtime entries of the checks, which the verifier reads, with the kinds that the mode
+/// removes excused (fir_verify.excuse_mode). gen_program makes it once.
+struct fir_path {
+    check.checker mut* ck;
+    fir_verify.runtime rt;
+}
+
+/// The passes between the lowering and the translator (spec/fir.md 3): the verifier, the
+/// build-mode pass of the mode of `g` and the verifier again, whose rules V9 among them stay on.
+/// The first verifier excuses the check kinds that `rt` excuses; the second excuses none, so a
+/// check that the pass keeps needs its runtime entry (rule V7). A violation of a rule ends the
+/// compiler with a panic that names it.
+fn check_fir(gen.emitter* g, fir_verify.runtime* rt, fir.func mut* f) void {
+    fir_verify.verify(f, rt);
+    fir_passes.build_mode(f, g->opts.release, g->opts.no_bounds_check);
+    fir_verify.runtime strict = fir_verify.unexcused(rt);
+    fir_verify.verify(f, &strict);
+}
+
+// Writes the definition of `fn_node` through FIR: the lowering, check_fir and the translator
+// (spec/fir.md 3). Three cases write no text, and each is a compile error (spec/fir.md 9.8,
+// spec/toolchain.md 1):
+// - the lowering does not support a construct of the function: at the construct,
+//   `cannot lower `<f>` to FIR: the lowering does not support the node `<kind>``;
+// - a construct needs a print or a string equality that `std.rt` lacks: at the construct,
+//   `the runtime `std.rt` has no entry `<name>`, which `<f>` needs`;
+// - a `check` that the build-mode pass of the mode keeps, or a `fail`, names an entry that
+//   `std.rt` lacks or declares with other parameters, which rule V7 refuses: at the name of the
+//   function,
+//   `the runtime `std.rt` has no entry `<name>` with the parameters that `<f>` needs`.
+// Only a stub `std.rt` of a test or an old --std-dir meets the last two. A violation of a rule
+// of the verifier ends the compiler with a panic.
+fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    if (!fir_lower.lower_function(fp->ck, fn_node, &f, &why)) {
+        if (why.entry.len > 0) {
+            strbuf.append(&text, "the runtime `std.rt` has no entry `");
+            strbuf.append(&text, why.entry);
+            strbuf.append(&text, "`, which `");
+            strbuf.append(&text, fn_node->sym->name);
+            strbuf.append(&text, "` needs");
+        } else {
+            strbuf.append(&text, "cannot lower `");
+            strbuf.append(&text, fn_node->sym->name);
+            strbuf.append(&text, "` to FIR: the lowering does not support the node `");
+            strbuf.append(&text, ast.ast_kind_name(why.kind));
+            strbuf.push(&text, '`');
+        }
+        gen.gen_error(g, why.at, strbuf.view(&text));
+        return false;
+    }
+    fir.check_kind mut missing = fir.check_kind.chk_overflow;
+    if (!fir_verify.runtime_holds(&f, &fp->rt, &missing)) {
+        fir.func_free(&f);
+        strbuf.append(&text, "the runtime `std.rt` has no entry `");
+        strbuf.append(&text, fir.check_entry(missing));
+        strbuf.append(&text, "` with the parameters that `");
+        strbuf.append(&text, fn_node->sym->name);
+        strbuf.append(&text, "` needs");
+        gen.gen_error(g, fn_node->name_loc, strbuf.view(&text));
+        return false;
+    }
+    emit_fir(g, fp, move(f));
+    return true;
+}
+
+/// Writes the FIR function `f`, which it takes: check_fir, then the translator. `f` is the only
+/// function of its FIR module, so its extern list drives the `declare` lines of its calls
+/// (spec/fir.md 5.1), after the lines of the functions before it.
+fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) void {
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    fir.module_add_function(&m, move(f));
+    fir.func mut* added = &m.funcs.items[0];
+    check_fir(g, &fp->rt, added);
+    fir.module_collect_externs(&m);
+    fir_llvm.translate_module(g, &m);
+}
+
+/// Writes the definition of `fn_node` through FIR when it defines a function that the emitter
+/// writes. `g->functions` counts each definition and `g->lowered` each one that the translator
+/// wrote, which --fir-stats prints. The two counts differ only after a compile error, which
+/// writes no module and no count.
+fn emit_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) void {
+    if (!emits(fn_node)) {
+        return;
+    }
+    g->functions += 1;
+    if (fir_function(g, fp, fn_node)) {
+        g->lowered += 1;
+    }
+}
+
+// ---- the module ----------------------------------------------------------
+
+// The named type of every struct the module declares, in source order, so that a field access names
+// a type the module defines. Four walks must count the same k_field_decl children. Otherwise, a
+// field index selects the wrong bytes. The walks are here, gen.gen_field_index,
+// fir.struct_field_type, which gives the type of the field that a FIR projection numbers, and the
+// constant initializer in gen_data.ft. All four take those children in order and skip on the kind
+// alone. A field with no type would leave them disagreeing, so it ends the compilation here rather
+// than shifting an index silently.
+fn gen_struct_type(gen.emitter mut* g, ast.node* decl) void {
+    ast.sym* s = decl->sym;
+    if (s == null || s->error || s->ty == null || s->ty->kind != types.type_kind.k_struct) {
+        return;
+    }
+    string named = gen.gen_mem_type(g, s->ty);
+    if (named == gen.ENUM_MEMBER_TYPE) {
+        // `std.rt`'s `struct enum_member` is the existing `%fort.enum_member`. The emitter writes
+        // its declaration once in the header.
+        return;
+    }
+    strbuf.append(&g->named, named);
+    strbuf.append(&g->named, " = type { ");
+    u64 mut written = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* f = ast.ast_child(decl, i);
+        if (f->kind == ast.ast_kind.k_field_decl) {
+            if (f->ty == null) {
+                // The checker types every field of a struct it lets through,
+                // so this is a broken tree and not a program the emitter
+                // refuses.
+                panic("gen_fir.gen_struct_type: a struct field with no type");
+            }
+            if (written > 0) {
+                strbuf.append(&g->named, ", ");
+            }
+            written += 1;
+            strbuf.append(&g->named, gen.gen_mem_type(g, f->ty));
+        }
+        i += 1;
+    }
+    strbuf.append(&g->named, " }\n");
+}
+
+fn gen_module(gen.emitter mut* g, fir_path mut* fp, modules.module* m) void {
+    g->module = m;
+    gen_declarations(g, fp, m->ast, 1);
+    // Module-level data precedes functions. Forward references are legal in
+    // LLVM IR, and this order fixes private-data numbering.
+    gen_declarations(g, fp, m->ast, 2);
+    gen_declarations(g, fp, m->ast, 3);
+    g->module = null;
+}
+
+fn gen_declaration(gen.emitter mut* g, fir_path mut* fp, ast.node* decl, i32 section) void {
+    ast.node* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            gen_declarations(g, fp, current->b, section);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            gen_declarations(g, fp, current->c, section);
+            return;
+        }
+        current = current->c;
+    }
+    if (section == 1 && current->kind == ast.ast_kind.k_struct_decl) {
+        gen_struct_type(g, current);
+    } else if (section == 2 && current->kind == ast.ast_kind.k_var_decl) {
+        gen_data.gen_global(g, current);
+    } else if (section == 3 && current->kind == ast.ast_kind.k_fn_decl && current->b != null) {
+        emit_function(g, fp, current);
+    }
+}
+
+fn gen_declarations(gen.emitter mut* g, fir_path mut* fp, ast.node* list, i32 section) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        gen_declaration(g, fp, ast.ast_child(list, i), section);
+        i += 1;
+    }
+}
+
+fn find_main(ast.node* list) ast.node* {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* decl = ast.ast_child(list, i);
+        i += 1;
+        if (decl->kind == ast.ast_kind.k_compile_if) {
+            ast.node* found = find_main_node(decl);
+            if (found != null) {
+                return found;
+            }
+        } else if (decl->kind == ast.ast_kind.k_fn_decl && decl->sym != null
+                   && !decl->sym->error && decl->sym->ty != null
+                   && decl->sym->ty->kind == types.type_kind.k_fn
+                   && decl->sym->name == "main") {
+            return decl;
+        }
+    }
+    return null;
+}
+
+fn find_main_node(ast.node* decl) ast.node* {
+    ast.node* mut current = decl;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            return find_main(current->b);
+        }
+        if (current->c == null) {
+            return null;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            return find_main(current->c);
+        }
+        current = current->c;
+    }
+    return null;
+}
+
+// Emits closure modules in dependency order, then emits the C `main`.
+// Uses annotations from `ck`. Returns false after a compile error of a function.
+// bootstrap0/src/gen.c stores the module set in the emitter beside the checker;
+// nothing ever reads it back, so it stays a parameter here. The lowering takes
+// `ck` as `mut`, and the emitter keeps a pointer that does not write.
+fn gen_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* set) bool {
+    g->ck = ck;
+    fir_path mut fp = fir_path{.ck = ck, .rt = fir_verify.runtime_of(ck)};
+    fir_verify.excuse_mode(&fp.rt, g->opts.release, g->opts.no_bounds_check);
+    // The named types every module carries, used or not.
+    strbuf.append(&g->named, gen.SPAN_TYPE);
+    strbuf.append(&g->named, " = type { ptr, i64 }\n");
+    strbuf.append(&g->named, gen.ENUM_MEMBER_TYPE);
+    strbuf.append(&g->named, " = type { i32, ptr }\n");
+    // every module after the ones it imports
+    u64 mut i = 0;
+    while (i < modules.count(set)) {
+        gen_module(g, &fp, modules.at(set, i));
+        i += 1;
+    }
+    modules.module* entry = modules.entry(set);
+    if (entry != null && entry->ast != null) {
+        ast.node* main_decl = find_main(entry->ast);
+        if (main_decl != null) {
+            // the only unmangled definition, in the entry module
+            gen.gen_main(g, main_decl->sym);
+        }
+    }
+    gen_data.gen_finish(g);
+    return !g->failed;
+}

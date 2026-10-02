@@ -5,27 +5,25 @@
 //| exits ok
 //| results ok
 //| ok
-/// Checks deferred statements in src/fort/gen_stmt.ft. The cases cover exited scopes, execution
-/// order, and aggregate returns.
+/// Checks the text that the FIR translator writes for deferred statements. The cases cover
+/// exited scopes, execution order, and aggregate returns.
 import gen_env;
 import std.str;
 import std.strbuf;
 
 //
-// Each exit has a static set of deferred statements. The emitter reads them
+// Each exit has a static set of deferred statements. The lowering reads them
 // from the scope stack and copies their code into each exit. The cases can
 // therefore count the copies. A `defer` in a loop body expands at `continue`,
-// at `break`, and at the iteration end. Each copy uses the statement emitted
-// at that exit.
-//
-// Each expected text comes from bootstrap-0 `fort -S` output for the same program.
-// It does not come from the fort emitter under test.
+// at `break`, and at the iteration end. Each copy uses the statement lowered
+// at that exit. Block n of FIR is `%L<n>`, and the translator writes the
+// blocks in number order (spec/fir.md 9.5, 12.4).
 //
 // All seven cases emit a definition through the `emit` helper below. The
 // helper has one block-check call site that covers all seven cases.
 
 fn emit(gen_env.env mut* e, string src, string name) string {
-    assert(gen_env.open_module(e, src));
+    assert(gen_env.open_module_rt(e, src));
     string got = gen_env.emit_function(e, name);
     gen_env.expect_blocks(e, got);
     return got;
@@ -44,7 +42,7 @@ fn wrap(strbuf.str_buf mut* b, string decls) string {
 // reverse textual order. And an inner block's own statements run when that
 // block ends and not at the function's exit. The three `eprintln`s are
 // therefore c, b, a: the inner block's `c`, then its `defer`, then the
-// function's.
+// function's, which runs after `return n` has stored its value.
 fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -57,9 +55,10 @@ fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
     strbuf.append(&src, "        defer eprintln(\"b\");\n        eprintln(\"c\");\n    }\n");
     strbuf.append(&src, "    return n;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "at_end");
-    string[11] mut want = {
+    string[16] want = {
         "define dso_local i64 @\"main.at_end\"(i64 %n.in) #0 {\n",
         "entry:\n",
+        "  %result = alloca i64, align 8\n",
         "  %n.0 = alloca i64, align 8\n",
         "  store i64 %n.in, ptr %n.0, align 8\n",
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 1)\n",
@@ -67,10 +66,14 @@ fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.1, i64 1)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
         "  %t0 = load i64, ptr %n.0, align 8\n",
+        "  store i64 %t0, ptr %result, align 8\n",
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.2, i64 1)\n",
-        "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n  ret i64 %t0\n}\n",
+        "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
+        "  %t1 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t1\n",
+        "}\n",
     };
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..11]));
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[..]));
     // Nothing was captured at `defer` time: each copy is the statement emitted
     // where the exit stands. So the three literals are three string constants
     // in the order the copies were written.
@@ -83,7 +86,8 @@ fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
 
 // A loop body is a scope that `break` and `continue` both leave. So its
 // deferred statements run at either exit and at the end of every iteration. In
-// a `for`, `continue` runs them before `step`.
+// a `for`, `continue` runs them before `step`, which is L3 here, and `break`
+// before the continuation, L4.
 fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -96,22 +100,28 @@ fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
     strbuf.append(&src, "        defer eprintln(\"step\");\n        if (go) {\n");
     strbuf.append(&src, "            continue;\n        }\n        break;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_loop");
-    string[10] mut want = {
-        "\nL4:\n",
+    string[16] want = {
+        "L3:\n",
+        "  br label %L1\n",
+        "\n",
+        "L4:\n",
+        "  ret void\n",
+        "\n",
+        "L5:\n",
         // The `continue` runs the body's deferred statement and then branches
         // to the step block.
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 4)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
-        "  br label %L2\n",
-        "\nL5:\n",
+        "  br label %L3\n",
+        "\n",
+        "L6:\n",
         // The `break` runs its own copy and branches to the continuation.
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.1, i64 4)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
-        "  br label %L3\n",
-        "\nL2:\n",
-        "  br label %L0\n",
+        "  br label %L4\n",
+        "}\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..10])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
     // Two exits, two copies, two string constants: the body never falls off
     // its own end here, since both arms of the `if` terminate.
     assert(gen_env.record_text(&e, 0) == "step");
@@ -121,9 +131,8 @@ fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
 
 // The same in a `do`, where the two exits go to two different blocks. The
 // `continue` runs the body's deferred statement and branches to the test, and
-// the `break` runs its own copy and branches to the continuation. bootstrap-0
-// refuses `do`-`while`, so the expected text of this one case was read off
-// stage2 and its blocks are named here.
+// the `break` runs its own copy and branches to the continuation. The blocks
+// of the `do` are body L1, test L2 and done L3.
 fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -137,21 +146,29 @@ fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
     strbuf.append(&src, "            continue;\n        }\n        break;\n");
     strbuf.append(&src, "    } while (go);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_do");
-    string[10] mut want = {
-        "\nL3:\n",
+    string[18] want = {
+        "L2:\n",
+        "  %t3 = load i8, ptr %go.0, align 1\n",
+        "  %t4 = trunc i8 %t3 to i1\n",
+        "  br i1 %t4, label %L1, label %L3\n",
+        "\n",
+        "L3:\n",
+        "  ret void\n",
+        "\n",
+        "L4:\n",
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 4)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
-        // The `continue` branches to the test block, which is L1 here.
-        "  br label %L1\n",
-        "\nL4:\n",
+        // The `continue` branches to the test block, which is L2 here.
+        "  br label %L2\n",
+        "\n",
+        "L5:\n",
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.1, i64 4)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
         // The `break` branches to the continuation and runs no test.
-        "  br label %L2\n",
-        "\nL1:\n",
-        "  %t3 = load i8, ptr %go.0, align 1\n",
+        "  br label %L3\n",
+        "}\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..10])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
     assert(gen_env.record_text(&e, 0) == "step");
     assert(gen_env.record_text(&e, 1) == "step");
     assert(e.g.strs.len == 2);
@@ -159,10 +176,10 @@ fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
 
 // A `break` inside deferred code binds to a loop written inside that deferred
 // code. And the deferred code is expanded at the exit that runs it, so that
-// loop is emitted inside the expansion. L2 is the enclosing loop's exit and L5
+// loop is emitted inside the expansion. L3 is the enclosing loop's exit and L6
 // the exit of the loop inside the deferred code. The inner `break` branches to
-// L5, `out` still runs, and the enclosing loop is left once, at the end of the
-// expansion. A branch to L2 there would put `out` after a terminator.
+// L6, `out` still runs, and the enclosing loop is left once, at the end of the
+// expansion. A branch to L3 there would put `out` after a terminator.
 fn a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -177,25 +194,41 @@ fn a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() void {
     strbuf.append(&src, "            eprintln(\"out\");\n        }\n        break;\n");
     strbuf.append(&src, "    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_loop");
-    string[9] mut want = {
-        "\nL4:\n",
+    string[24] want = {
+        "define dso_local void @\"main.in_loop\"() #0 {\n",
+        "entry:\n",
+        "  br label %L1\n",
+        "\n",
+        "L1:\n",
+        "  br i1 true, label %L2, label %L3\n",
+        "\n",
+        "L2:\n",
+        "  br label %L4\n",
+        "\n",
+        "L3:\n",
+        "  ret void\n",
+        "\n",
+        "L4:\n",
+        "  br i1 true, label %L5, label %L6\n",
+        "\n",
+        "L5:\n",
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 2)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
-        "  br label %L5\n",
-        "\nL5:\n",
+        "  br label %L6\n",
+        "\n",
+        "L6:\n",
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.1, i64 3)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
-        "  br label %L2\n",
-        "\nL2:\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..9])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(got, "  br label %L3\n}\n");
     assert(gen_env.record_text(&e, 0) == "in");
     assert(gen_env.record_text(&e, 1) == "out");
     assert(e.g.strs.len == 2);
 }
 
 // `return e` evaluates `e` before the deferred code runs, which cannot then
-// change the value returned: the value is in a register first.
+// change the value returned: the value is in `%result` first.
 fn a_return_reads_its_value_before_the_deferred_code_runs() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -207,13 +240,15 @@ fn a_return_reads_its_value_before_the_deferred_code_runs() void {
     strbuf.append(&src, "fn early(i64 n) i64 {\n    defer eprintln(\"out\");\n");
     strbuf.append(&src, "    return n;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "early");
-    string[4] mut want = {
+    string[6] want = {
         "  %t0 = load i64, ptr %n.0, align 8\n",
+        "  store i64 %t0, ptr %result, align 8\n",
         "  call void @\"std.rt.print_str\"(i32 2, ptr @.str.0, i64 3)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
-        "  ret i64 %t0\n",
+        "  %t1 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t1\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..4])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // ---- results -----------------------------------------------------------------------
@@ -244,7 +279,7 @@ fn an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() void {
         " i1 false)\n",
         "  ret void\n}\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..9])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[0..9]));
 }
 
 // A function with nothing deferred writes the caller's block directly and pays
@@ -267,7 +302,7 @@ fn an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() void {
         "  ret void\n}\n",
         "",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..4])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[0..4]));
     assert(str.find(got, "%tmp0") < 0);
 }
 

@@ -7,7 +7,7 @@
 /// Checks the storage that the FIR translator gives each local and the text of its allocas and
 /// places (spec/fir.md 12.1): `%result`, `%ret.sret`, the parameters, the named locals, the
 /// registers, the `%tmp` slots, no storage for a temporary that nothing names, and the three
-/// `getelementptr` shapes. Each lowered case holds the lines that the direct path writes too.
+/// `getelementptr` shapes.
 import fir;
 import fir_llvm;
 import llvm_env;
@@ -72,21 +72,11 @@ fn the_entry_block_of_the_worked_example() void {
         "  store ptr null, ptr %p.1, align 8",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    // the direct path writes the same entry block up to its check, with no `%result`
-    string[6] entry = {
-        "  %c.0 = alloca i8, align 1",
-        "  %p.1 = alloca ptr, align 8",
-        "  %t0 = zext i1 %c.in to i8",
-        "  store i8 %t0, ptr %c.0, align 1",
-        "  store ptr null, ptr %p.1, align 8",
-        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
-    };
-    llvm_env.in_direct(&e, "f", entry[..]);
 }
 
 // Under --release the build-mode pass folds `_3 = alloc` and `_2 = move _3` into `_2 = alloc`, so
 // no item names `_3` and it gets no storage: no alloca and no register (spec/fir.md 12.1, 13).
-// The store of the call is the direct store of the direct path in release mode.
+// The call stores its result straight into `p`.
 fn the_folded_temporary_of_the_worked_example_has_no_storage() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -123,18 +113,6 @@ fn the_folded_temporary_of_the_worked_example_has_no_storage() void {
         "  store ptr null, ptr %p.1, align 8",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    string[4] entry = {
-        "  %p.1 = alloca ptr, align 8",
-        "  %t0 = zext i1 %c.in to i8",
-        "  store i8 %t0, ptr %c.0, align 1",
-        "  store ptr null, ptr %p.1, align 8",
-    };
-    llvm_env.in_direct(&e, "f", entry[..]);
-    string[2] store = {
-        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
-        "  store ptr %t1, ptr %p.1, align 8",
-    };
-    llvm_env.in_direct(&e, "f", store[..]);
 }
 
 string[12] SHAPES = {
@@ -153,8 +131,7 @@ string[12] SHAPES = {
 };
 
 // `_0` of an aggregate type is `%ret.sret` and an aggregate parameter is `%p.in`, and neither has
-// an alloca (toolchain.md 6 item 7): the copy of `return p` writes the caller's storage, as the
-// direct path writes it.
+// an alloca (toolchain.md 6 item 7): the copy of `return p` writes the caller's storage.
 fn an_aggregate_result_and_parameter_have_no_alloca() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -169,7 +146,6 @@ fn an_aggregate_result_and_parameter_have_no_alloca() void {
         "i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "same", want[..]);
 }
 
 // `_0` of type `void` has no storage, and a scalar parameter is stored into its alloca before
@@ -187,7 +163,6 @@ fn a_void_result_has_no_storage() void {
         "  store i32 %x.in, ptr %x.0, align 4",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "nothing", want[..]);
 }
 
 // A scalar `_0` is `%result`, which each assignment of `_0` stores: the one agreed difference of
@@ -212,16 +187,6 @@ fn a_scalar_result_is_the_alloca_result() void {
         "  store i32 %t2, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    string[7] body = {
-        "  %b.1 = alloca i32, align 4",
-        "  store i32 %a.in, ptr %a.0, align 4",
-        "  store i32 %b.in, ptr %b.1, align 4",
-        "  %t0 = load i32, ptr %a.0, align 4",
-        "  %t1 = load i32, ptr %b.1, align 4",
-        "  %t2 = add i32 %t0, %t1",
-        "  ret i32 %t2",
-    };
-    llvm_env.in_direct(&e, "wrap", body[..]);
 }
 
 // ---- the classification -------------------------------------------------------------------------
@@ -272,7 +237,7 @@ string[40] CASES = {
 
 // `a[i] = c ? 1 : 2`: the index `_4` is a register that the store after the join reads, because
 // one statement assigns it and only that statement reads it; the arm value `_7`, which two arms
-// assign, is a slot. The direct path writes the same text up to its bounds check.
+// assign, is a slot.
 fn an_index_before_a_conditional_is_a_register() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -314,7 +279,6 @@ fn an_index_before_a_conditional_is_a_register() void {
         "  store i32 %t6, ptr %t9, align 4",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "sel", want[1..12]);
 }
 
 // `y += (c ? 1 : 2)`: the old value `_4` and the overflow flag `_6` are registers, and the arm
@@ -361,7 +325,6 @@ fn a_compound_assignment_over_a_conditional() void {
         "  store i32 %t7, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "acc", want[2..12]);
 }
 
 // `switch` on an enum with no `default`: `_2`, the value widened for `fail_enum`, is a register,
@@ -393,11 +356,9 @@ fn an_enum_value_for_its_failure_block_is_a_register() void {
         "L4:",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "pick", want[2..6]);
 }
 
-// The `&&` temporary, which two statements assign, is a slot, as the direct path's
-// short-circuit slot is (spec/fir.md 12.1).
+// The `&&` temporary, which two statements assign, is a slot (spec/fir.md 12.1).
 fn the_short_circuit_temporary_is_a_slot() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -433,13 +394,10 @@ fn the_short_circuit_temporary_is_a_slot() void {
         "  store i8 %t10, ptr %result, align 1",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "both", want[2..13]);
-    llvm_env.in_direct(&e, "both", want[15..19]);
 }
 
 // The counter of a range `for`, which the start and the step assign, is a slot, and so is the
-// copy of the collection, whose type is an aggregate. The direct path reads the counter in the
-// head of the loop in the same way.
+// copy of the collection, whose type is an aggregate.
 fn the_range_counter_is_a_slot() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -490,13 +448,11 @@ fn the_range_counter_is_a_slot() void {
         "  store i32 %t14, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "sum", want[2..10]);
-    llvm_env.in_direct(&e, "sum", want[12..16]);
 }
 
 // The address of a named local is its alloca and prints nothing, so the register `_3 = addr
 // mut(_1)` names `%v.0`, and the call passes it. The sink of a call statement is a register with
-// no storage, whose value nothing reads. Each call is the direct path's.
+// no storage, whose value nothing reads.
 fn an_address_is_a_register_with_no_instruction() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -517,14 +473,12 @@ fn an_address_is_a_register_with_no_instruction() void {
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
     assert(llvm_env.errors(&e) == before);
     assert(!e.g.failed);
-    llvm_env.in_direct(&e, "keep", want[3..5]);
     fir.func mut g = llvm_env.lower(&e, CASES[..], "drop", pass_env.CHECKED);
     defer fir.func_free(&g);
     assert(fir.local_count(&g) == 2);
     assert(llvm_env.storage_of(&g, 1) == fir_llvm.storage.sk_register);
     string[2] dropped = {"entry:", "  %t0 = call i32 @\"main.lend\"(ptr null)"};
     llvm_env.expect(&e, llvm_env.translate(&e, &g), dropped[..]);
-    llvm_env.in_direct(&e, "drop", dropped[1..]);
 }
 
 // Hand-written functions for the rules that a lowered function does not reach: a temporary that
@@ -751,7 +705,6 @@ fn a_field_through_a_pointer() void {
         "  store i64 %t2, ptr %result, align 8",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "field", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "field", want[2..7]);
 }
 
 // An index on a fixed array: `getelementptr inbounds [4 x i32], ptr %a.in, i64 0, i64 %t0`. The
@@ -774,12 +727,10 @@ fn an_index_on_a_fixed_array() void {
         "  store i32 %t3, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "elem", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "elem", want[2..6]);
-    llvm_env.in_direct(&e, "elem", want[8..10]);
 }
 
 // An index on a span: the load of the length for the bounds check, then the load of field 0 and
-// `getelementptr inbounds i32, ptr %t5, i64 %t0`, as the direct path writes it.
+// `getelementptr inbounds i32, ptr %t5, i64 %t0`.
 fn an_index_on_a_span() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -802,8 +753,6 @@ fn an_index_on_a_span() void {
         "  store i32 %t7, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "at", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "at", want[2..8]);
-    llvm_env.in_direct(&e, "at", want[10..14]);
 }
 
 // A deref loads the pointer, then the value.
@@ -821,7 +770,6 @@ fn a_deref() void {
         "  store i32 %t1, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "get", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "get", want[2..6]);
 }
 
 // An index on a `string` takes the element shape over `i8`, the memory type of `char`.
@@ -847,7 +795,6 @@ fn an_index_on_a_string() void {
         "  store i8 %t7, ptr %result, align 1",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "ch", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "ch", want[10..14]);
 }
 
 // A global is its symbol, with no instruction.
@@ -862,12 +809,10 @@ fn a_global() void {
         "  store i32 %t0, ptr %result, align 4",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "global", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "global", want[2..3]);
 }
 
 // A `bool` stores as `zext` and `i8`, and loads as `i8` and `trunc` (toolchain.md 6 item 2). The
-// value comes before the address of the place (spec/fir.md 12.5), where the direct path computes
-// the address first.
+// value comes before the address of the place (spec/fir.md 12.5).
 fn a_bool_field_stores_and_loads_through_i8() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -887,7 +832,6 @@ fn a_bool_field_stores_and_loads_through_i8() void {
         "  store i8 %t5, ptr %t4, align 1",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "set", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "set", want[1..6]);
     string[10] load = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -901,7 +845,6 @@ fn a_bool_field_stores_and_loads_through_i8() void {
         "  store i8 %t4, ptr %result, align 1",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "on", pass_env.CHECKED), load[..]);
-    llvm_env.in_direct(&e, "on", load[2..8]);
 }
 
 // Two projections after a deref: the element shape of the array behind the pointer, then the
@@ -940,7 +883,6 @@ fn projections_chain_in_order() void {
         "  store i64 %t2, ptr %result, align 8",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, PLACES[..], "header", pass_env.CHECKED), header[..]);
-    llvm_env.in_direct(&e, "header", header[2..7]);
 }
 
 fn main() i32 {

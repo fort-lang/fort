@@ -14,14 +14,14 @@ import std.strbuf;
 // the harness limit of 60 s under load.
 //
 // The emitter allocates much more in each round than the front end does: a
-// pool that holds every operand text, seven vectors and eight buffers. A
+// pool that holds every operand text, four lists and eight buffers. A
 // smaller count of rounds therefore reaches the same bound. Each of the
-// sixteen gen.gen_free releases is large enough to affect a complete round.
+// thirteen gen.gen_free releases is large enough to affect a complete round.
 u64 EMIT_ROUNDS = 400;
 u64 EMIT_WIDTH = 60;
 
 fn main() i32 {
-    lifetime.write_runtime();
+    lifetime.write_check_runtime();
     write_emitted();
     string[3] mut emitted = {"fort", "-S", "emitted.ft"};
     assert(lifetime.measure_rounds(emitted[0..3], EMIT_ROUNDS, false) < lifetime.BOUND);
@@ -34,36 +34,30 @@ fn main() i32 {
 // grow `files`. An enum reached by `print` grows `enums` and its member strings.
 // `extern` declarations and calls grow `externs`. String literals grow `strs`.
 // A struct grows `named`, and a module constant grows `globals`. Local slots
-// grow `allocas`. Nested blocks with `defer` grow `scopes` and `defers`. An
-// index and an `assert` grow `fail`.
+// grow `allocas`. An index and an `assert` grow `fail`. The program checks and
+// prints, so the probe writes the stub runtime of lifetime.write_check_runtime.
 //
-// Deletion checks fourteen of the sixteen gen.gen_free releases. Seven are the
-// buffers `named`, `globals`, `funcs`, `allocas`, `body`, `fail`, and `scratch`.
-// Six are the vectors `scopes`, `defers`, `files`, `strs`, `enums`, and
-// `externs`. The pool is the final release. This test is the only witness of
-// `globals`, `fail`, `defers`, `files`, `strs`, `enums`, `externs`, and `scratch`.
+// On T-118's tree, deletion checked fourteen of the sixteen gen.gen_free
+// releases. T-255 deleted three of the sixteen with the direct path: the
+// vectors `scopes` and `defers`, and `slots`, whose release had no witness of
+// its own. Twelve of the thirteen that remain were checked then, and T-255 did
+// not measure them again. Seven are the buffers `named`, `globals`, `funcs`,
+// `allocas`, `body`, `fail`, and `scratch`. Four are the lists `files`, `strs`,
+// `enums`, and `externs`. The pool is the final release. This test is the only
+// witness of `globals`, `fail`, `files`, `strs`, `enums`, `externs`, and
+// `scratch`.
 //
-// The fifteenth, `strbuf.free(&g->out)`, turns
+// The thirteenth, `strbuf.free(&g->out)`, turns
 // driver_lifetime_closure_test.ft red and leaves this test green, and the
-// reason is a measurement. The module of this program is 226998
-// bytes. The buffer exceeds 128 KB. At this threshold, glibc
+// reason is a measurement. The module of this program is 155159
+// bytes on T-255's tree. The buffer exceeds 128 KB. At this threshold, glibc
 // uses mmap instead of the heap. A leak of such a block does not
 // move the system view. And the block view is off for this mode, so neither
 // view sees it. The closure mode emits a module of about two kilobytes, which
 // comes out of the heap. Read the two files together for gen.gen_free.
 //
-// The sixteenth, `slots_free(&g->slots)`, has no witness of its own and can
-// have none. gen.function_begin releases the same vector at each
-// definition, and the C `main` is always the last definition, so the vector
-// that gen_free gets is already empty. A deletion of either call alone leaks
-// nothing and leaves all six tests green. A deletion of both turns this test
-// red, which is the measured form of "exactly one of the two runs". What the
-// call in function_begin answers for is a stale slot and not a leak. A symbol
-// of the previous definition still in the vector would be found by
-// gen_slot_place, which the emitted text of every other suite covers.
-//
 // The width makes the small releases visible. A two-line program covers only
-// `named`, `funcs`, `out`, `body`, `scopes`, and the pool. The `externs` list
+// `named`, `funcs`, `out`, `body`, and the pool. The `externs` list
 // holds references, not declarations. Thus, the program calls each declared
 // function to grow `externs` past the width.
 fn write_emitted() void {
@@ -103,8 +97,7 @@ fn write_emitted() void {
     i = 0;
     while (i < EMIT_WIDTH) {
         // Each step adds one local, one string constant, one `defer`, and one
-        // nested block. Thus, the slot list, `strs`, `defers`, and `scopes`
-        // grow with the width.
+        // nested block. Thus, the allocas and `strs` grow with the width.
         strbuf.append(&b, "    {\n        i64 step");
         strbuf.append_u64(&b, i);
         strbuf.append(&b, " = values[total % 4];\n");

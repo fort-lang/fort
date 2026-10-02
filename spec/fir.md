@@ -4,8 +4,9 @@ This document specifies FIR, the representation that stands between the checker 
 text of `toolchain.md` 6. D19.8 is the decision that owns it. Where this document and
 `decisions.md` disagree, `decisions.md` wins (D1.2).
 
-Status: design, written 2026-09-28 (T-209). No compiler code implements FIR yet. Section 16 gives
-the migration, and section 17 gives the questions the user has not ruled on.
+Status: implemented. Written 2026-09-28 as a design (T-209); T-213 to T-255 implemented it, and
+since T-255 (2026-09-30) the translator writes every function of a build. Section 16 gives the
+migration, which T-255 ended, and section 17 gives the open questions and their rulings.
 
 ## 1. Why FIR exists
 
@@ -291,7 +292,7 @@ place lends it (D17.4).
   literal with every element, or a span or `string` header with its pointer and its length; `T`
   (item 3). `aggregate zeroed T(a, ...)` is a designated struct literal, whose omitted fields are
   `const zero`: the translator zeroes the whole destination, padding included, after it reads
-  the operands, as the direct path does (D6.5, T-253 review round 2).
+  the operands, as the direct path did until T-255 deleted it (D6.5, T-253 review round 2).
 - `call C(a, ...)`: a call, where `C` is `fn m.f`, `extern name`, or an operand of function
   type; the result type of `C` (items 7, 8).
 
@@ -527,8 +528,8 @@ so `G` is read before `bump` runs.
   find its storage (5.5), `_a = addr(p)` holds that address first (D6.3). It is `addr mut(p)`
   when that storage is mutable. The place is then `(*_a)[_i]`. The header of a span or a `string`
   and the element are read after `i`, where they are used, with or without a deref. D6.3 leaves
-  open when that header is read. FIR keeps the order of the direct path
-  (`gen_expr.gen_index_place`), so the migration changes no behavior.
+  open when that header is read. FIR keeps the order that the direct path had, so the migration
+  changed no behavior.
 - **`a[lo..hi]`** on an array, a span or a `string`: `_lo = cast<u64>(lo)` and `_hi =
   cast<u64>(hi)` as for an index, with `0` and the length for an absent bound; `_f = or(gt(copy
   _lo, copy _hi), gt(copy _hi, len))`; `check(copy _f, span, cast<i64>(copy _lo), cast<i64>(copy
@@ -598,12 +599,12 @@ so `G` is read before `bump` runs.
   enters as `copy` or as a constant. A member that goes into a new temporary of a type with
   padding, such as a call, a `?:` or a positional literal, is built in a temporary that
   `_t = const zero T` zeroes first; so is the operand of a cast between aggregate types. The
-  direct path builds such a value in its destination and leaves the padding of the destination
+  direct path built such a value in its destination and left the padding of the destination
   as it was. That padding is zero in a designated literal (D6.5), and in the field that a
-  designated literal passes as the `sret` pointer of a call. So the FIR path leaves zero padding
-  wherever the direct path does. A designated literal and a cast write every byte of their
+  designated literal passes as the `sret` pointer of a call. So the translator leaves zero
+  padding wherever the direct path did. A designated literal and a cast write every byte of their
   temporary, so they take no zero first, and the argument of a call takes none, since the
-  direct path builds it in a temporary too.
+  direct path built it in a temporary too.
 
 ### 9.5 Scopes and deferred statements
 
@@ -687,8 +688,24 @@ that function and reports "not supported". The report names the kind of the tree
 location of the node: the token where the parser starts it, which is the operator of a binary,
 unary or field node and the `(` of a call. `--fir` prints the report as the comment
 `// not supported: <kind> at <line>:<col>` in place of the function. During the migration, the
-direct path then writes that function (section 16). After the migration, the report is a
-`gen_todo` diagnostic, as today (`notes/compiler.md` 6).
+direct path then wrote that function (section 16). Since the migration ended (16.6), a build
+reports a compile error at that location and writes no module (exit 1, `toolchain.md` 1). The
+error names the function and the kind: ``cannot lower `<f>` to FIR: the lowering does not
+support the node `<kind>` ``. When the construct is a print or a string equality whose `std.rt`
+function the closure lacks, the error names that function instead: ``the runtime `std.rt` has
+no entry `<name>`, which `<f>` needs``.
+
+A function whose `check`, `check(overwrite: p)` or `fail` names a runtime entry that the closure
+lacks, or declares with other parameters than rule V7 requires, is a compile error too, at the
+name of the function: ``the runtime `std.rt` has no entry `<name>` with the parameters that
+`<f>` needs``. Only a `check` or `check(overwrite: p)` that the build-mode pass of the selected
+mode keeps (section 11) needs its entry: before the pass, the verifier excuses a missing entry of
+such a check of a kind that the mode removes, and the pass removes those checks. After the pass,
+the verifier excuses no kind. A `fail` always needs its entry. Only a stub `std.rt` of a test or
+an old `--std-dir` meets either error of a runtime entry. The compiler tests the entries of these
+errors alone: the print functions, `str_eq` and the entry of each check kind. It assumes the
+other `std.rt` functions that the translator calls, such as `alloc`, `free`, `args_init`,
+`args` and `flush_all`.
 
 ## 10. The verifier
 
@@ -739,7 +756,9 @@ statement index.
 - **V7**: every `call` has the argument count of its callee's fort type, or at least that count
   for a variadic extern, and every argument agrees with its parameter as V4 defines agreement
   (items 7, 8). The reported operands of a `check` and a `fail` agree with the parameters of the
-  runtime entry of its kind, the location parameters excluded.
+  runtime entry of its kind, the location parameters excluded. Before the build-mode pass of a
+  build, a `check` or `check(overwrite: p)` of a kind that the mode removes needs no fitting
+  entry; after the pass, every check needs its entry (9.8).
 - **V8**: a `call` of a `noreturn` function is the last statement of its block, and the block
   ends in `trap` (D8.5).
 - **V9**: no path from `bb0` reaches a block that ends in `unreachable` (D8.4). On a `switch`
@@ -759,8 +778,9 @@ statement index.
   the empty set and every other block with the set of all temporaries, so a block that no edge
   reaches, such as the block after a terminator (D14.2), passes. V13 follows every edge, the edge
   that V9 prunes on a constant `switch` included.
-V9 closes the termination gap of section 1. The direct path writes `unreachable` at the end of a
-body because `check_terminates` says that the body terminates. With V9, a disagreement is an
+V9 closes the termination gap of section 1. The direct path wrote `unreachable` at the end of a
+body because `check_terminates` said that the body terminates, and the translator writes the
+`unreachable` that the lowering puts there for the same reason. With V9, a disagreement is an
 internal error at compile time, not undefined behavior at run time. The constant clause exists
 because `while (true)` lowers to `switch(const true)`, and D8.4 counts that loop as terminating.
 `check_terminates` accepts a literal `true` in a `while`, a `for` with no condition, and a
@@ -801,7 +821,7 @@ changes the function, and the verifier runs after it. The passes run in this ord
      whose assignments go keeps its number, and the translator gives it no storage (12.1).
    - Where a removed `check(overwrite: p)` stood between `_t = rvalue` and `p = move _t`, and
      nothing else reads `_t`, it rewrites the two statements to `p = rvalue`, which is the direct
-     store of the direct path in release mode.
+     store that the direct path wrote in release mode.
    - It then merges the continuation block of each removed check, the shift check included, into
      the block of the check: rule V11 says that block has no other predecessor. It renumbers the
      blocks in ascending order and rewrites every target of every terminator.
@@ -821,16 +841,16 @@ of a check holds only in the modes that keep that check (section 14).
 
 ## 12. Translation to LLVM
 
-The translator writes one FIR function as LLVM IR text. It keeps every item of `toolchain.md` 6
-that the direct path keeps, with the deviations of 12.5. It does not read the tree and it does not
-read the build mode.
+The translator writes one FIR function as LLVM IR text. It keeps every item of `toolchain.md` 6;
+12.5 records where its text deviated from the text of the direct path, which T-255 deleted. It
+does not read the tree and it does not read the build mode.
 
 ### 12.1 Locals and places
 
 - A named local or a parameter `_n` is an `alloca` in the entry block, in local order, named
-  `%<ident>.<n - 1>`, so that the numbers count parameters and locals from 0 as the direct path
-  does (item 10). An aggregate parameter has no `alloca`: its storage is the incoming
-  pointer (item 7). A scalar parameter arrives as `%<ident>.in` and is stored first (item 10).
+  `%<ident>.<n - 1>`, so that the numbers count parameters and locals from 0 (item 10). An aggregate
+  parameter has no `alloca`: its storage is the incoming pointer (item 7). A scalar parameter
+  arrives as `%<ident>.in` and is stored first (item 10).
 - `_0` of an aggregate type is `%ret.sret` (item 7). `_0` of a scalar type is the `alloca`
   `%result`, which `return` loads. The name has no dot, so no local collides with it (D19.5).
 - A temporary of scalar type that exactly one statement assigns, and that only statements and
@@ -846,9 +866,8 @@ read the build mode.
   the items in each block, because a register has no value before its assignment. The lowering
   writes neither case (V13, section 9). The next rule gives a temporary that nothing names no
   storage. The translator classifies the locals in one scan before it writes text, as the direct
-  path collects the locals before it emits. The direct path
-  keeps its scalar intermediates in registers and its aggregate temporaries in `%tmp<K>` slots,
-  so this rule gives the same shape.
+  path collected the locals before it emitted. The direct path kept its scalar intermediates in
+  registers and its aggregate temporaries in `%tmp<K>` slots, so this rule gave the same shape.
 - A temporary that no statement and no terminator names gets no storage: no register and no
   `alloca`. A statement or a terminator names a local when the local is the base of one of its
   places or the index of one of its projections. The build-mode pass leaves such temporaries,
@@ -864,7 +883,7 @@ read the build mode.
   or `llvm.memset`, and only then writes the destination, in every case, because the destination
   can be `p` itself (item 18, `notes/compiler.md` 6). A `move` or a `del` of a temporary prints
   no zeroing, whether the temporary is a register or a `%tmp` slot: nothing reads a temporary
-  after a `move` of it (rule V12), and the direct path zeroes no intermediate.
+  after a `move` of it (rule V12), and the direct path zeroed no intermediate.
 
 ### 12.2 Rvalues and statements
 
@@ -947,72 +966,72 @@ lost a `zeroext`.
   in ascending number, with the data of a failure block at the `check` that makes it (D19.5).
   Intrinsics and attribute groups stand in the fixed order of items 8 and 14.
 - Extern declarations stand in the order of the first call of each in the text of the function
-  definitions, the definitions in module order (item 8). One rule holds in any module, whether
-  the FIR path or the direct path writes each function (16.1). The extern list of a FIR function
+  definitions, the definitions in module order (item 8). The extern list of a FIR function
   follows its blocks in number order, and the translator writes the blocks in that order, so the
-  list follows the text (5.1). The direct path records an extern where it writes the call, after
-  the calls of the arguments. The `declare` lines of the two paths differ only where the texts of
-  their functions differ: for a `while` whose body breaks after an `if`, FIR numbers the block
-  after the loop before the rest of the body, so a call after the loop can precede a call in the
-  body.
+  list follows the text (5.1). During the migration (16.1) the same rule held in a module that
+  both paths wrote: the direct path recorded an extern where it wrote the call, after the calls
+  of the arguments. The `declare` lines of the two paths differed only where the texts of their
+  functions differed: for a `while` whose body breaks after an `if`, FIR numbers the block after
+  the loop before the rest of the body, so a call after the loop can precede a call in the body.
 - The translator gives `#8` to the definitions of the `noreturn` runtime entries that
   `toolchain.md` 5.1 lists, and to no other function (item 14).
 
-The translation deviates from the direct path in these ways, and in no other that the design
-knows. Each is a difference in text:
+The translation deviated from the text of the direct path in these ways, and in no other that
+the design knew; T-255 deleted the direct path, and the list stays as the record of what the
+migration changed and as the rules of `tools/fir_diff.py` (16.2). Each is a difference in text:
 - Block numbers differ, because FIR creates its blocks in another order than the direct path
-  allocates its labels, failure blocks take the last numbers, and the number of a `fail`-only
+  allocated its labels, failure blocks take the last numbers, and the number of a `fail`-only
   block is not a label.
-- A scalar `_0` is an `alloca` `%result` that each `return` loads; the direct path returns a
+- A scalar `_0` is an `alloca` `%result` that each `return` loads; the direct path returned a
   register. The `&&`, `||` and `?:` slots and `%tmp` numbers can differ in order.
-- `@.str.<N>` and `@.file.<N>` follow the block numbers, and the direct path follows its tree
+- `@.str.<N>` and `@.file.<N>` follow the block numbers, and the direct path followed its tree
   walk, so a string in a nested block can take a later number.
 - The address of an assignment target that the lowering does not hold with `addr` (9.3) is
   computed at the store, after the right side, and twice for `lv op= e`; the direct path
-  computes it once, before the right side. Nothing writes memory in between, so the address is
+  computed it once, before the right side. Nothing writes memory in between, so the address is
   the same.
 - A place operand is loaded once for each rvalue that names it, so `x / a[i]` loads `a[i]` for
-  the zero test, the overflow test and the division; the direct path loads it once. So
+  the zero test, the overflow test and the division; the direct path loaded it once. So
   `fprint(fd, a, b)` loads `fd` again for each print, after the print of the argument before.
   The print entries of `std.rt` write no global of another module, so the value is the same.
 - The failure blocks of nested constructs stand in another order, because they follow the
   numbers of the blocks that hold their checks; the labels still ascend (D19.6).
 - The index of an index projection loads before the pointer that its base reads: `h->arr[i + 1]`
-  computes and checks `i + 1` before it loads `h`. The direct path loads `h` first.
+  computes and checks `i + 1` before it loads `h`. The direct path loaded `h` first.
 - An operand that no temporary holds loads where the rvalue that reads it stands, after the
   temporaries of the other operands: `push_byte(b, cast(ch, u8))` loads `ch` before `b`. The
-  direct path loads the operands in order. The lowering holds an operand in a temporary before a
+  direct path loaded the operands in order. The lowering holds an operand in a temporary before a
   later writer (9.4), so no write stands between the two loads.
 - An aggregate reads every member before its first store (section 6): `pair{p.b, p.a}` loads
   both fields and then stores both, and `pair{f(), a + 1}` stores both members after the call
   and after the overflow check. An aggregate member of an aggregate goes into a `%tmp` slot
-  first and then into its field with `llvm.memcpy`. The direct path writes each member into its
-  field as it reads it, before the calls and the checks of the members after it.
+  first and then into its field with `llvm.memcpy`. The direct path wrote each member into its
+  field as it read it, before the calls and the checks of the members after it.
 - A designated literal zeroes the whole value with `llvm.memset` after it reads its members,
-  and the direct path before; both then store the named fields. A member of a literal that FIR
+  and the direct path did before; both then store the named fields. A member of a literal that FIR
   builds in a temporary of a type with padding is built in a zeroed temporary, which one
-  `llvm.memset` more zeroes, and then copied into its field (9.4). The direct path builds it in
-  the field, so the padding of that field is zero on the FIR path where the direct path leaves
+  `llvm.memset` more zeroes, and then copied into its field (9.4). The direct path built it in
+  the field, so the padding of that field is zero on the FIR path where the direct path left
   it as it was.
 - An aggregate rvalue goes through a `%tmp` slot: the result of a call, a `slice` and a `cast`
   between aggregate types is a temporary, and an `llvm.memcpy` copies it into the place that
   reads it. `return t` of a local of an owning aggregate type copies `t` into one more `%tmp`
-  slot before it copies it into `%ret.sret`. The direct path writes such a value into its
+  slot before it copies it into `%ret.sret`. The direct path wrote such a value into its
   destination.
 - `eat(move(s))` copies `s` with one `llvm.memcpy` into the `%tmp` slot of the argument and then
-  zeroes `s`. The direct path writes two: into an intermediate, and from it into the argument
+  zeroes `s`. The direct path wrote two: into an intermediate, and from it into the argument
   copy (T-251).
 - An aggregate argument that is a place other than the storage of a temporary is copied into
   its `%tmp` slot at the call, after the other arguments and their checks (T-251, open question
-  4 of that ticket). The direct path copies each argument where it evaluates it, so
+  4 of that ticket). The direct path copied each argument where it evaluated it, so
   `mem.copy(buf, s[0..n])` copies `buf` before the span check of `s[0..n]`.
 - A `switch` on a `&&`, `||` or `?:` slot loads the slot again, a `load i8` and a `trunc`, in
-  the block that has just stored it. The direct path branches on the value that it stored.
+  the block that has just stored it. The direct path branched on the value that it stored.
 - A string constant operand of `==` or `!=` on strings goes into a `%tmp` span, and the call of
-  `std.rt.str_eq` loads the two fields of that span. The direct path passes the pointer and the
+  `std.rt.str_eq` loads the two fields of that span. The direct path passed the pointer and the
   length of the constant.
 - A span check of `s[lo..hi]` tests `lo > hi` before `hi > len`, and `or` joins them in that
-  order. The direct path tests `hi > len` first.
+  order. The direct path tested `hi > len` first.
 One difference is in behavior: an aggregate literal that reads its destination (section 6). The
 user ruled on it on 2026-09-28 (open question 5), and D6.3 says so. The test
 `test/lang/run/structs/014_literal_reads_old_value.ft` holds the behavior of FIR, and the oracle
@@ -1222,14 +1241,15 @@ and the linear ownership analysis, each in its own way.
 
 ## 16. The migration
 
-The compiler moves to FIR one function at a time.
+The compiler moved to FIR one function at a time. T-255 ended the migration (item 6); the items
+below are the record of how it ran.
 
-1. **Two paths in one module.** For each function, the compiler tries the lowering. When the
-   lowering supports every construct of the function, the verifier, the passes and the
-   translator write it. Otherwise, the direct path writes it. The module-level parts do not
-   change. Each ticket measures the share of functions that the lowering supports, over the
+1. **Two paths in one module.** For each function, the compiler tried the lowering. When the
+   lowering supported every construct of the function, the verifier, the passes and the
+   translator wrote it. Otherwise, the direct path wrote it. The module-level parts did not
+   change. Each ticket measured the share of functions that the lowering supports, over the
    corpus and over `src/fort`.
-2. **The oracle.** The translator's text differs from the direct path's in the ways 12.5 lists,
+2. **The oracle.** The translator's text differed from the direct path's in the ways 12.5 lists,
    so the oracle is `llvm-diff` between the two, function by function, over the run corpus in
    both modes, which `tools/ir_snapshot.sh` (T-192) writes. Both hosts have `llvm-diff`:
    `llvm-diff-18` in the VM and Homebrew's `llvm@18` on the Mac. `llvm-diff` reports a changed
@@ -1265,12 +1285,14 @@ The compiler moves to FIR one function at a time.
    `test/lang`, `src/fort`, `src/lsp` and `std` in the three modes, and it flagged no function
    there. No known source program breaks V9, so the tests of V9 on the paths of the compiler
    take a FIR function built by hand.
-6. **The end.** The direct path goes when the lowering supports every function of the corpus and
-   of `src/fort`. The ticket that deletes it amends these texts: the sentence of D19.1 that names
-   the direct path, `toolchain.md` 6 item 1 ("built by appending text in one forward pass"),
-   `toolchain.md` 6 item 10 ("the tree walk never has to know its predecessors"), the sentence of
-   the rule of D19.3 that says "one tree walk with a destination place per expression", and
-   `toolchain.md` 8.
+6. **The end.** The direct path was to go when the lowering supported every function of the corpus
+   and of `src/fort`. The ticket that deleted it was to amend these texts: the sentence of D19.1
+   that names the direct path, `toolchain.md` 6 item 1 ("built by appending text in one forward
+   pass"), `toolchain.md` 6 item 10 ("the tree walk never has to know its predecessors"), the
+   sentence of the rule of D19.3 that says "one tree walk with a destination place per expression",
+   and `toolchain.md` 8. T-255 deleted the direct path on 2026-09-30, when `--fir-stats` gave
+   `lowered N of N` over `test/lang`, `src/fort`, `src/lsp` and `std` in the three modes, and
+   amended these texts and the block names of D19.5.
 
 The self-hosting fixpoint (D19.5, `notes/testing.md` 5) must hold after every ticket. The FIR
 modules must use only the language that the last pin of `tools/bootstrap.ref` accepts.
@@ -1296,11 +1318,11 @@ default. The user then resolved question 4 by removing its subject: `fort_entry`
    `main` (item 22). Should they be FIR functions? Ruled: no. `fort_entry` had no job left after
    T-088 moved the runtime into fort, and T-212 removed it, so the compiler-emitted `main` calls
    the program's `main` directly and is the one function the translator writes as fixed text.
-5. **Aggregate literals that read their destination.** The direct path writes a literal member
-   by member, so `s = pair{s.b, s.a}` gives `s.b, s.b`. Section 6 reads every operand first, so
+5. **Aggregate literals that read their destination.** The direct path wrote a literal member
+   by member, so `s = pair{s.b, s.a}` gave `s.b, s.b`. Section 6 reads every operand first, so
    the same statement swaps. Ruled: the swap. D6.3 gains the sentence "an aggregate literal
-   reads every member before the destination changes", and the direct path's behavior is a
-   known difference until the migration replaces it.
+   reads every member before the destination changes", and the direct path's behavior was a
+   known difference until T-255 deleted the direct path.
 
 ## 18. Coverage of the contract
 
@@ -1326,4 +1348,4 @@ Each item of `toolchain.md` 6 that describes a function body, and the part of FI
 - **Item 20, `noreturn`**: `trap`, rule V8, and the end of a body (9.6).
 
 Items 1, 4, 5, 6, 13, 21, 22 and 23 describe the module and its data. The translator keeps them
-as the direct path does.
+as the direct path did.

@@ -7,14 +7,13 @@
 //| entry ok
 //| module ok
 //| ok
-/// Checks function definitions from src/fort/gen_stmt.ft. Cases cover
-/// signatures, entry allocas, implicit tails, the C `main`, named structs, and
-/// complete module assembly.
-import ast;
+/// Checks function definitions that src/fort/gen_fir.ft writes through the FIR translator. Cases
+/// cover signatures, entry allocas, implicit tails, the C `main`, named structs, and complete
+/// module assembly.
 import check_env;
 import gen;
 import gen_env;
-import gen_stmt;
+import gen_fir;
 import std.str;
 import std.strbuf;
 
@@ -53,19 +52,24 @@ fn a_scalar_parameter_is_an_ordinary_one_and_lands_in_its_slot() void {
     strbuf.append(&src, "fn second(i64 a, i64 b) i64 {\n    return b;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&src)));
-    string[9] mut want = {
+    // A scalar result is the alloca `%result`, which `return` stores and the
+    // last block loads (spec/fir.md 12.1, 12.4).
+    string[12] mut want = {
         "define dso_local i64 @\"main.second\"(i64 %a.in, i64 %b.in) #0 {\n",
         "entry:\n",
+        "  %result = alloca i64, align 8\n",
         "  %a.0 = alloca i64, align 8\n",
         "  %b.1 = alloca i64, align 8\n",
         "  store i64 %a.in, ptr %a.0, align 8\n",
         "  store i64 %b.in, ptr %b.1, align 8\n",
         "  %t0 = load i64, ptr %b.1, align 8\n",
-        "  ret i64 %t0\n",
+        "  store i64 %t0, ptr %result, align 8\n",
+        "  %t1 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t1\n",
         "}\n",
     };
     string got = gen_env.emit_function(&e, "second");
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..9]));
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..12]));
     gen_env.expect_blocks(&e, got);
 }
 
@@ -82,19 +86,22 @@ fn a_narrow_parameter_and_result_carry_their_extension_attribute() void {
     strbuf.append(&src, "fn narrow(u8 a, i16 b) u8 {\n    return a;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&src)));
-    string[9] mut want = {
+    string[12] mut want = {
         "define dso_local zeroext i8 @\"main.narrow\"(i8 zeroext %a.in, i16 signext %b.in) #0 {\n",
         "entry:\n",
+        "  %result = alloca i8, align 1\n",
         "  %a.0 = alloca i8, align 1\n",
         "  %b.1 = alloca i16, align 2\n",
         "  store i8 %a.in, ptr %a.0, align 1\n",
         "  store i16 %b.in, ptr %b.1, align 2\n",
         "  %t0 = load i8, ptr %a.0, align 1\n",
-        "  ret i8 %t0\n",
+        "  store i8 %t0, ptr %result, align 1\n",
+        "  %t1 = load i8, ptr %result, align 1\n",
+        "  ret i8 %t1\n",
         "}\n",
     };
     string got = gen_env.emit_function(&e, "narrow");
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..9]));
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..12]));
     gen_env.expect_blocks(&e, got);
 }
 
@@ -124,7 +131,8 @@ fn an_aggregate_parameter_and_result_pass_by_pointer() void {
 }
 
 // A `noreturn` definition takes attribute group #1 and the block that would
-// fall off the end of its body ends in a trap.
+// fall off the end of its body ends in a trap. A block is `%L<n>` for FIR
+// block n, and `bb0` is `entry` (spec/fir.md 12.4).
 fn a_noreturn_definition_takes_the_noreturn_group_and_traps() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -137,15 +145,15 @@ fn a_noreturn_definition_takes_the_noreturn_group_and_traps() void {
     string[12] mut want = {
         "define dso_local void @\"main.stuck\"() #1 {\n",
         "entry:\n",
-        "  br label %L0\n",
-        "\n",
-        "L0:\n",
-        "  br i1 true, label %L1, label %L2\n",
+        "  br label %L1\n",
         "\n",
         "L1:\n",
-        "  br label %L0\n",
+        "  br i1 true, label %L2, label %L3\n",
         "\n",
         "L2:\n",
+        "  br label %L1\n",
+        "\n",
+        "L3:\n",
         "  call void @llvm.trap()\n  unreachable\n}\n",
     };
     string got = gen_env.emit_function(&e, "stuck");
@@ -171,7 +179,7 @@ fn the_allocas_are_the_parameters_then_the_locals_in_declaration_order() void {
     strbuf.append(&src, "    i64[3] xs = {1, 2, 3};\n");
     strbuf.append(&src, "    for (i64 x : xs) {\n        t += x;\n    }\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    assert(gen_env.open_module_rt(&e, strbuf.view(&src)));
     string got = gen_env.emit_function(&e, "walk");
     string[7] mut want = {
         "entry:\n",
@@ -197,7 +205,7 @@ fn an_owning_local_is_zeroed_in_the_entry_block() void {
     strbuf.append(&src, "fn owning() i64 {\n    i64 mut* own p = new(i64);\n");
     strbuf.append(&src, "    del(p);\n    return 0;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    assert(gen_env.open_module_rt(&e, strbuf.view(&src)));
     string got = gen_env.emit_function(&e, "owning");
     string[3] mut want = {
         "  %p.0 = alloca ptr, align 8\n",
@@ -221,7 +229,7 @@ fn the_tail_of_a_body_that_falls_off_its_end() void {
     strbuf.append(&src, "fn quiet() void {\n    return;\n    i64 dead = 1;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&src)));
-    // After a terminating statement the emitter opens a fresh block for the
+    // After a terminating statement the lowering opens a fresh block for the
     // unreachable statements the parser allows, and that block gets the same
     // tail.
     string[8] mut want = {
@@ -230,7 +238,7 @@ fn the_tail_of_a_body_that_falls_off_its_end() void {
         "  %dead.0 = alloca i64, align 8\n",
         "  ret void\n",
         "\n",
-        "L0:\n",
+        "L1:\n",
         "  store i64 1, ptr %dead.0, align 8\n",
         "  ret void\n}\n",
     };
@@ -306,7 +314,7 @@ fn the_named_types_are_the_two_fixed_ones_then_every_struct() void {
     strbuf.append(&src, "struct point {\n    i64 x;\n    u8 flag;\n    string name;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&src)));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string[3] mut want = {
         "%fort.span = type { ptr, i64 }\n",
         "%fort.enum_member = type { i32, ptr }\n",
@@ -349,8 +357,8 @@ fn the_module_is_the_sections_of_item_one_in_order() void {
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(gen_env.open_module(&e, "fn main() i32 {\n    return 0;\n}\n"));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
-    string[13] mut want = {
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    string[16] mut want = {
         "target triple = \"x86_64-unknown-linux-gnu\"\n",
         "\n",
         "%fort.span = type { ptr, i64 }\n",
@@ -358,7 +366,10 @@ fn the_module_is_the_sections_of_item_one_in_order() void {
         "\n",
         "define dso_local i32 @\"main.main\"() #0 {\n",
         "entry:\n",
-        "  ret i32 0\n",
+        "  %result = alloca i32, align 4\n",
+        "  store i32 0, ptr %result, align 4\n",
+        "  %t0 = load i32, ptr %result, align 4\n",
+        "  ret i32 %t0\n",
         "}\n",
         "\n",
         "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n",
@@ -370,7 +381,7 @@ fn the_module_is_the_sections_of_item_one_in_order() void {
         "\n",
         "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..13])) >= 0);
+    assert(str.find(got, gen_env.join_lines(&e, want[0..16])) >= 0);
     assert(str.find(got, gen_env.join_lines(&e, tail[0..2])) >= 0);
     gen_env.expect_blocks(&e, got);
 }
@@ -388,7 +399,7 @@ fn a_program_emits_every_module_of_the_closure() void {
     strbuf.append(&src, "import helper;\nfn main() i32 {\n");
     strbuf.append(&src, "    return cast(helper.one(), i32);\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&src)));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string got = gen_env.module_text(&e);
     // The imported module comes first, every module after the ones it
     // imports.

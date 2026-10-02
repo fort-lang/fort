@@ -1,15 +1,11 @@
 /// Provides the shared emitter-test environment. It combines a checked sandbox, an emitter, and
 /// queries for emitted text.
 //
-// bootstrap0/src/gen.c emits a complete function. This includes the signature,
-// parameter and local allocas, body, and failure blocks. Therefore,
-// bootstrap0/test/gen*_test.c compiles a complete program and reads the module back. An
-// expression suite here drives one node at a time, so it needs only the
-// emitter's slots. gen_stmt.gen_slots
-// creates those slots here and in gen_function. A suite therefore
-// cannot assert a slot name that the emitter does not produce. The other job this
-// module does is the per-function reset of the counters and buffers, which
-// `begin` spells the way function_begin does.
+// A suite emits a whole function through FIR (gen_fir.ft) or a whole program, and reads the text
+// back, as bootstrap0/test/gen*_test.c does. A suite of the helpers of gen.ft calls them one at a
+// time, after `begin`, the per-function reset of the counters and buffers that function_begin
+// does. The sandbox holds an empty `std.rt` unless the source opens with open_module_rt, so a
+// function whose check needs a runtime entry, or that prints, needs that form.
 //
 // What it cannot do, and what covers that instead. Nothing here runs `opt -passes=verify`: the
 // compiler's own modules are run through clang by every test of the stage2 corpus. `opt` would
@@ -19,13 +15,13 @@
 // bootstrap0/test/common/gen_helpers.h's gen_block_terminators. An assertion about the emitted text
 // is how a convention rule is pinned in any case, since no language run test can see one.
 import ast;
-import check;
-import std.str;
 import check_env;
+import fir_verify;
 import gen;
-import gen_expr;
-import gen_stmt;
-import modules;
+import gen_fir;
+import lower_env;
+import modules_env;
+import std.str;
 import std.strbuf;
 import types;
 
@@ -59,13 +55,14 @@ fn close(env mut* e) void {
     check_env.close(&e->c);
 }
 
-// ---- driving one function ----------------------------------------------------------
+// ---- the checked source ------------------------------------------------------------
 
-// Checks `body` as the whole of the body of `fn main() i32` and prepares the
-// emitter over it. The annotations the emitter reads, the module `assert`
-// quotes its argument out of, and one slot per parameter and local. False
+// Checks `body` as the whole of the body of `fn main() i32` and points the
+// emitter at the checked entry module. The runtime of the sandbox is
+// lower_env.RUNTIME, so that `main` emits with its checks and prints. False
 // when the source did not check clean, which is what an assertion asks first.
 fn open_body(env mut* e, string body) bool {
+    use_runtime(e);
     if (!check_env.check_body(&e->c, body)) {
         return false;
     }
@@ -75,49 +72,26 @@ fn open_body(env mut* e, string body) bool {
 // The same for a whole module source, which is how a test that needs a
 // declaration beside `main` writes one.
 fn open_src(env mut* e, string src) bool {
+    use_runtime(e);
     if (!check_env.check_src(&e->c, src)) {
         return false;
     }
     return open_main(e);
 }
 
-// Points the emitter at the checked entry module and binds the slots of
-// `main`.
+// Points the emitter at the checked entry module, which must define `main`.
 fn open_main(env mut* e) bool {
     e->g.ck = &e->c.ck;
     e->g.module = check_env.module_at(&e->c, "main");
     ast.node* fn_node = check_env.node_in_main(&e->c, ast.ast_kind.k_fn_decl, "main");
-    if (e->g.module == null || fn_node == null) {
-        return false;
-    }
-    // The very slots gen_function makes, from gen_function's own code. The allocas it wrote
-    // beside them belong to the entry block. An expression assertion does not
-    // inspect them, and `begin` clears them before the first emission.
-    gen.node_ref_vec mut locals = gen.node_ref_vec{};
-    defer gen.refs_free(&locals);
-    gen_stmt.gen_slots(&e->g, fn_node, &locals);
-    return true;
+    return e->g.module != null && fn_node != null;
 }
 
-// The per-function reset of gen.function_begin, minus the slots, so that
-// two assertions of one test each start from `%t0` and `L0`.
-//
-// It stays separate from function_begin because the two reset different state. function_begin
-// resets fourteen fields, the slot vector and the scope stack among them, because it starts a
-// definition. This resets the seven an expression assertion reads -- the three counters, the
-// three buffers and `terminated`. It keeps the slots because the next expression can name
-// locals that `open_main` already bound. A `begin` that called
-// function_begin would drop those slots and every expression suite would panic in
-// gen_slot_place. It also clears `failed`, which function_begin does not, so that one case's
-// gen_todo does not silence the next.
+// The per-function reset of gen.function_begin, so that two assertions of one test each start
+// from `%t0`, and the flag of a gen_todo, which function_begin does not clear, so that one
+// case's gen_todo does not silence the next.
 fn begin(env mut* e) void {
-    e->g.temps = 0;
-    e->g.labels = 0;
-    e->g.tmps = 0;
-    strbuf.clear(&e->g.allocas);
-    strbuf.clear(&e->g.body);
-    strbuf.clear(&e->g.fail);
-    e->g.terminated = false;
+    gen.function_begin(&e->g);
     e->g.failed = false;
 }
 
@@ -126,57 +100,6 @@ fn begin(env mut* e) void {
 // The declaration of the local named `name` in `main`.
 fn decl_of(env* e, string name) ast.node* {
     return check_env.node_in_main(&e->c, ast.ast_kind.k_var_decl, name);
-}
-
-// Its initializer, which is the expression a test emits.
-fn init_of(env* e, string name) ast.node* {
-    ast.node* d = decl_of(e, name);
-    if (d == null) {
-        return null;
-    }
-    return d->b;
-}
-
-// The place of that local, which is what an initializer is written into.
-fn place_of(env mut* e, string name) gen.gen_place {
-    return gen.gen_slot_place(&e->g, decl_of(e, name)->sym);
-}
-
-// ---- emitting -----------------------------------------------------------------------
-
-// Emits the initializer of the local `name` as a scalar value and answers the
-// operand it lands in. The text it produced is body(e).
-fn emit_value(env mut* e, string name) gen.gen_val {
-    begin(e);
-    return gen_expr.gen_expr_value(&e->g, init_of(e, name));
-}
-
-// The same, answering the text of the blocks it produced.
-fn value_text(env mut* e, string name) string {
-    emit_value(e, name);
-    return body(e);
-}
-
-// The expression of the `i`-th statement of `main`, with the call statement
-// unwrapped to the call it holds.
-fn stmt_expr(env* e, u64 i) ast.node* {
-    return check_env.body_expr(&e->c, "main", i);
-}
-
-// Emits that statement's expression for its effects alone, which is what a
-// call statement is.
-fn discard_at(env mut* e, u64 i) string {
-    begin(e);
-    gen_expr.gen_expr_discard(&e->g, stmt_expr(e, i));
-    return body(e);
-}
-
-// Emits it into that local's own place, which is how every aggregate is
-// produced.
-fn into_text(env mut* e, string name) string {
-    begin(e);
-    gen_expr.gen_expr_into(&e->g, init_of(e, name), place_of(e, name));
-    return body(e);
 }
 
 // The normal blocks emitted so far, a view valid until the next emission.
@@ -314,13 +237,6 @@ fn open_lines(env mut* e, string@ lines) bool {
 // text `assert` quoted out of the source is read back.
 fn record_text(env* e, u64 i) string {
     return gen.records_at(&e->g.strs, i).text;
-}
-
-// Emits the initializer of the local `name` as a place, which is what an
-// lvalue has and a value does not.
-fn emit_place(env mut* e, string name) gen.gen_place {
-    begin(e);
-    return gen_expr.gen_expr_place(&e->g, init_of(e, name));
 }
 
 // ---- structural block check -------------------------------------------------
@@ -465,23 +381,26 @@ fn globals(env* e) string {
 }
 
 fn module_text(env* e) string {
-    return gen.gen_text(&e->g);
+    return strbuf.view(&e->g.out);
 }
 
-// Emits and returns the entry module's
-// top-level function `name`. For the first
-// definition, this text is the complete funcs section.
+// Emits the entry module's top-level function `name` through FIR, as gen_fir.gen_program does
+// for each function in the mode of the emitter, and returns the definitions emitted so far. For
+// the first definition, this text is the complete funcs section. A function that gen_fir refuses
+// adds a compile error and no text.
 fn emit_function(env mut* e, string name) string {
     ast.node* fn_node = check_env.node_in_main(&e->c, ast.ast_kind.k_fn_decl, name);
     if (fn_node == null) {
         return "";
     }
-    gen_stmt.gen_function(&e->g, fn_node);
+    gen_fir.fir_path mut fp = gen_fir.fir_path{.ck = &e->c.ck,
+                                                .rt = fir_verify.runtime_of(&e->c.ck)};
+    fir_verify.excuse_mode(&fp.rt, e->g.opts.release, e->g.opts.no_bounds_check);
+    gen_fir.emit_function(&e->g, &fp, fn_node);
     return funcs(e);
 }
 
-// Checks `src` as a whole module and points the emitter at it without binding
-// any slot: a definition suite lets gen_function do that itself.
+// Checks `src` as a whole module and points the emitter at it.
 fn open_module(env mut* e, string src) bool {
     if (!check_env.check_src(&e->c, src)) {
         return false;
@@ -513,4 +432,49 @@ fn gen_options_open(env mut* e, bool release, bool no_bounds_check) void {
     opts.release = release;
     opts.no_bounds_check = no_bounds_check;
     open_with(e, opts);
+}
+
+// open_module over a sandbox whose std/rt.ft holds lower_env.RUNTIME: the runtime entry of each
+// check kind, str_eq and the print functions, so that a function with a check or a print emits.
+// gen_fir.gen_program then writes the functions of that runtime too.
+fn open_module_rt(env mut* e, string src) bool {
+    use_runtime(e);
+    return open_module(e, src);
+}
+
+// Writes lower_env.RUNTIME as the std/rt.ft of the sandbox, before the source checks.
+fn use_runtime(env mut* e) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : lower_env.RUNTIME) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+}
+
+// Emits `main` of the checked entry module through FIR, the first time it is asked, holds that
+// each of its blocks ends in one terminator, and gives its definition: the text that a case of
+// one expression reads its instructions from.
+fn main_text(env mut* e) string {
+    if (strbuf.view(&e->g.funcs).len == 0) {
+        emit_function(e, "main");
+        expect_blocks(e, funcs(e));
+    }
+    return funcs(e);
+}
+
+// Asserts that the lines `want` stand, together and in order, in `got`, printing both when they
+// do not.
+fn expect_in(string got, string want) void {
+    if (str.find(got, want) < 0) {
+        eprint("text:     [");
+        eprint(got);
+        eprintln("]");
+        eprint("lacks:    [");
+        eprint(want);
+        eprintln("]");
+    }
+    assert(str.find(got, want) >= 0);
 }

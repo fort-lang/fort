@@ -1,39 +1,58 @@
 //! run
 //! flags: -I ../../src/fort -I support
 //! stdout:
-//| paths ok
+//| functions ok
 //| counts ok
 //| declarations ok
 //| ok
-/// Checks the two paths of a function in src/fort/gen_stmt.ft (spec/fir.md 16.1): with the option
-/// `fir`, the emitter writes a function through the lowering, the verifier, the build-mode pass
-/// and the translator when the lowering supports it, and through the direct path otherwise. It
-/// also checks the counts that --fir-stats prints and the order of the `declare` lines.
+/// Checks how src/fort/gen_fir.ft writes the functions of a program (spec/fir.md 3, 9.8): the
+/// lowering, the verifier, the build-mode pass and the translator for each function, and a
+/// compile error for a function that the lowering refuses, that needs a print that the closure
+/// lacks, or whose check names a runtime entry that the closure lacks. It also checks the counts
+/// that --fir-stats prints and the order of the `declare` lines.
+import ast;
+import check_env;
 import gen;
 import gen_env;
-import gen_stmt;
+import gen_fir;
 import std.str;
 import std.strbuf;
 
 //
-// The sandbox of gen_env holds no runtime. So the lowering refuses a function with a print
-// (spec/fir.md 9.8), and a function whose check needs a runtime entry takes the direct path too,
-// because rule V7 refuses its FIR. Every other function takes the FIR path.
+// The sandbox of gen_env holds an empty runtime unless `runtime` asks for the one of lower_env.
+// With the empty runtime, the lowering refuses a function with a print (spec/fir.md 9.8), and
+// rule V7 refuses a function whose check needs a runtime entry. Each is a compile error.
 
-// Opens `e` over the source `lines`, each ended by its newline, with the option `fir` set as
-// `fir`, and emits the whole program.
-fn emit(gen_env.env mut* e, string@ lines, bool fir) void {
-    gen.gen_options mut opts = gen.gen_options{};
-    opts.fir = fir;
+// Opens `e` over the source `lines`, each ended by its newline, with the runtime of lower_env when
+// `runtime` is set and an empty one otherwise, and emits the whole program in the default mode.
+// Gives what gen_program gives: false after a diagnostic.
+fn emit(gen_env.env mut* e, string@ lines, bool runtime) bool {
+    return emit_with(e, lines, runtime, gen.gen_options{});
+}
+
+// The same in the mode of `opts`.
+fn emit_with(gen_env.env mut* e, string@ lines, bool runtime, gen.gen_options opts) bool {
     gen_env.open_with(e, opts);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
     for (string line : lines) {
         strbuf.append(&src, line);
     }
-    assert(gen_env.open_module(e, strbuf.view(&src)));
-    assert(gen_stmt.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    if (runtime) {
+        assert(gen_env.open_module_rt(e, strbuf.view(&src)));
+    } else {
+        assert(gen_env.open_module(e, strbuf.view(&src)));
+    }
+    return gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set);
 }
+
+// The message of the error of `helper`, whose print of an integer needs the print function of its
+// type, which the empty runtime lacks.
+string NO_PRINT = "the runtime `std.rt` has no entry `print_i64`, which `helper` needs";
+
+// The message of the error of a function whose overflow check names an entry that the runtime
+// lacks, after its first words `the runtime `std.rt``.
+string NO_OVERFLOW = " has no entry `fail_overflow` with the parameters that `add` needs";
 
 // The definition of `main.<name>` in `text`, from its `define` line to its `}` line.
 fn definition(string text, string name) string {
@@ -53,7 +72,7 @@ fn definition(string text, string name) string {
     return text[start..start + cast(end, u64) + 3];
 }
 
-// ---- the two paths -----------------------------------------------------------------------------
+// ---- the functions ------------------------------------------------------------------------------
 
 // A function with a print, which the lowering refuses in a closure without the runtime, and two
 // functions that it supports.
@@ -69,7 +88,7 @@ string[9] PATHS = {
     "}\n",
 };
 
-// What the FIR path writes for `id`: the scalar result is the alloca `%result`, which `return`
+// What the translator writes for `id`: the scalar result is the alloca `%result`, which `return`
 // loads (spec/fir.md 12.1, 12.4).
 string[9] FIR_ID = {
     "define dso_local i32 @\"main.id\"(i32 %a.in) #0 {\n",
@@ -83,79 +102,176 @@ string[9] FIR_ID = {
     "  ret i32 %t1\n}\n",
 };
 
-// What the direct path writes for `id`: the loaded value is the result.
-string[6] DIRECT_ID = {
-    "define dso_local i32 @\"main.id\"(i32 %a.in) #0 {\n",
-    "entry:\n",
-    "  %a.0 = alloca i32, align 4\n",
-    "  store i32 %a.in, ptr %a.0, align 4\n",
-    "  %t0 = load i32, ptr %a.0, align 4\n",
-    "  ret i32 %t0\n}\n",
-};
-
-// What the direct path writes for `helper` on both runs: the print of item 19.
-string[6] DIRECT_HELPER = {
+// What the translator writes for `helper` when the runtime declares the print functions: the
+// print of item 19.
+string[7] FIR_HELPER = {
     "define dso_local void @\"main.helper\"() #0 {\n",
     "entry:\n",
     "  %t0 = sext i32 1 to i64\n",
     "  call void @\"std.rt.print_i64\"(i32 1, i64 %t0)\n",
     "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)\n",
-    "  ret void\n}\n",
+    "  ret void\n",
+    "}\n",
 };
 
-// With the option, the lowering writes `id` and the direct path writes `helper`, which the
-// lowering refuses. Both stand in source order.
-fn a_supported_function_takes_the_fir_path_and_a_refused_one_the_direct_path() void {
+// The lowering refuses `helper`, whose print needs a runtime function that the empty runtime
+// lacks. The function is a compile error that names the missing function, and no text: the
+// program fails, and no other path writes the function (spec/fir.md 9.8). `id` stands as the
+// translator writes it.
+fn a_print_with_no_runtime_function_is_an_error_and_writes_no_text() void {
     gen_env.env mut e = gen_env.env{};
-    emit(&e, PATHS[..], true);
+    assert(!emit(&e, PATHS[..], false));
     defer gen_env.close(&e);
+    assert(gen_env.said(&e, NO_PRINT));
+    assert(gen_env.errors(&e) == 1);
+    assert(e.g.failed);
     string got = gen_env.funcs(&e);
     gen_env.expect_text(definition(got, "id"), gen_env.join_lines(&e, FIR_ID[..]));
-    gen_env.expect_text(definition(got, "helper"), gen_env.join_lines(&e, DIRECT_HELPER[..]));
-    assert(str.find(got, "main.helper") < str.find(got, "main.id"));
-    gen_env.expect_blocks(&e, gen_env.module_text(&e));
+    assert(str.find(got, "main.helper") < 0);
 }
 
-// Without the option, the direct path writes every function, as in the other emitter suites.
-fn without_the_option_the_direct_path_writes_every_function() void {
+// With the runtime of lower_env in the closure, the lowering supports every function of PATHS
+// and the translator writes each, the functions of the runtime among them.
+fn with_the_runtime_every_function_is_written() void {
     gen_env.env mut e = gen_env.env{};
-    emit(&e, PATHS[..], false);
+    assert(emit(&e, PATHS[..], true));
     defer gen_env.close(&e);
+    assert(gen_env.errors(&e) == 0);
     string got = gen_env.funcs(&e);
-    gen_env.expect_text(definition(got, "id"), gen_env.join_lines(&e, DIRECT_ID[..]));
-    gen_env.expect_text(definition(got, "helper"), gen_env.join_lines(&e, DIRECT_HELPER[..]));
-    assert(str.find(got, "%result") < 0);
+    gen_env.expect_text(definition(got, "id"), gen_env.join_lines(&e, FIR_ID[..]));
+    gen_env.expect_text(definition(got, "helper"), gen_env.join_lines(&e, FIR_HELPER[..]));
+    assert(str.find(got, "@\"std.rt.fail_overflow\"(") >= 0);
+    assert(e.g.lowered == e.g.functions);
+    assert(e.g.functions > 3);
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
 }
 
-// `add` has an overflow check, whose runtime entry the sandbox lacks. The lowering supports the
-// function, but rule V7 refuses its FIR, so the direct path writes it: its failure block calls
-// `std.rt.fail_overflow`, and no `%result` stands in it.
-fn a_check_with_no_runtime_entry_takes_the_direct_path() void {
+// A function with an overflow check.
+string[6] ADD = {
+    "fn add(i32 a, i32 b) i32 {\n",
+    "    return a + b;\n",
+    "}\n",
+    "fn main() i32 {\n",
+    "    return 0;\n",
+    "}\n",
+};
+
+// `add` has an overflow check, whose runtime entry the empty runtime lacks. The lowering
+// supports the function, but rule V7 would refuse its FIR, so it is a compile error at the name of
+// the function that names the entry, and no text.
+fn a_check_with_no_runtime_entry_is_an_error() void {
     gen_env.env mut e = gen_env.env{};
-    string[6] add = {
-        "fn add(i32 a, i32 b) i32 {\n",
-        "    return a + b;\n",
+    assert(!emit(&e, ADD[..], false));
+    defer gen_env.close(&e);
+    assert(gen_env.said(&e, NO_OVERFLOW));
+    assert(gen_env.said(&e, "the runtime `std.rt` has no entry"));
+    assert(gen_env.errors(&e) == 1);
+    assert(str.find(gen_env.funcs(&e), "main.add") < 0);
+    assert(e.g.functions == 2);
+    assert(e.g.lowered == 1);
+}
+
+// Under --release the build-mode pass removes the overflow check of `add`, so the module calls
+// no `fail_overflow`, and the empty runtime is enough: no error, and both functions are written.
+// An entry is needed only by the checks that the pass of the mode keeps.
+fn a_check_that_the_mode_removes_needs_no_runtime_entry() void {
+    gen_env.env mut e = gen_env.env{};
+    assert(emit_with(&e, ADD[..], false, gen.gen_options{true, false, ""}));
+    defer gen_env.close(&e);
+    assert(gen_env.errors(&e) == 0);
+    assert(e.g.functions == 2);
+    assert(e.g.lowered == 2);
+    string add = definition(gen_env.funcs(&e), "add");
+    assert(str.find(add, "  %t2 = add i32 %t0, %t1\n") >= 0);
+    assert(str.find(add, "fail_overflow") < 0);
+}
+
+// A function with a bounds check and one with a shift check.
+string[9] INDEX_SHIFT = {
+    "fn at(i32@ s, u64 i) i32 {\n",
+    "    return s[i];\n",
+    "}\n",
+    "fn sh(i32 a, u8 n) i32 {\n",
+    "    return a << n;\n",
+    "}\n",
+    "fn main() i32 {\n",
+    "    return 0;\n",
+    "}\n",
+};
+
+// Each mode excuses the entries of the kinds that its build-mode pass removes, and no other, with
+// the empty runtime. `--release` keeps the bounds check of `at`, so `at` is an error that names
+// `fail_bounds`, and removes the shift check of `sh`, so `sh` needs no `fail_shift`.
+// `--no-bounds-check` removes the bounds check and keeps the overflow check of ADD.
+fn each_mode_excuses_only_the_kinds_that_it_removes() void {
+    gen_env.env mut r = gen_env.env{};
+    assert(!emit_with(&r, INDEX_SHIFT[..], false, gen.gen_options{true, false, ""}));
+    defer gen_env.close(&r);
+    assert(gen_env.said(&r, " has no entry `fail_bounds` with the parameters that `at` needs"));
+    assert(gen_env.errors(&r) == 1);
+    string released = gen_env.funcs(&r);
+    assert(str.find(released, "main.at\"") < 0);
+    assert(str.find(definition(released, "sh"), "fail_shift") < 0);
+    gen_env.env mut n = gen_env.env{};
+    assert(emit_with(&n, INDEX_SHIFT[..], false, gen.gen_options{false, true, ""}) == false);
+    defer gen_env.close(&n);
+    assert(gen_env.said(&n, " has no entry `fail_shift` with the parameters that `sh` needs"));
+    assert(gen_env.errors(&n) == 1);
+    string unbounded = gen_env.funcs(&n);
+    assert(str.find(definition(unbounded, "at"), "fail_bounds") < 0);
+    assert(str.find(unbounded, "main.sh\"") < 0);
+    gen_env.env mut a = gen_env.env{};
+    assert(!emit_with(&a, ADD[..], false, gen.gen_options{false, true, ""}));
+    defer gen_env.close(&a);
+    assert(gen_env.said(&a, NO_OVERFLOW));
+}
+
+// Under both modes the pass removes both checks, so the empty runtime is enough. A pass that
+// kept a check would leave it to the verifier after the pass, which excuses no kind and so stops
+// the build with a panic of rule V7.
+fn both_modes_need_no_entry_for_an_index_or_a_shift() void {
+    gen_env.env mut e = gen_env.env{};
+    assert(emit_with(&e, INDEX_SHIFT[..], false, gen.gen_options{true, true, ""}));
+    defer gen_env.close(&e);
+    assert(gen_env.errors(&e) == 0);
+    assert(e.g.lowered == 3);
+    string text = gen_env.funcs(&e);
+    assert(str.find(text, "fail_bounds") < 0);
+    assert(str.find(text, "fail_shift") < 0);
+}
+
+// A construct that the lowering does not lower, which no checked program holds: the statement of
+// `f` is made a struct declaration by hand. It is a compile error at that node that names the
+// function and the kind of the node, and no text (spec/fir.md 9.8).
+fn a_construct_that_the_lowering_refuses_is_an_error() void {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    string[8] src = {
+        "fn f() void {\n",
+        "    g();\n",
+        "}\n",
+        "fn g() void {\n",
         "}\n",
         "fn main() i32 {\n",
         "    return 0;\n",
         "}\n",
     };
-    emit(&e, add[..], true);
-    defer gen_env.close(&e);
-    string got = definition(gen_env.funcs(&e), "add");
-    assert(str.find(got, "call i32 @llvm.sadd.with.overflow.i32(") < 0);
-    assert(str.find(got, "@llvm.sadd.with.overflow.i32(i32 %t0, i32 %t1)") >= 0);
-    assert(str.find(got, "call void @\"std.rt.fail_overflow\"(") >= 0);
-    assert(str.find(got, "%result") < 0);
-    assert(e.g.functions == 2);
-    assert(e.g.lowered == 1);
-    gen_env.expect_blocks(&e, gen_env.module_text(&e));
+    assert(gen_env.open_module(&e, gen_env.join_lines(&e, src[..])));
+    ast.node mut* decl = check_env.sym_main(&e.c, "f")->node;
+    ast.node mut* call = ast.ast_child_mut(decl->b, 0);
+    call->kind = ast.ast_kind.k_struct_decl;
+    assert(!gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_env.said(&e, "cannot lower `f` to FIR: the lowering does not support the node"));
+    assert(gen_env.said(&e, " the node `struct`"));
+    assert(gen_env.errors(&e) == 1);
+    assert(str.find(gen_env.funcs(&e), "main.f\"") < 0);
+    assert(e.g.functions == 3);
+    assert(e.g.lowered == 2);
 }
 
 // `stop` ends in a `fail(panic)` and `drop` in a `check(overwrite)` at the declaration of an
-// owning local. The sandbox lacks both runtime entries, so the direct path writes both functions,
-// and each calls its entry.
+// owning local. The empty runtime lacks both runtime entries, so each is a compile error.
 string[10] ENTRIES = {
     "fn stop() void {\n",
     "    panic(\"stop\");\n",
@@ -169,15 +285,18 @@ string[10] ENTRIES = {
     "}\n",
 };
 
-fn a_fail_or_an_overwrite_check_with_no_runtime_entry_takes_the_direct_path() void {
+fn a_fail_or_an_overwrite_check_with_no_runtime_entry_is_an_error() void {
     gen_env.env mut e = gen_env.env{};
-    emit(&e, ENTRIES[..], true);
+    assert(!emit(&e, ENTRIES[..], false));
     defer gen_env.close(&e);
     assert(e.g.functions == 3);
     assert(e.g.lowered == 1);
+    assert(gen_env.errors(&e) == 2);
+    assert(gen_env.said(&e, "has no entry `panic` with the parameters that `stop` needs"));
+    assert(gen_env.said(&e, "has no entry `fail_overwrite` with the parameters"));
     string text = gen_env.funcs(&e);
-    assert(str.find(definition(text, "stop"), "call void @\"std.rt.panic\"(") >= 0);
-    assert(str.find(definition(text, "drop"), "call void @\"std.rt.fail_overwrite\"(") >= 0);
+    assert(str.find(text, "main.stop") < 0);
+    assert(str.find(text, "main.drop") < 0);
     assert(str.find(definition(text, "main"), "%result") >= 0);
 }
 
@@ -198,12 +317,12 @@ string[13] LITERALS = {
     "}\n",
 };
 
-// The FIR path writes a designated literal as the direct path does: `aggregate zeroed` reads its
-// members, zeroes the whole destination with `llvm.memset`, the padding included, and stores the
-// named field alone. A positional literal stores each field and writes no memset.
+// A designated literal is `aggregate zeroed`: the translator reads its members, zeroes the whole
+// destination with `llvm.memset`, the padding included, and stores the named field alone. A
+// positional literal stores each field and writes no memset.
 fn a_designated_literal_zeroes_its_padding() void {
     gen_env.env mut e = gen_env.env{};
-    emit(&e, LITERALS[..], true);
+    assert(emit(&e, LITERALS[..], false));
     defer gen_env.close(&e);
     assert(e.g.lowered == 3);
     string text = gen_env.funcs(&e);
@@ -222,23 +341,19 @@ fn a_designated_literal_zeroes_its_padding() void {
 // ---- the counts --------------------------------------------------------------------------------
 
 // `functions` counts each definition of a fort function, the C `main` excluded, and `lowered`
-// those of the FIR path. PATHS with `main` has three definitions, and the lowering refuses one.
-fn the_counts_are_the_definitions_and_those_of_the_fir_path() void {
+// those that the translator wrote. PATHS with `main` has three definitions, and the lowering
+// refuses one in the empty runtime.
+fn the_counts_are_the_definitions_and_those_that_the_translator_wrote() void {
     gen_env.env mut e = gen_env.env{};
-    emit(&e, PATHS[..], true);
+    assert(!emit(&e, PATHS[..], false));
     defer gen_env.close(&e);
     assert(e.g.functions == 3);
     assert(e.g.lowered == 2);
     assert(str.find(gen_env.module_text(&e), "define dso_local i32 @main(") >= 0);
-    gen_env.env mut off = gen_env.env{};
-    emit(&off, PATHS[..], false);
-    defer gen_env.close(&off);
-    assert(off.g.functions == 3);
-    assert(off.g.lowered == 0);
 }
 
 // A function with no body is no definition, and neither is an `extern fn`: a module of `main`
-// alone has one definition, which the FIR path writes.
+// alone has one definition, which the translator writes.
 fn a_declaration_without_a_body_is_not_counted() void {
     gen_env.env mut e = gen_env.env{};
     string[4] declared = {
@@ -247,7 +362,7 @@ fn a_declaration_without_a_body_is_not_counted() void {
         "    return 0;\n",
         "}\n",
     };
-    emit(&e, declared[..], true);
+    assert(emit(&e, declared[..], false));
     defer gen_env.close(&e);
     assert(e.g.functions == 1);
     assert(e.g.lowered == 1);
@@ -257,6 +372,7 @@ fn a_declaration_without_a_body_is_not_counted() void {
 fn the_counts_start_at_zero() void {
     gen_env.env mut e = gen_env.env{};
     emit(&e, PATHS[..], true);
+    assert(e.g.functions > 0);
     gen.gen_free(&e.g);
     assert(e.g.functions == 0);
     assert(e.g.lowered == 0);
@@ -265,7 +381,8 @@ fn the_counts_start_at_zero() void {
 
 // ---- the declarations --------------------------------------------------------------------------
 
-// The `declare` lines of the C functions of `text`, in order, one per line, in `out`.
+// The `declare` lines of the C functions of `text`, in order, one per line, in `out`: each
+// `declare` line but those of the LLVM intrinsics.
 fn declarations(string text, strbuf.str_buf mut* out) string {
     strbuf.clear(out);
     u64 mut at = 0;
@@ -275,7 +392,8 @@ fn declarations(string text, strbuf.str_buf mut* out) string {
         if (next >= 0) {
             end = at + cast(next, u64) + 1;
         }
-        if (str.starts_with(text[at..end], "declare ")) {
+        string line = text[at..end];
+        if (str.starts_with(line, "declare ") && str.find(line, "@llvm.") < 0) {
             strbuf.append(out, text[at..end]);
         }
         at = end;
@@ -303,31 +421,26 @@ string[2] NESTED_DECLARATIONS = {
     "declare i32 @abs(i32) nobuiltin\n",
 };
 
-// The direct path records a C function where it writes the call, after the calls of the
-// arguments, so the inner call comes first, as it does in the text and on the FIR path.
+// The FIR module of a function lists a C function at its first call in block order, which is the
+// order of the text, so the inner call comes first.
 fn a_nested_call_declares_the_inner_function_first() void {
     strbuf.str_buf mut lines = strbuf.create();
     defer strbuf.free(&lines);
-    bool[2] options = {false, true};
-    for (bool fir : options) {
-        gen_env.env mut e = gen_env.env{};
-        emit(&e, NESTED[..], fir);
-        defer gen_env.close(&e);
-        assert(e.g.lowered == 0 || fir);
-        string text = gen_env.module_text(&e);
-        string want = gen_env.join_lines(&e, NESTED_DECLARATIONS[..]);
-        gen_env.expect_text(declarations(text, &lines), want);
-        string body = definition(text, "nested");
-        i64 inner = str.find(body, "call i32 @putchar(i32 65) #3");
-        i64 outer = str.find(body, "call i32 @abs(i32 %t");
-        assert(inner >= 0 && outer > inner);
-    }
+    gen_env.env mut e = gen_env.env{};
+    assert(emit(&e, NESTED[..], false));
+    defer gen_env.close(&e);
+    string text = gen_env.module_text(&e);
+    string want = gen_env.join_lines(&e, NESTED_DECLARATIONS[..]);
+    gen_env.expect_text(declarations(text, &lines), want);
+    string body = definition(text, "nested");
+    i64 inner = str.find(body, "call i32 @putchar(i32 65) #3");
+    i64 outer = str.find(body, "call i32 @abs(i32 %t");
+    assert(inner >= 0 && outer > inner);
 }
 
-// A module of two definitions: `counted` goes through the FIR path, and `shown`, whose print the
-// lowering refuses, through the direct path. In `counted`, the direct path writes the whole body
-// of the `while` before the block after the loop, and FIR numbers the block after the loop before
-// the block that follows the `if` of the body.
+// A module of two definitions with C calls. In `counted`, FIR numbers the block after the loop
+// before the block that follows the `if` of the body, so `getchar` stands before `putchar` in the
+// text.
 string[21] MIXED = {
     "extern fn abs(i32 x) i32;\n",
     "extern fn putchar(i32 c) i32;\n",
@@ -352,8 +465,8 @@ string[21] MIXED = {
     "}\n",
 };
 
-// The `declare` lines of MIXED: the C functions of `counted` in the order of its FIR text, then
-// the one of `shown`. One rule holds in a module whatever path writes each function.
+// The `declare` lines of MIXED: the C functions of `counted` in the order of its text, then the one
+// of `shown`.
 string[4] MIXED_DECLARATIONS = {
     "declare i32 @abs(i32) nobuiltin\n",
     "declare i32 @getchar() nobuiltin\n",
@@ -365,10 +478,9 @@ fn the_declarations_follow_the_text_of_a_mixed_module() void {
     strbuf.str_buf mut lines = strbuf.create();
     defer strbuf.free(&lines);
     gen_env.env mut e = gen_env.env{};
-    emit(&e, MIXED[..], true);
+    assert(emit(&e, MIXED[..], true));
     defer gen_env.close(&e);
-    assert(e.g.functions == 3);
-    assert(e.g.lowered == 2);
+    assert(e.g.lowered == e.g.functions);
     string text = gen_env.module_text(&e);
     string body = definition(text, "counted");
     i64 first = str.find(body, "call i32 @abs(");
@@ -382,43 +494,23 @@ fn the_declarations_follow_the_text_of_a_mixed_module() void {
     gen_env.expect_blocks(&e, text);
 }
 
-// The direct path alone writes `putchar` before `getchar` in `counted`, and declares them in that
-// order.
-string[4] DIRECT_DECLARATIONS = {
-    "declare i32 @abs(i32) nobuiltin\n",
-    "declare i32 @putchar(i32) nobuiltin\n",
-    "declare i32 @getchar() nobuiltin\n",
-    "declare i32 @puts(ptr) nobuiltin\n",
-};
-
-fn the_direct_path_declares_in_the_order_of_its_own_text() void {
-    strbuf.str_buf mut lines = strbuf.create();
-    defer strbuf.free(&lines);
-    gen_env.env mut e = gen_env.env{};
-    emit(&e, MIXED[..], false);
-    defer gen_env.close(&e);
-    assert(e.g.lowered == 0);
-    string text = gen_env.module_text(&e);
-    string body = definition(text, "counted");
-    assert(str.find(body, "call i32 @putchar(") < str.find(body, "call i32 @getchar()"));
-    string want = gen_env.join_lines(&e, DIRECT_DECLARATIONS[..]);
-    gen_env.expect_text(declarations(text, &lines), want);
-}
-
 fn main() i32 {
-    a_supported_function_takes_the_fir_path_and_a_refused_one_the_direct_path();
-    without_the_option_the_direct_path_writes_every_function();
-    a_check_with_no_runtime_entry_takes_the_direct_path();
-    a_fail_or_an_overwrite_check_with_no_runtime_entry_takes_the_direct_path();
+    a_print_with_no_runtime_function_is_an_error_and_writes_no_text();
+    with_the_runtime_every_function_is_written();
+    a_check_with_no_runtime_entry_is_an_error();
+    a_check_that_the_mode_removes_needs_no_runtime_entry();
+    each_mode_excuses_only_the_kinds_that_it_removes();
+    both_modes_need_no_entry_for_an_index_or_a_shift();
+    a_construct_that_the_lowering_refuses_is_an_error();
+    a_fail_or_an_overwrite_check_with_no_runtime_entry_is_an_error();
     a_designated_literal_zeroes_its_padding();
-    println("paths ok");
-    the_counts_are_the_definitions_and_those_of_the_fir_path();
+    println("functions ok");
+    the_counts_are_the_definitions_and_those_that_the_translator_wrote();
     a_declaration_without_a_body_is_not_counted();
     the_counts_start_at_zero();
     println("counts ok");
     a_nested_call_declares_the_inner_function_first();
     the_declarations_follow_the_text_of_a_mixed_module();
-    the_direct_path_declares_in_the_order_of_its_own_text();
     println("declarations ok");
     println("ok");
     return 0;

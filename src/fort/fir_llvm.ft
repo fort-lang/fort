@@ -1,24 +1,28 @@
 /// Translates FIR into LLVM IR text (spec/fir.md 12): the storage of the locals of one function,
 /// its places, its rvalues, its statements, its calls, its terminators and its failure blocks.
-/// The translator writes into the buffers of a `gen.emitter` as the direct path does, and
-/// gen.function_end assembles the definition.
+/// The translator writes into the buffers of a `gen.emitter`, and gen.function_end assembles the
+/// definition.
 //
 // The module uses switches and no function-pointer dispatch table. Its functions drop the prefix
 // of the module name. A translator serves one function, and close releases it. The signature map
 // of gen.signature_of writes every `define`, every `call` and, through gen_data.emit_extern, every
-// extern `declare`. This module imports no module of the direct path's statements, so that the
-// direct path can call it.
+// extern `declare`. This module imports no module that writes a whole program, so that gen_fir.ft
+// can call it.
 import ast;
 import consts;
+import diag;
 import fir;
 import gen;
-import gen_expr;
+import gen_data;
 import prim;
 import runtime_sig;
 import std.strbuf;
 import types;
 
-// The width of an `i64`, to which a bound of `slice_ptr` widens.
+// The widths of the integer types, which select an intrinsic of a family. A bound of `slice_ptr`
+// widens to an `i64`.
+u32 BITS_16 = 16;
+u32 BITS_32 = 32;
 u32 BITS_64 = 64;
 
 /// How the translator stores a local (spec/fir.md 12.1).
@@ -288,7 +292,7 @@ fn dotted(gen.emitter mut* g, string name, string suffix, u64 n) string {
     return gen.gen_take(g);
 }
 
-// `  <name> = alloca <type>, align <n>` in the entry block, as gen_stmt.emit_alloca writes it.
+// `  <name> = alloca <type>, align <n>` in the entry block (spec/toolchain.md 6 item 10).
 fn write_alloca(gen.emitter mut* g, string name, types.node* ty) void {
     string mem = gen.gen_mem_type(g, ty);
     strbuf.append(&g->allocas, "  ");
@@ -728,10 +732,10 @@ fn overflows(translator mut* t, fir.statement* s) gen.gen_val {
     gen.gen_val a = operand_value(t, x);
     gen.gen_val b = operand_value(t, y);
     u64 which = overflow_family(r.kind, gen.gen_is_signed(ty));
-    gen.gen_use_intrinsic(t->g, gen_expr.overflow_slot(which, gen.gen_int_bits(ty)));
+    gen.gen_use_intrinsic(t->g, overflow_slot(which, gen.gen_int_bits(ty)));
     gen.gen_use_attr(t->g, gen.ATTR_OVERFLOW);
     gen.gen_val mut value = gen.gen_val{};
-    gen.gen_val bad = gen_expr.gen_overflow_call(t->g, which, a, b, &value);
+    gen.gen_val bad = overflow_call(t->g, which, a, b, &value);
     bool flag = s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0;
     t->notes[cast(t->block, u64)] = overflow_note{flag, checked_form(r.kind), x, y,
                                                   s->place.local, value};
@@ -973,7 +977,7 @@ fn rvalue_value(translator mut* t, fir.statement* s) gen.gen_val {
     case fir.rvalue_kind.rv_cast:
         fir.operand x = fir.rvalue_operand(t->f, r, 0);
         gen.gen_val v = operand_value(t, x);
-        return gen_expr.gen_cast_value(t->g, s->loc, r.ty, fir.operand_type(t->f, x), v);
+        return cast_value(t->g, s->loc, r.ty, fir.operand_type(t->f, x), v);
     case fir.rvalue_kind.rv_addr:
         return place_addr(t, r.place);
     case fir.rvalue_kind.rv_alloc:
@@ -987,8 +991,7 @@ fn rvalue_value(translator mut* t, fir.statement* s) gen.gen_val {
     }
 }
 
-// A bound of `slice_ptr` as an `i64`, widened by the signedness of its type as the direct path
-// widens it.
+// A bound of `slice_ptr` as an `i64`, widened by the signedness of its type.
 fn bound_value(translator mut* t, fir.operand o) gen.gen_val {
     types.node* ty = fir.operand_type(t->f, o);
     gen.gen_val v = operand_value(t, o);
@@ -1016,7 +1019,7 @@ fn member_addr(translator mut* t, types.node* ty, gen.gen_val at, u32 k) gen.gen
 // `aggregate T(...)` into `dst`: every operand is read first, in order, then each member is
 // written through a `getelementptr` of the destination (spec/fir.md 6, 12.1). `aggregate zeroed`
 // zeroes the whole destination with `llvm.memset` between the two, padding included, and writes no
-// member that is `const zero`, as the direct path writes a designated literal.
+// member that is `const zero`.
 fn aggregate_into(translator mut* t, fir.rvalue r, fir.place dst) void {
     types.node* ty = r.ty;
     held mut@ own members = new(held, cast(r.ops_len, u64));
@@ -1262,7 +1265,6 @@ fn fail_call(translator mut* t, fir.terminator* term) void {
     gen.gen_args_add_loc(g, &args, term->loc);
     gen.gen_call_rt(g, entry_of(term->check), &args);
     strbuf.append(&g->body, "  unreachable\n");
-    g->terminated = true;
 }
 
 // Writes the failure block of the block `b` that holds only `fail` into `g->fail`, under its
@@ -1327,7 +1329,6 @@ fn return_to(translator mut* t) void {
         strbuf.append(&g->body, v.val);
         strbuf.push(&g->body, '\n');
     }
-    g->terminated = true;
 }
 
 // `check(f, kind, args) -> bb`: the condition and the reported operands, then `br i1` with the
@@ -1348,7 +1349,6 @@ fn check_to(translator mut* t, fir.terminator* term, u64 bad) void {
     }
     gen.gen_fail_block(g, bad, entry_of(term->check), &args, term->loc);
     // the failure block opened a block of its own; the block of the check ends in its `br`
-    g->terminated = true;
 }
 
 // `check(overwrite: p) -> bb`: the pointer word of `p`, field 0 of a span or a `string`, then
@@ -1370,13 +1370,12 @@ fn overwrite_to(translator mut* t, fir.terminator* term, u64 bad) void {
     defer gen.gen_args_free(&args);
     gen.gen_br_cond(g, live, bad, label_of(t, term->target));
     gen.gen_fail_block(g, bad, runtime_sig.rt_entry.rt_fail_overwrite, &args, term->loc);
-    g->terminated = true;
 }
 
 /// Translates the terminator of block `b` (spec/fir.md 12.4): `goto` is `br`, `switch` is `br i1`
 /// or an LLVM `switch`, `return` is `ret`, a `check` is a `br i1` and a failure block in
 /// `g->fail`, `fail` is the call and `unreachable` in place, `trap` is the call of `llvm.trap` and
-/// `unreachable`, and `unreachable` is `unreachable`. `g->terminated` is true after each kind.
+/// `unreachable`, and `unreachable` is `unreachable`.
 fn translate_terminator(translator mut* t, u32 b) void {
     gen.emitter mut* g = t->g;
     fir.block* bl = fir.block_at(t->f, b);
@@ -1401,10 +1400,8 @@ fn translate_terminator(translator mut* t, u32 b) void {
         gen.gen_use_intrinsic(g, gen.IN_TRAP);
         gen.gen_use_attr(g, gen.ATTR_TRAP);
         strbuf.append(&g->body, "  call void @llvm.trap()\n  unreachable\n");
-        g->terminated = true;
     case fir.term_kind.tk_unreachable:
         strbuf.append(&g->body, "  unreachable\n");
-        g->terminated = true;
     }
 }
 
@@ -1428,7 +1425,6 @@ fn write_block(translator mut* t, u32 b) void {
 /// signature map, the entry block with the allocas and the stores of the scalar parameters, each
 /// normal block in number order with its terminator, and then the failure blocks, in the order of
 /// the numbers of the blocks that make them. The blocks are `entry`, `%L<n>` and `%L<B + k>`.
-/// `g->terminated` is true after it, as after the direct path's gen_function.
 fn translate_function(gen.emitter mut* g, fir.func* f) void {
     gen.function_begin(g);
     gen.signature mut sig = gen.signature_of(g, f->ty, null);
@@ -1476,4 +1472,186 @@ fn translate_module(gen.emitter mut* g, fir.module* m) void {
         gen.gen_main(g, m->main);
     }
     declare_externs(g, m);
+}
+
+// ---- the overflow intrinsics and the casts ------------------------------------------------
+
+// Returns the overflow intrinsic for an operation and width. Families use `sadd ssub smul uadd usub
+// umul` order. Each uses `i8 i16 i32 i64` order.
+fn overflow_slot(u64 which, u32 bits) u64 {
+    u64 mut width = 0;
+    if (bits == BITS_16) {
+        width = 1;
+    } else if (bits == BITS_32) {
+        width = 2;
+    } else if (bits == BITS_64) {
+        width = 3;
+    }
+    return gen.IN_OVERFLOW_FIRST + which * gen.OVF_WIDTHS + width;
+}
+
+// The slot of one saturating conversion: the family's order and the
+// index of the target width among `i8 i16 i32 i64`.
+fn fpconv_slot(bool to_signed, bool from_f64, u32 bits) u64 {
+    u64 mut family = gen.FP_SI_F32;
+    if (to_signed && from_f64) {
+        family = gen.FP_SI_F64;
+    } else if (!to_signed && !from_f64) {
+        family = gen.FP_UI_F32;
+    } else if (!to_signed && from_f64) {
+        family = gen.FP_UI_F64;
+    }
+    u64 mut width = 0;
+    if (bits == BITS_16) {
+        width = 1;
+    } else if (bits == BITS_32) {
+        width = 2;
+    } else if (bits == BITS_64) {
+        width = 3;
+    }
+    return gen.IN_FPCONV_FIRST + family * gen.FP_WIDTHS + width;
+}
+
+// Writes the overflow intrinsic of the family `which` over `a` and `b`, then `extractvalue 0`,
+// then `extractvalue 1`. The first goes to *value, and the function returns the second, which is
+// true on overflow. The caller marks the declaration of the intrinsic used.
+fn overflow_call(gen.emitter mut* g, u64 which, gen.gen_val a, gen.gen_val b,
+                 gen.gen_val mut* value) gen.gen_val {
+    string pair = pair_type(g, a.ty);
+    gen.gen_val call = gen.gen_temp(g, pair);
+    gen.gen_text_append(g, "call ");
+    gen.gen_text_append(g, pair);
+    gen.gen_text_append(g, " @llvm.");
+    gen.gen_text_append(g, gen_data.overflow_op(which));
+    gen.gen_text_append(g, ".with.overflow.");
+    gen.gen_text_append(g, a.ty);
+    gen.gen_text_append(g, "(");
+    gen.gen_text_append(g, a.ty);
+    gen.gen_text_append(g, " ");
+    gen.gen_text_append(g, a.val);
+    gen.gen_text_append(g, ", ");
+    gen.gen_text_append(g, a.ty);
+    gen.gen_text_append(g, " ");
+    gen.gen_text_append(g, b.val);
+    gen.gen_text_append(g, ")");
+    gen.gen_ins_end(g);
+    *value = gen.gen_temp(g, a.ty);
+    gen.gen_text_append(g, "extractvalue ");
+    gen.gen_text_append(g, pair);
+    gen.gen_text_append(g, " ");
+    gen.gen_text_append(g, call.val);
+    gen.gen_text_append(g, ", 0");
+    gen.gen_ins_end(g);
+    gen.gen_val bad = gen.gen_temp(g, "i1");
+    gen.gen_text_append(g, "extractvalue ");
+    gen.gen_text_append(g, pair);
+    gen.gen_text_append(g, " ");
+    gen.gen_text_append(g, call.val);
+    gen.gen_text_append(g, ", 1");
+    gen.gen_ins_end(g);
+    return bad;
+}
+
+// `{ iN, i1 }`, the type an overflow intrinsic returns. It is built
+// before the instruction that names it is opened, since both write into the
+// emitter's one scratch buffer.
+fn pair_type(gen.emitter mut* g, string ty) string {
+    strbuf.clear(&g->scratch);
+    strbuf.append(&g->scratch, "{ ");
+    strbuf.append(&g->scratch, ty);
+    strbuf.append(&g->scratch, ", i1 }");
+    return gen.gen_take(g);
+}
+
+// Whether `t` is `bool`, whose cast to `bool` is the identity.
+fn is_bool(types.node* t) bool {
+    return t != null && t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool;
+}
+
+// Converts the scalar `v` of type `from` to the type `to`. The function writes nothing when the two
+// value types are equal, and the result is then `v` itself. `at` is the location of a report.
+fn cast_value(gen.emitter mut* g, diag.loc at, types.node* to, types.node* from,
+              gen.gen_val v) gen.gen_val {
+    bool to_ptr = to->kind == types.type_kind.k_ptr || to->kind == types.type_kind.k_voidptr ||
+                  to->kind == types.type_kind.k_fn;
+    bool from_ptr = from->kind == types.type_kind.k_ptr ||
+                    from->kind == types.type_kind.k_voidptr ||
+                    from->kind == types.type_kind.k_fn;
+    if (to_ptr && from_ptr) {
+        // nothing for pointer to pointer or a dropped mark
+        return v;
+    }
+    if (to_ptr) {
+        return gen.gen_cast_op(g, "inttoptr", v, gen.gen_value_type(g, to));
+    }
+    if (from_ptr) {
+        return gen.gen_cast_op(g, "ptrtoint", v, gen.gen_value_type(g, to));
+    }
+    if (types.type_is_float(to) || types.type_is_float(from)) {
+        return float_cast(g, at, to, from, v);
+    }
+    u32 from_bits = gen.gen_int_bits(from);
+    u32 to_bits = gen.gen_int_bits(to);
+    if (from_bits == 0 || to_bits == 0) {
+        gen.gen_todo(g, at, "this cast");
+        return v;
+    }
+    if (is_bool(from)) {
+        // nothing for `cast(b, bool)`, which is the identity
+        return gen.gen_resize(g, v, from_bits, gen.gen_value_type(g, to), to_bits, false);
+    }
+    // Only `bool` converts to `bool`. The checker rejects integers and all other source types.
+    // Thus, a `bool` target uses only the identity case above. Integer to integer widens by the
+    // source's signedness.
+    return gen.gen_resize(g, v, from_bits, gen.gen_value_type(g, to), to_bits,
+                          gen.gen_is_signed(from));
+}
+
+// Emits casts with one or two float types. Float widths use `fptrunc` or `fpext`. Integers use
+// `sitofp` or `uitofp` by source signedness. Float-to-integer uses a saturating intrinsic by target
+// signedness. Plain `fptosi` produces poison out of range. The cast rule requires truncation toward
+// zero, range saturation, zero for NaN, and no trap. The intrinsic provides these results. `char`,
+// `bool` and an enum reach no float type and no float reaches them, so the checker has refused
+// every other pairing.
+fn float_cast(gen.emitter mut* g, diag.loc at, types.node* to, types.node* from,
+              gen.gen_val v) gen.gen_val {
+    string ty = gen.gen_value_type(g, to);
+    if (types.type_is_float(to) && types.type_is_float(from)) {
+        if (to->prim == from->prim) {
+            // the identity emits nothing at all
+            return v;
+        }
+        if (to->prim == prim.prim_kind.prim_f32) {
+            return gen.gen_cast_op(g, "fptrunc", v, ty);
+        }
+        return gen.gen_cast_op(g, "fpext", v, ty);
+    }
+    if (types.type_is_float(to)) {
+        if (gen.gen_is_signed(from)) {
+            return gen.gen_cast_op(g, "sitofp", v, ty);
+        }
+        return gen.gen_cast_op(g, "uitofp", v, ty);
+    }
+    u32 bits = gen.gen_int_bits(to);
+    if (bits == 0) {
+        gen.gen_todo(g, at, "this cast");
+        return v;
+    }
+    bool to_signed = gen.gen_is_signed(to);
+    bool from_f64 = from->prim == prim.prim_kind.prim_f64;
+    u64 slot = fpconv_slot(to_signed, from_f64, bits);
+    gen.gen_use_intrinsic(g, slot);
+    gen.gen_use_attr(g, gen.ATTR_OVERFLOW);
+    gen.gen_val r = gen.gen_temp(g, ty);
+    gen.gen_text_append(g, "call ");
+    gen.gen_text_append(g, ty);
+    gen.gen_text_append(g, " @");
+    gen.gen_fpconv_call_name(g, slot);
+    gen.gen_text_append(g, "(");
+    gen.gen_text_append(g, v.ty);
+    gen.gen_text_append(g, " ");
+    gen.gen_text_append(g, v.val);
+    gen.gen_text_append(g, ")");
+    gen.gen_ins_end(g);
+    return r;
 }
