@@ -638,6 +638,73 @@ fn drop_conflicting_guards(ownership_state.state mut* s,
     }
 }
 
+fn has_predicate(ownership_state.state* s, ownership_api.predicate_atom fact) bool {
+    u64 mut i = 0;
+    while (i < s->predicates_len) {
+        if (ownership_state.same_predicate(s->predicates[i], fact)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn has_guard(ownership_state.state* s, ownership_api.guard_fact fact) bool {
+    u64 mut i = 0;
+    while (i < s->guards_len) {
+        if (ownership_state.same_guard(s->guards[i], fact)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn has_shape(ownership_state.state* s, ownership_api.entity_id key) bool {
+    u64 mut i = 0;
+    while (i < s->shapes_len) {
+        if (entity(s->shapes[i].key, key)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn weaken_one_sided(ownership_state.state mut* out, ownership_state.state* a,
+    ownership_state.state* b, ownership_api.source_position at) void {
+    u64 mut i = 0;
+    while (i < out->predicates_len) {
+        if (has_predicate(a, out->predicates[i]) &&
+            has_predicate(b, out->predicates[i])) { i += 1; continue; }
+        remember_conflict(out, ownership_api.limit_category.p, out->predicates[i].key, at);
+        u64 mut j = i + 1;
+        while (j < out->predicates_len) {
+            out->predicates[j - 1] = out->predicates[j];
+            j += 1;
+        }
+        out->predicates_len -= 1;
+    }
+    i = 0;
+    while (i < out->guards_len) {
+        if (has_guard(a, out->guards[i]) && has_guard(b, out->guards[i])) {
+            i += 1;
+            continue;
+        }
+        remember_conflict(out, ownership_api.limit_category.g, out->guards[i].key, at);
+        u64 mut j = i + 1;
+        while (j < out->guards_len) {
+            out->guards[j - 1] = out->guards[j];
+            j += 1;
+        }
+        out->guards_len -= 1;
+    }
+    i = 0;
+    while (i < out->shapes_len) {
+        if (!has_shape(a, out->shapes[i].key) || !has_shape(b, out->shapes[i].key)) {
+            remember_conflict(out, ownership_api.limit_category.h, out->shapes[i].key, at);
+            out->shapes[i].residual = true;
+            out->shapes[i].acyclic_proved = false;
+            out->shapes[i].separation_proved = false;
+        }
+        i += 1;
+    }
+}
+
 fn inherited(ownership_state.state* a, ownership_state.state* b,
     ownership_api.operation_position op, ownership_api.source_position at)
     ownership_api.proof_status {
@@ -691,14 +758,16 @@ fn record_failure(ownership_api.services* svc, ownership_api.proof_status proof,
 }
 
 fn compose(ownership_state.state* a, ownership_state.state* b,
-    ownership_api.services* svc, ownership_api.work_kind work,
+    ownership_api.services* svc, ownership_api.work_kind work, bool valid,
     ownership_api.operation_position op, ownership_api.source_position at)
     ownership_state.state {
-    ownership_api.charge_result charged = ownership_api.charge_work(svc, work, op, at);
-    if (a->proof.kind == ownership_api.proof_kind.bottom && charged.allowed) {
+    ownership_api.charge_result mut charged = ownership_api.charge_result{};
+    if (valid) { charged = ownership_api.charge_work(svc, work, op, at); }
+    else { charged.allowed = true; }
+    if (valid && a->proof.kind == ownership_api.proof_kind.bottom && charged.allowed) {
         return ownership_state.clone(b);
     }
-    if (b->proof.kind == ownership_api.proof_kind.bottom && charged.allowed) {
+    if (valid && b->proof.kind == ownership_api.proof_kind.bottom && charged.allowed) {
         return ownership_state.clone(a);
     }
     ownership_state.state mut out = ownership_state.empty();
@@ -709,8 +778,12 @@ fn compose(ownership_state.state* a, ownership_state.state* b,
     dedup_collision_facts(&out);
     drop_conflicting_predicates(&out, at);
     drop_conflicting_guards(&out, at);
+    weaken_one_sided(&out, a, b, at);
     out.proof = inherited(a, b, op, at);
-    if (!charged.allowed) {
+    if (!valid) {
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            op, at);
+    } else if (!charged.allowed) {
         out.proof = record_failure(svc, charged.proof, op, at);
     }
     return out;
@@ -718,9 +791,16 @@ fn compose(ownership_state.state* a, ownership_state.state* b,
 
 /// Joins two predecessor states. A failed charge retains both sets of facts.
 fn join(ownership_state.state* a, ownership_state.state* b,
-    ownership_api.services* svc, ownership_api.operation_position op,
+    ownership_api.services* svc, ownership_api.limit_table* limits,
+    ownership_api.operation_position op,
     ownership_api.source_position at) ownership_state.state {
-    return compose(a, b, svc, ownership_api.work_kind.join, op, at);
+    bool valid = ownership_api.valid_limits(limits);
+    ownership_state.state mut out = compose(a, b, svc, ownership_api.work_kind.join,
+        valid, op, at);
+    if (!valid) { return out; }
+    cover_bounds(&out, limits, at);
+    dedup_collision_facts(&out);
+    return out;
 }
 
 fn remember_loss(ownership_state.state mut* s, ownership_api.limit_category category,
@@ -733,6 +813,215 @@ fn remember_loss(ownership_state.state mut* s, ownership_api.limit_category cate
         i += 1;
     }
     ownership_state.append_losses(s, fact);
+}
+
+fn plus_count(u64 a, u64 b) u64 {
+    if (b > U64_MAX - a) { return U64_MAX; }
+    return a + b;
+}
+
+fn has_bound_loss(ownership_state.state* s, ownership_api.limit_category category)
+    bool {
+    u64 mut i = 0;
+    while (i < s->losses_len) {
+        if (s->losses[i].category == category &&
+            s->losses[i].reason == ownership_api.incomplete_reason.work_limit) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn blur_region(ownership_state.state mut* s, ownership_api.region input)
+    ownership_api.region {
+    ownership_api.region mut out = input;
+    out.residual = true;
+    out.offset = ownership_api.scalar_fact{};
+    out.access = ownership_api.byte_window{};
+    out.extent = ownership_api.scalar_fact{};
+    out.alignment = 0;
+    if (input.partitions.len > 0) {
+        ownership_api.region_partition mut@ own parts =
+            new(ownership_api.region_partition, input.partitions.len);
+        u64 mut i = 0;
+        while (i < parts.len) {
+            parts[i] = input.partitions[i];
+            parts[i].residual = true;
+            i += 1;
+        }
+        out.partitions = ownership_state.copy_partitions(s, parts[..]);
+        del(parts);
+    }
+    return out;
+}
+
+fn cover_regions(ownership_state.state mut* s, ownership_api.limit_table* limits,
+    ownership_api.source_position at) void {
+    u64 mut used = plus_count(s->allocations_len, s->regions_len);
+    used = plus_count(used, s->nodes_len);
+    used = plus_count(used, s->edges_len);
+    u64 mut i = 0;
+    while (i < s->regions_len) {
+        used = plus_count(used, s->regions[i].partitions.len);
+        i += 1;
+    }
+    if (used <= limits->r && !has_bound_loss(s, ownership_api.limit_category.r)) {
+        return;
+    }
+    i = 0;
+    while (i < s->allocations_len) {
+        ownership_api.allocation_fact mut* fact = &s->allocations[i];
+        remember_loss(s, ownership_api.limit_category.r, limits->r, at, fact->key);
+        if (fact->obligation) {
+            fact->count.zero = true;
+            fact->count.one = true;
+            fact->count.many = true;
+        }
+        fact->validity = ownership_api.validity_kind.unknown;
+        fact->owner.place.residual = true;
+        fact->owner.detached = true;
+        i += 1;
+    }
+    i = 0;
+    while (i < s->sources_len) {
+        if (s->sources[i].validity == ownership_api.validity_kind.live &&
+            allocation_index(s, s->sources[i].allocation) != U64_MAX) {
+            s->sources[i].validity = ownership_api.validity_kind.unknown;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->regions_len) {
+        remember_loss(s, ownership_api.limit_category.r, limits->r, at, s->regions[i].key);
+        s->regions[i] = blur_region(s, s->regions[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < s->nodes_len) {
+        remember_loss(s, ownership_api.limit_category.r, limits->r, at, s->nodes[i].key);
+        s->nodes[i].residual = true;
+        i += 1;
+    }
+    i = 0;
+    while (i < s->edges_len) {
+        remember_loss(s, ownership_api.limit_category.r, limits->r, at, s->edges[i].key);
+        s->edges[i].kind = ownership_api.edge_kind.residual;
+        s->edges[i].place.residual = true;
+        s->edges[i].range = blur_region(s, s->edges[i].range);
+        i += 1;
+    }
+    i = 0;
+    while (i < s->shapes_len) {
+        s->shapes[i].residual = true;
+        s->shapes[i].acyclic_proved = false;
+        s->shapes[i].separation_proved = false;
+        i += 1;
+    }
+}
+
+fn cover_predicates(ownership_state.state mut* s, ownership_api.limit_table* limits,
+    ownership_api.source_position at) void {
+    if (s->predicates_len <= limits->p &&
+        !has_bound_loss(s, ownership_api.limit_category.p)) { return; }
+    u64 mut i = 0;
+    while (i < s->predicates_len) {
+        remember_loss(s, ownership_api.limit_category.p, limits->p, at, s->predicates[i].key);
+        i += 1;
+    }
+    s->predicates_len = 0;
+    i = 0;
+    while (i < s->guards_len) {
+        remember_loss(s, ownership_api.limit_category.g, limits->g, at, s->guards[i].key);
+        i += 1;
+    }
+    s->guards_len = 0;
+    i = 0;
+    while (i < s->correlations_len) {
+        remember_loss(s, ownership_api.limit_category.g, limits->g, at,
+            s->correlations[i].guard);
+        i += 1;
+    }
+    s->correlations_len = 0;
+}
+
+fn cover_guards(ownership_state.state mut* s, ownership_api.limit_table* limits,
+    ownership_api.source_position at) void {
+    u64 mut used = plus_count(s->guards_len, s->correlations_len);
+    used = plus_count(used, s->contents_len);
+    if (used <= limits->g && !has_bound_loss(s, ownership_api.limit_category.g)) {
+        return;
+    }
+    u64 mut i = 0;
+    while (i < s->guards_len) {
+        remember_loss(s, ownership_api.limit_category.g, limits->g, at, s->guards[i].key);
+        i += 1;
+    }
+    s->guards_len = 0;
+    i = 0;
+    while (i < s->correlations_len) {
+        remember_loss(s, ownership_api.limit_category.g, limits->g, at,
+            s->correlations[i].guard);
+        i += 1;
+    }
+    s->correlations_len = 0;
+    i = 0;
+    while (i < s->contents_len) {
+        ownership_api.contents_fact mut* fact = &s->contents[i];
+        remember_loss(s, ownership_api.limit_category.g, limits->g, at, fact->place.root);
+        fact->place.residual = true;
+        fact->kind = ownership_api.contents_kind.unknown;
+        fact->value_version = ownership_api.entity_id{};
+        fact->span_length = ownership_api.scalar_fact{};
+        fact->owner_empty = false;
+        if (fact->borrows.len > 0) {
+            ownership_api.borrow_relation mut@ own borrows =
+                new(ownership_api.borrow_relation, fact->borrows.len);
+            u64 mut j = 0;
+            while (j < borrows.len) {
+                borrows[j] = fact->borrows[j];
+                borrows[j].representation_complete = false;
+                j += 1;
+            }
+            fact->borrows = ownership_state.copy_borrows(s, borrows[..]);
+            del(borrows);
+        }
+        i += 1;
+    }
+    dedup_contents(s);
+}
+
+fn cover_shapes(ownership_state.state mut* s, ownership_api.limit_table* limits,
+    ownership_api.source_position at) void {
+    u64 mut used = 0;
+    u64 mut i = 0;
+    while (i < s->shapes_len) {
+        ownership_api.shape_description shape = s->shapes[i];
+        used = plus_count(used, 1);
+        used = plus_count(used, shape.parameters.len);
+        used = plus_count(used, shape.clauses.len);
+        used = plus_count(used, shape.descendants.len);
+        i += 1;
+    }
+    if (used <= limits->h && !has_bound_loss(s, ownership_api.limit_category.h)) {
+        return;
+    }
+    i = 0;
+    while (i < s->shapes_len) {
+        remember_loss(s, ownership_api.limit_category.h, limits->h, at, s->shapes[i].key);
+        s->shapes[i].residual = true;
+        s->shapes[i].acyclic_proved = false;
+        s->shapes[i].separation_proved = false;
+        i += 1;
+    }
+}
+
+fn cover_bounds(ownership_state.state mut* s, ownership_api.limit_table* limits,
+    ownership_api.source_position at) void {
+    cover_regions(s, limits, at);
+    cover_predicates(s, limits, at);
+    cover_guards(s, limits, at);
+    cover_shapes(s, limits, at);
 }
 
 fn trim_place(ownership_state.state mut* s, ownership_api.place_path input,
@@ -829,17 +1118,16 @@ fn widen(ownership_state.state* a, ownership_state.state* b,
     ownership_api.services* svc, ownership_api.limit_table* limits,
     ownership_api.operation_position op, ownership_api.source_position at)
     ownership_state.state {
+    bool valid = ownership_api.valid_limits(limits);
     ownership_state.state mut out = compose(a, b, svc, ownership_api.work_kind.widening,
-        op, at);
-    if (!ownership_api.valid_limits(limits)) {
-        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
-            op, at);
-        return out;
-    }
+        valid, op, at);
+    if (!valid) { return out; }
     trim_contents(&out, limits, at);
     trim_allocations(&out, limits, at);
     trim_ranges(&out, limits, at);
     dedup_contents(&out);
+    dedup_collision_facts(&out);
+    cover_bounds(&out, limits, at);
     dedup_collision_facts(&out);
     return out;
 }
