@@ -1,0 +1,256 @@
+/// Builds local ownership proof states for transfer tests.
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+import ownership_transfer;
+
+struct counters {
+    u32 next_operation;
+    bool deny;
+    u64 charges;
+    u64 events;
+    ownership_api.event_kind last_kind;
+    ownership_api.incomplete_reason last_reason;
+    ownership_api.entity_id last_relation;
+    u64 last_witnesses;
+    ownership_api.evidence_kind last_evidence;
+    bool last_witness_validated;
+}
+
+struct env {
+    ownership_state.state state;
+    counters counts;
+    ownership_api.services service;
+    ownership_transfer.event_binding[512] event_bindings;
+    u64 event_bindings_len;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* req)
+    ownership_api.charge_result {
+    counters mut* c = cast(opaque, counters mut*);
+    assert(ownership_keys.canonical_charges(req));
+    c->charges += 1;
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    if (c->deny) {
+        out.limit.present = true;
+        out.limit.category = req->items[0].category;
+        out.limit.scope = req->items[0].scope;
+        out.limit.work = req->work;
+        out.limit.used = 1;
+        out.limit.bound = 1;
+        out.limit.attempted = req->items[0].amount;
+        return out;
+    }
+    out.allowed = true;
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    counters mut* c = cast(opaque, counters mut*);
+    assert(req->event.key.kind == ownership_api.entity_kind.event);
+    assert(req->event.evidence == ownership_api.evidence_kind.abstract_possibility ||
+        req->event.evidence == ownership_api.evidence_kind.unconditional);
+    assert(req->event.witnesses.len <= 1);
+    if (req->event.witnesses.len == 1) {
+        assert(req->event.witnesses[0].key.kind == ownership_api.entity_kind.witness);
+    }
+    assert(req->event.source.line == req->event.operation.operation);
+    c->events += 1;
+    c->last_kind = req->event.kind;
+    c->last_reason = req->event.reason;
+    c->last_relation = req->event.relation;
+    c->last_witnesses = req->event.witnesses.len;
+    c->last_evidence = req->event.evidence;
+    if (req->event.witnesses.len == 1) {
+        c->last_witness_validated = req->event.witnesses[0].validated;
+    }
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = req->current;
+    out.retained = true;
+    return out;
+}
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    ownership_api.entity_id mut out = ownership_api.entity_id{};
+    out.kind = kind;
+    out.ordinal = ordinal;
+    return out;
+}
+
+fn place(u32 slot) ownership_api.place_path {
+    ownership_api.place_path mut out = ownership_api.place_path{};
+    out.root = id(ownership_api.entity_kind.slot, slot);
+    return out;
+}
+
+fn init(env mut* e) void {
+    e->state = ownership_state.empty();
+    e->service.budget_context = cast(&e->counts, void mut*);
+    e->service.event_context = cast(&e->counts, void mut*);
+    e->service.budget = budget;
+    e->service.event = event;
+}
+
+fn free(env mut* e) void {
+    ownership_state.free(&e->state);
+}
+
+fn req(env mut* e, ownership_transfer.action kind, u32 src, u32 dst)
+    ownership_transfer.request {
+    e->counts.next_operation += 1;
+    ownership_transfer.request mut out = ownership_transfer.request{};
+    out.kind = kind;
+    out.operation.operation = e->counts.next_operation;
+    out.source_position.line = e->counts.next_operation;
+    out.source_position.col = 1;
+    out.source = place(src);
+    out.destination = place(dst);
+    out.direct_source_proved = true;
+    out.direct_destination_proved = true;
+    assert(e->event_bindings_len < e->event_bindings.len);
+    u64 index = e->event_bindings_len;
+    e->event_bindings[index].operation = out.operation;
+    e->event_bindings[index].key = id(ownership_api.entity_kind.event,
+        e->counts.next_operation);
+    e->event_bindings_len += 1;
+    out.event_map_complete_proved = true;
+    out.event_bindings = e->event_bindings[..e->event_bindings_len];
+    return out;
+}
+
+fn apply(env mut* e, ownership_transfer.request* r)
+    ownership_api.proof_status {
+    return ownership_transfer.apply(&e->state, &e->service, r);
+}
+
+fn allocation(u32 key, u32 site, u32 owner, i64 length)
+    ownership_api.allocation_fact {
+    ownership_api.allocation_fact mut out = ownership_api.allocation_fact{};
+    out.key = id(ownership_api.entity_kind.allocation, key);
+    out.site = id(ownership_api.entity_kind.allocation, site);
+    out.validity = ownership_api.validity_kind.live;
+    out.count.one = true;
+    out.obligation = true;
+    out.owner.place = place(owner);
+    out.logical_length.kind = ownership_api.fact_kind.exact;
+    out.logical_length.value = length;
+    return out;
+}
+
+fn source(u32 key, ownership_api.source_kind kind,
+    ownership_api.entity_id allocation) ownership_api.source_fact {
+    ownership_api.source_fact mut out = ownership_api.source_fact{};
+    out.key = id(ownership_api.entity_kind.source, key);
+    out.kind = kind;
+    out.validity = ownership_api.validity_kind.live;
+    out.allocation = allocation;
+    return out;
+}
+
+fn reference(u32 version, ownership_api.entity_id source,
+    ownership_api.borrow_relation@ borrows) ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = ownership_api.contents_fact{};
+    out.kind = ownership_api.contents_kind.reference;
+    out.value_version = id(ownership_api.entity_kind.value, version);
+    out.borrows = borrows;
+    out.span_length.kind = ownership_api.fact_kind.exact;
+    out.span_length.value = 1;
+    return out;
+}
+
+fn borrow(ownership_api.entity_id source, u32 version,
+    ownership_api.place_path containing) ownership_api.borrow_relation {
+    ownership_api.borrow_relation mut out = ownership_api.borrow_relation{};
+    out.key = id(ownership_api.entity_kind.relation, version);
+    out.value_version = id(ownership_api.entity_kind.value, version);
+    out.source = source;
+    out.containing = containing;
+    out.representation_complete = true;
+    return out;
+}
+
+fn alloc(env mut* e, u32 slot, u32 key, u32 source_key, i64 length)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.allocation, slot, slot);
+    r.allocation = allocation(key, 100, slot, length);
+    r.fresh_source = source(source_key, ownership_api.source_kind.heap, r.allocation.key);
+    ownership_api.borrow_relation[1] borrows = {borrow(r.fresh_source.key, key, place(slot))};
+    r.value = reference(key, r.fresh_source.key, borrows[..]);
+    r.source_key = r.fresh_source.key;
+    return apply(e, &r);
+}
+
+fn add_stack(env mut* e, u32 key) void {
+    ownership_api.source_fact fact = source(key, ownership_api.source_kind.stack,
+        ownership_api.entity_id{});
+    ownership_api.operation_position op = ownership_api.operation_position{};
+    ownership_api.source_position at = ownership_api.source_position{};
+    assert(ownership_state.add_source(&e->state, &e->service, fact, op, at).applied);
+}
+
+fn copy(env mut* e, u32 src, u32 dst, bool owning)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.copy, src, dst);
+    r.destination_owns = owning;
+    return apply(e, &r);
+}
+
+fn move_owner(env mut* e, u32 src, u32 dst) ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.move_owner, src, dst);
+    return apply(e, &r);
+}
+
+fn release(env mut* e, u32 slot, bool leaves_empty)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.release, slot, slot);
+    r.leaves_empty_proved = leaves_empty;
+    return apply(e, &r);
+}
+
+fn inspect(env mut* e, u32 slot) ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.inspect, slot, slot);
+    return apply(e, &r);
+}
+
+fn use(env mut* e, u32 slot) ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.use, slot, slot);
+    return apply(e, &r);
+}
+
+fn dead(env mut* e, u32 slot, u32 source_key, bool proved, bool retained)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.dead, slot, slot);
+    r.source_key = id(ownership_api.entity_kind.source, source_key);
+    r.source_correspondence_proved = true;
+    r.liveness_proved = proved;
+    r.retained_borrow = retained;
+    return apply(e, &r);
+}
+
+fn empty_value() ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = ownership_api.contents_fact{};
+    out.kind = ownership_api.contents_kind.empty_owner;
+    out.owner_empty = true;
+    out.span_length.kind = ownership_api.fact_kind.exact;
+    return out;
+}
+
+fn assign_empty(env mut* e, u32 slot) ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.assignment, slot, slot);
+    r.value = empty_value();
+    return apply(e, &r);
+}
+
+fn address(env mut* e, u32 slot, u32 destination, u32 source_key,
+    bool correspondence) ownership_api.proof_status {
+    ownership_transfer.request mut r = req(e, ownership_transfer.action.address,
+        slot, destination);
+    r.source_key = id(ownership_api.entity_kind.source, source_key);
+    r.source_correspondence_proved = correspondence;
+    ownership_api.borrow_relation[1] borrows = {borrow(r.source_key, source_key,
+        place(destination))};
+    r.value = reference(source_key, r.source_key, borrows[..]);
+    return apply(e, &r);
+}
