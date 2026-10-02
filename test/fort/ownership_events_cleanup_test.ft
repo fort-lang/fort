@@ -1,0 +1,113 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| eight event allocation classes released
+//| repeated teardown and reuse ok
+/// Measures release of the event vector and seven nested allocation classes.
+import heap;
+import ownership_api;
+import ownership_events;
+
+u64 ROUNDS = 600;
+u64 EARLY = 300;
+u64 POINTER_BOUND = 8192;
+$if ($cfg(target_os) == "macos") {
+    u64 SYSTEM_BOUND = 1024;
+} else {
+    u64 SYSTEM_BOUND = 16384;
+}
+
+struct sample {
+    u64 system;
+    u64[8] ptrs;
+}
+
+fn moved(u64 early, u64 late, u64 last) u64 {
+    assert(early != 0 && late != 0 && last != 0);
+    u64 a = heap.distance(early, late);
+    u64 b = heap.distance(early, last);
+    return a < b ? a : b;
+}
+
+fn one_round(sample mut* out) void {
+    ownership_api.limit_table table = ownership_api.limit_table{
+        ownership_api.LIMIT_VERSION, 8, 8, 8, 8, 8, 8, 8, 8, 4};
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    assert(ownership_events.bind(&events, &table, &svc));
+    char[4096] mut text = {};
+    text[0] = 'e';
+    char[512] mut note_a = {};
+    char[512] mut note_b = {};
+    note_a[0] = 'a';
+    note_b[0] = 'b';
+    ownership_api.projection[1] source = {ownership_api.projection{}};
+    ownership_api.projection[1] owner = {ownership_api.projection{}};
+    ownership_api.entity_id[2] conditions = {};
+    ownership_api.witness_link[1] witnesses = {};
+    ownership_api.event_note[2] mut notes = {};
+    notes[0].text = cast(note_a[..], string);
+    notes[1].text = cast(note_b[..], string);
+    ownership_api.event_descriptor mut event = ownership_api.event_descriptor{};
+    event.key.kind = ownership_api.entity_kind.event;
+    event.key.ordinal = 1;
+    event.kind = ownership_api.event_kind.incomplete_proof;
+    event.source_path.projections = source[..];
+    event.owner_path.projections = owner[..];
+    event.conditions = conditions[..];
+    event.witnesses = witnesses[..];
+    event.notes = notes[..];
+    event.text = cast(text[..], string);
+    ownership_api.proof_status mut ready = ownership_api.proof_status{};
+    ready.kind = ownership_api.proof_kind.complete;
+    ownership_api.event_request req = ownership_api.event_request{event, ready};
+    ownership_api.event_result result = ownership_api.record_event(&svc, &req);
+    assert(result.retained && ownership_api.successful(result.proof));
+    assert(events.len == 1 && events.budget.used.v == 2);
+    out->ptrs[0] = cast(events.items.ptr, u64);
+    out->ptrs[1] = cast(events.items[0].source_path.ptr, u64);
+    out->ptrs[2] = cast(events.items[0].owner_path.ptr, u64);
+    out->ptrs[3] = cast(events.items[0].conditions.ptr, u64);
+    out->ptrs[4] = cast(events.items[0].witnesses.ptr, u64);
+    out->ptrs[5] = cast(events.items[0].notes.ptr, u64);
+    out->ptrs[6] = cast(events.items[0].text.ptr, u64);
+    out->ptrs[7] = cast(events.items[0].note_text.ptr, u64);
+    ownership_api.state_handle mut empty_state = ownership_api.state_handle{};
+    ownership_api.event_handle mut handle = ownership_api.event_handle{};
+    handle.context = cast(&events, void mut*);
+    handle.destroy = ownership_events.destroy;
+    ownership_api.teardown(&empty_state, &handle);
+    assert(events.len == 0 && events.budget.used.v == 0 && events.items.len == 0);
+    assert(handle.context == null && handle.destroy == null);
+    ownership_api.teardown(&empty_state, &handle);
+    ownership_events.free(&events);
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.event_result again = ownership_api.record_event(&svc, &req);
+    assert(again.retained && events.budget.used.v == 2);
+    ownership_events.free(&events);
+    assert(events.budget.used.v == 0 && events.items.len == 0);
+    out->system = heap.system_view();
+}
+
+fn main() i32 {
+    sample[3] mut snapshots = {};
+    u64 mut round = 0;
+    while (round < ROUNDS) {
+        sample mut now = sample{};
+        one_round(&now);
+        if (round == EARLY) { snapshots[0] = now; }
+        if (round == ROUNDS - 2) { snapshots[1] = now; }
+        if (round == ROUNDS - 1) { snapshots[2] = now; }
+        round += 1;
+    }
+    assert(moved(snapshots[0].system, snapshots[1].system, snapshots[2].system) < SYSTEM_BOUND);
+    u64 mut i = 0;
+    while (i < 8) {
+        assert(!heap.ADDRESS_IS_A_VIEW || moved(snapshots[0].ptrs[i],
+            snapshots[1].ptrs[i], snapshots[2].ptrs[i]) < POINTER_BOUND);
+        i += 1;
+    }
+    println("eight event allocation classes released");
+    println("repeated teardown and reuse ok");
+    return 0;
+}

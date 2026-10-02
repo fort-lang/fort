@@ -1,0 +1,585 @@
+/// Stores finite proof events and one terminal failure outside the report bound.
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import std.mem;
+
+struct stored_event {
+    ownership_api.event_descriptor value;
+    ownership_api.projection mut@ own source_path;
+    ownership_api.projection mut@ own owner_path;
+    ownership_api.entity_id mut@ own conditions;
+    ownership_api.witness_link mut@ own witnesses;
+    ownership_api.event_note mut@ own notes;
+    u8 mut@ own text;
+    u8 mut@ own note_text;
+}
+
+// The event store keeps its meter live after caller state teardown.
+// A canonical event stream can use callback. record_batch orders other input streams first.
+// The first event that exceeds V excludes later keys, even when a later event costs less.
+struct store {
+    stored_event mut@ own items;
+    u64 len;
+    u64 event_used;
+    u64 rendered;
+    ownership_limits.meter budget;
+    store mut* bound_address;
+    ownership_api.terminal_failure terminal;
+    ownership_api.event_descriptor terminal_order;
+}
+
+fn complete() ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.proof_status{};
+    out.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn failed(ownership_api.incomplete_reason reason, ownership_api.event_descriptor* event)
+    ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = ownership_api.incomplete(reason, event->operation, event->source);
+    return out;
+}
+
+fn terminal_status(store* s) ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.incomplete(s->terminal.reason,
+        s->terminal.operation, s->terminal.source);
+    out.terminal = s->terminal;
+    return out;
+}
+
+fn cost(ownership_api.event_descriptor* event) u64 {
+    if (event->witnesses.len == ownership_api.U64_MAX) { return ownership_api.U64_MAX; }
+    return event->witnesses.len + 1;
+}
+
+fn same_scalar(ownership_api.scalar_fact a, ownership_api.scalar_fact b) bool {
+    return a.kind == b.kind && a.value == b.value &&
+        ownership_keys.entity(a.symbol, b.symbol) == 0;
+}
+
+fn same_path(ownership_api.place_path* a, ownership_api.place_path* b) bool {
+    if (ownership_keys.entity(a->root, b->root) != 0 || a->residual != b->residual ||
+        a->projections.len != b->projections.len) { return false; }
+    u64 mut i = 0;
+    while (i < a->projections.len) {
+        ownership_api.projection left = a->projections[i];
+        ownership_api.projection right = b->projections[i];
+        if (left.kind != right.kind || left.field != right.field ||
+            !same_scalar(left.index, right.index) ||
+            ownership_keys.entity(left.captured_version, right.captured_version) != 0) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_witness(ownership_api.witness_link a, ownership_api.witness_link b) bool {
+    return ownership_keys.entity(a.key, b.key) == 0 &&
+        ownership_keys.entity(a.event, b.event) == 0 &&
+        ownership_keys.entity(a.predecessor, b.predecessor) == 0 &&
+        ownership_keys.function(a.summary, b.summary) == 0 &&
+        ownership_keys.entity(a.condition, b.condition) == 0 &&
+        a.validated == b.validated;
+}
+
+fn same_note(ownership_api.event_note a, ownership_api.event_note b) bool {
+    return a.role == b.role && ownership_keys.source(a.source, b.source) == 0 &&
+        ownership_keys.entity(a.relation, b.relation) == 0 && a.text == b.text;
+}
+
+fn same_conditions(ownership_api.entity_id@ a, ownership_api.entity_id@ b) bool {
+    if (a.len != b.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a.len) {
+            if (ownership_keys.entity(a[i], a[j]) == 0) { left += 1; }
+            if (ownership_keys.entity(a[i], b[j]) == 0) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_witnesses(ownership_api.witness_link@ a, ownership_api.witness_link@ b) bool {
+    if (a.len != b.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a.len) {
+            if (same_witness(a[i], a[j])) { left += 1; }
+            if (same_witness(a[i], b[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_notes(ownership_api.event_note@ a, ownership_api.event_note@ b) bool {
+    if (a.len != b.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.len) {
+        u64 mut left = 0;
+        u64 mut right = 0;
+        u64 mut j = 0;
+        while (j < a.len) {
+            if (same_note(a[i], a[j])) { left += 1; }
+            if (same_note(a[i], b[j])) { right += 1; }
+            j += 1;
+        }
+        if (left != right) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_limit(ownership_api.exhaustion a, ownership_api.exhaustion b) bool {
+    return a.present == b.present && a.category == b.category && a.scope == b.scope &&
+        a.work == b.work && a.used == b.used && a.bound == b.bound &&
+        a.attempted == b.attempted &&
+        ownership_keys.operation(a.operation, b.operation) == 0 &&
+        ownership_keys.source(a.source, b.source) == 0 && a.saturated == b.saturated;
+}
+
+fn same_event(ownership_api.event_descriptor* a, ownership_api.event_descriptor* b) bool {
+    return ownership_keys.entity(a->key, b->key) == 0 &&
+        ownership_keys.operation(a->operation, b->operation) == 0 &&
+        ownership_keys.source(a->source, b->source) == 0 && a->kind == b->kind &&
+        a->evidence == b->evidence && a->reason == b->reason &&
+        ownership_keys.entity(a->relation, b->relation) == 0 &&
+        same_path(&a->source_path, &b->source_path) &&
+        same_path(&a->owner_path, &b->owner_path) &&
+        same_conditions(a->conditions, b->conditions) &&
+        same_witnesses(a->witnesses, b->witnesses) && same_notes(a->notes, b->notes) &&
+        a->text == b->text && a->precision.category == b->precision.category &&
+        a->precision.bound == b->precision.bound &&
+        ownership_keys.source(a->precision.first_source, b->precision.first_source) == 0 &&
+        ownership_keys.entity(a->precision.relation, b->precision.relation) == 0 &&
+        a->precision.reason == b->precision.reason && same_limit(a->limit, b->limit);
+}
+
+fn release(stored_event mut* event) void {
+    del(event->source_path);
+    del(event->owner_path);
+    del(event->conditions);
+    del(event->witnesses);
+    del(event->notes);
+    del(event->text);
+    del(event->note_text);
+    *event = stored_event{};
+}
+
+fn reserve(store mut* s) void {
+    if (s->len < s->items.len) { return; }
+    u64 mut cap = 8;
+    if (s->items.len >= cap) {
+        if (s->items.len > ownership_api.U64_MAX / 2) {
+            panic("ownership_events.reserve: capacity overflow");
+        }
+        cap = s->items.len * 2;
+    }
+    stored_event mut@ own bigger = new(stored_event, cap);
+    u64 mut i = 0;
+    while (i < s->len) {
+        bigger[i] = move(s->items[i]);
+        i += 1;
+    }
+    del(s->items);
+    s->items = move(bigger);
+}
+
+fn clone(ownership_api.event_descriptor* input) stored_event {
+    stored_event mut out = stored_event{};
+    out.value = *input;
+    out.value.source_path.projections = out.source_path[..];
+    out.value.owner_path.projections = out.owner_path[..];
+    out.value.conditions = out.conditions[..];
+    out.value.witnesses = out.witnesses[..];
+    out.value.notes = out.notes[..];
+    out.value.text = "";
+    if (input->source_path.projections.len > 0) {
+        out.source_path = new(ownership_api.projection, input->source_path.projections.len);
+        u64 mut i = 0;
+        while (i < out.source_path.len) {
+            out.source_path[i] = input->source_path.projections[i];
+            i += 1;
+        }
+        out.value.source_path.projections = out.source_path[..];
+    }
+    if (input->owner_path.projections.len > 0) {
+        out.owner_path = new(ownership_api.projection, input->owner_path.projections.len);
+        u64 mut i = 0;
+        while (i < out.owner_path.len) {
+            out.owner_path[i] = input->owner_path.projections[i];
+            i += 1;
+        }
+        out.value.owner_path.projections = out.owner_path[..];
+    }
+    if (input->conditions.len > 0) {
+        out.conditions = new(ownership_api.entity_id, input->conditions.len);
+        u64 mut i = 0;
+        while (i < out.conditions.len) {
+            out.conditions[i] = input->conditions[i];
+            i += 1;
+        }
+        i = 1;
+        while (i < out.conditions.len) {
+            ownership_api.entity_id item = out.conditions[i];
+            u64 mut j = i;
+            while (j > 0 && ownership_keys.entity(item, out.conditions[j - 1]) < 0) {
+                out.conditions[j] = out.conditions[j - 1];
+                j -= 1;
+            }
+            out.conditions[j] = item;
+            i += 1;
+        }
+        out.value.conditions = out.conditions[..];
+    }
+    if (input->witnesses.len > 0) {
+        out.witnesses = new(ownership_api.witness_link, input->witnesses.len);
+        u64 mut i = 0;
+        while (i < out.witnesses.len) {
+            out.witnesses[i] = input->witnesses[i];
+            i += 1;
+        }
+        i = 1;
+        while (i < out.witnesses.len) {
+            ownership_api.witness_link item = out.witnesses[i];
+            u64 mut j = i;
+            while (j > 0 && ownership_keys.entity(item.key, out.witnesses[j - 1].key) < 0) {
+                out.witnesses[j] = out.witnesses[j - 1];
+                j -= 1;
+            }
+            out.witnesses[j] = item;
+            i += 1;
+        }
+        out.value.witnesses = out.witnesses[..];
+    }
+    if (input->notes.len > 0) {
+        out.notes = new(ownership_api.event_note, input->notes.len);
+        u64 mut total = 0;
+        u64 mut i = 0;
+        while (i < input->notes.len) {
+            if (input->notes[i].text.len > ownership_api.U64_MAX - total) {
+                panic("ownership_events.clone: note text overflow");
+            }
+            total += input->notes[i].text.len;
+            i += 1;
+        }
+        if (total > 0) { out.note_text = new(u8, total); }
+        u64 mut offset = 0;
+        i = 0;
+        while (i < out.notes.len) {
+            out.notes[i] = input->notes[i];
+            u64 size = input->notes[i].text.len;
+            if (size > 0) {
+                u8 mut@ target = out.note_text[offset..offset + size];
+                mem.copy(target, cast(input->notes[i].text, u8@));
+                out.notes[i].text = cast(target, string);
+            } else {
+                out.notes[i].text = "";
+            }
+            offset += size;
+            i += 1;
+        }
+        i = 1;
+        while (i < out.notes.len) {
+            ownership_api.event_note item = out.notes[i];
+            u64 mut j = i;
+            while (j > 0 && ownership_keys.note(&item, &out.notes[j - 1]) < 0) {
+                out.notes[j] = out.notes[j - 1];
+                j -= 1;
+            }
+            out.notes[j] = item;
+            i += 1;
+        }
+        out.value.notes = out.notes[..];
+    }
+    if (input->text.len > 0) {
+        out.text = new(u8, input->text.len);
+        mem.copy(out.text, cast(input->text, u8@));
+        out.value.text = cast(out.text[..], string);
+    }
+    return out;
+}
+
+fn remember(store mut* s, ownership_api.event_descriptor* event,
+    ownership_api.exhaustion limit) void {
+    if (s->terminal.present && ownership_keys.event(event, &s->terminal_order) >= 0) {
+        return;
+    }
+    s->terminal_order = ownership_api.event_descriptor{};
+    s->terminal_order.key = event->key;
+    s->terminal_order.operation = event->operation;
+    s->terminal_order.source = event->source;
+    s->terminal_order.kind = event->kind;
+    s->terminal_order.relation = event->relation;
+    s->terminal = ownership_api.terminal_failure{};
+    s->terminal.present = true;
+    s->terminal.reason = ownership_api.incomplete_reason.report_limit;
+    s->terminal.operation = event->operation;
+    s->terminal.source = event->source;
+    s->terminal.relation = event->relation;
+    s->terminal.limit = limit;
+}
+
+fn remember_conflict(store mut* s, ownership_api.event_descriptor* old,
+    ownership_api.event_descriptor* incoming) void {
+    ownership_api.event_descriptor* mut chosen = old;
+    if (ownership_keys.event(incoming, old) < 0) { chosen = incoming; }
+    if (s->terminal.present && ownership_keys.event(chosen, &s->terminal_order) >= 0) {
+        return;
+    }
+    s->terminal_order = ownership_api.event_descriptor{};
+    s->terminal_order.key = chosen->key;
+    s->terminal_order.operation = chosen->operation;
+    s->terminal_order.source = chosen->source;
+    s->terminal_order.kind = chosen->kind;
+    s->terminal_order.relation = chosen->relation;
+    s->terminal = ownership_api.terminal_failure{};
+    s->terminal.present = true;
+    s->terminal.reason = ownership_api.incomplete_reason.invalid_input;
+    s->terminal.operation = chosen->operation;
+    s->terminal.source = chosen->source;
+    s->terminal.relation = chosen->relation;
+}
+
+fn refused(store mut* s, ownership_api.event_descriptor* event, u64 attempted,
+    bool saturated) ownership_api.event_result {
+    ownership_api.exhaustion mut limit = ownership_api.exhaustion{};
+    limit.present = true;
+    limit.category = ownership_api.limit_category.v;
+    limit.scope = ownership_api.limit_scope.report;
+    limit.used = s->budget.used.v;
+    limit.bound = s->budget.bounds.v;
+    limit.attempted = attempted;
+    limit.operation = event->operation;
+    limit.source = event->source;
+    limit.saturated = saturated;
+    remember(s, event, limit);
+    ownership_api.event_result mut out = failed(ownership_api.incomplete_reason.report_limit,
+        event);
+    out.proof.terminal.limit = limit;
+    return out;
+}
+
+/// Configures the owned meter and binds callbacks while the store stays at one address.
+fn bind(store mut* s, ownership_api.limit_table* limits, ownership_api.services mut* svc) bool {
+    if (s->len != 0 || s->rendered != 0 || s->terminal.present ||
+        !ownership_limits.configure(&s->budget, limits)) { return false; }
+    s->bound_address = s;
+    svc->budget_context = cast(&s->budget, void mut*);
+    svc->budget = ownership_limits.callback;
+    svc->event_context = cast(s, void mut*);
+    svc->event = callback;
+    return true;
+}
+
+/// Retains the canonical event prefix. A later smaller key can replace a larger key.
+fn callback(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    if (opaque == null) {
+        return failed(ownership_api.incomplete_reason.invalid_input, &req->event);
+    }
+    store mut* s = cast(opaque, store mut*);
+    if (s->bound_address != s || !s->budget.configured ||
+        s->budget.used.v != s->event_used + s->rendered) {
+        return failed(ownership_api.incomplete_reason.invalid_input, &req->event);
+    }
+    u64 mut duplicate = 0;
+    while (duplicate < s->len) {
+        ownership_api.event_descriptor* prior = &s->items[duplicate].value;
+        if (ownership_keys.entity(prior->key, req->event.key) == 0) {
+            if (!same_event(prior, &req->event)) {
+                remember_conflict(s, prior, &req->event);
+                ownership_api.event_result mut conflict = failed(
+                    ownership_api.incomplete_reason.invalid_input, &req->event);
+                conflict.proof.terminal = s->terminal;
+                conflict.retained = true;
+                conflict.stored_key = prior->key;
+                return conflict;
+            }
+            ownership_api.event_result mut repeated = ownership_api.event_result{};
+            repeated.proof = req->current;
+            if (s->terminal.present) { repeated.proof = terminal_status(s); }
+            repeated.retained = true;
+            repeated.stored_key = prior->key;
+            return repeated;
+        }
+        duplicate += 1;
+    }
+    u64 mut at = 0;
+    while (at < s->len && ownership_keys.event(&s->items[at].value, &req->event) < 0) {
+        at += 1;
+    }
+    if (req->event.witnesses.len == ownership_api.U64_MAX) {
+        return refused(s, &req->event, ownership_api.U64_MAX, true);
+    }
+    u64 amount = cost(&req->event);
+    u64 mut prefix = s->rendered;
+    u64 mut i = 0;
+    while (i < at) {
+        prefix += cost(&s->items[i].value);
+        i += 1;
+    }
+    bool saturated = amount > ownership_api.U64_MAX - prefix;
+    if ((s->terminal.present && ownership_keys.event(&req->event, &s->terminal_order) >= 0) ||
+        saturated || prefix > s->budget.bounds.v ||
+        amount > s->budget.bounds.v - prefix) {
+        return refused(s, &req->event, amount, saturated);
+    }
+    u64 mut keep = at;
+    u64 mut final_used = prefix + amount;
+    while (keep < s->len) {
+        u64 next = cost(&s->items[keep].value);
+        if (next > s->budget.bounds.v - final_used) { break; }
+        final_used += next;
+        keep += 1;
+    }
+    u64 old_used = s->budget.used.v;
+    s->budget.used.v = final_used - amount;
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.v, ownership_api.limit_scope.report, amount}};
+    ownership_api.charge_request charge = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, req->event.operation, req->event.source, item[..]};
+    ownership_api.charge_result permission = ownership_limits.try_charge(&s->budget, &charge);
+    if (!permission.allowed) {
+        s->budget.used.v = old_used;
+        return refused(s, &req->event, amount, permission.limit.saturated);
+    }
+    stored_event mut copy = clone(&req->event);
+    i = keep;
+    while (i < s->len) {
+        ownership_api.exhaustion mut limit = ownership_api.exhaustion{};
+        limit.present = true;
+        limit.category = ownership_api.limit_category.v;
+        limit.scope = ownership_api.limit_scope.report;
+        limit.used = final_used;
+        limit.bound = s->budget.bounds.v;
+        limit.attempted = cost(&s->items[i].value);
+        limit.operation = s->items[i].value.operation;
+        limit.source = s->items[i].value.source;
+        remember(s, &s->items[i].value, limit);
+        release(&s->items[i]);
+        i += 1;
+    }
+    s->len = keep;
+    reserve(s);
+    i = s->len;
+    while (i > at) {
+        s->items[i] = move(s->items[i - 1]);
+        i -= 1;
+    }
+    s->items[at] = move(copy);
+    s->len += 1;
+    s->event_used = final_used - s->rendered;
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = req->current;
+    if (s->terminal.present) { out.proof = terminal_status(s); }
+    out.retained = true;
+    out.stored_key = req->event.key;
+    return out;
+}
+
+/// Orders a complete input batch before the first V charge.
+fn record_batch(store mut* s, ownership_api.services* svc, ownership_api.event_descriptor@ input,
+    ownership_api.proof_status current) ownership_api.proof_status {
+    ownership_api.proof_status mut verdict = current;
+    ownership_api.event_descriptor mut@ own sorted = new(ownership_api.event_descriptor,
+        input.len);
+    u64 mut i = 0;
+    while (i < input.len) {
+        sorted[i] = input[i];
+        i += 1;
+    }
+    i = 1;
+    while (i < sorted.len) {
+        ownership_api.event_descriptor item = sorted[i];
+        u64 mut j = i;
+        while (j > 0 && ownership_keys.event(&item, &sorted[j - 1]) < 0) {
+            sorted[j] = sorted[j - 1];
+            j -= 1;
+        }
+        sorted[j] = item;
+        i += 1;
+    }
+    i = 0;
+    while (i < sorted.len) {
+        ownership_api.event_request req = ownership_api.event_request{sorted[i], verdict};
+        ownership_api.event_result out = ownership_api.record_event(svc, &req);
+        if (!ownership_api.successful(out.proof)) { verdict = out.proof; }
+        i += 1;
+    }
+    del(sorted);
+    if (s->terminal.present) {
+        verdict = ownership_api.incomplete(s->terminal.reason,
+            s->terminal.operation, s->terminal.source);
+        verdict.terminal = s->terminal;
+    }
+    return verdict;
+}
+
+/// Charges one rendered diagnostic record against the same V meter.
+fn charge_rendered(store mut* s, ownership_api.operation_position op,
+    ownership_api.source_position source) ownership_api.charge_result {
+    ownership_api.charge_request mut req = ownership_api.charge_request{};
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.v, ownership_api.limit_scope.report, 1}};
+    req.items = item[..];
+    req.operation = op;
+    req.source = source;
+    if (s->bound_address != s || !s->budget.configured) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            op, source);
+        return out;
+    }
+    ownership_api.charge_result out = ownership_limits.try_charge(&s->budget, &req);
+    if (out.allowed) {
+        s->rendered += 1;
+    } else if (out.limit.present) {
+        ownership_api.event_descriptor mut event = ownership_api.event_descriptor{};
+        event.operation = op;
+        event.source = source;
+        event.kind = ownership_api.event_kind.incomplete_proof;
+        event.key.kind = ownership_api.entity_kind.event;
+        remember(s, &event, out.limit);
+    }
+    return out;
+}
+
+/// Releases copied text and nested vectors. The meter keeps non-V counters.
+fn free(store mut* s) void {
+    u64 mut i = 0;
+    while (i < s->len) {
+        release(&s->items[i]);
+        i += 1;
+    }
+    del(s->items);
+    s->len = 0;
+    s->event_used = 0;
+    s->rendered = 0;
+    s->terminal = ownership_api.terminal_failure{};
+    s->terminal_order = ownership_api.event_descriptor{};
+    s->budget = ownership_limits.meter{};
+    s->bound_address = null;
+}
+
+fn destroy(void mut* opaque) void {
+    if (opaque != null) { free(cast(opaque, store mut*)); }
+}
+
+fn at(store* s, u64 index) ownership_api.event_descriptor* {
+    if (index >= s->len) { panic("ownership_events.at: index out of range"); }
+    return &s->items[index].value;
+}

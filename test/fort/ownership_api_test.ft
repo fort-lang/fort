@@ -12,6 +12,7 @@
 //| numeric tables ok
 //| teardown ok
 //| reporting statuses ok
+//| reporting failure precedence ok
 /// Tests independent extension contracts and failures without production analyzer modules.
 import ownership_api;
 import ownership_keys;
@@ -464,6 +465,54 @@ fn optimistic_event(void mut* opaque, ownership_api.event_request* req) ownershi
     return out;
 }
 
+fn failing_event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        req->event.operation, req->event.source);
+    out.retained = true;
+    return out;
+}
+
+fn failed_complete_event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    ownership_api.event_result mut out = failing_event(opaque, req);
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn reporting_failure_precedence() void {
+    ownership_diag_client.context mut ctx = ownership_diag_client.context{};
+    ownership_api.services mut svc = ownership_diag_client.service(&ctx);
+    ownership_api.event_request mut req = ownership_api.event_request{};
+    req.event.operation.operation = 5;
+    req.event.source.line = 9;
+    req.current = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        req.event.operation, req.event.source);
+    req.current.terminal.limit.present = true;
+    req.current.terminal.limit.category = ownership_api.limit_category.w;
+    req.current.terminal.limit.used = 7;
+    svc.event = failing_event;
+    ownership_api.event_result new_failure = ownership_api.record_event(&svc, &req);
+    assert(new_failure.retained && new_failure.proof.failed);
+    assert(new_failure.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(req.current.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    svc.event = optimistic_event;
+    ownership_api.event_result earlier = ownership_api.record_event(&svc, &req);
+    assert(earlier.retained && earlier.proof.failed);
+    assert(earlier.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    svc.event = failed_complete_event;
+    ownership_api.event_result malformed = ownership_api.record_event(&svc, &req);
+    assert(malformed.retained && malformed.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(malformed.proof.failed && malformed.proof.terminal.present);
+    assert(malformed.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(malformed.proof.terminal.operation.operation == 5 &&
+        malformed.proof.terminal.source.line == 9);
+    assert(malformed.proof.terminal.limit.present &&
+        malformed.proof.terminal.limit.category == ownership_api.limit_category.w &&
+        malformed.proof.terminal.limit.used == 7);
+    println("reporting failure precedence ok");
+}
+
 fn reporting_statuses() void {
     ownership_diag_client.context mut ctx = ownership_diag_client.context{};
     ctx.render = true;
@@ -563,5 +612,6 @@ fn main() i32 {
     numeric_tables();
     teardown();
     reporting_statuses();
+    reporting_failure_precedence();
     return 0;
 }

@@ -1,0 +1,438 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| 27 bound cases ok
+//| 8 work cases ok
+//| 10 invalid tables ok
+//| invalid charges ok
+//| complete charge order ok
+//| production stress matrix ok
+/// Tests each finite bound and the canonical budget callback.
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+
+struct bound_case {
+    ownership_api.limit_category category;
+    string below;
+    string at;
+    string above;
+}
+
+fn small(u64 n) ownership_api.limit_table {
+    return ownership_api.limit_table{ownership_api.LIMIT_VERSION, n, n, n, n, n, n, n, n, n};
+}
+
+fn amount(ownership_api.used_counts* used, ownership_api.limit_category category) u64 {
+    switch (category) {
+    case ownership_api.limit_category.d: return used->d;
+    case ownership_api.limit_category.r: return used->r;
+    case ownership_api.limit_category.p: return used->p;
+    case ownership_api.limit_category.g: return used->g;
+    case ownership_api.limit_category.h: return used->h;
+    case ownership_api.limit_category.t: return used->t;
+    case ownership_api.limit_category.e: return used->e;
+    case ownership_api.limit_category.w: return used->w;
+    case ownership_api.limit_category.v: return used->v;
+    }
+}
+
+fn zero(ownership_api.limit_table mut* limits, ownership_api.limit_category category) void {
+    switch (category) {
+    case ownership_api.limit_category.d: limits->d = 0;
+    case ownership_api.limit_category.r: limits->r = 0;
+    case ownership_api.limit_category.p: limits->p = 0;
+    case ownership_api.limit_category.g: limits->g = 0;
+    case ownership_api.limit_category.h: limits->h = 0;
+    case ownership_api.limit_category.t: limits->t = 0;
+    case ownership_api.limit_category.e: limits->e = 0;
+    case ownership_api.limit_category.w: limits->w = 0;
+    case ownership_api.limit_category.v: limits->v = 0;
+    }
+}
+
+fn bounds() void {
+    bound_case[9] cases = {
+        bound_case{ownership_api.limit_category.d, "B-D-01", "B-D-02", "B-D-03"},
+        bound_case{ownership_api.limit_category.r, "B-R-01", "B-R-02", "B-R-03"},
+        bound_case{ownership_api.limit_category.p, "B-P-01", "B-P-02", "B-P-03"},
+        bound_case{ownership_api.limit_category.g, "B-G-01", "B-G-02", "B-G-03"},
+        bound_case{ownership_api.limit_category.h, "B-H-01", "B-H-02", "B-H-03"},
+        bound_case{ownership_api.limit_category.t, "B-T-01", "B-T-02", "B-T-03"},
+        bound_case{ownership_api.limit_category.e, "B-E-01", "B-E-02", "B-E-03"},
+        bound_case{ownership_api.limit_category.w, "B-W-01", "B-W-02", "B-W-03"},
+        bound_case{ownership_api.limit_category.v, "B-V-01", "B-V-02", "B-V-03"},
+    };
+    u64 mut scenarios = 0;
+    u64 mut i = 0;
+    while (i < cases.len) {
+        ownership_limits.meter mut budget = ownership_limits.meter{};
+        ownership_api.limit_table limits = small(3);
+        assert(ownership_limits.configure(&budget, &limits));
+        ownership_api.charge_item[1] item = {ownership_api.charge_item{
+            cases[i].category, ownership_api.scope_of(cases[i].category), 1}};
+        ownership_api.operation_position op = ownership_api.operation_position{
+            ownership_api.function_id{ownership_api.declaration_id{2, 4}, 0}, 3, 7, false};
+        ownership_api.source_position source = ownership_api.source_position{2, 1, 19, 5, 19, 8};
+        ownership_api.charge_request req = ownership_api.charge_request{
+            ownership_api.work_kind.transfer, op, source, item[..]};
+        ownership_api.charge_result first = ownership_limits.try_charge(&budget, &req);
+        ownership_api.charge_result second = ownership_limits.try_charge(&budget, &req);
+        assert(first.allowed && second.allowed && amount(&budget.used, cases[i].category) == 2);
+        assert(cases[i].below.len == 6);
+        scenarios += 1;
+        ownership_api.charge_result third = ownership_limits.try_charge(&budget, &req);
+        assert(third.allowed && amount(&budget.used, cases[i].category) == 3);
+        assert(cases[i].at.len == 6);
+        scenarios += 1;
+        ownership_api.charge_result fourth = ownership_limits.try_charge(&budget, &req);
+        assert(!fourth.allowed && fourth.limit.present && !fourth.limit.saturated);
+        assert(fourth.limit.category == cases[i].category && fourth.limit.used == 3);
+        assert(fourth.limit.bound == 3 && fourth.limit.attempted == 1);
+        assert(ownership_keys.operation(fourth.limit.operation, op) == 0);
+        assert(ownership_keys.source(fourth.limit.source, source) == 0);
+        assert(amount(&budget.used, cases[i].category) == 3);
+        if (cases[i].category == ownership_api.limit_category.w ||
+            cases[i].category == ownership_api.limit_category.v) {
+            assert(fourth.proof.failed && fourth.proof.terminal.present);
+            assert(fourth.proof.kind == ownership_api.proof_kind.incomplete);
+            assert(fourth.proof.terminal.limit.present);
+        } else {
+            assert(!fourth.proof.failed && fourth.proof.kind == ownership_api.proof_kind.complete);
+            ownership_api.entity_id mut relation = ownership_api.entity_id{};
+            relation.kind = ownership_api.entity_kind.relation;
+            relation.ordinal = 31;
+            ownership_api.lost_fact fact = ownership_limits.lost(&fourth.limit, relation);
+            assert(fact.category == cases[i].category && fact.bound == 3);
+            assert(ownership_keys.source(fact.first_source, source) == 0);
+            assert(ownership_keys.entity(fact.relation, relation) == 0);
+            ownership_api.contents_fact mut empty = ownership_api.contents_fact{};
+            empty.kind = ownership_api.contents_kind.empty_owner;
+            empty.owner_empty = true;
+            ownership_api.allocation_fact mut separate = ownership_api.allocation_fact{};
+            separate.obligation = false;
+            assert(empty.owner_empty && !separate.obligation && !fourth.proof.failed);
+        }
+        assert(cases[i].above.len == 6);
+        scenarios += 1;
+        i += 1;
+    }
+    assert(scenarios == 27);
+    println("27 bound cases ok");
+}
+
+fn dummy_event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    return ownership_api.event_result{};
+}
+
+fn work() void {
+    ownership_api.work_kind[5] kinds = {
+        ownership_api.work_kind.transfer, ownership_api.work_kind.join,
+        ownership_api.work_kind.widening, ownership_api.work_kind.substitution,
+        ownership_api.work_kind.summary_solver,
+    };
+    u64 mut cases = 0;
+    u64 mut i = 0;
+    while (i < kinds.len) {
+        ownership_limits.meter mut budget = ownership_limits.meter{};
+        ownership_api.limit_table limits = small(1);
+        assert(ownership_limits.configure(&budget, &limits));
+        ownership_api.services mut svc = ownership_api.services{};
+        svc.budget_context = cast(&budget, void mut*);
+        svc.budget = ownership_limits.callback;
+        svc.event = dummy_event;
+        ownership_api.operation_position mut op = ownership_api.operation_position{};
+        op.operation = cast(i + 1, u32);
+        ownership_api.allocation_fact[1] mut obligations = {};
+        obligations[0].obligation = true;
+        obligations[0].count.one = true;
+        ownership_api.witness_link[1] mut witnesses = {};
+        witnesses[0].key.kind = ownership_api.entity_kind.witness;
+        witnesses[0].key.ordinal = 17;
+        witnesses[0].validated = true;
+        ownership_api.charge_result allowed = ownership_api.charge_work(&svc, kinds[i], op,
+            ownership_api.source_position{});
+        u64 mut mutations = 0;
+        if (allowed.allowed) { mutations += 1; }
+        ownership_api.charge_result denied = ownership_api.charge_work(&svc, kinds[i], op,
+            ownership_api.source_position{});
+        if (denied.allowed) { mutations += 1; }
+        assert(mutations == 1 && budget.used.w == 1);
+        assert(!denied.allowed && denied.proof.failed && denied.limit.used == 1);
+        assert(denied.limit.work == kinds[i] && denied.limit.operation.operation == op.operation);
+        assert(obligations[0].obligation && obligations[0].count.one);
+        assert(witnesses[0].validated && witnesses[0].key.ordinal == 17);
+        cases += 1;
+        i += 1;
+    }
+    // W06: D is the first simultaneous limit. No item changes its counter.
+    ownership_limits.meter mut simultaneous = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = small(1);
+    assert(ownership_limits.configure(&simultaneous, &limits));
+    simultaneous.used.d = 1;
+    simultaneous.used.r = 1;
+    ownership_api.charge_item[2] items = {
+        ownership_api.charge_item{ownership_api.limit_category.d,
+            ownership_api.limit_scope.path, 1},
+        ownership_api.charge_item{ownership_api.limit_category.r,
+            ownership_api.limit_scope.state, 1},
+    };
+    ownership_api.charge_request mut req = ownership_api.charge_request{
+        ownership_api.work_kind.join, ownership_api.operation_position{},
+        ownership_api.source_position{}, items[..]};
+    ownership_api.charge_result tied = ownership_limits.try_charge(&simultaneous, &req);
+    assert(!tied.allowed && tied.limit.category == ownership_api.limit_category.d);
+    assert(simultaneous.used.d == 1 && simultaneous.used.r == 1);
+    cases += 1;
+    // W07: saturation cannot wrap the W counter or grant permission.
+    ownership_limits.meter mut saturation = ownership_limits.meter{};
+    limits.w = ownership_api.U64_MAX;
+    assert(ownership_limits.configure(&saturation, &limits));
+    saturation.used.w = ownership_api.U64_MAX;
+    ownership_api.charge_item[1] unit = {ownership_api.charge_item{
+        ownership_api.limit_category.w, ownership_api.limit_scope.computation, 1}};
+    req.items = unit[..];
+    ownership_api.charge_result full = ownership_limits.try_charge(&saturation, &req);
+    assert(!full.allowed && full.limit.saturated && full.limit.used == ownership_api.U64_MAX);
+    assert(saturation.used.w == ownership_api.U64_MAX);
+    cases += 1;
+    // W08: canonical batch order selects the same attempted operation.
+    ownership_api.charge_request[2] mut forward = {};
+    ownership_api.charge_request[2] mut reverse = {};
+    forward[0] = req;
+    forward[1] = req;
+    forward[0].operation.operation = 4;
+    forward[1].operation.operation = 9;
+    reverse[0] = forward[1];
+    reverse[1] = forward[0];
+    ownership_limits.meter mut left = ownership_limits.meter{};
+    ownership_limits.meter mut right = ownership_limits.meter{};
+    limits.w = 1;
+    assert(ownership_limits.configure(&left, &limits));
+    assert(ownership_limits.configure(&right, &limits));
+    ownership_api.charge_result l = ownership_limits.charge_batch(&left, forward[..]);
+    ownership_api.charge_result r = ownership_limits.charge_batch(&right, reverse[..]);
+    assert(!l.allowed && !r.allowed && l.limit.operation.operation == 9);
+    assert(ownership_keys.operation(l.limit.operation, r.limit.operation) == 0);
+    assert(left.used.w == 1 && right.used.w == 1);
+    cases += 1;
+    assert(cases == 8);
+    println("8 work cases ok");
+}
+
+fn versions() void {
+    ownership_api.limit_category[9] categories = {
+        ownership_api.limit_category.d, ownership_api.limit_category.r,
+        ownership_api.limit_category.p, ownership_api.limit_category.g,
+        ownership_api.limit_category.h, ownership_api.limit_category.t,
+        ownership_api.limit_category.e, ownership_api.limit_category.w,
+        ownership_api.limit_category.v,
+    };
+    ownership_limits.meter mut budget = ownership_limits.meter{};
+    u64 mut i = 0;
+    while (i < categories.len) {
+        ownership_api.limit_table mut limits = small(1);
+        zero(&limits, categories[i]);
+        assert(!ownership_limits.configure(&budget, &limits));
+        assert(!budget.configured && budget.used.w == 0);
+        i += 1;
+    }
+    ownership_api.limit_table mut unsupported = small(1);
+    unsupported.version += 1;
+    assert(!ownership_limits.configure(&budget, &unsupported));
+    ownership_api.limit_table valid = small(1);
+    assert(ownership_limits.configure(&budget, &valid));
+    budget.used.w = 1;
+    assert(!ownership_limits.configure(&budget, &unsupported));
+    assert(budget.configured && budget.used.w == 1 && budget.bounds.version == 1);
+    ownership_api.limit_table production = ownership_limits.production();
+    assert(ownership_api.valid_limits(&production));
+    println("10 invalid tables ok");
+}
+
+fn invalid_charges() void {
+    ownership_limits.meter mut budget = ownership_limits.meter{};
+    ownership_api.limit_table limits = small(3);
+    assert(ownership_limits.configure(&budget, &limits));
+    ownership_api.charge_request mut req = ownership_api.charge_request{};
+    assert(!ownership_limits.try_charge(&budget, &req).allowed);
+    ownership_api.charge_item[2] mut items = {
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 1},
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 1},
+    };
+    req.items = items[..];
+    assert(!ownership_limits.try_charge(&budget, &req).allowed);
+    items[1].category = ownership_api.limit_category.d;
+    items[1].scope = ownership_api.limit_scope.path;
+    assert(!ownership_limits.try_charge(&budget, &req).allowed);
+    items[0].amount = 0;
+    assert(!ownership_limits.try_charge(&budget, &req).allowed);
+    items[0].amount = 1;
+    items[0].scope = ownership_api.limit_scope.report;
+    assert(!ownership_limits.try_charge(&budget, &req).allowed);
+    assert(budget.used.w == 0 && budget.used.d == 0);
+    ownership_limits.meter mut mixed = ownership_limits.meter{};
+    ownership_api.limit_table tight = small(1);
+    assert(ownership_limits.configure(&mixed, &tight));
+    mixed.used.d = 1;
+    ownership_api.charge_item[2] invalid_work = {
+        ownership_api.charge_item{ownership_api.limit_category.d,
+            ownership_api.limit_scope.path, 1},
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 2},
+    };
+    req.items = invalid_work[..];
+    ownership_api.charge_result bad = ownership_limits.try_charge(&mixed, &req);
+    assert(!bad.allowed && !bad.limit.present && bad.proof.failed);
+    assert(bad.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(mixed.used.d == 1 && mixed.used.w == 0);
+    println("invalid charges ok");
+}
+
+fn complete_order() void {
+    ownership_api.limit_table mut tight = small(1);
+    ownership_api.charge_item[1] short_items = {ownership_api.charge_item{
+        ownership_api.limit_category.d, ownership_api.limit_scope.path, 1}};
+    ownership_api.charge_item[2] mut long_items = {
+        ownership_api.charge_item{ownership_api.limit_category.d,
+            ownership_api.limit_scope.path, 1},
+        ownership_api.charge_item{ownership_api.limit_category.r,
+            ownership_api.limit_scope.state, 2},
+    };
+    ownership_api.charge_request mut short_req = ownership_api.charge_request{};
+    short_req.items = short_items[..];
+    ownership_api.charge_request mut long_req = short_req;
+    long_req.items = long_items[..];
+    ownership_api.charge_request[2] mut forward = {short_req, long_req};
+    ownership_api.charge_request[2] mut reverse = {long_req, short_req};
+    ownership_limits.meter mut left = ownership_limits.meter{};
+    ownership_limits.meter mut right = ownership_limits.meter{};
+    assert(ownership_limits.configure(&left, &tight));
+    assert(ownership_limits.configure(&right, &tight));
+    ownership_api.charge_result mut a = ownership_limits.charge_batch(&left, forward[..]);
+    ownership_api.charge_result mut b = ownership_limits.charge_batch(&right, reverse[..]);
+    assert(!a.allowed && !b.allowed && a.limit.category == ownership_api.limit_category.d);
+    assert(b.limit.category == a.limit.category && left.used.d == 1 && right.used.d == 1);
+    assert(left.used.r == 0 && right.used.r == 0);
+
+    tight.d = 2;
+    long_items[1].amount = 1;
+    ownership_api.charge_item[2] mut more_items = {long_items[0], long_items[1]};
+    more_items[1].amount = 2;
+    short_req.items = long_items[..];
+    long_req.items = more_items[..];
+    forward[0] = short_req;
+    forward[1] = long_req;
+    reverse[0] = long_req;
+    reverse[1] = short_req;
+    assert(ownership_limits.configure(&left, &tight));
+    assert(ownership_limits.configure(&right, &tight));
+    a = ownership_limits.charge_batch(&left, forward[..]);
+    b = ownership_limits.charge_batch(&right, reverse[..]);
+    assert(!a.allowed && !b.allowed && a.limit.category == ownership_api.limit_category.r);
+    assert(b.limit.category == a.limit.category && left.used.d == 1 && right.used.d == 1);
+    assert(left.used.r == 1 && right.used.r == 1);
+
+    tight.d = 1;
+    more_items[1].category = ownership_api.limit_category.p;
+    more_items[1].amount = 1;
+    forward[1].items = more_items[..];
+    reverse[0].items = more_items[..];
+    assert(ownership_limits.configure(&left, &tight));
+    assert(ownership_limits.configure(&right, &tight));
+    a = ownership_limits.charge_batch(&left, forward[..]);
+    b = ownership_limits.charge_batch(&right, reverse[..]);
+    assert(!a.allowed && !b.allowed && a.limit.category == ownership_api.limit_category.d);
+    assert(b.limit.category == a.limit.category && left.used.r == 1 && right.used.r == 1);
+    assert(left.used.p == 0 && right.used.p == 0);
+    println("complete charge order ok");
+}
+
+fn production_stress() void {
+    ownership_api.limit_table table = ownership_limits.production();
+    assert(table.version == 1 && table.d == 16 && table.r == 256 && table.p == 128);
+    assert(table.g == 128 && table.h == 64 && table.t == 64 && table.e == 256);
+    assert(table.w == 65536 && table.v == 512);
+    ownership_api.limit_category[9] categories = {
+        ownership_api.limit_category.d, ownership_api.limit_category.r,
+        ownership_api.limit_category.p, ownership_api.limit_category.g,
+        ownership_api.limit_category.h, ownership_api.limit_category.t,
+        ownership_api.limit_category.e, ownership_api.limit_category.w,
+        ownership_api.limit_category.v,
+    };
+    u64[9] baseline = {4, 48, 24, 16, 8, 8, 40, 4096, 24};
+    u64[9] branching = {12, 192, 96, 96, 48, 48, 192, 49152, 384};
+    u64[9] selected = {16, 256, 128, 128, 64, 64, 256, 65536, 512};
+    u64 mut i = 0;
+    while (i < categories.len) {
+        ownership_limits.meter mut budget = ownership_limits.meter{};
+        assert(ownership_limits.configure(&budget, &table));
+        ownership_api.charge_item[1] mut item = {ownership_api.charge_item{
+            categories[i], ownership_api.scope_of(categories[i]), baseline[i]}};
+        ownership_api.operation_position mut op = ownership_api.operation_position{};
+        op.operation = cast(i + 1, u32);
+        ownership_api.source_position source = ownership_api.source_position{
+            1, 2, cast(i + 20, u32), 1, cast(i + 20, u32), 2};
+        ownership_api.charge_request req = ownership_api.charge_request{
+            ownership_api.work_kind.transfer, op, source, item[..]};
+        if (categories[i] == ownership_api.limit_category.w) {
+            item[0].amount = 1;
+            u64 mut n = 0;
+            while (n < baseline[i]) {
+                assert(ownership_limits.try_charge(&budget, &req).allowed);
+                n += 1;
+            }
+        } else {
+            assert(ownership_limits.try_charge(&budget, &req).allowed);
+        }
+        assert(amount(&budget.used, categories[i]) == baseline[i]);
+        if (categories[i] == ownership_api.limit_category.w) {
+            u64 mut n = baseline[i];
+            while (n < branching[i]) {
+                assert(ownership_limits.try_charge(&budget, &req).allowed);
+                n += 1;
+            }
+        } else {
+            item[0].amount = branching[i] - baseline[i];
+            assert(ownership_limits.try_charge(&budget, &req).allowed);
+        }
+        assert(amount(&budget.used, categories[i]) == branching[i]);
+        if (categories[i] == ownership_api.limit_category.w) {
+            u64 mut n = branching[i];
+            while (n < selected[i]) {
+                assert(ownership_limits.try_charge(&budget, &req).allowed);
+                n += 1;
+            }
+        } else {
+            item[0].amount = selected[i] - branching[i];
+            assert(ownership_limits.try_charge(&budget, &req).allowed);
+        }
+        assert(amount(&budget.used, categories[i]) == selected[i]);
+        item[0].amount = 1;
+        ownership_api.charge_result over = ownership_limits.try_charge(&budget, &req);
+        assert(!over.allowed && over.limit.present && over.limit.used == selected[i]);
+        assert(over.limit.bound == selected[i] && over.limit.attempted == 1);
+        assert(ownership_keys.operation(over.limit.operation, op) == 0);
+        assert(ownership_keys.source(over.limit.source, source) == 0);
+        if (i < 7) {
+            assert(!over.proof.failed && over.proof.kind == ownership_api.proof_kind.complete);
+        } else {
+            assert(over.proof.failed && over.proof.kind == ownership_api.proof_kind.incomplete);
+        }
+        i += 1;
+    }
+    println("production stress matrix ok");
+}
+
+fn main() i32 {
+    bounds();
+    work();
+    versions();
+    invalid_charges();
+    complete_order();
+    production_stress();
+    return 0;
+}
