@@ -754,6 +754,269 @@ Rejected intervals describe the required diagnostic reason, not a diagnostic ide
 - Verdict: Reject the final write. Diagnostic reason: the deferred effect creates a live overwritten
   obligation. Checking the earlier empty state would miss B.
 
+### 2.7 Finite heap obligations and cleanup
+
+This section defines the heap proof under D17.16. It does not change allocation or release code.
+The analysis uses finite states. The program can allocate an unbounded number of objects over time.
+
+**Concrete identities and obligations.** Each successful allocation creates one fresh allocation
+identity and one obligation. Two live allocations from the same expression have different
+identities.
+Reusing a released address does not reuse its identity. A borrow of the released allocation stays
+invalid when a later allocation uses that address or expression.
+
+An owning reference designates one allocation, or it is empty. An owning span designates its backing
+allocation, not one allocation per element. Its element slots can contain separate owned references.
+A zero-element allocation still has one obligation (section 2.1).
+An owned edge is an owning leaf in allocation storage. It holds the target allocation's obligation.
+A borrowed edge holds a source relation. It adds no release obligation.
+The graph records allocation storage, owned edges, borrowed edges, and owner places separately.
+Each live allocation has one current owning reference or a transfer in progress.
+The proof retains an obligation if its current owner becomes unreachable. Unreachability is not
+cleanup.
+
+**Finite representation.** A heap state uses singleton representatives and summary groups.
+A singleton represents one selected allocation in each concrete state that the abstract state
+permits. A summary group represents a set of allocations that can coexist in one concrete state.
+Group keys can use allocation sites and bounded call context. A group key alone proves no identity
+equality, disjointness, or cleanup result.
+The implementation bounds representative and predicate counts. When it reaches a bound, it retains
+conservative groups and loses precision. It cannot discharge an obligation to meet that bound.
+
+Keep these facts for each group:
+
+- Possible simultaneous cardinalities: zero, one, and many. Many means at least two allocations.
+- Outstanding obligations and their owning paths or detached residual state.
+- Possible borrowed sources, including subranges and released-source history.
+- Proved structural relations and separation between represented allocations.
+
+A cardinality set can contain several alternatives. For example, `{zero, one}` is not two live
+allocations. Conversely, `{many}` cannot stand for one obligation merely because it has one group
+key. The state need not retain an exact unbounded count. It must retain whether any obligation can
+remain and the structural relation that permits complete cleanup.
+
+A new allocation adds a fresh obligation. Moving it to an older group preserves that obligation.
+If finite identity precision cannot separate it from an earlier borrow source, retain possible
+overlap. Do not mark the earlier source live from the new allocation's validity.
+Keep released sources separate from live-source facts. An ambiguous borrow use needs proof for
+each possible source (D17.14).
+Discard a released-source record only when no later use or retention can refer to it.
+
+**Updates and conservation.** A move changes the owning path, not the allocation identity.
+Moving an owned edge empties that edge and retains its target's obligation at the destination.
+Before a nonempty `del`, prove valid ownership of the selected allocation and empty owned leaves
+within its storage. Then discharge that allocation's obligation and invalidate its borrowed sources.
+The release does not recursively discharge targets that its fields previously owned.
+Empty `del` discharges nothing.
+
+A release of one member cannot mark its entire summary group empty.
+Releasing one member of `{many}` leaves `{one, many}` unless stronger relational facts apply.
+A weak update retains possible residual members and possible sources. A join retains alternatives
+from its reaching states. Widening retains possible residual obligations and possible overlap.
+A complete-region cleanup summary can discharge a group only after the inductive proof below.
+Its effect must retain obligations outside that region.
+
+An owning destination must be empty after right-side effects and before replacement (section 2.5).
+A transfer into one of the target's own descendants can create an owned cycle.
+Type-correct moves alone do not prove that the resulting graph has an acyclic shape.
+No exclusive borrowing rule applies. Substitute writable aliases before proving a destructive
+update.
+An unproved write through a possible alias destroys the affected shape fact. It does not destroy
+the affected obligations.
+
+**Inductive shapes.** A structural predicate describes a finite concrete region of any size.
+Its recursive definition has a finite number of clauses and field or element roles.
+The proof infers these predicates and their preconditions. Source code declares no heap predicate or
+lifetime annotation.
+
+`chain(root)` has two clauses:
+
+1. An empty root owns no region.
+2. A nonempty root owns one node, its proved payload regions, and a chain through its successor
+   field. The node, payload regions, and successor region have disjoint allocation identities.
+
+The second clause contains no path back to its node through an owned edge.
+Each owned leaf belongs to the successor, a payload region, or a proved empty leaf.
+The predicate cannot omit another owned field because the cleanup function does not read it.
+Payload regions need their own complete cleanup proof. A pool block has one byte allocation as its
+payload. A list node with only a successor has no payload region.
+
+`tree(root)` uses the same empty clause. Its nonempty clause separates the node, payload regions,
+and each child subtree. The child subtrees are pairwise disjoint in allocation identity.
+An owned element collection also needs proof that its element partition covers its owned leaves.
+An unproved index partition gives no complete child-cleanup fact.
+Borrowed edges can cross these regions, point into them, or form cycles. They do not establish
+ownership separation. Their semantic uses still need live sources.
+
+Constructing a fresh zeroed node proves its owned leaves empty.
+Attaching a transferred chain to its empty successor preserves `chain` when the node and chain are
+disjoint. Attaching a transferred tree to an empty child preserves `tree` under the same separation
+condition. A repeated allocation expression does not defeat freshness.
+Conversely, different owner places or different indices alone do not prove different target
+allocations. Summaries must preserve the construction conditions and actual argument aliases.
+An arbitrary parameter is not a chain merely because its type has a successor field.
+Instantiate the inferred shape precondition at each call. Reject a required fact that remains
+unproved.
+
+**Destructive cleanup.** Unfold a nonempty chain into one node and its separate successor region.
+Transfer the successor into surviving owner storage before deleting the node.
+Release or transfer its payloads. Prove its owned leaves empty. Delete only that node.
+Continue with the saved successor, retaining its complete obligations and source relations.
+
+```fort
+struct heap_node {
+    heap_node mut* own next;
+    u8 mut@ own bytes;
+}
+
+fn drop_chain(heap_node mut* own mut current) void {
+    while (current != null) {
+        heap_node mut* own next = move(current->next);
+        del(current->bytes);
+        del(current);
+        current = move(next);
+    }
+}
+```
+
+At each loop head, `current` owns the remaining chain. Earlier iterations leave no detached
+obligation. The empty input takes the zero-iteration path and needs no release.
+The nonempty iteration saves the separate tail, discharges the payload and node obligations, and
+restores the invariant with the tail. The number of remaining nodes decreases by one.
+This number is a mathematical proof measure. It adds no program counter or runtime check.
+Finite acyclic input establishes induction for any length.
+The false loop condition proves an empty remaining chain. It does not erase an unrelated or
+detached obligation.
+
+The list `pop` in section 2.4 transfers one node and restores the remaining list head.
+It empties that node's successor. Thus `del(pop(l))` releases one empty node per iteration.
+The pool sequence also releases `block->bytes` before `del(block)`.
+Each iteration discharges two allocation obligations when the block has a nonempty payload owner.
+The inference must preserve the per-block payload relation. Counting only block allocations gives
+no proof of pool cleanup.
+
+Tree cleanup uses induction on the disjoint child subtrees.
+Move each child to its cleanup function. Prove that function's normal result discharges its entire
+region. Release any owned child-slot allocation and payloads before deleting the node.
+Recursive calls need the same shape and strict-subregion conditions. An unsupported recursive
+effect or unproved child separation supplies no successful cleanup fact.
+
+Check `break`, `continue`, return, and deferred effects in their FIR order (D17.14).
+An early normal exit must release or transfer the remaining region and detached obligations.
+Saving the next node only in a borrowed reference does not transfer its obligation.
+Reading a successor after deleting its node is an invalid borrow use.
+An abort path needs no cleanup. It supplies no successful normal-return cleanup result.
+
+**Cycles, sharing, and precision limits.** An owned cycle does not satisfy `chain` or `tree`.
+Do not fold a cyclic graph into an acyclic summary group.
+A finite identity proof can cut a cycle by moving its owned edge into surviving storage.
+It must prove the cut, valid target ownership, and empty owned leaves before subsequent release.
+If it cannot establish these facts, report incomplete proof at the operation that needs them.
+An uncut owned cycle retains its obligations, including when it has no external owning root.
+
+Two owning edges to the same allocation do not constitute two independent obligations.
+They violate the one-owner condition. A shape proof cannot discharge each edge as a separate child.
+Unknown target overlap preserves this possibility until the proof establishes separation.
+Multiple borrowed edges to one allocation remain legal.
+Deleting their source invalidates them even when a containing object still lives.
+An unused dangling borrowed field alone does not require an error. A later read or escape does.
+
+Pool growth preserves earlier block allocations and their view sources.
+Pool cleanup invalidates the node and payload sources that it actually releases.
+It preserves sources outside its discharged region, including transferred descendants.
+Refilling an empty pool creates fresh identities. It does not revive earlier pool views.
+Unsupported shapes, alias effects, or source distinctions retain uncertainty and obligations.
+Reject the affected operation as incomplete proof. Never infer successful cleanup from lost
+precision.
+
+**Soundness condition.** The abstract state includes each concrete state that reaches the operation.
+Its transfer rules include each possible concrete successor state.
+An accepted release discharges one valid obligation with empty owned leaves in each reaching state.
+Inductive cleanup partitions the initial region into released nodes, released payloads, live
+transferred regions, and the remaining region. These parts have disjoint allocation identities.
+Transferred regions retain their allocation identities and obligations at their new owning paths.
+Keep their source relations, including borrowed fields and views into transferred storage.
+A transfer itself releases no allocation. A source outside the transferred region can still end
+independently.
+The empty normal exit proves that the remaining part has no allocation obligations.
+An empty remainder can coexist with live transferred obligations. Check these obligations at their
+new owning boundaries. Complete release additionally requires an empty transferred part.
+Discharge only allocations that the proof shows released.
+A summary group that contains transferred or other live members retains those members' obligations.
+An omitted child, unaccounted detached allocation, or possible owned cycle breaks this proof.
+Finite merging can enlarge the possible states. It cannot remove a violating state or declare its
+obligation discharged. Incomplete proof therefore rejects the affected operation (D17.14).
+
+**Finite traces.** These ten traces state the required analysis result.
+They define proof cases, not results measured from the current compiler.
+`A`, `B`, and `C` name distinct concrete allocations. `empty` names an empty owner.
+`many` records concurrent obligations in a summary group. A live borrow adds no obligation.
+
+| Trace | Case | Required result |
+|---|---|---|
+| H01 | Empty chain | Zero obligations before and after cleanup. |
+| H02 | One node | Empty payload and successor; shallow release discharges one node. |
+| H03 | Unbounded chain | Separate node and tail; exit has no remaining or detached obligation. |
+| H04 | Branching tree | Discharge each disjoint subtree; release its empty parent last. |
+| H05 | Owned cycle | Uncut cycle retains obligations; a proved cut can permit shallow release. |
+| H06 | Borrowed cycle | Keep two owner obligations; reject later use of a released source. |
+| H07 | Two live allocations at one site | Releasing A preserves B; fresh C does not revive A. |
+| H08 | Transferred child | Releasing A preserves B at its new owner and B's live views. |
+| H09 | Leaked child | Reject release of A while its owned B leaf remains live. |
+| H10 | View after pool release | Growth preserves the view; cleanup invalidates its source. |
+
+H01: `root = empty; drop_chain(move(root));` retains zero obligations.
+Repeated empty cleanup retains zero obligations.
+
+H02: `root -> A; A.next = empty; A.bytes = empty` has one obligation.
+Move the empty successor, delete the empty payload, then delete A. The state has zero obligations.
+With a nonempty payload P, delete P first. The two obligations then both discharge.
+Alternatively, move P into a surviving output owner before deleting A.
+The remainder becomes empty. P's obligation and source stay live at the output owner.
+
+H03: `root -> A + chain(tail)` can represent any positive number of nodes.
+After `next = move(A.next)`, A and `chain(next)` remain separate obligations.
+After payload cleanup and `del(A)`, only `chain(next)` remains.
+Advancing preserves the invariant. The empty exit has zero chain obligations.
+A partial traversal retains its remaining chain. One node release cannot clear `many`.
+
+H04: `root -> A; A.left -> tree(B); A.right -> tree(C)` separates three regions.
+Moving and cleaning both child regions empties both fields. Delete A last.
+If B and C may overlap, this trace supplies incomplete proof, not two successful child cleanups.
+
+H05: `view -> A; A.next owns A` has one allocation obligation in an owned self-cycle.
+`del(view->next)` cannot release A while A contains that live owned leaf.
+`out = move(view->next)` cuts the proved singleton cycle and empties A.next.
+Then `del(out)` can release A if its other owned leaves are empty. Later use of view is invalid.
+An unproved cycle cut cannot discharge a summary group.
+
+H06: `a owns A; b owns B; A.back borrows B; B.back borrows A` has two obligations.
+Delete A with no owned descendants. B remains live, but B.back now has a released source.
+Reading through B.back is invalid. Deleting B without reading that field discharges the second
+obligation.
+
+H07: Two executions of one expression create A and B. The group records `many`.
+Delete the selected A. B's obligation remains; the group cannot become zero.
+When separation is proved, a view of B remains live. A view of A remains invalid.
+Allocate C at that expression. Its new obligation and live state do not repair A's view.
+
+H08: `parent owns A; A.child owns B; view borrows B` has two obligations.
+`out = move(A.child)` empties the child leaf and preserves B's identity at out.
+Delete A. One obligation remains at out, and view still refers to live B.
+The partition contains released A, transferred B, and an empty remainder.
+If A and B share a summary group, releasing A cannot mark that group empty.
+Delete out. The state has zero obligations, and later use of view is invalid.
+
+H09: `parent owns A; A.child owns B` has two obligations.
+`del(parent)` fails its empty-descendant requirement. It supplies no discharge of B.
+Moving B out permits A's release but requires cleanup or transfer of B at its new boundary.
+
+H10: A pool chain owns nodes A and B, with separate byte allocations P and Q.
+The state has four obligations. A view of P survives the addition of B and Q.
+Cleanup extracts the tail, deletes each byte allocation, then deletes each node.
+The complete empty-chain result discharges four obligations and invalidates that view of P.
+Deleting only A and B cannot prove cleanup of P and Q.
+
 ## 3. Pointers
 
 A pointer `T*` holds the address of one `T` or is `null`. There is no pointer arithmetic, so

@@ -501,6 +501,23 @@ came here.
   `p` in `check(overwrite: p)` is the one read with `is_use` false (`spec/fir.md` 14), so an
   ownership analysis such as T-182 skips it, and V12 and V13 test every read. The pointers that
   the address of `p` loads come before it as uses (T-259): skip the test and not those loads.
+- **The heap proof retains multiplicity and structural separation** (T-274, D17.16).
+  `memory-model.md` 2.7 defines singleton representatives, summary groups, and inductive shapes.
+  One allocation-site key cannot replace several concurrent obligations with one obligation.
+  Releasing a selected member cannot clear the remaining group.
+  Widening retains residual obligations.
+  Borrow alternatives and simultaneous allocation multiplicity are separate facts.
+  `containers.pool_free` extracts `block->next`, releases `block->bytes`, releases the block, and
+  advances. Its chain predicate must retain each block's separate payload allocation.
+  Complete release discharges the whole proved region, including payloads and detached obligations.
+  Cleanup that transfers a region preserves its obligations and source relations at new owning
+  paths.
+  A transferred child keeps its identity and obligation outside the old container's cleanup region.
+  Retained pool views preserve their payload sources through pool growth and lose validity at
+  payload release. A refilled pool cannot revive an earlier view.
+  These are analysis invariants. The current compiler does not implement this complete heap proof.
+  The ten H01-H10 specification traces have read evidence, not compiler-probe evidence.
+  T-286 implements the heap analysis. Keep `del` shallow and add no runtime identity data.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by
