@@ -1,0 +1,389 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| capture groups 6 probes 8
+//| deferred capture identity
+/// Checks inactive range capture candidates from checked source lowering.
+/// The verifier sees ordinary FIR without a source-completeness claim.
+import fir;
+import fir_lower;
+import fir_print;
+import fir_verify;
+import lower_env;
+import std.str;
+import std.strbuf;
+
+fn lower_capture(lower_env.env mut* e, string@ source, string name, fir.func mut* f,
+                 fir_lower.range_capture_candidate_vec mut* candidates) void {
+    lower_env.check_lines(e, source, true);
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function_with_capture_candidates(
+            &e->c.ck, lower_env.decl(e, name), f, candidates, &why)) {
+        panic("capture test: lowering refused checked source");
+    }
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(f, &e->rt, &bad));
+    assert(f->range_declarations.len == 0 && f->range_expansions.len == 0);
+    assert(f->range_loans.len == 0 && f->range_captures.len == 0);
+    assert(f->range_boundaries.len == 0 && f->range_absences.len == 0);
+    assert(!f->range_supplied_complete && !f->range_source_complete);
+}
+
+fn text_of(fir.func* f, strbuf.str_buf mut* out) string {
+    fir_print.print_function(f, out);
+    return strbuf.view(out);
+}
+
+fn is_local(fir.place p, u32 n) bool {
+    return p.base == fir.base_kind.bk_local && p.local == n && p.proj_len == 0;
+}
+
+fn occurs_once(string haystack, string needle) bool {
+    i64 at = str.find(haystack, needle);
+    if (at < 0) {
+        return false;
+    }
+    return str.find(haystack[cast(at, u64) + needle.len..], needle) < 0;
+}
+
+// P01. The lent span header is a new local. Its original owner stays in the parameter slot.
+fn owning_span() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(u8 mut@ own bytes) void {",
+        "    for (u8 x : bytes) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir_lower.range_capture_candidate c = cs.items[0];
+    assert(c.declaration == 1 && c.expansion == 1 && c.binding.loan == 1);
+    assert(c.binding.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.binding.original_present && is_local(c.binding.original, 1));
+    assert(is_local(c.binding.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.binding.captured)));
+    assert(fir.type_owning(fir.place_type(&f, c.binding.original)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+    assert(str.find(text, "move _1") < 0);
+}
+
+// P02. The owned string retains its original storage and the loop reads its lent header.
+fn owning_string() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(string own text) void {",
+        "    for (char x : text) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && is_local(c.original, 1));
+    assert(is_local(c.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.captured)));
+    assert(fir.type_owning(fir.place_type(&f, c.original)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+}
+
+// P03a. A borrowed span keeps a source relation without creating a new owner.
+fn borrowed_span() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(u8@ bytes) void {",
+        "    for (u8 x : bytes) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && is_local(c.original, 1));
+    assert(is_local(c.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.original)));
+    assert(!fir.type_owning(fir.place_type(&f, c.captured)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+}
+
+// P03b. A borrowed string has the same capture relation without an owner.
+fn borrowed_string() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(string text) void {",
+        "    for (char x : text) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && is_local(c.original, 1));
+    assert(is_local(c.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.original)));
+    assert(!fir.type_owning(fir.place_type(&f, c.captured)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+}
+
+// P04. An owning array keeps its place. The loop makes no owning element copy.
+fn owning_array() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(u8 mut* own[2] items) void {",
+        "    for (u8 mut* item : items) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.owning_fixed_array_place);
+    assert(c.original_present && is_local(c.original, 1));
+    assert(is_local(c.captured, 1));
+    assert(fir.type_owning(fir.place_type(&f, c.captured)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(str.find(text, "= copy _1 #2:") < 0);
+    assert(str.find(text, "lt(copy _3, const u64 2)") >= 0);
+    assert(str.find(text, "_2 = copy _1[_3]") >= 0);
+    assert(str.find(text, "move _1") < 0);
+}
+
+// P05. The non-owning array is a value copy. A body write to the source cannot change it.
+fn copied_array() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn walk(i32[2] mut values) void {",
+        "    for (i32 x : values) {",
+        "        values[0] = 9;",
+        "    }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.non_owning_array_copy);
+    assert(!c.original_present && is_local(c.captured, 3));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, const u64 2)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+    assert(str.find(text, "_1[") >= 0);
+}
+
+// P06a. The held address names the selected field after the path pointer changes.
+fn indirect_field() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "struct holder { u8 mut@ own items; }",
+        "fn walk(holder mut* mut h, holder mut* next) void {",
+        "    for (u8 x : h->items) { }",
+        "    h = next;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && c.original.proj_len == 1);
+    assert(fir.place_projection(&f, c.original, 0).kind == fir.proj_kind.pj_deref);
+    assert(c.original.base == fir.base_kind.bk_local && c.original.local != 1);
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(str.find(text, "addr mut((*_1).0)") >= 0);
+    assert(str.find(text, "copy (*_") >= 0);
+    assert(str.find(text, "= copy _2") >= 0);
+    assert(str.find(text, "lt(copy _") >= 0);
+}
+
+// P06b. The index call changes a scalar once before capture. The binding uses its index local.
+fn projected_index() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "fn select(i32 mut* count) i32 {",
+        "    *count += 1;",
+        "    return 0;",
+        "}",
+        "fn walk(u8 mut@ own[2] items, i32 mut count) i32 {",
+        "    for (u8 x : items[select(&count)]) {",
+        "        count += 1;",
+        "    }",
+        "    return count;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && c.original.proj_len == 1);
+    fir.projection pj = fir.place_projection(&f, c.original, 0);
+    assert(pj.kind == fir.proj_kind.pj_index && pj.index != 2);
+    assert(is_local(c.captured, 4));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = text_of(&f, &printed);
+    assert(occurs_once(text, "call fn main.select"));
+    assert(str.find(text, "check(") >= 0);
+    assert(str.find(text, "copy _4.1") >= 0);
+    i64 head = str.find(text, "lt(copy _10, copy _4.1)");
+    assert(head >= 0);
+    assert(str.find(text, "_2 = add(") > head);
+}
+
+// The same deferred source node has one declaration and a new expansion on each exit.
+fn deferred_expansions() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn walk(i32[2] values, bool leave) void {",
+        "    defer {",
+        "        for (i32 x : values) { }",
+        "    }",
+        "    if (leave) {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 2);
+    assert(cs.items[0].declaration == 1 && cs.items[1].declaration == 1);
+    assert(cs.items[0].expansion != cs.items[1].expansion);
+    assert(cs.items[0].binding.loan == cs.items[0].expansion);
+    assert(cs.items[1].binding.loan == cs.items[1].expansion);
+}
+
+// Two selected source nodes receive separate declaration IDs in source order.
+// Both candidates remain absent from the verified FIR function.
+fn distinct_source_sites() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {
+        "fn walk(u8@ bytes, i32[2] values) void {",
+        "    for (u8 b : bytes) { }",
+        "    for (i32 n : values) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    lower_capture(&e, source[..], "walk", &f, &cs);
+    assert(cs.len == 2);
+    assert(cs.items[0].declaration == 1);
+    assert(cs.items[1].declaration == 2);
+    assert(cs.items[0].expansion == 1);
+    assert(cs.items[1].expansion == 2);
+    assert(cs.items[0].binding.kind == fir.range_capture_kind.borrowed_header);
+    assert(cs.items[1].binding.kind == fir.range_capture_kind.non_owning_array_copy);
+    assert(cs.items[0].binding.original_present);
+    assert(!cs.items[1].binding.original_present);
+}
+
+// A rejected write still stops before lowering can publish a candidate.
+fn invalidating_body_is_refused() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn walk(u8 mut@ own bytes) void {",
+        "    for (u8 b : bytes) {",
+        "        del(bytes);",
+        "    }",
+        "}",
+    };
+    string diagnostic = lower_env.diagnostic(&e, source[..]);
+    assert(str.find(diagnostic, "cannot change collection storage during a range loop") >= 0);
+}
+
+fn main() i32 {
+    owning_span();
+    owning_string();
+    borrowed_span();
+    borrowed_string();
+    owning_array();
+    copied_array();
+    indirect_field();
+    projected_index();
+    println("capture groups 6 probes 8");
+    deferred_expansions();
+    distinct_source_sites();
+    invalidating_body_is_refused();
+    println("deferred capture identity");
+    return 0;
+}
