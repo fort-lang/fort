@@ -5,6 +5,7 @@
 //| G03.1 G03.2 G03.3 G04.1 G04.2
 //| G07.1 G07.2 G07.3 G09.1 G09.2
 //| callback limits ok
+//| residual owner selection ok
 /// Tests finite ownership facts and charged state updates.
 import ownership_api;
 import ownership_keys;
@@ -386,6 +387,34 @@ fn refusal_preserves_state() void {
     ownership_state.free(&s);
 }
 
+fn residual_owner_selection() void {
+    service_context mut ctx = service_context{};
+    ownership_api.services svc = services(&ctx);
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_api.allocation_fact mut a = allocation(7, 7, 1);
+    a.owner.place.residual = true;
+    ownership_api.operation_position op = ownership_api.operation_position{};
+    ownership_api.source_position at = ownership_api.source_position{};
+    assert(ownership_state.add_allocation(&s, &svc, a, op, at).applied);
+    ownership_state.state mut before = ownership_state.clone(&s);
+    u64 charged = ctx.calls;
+    ownership_api.owner_location after = ownership_api.owner_location{place(8), false, false};
+    ownership_api.mutation_result moved = ownership_state.transfer_owner(
+        &s, &svc, a.key, after, true, op, at);
+    ownership_api.mutation_result released = ownership_state.release_member(
+        &s, &svc, a.key, true, op, at);
+    assert(!moved.applied && !released.applied);
+    assert(moved.proof.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(released.proof.terminal.reason ==
+        ownership_api.incomplete_reason.missing_correspondence);
+    assert(ctx.calls == charged && ctx.events == 2);
+    assert(ownership_state.equal(&s, &before));
+    assert(ownership_state.view(&s).allocations[0].history.len == 0);
+    assert(ownership_state.view(&s).allocations[0].obligation);
+    ownership_state.free(&before);
+    ownership_state.free(&s);
+}
+
 fn g07() void {
     service_context mut ctx = service_context{};
     ownership_api.services svc = services(&ctx);
@@ -537,5 +566,7 @@ fn main() i32 {
     callbacks();
     refusal_preserves_state();
     println("callback limits ok");
+    residual_owner_selection();
+    println("residual owner selection ok");
     return 0;
 }
