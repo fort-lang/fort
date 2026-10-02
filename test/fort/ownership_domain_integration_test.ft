@@ -3,6 +3,7 @@
 //! stdout:
 //| G08.4 combined teardown ok
 //| missing services and limits ok
+//| mixed terminal evidence
 /// Tests the joined state, limit, event, and extension contracts.
 import ownership_api;
 import ownership_events;
@@ -199,6 +200,51 @@ fn boundary_states() void {
     ownership_state.free(&live);
 }
 
+fn mixed_terminal_evidence() void {
+    ownership_state.state mut unknown = ownership_state.unknown();
+    ownership_state.state mut failed = ownership_state.empty();
+    ownership_state.append_allocations(&failed, allocation(7));
+    ownership_api.operation_position at = op(35);
+    ownership_api.source_position source = ownership_api.source_position{};
+    failed.proof = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+        at, source);
+    failed.proof.terminal.limit.present = true;
+    failed.proof.terminal.limit.category = ownership_api.limit_category.w;
+    failed.proof.terminal.limit.used = 4;
+    failed.proof.terminal.limit.bound = 4;
+    failed.proof.terminal.limit.attempted = 1;
+    ownership_events.store mut events = ownership_events.store{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_api.limit_table bounds = ownership_limits.production();
+    assert(ownership_events.bind(&events, &bounds, &svc));
+    ownership_state.state mut ab = ownership_join.join(&unknown, &failed, &svc,
+        &bounds, at, source);
+    ownership_state.state mut ba = ownership_join.join(&failed, &unknown, &svc,
+        &bounds, at, source);
+    assert(ownership_state.equal(&ab, &ba));
+    assert(ab.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(ab.proof.terminal.limit.present && ab.proof.terminal.limit.used == 4);
+    assert(ab.proof.terminal.limit.bound == 4 && ab.proof.terminal.limit.attempted == 1);
+    assert(ab.allocations_len == 1 && ab.allocations[0].obligation);
+    ownership_state.state mut later = ownership_state.clone(&failed);
+    later.proof.terminal.limit.used = 5;
+    ownership_state.state mut first = ownership_join.join(&failed, &later, &svc,
+        &bounds, at, source);
+    ownership_state.state mut second = ownership_join.join(&later, &failed, &svc,
+        &bounds, at, source);
+    assert(ownership_state.equal(&first, &second));
+    assert(first.proof.terminal.limit.used == 4);
+    assert(first.allocations[0].obligation);
+    ownership_state.free(&second);
+    ownership_state.free(&first);
+    ownership_state.free(&later);
+    ownership_state.free(&ba);
+    ownership_state.free(&ab);
+    ownership_events.free(&events);
+    ownership_state.free(&failed);
+    ownership_state.free(&unknown);
+}
+
 fn main() i32 {
     combined_teardown();
     missing_services();
@@ -206,5 +252,7 @@ fn main() i32 {
     exhausted_work();
     boundary_states();
     println("missing services and limits ok");
+    mixed_terminal_evidence();
+    println("mixed terminal evidence");
     return 0;
 }

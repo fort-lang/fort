@@ -727,31 +727,54 @@ fn weaken_one_sided(ownership_state.state mut* out, ownership_state.state* a,
     }
 }
 
+fn terminal_order(ownership_api.terminal_failure a,
+    ownership_api.terminal_failure b) i32 {
+    i32 mut c = ownership_keys.operation(a.operation, b.operation);
+    if (c != 0) { return c; }
+    c = ownership_keys.source(a.source, b.source);
+    if (c != 0) { return c; }
+    c = number(cast(a.reason, u64), cast(b.reason, u64));
+    if (c != 0) { return c; }
+    c = ownership_keys.entity(a.relation, b.relation);
+    if (c != 0) { return c; }
+    c = number(cast(a.limit.present, u64), cast(b.limit.present, u64));
+    if (c != 0) { return c; }
+    c = number(cast(a.limit.category, u64), cast(b.limit.category, u64));
+    if (c != 0) { return c; }
+    c = number(cast(a.limit.scope, u64), cast(b.limit.scope, u64));
+    if (c != 0) { return c; }
+    c = number(cast(a.limit.work, u64), cast(b.limit.work, u64));
+    if (c != 0) { return c; }
+    c = number(a.limit.used, b.limit.used);
+    if (c != 0) { return c; }
+    c = number(a.limit.bound, b.limit.bound);
+    if (c != 0) { return c; }
+    c = number(a.limit.attempted, b.limit.attempted);
+    if (c != 0) { return c; }
+    c = ownership_keys.operation(a.limit.operation, b.limit.operation);
+    if (c != 0) { return c; }
+    c = ownership_keys.source(a.limit.source, b.limit.source);
+    if (c != 0) { return c; }
+    return number(cast(a.limit.saturated, u64), cast(b.limit.saturated, u64));
+}
+
 fn inherited(ownership_state.state* a, ownership_state.state* b,
     ownership_api.operation_position op, ownership_api.source_position at)
     ownership_api.proof_status {
-    if (a->proof.kind == ownership_api.proof_kind.incomplete && a->proof.terminal.present &&
-        b->proof.kind == ownership_api.proof_kind.incomplete && b->proof.terminal.present) {
-        i32 mut order = ownership_keys.operation(a->proof.terminal.operation,
-            b->proof.terminal.operation);
-        if (order == 0) {
-            order = ownership_keys.source(a->proof.terminal.source,
-                b->proof.terminal.source);
-        }
-        if (order == 0) {
-            order = cast(a->proof.terminal.reason, i32) -
-                cast(b->proof.terminal.reason, i32);
-        }
-        return order <= 0 ? a->proof : b->proof;
+    bool first = a->proof.kind == ownership_api.proof_kind.incomplete &&
+        a->proof.terminal.present;
+    bool second = b->proof.kind == ownership_api.proof_kind.incomplete &&
+        b->proof.terminal.present;
+    if (first && second) {
+        return terminal_order(a->proof.terminal, b->proof.terminal) <= 0 ?
+            a->proof : b->proof;
     }
+    if (first) { return a->proof; }
+    if (second) { return b->proof; }
     if (!ownership_api.successful(a->proof)) {
-        if (a->proof.kind == ownership_api.proof_kind.incomplete &&
-            a->proof.terminal.present) { return a->proof; }
         return ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect, op, at);
     }
     if (!ownership_api.successful(b->proof)) {
-        if (b->proof.kind == ownership_api.proof_kind.incomplete &&
-            b->proof.terminal.present) { return b->proof; }
         return ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect, op, at);
     }
     ownership_api.proof_status mut out = ownership_api.proof_status{};
