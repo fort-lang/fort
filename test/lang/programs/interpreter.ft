@@ -337,15 +337,21 @@ fn assemble(string@ src, string mut* error) insn mut@ own {
     // Pass one: count instructions and note each label's address.
     u64 mut n = 0;
     u64 mut label_count = 0;
-    for (string raw : src) {
-        string line = trim(raw);
-        if (line.len == 0) {
-            continue;
-        }
-        if (is_label(line)) {
-            label_count++;
-        } else {
-            n++;
+    {
+        string@ range_values = src;
+        u64 mut range_index = 0;
+        while (range_index < range_values.len) {
+            string raw = range_values[range_index];
+            range_index += 1;
+            string line = trim(raw);
+            if (line.len == 0) {
+                continue;
+            }
+            if (is_label(line)) {
+                label_count++;
+            } else {
+                n++;
+            }
         }
     }
     string mut@ own names = new(string, label_count);
@@ -354,57 +360,69 @@ fn assemble(string@ src, string mut* error) insn mut@ own {
     defer del(places);
     u64 mut seen = 0;
     u64 mut here = 0;
-    for (string raw : src) {
-        string line = trim(raw);
-        if (line.len == 0) {
-            continue;
-        }
-        if (is_label(line)) {
-            names[seen] = line[0..line.len - 1];
-            places[seen] = here;
-            seen++;
-        } else {
-            here++;
+    {
+        string@ range_values = src;
+        u64 mut range_index = 0;
+        while (range_index < range_values.len) {
+            string raw = range_values[range_index];
+            range_index += 1;
+            string line = trim(raw);
+            if (line.len == 0) {
+                continue;
+            }
+            if (is_label(line)) {
+                names[seen] = line[0..line.len - 1];
+                places[seen] = here;
+                seen++;
+            } else {
+                here++;
+            }
         }
     }
 
     // Pass two: emit, resolving a label operand against the table.
     insn mut@ own code = new(insn, n);
     u64 mut at = 0;
-    for (string raw : src) {
-        string line = trim(raw);
-        if (line.len == 0 || is_label(line)) {
-            continue;
-        }
-        bool mut ok = false;
-        op what = mnemonic(word(line, 0), &ok);
-        if (!ok) {
-            *error = "unknown mnemonic";
-            return move(code);
-        }
-        string operand = word(line, 1);
-        i64 mut arg = 0;
-        if (takes_label(what)) {
-            bool mut found = false;
-            for (u64 mut i = 0; i < seen; i++) {
-                if (names[i] == operand) {
-                    arg = cast(places[i], i64);
-                    found = true;
+    {
+        string@ range_values = src;
+        u64 mut range_index = 0;
+        while (range_index < range_values.len) {
+            string raw = range_values[range_index];
+            range_index += 1;
+            string line = trim(raw);
+            if (line.len == 0 || is_label(line)) {
+                continue;
+            }
+            bool mut ok = false;
+            op what = mnemonic(word(line, 0), &ok);
+            if (!ok) {
+                *error = "unknown mnemonic";
+                return move(code);
+            }
+            string operand = word(line, 1);
+            i64 mut arg = 0;
+            if (takes_label(what)) {
+                bool mut found = false;
+                for (u64 mut i = 0; i < seen; i++) {
+                    if (names[i] == operand) {
+                        arg = cast(places[i], i64);
+                        found = true;
+                    }
+                }
+                if (!found) {
+                    *error = "unknown label";
+                    return move(code);
+                }
+            } else if (operand.len > 0) {
+                arg = parse_int(operand, &ok);
+                if (!ok) {
+                    *error = "bad operand";
+                    return move(code);
                 }
             }
-            if (!found) {
-                *error = "unknown label";
-                return move(code);
-            }
-        } else if (operand.len > 0) {
-            arg = parse_int(operand, &ok);
-            if (!ok) {
-                *error = "bad operand";
-                return move(code);
-            }
+            code[at] = insn{what, arg};
+            at++;
         }
-        code[at] = insn{what, arg};
-        at++;
     }
     return move(code);
 }
@@ -421,8 +439,14 @@ fn run(insn@ code, i64@ args, string name) i64 {
     m.frames[0] = frame{0, 0};
     m.depth = 1;
     m.locals_top = 4;
-    for (i64 a : args) {
-        push_value(&m, a);
+    {
+        i64@ range_values = args;
+        u64 mut range_index = 0;
+        while (range_index < range_values.len) {
+            i64 a = range_values[range_index];
+            range_index += 1;
+            push_value(&m, a);
+        }
     }
     u64 mut pc = 0;
     u64 mut steps = 0;
