@@ -127,8 +127,8 @@ Delete the branch after GitHub reports the merge. A red `ci-status` on `main` bl
   finding carries `file:line`, a severity and either `fixed: <evidence>` or `declined: <reason>`.
   `Log` holds one line for each event, in one shape: `- YYYY-MM-DD role: event; evidence`. A
   ruling, a measurement or a finding goes into the matching Notes subsection and the Log line
-  points at it. **`.tickets/` is gitignored and `.tickets/README.md` is untracked**, so the
-  template reaches no commit and a reader verifies it by reading the file in the main checkout.
+  points at it. `.tickets/` is ignored and its template is not checked in. Cite no local ticket
+  ID in PR text, commit messages, or new checked-in prose. Cite a decision, path, test, or SHA.
 - Assign a ticket only when each dependency is in `done/` after its merge into `main`. Assign
   independent tickets concurrently, one implementor each.
 - Acceptance criteria are verifiable in GitHub CI, the VM, or on a named native host.
