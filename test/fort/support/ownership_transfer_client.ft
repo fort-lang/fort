@@ -1,0 +1,113 @@
+/// Exercises transfer services without an ownership transfer implementation.
+import ownership_api;
+import ownership_keys;
+import std.strbuf;
+
+struct storage {
+    u64 mutations;
+    u64 destroyed;
+    ownership_api.allocation_fact[1] allocations;
+    ownership_api.source_fact[1] sources;
+}
+
+struct event_storage {
+    strbuf.str_buf text;
+    ownership_api.event_descriptor record;
+    u64 destroyed;
+    storage* state;
+}
+
+struct context {
+    u64 charges;
+    u64 calls;
+    bool permit;
+    bool saturate;
+    ownership_api.work_kind last_work;
+    event_storage mut* events;
+}
+
+fn complete() ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.proof_status{};
+    out.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    context mut* ctx = cast(opaque, context mut*);
+    assert(ownership_keys.canonical_charges(req));
+    assert(req->items.len == 1 && req->items[0].amount == 1);
+    ctx->charges += 1;
+    ctx->last_work = req->work;
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    out.allowed = ctx->permit && !ctx->saturate;
+    out.proof = complete();
+    if (!out.allowed) {
+        out.limit.present = true;
+        out.limit.category = ownership_api.limit_category.w;
+        out.limit.scope = ownership_api.limit_scope.computation;
+        out.limit.work = req->work;
+        out.limit.used = 2;
+        out.limit.bound = 2;
+        out.limit.attempted = 1;
+        out.limit.operation = req->operation;
+        out.limit.source = req->source;
+        out.limit.saturated = ctx->saturate;
+    }
+    return out;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    context mut* ctx = cast(opaque, context mut*);
+    assert(ctx->events != null);
+    assert(req->event.conditions.len == 0 && req->event.witnesses.len == 0);
+    assert(req->event.notes.len == 0 && req->event.source_path.projections.len == 0);
+    assert(req->event.owner_path.projections.len == 0);
+    strbuf.clear(&ctx->events->text);
+    strbuf.append(&ctx->events->text, req->event.text);
+    ctx->events->record = req->event;
+    ctx->events->record.text = strbuf.view(&ctx->events->text);
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = req->current;
+    out.retained = true;
+    out.stored_key = req->event.key;
+    return out;
+}
+
+fn apply(void mut* opaque, ownership_api.transfer_request* req) ownership_api.transfer_result {
+    context mut* ctx = cast(opaque, context mut*);
+    assert(ctx->charges > ctx->calls);
+    assert(req->destination != null);
+    storage mut* state = cast(req->destination->context, storage mut*);
+    assert(state != null && state->destroyed == 0);
+    ctx->calls += 1;
+    state->mutations += 1;
+    ownership_api.transfer_result mut out = ownership_api.transfer_result{};
+    out.proof = complete();
+    out.retained = req->before;
+    out.mutated = true;
+    return out;
+}
+
+fn destroy_state(void mut* opaque) void {
+    storage mut* state = cast(opaque, storage mut*);
+    state->destroyed += 1;
+}
+
+fn destroy_events(void mut* opaque) void {
+    event_storage mut* events = cast(opaque, event_storage mut*);
+    assert(events->state != null && events->state->destroyed == 1);
+    strbuf.free(&events->text);
+    events->record = ownership_api.event_descriptor{};
+    events->destroyed += 1;
+}
+
+fn service(context mut* ctx) ownership_api.services {
+    ownership_api.services mut out = ownership_api.services{};
+    out.budget_context = cast(ctx, void mut*);
+    out.event_context = cast(ctx, void mut*);
+    out.transfer_context = cast(ctx, void mut*);
+    out.budget = budget;
+    out.event = event;
+    out.transfer = apply;
+    return out;
+}

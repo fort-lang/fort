@@ -1,0 +1,528 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| L01 distinct expansions ok
+//| L02 absent expansion ok
+//| L03 deferred expansions ok
+//| L04 zero iterations ok
+//| L05 nested loans ok
+//| L06 ordered cleanup ok
+//| L07 missing facts ok
+//| L08 structural limits ok
+//| verified inputs ok
+//| same body inputs ok
+//| function type inputs ok
+/// Tests supplied range metadata without claiming source producer completeness.
+import ast;
+import fir;
+import fir_lower;
+import fir_verify;
+import ownership_api;
+import ownership_keys;
+import ownership_env;
+import types;
+
+u64 SOURCE_LINES = 13;
+string[SOURCE_LINES] SOURCE = {
+    "fn f(bool c) void {",
+    "    i32@ values = {};",
+    "    i32[1] fixed = {};",
+    "    u8 mut* own[1] owning = {};",
+    "    for (i32 element : values) {",
+    "        defer {",
+    "            i32 saved = element;",
+    "        }",
+    "        if (c) { break; }",
+    "    }",
+    "}",
+    "fn g() i32 { return 7; }",
+    "fn h(i32 value) i32 { return value + 1; }",
+};
+
+struct fixture {
+    ownership_api.range_declaration[2] declarations;
+    ownership_api.range_expansion[3] expansions;
+    ownership_api.range_loan[3] loans;
+    ownership_api.range_capture[3] captures;
+    ownership_api.range_boundary[15] boundaries;
+    ownership_api.absence_evidence[2] absences;
+    ownership_api.projection[2] projections;
+    ownership_api.entity_id[2] sources;
+}
+
+fn setup(ownership_env.env mut* e, fixture mut* data) void {
+    ownership_env.load(e, SOURCE[..], "f");
+    ownership_api.function_id function = ownership_api.function_id{
+        ownership_api.declaration_id{1, 1}, 0};
+    data->declarations[0].key = ownership_api.declaration_id{1, 2};
+    data->declarations[0].function = function;
+    data->declarations[0].source = ownership_api.source_position{1, 0, 3, 5, 3, 31};
+    data->declarations[0].selected = true;
+    data->declarations[1] = data->declarations[0];
+    data->declarations[1].key.declaration = 3;
+    data->declarations[1].source.line = 4;
+    data->sources[0] = ownership_api.entity_id{function, ownership_api.entity_kind.source, 1};
+    data->sources[1] = ownership_api.entity_id{function, ownership_api.entity_kind.source, 2};
+    data->projections[0].kind = ownership_api.projection_kind.field;
+    data->projections[0].field = 1;
+    data->projections[1].kind = ownership_api.projection_kind.captured_index;
+    data->projections[1].captured_version = ownership_api.entity_id{
+        function, ownership_api.entity_kind.value, 7};
+    data->projections[1].index.kind = ownership_api.fact_kind.exact;
+    data->projections[1].index.value = 0;
+    u64 mut i = 0;
+    while (i < data->expansions.len) {
+        data->expansions[i].key = ownership_api.expansion_id{function,
+            data->declarations[0].key, cast(i, u32)};
+        data->expansions[i].source = data->declarations[0].source;
+        data->loans[i].key = ownership_api.loan_id{data->expansions[i].key, 0};
+        data->loans[i].whole_body = true;
+        data->captures[i].loan = data->loans[i].key;
+        data->captures[i].kind = ownership_api.capture_kind.non_owning_array_copy;
+        data->captures[i].ty = fir.local_at(&e->body, 3)->ty;
+        data->captures[i].captured_value = ownership_api.entity_id{
+            function, ownership_api.entity_kind.value, cast(i + 1, u32)};
+        data->captures[i].sources = data->sources[..];
+        data->captures[i].original_path.root = ownership_api.entity_id{
+            function, ownership_api.entity_kind.slot, cast(i + 1, u32)};
+        data->captures[i].original_path.projections = data->projections[..];
+        data->captures[i].value_present = true;
+        data->captures[i].path_present = true;
+        u64 mut j = 0;
+        while (j < 5) {
+            data->boundaries[i * 5 + j].loan = data->loans[i].key;
+            data->boundaries[i * 5 + j].kind = cast(j, ownership_api.boundary_kind);
+            data->boundaries[i * 5 + j].position =
+                ownership_api.operation_position{function, 0, 0, false};
+            data->boundaries[i * 5 + j].order = cast(j, u32);
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+fn view(fixture* data, u64 count) ownership_api.range_input {
+    ownership_api.range_input mut out = ownership_api.range_input{};
+    out.declarations = data->declarations[0..1];
+    out.expansions = data->expansions[0..count];
+    out.loans = data->loans[0..count];
+    out.captures = data->captures[0..count];
+    out.boundaries = data->boundaries[0..count * 5];
+    return out;
+}
+
+fn supply_complete(ownership_env.env mut* e, ownership_api.range_input* input) void {
+    ownership_env.supply(e, input);
+    assert(ownership_api.successful(e->supplied));
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(got.coverage.structural_valid && got.coverage.supplied_complete);
+    assert(!got.coverage.actual_source_complete);
+}
+
+fn distinct_expansions(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input input = view(&data, 2);
+    supply_complete(e, &input);
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(got.declarations.len == 1 && got.expansions.len == 2);
+    assert(ownership_keys.source(got.expansions[0].source, got.expansions[1].source) == 0);
+    assert(ownership_keys.expansion(got.expansions[0].key, got.expansions[1].key) != 0);
+    assert(ownership_keys.declaration(got.expansions[0].key.declaration,
+        got.expansions[1].key.declaration) == 0);
+    // Reverse the supplied order. Identities keep the same semantic order.
+    ownership_api.expansion_id second = got.expansions[1].key;
+    ownership_api.range_expansion old = data.expansions[0];
+    data.expansions[0] = data.expansions[1];
+    data.expansions[1] = old;
+    ownership_env.supply(e, &input);
+    assert(ownership_api.successful(e->supplied));
+    assert(ownership_keys.expansion(e->expansions[0].key, e->expansions[1].key) > 0);
+    assert(ownership_keys.expansion(e->expansions[0].key, second) == 0);
+    println("L01 distinct expansions ok");
+}
+
+fn absent_expansion(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input mut input = view(&data, 0);
+    data.absences[0].declaration = data.declarations[0].key;
+    data.absences[0].proposed = ownership_api.absence_kind.checked_unreachable;
+    input.absences = data.absences[0..1];
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.source_coverage);
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(got.declarations.len == 1 && got.expansions.len == 0 && got.absences.len == 1);
+    assert(got.absences[0].proposed == ownership_api.absence_kind.checked_unreachable);
+    assert(got.coverage.structural_valid && !got.coverage.supplied_complete);
+    assert(!got.coverage.actual_source_complete);
+    data.absences[0].checked_source = true;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    data.absences[0].verified_fir = true;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    data.absences[0].correspondence = true;
+    supply_complete(e, &input);
+    assert(!ownership_env.ranges(e).coverage.actual_source_complete);
+    println("L02 absent expansion ok");
+}
+
+fn deferred_expansions(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    u64 mut i = 0;
+    while (i < data.expansions.len) {
+        data.expansions[i].deferred.registration = ownership_api.declaration_id{1, 7};
+        data.expansions[i].deferred.context = cast(i + 2, u32);
+        data.expansions[i].deferred.exit_occurrence = cast(i + 4, u32);
+        data.expansions[i].deferred.exit_source = ownership_api.source_position{
+            1, 0, cast(i + 10, u32), 3, cast(i + 10, u32), 9};
+        data.captures[i].kind = cast(i, ownership_api.capture_kind);
+        u32 local = i == 0 ? 2 : (i == 1 ? 4 : 3);
+        data.captures[i].ty = fir.local_at(&e->body, local)->ty;
+        i += 1;
+    }
+    ownership_api.range_input input = view(&data, 3);
+    supply_complete(e, &input);
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(got.expansions.len == 3 && got.captures.len == 3 && got.loans.len == 3);
+    i = 0;
+    while (i < got.expansions.len) {
+        assert(got.expansions[i].deferred.context == cast(i + 2, u32));
+        assert(got.expansions[i].deferred.exit_occurrence == cast(i + 4, u32));
+        assert(got.expansions[i].deferred.exit_source.line == cast(i + 10, u32));
+        assert(got.captures[i].kind == cast(i, ownership_api.capture_kind));
+        assert(got.captures[i].ty == data.captures[i].ty);
+        assert(got.captures[i].original_path.root.ordinal == cast(i + 1, u32));
+        assert(got.captures[i].original_path.projections.len == 2);
+        assert(got.captures[i].sources.len == 2);
+        assert(got.loans[i].whole_body);
+        i += 1;
+    }
+    // Input storage contains independent copies of nested slices.
+    data.projections[1].index.value = 99;
+    data.sources[0].ordinal = 88;
+    assert(got.captures[0].original_path.projections[1].index.value == 0);
+    assert(got.captures[0].sources[0].ordinal == 1);
+    assert(ownership_keys.deferred(got.expansions[0].deferred, got.expansions[1].deferred) < 0);
+    println("L03 deferred expansions ok");
+}
+
+fn zero_iterations(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    assert(fir.local_at(&e->body, 2)->ty->kind == types.type_kind.k_span);
+    data.captures[0].kind = ownership_api.capture_kind.borrowed_header;
+    data.captures[0].ty = fir.local_at(&e->body, 2)->ty;
+    ownership_api.range_input input = view(&data, 1);
+    supply_complete(e, &input);
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(got.expansions.len == 1 && got.captures.len == 1);
+    assert(got.captures[0].value_present && got.captures[0].path_present);
+    assert(got.captures[0].original_path.root.kind == ownership_api.entity_kind.slot);
+    assert(got.loans[0].whole_body);
+    assert(got.boundaries.len == 5);
+    assert(got.boundaries[2].kind == ownership_api.boundary_kind.body_cleanup);
+    assert(got.boundaries[3].kind == ownership_api.boundary_kind.loan_exit);
+    println("L04 zero iterations ok");
+}
+
+fn nested_loans(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    data.loans[1].parent_present = true;
+    data.loans[1].parent = data.loans[0].key;
+    data.loans[2].parent_present = true;
+    data.loans[2].parent = data.loans[1].key;
+    ownership_api.range_input input = view(&data, 3);
+    supply_complete(e, &input);
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(!got.loans[0].parent_present);
+    assert(got.loans[1].parent_present && got.loans[2].parent_present);
+    assert(ownership_keys.loan(got.loans[1].parent, got.loans[0].key) == 0);
+    assert(ownership_keys.loan(got.loans[2].parent, got.loans[1].key) == 0);
+    assert(ownership_keys.loan(got.boundaries[6].loan, got.loans[1].key) == 0);
+    assert(got.boundaries[6].kind == ownership_api.boundary_kind.body_entry);
+    assert(got.boundaries[8].kind == ownership_api.boundary_kind.loan_exit);
+    data.loans[1].parent = data.loans[1].key;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    data.loans[0].parent_present = true;
+    data.loans[0].parent = data.loans[2].key;
+    data.loans[1].parent = data.loans[0].key;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    data.loans[0].parent_present = false;
+    data.loans[1].parent.ordinal = 9;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    println("L05 nested loans ok");
+}
+
+fn ordered_cleanup(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input input = view(&data, 1);
+    supply_complete(e, &input);
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(ownership_keys.operation(got.boundaries[2].position, got.boundaries[4].position) == 0);
+    assert(ownership_keys.boundary(got.boundaries[2], got.boundaries[3]) < 0);
+    assert(ownership_keys.boundary(got.boundaries[3], got.boundaries[4]) < 0);
+    data.boundaries[4].order = 2;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_boundary);
+    data.boundaries[4].order = 4;
+    data.boundaries[2].order = 3;
+    data.boundaries[3].order = 2;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    println("L06 ordered cleanup ok");
+}
+
+fn missing_facts(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input mut input = view(&data, 1);
+    data.captures[0].value_present = false;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_capture);
+    assert(!ownership_env.ranges(e).coverage.supplied_complete);
+    data.captures[0].value_present = true;
+    data.captures[0].path_present = false;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    data.captures[0].path_present = true;
+    data.captures[0].original_path.root.kind = ownership_api.entity_kind.none;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    data.captures[0].original_path.root.kind = ownership_api.entity_kind.slot;
+    data.captures[0].ty = null;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_capture);
+    data.captures[0].ty = fir.local_at(&e->body, 3)->ty;
+    data.captures[0].sources = data.sources[0..0];
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_capture);
+    data.captures[0].sources = data.sources[..];
+    input.captures = data.captures[0..0];
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_capture);
+    input.captures = data.captures[0..1];
+    input.boundaries = data.boundaries[0..3];
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_boundary);
+    input.boundaries = data.boundaries[1..5];
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_boundary);
+    input.boundaries = data.boundaries[0..5];
+    data.boundaries[0].position.block = 4294967295;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_boundary);
+    data.boundaries[0].position.block = 0;
+    data.boundaries[0].position.operation = 4294967295;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.missing_boundary);
+    println("L07 missing facts ok");
+}
+
+fn structural_limits(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input mut input = view(&data, 0);
+    input.coverage.structural_valid = true;
+    input.coverage.supplied_complete = true;
+    input.coverage.actual_source_complete = true;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    ownership_api.range_input got = ownership_env.ranges(e);
+    assert(got.coverage.structural_valid && !got.coverage.supplied_complete);
+    assert(!got.coverage.actual_source_complete);
+    ownership_api.outcome_fact unknown = ownership_api.outcome_fact{
+        ownership_api.outcome_kind.unknown_fort, ownership_api.entity_id{}, true, true, false, {}};
+    assert(unknown.possible_caller_return && unknown.cleanup_required && !unknown.cleanup_proved);
+    input = view(&data, 1);
+    data.expansions[0].key.declaration.declaration = 999;
+    ownership_env.supply(e, &input);
+    assert(e->supplied.terminal.reason == ownership_api.incomplete_reason.source_coverage);
+    data.expansions[0].key.declaration = data.declarations[0].key;
+    data.declarations[1] = data.declarations[0];
+    input.declarations = data.declarations[..];
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    input = view(&data, 2);
+    data.expansions[1] = data.expansions[0];
+    ownership_env.supply(e, &input);
+    assert(e->supplied.failed);
+    println("L08 structural limits ok");
+}
+
+struct teardown_probe {
+    ownership_env.env* input;
+    u64 state_calls;
+    u64 event_calls;
+}
+
+fn release_state(void mut* opaque) void {
+    teardown_probe mut* probe = cast(opaque, teardown_probe mut*);
+    assert(probe->input->verified && probe->input->body.sym != null);
+    assert(probe->input->body.ty != null && probe->input->body.locals.len > 0);
+    assert(probe->input->declarations.len == 1);
+    assert(probe->state_calls == 0 && probe->event_calls == 0);
+    probe->state_calls += 1;
+}
+
+fn release_events(void mut* opaque) void {
+    teardown_probe mut* probe = cast(opaque, teardown_probe mut*);
+    assert(probe->input->verified && probe->input->body.ty != null);
+    assert(probe->state_calls == 1 && probe->event_calls == 0);
+    probe->event_calls += 1;
+}
+
+fn verified_inputs(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input input = view(&data, 1);
+    supply_complete(e, &input);
+    teardown_probe mut probe = teardown_probe{};
+    probe.input = e;
+    e->state = ownership_api.state_handle{cast(&probe, void mut*), release_state};
+    e->events = ownership_api.event_handle{cast(&probe, void mut*), release_events};
+    ownership_env.supply(e, &input);
+    assert(probe.state_calls == 1 && probe.event_calls == 1);
+    assert(e->verified && ownership_api.successful(e->supplied));
+    probe.state_calls = 0;
+    probe.event_calls = 0;
+    e->state = ownership_api.state_handle{cast(&probe, void mut*), release_state};
+    e->events = ownership_api.event_handle{cast(&probe, void mut*), release_events};
+    ownership_env.load(e, SOURCE[..], "g");
+    assert(probe.state_calls == 1 && probe.event_calls == 1);
+    assert(e->verified && e->body.sym->name == "g");
+    assert(e->declarations.len == 0 && e->captures.len == 0 && e->sources.len == 0);
+    assert(!ownership_env.ranges(e).coverage.actual_source_complete);
+    fir.func mut broken = fir.func{};
+    assert(!ownership_env.accept(e, &broken));
+    assert(e->verified && e->body.sym->name == "g");
+    assert(ownership_env.accept(e, &e->body));
+    fir.func mut held = move(e->body);
+    e->verified = false;
+    assert(ownership_env.accept(e, &held));
+    assert(e->verified && held.locals.len == 0 && held.blocks.len == 0);
+    assert(e->body.sym->name == "g");
+    ownership_env.load(e, SOURCE[..], "h");
+    bool mut check_present = false;
+    u64 mut i = 0;
+    while (i < e->body.blocks.len) {
+        if (e->body.blocks.items[i].term.kind == fir.term_kind.tk_check) { check_present = true; }
+        i += 1;
+    }
+    assert(check_present);
+    // The environment keeps the pre-transform overflow check.
+    fir_verify.violation mut v = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&e->body, &e->checked.rt, &v));
+    println("verified inputs ok");
+}
+
+fn same_body_inputs(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input input = view(&data, 1);
+    supply_complete(e, &input);
+    ownership_api.range_input before = ownership_env.ranges(e);
+    types.node* body_type = e->body.ty;
+    ast.sym* checked_symbol = e->body.sym;
+    fir.local mut* locals = e->body.locals.items.ptr;
+    fir.block mut* blocks = e->body.blocks.items.ptr;
+    teardown_probe mut probe = teardown_probe{};
+    probe.input = e;
+    e->state = ownership_api.state_handle{cast(&probe, void mut*), release_state};
+    e->events = ownership_api.event_handle{cast(&probe, void mut*), release_events};
+    assert(ownership_env.accept(e, &e->body));
+    assert(probe.state_calls == 0 && probe.event_calls == 0);
+    e->body.ty = null;
+    assert(!ownership_env.accept(e, &e->body));
+    assert(!e->verified && !ownership_env.ranges(e).coverage.structural_valid);
+    assert(e->body.ty == null && e->body.sym == checked_symbol);
+    e->body.ty = body_type;
+    assert(ownership_env.accept(e, &e->body));
+    assert(e->verified);
+    e->body.blocks.items[0].terminated = false;
+    assert(!ownership_env.accept(e, &e->body));
+    assert(!e->verified && !ownership_env.ranges(e).coverage.structural_valid);
+    assert(!e->body.blocks.items[0].terminated);
+    e->body.blocks.items[0].terminated = true;
+    assert(ownership_env.accept(e, &e->body));
+    e->verified = false;
+    assert(ownership_env.accept(e, &e->body));
+    assert(e->verified && e->body.ty == body_type && e->body.sym == checked_symbol);
+    assert(e->body.tt == &e->checked.c.ck.types);
+    assert(e->body.locals.items.ptr == locals && e->body.blocks.items.ptr == blocks);
+    ownership_api.range_input after = ownership_env.ranges(e);
+    assert(after.coverage.structural_valid && after.coverage.supplied_complete);
+    assert(after.declarations.ptr == before.declarations.ptr);
+    assert(after.expansions.ptr == before.expansions.ptr && after.loans.ptr == before.loans.ptr);
+    assert(after.captures.ptr == before.captures.ptr &&
+        after.boundaries.ptr == before.boundaries.ptr);
+    assert(after.captures[0].ty == before.captures[0].ty);
+    assert(after.captures[0].sources.ptr == before.captures[0].sources.ptr);
+    assert(after.captures[0].original_path.projections.ptr ==
+        before.captures[0].original_path.projections.ptr);
+    assert(probe.state_calls == 0 && probe.event_calls == 0);
+    assert(e->state.context == cast(&probe, void mut*));
+    assert(e->events.context == cast(&probe, void mut*));
+    ownership_api.teardown(&e->state, &e->events);
+    assert(probe.state_calls == 1 && probe.event_calls == 1);
+    println("same body inputs ok");
+}
+
+fn function_type_inputs(ownership_env.env mut* e) void {
+    fixture mut data = fixture{};
+    setup(e, &data);
+    ownership_api.range_input input = view(&data, 1);
+    supply_complete(e, &input);
+    types.node* body_type = e->body.ty;
+    ownership_api.range_input before = ownership_env.ranges(e);
+    fir.func mut other = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function(&e->checked.c.ck, e->body.sym->node, &other, &why));
+    other.ty = e->checked.c.ck.types.void_type;
+    assert(!ownership_env.accept(e, &other));
+    assert(other.locals.len > 0 && other.blocks.len > 0);
+    assert(other.ty->kind == types.type_kind.k_void);
+    assert(e->verified && e->body.ty == body_type);
+    assert(ownership_env.ranges(e).declarations.ptr == before.declarations.ptr);
+    fir.func_free(&other);
+    e->body.ty = e->checked.c.ck.types.void_type;
+    assert(!ownership_env.accept(e, &e->body));
+    assert(!e->verified && !ownership_env.ranges(e).coverage.structural_valid);
+    assert(e->body.ty->kind == types.type_kind.k_void);
+    assert(ownership_env.ranges(e).captures.ptr == before.captures.ptr);
+    e->body.ty = body_type;
+    assert(ownership_env.accept(e, &e->body));
+    assert(e->verified && e->body.ty->kind == types.type_kind.k_fn);
+    assert(e->body.tt == &e->checked.c.ck.types);
+    assert(e->captures[0].ty == before.captures[0].ty);
+    println("function type inputs ok");
+}
+
+fn main() i32 {
+    ownership_env.env mut e = ownership_env.env{};
+    ownership_env.open(&e);
+    distinct_expansions(&e);
+    absent_expansion(&e);
+    deferred_expansions(&e);
+    zero_iterations(&e);
+    nested_loans(&e);
+    ordered_cleanup(&e);
+    missing_facts(&e);
+    structural_limits(&e);
+    verified_inputs(&e);
+    same_body_inputs(&e);
+    function_type_inputs(&e);
+    ownership_env.close(&e);
+    assert(e.body.locals.len == 0 && e.body.blocks.len == 0);
+    assert(e.declarations.len == 0 && e.expansions.len == 0 && e.projections.len == 0);
+    return 0;
+}

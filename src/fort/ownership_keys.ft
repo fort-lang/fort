@@ -1,0 +1,140 @@
+/// Compares finite ownership identities without allocation addresses.
+import ownership_api;
+
+fn number(u32 a, u32 b) i32 {
+    if (a < b) { return -1; }
+    if (a > b) { return 1; }
+    return 0;
+}
+
+fn declaration(ownership_api.declaration_id a, ownership_api.declaration_id b) i32 {
+    i32 c = number(a.module, b.module);
+    if (c != 0) { return c; }
+    return number(a.declaration, b.declaration);
+}
+
+fn function(ownership_api.function_id a, ownership_api.function_id b) i32 {
+    i32 c = declaration(a.declaration, b.declaration);
+    if (c != 0) { return c; }
+    return number(a.instance, b.instance);
+}
+
+fn entity(ownership_api.entity_id a, ownership_api.entity_id b) i32 {
+    i32 mut c = function(a.function, b.function);
+    if (c != 0) { return c; }
+    c = number(cast(a.kind, u32), cast(b.kind, u32));
+    if (c != 0) { return c; }
+    return number(a.ordinal, b.ordinal);
+}
+
+fn operation(ownership_api.operation_position a, ownership_api.operation_position b) i32 {
+    i32 mut c = function(a.function, b.function);
+    if (c != 0) { return c; }
+    c = number(a.block, b.block);
+    if (c != 0) { return c; }
+    c = number(a.operation, b.operation);
+    if (c != 0) { return c; }
+    return number(cast(a.terminator, u32), cast(b.terminator, u32));
+}
+
+fn source(ownership_api.source_position a, ownership_api.source_position b) i32 {
+    u32[6] left = {a.module, a.file, a.line, a.col, a.end_line, a.end_col};
+    u32[6] right = {b.module, b.file, b.line, b.col, b.end_line, b.end_col};
+    u64 mut i = 0;
+    while (i < left.len) {
+        i32 c = number(left[i], right[i]);
+        if (c != 0) { return c; }
+        i += 1;
+    }
+    return 0;
+}
+
+fn expansion(ownership_api.expansion_id a, ownership_api.expansion_id b) i32 {
+    i32 mut c = function(a.function, b.function);
+    if (c != 0) { return c; }
+    c = declaration(a.declaration, b.declaration);
+    if (c != 0) { return c; }
+    return number(a.ordinal, b.ordinal);
+}
+
+fn loan(ownership_api.loan_id a, ownership_api.loan_id b) i32 {
+    i32 c = expansion(a.expansion, b.expansion);
+    if (c != 0) { return c; }
+    return number(a.ordinal, b.ordinal);
+}
+
+fn deferred(ownership_api.deferred_occurrence a, ownership_api.deferred_occurrence b) i32 {
+    i32 mut c = declaration(a.registration, b.registration);
+    if (c != 0) { return c; }
+    c = number(a.context, b.context);
+    if (c != 0) { return c; }
+    c = number(a.exit_occurrence, b.exit_occurrence);
+    if (c != 0) { return c; }
+    return source(a.exit_source, b.exit_source);
+}
+
+/// Orders boundaries by operation, supplied order, loan, and kind.
+fn boundary(ownership_api.range_boundary a, ownership_api.range_boundary b) i32 {
+    i32 mut c = operation(a.position, b.position);
+    if (c != 0) { return c; }
+    c = number(a.order, b.order);
+    if (c != 0) { return c; }
+    c = loan(a.loan, b.loan);
+    if (c != 0) { return c; }
+    return number(cast(a.kind, u32), cast(b.kind, u32));
+}
+
+/// Orders events as the diagnostic contract requires.
+fn event(ownership_api.event_descriptor* a, ownership_api.event_descriptor* b) i32 {
+    i32 mut c = function(a->operation.function, b->operation.function);
+    if (c != 0) { return c; }
+    c = source(a->source, b->source);
+    if (c != 0) { return c; }
+    c = operation(a->operation, b->operation);
+    if (c != 0) { return c; }
+    c = number(cast(a->kind, u32), cast(b->kind, u32));
+    if (c != 0) { return c; }
+    c = entity(a->relation, b->relation);
+    if (c != 0) { return c; }
+    return entity(a->key, b->key);
+}
+
+fn note(ownership_api.event_note* a, ownership_api.event_note* b) i32 {
+    i32 mut c = number(cast(a->role, u32), cast(b->role, u32));
+    if (c != 0) { return c; }
+    c = source(a->source, b->source);
+    if (c != 0) { return c; }
+    return entity(a->relation, b->relation);
+}
+
+/// D, R, P, G, H, T, E, W, V is also the simultaneous-limit order.
+fn category(ownership_api.limit_category a, ownership_api.limit_category b) i32 {
+    return number(cast(a, u32), cast(b, u32));
+}
+
+/// Orders equal categories by scope, then work kind, then attempted operation.
+fn exhaustion(ownership_api.exhaustion* a, ownership_api.exhaustion* b) i32 {
+    i32 mut c = category(a->category, b->category);
+    if (c != 0) { return c; }
+    c = number(cast(a->scope, u32), cast(b->scope, u32));
+    if (c != 0) { return c; }
+    c = number(cast(a->work, u32), cast(b->work, u32));
+    if (c != 0) { return c; }
+    return operation(a->operation, b->operation);
+}
+
+/// Rejects zero charges, incorrect scopes, duplicate categories, and unsorted categories.
+fn canonical_charges(ownership_api.charge_request* req) bool {
+    u64 mut i = 0;
+    while (i < req->items.len) {
+        ownership_api.charge_item item = req->items[i];
+        if (item.amount == 0 || item.scope != ownership_api.scope_of(item.category)) {
+            return false;
+        }
+        if (i > 0 && category(req->items[i - 1].category, item.category) >= 0) {
+            return false;
+        }
+        i += 1;
+    }
+    return req->items.len > 0;
+}

@@ -1,0 +1,63 @@
+/// Exercises separate foreign and persistent-global contracts.
+import ownership_api;
+
+struct context {
+    ownership_api.source_fact[2] sources;
+    ownership_api.outcome_fact[6] outcomes;
+    ownership_api.global_input[1] persistent;
+    ownership_api.ordered_effect[2] cleanup;
+    u64 foreign_calls;
+    u64 global_calls;
+}
+
+fn foreign(void mut* opaque, ownership_api.ffi_request* req) ownership_api.ffi_result {
+    context mut* ctx = cast(opaque, context mut*);
+    assert(req->before.allocations.len == 1);
+    assert(req->before.allocations[0].obligation);
+    ctx->foreign_calls += 1;
+    ownership_api.ffi_result mut out = ownership_api.ffi_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    out.trusted_sources = ctx->sources[..];
+    out.outcomes = ctx->outcomes[..];
+    out.hidden_effects_outside_proof = true;
+    return out;
+}
+
+fn globals(void mut* opaque, ownership_api.global_request* req) ownership_api.global_result {
+    context mut* ctx = cast(opaque, context mut*);
+    ctx->global_calls += 1;
+    ownership_api.global_result mut out = ownership_api.global_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    out.persistent = ctx->persistent[..];
+    out.cleanup = ctx->cleanup[..];
+    out.boundary_proved = req->entry.boundary_present && req->outcome.cleanup_proved;
+    return out;
+}
+
+fn service(context mut* ctx) ownership_api.services {
+    ownership_api.services mut out = ownership_api.services{};
+    out.budget_context = cast(ctx, void mut*);
+    out.event_context = cast(ctx, void mut*);
+    out.ffi_context = cast(ctx, void mut*);
+    out.global_context = cast(ctx, void mut*);
+    out.budget = budget;
+    out.event = event;
+    out.ffi = foreign;
+    out.globals = globals;
+    return out;
+}
+
+// These callbacks establish only the test service contract.
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    out.allowed = true;
+    return out;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = req->current;
+    out.retained = false;
+    return out;
+}
