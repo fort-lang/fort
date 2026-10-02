@@ -490,7 +490,7 @@ Normal return requires cleanup after deferred effects. Abort paths require no cl
 Unknown call outcomes preserve possible normal continuations and their cleanup obligations.
 
 Executable owning globals must be empty at normal exit.
-Libraries retain ownership between calls and provide explicit cleanup (D17.14).
+Libraries retain ownership between calls and provide explicit cleanup (D17.14, section 2.9).
 These obligations cover memory. They add no resource type system for scalar handles.
 Foreign effects remain outside proof (section 4.5). The proof does not establish total memory
 safety.
@@ -1287,6 +1287,306 @@ Rejected intervals specify a diagnostic reason, not a diagnostic identifier or o
 - Output: The zero-element allocation still has a residual obligation.
 - Verdict: Reject. Diagnostic reason: the normal storage boundary loses an owned allocation.
 
+### 2.9 Global ownership and entry boundaries
+
+A global has persistent storage. Its declared initializer supplies its first state (D7.10, D17.19).
+An ordinary function return does not end that storage.
+Track its contents, owning leaves, and retained borrow sources through calls.
+A local-to-global move transfers an allocation obligation. It does not lose that obligation.
+Moving from a global empties its selected place and transfers the obligation to the destination.
+Moving an aggregate does not rebase addresses into its inline storage (D17.7, D17.14).
+
+Check global replacement after right-side effects, before the store (D17.11).
+An address, field projection, element projection, or fort call does not exempt the destination.
+An old owning leaf must be empty or have a proved transfer or release.
+New contents do not revive borrows from an earlier released allocation.
+Track global aggregate leaves separately. Keep del shallow (D17.9).
+A live allocation with zero elements still has an obligation.
+A retained global borrow alone adds no ownership. Its later use still needs a valid source.
+Storing a local address in a global does not extend local storage life.
+Clear or replace that retained relation before its source ends, or reject the escape (D17.14).
+
+**Executable boundary.** Normal executable exit requires empty owning globals in the complete
+checked import closure (D17.19).
+Include user, library, and runtime globals. Include live owned descendants of their allocations.
+Release or transfer descendants before their containing allocation, as the shallow del rule
+requires.
+A global is empty when its owning leaves hold zero values and retain no allocation obligations.
+Borrowed fields and scalar resources need no release under this memory rule.
+
+The final boundary occurs after applicable fort and runtime cleanup.
+It precedes the generated C return or the known foreign normal-exit operation.
+Check all reaching normal-termination paths at that boundary.
+Apply deferred effects before a source function returns normally (D7.8).
+A source main return alone is not the boundary. Generated shutdown still follows it.
+An ordinary call to a function named main has ordinary function-return semantics.
+
+Known std.sys.exit and std.rt.exit do not unwind caller scopes.
+Their summaries include runtime cleanup before the final boundary.
+Establish those effects from the analyzed fort bodies and generated sequence.
+A runtime function name alone proves no release.
+Reject or retain requirements when cleanup is absent.
+Do not require an empty runtime argument owner at the exit call's entry.
+Require its emptiness after its cleanup effect.
+The runtime does not automatically delete user globals or suspended caller owners.
+Those owners must already have a proved release or transfer before final termination.
+A pending caller defer supplies no cleanup effect on an exit path that does not run it.
+Compose these requirements through fort wrappers and indirect fort targets in effect order.
+
+**Runtime argument owner.** Generated startup builds the argument span before source main runs
+(D11.6).
+The runtime args_store owns the allocation of string headers.
+Positive argc creates that allocation. Nonpositive argc leaves args_store empty.
+Final cleanup must also permit that empty state (D17.9).
+Each string borrows bytes from C argv. Deleting the header allocation does not delete those bytes.
+Keep argument views valid through source execution and applicable source defers.
+Flush runtime buffers before final argument-storage release.
+Release that allocation and empty args_store before normal executable termination.
+This requirement also applies when source main has no argument parameter.
+Account for the generated startup and shutdown sequence outside source-function FIR.
+Checking only source-function returns does not prove this sequence.
+The rule fixes no new runtime ABI helper or runtime ownership representation.
+The proof must not replace an absent implementation effect with the intended runtime behavior.
+
+**Libraries.** A library can retain owners between ordinary calls (D17.19).
+Infer global preconditions, ordered effects, and postconditions from all available fort bodies.
+Analyze uncalled bodies too. Library checking does not hide local leaks or invalid source uses.
+Symbolic global state differs from the initializer state of the first host call.
+Do not assume globals are empty at each later entry.
+Do not require all library globals to become empty at each normal call return.
+
+A library provides explicit cleanup through ordinary callable fort functions.
+Cleanup releases or transfers allocations and empties its owning global leaves.
+Library checking defines its global set through the complete checked library closure.
+The host calls cleanup after final library use and before unload or normal host termination.
+That shutdown boundary requires empty owning globals in the library closure, including its runtime.
+Foreign host storage outside the closure uses D17.13 trust.
+An executable caller still includes imported library globals at its final boundary.
+Infer requirements for cleanup order when one library retains another library's borrowed storage.
+Preserve that source relation until the retaining relation ends.
+No automatic destructor, entry annotation, prescribed cleanup name, or contract syntax applies.
+
+A library check uses symbolic caller and global states.
+It does not invent an external call sequence or a generated executable entry.
+The same proof applies in check and build modes under the same boundary assumptions.
+Build analysis instantiates library summaries with executable startup and shutdown states.
+The host's external call order and cleanup invocation remain outside standalone library proof.
+The check proves no external shutdown sequence.
+This ownership boundary adds no separate-compilation or shared-library output mode (D15).
+
+**Foreign entries.** Trust valid symbolic foreign inputs under D17.13.
+An own input carries a symbolic allocation obligation. An ordinary return must release or transfer
+it.
+A move into an owning global can satisfy that transfer while preserving the library's global state.
+A borrowed input does not become owned. Its retained source relation remains a caller requirement.
+Callback-local storage still ends after applicable defers at normal callback return.
+Reject retained or returned borrows of that storage when they escape its boundary.
+Foreign callback timing, argument validity, hidden retention, and hidden writes remain outside
+proof.
+An executable's known fort calls still preserve the callback's analyzed effects and requirements.
+
+**Termination classes.** Function return, normal process termination, abort, and unresolved foreign
+termination are distinct (D17.19).
+The recognized foreign leaves are the selected std.libc declarations:
+
+```fort
+extern fn exit(i32 code) noreturn;
+extern fn abort() noreturn;
+```
+
+Exit supplies normal process termination. Abort supplies abort termination.
+A compatible redeclaration of the same linked C symbol shares its class (D9.8).
+Compatibility includes return type, fixed parameter types, ownership qualifiers, and variable-tail
+mark.
+The existing extern-identity rule rejects incompatible redeclarations.
+Match the C symbol, not a fort identifier that resembles exit or abort.
+An ordinary fort function with either name requires body analysis.
+These two leaves add no programmer contract or extensible contract database.
+Trust their standard termination conventions under symbol interposition (D17.13).
+A foreign replacement that violates that convention remains outside the proof.
+
+Resolve function-value copies and aliases before combining possible target summaries.
+Compose available fort body effects to classify wrappers.
+Keep mixed outcomes separate under their reaching conditions.
+A wrapper that can abort or exit normally requires cleanup only on its normal-termination paths.
+An unresolved foreign target retains the unresolved foreign class.
+Panic and runtime failures reach abort. Compiler traps also require no cleanup.
+Abort paths carry no final global or suspended-caller cleanup requirement.
+Checks on earlier operations still apply before either kind of termination.
+
+Noreturn proves that control does not return to the caller under the declared promise (D8.5).
+It proves neither abort nor normal process termination.
+The defensive trap after a call catches a violated promise. It does not describe the callee's exit.
+An unresolved foreign termination, including a low-level _exit call, uses D17.13 trust.
+Its hidden process effects remain outside proof. Missing foreign termination metadata causes no
+error.
+Accepting it does not prove normal-exit cleanup or classify it as abort.
+Unknown fort effects receive no foreign exemption and retain possible normal continuations.
+
+Foreign exit handlers, signal timing, process replacement, and non-local foreign control flow remain
+outside proof under D17.13.
+The compiler does not prove that such handlers preserve an argument view after runtime cleanup.
+A later header-element read through released argument-header storage fails its source obligation.
+A copied string header still borrows argv bytes.
+Header-allocation cleanup does not release those bytes.
+An infinite execution has no final normal-exit boundary until it reaches known normal termination.
+It still checks operations and completed local storage boundaries during that execution.
+
+#### Six global examples
+
+These verdicts follow D17.19. They describe the ownership proof, not current compiler coverage.
+Each executable example assumes the required final runtime argument cleanup.
+Diagnostic descriptions identify obligations. They add no fixed diagnostic message text.
+
+**G1. Local-to-global transfer.** Accept the transfer and later cleanup.
+The source owner becomes empty. The global retains the allocation until del.
+
+```fort
+u8 mut@ own mut pool = {};
+
+fn fill() void {
+    u8 mut@ own local = new(u8, 4);
+    pool = move(local);
+}
+
+fn main() i32 {
+    fill();
+    del(pool);
+    return 0;
+}
+```
+
+**G2. Global overwrite.** Reject the second store. Its previous owning leaf remains live.
+Deleting or transferring pool before the replacement makes that store legal.
+
+```fort
+u8 mut@ own mut pool = {};
+
+fn replace() void {
+    pool = new(u8, 4);
+    pool = new(u8, 8);
+}
+```
+
+**G3. Normal main return.** Reject the executable path at its final normal-exit boundary.
+The diagnostic identifies pool and its undischarged allocation. A store into pool is not a local
+leak.
+
+```fort
+u8 mut@ own mut pool = {};
+
+fn main() i32 {
+    pool = new(u8, 4);
+    return 0;
+}
+```
+
+**G4. Abort.** Accept this ownership path. Panic aborts; it has no cleanup requirement.
+
+```fort
+u8 mut@ own mut pool = {};
+
+fn main() i32 {
+    pool = new(u8, 4);
+    panic("stop");
+}
+```
+
+**G5. Library return and cleanup.** Accept put with an empty pool precondition.
+Its normal return retains global ownership. Accept clear; its result state has an empty pool.
+The host calls clear before unload or normal host termination.
+It must also discharge any other owners in the checked library closure.
+
+```fort
+u8 mut@ own mut pool = {};
+
+fn put(u8 mut@ own value) void {
+    pool = move(value);
+}
+
+fn clear() void {
+    del(pool);
+}
+```
+
+**G6. Foreign callback.** Accept the owner transfer with an empty saved precondition.
+Trust the incoming allocation's validity and uniqueness. Keep the global obligation after return.
+Reject bad_callback: retained points into callback-local storage after that storage ends.
+
+```fort
+u8 mut* own mut saved = null;
+u8 mut@ mut retained = {};
+
+fn callback(u8 mut* own value) void {
+    saved = move(value);
+}
+
+fn bad_callback() void {
+    u8[4] mut local = {};
+    retained = local[..];
+}
+```
+
+#### Seven exit traces
+
+These traces distinguish ordered effects from the final obligation boundary (D17.19).
+An allocation label identifies storage, not an owner slot.
+An empty global has no allocation obligation. Runtime cleanup is an effect, not an exemption.
+
+**X1. Runtime cleanup.** Source state: args_store owns header allocation A; user globals are empty.
+Ordered effects: source main returns after defer; runtime flushes; runtime releases A; C main
+returns.
+Class: known normal process termination.
+Required cleanup: empty args_store and all other owning globals before the final return.
+Verdict: accept after those effects. Flushing alone leaves A live and fails the final obligation.
+
+**X2. sys.exit with a pending defer.** Source state: pool owns A; args_store owns B.
+The caller has defer del(pool), then calls sys.exit(7).
+Ordered effects: runtime flushes; runtime releases B; foreign exit terminates.
+The caller defer does not run.
+Class: known normal process termination.
+Required cleanup: discharge A before the final boundary. Do not require B empty before runtime
+cleanup.
+Verdict: reject for pool. A pending defer cannot satisfy that obligation.
+
+**X3. Fort exit wrapper.** Source state: pool owns A; args_store owns B; caller owners are empty.
+Ordered effects: a fort wrapper deletes pool and calls sys.exit.
+Runtime flushes and releases B before foreign exit terminates.
+Class: known normal process termination through an inferred wrapper summary.
+Required cleanup: discharge A and B before the final boundary.
+Verdict: accept. A live caller owner would instead fail unless cleanup reaches it before
+termination.
+
+**X4. Abort.** Source state: pool owns A; args_store owns B; a caller local owns C.
+Ordered effects: panic reports its message and aborts. Caller defers do not run.
+Class: abort.
+Required cleanup: none on that path. Earlier invalid operations still require diagnostics.
+Verdict: accept this termination path. Do not require releases of A, B, or C.
+
+**X5. Unresolved foreign termination.** Source state: pool owns A; args_store owns B.
+Ordered effects: an ordinary extern fn finish() noreturn call uses its declared no-return promise.
+Class: unresolved foreign termination. Its body could abort, exit, or run without termination.
+Required cleanup: the compiler proves no foreign final boundary; the foreign convention remains
+trusted.
+Verdict: accept under D17.13. Record the proof limit; infer neither cleanup nor an abort exemption.
+
+**X6. Generated startup.** Source state: runtime and user owners start empty; argc is positive.
+Ordered effects: args_init allocates A; args lends it; source main runs and returns after defer.
+Runtime flush and argument release follow; the final generated return ends the process.
+Class: known normal process termination.
+Required cleanup: discharge A and source-created owners at their applicable boundaries.
+Verdict: accept only with the complete generated sequence. A source-function-only count is
+insufficient.
+The same sequence applies when source main takes no arguments.
+
+**X7. Library cleanup.** Source state: a foreign host enters with empty library pool.
+Ordered effects: callback transfers owner A into pool; callback returns; later clear deletes A; host
+unloads.
+Class: two ordinary function returns, followed by a host-controlled library boundary.
+Required cleanup: callback-local owners discharge at return; pool may remain live until clear.
+Verdict: accept the bodies and inferred states. Host invocation and unload order remain external
+requirements.
+
 ## 3. Pointers
 
 A pointer `T*` holds the address of one `T` or is `null`. There is no pointer arithmetic, so
@@ -1756,8 +2056,9 @@ output printed before a failure is never lost. A buffer whose descriptor is inte
 well, which is C's rule: the same program shows each `println` as it runs on a terminal and holds
 its output until it exits when it is redirected to a file or a pipe. The runtime exports
 `std.rt.flush(i32 fd)` and `std.rt.flush_all()`; `io.close` and `io.flush` call the former.
-Program start and exit are the `main` the compiler emits: it asks the runtime to build `args`,
-calls the entry module's `main`, flushes, and returns that result masked to eight bits (D11.6).
+Program start and exit use the main that the compiler emits (D11.6).
+It builds args, calls the source entry, flushes, and releases runtime argument-header storage.
+The final normal-exit boundary then precedes the masked return (D17.19, section 2.9).
 The runtime is `std.rt`, fort like the rest of the library (D13.1).
 
 ## 8. Undefined behavior

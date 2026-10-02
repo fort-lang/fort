@@ -375,6 +375,43 @@ that does not hold the library therefore fails every compile, a program with no 
 included, with `module 'std.rt' not found` naming a module the user never wrote: the runtime is
 read from there like any other standard library module.
 
+### 2.1 Ownership entry and exit boundaries
+
+Selected analysis checks all available fort bodies, including uncalled bodies (D17.19, D19.8).
+It preserves global state and inferred caller requirements across ordinary function returns.
+Library checking uses symbolic inputs and global states.
+It still rejects local leaks and invalid source uses at their applicable boundaries.
+It does not invent a foreign host call sequence or an executable entry.
+Check and build modes use the same proof for the same closure and boundary assumptions (D20.1).
+
+A build supplies the generated executable boundary (D11.6).
+Account for static global initialization, runtime args_init, args, and source main in order.
+The runtime argument-owning global exists even when source main has no argument parameter.
+Positive argc allocates its headers. Nonpositive argc leaves it empty.
+On source main return, apply its defers before its normal-return checks.
+Then flush runtime buffers and release runtime-owned argument-header storage.
+Check final owning-global emptiness before the generated C return.
+Include imported library and runtime globals, and live owned descendants of their allocations.
+Generated startup and shutdown can lie outside source-function FIR.
+A count of lowered fort functions does not prove coverage of those generated effects.
+Require explicit analysis coverage of the complete generated sequence.
+
+Known normal process termination through std.sys.exit or std.rt.exit has the same final obligation.
+Apply runtime cleanup before that boundary. Do not check argument-owner emptiness at call entry.
+Establish the cleanup from analyzed fort bodies or verified generated effects.
+An intended runtime guarantee does not replace an absent implementation effect.
+These calls execute no caller defers and automatically delete no user globals.
+Residual owners in suspended caller frames must also discharge before normal termination.
+Infer and instantiate these requirements through fort wrappers and indirect fort targets.
+Check prior releases, transfers, and retained borrows in their actual effect order.
+
+Panic, runtime failures, and compiler traps use the abort cleanup exemption (D17.19).
+Noreturn alone supplies no normal-exit or abort classification.
+Unresolved foreign termination uses D17.13 trust and establishes no proved final boundary.
+Unknown fort bodies receive no such exemption.
+Library cleanup requirements and external host limits appear in memory-model.md 2.9.
+These rules change no ABI representation and prescribe no new runtime entry-point signature.
+
 ## 3. Build modes
 
 Two modes (D11.1); `--no-bounds-check` is an orthogonal switch (D10.6). The compiler itself
@@ -410,7 +447,9 @@ The undefined behaviors of D10.7 remain undefined in every mode.
 ## 4. Diagnostics
 
 Ownership errors use the existing source diagnostic contract (D17.14, D20.1).
-Check mode and build mode report the same selected proof verdicts.
+Check and build modes report the same proof verdicts under the same entry and boundary assumptions.
+Library checking retains inferred global requirements; a build instantiates them at executable
+entry.
 JSON keeps its existing schema and includes the same error and note ranges (D20.2).
 
 Compile-time diagnostics (D14.2) are written to stderr. Each one starts with a header line:
@@ -795,10 +834,13 @@ fn flush_all() void;
 // module (section 6 item 22): it calls `args_init`, which builds the argument
 // span from `argv` (one string per argument, NUL-terminated, since it is the
 // `argv` byte sequence itself), then `args`, then the entry module's `main`,
-// then `flush_all`, and returns `status & 0xFF`. The span lives for
-// the whole process and `args()` hands it out for `sys.args()`. `exit`
-// flushes every buffer and ends the process with `status & 0xFF`;
-// `sys.exit` is a call to it.
+// then flush_all and final argument-header cleanup. It returns status & 0xFF.
+// args() lends the span during source execution and applicable source defers.
+// Final normal termination releases its runtime-owned header allocation.
+// The strings borrow argv bytes; cleanup does not release those bytes.
+// exit performs the runtime cleanup before foreign exit with status & 0xFF.
+// sys.exit calls it. Neither path automatically deletes user globals.
+// exit does not run caller defers. Section 2.1 fixes the final obligation boundary.
 fn args_init(i32 argc, char* mut* argv) void;
 fn args() string@;
 fn exit(i32 status) noreturn;
@@ -904,11 +946,16 @@ interactive path, and the script drives a compiled program on a real pseudo term
 ## 6. Code generation contract
 
 This section is normative for the compiler. The LLVM IR module it emits must satisfy every item
-and must pass `opt -passes=verify` (D19.1). The two examples at the end are what the compiler
-emits for their programs, as the goldens of `bootstrap0/test/gen_module_test.c` hold it, plus a
-hand-written definition of each `std.rt` entry point the example calls, over the C library,
-where a module the compiler builds holds the whole of `std.rt` (item 8, D9.10, D13.1). A change
-to the emitter's text is a change here.
+and must pass `opt -passes=verify` (D19.1).
+The two worked examples illustrate LLVM types, calls, data, and runtime checks.
+They use hand-written runtime stubs instead of the complete std.rt module (item 8, D9.10, D13.1).
+Their args_init stubs allocate no argument headers. Their args stubs return an empty span.
+Their flush-only entries therefore retain no runtime argument owner.
+Production startup with positive argc creates that owner and requires final cleanup (D17.19).
+The examples omit production allocation and cleanup effects. They are not exact complete compiler
+output.
+Item 22 defines the required production entry sequence without selecting a cleanup helper.
+A change to the emitter's text is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
    the whole program (D9.10, D19.1) and is built by appending text. It
@@ -1367,48 +1414,51 @@ to the emitter's text is a change here.
     other and carries `dso_local` and `#0` (item 4, item 7). It calls the entry module's `main`
     directly. When that `main` declares the parameter, `@main` passes `ptr %args`, the span it
     built in its own frame. That span is the caller-made copy of item 7, so the callee uses it in
-    place and no second copy exists (item 10). The examples below show Linux IR:
+    place and no second copy exists (item 10).
+    The following Linux ABI fragments show startup and source-entry calls.
+    Final runtime argument cleanup follows the flush (section 2.1).
+    These fragments prescribe no cleanup helper or new ABI signature.
 
     ```llvm
-    define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
-    entry:
       %args = alloca %fort.span, align 8
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
       call void @"std.rt.args"(ptr sret(%fort.span) %args)
       %t0 = call i32 @"main.main"(ptr %args)
       call void @"std.rt.flush_all"()
-      %t1 = and i32 %t0, 255
-      ret i32 %t1
-    }
     ```
 
     When the entry module's `main` takes no parameter, the call passes no argument and the rest
-    is the same:
+    follows the same rule:
 
     ```llvm
-    define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
-    entry:
       %args = alloca %fort.span, align 8
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
       call void @"std.rt.args"(ptr sret(%fort.span) %args)
       %t0 = call i32 @"main.main"()
       call void @"std.rt.flush_all"()
-      %t1 = and i32 %t0, 255
-      ret i32 %t1
-    }
     ```
 
     `std.rt.args` returns an aggregate, so it takes the destination as the hidden result pointer
     of item 7, written `sret(%fort.span)` on its own definition.
     The call writes `call void @"std.rt.args"(ptr sret(%fort.span) %args)` on both targets
     (D9.9).
-    `args_init` runs first, since `args` hands out what it built. The `and` is D11.6's
-    `status & 0xFF`.
+    `args_init` runs first, since `args` lends what it built.
+    The generated definition retains the C signature i32 @main(i32 %argc, ptr %argv).
+    After runtime argument cleanup and the final obligation boundary, it emits:
 
-23. **`-S` and `-c`** (D14.1). `-S` writes the module and stops, so the text above is exactly
-    what a user reads; `-c` writes it into the temporary directory and runs `--cc -c` over it
-    (section 2). The compiler never writes a `.s` file; `llc` over the `-S` output is how a
-    human reads the machine code.
+    ```llvm
+      %t1 = and i32 %t0, 255
+      ret i32 %t1
+    ```
+
+    The and implements status & 0xFF (D11.6). Cleanup must precede this return (D17.19).
+    A complete emitted main must include the required cleanup between the fragments.
+
+23. **`-S` and `-c`** (D14.1). `-S` writes the complete module and stops.
+    The module follows this contract, including final entry cleanup (item 22).
+    `-c` writes it into the temporary directory and runs `--cc -c` over it (section 2).
+    The compiler never writes a `.s` file.
+    A user can run llc on the -S output to read the machine code.
 
 The attribute groups have fixed indices, and only the used ones are emitted, so gaps in the
 numbering are normal (D19.5):
@@ -1439,7 +1489,9 @@ D14.2 emits no warning about what follows it).
 fn main() i32 { println("hello, world!"); return 0; }
 ```
 
-in `main.ft` is:
+The following standalone Linux module illustrates `main.ft`.
+Its argument stubs create no owner, including when argc is positive.
+Its entry omits production argument cleanup. Production normal return follows item 22 (D17.19).
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1506,12 +1558,15 @@ attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
 attributes #3 = { nobuiltin }
 ```
 
-The module the compiler emits for that program differs from this one in one way, and the way is
-the size: it also holds every definition of `std.rt` and of `std.libc`, because every closure
-holds the runtime (D9.10, D13.1). The five definitions above stand for them, over the C library's
-`write`, so that the example is small enough to read and links on its own. Every
-other byte is what the compiler writes: `main.main` and the `main` of item 22, the
-quoted dotted names of item 4, the private data of item 5 and the attribute group of item 7.
+The five runtime definitions let this module link on its own through the C library's write.
+The source function, quoted names, private data, and attributes illustrate items 4, 5, 7, and 19.
+A production module includes the complete runtime closure (D9.10, D13.1).
+Its args_init creates header storage for positive argc even when source main takes no arguments.
+After source main returns, the production entry flushes and releases that storage before its final
+normal-exit boundary and masked return (D11.6, D17.19).
+The empty stubs above model neither that allocation nor its release.
+The illustrated entry is not the complete production entry of item 22.
+This example prescribes no cleanup helper or new ABI signature.
 
 ### 6.2 A program with a check
 
@@ -1524,8 +1579,10 @@ fn main() i32 {
 }
 ```
 
-in `abort.ft`, whose module path is therefore `abort` (D9.1) and whose `main` is the symbol
-`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, is, on the same terms:
+The following standalone Linux module illustrates `abort.ft` with the fault position at 12:13.
+Its module path is abort (D9.1). Its source main symbol is abort.main (D9.7).
+It uses the same empty argument stubs as section 6.1. They create no runtime argument owner.
+Its flush-only normal return omits production argument cleanup (item 22, D17.19).
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1633,6 +1690,10 @@ them (item 2). The definition of `std.rt.fail_bounds` carries the `#8` of item 1
 the `llvm.trap` of item 20 after its call to a C function declared `noreturn` nowhere. The
 program prints `before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`,
 and dies with SIGABRT (D11.4).
+That abort path requires no cleanup (D17.19).
+A production normal return still requires argument-storage release after flush and before the final
+boundary and return. The illustrated entry omits that effect because its stubs allocate no owner.
+This example prescribes no cleanup helper or new ABI signature.
 
 ## 7. Testing
 
