@@ -1269,15 +1269,21 @@ fn main(string@ args) i32 {
     u64 mut lines = 0;
     u64 mut words = 0;
     bool mut in_word = false;
-    for (char ch : text) {
-        if (ch == '\n') {
-            lines++;
-        }
-        if (str.is_space(ch)) {
-            in_word = false;
-        } else if (!in_word) {
-            in_word = true;
-            words++;
+    {
+        string range_values = text;
+        u64 mut range_index = 0;
+        while (range_index < range_values.len) {
+            char ch = range_values[range_index];
+            range_index += 1;
+            if (ch == '\n') {
+                lines++;
+            }
+            if (str.is_space(ch)) {
+                in_word = false;
+            } else if (!in_word) {
+                in_word = true;
+                words++;
+            }
         }
     }
     if (text.len > 0 && text[text.len - 1] != '\n') {
