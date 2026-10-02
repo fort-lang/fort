@@ -1,0 +1,617 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| G01 acyclic
+//| G02 self recursion
+//| G03 mutual recursion
+//| G04 field target
+//| G05 parameter target
+//| G06 returned target
+//| G07 two targets
+//| G08 fort and foreign
+//| G09 unknown fort
+//| G10 target limit
+/// Tests call components and target propagation over verified FIR.
+import ast;
+import check_env;
+import fir;
+import fir_lower;
+import fir_verify;
+import lower_env;
+import ownership_api;
+import ownership_graph;
+import ownership_keys;
+import ownership_limits;
+import std.strbuf;
+
+struct fixture {
+    lower_env.env checked;
+    fir.func mut@ own functions;
+    ownership_graph.body_input mut@ own inputs;
+    ownership_graph.graph graph;
+}
+
+fn lower(lower_env.env mut* e, string name) fir.func {
+    fir.func mut body = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), &body, &why));
+    fir_verify.violation mut v = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&body, &e->rt, &v));
+    return body;
+}
+
+fn open(fixture mut* f, string@ source, string@ names, u64 target_limit) void {
+    lower_env.open(&f->checked);
+    lower_env.check_lines(&f->checked, source, true);
+    f->functions = new(fir.func, names.len);
+    f->inputs = new(ownership_graph.body_input, names.len);
+    u64 mut i = 0;
+    while (i < names.len) {
+        f->functions[i] = lower(&f->checked, names[i]);
+        f->inputs[i] = ownership_graph.body_input{
+            ownership_api.function_id{ownership_api.declaration_id{1, cast(i + 1, u32)}, 0},
+            &f->functions[i], true};
+        i += 1;
+    }
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.t = target_limit;
+    f->graph = ownership_graph.build(f->inputs[..], limits);
+    assert(ownership_api.successful(f->graph.proof));
+}
+
+fn close(fixture mut* f) void {
+    ownership_graph.free(&f->graph);
+    u64 mut i = 0;
+    while (i < f->functions.len) { fir.func_free(&f->functions[i]); i += 1; }
+    del(f->inputs);
+    del(f->functions);
+    lower_env.close(&f->checked);
+}
+
+fn nth_call(fixture* f, string name, u64 ordinal) u64 {
+    u64 mut i = 0;
+    u64 mut left = ordinal;
+    while (i < f->graph.calls_len) {
+        ownership_graph.call_site* call = &f->graph.calls[i];
+        if (f->functions[call->body].sym->name == name) {
+            if (left == 0) { return i; }
+            left -= 1;
+        }
+        i += 1;
+    }
+    panic("ownership_graph_test: missing call");
+}
+
+fn target(fixture* f, u64 call, u32 declaration) bool {
+    ownership_graph.target_view view = ownership_graph.targets_at(&f->graph,
+        f->graph.calls[call].position);
+    u64 mut i = 0;
+    while (i < view.fort_targets.len) {
+        if (view.fort_targets[i].function.declaration.declaration == declaration) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn acyclic() void {
+    fixture mut f = fixture{};
+    string[2] source = {"fn leaf() void {}", "fn caller() void { leaf(); }"};
+    string[2] names = {"leaf", "caller"};
+    open(&f, source[..], names[..], 4);
+    assert(f.graph.calls_len == 1 && f.graph.component_count == 2);
+    u64 call = nth_call(&f, "caller", 0);
+    assert(target(&f, call, 1));
+    assert(!f.graph.calls[call].residual_fort);
+    assert(!ownership_graph.recursive_component(&f.graph, 0));
+    assert(!ownership_graph.recursive_component(&f.graph, 1));
+    ownership_api.entity_id[1] extra = {ownership_api.entity_id{
+        ownership_api.function_id{ownership_api.declaration_id{1, 99}, 0},
+        ownership_api.entity_kind.target, 0}};
+    ownership_api.graph_request mut req = ownership_api.graph_request{};
+    req.query = ownership_api.graph_query_kind.targets;
+    req.operation = f.graph.calls[call].position;
+    req.candidates = extra[..];
+    ownership_api.graph_result out = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(ownership_api.successful(out.proof) && out.targets.len == 1 && out.residual_fort);
+    ownership_api.graph_request mut again = ownership_api.graph_request{};
+    again.query = ownership_api.graph_query_kind.targets;
+    again.operation = f.graph.calls[call].position;
+    ownership_api.graph_result repeated = ownership_graph.query(cast(&f.graph, void mut*),
+        &again);
+    assert(ownership_api.successful(repeated.proof) && repeated.targets.len == 1);
+    assert(repeated.targets[0].function.declaration.declaration == 1);
+    assert(f.graph.query_targets.len == 1);
+    close(&f);
+    strbuf.str_buf mut text = strbuf.create();
+    u64[80] mut starts = {};
+    u64[80] mut lengths = {};
+    u64 mut i = 0;
+    while (i < starts.len) {
+        strbuf.append(&text, "fn graph_");
+        starts[i] = text.len - 6;
+        strbuf.append_u64(&text, i);
+        lengths[i] = text.len - starts[i];
+        strbuf.append(&text, "() void {}\n");
+        i += 1;
+    }
+    string complete_source = strbuf.view(&text);
+    string[1] generated = {complete_source};
+    string mut@ own names_large = new(string, starts.len);
+    i = 0;
+    while (i < starts.len) {
+        names_large[i] = complete_source[starts[i]..starts[i] + lengths[i]];
+        i += 1;
+    }
+    fixture mut large = fixture{};
+    open(&large, generated[..], names_large[..], 4);
+    assert(large.graph.component_count == starts.len);
+    assert(large.graph.work < 2000);
+    close(&large);
+    del(names_large);
+    strbuf.free(&text);
+    println("G01 acyclic");
+}
+
+fn self_recursion() void {
+    fixture mut f = fixture{};
+    string[1] source = {"fn recurse() void { recurse(); }"};
+    string[1] names = {"recurse"};
+    open(&f, source[..], names[..], 4);
+    assert(f.graph.component_count == 1 &&
+        ownership_graph.recursive_component(&f.graph, 0));
+    assert(target(&f, nth_call(&f, "recurse", 0), 1));
+    close(&f);
+    println("G02 self recursion");
+}
+
+fn mutual_recursion() void {
+    fixture mut f = fixture{};
+    string[2] source = {"fn a() void { b(); }", "fn b() void { a(); }"};
+    string[2] names = {"a", "b"};
+    open(&f, source[..], names[..], 4);
+    assert(f.graph.component_count == 1 &&
+        ownership_graph.recursive_component(&f.graph, 0));
+    assert(target(&f, nth_call(&f, "a", 0), 2));
+    assert(target(&f, nth_call(&f, "b", 0), 1));
+    close(&f);
+    fixture mut erased = fixture{};
+    string[3] erased_source = {"fn second(i32 mut* p) void { caller(p); }",
+        "fn caller(i32 mut* p) void {",
+        "fn (i32*) void f = cast(cast(second, void*), fn (i32*) void); f(p); }"};
+    string[2] erased_names = {"second", "caller"};
+    open(&erased, erased_source[..], erased_names[..], 4);
+    assert(target(&erased, nth_call(&erased, "second", 0), 2));
+    assert(erased.graph.calls[nth_call(&erased, "caller", 0)].residual_fort);
+    u32 component = ownership_graph.component_of(&erased.graph, erased.inputs[0].key);
+    assert(component == ownership_graph.component_of(&erased.graph, erased.inputs[1].key));
+    assert(ownership_graph.recursive_component(&erased.graph, component));
+    close(&erased);
+    println("G03 mutual recursion");
+}
+
+fn field_target() void {
+    fixture mut f = fixture{};
+    string[3] source = {"struct handler { fn () void run; }",
+        "fn leaf() void {}",
+        "fn caller() void { handler h = {leaf}; fn () void cb = h.run; cb(); }"};
+    string[2] names = {"leaf", "caller"};
+    open(&f, source[..], names[..], 4);
+    u64 call = nth_call(&f, "caller", 0);
+    assert(target(&f, call, 1) && !f.graph.calls[call].residual_fort);
+    close(&f);
+    fixture mut alias = fixture{};
+    string[5] alias_source = {"struct handler { fn () void cb; }",
+        "fn first() void {}", "fn second() void { caller(); }",
+        "fn caller() void { handler mut h = {first}; handler mut* p = &h;",
+        "p->cb = second; p->cb(); h.cb(); }"};
+    string[3] alias_names = {"first", "second", "caller"};
+    open(&alias, alias_source[..], alias_names[..], 4);
+    u64 alias_call = nth_call(&alias, "caller", 0);
+    assert(alias.graph.calls[alias_call].residual_fort);
+    u64 local_call = nth_call(&alias, "caller", 1);
+    assert(target(&alias, local_call, 1) && alias.graph.calls[local_call].residual_fort);
+    u32 mut second_component = ownership_graph.component_of(&alias.graph, alias.inputs[1].key);
+    assert(second_component == ownership_graph.component_of(&alias.graph, alias.inputs[2].key));
+    assert(ownership_graph.recursive_component(&alias.graph, second_component));
+    close(&alias);
+    fixture mut through_call = fixture{};
+    string[6] call_source = {"struct handler { fn () void cb; }",
+        "fn first() void {}", "fn second() void { caller(); }",
+        "fn change(handler mut* p) void { p->cb = second; }",
+        "fn caller() void { handler mut h = {first}; change(&h);",
+        "h.cb(); }"};
+    string[4] call_names = {"first", "second", "change", "caller"};
+    open(&through_call, call_source[..], call_names[..], 4);
+    u64 changed_call = nth_call(&through_call, "caller", 1);
+    assert(target(&through_call, changed_call, 1));
+    assert(through_call.graph.calls[changed_call].residual_fort);
+    second_component = ownership_graph.component_of(&through_call.graph,
+        through_call.inputs[1].key);
+    assert(second_component == ownership_graph.component_of(&through_call.graph,
+        through_call.inputs[3].key));
+    assert(ownership_graph.recursive_component(&through_call.graph, second_component));
+    close(&through_call);
+    fixture mut nested = fixture{};
+    string[8] nested_source = {"struct handler { fn () void cb; }",
+        "struct wrapper { handler value; }", "fn first() void {}",
+        "fn second() void { caller(); }", "fn caller() void { handler s = {second};",
+        "wrapper w = {s}; handler mut h = {first}; h = w.value; h.cb(); }",
+        "fn invoke(fn () wrapper maker) void { handler mut h = {first};",
+        "wrapper w = maker(); h = w.value; h.cb(); }"};
+    string[4] nested_names = {"first", "second", "caller", "invoke"};
+    open(&nested, nested_source[..], nested_names[..], 4);
+    u64 nested_call = nth_call(&nested, "caller", 0);
+    assert(target(&nested, nested_call, 1) && nested.graph.calls[nested_call].residual_fort);
+    second_component = ownership_graph.component_of(&nested.graph, nested.inputs[1].key);
+    assert(second_component == ownership_graph.component_of(&nested.graph, nested.inputs[2].key));
+    assert(ownership_graph.recursive_component(&nested.graph, second_component));
+    u64 projected_call = nth_call(&nested, "invoke", 1);
+    assert(target(&nested, projected_call, 1));
+    assert(nested.graph.calls[projected_call].residual_fort);
+    close(&nested);
+    fixture mut aggregate_cast = fixture{};
+    string[5] cast_source = {"struct handler { fn () void cb; }",
+        "fn first() void {}", "fn second() void { caller(); }",
+        "fn caller() void { handler s = {second}; handler mut h = {first};",
+        "h = cast(s, handler); h.cb(); }"};
+    open(&aggregate_cast, cast_source[..], alias_names[..], 4);
+    u64 cast_call = nth_call(&aggregate_cast, "caller", 0);
+    assert(target(&aggregate_cast, cast_call, 1));
+    assert(target(&aggregate_cast, cast_call, 2));
+    assert(aggregate_cast.graph.calls[cast_call].residual_fort);
+    second_component = ownership_graph.component_of(&aggregate_cast.graph,
+        aggregate_cast.inputs[1].key);
+    assert(second_component == ownership_graph.component_of(&aggregate_cast.graph,
+        aggregate_cast.inputs[2].key));
+    assert(ownership_graph.recursive_component(&aggregate_cast.graph, second_component));
+    close(&aggregate_cast);
+    println("G04 field target");
+}
+
+fn parameter_target() void {
+    fixture mut f = fixture{};
+    string[3] source = {"fn leaf() void {}",
+        "fn invoke(fn () void cb) void { cb(); }",
+        "fn caller() void { invoke(leaf); }"};
+    string[3] names = {"leaf", "invoke", "caller"};
+    open(&f, source[..], names[..], 4);
+    u64 call = nth_call(&f, "invoke", 0);
+    assert(target(&f, call, 1) && f.graph.calls[call].residual_fort);
+    close(&f);
+    fixture mut aggregate = fixture{};
+    string[4] aggregate_source = {"struct handler { fn () void cb; }",
+        "fn leaf() void {}", "fn invoke(handler h) void { h.cb(); }",
+        "fn caller() void { handler h = {leaf}; invoke(h); }"};
+    open(&aggregate, aggregate_source[..], names[..], 4);
+    u64 aggregate_call = nth_call(&aggregate, "invoke", 0);
+    assert(target(&aggregate, aggregate_call, 1));
+    assert(aggregate.graph.calls[aggregate_call].residual_fort);
+    close(&aggregate);
+    println("G05 parameter target");
+}
+
+fn returned_target() void {
+    fixture mut f = fixture{};
+    string[3] source = {"fn leaf() void {}",
+        "fn pick() fn () void { return leaf; }",
+        "fn caller() void { pick()(); }"};
+    string[3] names = {"leaf", "pick", "caller"};
+    open(&f, source[..], names[..], 4);
+    assert(target(&f, nth_call(&f, "caller", 1), 1));
+    close(&f);
+    fixture mut unknown = fixture{};
+    string[4] unknown_source = {"struct handler { fn () void cb; }",
+        "fn first() void {}", "fn invoke(fn () handler maker) void {",
+        "handler mut h = {first}; h = maker(); h.cb(); }"};
+    string[2] unknown_names = {"first", "invoke"};
+    open(&unknown, unknown_source[..], unknown_names[..], 4);
+    u64 unknown_call = nth_call(&unknown, "invoke", 1);
+    assert(target(&unknown, unknown_call, 1));
+    assert(unknown.graph.calls[unknown_call].residual_fort);
+    close(&unknown);
+    fixture mut foreign_cast = fixture{};
+    string[6] cast_source = {"struct handler { fn () void cb; }",
+        "fn first() void {}", "extern fn maker_pointer() void*;",
+        "fn invoke() void { fn () handler maker =",
+        "cast(maker_pointer(), fn () handler); handler mut h = {first};",
+        "h = maker(); h.cb(); }"};
+    string[2] cast_names = {"first", "invoke"};
+    open(&foreign_cast, cast_source[..], cast_names[..], 4);
+    u64 cast_call = nth_call(&foreign_cast, "invoke", 2);
+    assert(target(&foreign_cast, cast_call, 1));
+    assert(foreign_cast.graph.calls[cast_call].residual_fort);
+    close(&foreign_cast);
+    println("G06 returned target");
+}
+
+fn two_targets(u64 limit, bool widened) void {
+    fixture mut f = fixture{};
+    string[5] source = {"struct slot { fn () void cb; }", "fn first() void {}",
+        "fn second() void {}", "fn caller(bool choice) void { slot mut s = {first};",
+        "if (choice) { s.cb = second; } s.cb(); }"};
+    string[3] names = {"first", "second", "caller"};
+    open(&f, source[..], names[..], limit);
+    u64 call = nth_call(&f, "caller", 0);
+    assert(target(&f, call, 1));
+    assert(target(&f, call, 2) != widened);
+    assert(f.graph.calls[call].residual_fort == widened);
+    close(&f);
+    if (widened) { println("G10 target limit"); }
+    else { println("G07 two targets"); }
+}
+
+fn fort_and_foreign() void {
+    fixture mut f = fixture{};
+    string[4] source = {"extern fn ext() void;", "extern fn ext2() void;",
+        "fn leaf() void {}", "fn caller() void { leaf(); ext(); }"};
+    string[2] names = {"leaf", "caller"};
+    open(&f, source[..], names[..], 4);
+    ownership_graph.target_view fort_view = ownership_graph.targets_at(&f.graph,
+        f.graph.calls[nth_call(&f, "caller", 0)].position);
+    ownership_graph.target_view foreign_view = ownership_graph.targets_at(&f.graph,
+        f.graph.calls[nth_call(&f, "caller", 1)].position);
+    assert(fort_view.fort_targets.len == 1 && fort_view.foreign_targets.len == 0);
+    assert(foreign_view.fort_targets.len == 0 && foreign_view.foreign_targets.len == 1);
+    assert(!foreign_view.residual_fort && foreign_view.foreign_targets[0]->name == "ext");
+    ownership_api.graph_request mut foreign_request = ownership_api.graph_request{};
+    foreign_request.query = ownership_api.graph_query_kind.targets;
+    foreign_request.operation = f.graph.calls[nth_call(&f, "caller", 1)].position;
+    ownership_api.graph_result callback = ownership_graph.query(cast(&f.graph, void mut*),
+        &foreign_request);
+    assert(callback.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(!callback.residual_fort);
+    // This synthetic set exercises both classes at one abstract call.
+    ownership_graph.graph mut synthetic = ownership_graph.graph{};
+    synthetic.limits = ownership_limits.production();
+    synthetic.proof.kind = ownership_api.proof_kind.complete;
+    synthetic.calls = new(ownership_graph.call_site, 1);
+    synthetic.calls_len = 1;
+    ownership_graph.call_site mut* mixed = &synthetic.calls[0];
+    ownership_graph.target fort_target = ownership_graph.target_of(&f.graph, f.functions[0].sym);
+    ast.sym* ext = check_env.sym_main(&f.checked.c, "ext");
+    ownership_graph.target foreign_target = ownership_graph.target_of(&f.graph, ext);
+    assert(ownership_graph.add_target(&synthetic, mixed, fort_target));
+    assert(ownership_graph.add_target(&synthetic, mixed, foreign_target));
+    assert(mixed->targets_len == 2 && !mixed->residual_fort && !mixed->residual_foreign);
+    assert(mixed->targets[0].kind != mixed->targets[1].kind);
+    ownership_graph.materialize(&synthetic);
+    ownership_api.graph_request mut request = ownership_api.graph_request{};
+    request.query = ownership_api.graph_query_kind.targets;
+    ownership_api.graph_result combined = ownership_graph.query(cast(&synthetic, void mut*),
+        &request);
+    assert(combined.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(combined.targets.len == 1 && !combined.residual_fort);
+    ownership_graph.target_view combined_view = ownership_graph.targets_at(&synthetic,
+        request.operation);
+    assert(combined_view.fort_targets.len == 1 && combined_view.foreign_targets.len == 1);
+    ownership_graph.free(&synthetic);
+    ownership_graph.graph mut foreign_only = ownership_graph.graph{};
+    foreign_only.limits = ownership_limits.production();
+    foreign_only.limits.t = 1;
+    foreign_only.proof.kind = ownership_api.proof_kind.complete;
+    foreign_only.calls = new(ownership_graph.call_site, 1);
+    foreign_only.calls_len = 1;
+    ownership_graph.call_site mut* limited = &foreign_only.calls[0];
+    ast.sym* ext2 = check_env.sym_main(&f.checked.c, "ext2");
+    assert(ownership_graph.add_target(&foreign_only, limited, foreign_target));
+    assert(ownership_graph.add_target(&foreign_only, limited,
+        ownership_graph.target_of(&f.graph, ext2)));
+    assert(limited->targets_len == 1 && limited->residual_foreign);
+    assert(!limited->residual_fort);
+    ownership_graph.materialize(&foreign_only);
+    ownership_graph.target_view limited_view = ownership_graph.targets_at(&foreign_only,
+        ownership_api.operation_position{});
+    assert(limited_view.foreign_targets.len == 1 && limited_view.residual_foreign);
+    assert(!limited_view.residual_fort);
+    ownership_graph.free(&foreign_only);
+    close(&f);
+    println("G08 fort and foreign");
+}
+
+fn unknown_fort() void {
+    fixture mut f = fixture{};
+    string[1] source = {"fn invoke(fn () void cb) void { cb(); }"};
+    string[1] names = {"invoke"};
+    open(&f, source[..], names[..], 4);
+    u64 call = nth_call(&f, "invoke", 0);
+    ownership_graph.target_view view = ownership_graph.targets_at(&f.graph,
+        f.graph.calls[call].position);
+    assert(view.fort_targets.len == 0 && view.foreign_targets.len == 0);
+    assert(view.residual_fort && !view.residual_foreign);
+    ownership_api.graph_request mut req = ownership_api.graph_request{};
+    req.query = ownership_api.graph_query_kind.targets;
+    req.operation = f.graph.calls[call].position;
+    ownership_api.graph_result result = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(ownership_api.successful(result.proof) && result.residual_fort);
+    ownership_graph.body_input[1] mut unverified = {f.inputs[0]};
+    unverified[0].verified = false;
+    ownership_graph.graph mut refused = ownership_graph.build(unverified[..],
+        ownership_limits.production());
+    assert(refused.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    ownership_graph.free(&refused);
+    ownership_api.limit_table mut small = ownership_limits.production();
+    small.w = 2;
+    ownership_graph.graph mut exhausted = ownership_graph.build(f.inputs[..], small);
+    assert(exhausted.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(exhausted.proof.failed && exhausted.proof.terminal.present);
+    assert(exhausted.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(exhausted.proof.terminal.limit.present);
+    assert(exhausted.proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(exhausted.proof.terminal.limit.scope == ownership_api.limit_scope.computation);
+    assert(exhausted.proof.terminal.limit.work == ownership_api.work_kind.transfer);
+    assert(exhausted.proof.terminal.limit.used == 2);
+    assert(exhausted.proof.terminal.limit.bound == 2);
+    assert(exhausted.proof.terminal.limit.attempted == 1);
+    assert(ownership_api.successful(f.graph.proof));
+    assert(exhausted.proof.terminal.limit.operation.function.declaration.declaration == 1);
+    assert(exhausted.proof.terminal.limit.source.line > 0);
+    ownership_graph.free(&exhausted);
+    fixture mut parameters = fixture{};
+    string[2] parameter_source = {"fn a(fn () void x, fn () void y, fn () void z) void {}",
+        "fn b(fn () void x) void {}"};
+    string[2] parameter_names = {"a", "b"};
+    open(&parameters, parameter_source[..], parameter_names[..], 4);
+    small.w = 2;
+    exhausted = ownership_graph.build(parameters.inputs[..], small);
+    assert(exhausted.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(exhausted.proof.terminal.limit.used == 2);
+    assert(exhausted.proof.terminal.limit.operation.function.declaration.declaration == 1);
+    assert(exhausted.calls_len == 0);
+    assert(ownership_keys.operation(exhausted.active_operation,
+        exhausted.proof.terminal.limit.operation) == 0);
+    ownership_graph.free(&exhausted);
+    close(&parameters);
+    fixture mut nested_work = fixture{};
+    string[3] work_source = {"struct handler { fn () void cb; }",
+        "fn leaf() void {}",
+        "fn caller() void { handler a = {leaf}; handler b = a; b.cb(); }"};
+    string[2] work_names = {"leaf", "caller"};
+    open(&nested_work, work_source[..], work_names[..], 4);
+    small.w = 6;
+    exhausted = ownership_graph.build(nested_work.inputs[..], small);
+    assert(exhausted.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(exhausted.proof.terminal.limit.used == 6);
+    assert(exhausted.proof.terminal.limit.operation.function.declaration.declaration == 2);
+    assert(exhausted.proof.terminal.limit.operation.operation == 3);
+    assert(ownership_keys.operation(exhausted.active_operation,
+        exhausted.proof.terminal.limit.operation) == 0);
+    ownership_graph.free(&exhausted);
+    close(&nested_work);
+    ownership_graph.body_input mut@ own none = new(ownership_graph.body_input, 0);
+    ownership_graph.graph mut empty = ownership_graph.build(none[..],
+        ownership_limits.production());
+    assert(ownership_api.successful(empty.proof) && empty.component_count == 0);
+    ownership_graph.free(&empty);
+    del(none);
+    ownership_graph.body_input[1] mut null_body = {f.inputs[0]};
+    null_body[0].body = null;
+    refused = ownership_graph.build(null_body[..], ownership_limits.production());
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    ownership_graph.free(&refused);
+    ownership_api.limit_table mut invalid = ownership_limits.production();
+    invalid.t = 0;
+    refused = ownership_graph.build(f.inputs[..], invalid);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    ownership_graph.free(&refused);
+    invalid = ownership_limits.production();
+    invalid.version += 1;
+    refused = ownership_graph.build(f.inputs[..], invalid);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    ownership_graph.free(&refused);
+    ownership_api.graph_result mut null_query = ownership_graph.query(null, &req);
+    assert(null_query.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(null_query.residual_fort);
+    null_query = ownership_graph.query(cast(&f.graph, void mut*), null);
+    assert(null_query.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(null_query.residual_fort);
+    close(&f);
+    fixture mut pair = fixture{};
+    string[2] pair_source = {"fn first() void {}", "fn second() void {}"};
+    string[2] pair_names = {"first", "second"};
+    open(&pair, pair_source[..], pair_names[..], 4);
+    ownership_graph.body_input[2] mut duplicate = {pair.inputs[0], pair.inputs[1]};
+    duplicate[1].body = duplicate[0].body;
+    refused = ownership_graph.build(duplicate[..], ownership_limits.production());
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    ownership_graph.free(&refused);
+    ownership_graph.body_input[2] mut unordered = {pair.inputs[1], pair.inputs[0]};
+    refused = ownership_graph.build(unordered[..], ownership_limits.production());
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    ownership_graph.free(&refused);
+    close(&pair);
+    fixture mut global = fixture{};
+    string[4] global_source = {"struct handler { fn () void cb; }",
+        "fn leaf() void {}", "handler mut GLOBAL = {leaf};",
+        "fn invoke() void { GLOBAL.cb(); }"};
+    string[2] global_names = {"leaf", "invoke"};
+    open(&global, global_source[..], global_names[..], 4);
+    u64 global_call = nth_call(&global, "invoke", 0);
+    assert(global.graph.calls[global_call].residual_fort);
+    close(&global);
+    println("G09 unknown fort");
+}
+
+fn query_limits() void {
+    fixture mut f = fixture{};
+    string[2] source = {"fn leaf() void {}", "fn caller() void { leaf(); }"};
+    string[2] names = {"leaf", "caller"};
+    open(&f, source[..], names[..], 4);
+    u64 call = nth_call(&f, "caller", 0);
+    ownership_api.entity_id[6] mut candidates = {};
+    u64 mut i = 0;
+    while (i < candidates.len) {
+        candidates[i] = ownership_api.entity_id{
+            ownership_api.function_id{ownership_api.declaration_id{1, cast(i + 3, u32)}, 0},
+            ownership_api.entity_kind.target, 0};
+        i += 1;
+    }
+    candidates[0] = ownership_api.entity_id{f.inputs[1].key,
+        ownership_api.entity_kind.target, 0};
+    candidates[1] = candidates[0];
+    candidates[2] = ownership_api.entity_id{f.inputs[0].key,
+        ownership_api.entity_kind.target, 0};
+    ownership_api.graph_request mut req = ownership_api.graph_request{};
+    req.query = ownership_api.graph_query_kind.targets;
+    req.operation = f.graph.calls[call].position;
+    req.source = ownership_api.source_position{1, 2, 3, 4, 3, 5};
+    req.candidates = candidates[..];
+    ownership_api.graph_result bounded = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(ownership_api.successful(bounded.proof) && bounded.residual_fort);
+    assert(bounded.targets.len == 2 && f.graph.query_targets.len == f.graph.limits.t);
+    assert(bounded.targets[0].function.declaration.declaration == 1);
+    assert(bounded.targets[1].function.declaration.declaration == 2);
+    f.graph.limits.t = 1;
+    req.candidates = candidates[0..1];
+    ownership_api.graph_result capped = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(ownership_api.successful(capped.proof) && capped.residual_fort);
+    assert(capped.targets.len == 1 && f.graph.query_targets.len == 1);
+    f.graph.limits.t = 4;
+    req.candidates = candidates[..];
+    assert(ownership_graph.grow(ownership_graph.U64_MAX / 2) ==
+        ownership_graph.U64_MAX - 1);
+    u64 before = f.graph.work;
+    f.graph.limits.w = before + 1;
+    ownership_api.graph_result refused = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(refused.proof.failed && refused.proof.terminal.present);
+    assert(refused.residual_fort && refused.proof.terminal.limit.present);
+    assert(ownership_api.successful(f.graph.proof));
+    assert(target(&f, call, 1));
+    assert(refused.proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(refused.proof.terminal.limit.work == ownership_api.work_kind.substitution);
+    assert(refused.proof.terminal.limit.used == before);
+    assert(refused.proof.terminal.limit.bound == before + 1);
+    assert(refused.proof.terminal.limit.attempted == 7);
+    assert(ownership_keys.operation(refused.proof.terminal.limit.operation,
+        req.operation) == 0);
+    assert(refused.proof.terminal.limit.source.file == req.source.file);
+    assert(refused.proof.terminal.limit.source.line == req.source.line);
+    ownership_graph.graph mut overflow = ownership_graph.graph{};
+    overflow.limits = ownership_limits.production();
+    overflow.active_operation = req.operation;
+    overflow.active_source = req.source;
+    overflow.active_work = ownership_api.work_kind.substitution;
+    ownership_api.proof_status overflowed = ownership_graph.charge_query(&overflow,
+        1, ownership_graph.U64_MAX);
+    assert(overflowed.terminal.limit.saturated && overflow.work == 0);
+    assert(overflowed.terminal.limit.used == 0);
+    assert(overflowed.terminal.limit.attempted == ownership_graph.U64_MAX);
+    assert(ownership_keys.operation(overflowed.terminal.limit.operation, req.operation) == 0);
+    close(&f);
+}
+
+fn main() i32 {
+    acyclic();
+    self_recursion();
+    mutual_recursion();
+    field_target();
+    parameter_target();
+    returned_target();
+    two_targets(4, false);
+    fort_and_foreign();
+    unknown_fort();
+    query_limits();
+    two_targets(1, true);
+    return 0;
+}
