@@ -1,0 +1,1013 @@
+/// Builds finite call components and function-value targets from verified FIR.
+import ast;
+import fir;
+import ownership_api;
+import ownership_keys;
+import std.str;
+import types;
+
+u32 ROOT = 4294967295;
+u64 U64_MAX = 18446744073709551615;
+
+enum target_kind {
+    fort,
+    foreign,
+    residual_fort,
+    residual_foreign,
+}
+
+struct target {
+    target_kind kind;
+    ownership_api.function_id function;
+    ast.sym* foreign_symbol;
+}
+
+/// The caller keeps each verified body and its checked symbols live through graph teardown.
+struct body_input {
+    ownership_api.function_id key;
+    fir.func* body;
+    bool verified;
+}
+
+struct fact {
+    u32 body;
+    fir.base_kind base;
+    u32 local;
+    ast.sym* global;
+    u32 field;
+    target value;
+}
+
+struct call_site {
+    ownership_api.operation_position position;
+    ownership_api.source_position source;
+    u32 body;
+    fir.place destination;
+    fir.rvalue value;
+    target mut@ own targets;
+    u64 targets_len;
+    ownership_api.entity_id mut@ own fort_targets;
+    u64 fort_len;
+    ast.sym* mut@ own foreign_targets;
+    u64 foreign_len;
+    bool residual_fort;
+    bool residual_foreign;
+}
+
+struct target_view {
+    ownership_api.entity_id@ fort_targets;
+    ast.sym*@ foreign_targets;
+    bool residual_fort;
+    bool residual_foreign;
+    ownership_api.proof_status proof;
+}
+
+struct graph {
+    body_input@ bodies;
+    ownership_api.limit_table limits;
+    fact mut@ own facts;
+    u64 facts_len;
+    call_site mut@ own calls;
+    u64 calls_len;
+    u32 mut@ own components;
+    bool mut@ own recursive;
+    ownership_api.entity_id mut@ own query_targets;
+    u32 component_count;
+    ownership_api.proof_status proof;
+    u64 work;
+    ownership_api.operation_position active_operation;
+    ownership_api.source_position active_source;
+    ownership_api.work_kind active_work;
+}
+
+fn complete() ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.proof_status{};
+    out.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn incomplete(ownership_api.incomplete_reason reason) ownership_api.proof_status {
+    return ownership_api.incomplete(reason, ownership_api.operation_position{},
+        ownership_api.source_position{});
+}
+
+fn work_failure(graph* g, u64 attempted, bool saturated)
+    ownership_api.proof_status {
+    ownership_api.proof_status mut proof = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit,
+        g->active_operation, g->active_source);
+    ownership_api.exhaustion mut limit = ownership_api.exhaustion{};
+    limit.present = true;
+    limit.category = ownership_api.limit_category.w;
+    limit.scope = ownership_api.limit_scope.computation;
+    limit.work = g->active_work;
+    limit.used = g->work;
+    limit.bound = g->limits.w;
+    limit.attempted = attempted;
+    limit.operation = g->active_operation;
+    limit.source = g->active_source;
+    limit.saturated = saturated;
+    proof.terminal.limit = limit;
+    return proof;
+}
+
+fn refuse_work(graph mut* g, u64 attempted, bool saturated) void {
+    g->proof = work_failure(g, attempted, saturated);
+}
+
+fn charge_work(graph mut* g, u64 attempted) bool {
+    if (!ownership_api.successful(g->proof)) { return false; }
+    if (g->work > g->limits.w || attempted > g->limits.w - g->work) {
+        refuse_work(g, attempted, false);
+        return false;
+    }
+    g->work += attempted;
+    return true;
+}
+
+fn charge_query(graph mut* g, u64 known, u64 candidates)
+    ownership_api.proof_status {
+    if (candidates > U64_MAX - known) { return work_failure(g, U64_MAX, true); }
+    u64 attempted = known + candidates;
+    if (g->work > g->limits.w || attempted > g->limits.w - g->work) {
+        return work_failure(g, attempted, false);
+    }
+    g->work += attempted;
+    return complete();
+}
+
+fn grow(u64 cap) u64 {
+    if (cap == 0) { return 8; }
+    if (cap > U64_MAX / 2) { panic("ownership_graph: capacity overflow"); }
+    return cap * 2;
+}
+
+fn reserve_facts(graph mut* g) void {
+    if (g->facts_len < g->facts.len) { return; }
+    fact mut@ own next = new(fact, grow(g->facts.len));
+    u64 mut i = 0;
+    while (i < g->facts_len) { next[i] = g->facts[i]; i += 1; }
+    del(g->facts);
+    g->facts = move(next);
+}
+
+fn reserve_calls(graph mut* g) void {
+    if (g->calls_len < g->calls.len) { return; }
+    call_site mut@ own next = new(call_site, grow(g->calls.len));
+    u64 mut i = 0;
+    while (i < g->calls_len) { next[i] = move(g->calls[i]); i += 1; }
+    del(g->calls);
+    g->calls = move(next);
+}
+
+fn same_target(target a, target b) bool {
+    if (a.kind != b.kind) { return false; }
+    if (a.kind == target_kind.fort) {
+        return ownership_keys.function(a.function, b.function) == 0;
+    }
+    if (a.kind == target_kind.foreign) {
+        return a.foreign_symbol == b.foreign_symbol ||
+            a.foreign_symbol->name == b.foreign_symbol->name;
+    }
+    return true;
+}
+
+fn target_order(target a, target b) i32 {
+    if (cast(a.kind, u32) < cast(b.kind, u32)) { return -1; }
+    if (cast(a.kind, u32) > cast(b.kind, u32)) { return 1; }
+    if (a.kind == target_kind.fort) {
+        return ownership_keys.function(a.function, b.function);
+    }
+    if (a.kind == target_kind.foreign) {
+        return str.cmp(a.foreign_symbol->name, b.foreign_symbol->name);
+    }
+    return 0;
+}
+
+fn same_place(fact* a, fact* b) bool {
+    return a->body == b->body && a->base == b->base && a->local == b->local &&
+        a->global == b->global && a->field == b->field;
+}
+
+fn add_fact(graph mut* g, fact value) bool {
+    if (!ownership_api.successful(g->proof)) { return false; }
+    u64 mut i = 0;
+    while (i < g->facts_len) {
+        if (same_place(&g->facts[i], &value) && same_target(g->facts[i].value, value.value)) {
+            return false;
+        }
+        i += 1;
+    }
+    if (!charge_work(g, 1)) { return false; }
+    reserve_facts(g);
+    g->facts[g->facts_len] = value;
+    g->facts_len += 1;
+    return true;
+}
+
+fn body_of(graph* g, ast.sym* symbol) u64 {
+    u64 mut i = 0;
+    while (i < g->bodies.len) {
+        if (g->bodies[i].body->sym == symbol) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+
+fn target_of(graph* g, ast.sym* symbol) target {
+    target mut out = target{};
+    if (symbol == null) { out.kind = target_kind.residual_fort; return out; }
+    if (symbol->kind == ast.sym_kind.s_extern_fn) {
+        out.kind = target_kind.foreign;
+        out.foreign_symbol = symbol;
+        return out;
+    }
+    u64 index = body_of(g, symbol);
+    if (index == U64_MAX) { out.kind = target_kind.residual_fort; return out; }
+    out.kind = target_kind.fort;
+    out.function = g->bodies[index].key;
+    return out;
+}
+
+// Only a direct field projection has an exact field key in this graph.
+fn field_of(fir.func* body, fir.place slot) u32 {
+    if (slot.proj_len == 0) { return ROOT; }
+    if (slot.proj_len != 1) { return ROOT - 1; }
+    fir.projection p = fir.place_projection(body, slot, 0);
+    if (p.kind != fir.proj_kind.pj_field) { return ROOT - 1; }
+    return p.field;
+}
+
+fn place_fact(graph* g, u32 body, fir.place slot, target value) fact {
+    fact mut out = fact{};
+    out.body = body;
+    out.base = slot.base;
+    out.local = slot.local;
+    out.global = slot.global;
+    out.field = field_of(g->bodies[body].body, slot);
+    out.value = value;
+    return out;
+}
+
+fn source_at(graph* g, u32 body, fir.statement* instruction)
+    ownership_api.source_position {
+    return ownership_api.source_position{
+        g->bodies[body].key.declaration.module, 0,
+        instruction->loc.line, instruction->loc.col,
+        instruction->loc.end_line, instruction->loc.end_col};
+}
+
+fn seed_unknown(graph mut* g, u32 body, fir.place slot) bool {
+    types.node* ty = fir.place_type(g->bodies[body].body, slot);
+    if (ty->kind != types.type_kind.k_fn && !fir.type_aggregate(ty)) { return false; }
+    fact mut unknown = place_fact(g, body, slot,
+        target{.kind = target_kind.residual_fort});
+    if (ty->kind != types.type_kind.k_fn) { unknown.field = ROOT - 1; }
+    return add_fact(g, unknown);
+}
+
+fn matches(fact* value, u32 body, fir.place slot, u32 field) bool {
+    return value->body == body && value->base == slot.base &&
+        value->local == slot.local && value->global == slot.global &&
+        (value->field == field || value->field == ROOT - 1);
+}
+
+fn copy_place(graph mut* g, u32 from_body, fir.place source, u32 to_body,
+    fir.place destination, u32 extra_field) bool {
+    fir.func* src = g->bodies[from_body].body;
+    fir.func* dst = g->bodies[to_body].body;
+    u32 source_field = field_of(src, source);
+    u32 destination_field = field_of(dst, destination);
+    bool mut changed = false;
+    if (source.base == fir.base_kind.bk_global || source_field == ROOT - 1 ||
+        (source_field != ROOT && fir.type_aggregate(fir.place_type(src, source)))) {
+        changed = seed_unknown(g, to_body, destination) || changed;
+    }
+    if (!ownership_api.successful(g->proof)) { return false; }
+    u64 count = g->facts_len;
+    u64 mut i = 0;
+    while (i < count) {
+        fact current = g->facts[i];
+        bool matched = source_field == ROOT ?
+            matches(&current, from_body, source, current.field) :
+            matches(&current, from_body, source, source_field);
+        if (matched) {
+            fact mut next = place_fact(g, to_body, destination, current.value);
+            if (extra_field != ROOT) { next.field = extra_field; }
+            else if (destination_field == ROOT && source_field == ROOT) {
+                next.field = current.field;
+            }
+            else if (destination_field == ROOT) { next.field = ROOT; }
+            else if (source_field == ROOT && current.field != ROOT) {
+                next.field = ROOT - 1;
+                next.value.kind = target_kind.residual_fort;
+            }
+            changed = add_fact(g, next) || changed;
+            if (!ownership_api.successful(g->proof)) { return false; }
+        }
+        i += 1;
+    }
+    return changed;
+}
+
+fn copy_operand(graph mut* g, u32 body, fir.operand source, u32 to_body,
+    fir.place destination, u32 field) bool {
+    if (source.kind != fir.operand_kind.ok_const) {
+        return copy_place(g, body, source.place, to_body, destination, field);
+    }
+    if (source.value.kind != fir.const_kind.ck_fn) { return false; }
+    fact mut value = place_fact(g, to_body, destination, target_of(g, source.value.sym));
+    if (field != ROOT) { value.field = field; }
+    return add_fact(g, value);
+}
+
+fn reserve_targets(call_site mut* call) void {
+    if (call->targets_len < call->targets.len) { return; }
+    target mut@ own next = new(target, grow(call->targets.len));
+    u64 mut i = 0;
+    while (i < call->targets_len) { next[i] = call->targets[i]; i += 1; }
+    del(call->targets);
+    call->targets = move(next);
+}
+
+fn add_target(graph mut* g, call_site mut* call, target value) bool {
+    if (!ownership_api.successful(g->proof)) { return false; }
+    if (value.kind == target_kind.residual_fort) {
+        bool added = !call->residual_fort;
+        call->residual_fort = true;
+        return added;
+    }
+    if (value.kind == target_kind.residual_foreign) {
+        bool added = !call->residual_foreign;
+        call->residual_foreign = true;
+        return added;
+    }
+    u64 mut i = 0;
+    while (i < call->targets_len) {
+        if (same_target(call->targets[i], value)) { return false; }
+        i += 1;
+    }
+    if (call->targets_len >= g->limits.t) {
+        if (value.kind == target_kind.fort) { return add_target(g, call,
+            target{.kind = target_kind.residual_fort}); }
+        return add_target(g, call, target{.kind = target_kind.residual_foreign});
+    }
+    if (!charge_work(g, 1)) { return false; }
+    reserve_targets(call);
+    call->targets[call->targets_len] = value;
+    call->targets_len += 1;
+    return true;
+}
+
+fn collect_callee(graph mut* g, call_site mut* call) bool {
+    fir.rvalue value = call->value;
+    if (value.callee != fir.callee_kind.cl_value) {
+        return add_target(g, call, target_of(g, value.callee_sym));
+    }
+    if (value.callee_op.kind == fir.operand_kind.ok_const) {
+        if (value.callee_op.value.kind == fir.const_kind.ck_fn) {
+            return add_target(g, call, target_of(g, value.callee_op.value.sym));
+        }
+        return false;
+    }
+    fir.place callee_slot = value.callee_op.place;
+    u32 field = field_of(g->bodies[call->body].body, callee_slot);
+    bool mut changed = false;
+    if (callee_slot.base == fir.base_kind.bk_global || field == ROOT - 1) {
+        changed = add_target(g, call, target{.kind = target_kind.residual_fort});
+    }
+    if (!ownership_api.successful(g->proof)) { return false; }
+    u64 mut i = 0;
+    while (i < g->facts_len) {
+        fact current = g->facts[i];
+        if (matches(&current, call->body, callee_slot, field)) {
+            changed = add_target(g, call, current.value) || changed;
+            if (!ownership_api.successful(g->proof)) { return false; }
+        }
+        i += 1;
+    }
+    return changed;
+}
+
+fn copy_call(graph mut* g, call_site mut* call) bool {
+    fir.func* caller = g->bodies[call->body].body;
+    bool mut changed = collect_callee(g, call);
+    if (!ownership_api.successful(g->proof)) { return false; }
+    u64 mut i = 0;
+    while (i <= call->targets_len) {
+        target selected = i == call->targets_len ?
+            target{.kind = target_kind.residual_fort} : call->targets[i];
+        if (selected.kind == target_kind.fort ||
+            (i == call->targets_len && call->residual_fort)) {
+            u64 mut callee = 0;
+            while (callee < g->bodies.len) {
+                if (selected.kind == target_kind.fort &&
+                    ownership_keys.function(g->bodies[callee].key, selected.function) == 0) {
+                    break;
+                }
+                if (selected.kind == target_kind.residual_fort) { break; }
+                callee += 1;
+            }
+            while (callee < g->bodies.len) {
+                fir.func* body = g->bodies[callee].body;
+                u32 mut arg = 0;
+                while (arg < call->value.ops_len && arg + 1 < fir.local_count(body) &&
+                    fir.local_at(body, arg + 1)->kind == fir.local_kind.lk_param) {
+                    fir.operand source = fir.rvalue_operand(caller, call->value, arg);
+                    changed = copy_operand(g, call->body, source, cast(callee, u32),
+                        fir.place_local(arg + 1), ROOT) || changed;
+                    if (!ownership_api.successful(g->proof)) { return false; }
+                    arg += 1;
+                }
+                changed = copy_place(g, cast(callee, u32), fir.place_local(0),
+                    call->body, call->destination, ROOT) || changed;
+                if (!ownership_api.successful(g->proof)) { return false; }
+                if (selected.kind == target_kind.fort) { break; }
+                callee += 1;
+            }
+        } else if (selected.kind == target_kind.foreign) {
+            changed = seed_unknown(g, call->body, call->destination) || changed;
+            if (!ownership_api.successful(g->proof)) { return false; }
+        }
+        i += 1;
+    }
+    if (call->residual_fort || call->residual_foreign) {
+        changed = seed_unknown(g, call->body, call->destination) || changed;
+        if (!ownership_api.successful(g->proof)) { return false; }
+    }
+    return changed;
+}
+
+fn copy_statement(graph mut* g, u32 body, fir.statement* instruction) bool {
+    if (instruction->kind != fir.stmt_kind.st_assign) { return false; }
+    fir.rvalue value = instruction->value;
+    if (value.kind == fir.rvalue_kind.rv_use) {
+        return copy_operand(g, body, fir.rvalue_operand(g->bodies[body].body, value, 0),
+            body, instruction->place, ROOT);
+    }
+    if (value.kind == fir.rvalue_kind.rv_aggregate) {
+        bool mut changed = false;
+        u32 mut i = 0;
+        while (i < value.ops_len) {
+            changed = copy_operand(g, body,
+                fir.rvalue_operand(g->bodies[body].body, value, i), body,
+                instruction->place, i) || changed;
+            if (!ownership_api.successful(g->proof)) { return false; }
+            i += 1;
+        }
+        return changed;
+    }
+    if (value.kind == fir.rvalue_kind.rv_cast &&
+        fir.type_aggregate(fir.place_type(g->bodies[body].body, instruction->place))) {
+        bool mut changed = copy_operand(g, body,
+            fir.rvalue_operand(g->bodies[body].body, value, 0), body,
+            instruction->place, ROOT);
+        if (!ownership_api.successful(g->proof)) { return false; }
+        changed = seed_unknown(g, body, instruction->place) || changed;
+        return changed;
+    }
+    if (value.kind == fir.rvalue_kind.rv_addr || value.kind == fir.rvalue_kind.rv_slice) {
+        return seed_unknown(g, body, value.place);
+    }
+    if (value.kind != fir.rvalue_kind.rv_call &&
+        fir.place_type(g->bodies[body].body, instruction->place)->kind == types.type_kind.k_fn) {
+        return add_fact(g, place_fact(g, body, instruction->place,
+            target{.kind = target_kind.residual_fort}));
+    }
+    return false;
+}
+
+fn collect_calls(graph mut* g) bool {
+    u32 mut body = 0;
+    while (cast(body, u64) < g->bodies.len) {
+        fir.func* f = g->bodies[body].body;
+        u32 mut block = 0;
+        while (block < fir.block_count(f)) {
+            u32 mut position = 0;
+            while (position < fir.block_statement_count(f, block)) {
+                fir.statement* instruction = fir.block_statement(f, block, position);
+                if (instruction->kind == fir.stmt_kind.st_assign &&
+                    instruction->value.kind == fir.rvalue_kind.rv_call) {
+                    g->active_operation = ownership_api.operation_position{
+                        g->bodies[body].key, block, position, false};
+                    g->active_source = source_at(g, body, instruction);
+                    g->active_work = ownership_api.work_kind.transfer;
+                    if (!charge_work(g, 1)) { return false; }
+                    reserve_calls(g);
+                    call_site mut call = call_site{};
+                    call.position = ownership_api.operation_position{
+                        g->bodies[body].key, block, position, false};
+                    call.source = g->active_source;
+                    call.body = body;
+                    call.destination = instruction->place;
+                    call.value = instruction->value;
+                    g->calls[g->calls_len] = move(call);
+                    g->calls_len += 1;
+                }
+                position += 1;
+            }
+            block += 1;
+        }
+        body += 1;
+    }
+    return true;
+}
+
+fn seed_parameters(graph mut* g) bool {
+    u32 mut body = 0;
+    while (cast(body, u64) < g->bodies.len) {
+        fir.func* f = g->bodies[body].body;
+        u32 mut local = 1;
+        while (local < fir.local_count(f) &&
+            fir.local_at(f, local)->kind == fir.local_kind.lk_param) {
+            g->active_operation = ownership_api.operation_position{
+                g->bodies[body].key, 0, 0, false};
+            g->active_source = ownership_api.source_position{};
+            g->active_work = ownership_api.work_kind.substitution;
+            types.node* ty = fir.local_at(f, local)->ty;
+            if (ty->kind == types.type_kind.k_fn || fir.type_aggregate(ty)) {
+                fact mut unknown = place_fact(g, body, fir.place_local(local),
+                    target{.kind = target_kind.residual_fort});
+                if (ty->kind != types.type_kind.k_fn) { unknown.field = ROOT - 1; }
+                add_fact(g, unknown);
+                if (!ownership_api.successful(g->proof)) { return false; }
+            }
+            local += 1;
+        }
+        body += 1;
+    }
+    return true;
+}
+
+fn step(graph mut* g) bool {
+    bool mut changed = false;
+    u32 mut body = 0;
+    while (cast(body, u64) < g->bodies.len) {
+        fir.func* f = g->bodies[body].body;
+        u32 mut block = 0;
+        while (block < fir.block_count(f)) {
+            u32 mut position = 0;
+            while (position < fir.block_statement_count(f, block)) {
+                g->active_operation = ownership_api.operation_position{
+                    g->bodies[body].key, block, position, false};
+                g->active_source = source_at(g, body,
+                    fir.block_statement(f, block, position));
+                g->active_work = ownership_api.work_kind.transfer;
+                if (!charge_work(g, 1)) { return false; }
+                changed = copy_statement(g, body,
+                    fir.block_statement(f, block, position)) || changed;
+                if (!ownership_api.successful(g->proof)) { return false; }
+                position += 1;
+            }
+            block += 1;
+        }
+        body += 1;
+    }
+    u64 mut call = 0;
+    while (call < g->calls_len) {
+        g->active_operation = g->calls[call].position;
+        g->active_source = g->calls[call].source;
+        g->active_work = ownership_api.work_kind.substitution;
+        if (!charge_work(g, 1)) { return false; }
+        changed = copy_call(g, &g->calls[call]) || changed;
+        if (!ownership_api.successful(g->proof)) { return false; }
+        call += 1;
+    }
+    return changed;
+}
+
+fn stabilize(graph mut* g) void {
+    while (ownership_api.successful(g->proof) && step(g)) {}
+    if (!ownership_api.successful(g->proof)) { return; }
+    bool mut missing = false;
+    u64 mut i = 0;
+    while (i < g->calls_len) {
+        if (g->calls[i].targets_len == 0 && !g->calls[i].residual_fort &&
+            !g->calls[i].residual_foreign) {
+            g->calls[i].residual_fort = true;
+            missing = true;
+        }
+        i += 1;
+    }
+    if (missing) {
+        while (ownership_api.successful(g->proof) && step(g)) {}
+    }
+}
+
+fn materialize(graph mut* g) void {
+    u64 mut i = 0;
+    while (i < g->calls_len) {
+        call_site mut* call = &g->calls[i];
+        u64 mut sorted = 1;
+        while (sorted < call->targets_len) {
+            target value = call->targets[sorted];
+            u64 mut at = sorted;
+            while (at > 0 && target_order(value, call->targets[at - 1]) < 0) {
+                call->targets[at] = call->targets[at - 1];
+                at -= 1;
+            }
+            call->targets[at] = value;
+            sorted += 1;
+        }
+        u64 mut fort_count = 0;
+        u64 mut foreign_count = 0;
+        u64 mut j = 0;
+        while (j < call->targets_len) {
+            if (call->targets[j].kind == target_kind.fort) { fort_count += 1; }
+            else { foreign_count += 1; }
+            j += 1;
+        }
+        call->fort_targets = new(ownership_api.entity_id, fort_count);
+        call->foreign_targets = new(ast.sym*, foreign_count);
+        j = 0;
+        while (j < call->targets_len) {
+            target t = call->targets[j];
+            if (t.kind == target_kind.fort) {
+                call->fort_targets[call->fort_len] = ownership_api.entity_id{
+                    t.function, ownership_api.entity_kind.target, 0};
+                call->fort_len += 1;
+            } else {
+                call->foreign_targets[call->foreign_len] = t.foreign_symbol;
+                call->foreign_len += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+struct adjacency_edge {
+    u32 from;
+    u32 to;
+    u64 next_forward;
+    u64 next_reverse;
+}
+
+struct edge_store {
+    adjacency_edge mut@ own links;
+    u64 length;
+    u64 mut@ own forward_heads;
+    u64 mut@ own reverse_heads;
+}
+
+fn free_edges(edge_store mut* store) void {
+    del(store->links);
+    del(store->forward_heads);
+    del(store->reverse_heads);
+}
+
+fn add_edge(graph mut* g, edge_store mut* store, u32 from, u32 to) bool {
+    if (!charge_work(g, 1)) { return false; }
+    if (store->length == store->links.len) {
+        adjacency_edge mut@ own next = new(adjacency_edge, grow(store->links.len));
+        u64 mut i = 0;
+        while (i < store->length) { next[i] = store->links[i]; i += 1; }
+        del(store->links);
+        store->links = move(next);
+    }
+    u64 index = store->length;
+    store->links[index] = adjacency_edge{from, to,
+        store->forward_heads[from], store->reverse_heads[to]};
+    store->forward_heads[from] = index;
+    store->reverse_heads[to] = index;
+    store->length += 1;
+    return true;
+}
+
+fn call_edges(graph mut* g, edge_store mut* store) bool {
+    u64 mut i = 0;
+    while (i < g->calls_len) {
+        call_site* call = &g->calls[i];
+        g->active_operation = call->position;
+        g->active_source = call->source;
+        g->active_work = ownership_api.work_kind.summary_solver;
+        u64 mut j = 0;
+        while (j < call->targets_len) {
+            target value = call->targets[j];
+            if (value.kind == target_kind.fort) {
+                u64 mut to = 0;
+                while (to < g->bodies.len &&
+                    ownership_keys.function(g->bodies[to].key, value.function) != 0) { to += 1; }
+                if (to < g->bodies.len &&
+                    !add_edge(g, store, call->body, cast(to, u32))) { return false; }
+            }
+            j += 1;
+        }
+        if (call->residual_fort) {
+            u64 mut to = 0;
+            while (to < g->bodies.len) {
+                if (!add_edge(g, store, call->body, cast(to, u32))) { return false; }
+                to += 1;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Each walk uses a stack of node and next-edge cursors.
+fn visit(graph mut* g, edge_store* store, u32 root, bool reverse,
+    bool mut@ seen, u32 mut@ order, u64 mut* order_len,
+    u32 mut@ nodes, u64 mut@ cursors, u32 mut@ raw, u32 component) bool {
+    u64 mut depth = 1;
+    nodes[0] = root;
+    cursors[0] = reverse ? store->reverse_heads[root] : store->forward_heads[root];
+    seen[root] = true;
+    if (reverse) { raw[root] = component; }
+    while (depth > 0) {
+        g->active_operation = ownership_api.operation_position{
+            g->bodies[nodes[depth - 1]].key, 0, 0, false};
+        g->active_source = ownership_api.source_position{};
+        g->active_work = ownership_api.work_kind.summary_solver;
+        if (!charge_work(g, 1)) { return false; }
+        u64 top = depth - 1;
+        u64 link = cursors[top];
+        if (link == U64_MAX) {
+            if (!reverse) { order[*order_len] = nodes[top]; *order_len += 1; }
+            depth -= 1;
+            continue;
+        }
+        adjacency_edge next = store->links[link];
+        cursors[top] = reverse ? next.next_reverse : next.next_forward;
+        u32 neighbor = reverse ? next.from : next.to;
+        if (!seen[neighbor]) {
+            seen[neighbor] = true;
+            if (reverse) { raw[neighbor] = component; }
+            nodes[depth] = neighbor;
+            cursors[depth] = reverse ? store->reverse_heads[neighbor] :
+                store->forward_heads[neighbor];
+            depth += 1;
+        }
+    }
+    return true;
+}
+
+fn components(graph mut* g) void {
+    u64 n = g->bodies.len;
+    if (n == 0) { return; }
+    if (g->work > g->limits.w || n > (g->limits.w - g->work) / 2) {
+        g->active_operation = ownership_api.operation_position{
+            g->bodies[0].key, 0, 0, false};
+        g->active_source = ownership_api.source_position{};
+        g->active_work = ownership_api.work_kind.summary_solver;
+        refuse_work(g, n * 2, false);
+        return;
+    }
+    edge_store mut store = edge_store{};
+    defer free_edges(&store);
+    store.forward_heads = new(u64, n);
+    store.reverse_heads = new(u64, n);
+    u64 mut i = 0;
+    while (i < n) {
+        store.forward_heads[i] = U64_MAX;
+        store.reverse_heads[i] = U64_MAX;
+        i += 1;
+    }
+    if (!call_edges(g, &store)) { return; }
+    bool mut@ own seen = new(bool, n);
+    defer del(seen);
+    u32 mut@ own order = new(u32, n);
+    defer del(order);
+    u32 mut@ own nodes = new(u32, n);
+    defer del(nodes);
+    u64 mut@ own cursors = new(u64, n);
+    defer del(cursors);
+    u32 mut@ own raw = new(u32, n);
+    defer del(raw);
+    u64 mut order_len = 0;
+    i = 0;
+    while (i < n) {
+        if (!seen[i] && !visit(g, &store, cast(i, u32), false, seen[..], order[..],
+            &order_len, nodes[..], cursors[..], raw[..], 0)) { return; }
+        i += 1;
+    }
+    i = 0;
+    while (i < n) { seen[i] = false; i += 1; }
+    u32 mut raw_count = 0;
+    while (order_len > 0) {
+        order_len -= 1;
+        u32 root = order[order_len];
+        if (!seen[root]) {
+            if (!visit(g, &store, root, true, seen[..], order[..], &order_len,
+                nodes[..], cursors[..], raw[..], raw_count)) { return; }
+            raw_count += 1;
+        }
+    }
+    u32 mut@ own canonical = new(u32, raw_count);
+    defer del(canonical);
+    u32 mut@ own members = new(u32, raw_count);
+    defer del(members);
+    i = 0;
+    while (i < cast(raw_count, u64)) { canonical[i] = ROOT; i += 1; }
+    g->components = new(u32, n);
+    g->recursive = new(bool, n);
+    i = 0;
+    while (i < n) {
+        u32 group = raw[i];
+        members[group] += 1;
+        if (canonical[group] == ROOT) {
+            canonical[group] = g->component_count;
+            g->component_count += 1;
+        }
+        g->components[i] = canonical[group];
+        i += 1;
+    }
+    i = 0;
+    while (i < n) {
+        if (members[raw[i]] > 1) { g->recursive[g->components[i]] = true; }
+        i += 1;
+    }
+    i = 0;
+    while (i < store.length) {
+        adjacency_edge link = store.links[i];
+        if (link.from == link.to) { g->recursive[g->components[link.from]] = true; }
+        i += 1;
+    }
+}
+
+/// Accepts sorted, distinct function keys and structurally verified FIR bodies.
+fn build(body_input@ bodies, ownership_api.limit_table limits) graph {
+    graph mut g = graph{};
+    g.bodies = bodies;
+    g.limits = limits;
+    g.proof = complete();
+    if (!ownership_api.valid_limits(&limits) || bodies.len > cast(ROOT, u64)) {
+        g.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
+        return g;
+    }
+    if (bodies.len > limits.w) {
+        if (bodies.len > 0) {
+            g.active_operation = ownership_api.operation_position{
+                bodies[0].key, 0, 0, false};
+        }
+        g.active_work = ownership_api.work_kind.transfer;
+        refuse_work(&g, bodies.len, false);
+        return g;
+    }
+    u64 mut i = 0;
+    while (i < bodies.len) {
+        if (!bodies[i].verified || bodies[i].body == null ||
+            bodies[i].body->sym == null ||
+            bodies[i].body->ty == null ||
+            bodies[i].body->ty->kind != types.type_kind.k_fn ||
+            (i > 0 && ownership_keys.function(bodies[i - 1].key, bodies[i].key) >= 0)) {
+            g.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
+            return g;
+        }
+        u64 mut earlier = 0;
+        while (earlier < i) {
+            if (bodies[earlier].body->sym == bodies[i].body->sym) {
+                g.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
+                return g;
+            }
+            earlier += 1;
+        }
+        i += 1;
+    }
+    if (!collect_calls(&g)) { return g; }
+    if (!seed_parameters(&g)) { return g; }
+    stabilize(&g);
+    if (ownership_api.successful(g.proof)) { materialize(&g); components(&g); }
+    return g;
+}
+
+/// Returns graph-owned target slices for one call position.
+fn targets_at(graph* g, ownership_api.operation_position position) target_view {
+    target_view mut out = target_view{};
+    out.proof = g->proof;
+    if (!ownership_api.successful(g->proof)) { out.residual_fort = true; return out; }
+    u64 mut i = 0;
+    while (i < g->calls_len) {
+        call_site* call = &g->calls[i];
+        if (ownership_keys.operation(call->position, position) == 0) {
+            out.fort_targets = call->fort_targets[0..call->fort_len];
+            out.foreign_targets = call->foreign_targets[0..call->foreign_len];
+            out.residual_fort = call->residual_fort;
+            out.residual_foreign = call->residual_foreign;
+            return out;
+        }
+        i += 1;
+    }
+    out.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
+    out.residual_fort = true;
+    return out;
+}
+
+fn component_of(graph* g, ownership_api.function_id key) u32 {
+    u64 mut i = 0;
+    while (i < g->bodies.len) {
+        if (ownership_keys.function(g->bodies[i].key, key) == 0 &&
+            ownership_api.successful(g->proof)) { return g->components[i]; }
+        i += 1;
+    }
+    return ROOT;
+}
+
+fn recursive_component(graph* g, u32 component) bool {
+    return ownership_api.successful(g->proof) && component < g->component_count &&
+        g->recursive[component];
+}
+
+fn query(void mut* opaque, ownership_api.graph_request* request)
+    ownership_api.graph_result {
+    ownership_api.graph_result mut out = ownership_api.graph_result{};
+    if (opaque == null || request == null) {
+        out.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
+        out.residual_fort = true;
+        return out;
+    }
+    graph mut* g = cast(opaque, graph mut*);
+    if (request->query != ownership_api.graph_query_kind.targets) {
+        out.proof = incomplete(ownership_api.incomplete_reason.missing_graph);
+        out.residual_fort = true;
+        return out;
+    }
+    target_view targets = targets_at(g, request->operation);
+    out.proof = targets.proof;
+    out.residual_fort = targets.residual_fort;
+    if (!ownership_api.successful(out.proof)) { return out; }
+    g->active_operation = request->operation;
+    g->active_source = request->source;
+    g->active_work = ownership_api.work_kind.substitution;
+    if (targets.fort_targets.len > g->limits.t) {
+        out.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
+        out.residual_fort = true;
+        return out;
+    }
+    out.proof = charge_query(g, targets.fort_targets.len, request->candidates.len);
+    if (!ownership_api.successful(out.proof)) {
+        out.residual_fort = true;
+        return out;
+    }
+    u64 remaining = g->limits.t - targets.fort_targets.len;
+    u64 mut candidates = request->candidates.len;
+    if (candidates > remaining) { candidates = remaining; }
+    u64 capacity = targets.fort_targets.len + candidates;
+    del(g->query_targets);
+    g->query_targets = new(ownership_api.entity_id, capacity);
+    u64 mut kept = 0;
+    u64 mut i = 0;
+    while (i < targets.fort_targets.len) {
+        g->query_targets[kept] = targets.fort_targets[i];
+        kept += 1;
+        i += 1;
+    }
+    i = 0;
+    while (i < request->candidates.len) {
+        ownership_api.entity_id candidate = request->candidates[i];
+        bool mut known = false;
+        u64 mut body = 0;
+        while (body < g->bodies.len) {
+            if (ownership_keys.function(g->bodies[body].key, candidate.function) == 0) {
+                known = true;
+                break;
+            }
+            body += 1;
+        }
+        if (candidate.kind != ownership_api.entity_kind.target || !known) {
+            out.residual_fort = true;
+        } else {
+            u64 mut j = 0;
+            while (j < kept && ownership_keys.entity(g->query_targets[j], candidate) != 0) {
+                j += 1;
+            }
+            if (j == kept) {
+                if (kept >= g->limits.t) { out.residual_fort = true; }
+                else { g->query_targets[kept] = candidate; kept += 1; }
+            }
+        }
+        i += 1;
+    }
+    i = 1;
+    while (i < kept) {
+        ownership_api.entity_id value = g->query_targets[i];
+        u64 mut j = i;
+        while (j > 0 && ownership_keys.entity(value, g->query_targets[j - 1]) < 0) {
+            g->query_targets[j] = g->query_targets[j - 1];
+            j -= 1;
+        }
+        g->query_targets[j] = value;
+        i += 1;
+    }
+    out.targets = g->query_targets[0..kept];
+    if (targets.foreign_targets.len > 0 || targets.residual_foreign) {
+        out.proof = incomplete(ownership_api.incomplete_reason.unknown_effect);
+    }
+    return out;
+}
+
+fn free(graph mut* g) void {
+    u64 mut i = 0;
+    while (i < g->calls_len) {
+        del(g->calls[i].targets);
+        del(g->calls[i].fort_targets);
+        del(g->calls[i].foreign_targets);
+        i += 1;
+    }
+    del(g->calls);
+    del(g->facts);
+    del(g->components);
+    del(g->recursive);
+    del(g->query_targets);
+    *g = graph{};
+}
