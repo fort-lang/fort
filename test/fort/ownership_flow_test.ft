@@ -1,0 +1,813 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| control flow ok
+/// Checks ownership paths over verified FIR edges and supplied effects.
+import fir;
+import fir_env;
+import fir_parse;
+import diag;
+import consts;
+import ownership_api;
+import ownership_flow;
+import ownership_local_env;
+import ownership_limits;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import std.strbuf;
+import types;
+
+struct fixture {
+    fir_env.env environment;
+    fir.module module;
+    ownership_limits.meter meter;
+    ownership_api.limit_table limits;
+    ownership_api.services services;
+    u64 events;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* request)
+    ownership_api.event_result {
+    u64 mut* count = cast(opaque, u64 mut*);
+    *count += 1;
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = request->current;
+    out.retained = true;
+    return out;
+}
+
+fn init(fixture mut* f) void {
+    fir_env.open(&f->environment);
+    f->limits = ownership_limits.production();
+    assert(ownership_limits.configure(&f->meter, &f->limits));
+    f->services.budget_context = cast(&f->meter, void mut*);
+    f->services.budget = ownership_limits.callback;
+    f->services.event_context = cast(&f->events, void mut*);
+    f->services.event = event;
+}
+
+fn open(fixture mut* f, string lets, string@ blocks) fir.func* {
+    init(f);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn main.f(_1 (c): bool) -> i32 {\n");
+    strbuf.append(&text, lets);
+    strbuf.push(&text, '\n');
+    u64 mut i = 0;
+    while (i < blocks.len) {
+        strbuf.append(&text, blocks[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    strbuf.append(&text, "}\n");
+    u64 before = fir_env.errors(&f->environment);
+    f->module = fir_parse.parse_module(&f->environment.c.m.s, "flow.fir", strbuf.view(&text),
+        fir_env.prelude(&f->environment));
+    if (fir_env.errors(&f->environment) != before) {
+        eprintln(strbuf.view(&text));
+        panic("ownership_flow_test.open: FIR text does not parse");
+    }
+    return fir.module_function_at(&f->module, 0);
+}
+
+fn slot(u32 ordinal) ownership_api.place_path {
+    ownership_api.place_path mut out = ownership_api.place_path{};
+    out.root = id(ownership_api.entity_kind.slot, ordinal);
+    return out;
+}
+
+fn flow_event(ownership_api.operation_position op, ownership_api.event_kind kind,
+    ownership_api.entity_id relation, u32 ordinal) ownership_flow.event_binding {
+    ownership_flow.event_binding mut out = ownership_flow.event_binding{};
+    out.operation = op;
+    out.kind = kind;
+    out.relation = relation;
+    out.key = id(ownership_api.entity_kind.event, ordinal);
+    return out;
+}
+
+fn parameter_case(u32 variant) void {
+    fixture mut fixture_at = fixture{};
+    init(&fixture_at);
+    defer close(&fixture_at);
+    types.table mut* tt = fir_env.tt(&fixture_at.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* owning = types.type_ptr(tt, integer, true, true);
+    types.node* mut param_type = owning;
+    if (variant == 1 || variant == 3) {
+        param_type = types.type_array(tt, owning, 2);
+    } else if (variant == 4) {
+        param_type = types.type_ptr(tt, integer, false, false);
+    }
+    types.node* mut result_type = types.type_void(tt);
+    if (variant == 2 || variant == 3) {
+        result_type = types.type_ptr(tt, param_type, false, true);
+    } else if (variant == 4) {
+        result_type = param_type;
+    }
+    types.node*[1] params = {param_type};
+    types.node* function_type = types.type_fn(tt, result_type, params[..], false);
+    fir.func mut function = fir.func_new(tt, null, function_type);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    if (variant == 2 || variant == 3) {
+        fir.rvalue addr = fir.rvalue_addr(&function, fir.place_local(1), true);
+        fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(0), addr, where, 0));
+    } else if (variant == 4) {
+        fir.rvalue copied = fir.rvalue_use(&function, fir.operand_copy(fir.place_local(1)));
+        fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(0), copied, where, 0));
+    }
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 1));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.source_fact mut storage = ownership_api.source_fact{};
+    storage.key = id(ownership_api.entity_kind.source, 1);
+    storage.kind = ownership_api.source_kind.stack;
+    storage.validity = ownership_api.validity_kind.live;
+    ownership_state.append_sources(&entry, storage);
+    if (variant < 2) {
+        ownership_api.allocation_fact mut allocation = ownership_api.allocation_fact{};
+        allocation.key = id(ownership_api.entity_kind.allocation, 1);
+        allocation.site = allocation.key;
+        allocation.validity = ownership_api.validity_kind.live;
+        allocation.count.one = true;
+        allocation.obligation = true;
+        allocation.owner.place = slot(1);
+        if (variant == 1) {
+            ownership_api.projection[1] fields = {
+                ownership_api.projection{.kind = ownership_api.projection_kind.fixed_index},
+            };
+            allocation.owner.place.projections = fields[..];
+        }
+        ownership_state.append_allocations(&entry, allocation);
+    }
+    if (variant >= 2) {
+        ownership_api.contents_fact mut returned = ownership_api.contents_fact{};
+        returned.place = slot(0);
+        returned.kind = ownership_api.contents_kind.reference;
+        returned.value_version = id(ownership_api.entity_kind.value, 2);
+        ownership_api.borrow_relation[1] mut relations = {};
+        relations[0].key = id(ownership_api.entity_kind.relation, 2);
+        relations[0].value_version = returned.value_version;
+        relations[0].source = storage.key;
+        relations[0].representation_complete = true;
+        if (variant == 4) {
+            ownership_api.source_fact mut caller = ownership_api.source_fact{};
+            caller.key = id(ownership_api.entity_kind.source, 2);
+            caller.kind = ownership_api.source_kind.symbolic_caller;
+            caller.validity = ownership_api.validity_kind.live;
+            ownership_state.append_sources(&entry, caller);
+            relations[0].source = caller.key;
+        }
+        returned.borrows = relations[..];
+        ownership_state.append_contents(&entry, returned);
+    }
+    ownership_flow.program mut input = input_of(&fixture_at, &function, &entry);
+    ownership_flow.parameter[1] params_input = {
+        ownership_flow.parameter{slot(1).root, storage.key},
+    };
+    input.parameters = params_input[..];
+    input.result_slot = slot(0).root;
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.block = 0,
+            .operation = fir.block_statement_count(&function, 0), .terminator = true},
+            variant < 2 ? ownership_api.event_kind.lost_ownership :
+            ownership_api.event_kind.invalid_use,
+            id(variant < 2 ? ownership_api.entity_kind.allocation :
+            ownership_api.entity_kind.source, 1), 1),
+    };
+    if (variant != 4) { input.events = events[..]; }
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.normal_returns == 1);
+    assert(result.failures == (variant == 4 ? cast(0, u64) : cast(1, u64)));
+    assert(fixture_at.events == result.failures);
+    ownership_flow.free(&result);
+}
+
+fn local_step(ownership_local_env.env mut* e, ownership_transfer.action kind,
+    u32 slot_number, u32 block, u32 gap, u32 order) ownership_flow.step {
+    ownership_flow.step mut out = ownership_flow.step{};
+    out.kind = ownership_flow.step_kind.local_effect;
+    out.block = block;
+    out.gap = gap;
+    out.order = order;
+    out.local = ownership_local_env.req(e, kind, slot_number, slot_number);
+    out.local.operation.block = block;
+    e->event_bindings[e->event_bindings_len - 1].operation = out.local.operation;
+    out.operation = out.local.operation;
+    out.source = out.local.source_position;
+    return out;
+}
+
+fn call_case(u32 variant) void {
+    fixture mut f = fixture{};
+    string[1] blocks = {
+        "bb0: { _2 = call fn main.add(const i32 1, const i64 2); _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "let _2: u64;",
+        blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.allocation_fact mut allocation = ownership_api.allocation_fact{};
+    allocation.key = id(ownership_api.entity_kind.allocation, 1);
+    allocation.site = allocation.key;
+    allocation.validity = ownership_api.validity_kind.live;
+    allocation.count.one = true;
+    allocation.obligation = true;
+    allocation.owner.place = slot(9);
+    if (variant != 3) { ownership_state.append_allocations(&entry, allocation); }
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.step[1] mut steps = {};
+    steps[0].kind = ownership_flow.step_kind.call_outcome;
+    steps[0].block = 0;
+    steps[0].gap = 1;
+    steps[0].operation.block = 0;
+    steps[0].operation.operation = 1;
+    ownership_api.outcome_fact[2] mut outcomes = {};
+    outcomes[0].kind = ownership_api.outcome_kind.abort;
+    if (variant == 1) {
+        outcomes[1].kind = ownership_api.outcome_kind.function_return;
+        steps[0].outcomes = outcomes[..];
+    } else if (variant == 0) {
+        steps[0].outcomes = outcomes[0..1];
+    } else if (variant == 2 || variant == 3) {
+        outcomes[0].kind = ownership_api.outcome_kind.unknown_fort;
+        steps[0].outcomes = outcomes[0..1];
+    } else if (variant == 4) {
+        outcomes[0].kind = ownership_api.outcome_kind.normal_process_exit;
+        steps[0].outcomes = outcomes[0..1];
+    } else if (variant == 5) {
+        outcomes[0].kind = ownership_api.outcome_kind.divergence;
+        steps[0].outcomes = outcomes[0..1];
+    }
+    steps[0].outcomes_complete = variant != 2 && variant != 3;
+    input.steps = steps[..];
+    ownership_flow.event_binding[1] events = {
+        flow_event(variant == 4 ? steps[0].operation :
+            ownership_api.operation_position{.block = 0,
+                .operation = fir.block_statement_count(function, 0), .terminator = true},
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}, 1),
+    };
+    if (variant == 2 || variant == 4) { input.events = events[..]; }
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    if (variant == 0) {
+        assert(result.failures == 0 && result.normal_returns == 0);
+    } else if (variant == 1) {
+        assert(result.failures == 0 && result.normal_returns == 1);
+    } else if (variant == 2) {
+        assert(result.failures == 1 && result.normal_returns == 1);
+        assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
+    } else if (variant == 3) {
+        assert(result.failures == 0 && result.normal_returns == 1);
+    } else if (variant == 4) {
+        assert(result.failures == 1 && result.normal_returns == 0);
+        assert(result.first_failure.terminal.reason ==
+            ownership_api.incomplete_reason.missing_globals);
+    } else {
+        assert(result.failures == 0 && result.normal_returns == 0);
+    }
+    ownership_flow.free(&result);
+}
+
+fn defer_order(bool reverse) void {
+    fixture mut f = fixture{};
+    string[1] mut blocks = {"bb0: { del(move _2); dead(_2); _0 = const i32 0; return; }"};
+    if (reverse) {
+        blocks[0] = "bb0: { dead(_2); del(move _2); _0 = const i32 0; return; }";
+    }
+    fir.func* function = open(&f, "let _2: i32 mut* own;", blocks[..]);
+    defer close(&f);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_local_env.add_stack(&e, 2);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e, 2, 1, 101, 1)));
+    ownership_flow.step[2] mut steps = {};
+    steps[0] = local_step(&e, reverse ? ownership_transfer.action.dead :
+        ownership_transfer.action.release, 2, 0, 0, 0);
+    steps[1] = local_step(&e, reverse ? ownership_transfer.action.release :
+        ownership_transfer.action.dead, 2, 0, 1, 0);
+    u64 mut i = 0;
+    while (i < steps.len) {
+        if (steps[i].local.kind == ownership_transfer.action.release) {
+            steps[i].local.leaves_empty_proved = true;
+        } else {
+            steps[i].local.source_key = id(ownership_api.entity_kind.source, 2);
+            steps[i].local.source_correspondence_proved = true;
+            steps[i].local.liveness_proved = true;
+        }
+        i += 1;
+    }
+    ownership_flow.program mut input = input_of(&f, function, &e.state);
+    input.services = &e.service;
+    input.steps = steps[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == (reverse ? cast(1, u64) : cast(0, u64)));
+    assert(result.normal_returns == (reverse ? cast(0, u64) : cast(1, u64)));
+    ownership_flow.free(&result);
+}
+
+fn returned_view_after_defer() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* owning = types.type_ptr(tt, integer, true, true);
+    types.node* borrowed = types.type_ptr(tt, integer, false, true);
+    types.node*[1] params = {};
+    types.node* function_type = types.type_fn(tt, borrowed, params[0..0], false);
+    fir.func mut function = fir.func_new(tt, null, function_type);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    assert(fir.local_add(&function, owning, fir.local_kind.lk_named, null, where) == 1);
+    assert(fir.local_add(&function, borrowed, fir.local_kind.lk_named, null, where) == 2);
+    fir.rvalue copy = fir.rvalue_use(&function, fir.operand_copy(fir.place_local(2)));
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(0), copy, where, 0));
+    fir.statement mut deferred = fir.stmt_del(fir.place_local(1), where, 1);
+    deferred.exit_loc.line = 2;
+    fir.block_append(&function, 0, deferred);
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 2));
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e, 1, 1, 101, 1)));
+    ownership_api.contents_fact mut returned = ownership_api.contents_fact{};
+    returned.place = slot(0);
+    returned.kind = ownership_api.contents_kind.reference;
+    returned.value_version = id(ownership_api.entity_kind.value, 3);
+    ownership_api.borrow_relation[1] mut relations = {};
+    relations[0].key = id(ownership_api.entity_kind.relation, 3);
+    relations[0].value_version = returned.value_version;
+    relations[0].source = id(ownership_api.entity_kind.source, 101);
+    relations[0].representation_complete = true;
+    returned.borrows = relations[..];
+    ownership_state.append_contents(&e.state, returned);
+    ownership_flow.step[1] mut steps = {
+        local_step(&e, ownership_transfer.action.release, 1, 0, 1, 0),
+    };
+    steps[0].local.leaves_empty_proved = true;
+    ownership_flow.program mut input = input_of(&f, &function, &e.state);
+    e.service.event_context = cast(&f.events, void mut*);
+    e.service.event = event;
+    input.services = &e.service;
+    input.result_slot = slot(0).root;
+    input.steps = steps[..];
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.block = 0,
+            .operation = fir.block_statement_count(&function, 0), .terminator = true},
+            ownership_api.event_kind.invalid_use,
+            id(ownership_api.entity_kind.source, 101), 1),
+    };
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 1 && result.normal_returns == 1);
+    assert(result.first_failure.kind == ownership_api.proof_kind.complete);
+    ownership_flow.free(&result);
+}
+
+fn short_circuit_move() void {
+    fixture mut f = fixture{};
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _3 = move _2; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { del(move _2); del(move _3); _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "let _2: i32 mut* own; let _3: i32 mut* own;", blocks[..]);
+    defer close(&f);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e, 2, 1, 101, 1)));
+    ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+    empty.place = slot(3);
+    ownership_state.append_contents(&e.state, empty);
+    ownership_flow.step[3] mut steps = {
+        local_step(&e, ownership_transfer.action.move_owner, 2, 1, 0, 0),
+        local_step(&e, ownership_transfer.action.release, 2, 3, 0, 0),
+        local_step(&e, ownership_transfer.action.release, 3, 3, 1, 0),
+    };
+    steps[0].local.destination = slot(3);
+    steps[1].local.leaves_empty_proved = true;
+    steps[2].local.leaves_empty_proved = true;
+    ownership_flow.program mut input = input_of(&f, function, &e.state);
+    input.services = &e.service;
+    input.steps = steps[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 2);
+    assert(result.blocks[3].len == 2);
+    ownership_flow.free(&result);
+}
+
+fn loop_zero_path_keeps_owner() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* owner = types.type_ptr(tt, integer, true, true);
+    types.node* boolean = types.type_prim(tt, prim.prim_kind.prim_bool);
+    types.node*[2] params = {owner, boolean};
+    types.node* signature = types.type_fn(tt, types.type_void(tt), params[..], false);
+    fir.func mut function = fir.func_new(tt, null, signature);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    assert(fir.block_new(&function) == 1);
+    assert(fir.block_new(&function) == 2);
+    assert(fir.block_new(&function) == 3);
+    fir.block_set_terminator(&function, 0, fir.term_goto(1, where, 0));
+    u32 first = fir.arm_push(&function, consts.cv_from_bool(true), 2);
+    fir.terminator branch = fir.term_switch(fir.operand_copy(fir.place_local(2)),
+        first, 1, 3, where, 0);
+    fir.block_set_terminator(&function, 1, branch);
+    fir.block_append(&function, 2, fir.stmt_del(fir.place_local(1), where, 1));
+    fir.block_set_terminator(&function, 2, fir.term_goto(1, where, 2));
+    fir.block_set_terminator(&function, 3, fir.term_return(where, 3));
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_local_env.add_stack(&e, 1);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e, 1, 1, 101, 1)));
+    ownership_flow.step[1] mut steps = {
+        local_step(&e, ownership_transfer.action.release, 1, 2, 0, 0),
+    };
+    steps[0].local.leaves_empty_proved = true;
+    ownership_flow.program mut input = input_of(&f, &function, &e.state);
+    input.services = &e.service;
+    input.steps = steps[..];
+    ownership_flow.parameter[1] params_input = {
+        ownership_flow.parameter{slot(1).root, id(ownership_api.entity_kind.source, 1)},
+    };
+    input.parameters = params_input[..];
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.block = 3, .terminator = true},
+            ownership_api.event_kind.lost_ownership,
+            id(ownership_api.entity_kind.allocation, 1), 1),
+    };
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 1 && result.normal_returns == 2);
+    assert(result.blocks[1].len == 2 && result.blocks[3].len == 2);
+    ownership_flow.analysis mut again = ownership_flow.solve(&input);
+    assert(again.failures == result.failures &&
+        again.normal_returns == result.normal_returns && again.transfers == result.transfers);
+    u64 mut b = 0;
+    while (b < result.blocks.len) {
+        assert(result.blocks[b].len == again.blocks[b].len);
+        u64 mut i = 0;
+        while (i < result.blocks[b].len) {
+            assert(ownership_state.equal(&result.blocks[b].paths[i].facts,
+                &again.blocks[b].paths[i].facts));
+            i += 1;
+        }
+        b += 1;
+    }
+    ownership_flow.free(&again);
+    ownership_flow.free(&result);
+}
+
+fn abort_has_no_cleanup_boundary() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* owner = types.type_ptr(tt, integer, true, true);
+    types.node* boolean = types.type_prim(tt, prim.prim_kind.prim_bool);
+    types.node*[2] params = {owner, boolean};
+    types.node* signature = types.type_fn(tt, types.type_void(tt), params[..], false);
+    fir.func mut function = fir.func_new(tt, null, signature);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    assert(fir.block_new(&function) == 1);
+    assert(fir.block_new(&function) == 2);
+    u32 first = fir.arm_push(&function, consts.cv_from_bool(true), 1);
+    fir.terminator branch = fir.term_switch(fir.operand_copy(fir.place_local(2)),
+        first, 1, 2, where, 0);
+    fir.block_set_terminator(&function, 0, branch);
+    fir.block_set_terminator(&function, 1, fir.term_return(where, 1));
+    fir.block_set_terminator(&function, 2, fir.term_trap(where, 2));
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_local_env.add_stack(&e, 1);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e, 1, 1, 101, 1)));
+    ownership_flow.program mut input = input_of(&f, &function, &e.state);
+    input.services = &e.service;
+    ownership_flow.parameter[1] params_input = {
+        ownership_flow.parameter{slot(1).root, id(ownership_api.entity_kind.source, 1)},
+    };
+    input.parameters = params_input[..];
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.block = 1, .terminator = true},
+            ownership_api.event_kind.lost_ownership,
+            id(ownership_api.entity_kind.allocation, 1), 1),
+    };
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 1 && result.normal_returns == 1);
+    assert(result.blocks[1].len == 1 && result.blocks[2].len == 1);
+    ownership_flow.free(&result);
+}
+
+fn close(fixture mut* f) void {
+    fir.module_free(&f->module);
+    fir_env.close(&f->environment);
+}
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    ownership_api.entity_id mut out = ownership_api.entity_id{};
+    out.kind = kind;
+    out.ordinal = ordinal;
+    return out;
+}
+
+fn input_of(fixture mut* f, fir.func* function, ownership_state.state mut* entry)
+    ownership_flow.program {
+    ownership_flow.program mut input = ownership_flow.program{};
+    input.function = function;
+    input.entry = entry;
+    input.services = &f->services;
+    input.limits = &f->limits;
+    input.supplied_complete = true;
+    input.verified_fir = true;
+    return input;
+}
+
+fn run_simple() void {
+    fixture mut f = fixture{};
+    string[1] blocks = {"bb0: { _0 = const i32 0; return; }"};
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 1);
+    ownership_flow.free(&result);
+}
+
+fn constant_edge() void {
+    fixture mut f = fixture{};
+    string[3] blocks = {
+        "bb0: { switch(const true) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 1; return; }",
+        "bb2: { _0 = const i32 2; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 1);
+    assert(result.blocks[1].len == 1 && result.blocks[2].len == 0);
+    ownership_flow.free(&result);
+}
+
+fn zero_constant_edge() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node*[1] params = {};
+    types.node* signature = types.type_fn(tt, integer, params[0..0], false);
+    fir.func mut function = fir.func_new(tt, null, signature);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    assert(fir.block_new(&function) == 1 && fir.block_new(&function) == 2);
+    u32 first = fir.arm_push(&function, consts.cv_from_bool(true), 1);
+    fir.terminator branch = fir.term_switch(fir.operand_const(
+        fir.const_zero(types.type_prim(tt, prim.prim_kind.prim_bool))), first, 1, 2, where, 0);
+    fir.block_set_terminator(&function, 0, branch);
+    fir.block_set_terminator(&function, 1, fir.term_return(where, 1));
+    fir.block_set_terminator(&function, 2, fir.term_return(where, 2));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 1);
+    assert(result.blocks[1].len == 0 && result.blocks[2].len == 1);
+    ownership_flow.free(&result);
+}
+
+fn branch_join() void {
+    fixture mut f = fixture{};
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.edge_fact[2] edge = {
+        ownership_flow.edge_fact{0, 0, id(ownership_api.entity_kind.value, 1), false},
+        ownership_flow.edge_fact{0, 1, id(ownership_api.entity_kind.value, 1), true},
+    };
+    input.edges = edge[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 2);
+    assert(result.blocks[3].len == 2);
+    assert(result.blocks[3].paths[0].facts.predicates[0].lower.value == 1);
+    assert(result.blocks[3].paths[1].facts.predicates[0].lower.value == 0);
+    ownership_flow.free(&result);
+}
+
+fn null_correlation_after_write() void {
+    fixture mut f = fixture{};
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "let _2: i32;", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.edge_fact[2] edges = {
+        ownership_flow.edge_fact{0, 0, id(ownership_api.entity_kind.value, 5), false},
+        ownership_flow.edge_fact{0, 1, id(ownership_api.entity_kind.value, 5), true},
+    };
+    input.edges = edges[..];
+    ownership_flow.step[1] mut steps = {};
+    steps[0].kind = ownership_flow.step_kind.collection_write;
+    steps[0].block = 1;
+    steps[0].gap = 0;
+    steps[0].operation.block = 1;
+    steps[0].written = fir.place_local(2);
+    steps[0].invalidates = edges[0].value_version;
+    input.steps = steps[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 2);
+    assert(result.blocks[3].len == 2);
+    assert(result.blocks[3].paths[0].facts.predicates_len == 0);
+    assert(result.blocks[3].paths[1].facts.predicates_len == 1);
+    ownership_flow.free(&result);
+}
+
+fn loop_paths() void {
+    fixture mut f = fixture{};
+    string[4] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { goto bb1; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 1);
+    assert(result.blocks[1].len == 1 && result.blocks[2].len == 1);
+    assert(result.blocks[3].len == 1 && result.transfers == 4);
+    ownership_flow.free(&result);
+}
+
+fn early_return() void {
+    fixture mut f = fixture{};
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 1; return; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 2; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 2);
+    ownership_flow.free(&result);
+}
+
+fn break_and_continue() void {
+    fixture mut f = fixture{};
+    string[5] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb4]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { goto bb1; }",
+        "bb4: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 1);
+    assert(result.blocks[2].len == 1 && result.blocks[3].len == 1);
+    assert(result.blocks[4].len == 1 && result.transfers == 5);
+    ownership_flow.free(&result);
+}
+
+fn range_write(bool summarized, bool inside, bool alias) void {
+    fixture mut f = fixture{};
+    string[4] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { goto bb2; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    open(&f, "let _2: i32@; let _3: i32@ mut*;", blocks[..]);
+    fir.func mut* function = &f.module.funcs.items[0];
+    defer close(&f);
+    fir.range_loan mut loan = fir.range_loan{};
+    loan.id = 17;
+    loan.whole_body = true;
+    fir.range_loan_add(function, loan);
+    fir.range_capture mut capture = fir.range_capture{};
+    capture.loan = 17;
+    capture.kind = fir.range_capture_kind.borrowed_header;
+    capture.captured = fir.place_local(2);
+    capture.original = fir.place_local(2);
+    capture.original_present = true;
+    fir.range_capture_add(function, capture);
+    fir.range_boundary mut enter = fir.range_boundary{};
+    enter.loan = 17;
+    enter.kind = fir.range_boundary_kind.body_entry;
+    enter.block = 1;
+    fir.range_boundary_add(function, enter);
+    fir.range_boundary mut leave = fir.range_boundary{};
+    leave.loan = 17;
+    leave.kind = fir.range_boundary_kind.loan_exit;
+    leave.block = 3;
+    fir.range_boundary_add(function, leave);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.step[1] mut steps = {};
+    steps[0].block = inside ? 2 : 3;
+    steps[0].gap = 0;
+    steps[0].kind = ownership_flow.step_kind.collection_write;
+    steps[0].operation.block = steps[0].block;
+    steps[0].operation.operation = 5;
+    steps[0].source.line = 5;
+    steps[0].written = alias ? fir.place_deref(function, fir.place_local(3)) :
+        fir.place_local(2);
+    steps[0].summarized = summarized;
+    input.steps = steps[..];
+    ownership_flow.event_binding[1] events = {
+        flow_event(steps[0].operation, alias ?
+            ownership_api.event_kind.incomplete_proof : ownership_api.event_kind.invalid_use,
+            ownership_api.entity_id{}, 1),
+    };
+    if (inside) { input.events = events[..]; }
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == (inside ? cast(1, u64) : cast(0, u64)));
+    assert(result.normal_returns == (inside ? cast(0, u64) : cast(1, u64)));
+    if (inside) {
+        assert(result.first_failure.kind == (alias ? ownership_api.proof_kind.incomplete :
+            ownership_api.proof_kind.complete));
+        assert(f.events == 1);
+    }
+    ownership_flow.free(&result);
+}
+
+fn main() i32 {
+    run_simple();
+    constant_edge();
+    zero_constant_edge();
+    branch_join();
+    null_correlation_after_write();
+    loop_paths();
+    early_return();
+    break_and_continue();
+    range_write(false, true, false);
+    range_write(true, true, false);
+    range_write(false, false, false);
+    range_write(true, false, false);
+    range_write(false, true, true);
+    parameter_case(0);
+    parameter_case(1);
+    parameter_case(2);
+    parameter_case(3);
+    parameter_case(4);
+    call_case(0);
+    call_case(1);
+    call_case(2);
+    call_case(3);
+    call_case(4);
+    call_case(5);
+    defer_order(false);
+    defer_order(true);
+    returned_view_after_defer();
+    short_circuit_move();
+    loop_zero_path_keeps_owner();
+    abort_has_no_cleanup_boundary();
+    println("control flow ok");
+    return 0;
+}
