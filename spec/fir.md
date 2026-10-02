@@ -572,15 +572,14 @@ so `G` is read before `bump` runs.
   to its address before `i`. When `i` contains a writer and the place `p` of `a` reads memory to
   find its storage (5.5), `_a = addr(p)` holds that address first (D6.3). It is `addr mut(p)`
   when that storage is mutable. The place is then `(*_a)[_i]`. The header of a span or a `string`
-  and the element are read after `i`, where they are used, with or without a deref. D6.3 leaves
-  open when that header is read. FIR keeps the order that the direct path had, so the migration
-  changed no behavior.
+  and the element are read after `i`, where they are used, with or without a deref (D6.3).
 - **`a[lo..hi]`** on an array, a span or a `string`: `_lo = cast<u64>(lo)` and `_hi =
   cast<u64>(hi)` as for an index, with `0` and the length for an absent bound; `_f = or(gt(copy
   _lo, copy _hi), gt(copy _hi, len))`; `check(copy _f, span, cast<i64>(copy _lo), cast<i64>(copy
   _hi), len)`; then `slice(a, copy _lo, copy _hi)` into the destination (item 16). When a bound
   contains a writer, the place of `a` is held as for an index (D6.3). On a pointer:
-  `slice_ptr(a, lo, hi)` with no runtime check (D6.9).
+  `slice_ptr(a, lo, hi)` with no runtime check (D6.9). A stored span or `string` header is read
+  after the explicit bounds. An absent upper bound uses the length from that read (D6.3).
 - **`-x`**: `sub(const 0, x)` with the overflow check for an integer; `fneg(x)` for a float.
   `!x` and `~x`: `not`.
 - **`x + y`, `x - y`, `x * y`** on integers: `_f = add_overflows(a, b)`, `check(copy _f,
