@@ -631,6 +631,29 @@ fn zero_constant_edge() void {
     ownership_flow.free(&result);
 }
 
+fn constant_shared_target() void {
+    fixture mut f = fixture{};
+    string[2] blocks = {
+        "bb0: { switch(const true) -> [true: bb1, otherwise: bb1]; }",
+        "bb1: { _0 = const i32 1; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.edge_fact[2] facts = {
+        ownership_flow.edge_fact{0, 0, id(ownership_api.entity_kind.value, 1), false},
+        ownership_flow.edge_fact{0, 1, id(ownership_api.entity_kind.value, 1), true},
+    };
+    input.edges = facts[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.normal_returns == 1);
+    assert(result.blocks[1].len == 1);
+    assert(result.blocks[1].paths[0].facts.predicates[0].lower.value == 1);
+    ownership_flow.free(&result);
+}
+
 fn branch_join() void {
     fixture mut f = fixture{};
     string[4] blocks = {
@@ -817,6 +840,7 @@ fn main() i32 {
     run_simple();
     constant_edge();
     zero_constant_edge();
+    constant_shared_target();
     branch_join();
     null_correlation_after_write();
     loop_paths();
