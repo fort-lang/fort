@@ -499,6 +499,261 @@ The proof adds no runtime identity tracking, source exemptions, lifetime annotat
 syntax.
 `toolchain.md` 1 defines staged whole-feature selection and migration.
 
+### 2.6 Place identity and aggregate storage
+
+#### 2.6.1 Storage identity
+
+The proof uses three separate identities (D17.15):
+
+| Identity | Meaning |
+|---|---|
+| Slot | A storage object and a projected region that contains a value. |
+| Source | The storage that a pointer, span, or string value designates. |
+| Allocation | A heap object's identity and its release or transfer obligation. |
+
+A local's storage identity includes its active scope instance.
+A by-value parameter has its own slot, including a caller-made aggregate copy.
+A borrowed parameter value instead designates separate symbolic caller storage.
+A global designates its module storage.
+An aggregate result designates the actual caller destination.
+Two formal names establish no separation between their referenced storage (D17.15, D19.8).
+
+Field projections select regions within the containing object.
+Nested fields and fixed-array elements retain their containing storage identity.
+Dereference and span indexing first resolve the current pointer or backing source.
+The proof preserves possible overlap when it cannot resolve that source.
+Different borrowed headers can designate the same backing storage.
+Different slots can contain references to the same source.
+The lifetime of a header or owner slot does not determine its referenced source's lifetime (D17.15).
+
+#### 2.6.2 Dynamic elements and updates
+
+Bind each index use to its current value, including a held index temporary (D17.15).
+An assignment to the index local does not change the value of an earlier held index.
+An unchanged index spelling does not establish equality across assignments.
+Equality proves the same selected slot only when the backing storage and projection also agree.
+Inequality proves separate slots only when their proved storage regions do not overlap.
+It proves no separation between their pointed-to sources or allocations.
+
+Use finite partitions for known index values, equality or inequality relations, and known ranges.
+A partition records its membership condition and the possible contents of its element set.
+Split or refine a partition only with proved facts.
+An unproved relation keeps possible overlap.
+A summary partition does not identify one concrete slot.
+The finite-domain and convergence rules govern lost precision (`fir.md` 14; D19.8).
+
+A strong update replaces one proved concrete destination region in each represented state (D17.15).
+A source that can denote several concrete objects supplies no singleton proof.
+Update all aliases of that region. Preserve disjoint regions.
+A weak update keeps guarded alternatives for each possible destination.
+Each alternative changes its selected region and preserves unselected regions.
+Joining alternatives retains possible old contents, new contents, and invalidation.
+It also retains live obligations.
+A join must not discharge all candidate allocations when only one candidate is released.
+It must not create multiple independent owners for one conditional transfer.
+
+Check owning destination leaves on each feasible selected alternative after right-side effects.
+Unknown selection can succeed when guarded facts prove all required obligations.
+Reject an operation when any feasible alternative violates its obligation or cannot establish it.
+Do not infer emptiness, release, or pointee separation from index inequality alone (D17.11, D17.15).
+
+#### 2.6.3 Aggregate transfer and retained addresses
+
+A whole aggregate copy preserves each borrowed field's original source (D17.15).
+An owning aggregate copy into an owning place still requires move (D17.7).
+A whole move transfers all owning leaves, borrowed fields, and scalar fields.
+It empties the complete abstract source value, including its non-owning fields (D17.6).
+A projected move transfers and empties only the selected subobject.
+Sibling fields and elements keep their contents and obligations.
+Track nested owning leaves rather than one obligation for the aggregate's type (D17.15).
+
+A view into a transferred heap allocation remains a view into that same live allocation.
+A view into inline source storage remains a view into that source storage.
+Neither copy nor move changes the stored address to the corresponding destination field.
+Reject its use or escape when that original storage ends.
+Permit it when the original caller or local storage survives its required uses.
+Keeping the destination aggregate alive does not extend the original source's lifetime (D17.15).
+An output-parameter write also preserves the stored borrow's original source.
+A caller destination cannot make a callee-local inline source survive return.
+Transferring a heap owner through that output can preserve its live allocation view (D17.15).
+
+An address of an owner slot refers to the slot, not its owned allocation.
+Moving the slot value leaves the slot storage live and changes its contents to zero.
+Reading that zero value is legal. Dereferencing it as an object is not (D17.9, D17.15).
+An address into a span header likewise differs from a view into its backing allocation.
+
+Generated code can omit clearing fixed temporary storage (`fir.md` 12.1).
+The proof still transfers its ownership and empties its abstract owner state.
+The remaining bytes create no additional ownership obligation.
+Source-defined temporary boundaries still govern later uses.
+This distinction changes no emitted instruction or ABI (D17.6, D17.15).
+
+#### 2.6.4 Parameter and result boundaries
+
+Each normal return ends scalar and aggregate by-value parameter slots after deferred effects.
+No FIR dead marker is required for that boundary (D17.14, D17.15).
+Check residual owning leaves, including unused scalar owners and nested aggregate owners.
+A symbolic owning input admits a live obligation unless the returning path proves that input empty.
+Current calls that pass only empty values do not remove that body obligation.
+Returned and retained addresses into ending parameter storage fail at that boundary.
+Returning an address into an inline parameter field also fails.
+Returning a borrowed parameter value can succeed.
+Its symbolic caller source remains separate.
+The summary retains that source and its caller lifetime requirements (D17.15, D19.8).
+
+Bind aggregate _0 to the caller destination before applying callee effects.
+Include aliases with arguments, globals, and other referenced regions.
+Scalar _0 stays private to the callee. Its stored return value carries its source relations.
+An aggregate return does not end the caller destination's storage (D17.15; `fir.md` 5.3).
+
+Check each destructive destination write against its previous overlapping owned leaves.
+First apply operand reads, moves, and calls in emitted FIR order.
+Then require each discarded obligation to be empty or already transferred (D17.11, D17.15).
+A same-slot move can pass because the operand transfer empties that destination before the write.
+A fresh return allocation does not prove that the previous caller destination is empty.
+Whole-object zeroing also discards previous leaves and requires this proof.
+Aggregate literals read all operands before their first destination store (`fir.md` 6).
+
+When return lowering uses a holding temporary, transfer the return value there first.
+Apply deferred effects and crossed storage boundaries. Then check the final write into actual _0.
+An alias can refill the destination during defer, so recheck its current leaves at that final write.
+An earlier completed result write remains visible to later deferred effects.
+Do not reorder either effect to establish destination emptiness or source validity.
+Check returned borrows after all deferred effects on their original sources (D17.15; `fir.md` 9.6).
+
+#### 2.6.5 Finite case traces
+
+These 17 traces state required proof verdicts (D17.15). They are not current compiler test results.
+`A` and `B` name distinct live allocations in these input states.
+The input supplies this fact. Slot separation alone does not establish it.
+`zero` means an empty owner. `view(A)` designates allocation A. `slot(s)` designates slot s.
+`owns(A)` includes its cleanup obligation. Each trace describes only its listed operation interval.
+Accepted intervals preserve later cleanup and lifetime requirements.
+Rejected intervals describe the required diagnostic reason, not a diagnostic identifier or format.
+
+##### P01. Same index
+
+- Input: `kids[k] = owns(A)`. Two index uses hold the same value and backing source.
+- Operation: Release `kids[k]`; inspect the selected owner's zero value through the second use.
+- Output: `A` is released. Both uses select the emptied slot. Other element contents stay unchanged.
+- Verdict: Accept. Empty-owner inspection is legal. A later object dereference through it fails.
+
+##### P02. Distinct indices with shared pointees
+
+- Input: `refs[0] = view(A)`, `refs[1] = view(A)`, and `owner = owns(A)`.
+- Operation: Release `owner`; dereference `refs[1]` after comparing the two indices as unequal.
+- Output: The element slots stay distinct. Both stored views designate released A.
+- Verdict: Reject the dereference. Diagnostic reason: the selected view refers to released storage.
+
+##### P03. Distinct owned elements
+
+- Input: `kids[0] = owns(A)`, `kids[1] = owns(B)`, and `v = view(B)`.
+- Operation: Release `kids[0]`; use `v` while B remains live.
+- Output: Element 0 is zero and A is released. Element 1 still owns B. The view still designates B.
+- Verdict: Accept. Allocation separation comes from the input ownership facts, not index inequality.
+
+##### P04. Unknown index
+
+- Input: `kids[0] = owns(A)`, `kids[1] = owns(B)`, `v = view(A)`, and `k` is 0 or 1.
+- Operation: Release `kids[k]`; dereference `v` without a condition that excludes `k == 0`.
+- Output: If k is 0, A is released and B stays owned. If k is 1, B is released and A stays owned.
+- Verdict: Reject the dereference. Diagnostic reason: a reaching selection releases its source.
+
+##### P05. Nested fields
+
+- Input: `s.left.data = owns(A)` and `s.right.data = owns(B)`; destination `taken` is zero.
+- Operation: `taken = move(s.left.data)`; dereference `s.left.data`.
+- Output: `taken` owns A. The selected field is zero. The sibling field still owns B.
+- Verdict: Reject the dereference. Diagnostic reason: the selected owner is empty after transfer.
+
+##### P06. Fixed arrays
+
+- Input: `a[0] = owns(A)`, `a[1] = owns(B)`, `v = view(B)`, and destination array `b` is zero.
+- Operation: Move the complete array a into b; use v while B remains live.
+- Output: Both a elements are zero. The corresponding b elements own A and B. The view keeps B.
+- Verdict: Accept. The move transfers every element. It does not move a's inline slot storage.
+
+##### P07. Returned inline view
+
+- Input: Local aggregate s has inline array `values`; `s.view` designates that inline array.
+- Operation: Copy s into result storage; end the local storage; return the retained view.
+- Output: The result's copied view still designates ended `s.values`, not the result's array.
+- Verdict: Reject the escape. Diagnostic reason: the returned aggregate retains ended local storage.
+
+##### P08. Returned heap view
+
+- Input: Local owning aggregate s has `s.data = owns(A)` and `s.view = view(A)`.
+- Operation: Move s into an empty result destination; end s's storage; return the result.
+- Output: The result owns A and retains its live view. All source fields are zero. A remains live.
+- Verdict: Accept. Caller uses and cleanup must preserve the returned allocation's obligations.
+
+##### P09. Owner-slot address
+
+- Input: `p = owns(A)`, `q` is zero, and `address = slot(p)`; p's storage remains live.
+- Operation: `q = move(p)`; read the owner value through address.
+- Output: q owns A. p is zero. address still designates the live p slot and reads zero.
+- Verdict: Accept. Returning address from p's scope instead fails when that slot ends.
+
+##### P10. Unused scalar owner parameter
+
+- Input: By-value scalar parameter p owns A. No operation or defer consumes that obligation.
+- Operation: Reach normal return without using p.
+- Output: The parameter slot ends with its obligation still live. A remains allocated.
+- Verdict: Reject the return.
+  Diagnostic reason: ending parameter storage loses its owned allocation.
+
+##### P11. Unused aggregate owner parameter
+
+- Input: By-value aggregate parameter p has nested owning leaves for A and B.
+- Operation: Reach normal return without transferring or releasing either leaf.
+- Output: The parameter copy ends with two live obligations, even when FIR has no parameter dead.
+- Verdict: Reject the return. Diagnostic reason: ending parameter storage loses its nested owners.
+
+##### P12. Returned parameter-slot address
+
+- Input: Borrowed pointer parameter p contains `view(A)` with a live symbolic caller source.
+- Operation: Return `&p` after deferred effects.
+- Output: A stays live. The returned address designates p's ending private slot, not A.
+- Verdict: Reject the escape. Diagnostic reason: the result refers to ended parameter-slot storage.
+
+##### P13. Returned inline parameter-field address
+
+- Input: By-value parameter p contains inline array `values` in the parameter copy.
+- Operation: Return `&p.values[0]` after deferred effects.
+- Output: The caller's original aggregate remains separate. The result points into the ending copy.
+- Verdict: Reject the escape.
+  Diagnostic reason: the result refers to an ended inline parameter field.
+
+##### P14. Returned view into caller heap storage
+
+- Input: Borrowed parameter p contains `view(A)`; the symbolic caller owns live A.
+- Operation: Return p without a deferred effect that invalidates A.
+- Output: p's private slot ends. The returned value still designates caller allocation A.
+- Verdict: Accept with the summary's caller lifetime requirement. Ending p does not release A.
+
+##### P15. Same-slot aggregate result
+
+- Input: Caller aggregate s owns A. The borrowed argument points to s. Aggregate _0 also binds to s.
+- Operation: The callee returns `move(*argument)` without defer.
+  Hold the value, empty s, then write _0.
+- Output: The old destination is zero at the write. The result restores ownership of A to s.
+- Verdict: Accept. The intermediate transfer satisfies the previous destination obligation.
+
+##### P16. Global aggregate result
+
+- Input: Global aggregate G owns A. Aggregate _0 binds to G. A fresh return aggregate owns B.
+- Operation: Write the return aggregate into _0 without consuming G's previous owned leaf.
+- Output: The proposed replacement discards A's obligation. B's freshness does not discharge A.
+- Verdict: Reject the write. Diagnostic reason: replacing the actual result destination loses A.
+
+##### P17. Result writes and deferred effects
+
+- Input: Caller s owns A. A borrowed argument and aggregate _0 both refer to s.
+- Operation: Hold `move(*argument)`; defer installs owned B in the emptied s; write the held result.
+- Output: The holding temporary owns A. The final destination owns B before that result write.
+- Verdict: Reject the final write. Diagnostic reason: the deferred effect creates a live overwritten
+  obligation. Checking the earlier empty state would miss B.
+
 ## 3. Pointers
 
 A pointer `T*` holds the address of one `T` or is `null`. There is no pointer arithmetic, so

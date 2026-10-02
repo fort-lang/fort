@@ -283,6 +283,20 @@ came here.
 
 ## 6. The IR emitter
 
+- **Ownership proof uses storage identity, not only place spelling** (T-273, D17.15).
+  `spec/memory-model.md` 2.6 defines the contract. Structural FIR comparisons remain conservative
+  optimization rules. The proof must bind dynamic indices to their current values and substitute
+  actual caller aliases. Distinct element regions do not prove distinct pointed-to allocations.
+  A weak update preserves unselected contents and conditional ownership obligations.
+  It must not discharge all candidate allocations for one selected release.
+  Whole aggregate moves transfer all fields. Projected moves empty only their selected subobject.
+  Neither move rebases an inline address. Abstract temporary ownership ends on transfer even when
+  LLVM omits generated source clearing. Normal return ends by-value parameter storage after defer,
+  including parameter copies without dead markers. Symbolic caller sources have separate lifetimes.
+  Aggregate _0 binds to actual caller storage before effects. Check old overlapping destination
+  leaves after operand effects. With a holding temporary, check the actual result destination at the
+  final write after defer. The 17 normative traces in memory model 2.6 are design evidence, not
+  compiler probes.
 - **An emitter that copies a value and then clears its source needs an intermediate.** `move(lv)`
   writes into a destination the emitter cannot prove distinct from the operand (`s = move(s)`,
   `*p = move(*q)`, `v[i] = move(v[j])`), so it reads into a register or a `%tmpK` slot first and

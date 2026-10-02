@@ -990,6 +990,15 @@ A whole aggregate move transfers borrowed and scalar fields as well as owned lea
 It clears the complete named source value. A projected move clears only its selected place.
 A move preserves live heap-source relations but does not rebase inline storage addresses.
 The proof binds aggregate result storage to the caller destination before ordered effects (D19.8).
+`memory-model.md` 2.6 defines projected storage identity and aggregate boundary rules (D17.15).
+Disjoint inline fields or elements do not establish distinct allocations in their reference values.
+Unknown element updates preserve possible selected leaves and unselected obligations.
+Copying a borrowed field preserves its original source, including a source in caller inline storage.
+Returning a view into ended local or by-value parameter storage fails.
+Returning an owner with a view into its transferred live allocation can succeed.
+Unused by-value owning aggregate parameters still require cleanup at normal return.
+An aggregate result write checks its actual caller destination, including aliases with inputs or
+globals.
 
 ```fort
 struct vec { i32 mut@ own data; u64 len; }

@@ -246,6 +246,35 @@ Ownership analysis substitutes actual source and alias relations before applying
 Taking an address, projecting a place, or using an unknown index supplies no proof exemption.
 An unknown destination keeps possible overlap and its ownership obligations (D17.14).
 
+For ownership proof, resolve places to storage identities and regions (`memory-model.md` 2.6;
+D17.15).
+The structural comparisons above remain conservative optimization rules.
+They do not replace instantiated caller aliases or captured index-value relations.
+Record a local's scope instance, the selected field path, and its known region.
+Record a dereference or span index's possible backing sources separately from the header slot.
+Bind each dynamic index to its value at that operation, not merely its local number.
+Retain finite equality, inequality, and range membership conditions when they establish selection.
+Different indices can prove separate element regions. They do not prove separate pointees.
+One proved concrete destination region permits a strong update, including its aliases.
+Multiple possible destinations require guarded alternatives or a conservative weak update.
+Preserve unselected contents, allocation obligations, and possible invalidation in each alternative.
+Nested aggregate fields and elements retain their own ownership and borrowed-source relations.
+An aggregate _0 uses caller destination identity (D17.15).
+Its local number supplies no fresh storage identity.
+No new projection syntax, LLVM representation, or runtime identity field follows from these rules.
+
+The proof needs these input facts from verified FIR and source-boundary metadata (D17.15):
+
+- Slot types, field paths, layout regions, and allocation or symbolic caller sources.
+- Captured index values, source relations, partition conditions, and possible aliases.
+- Ordered reads, writes, moves, calls, result destinations, and deferred expansions.
+- Local dead markers, temporary boundaries, and the implicit normal-return parameter boundary.
+- Source locations for storage creation, transfer, retention, invalidation, and required uses.
+
+FIR already supplies types, places, ordered operations, and source locations.
+Preserve source-defined boundaries that explicit lifetime statements do not identify.
+The data-carrier contract adds no source annotation or runtime field.
+
 ### 5.6 Operands and constants
 
 | operand | spelling | meaning |
@@ -680,6 +709,24 @@ Ending a borrowed parameter slot does not end its symbolic caller source.
 Bind aggregate _0 to the caller destination, including aliases with arguments and globals.
 Check old destination obligations at overlapping result writes in their FIR order (D17.11).
 Check returned borrows after deferred effects. An aborting expansion has no normal continuation.
+
+The boundary checks apply to unused scalar and aggregate owner parameters (D17.15).
+An aggregate parameter's caller-made copy ends here, even though its bytes belong to a caller
+temporary.
+A returned address into that copy fails. A copied borrow into original caller storage retains that
+separate source.
+Scalar _0 is private storage; copying its returned value preserves the value's source relations.
+Aggregate _0 instead keeps the actual caller region and its lifetime.
+
+Apply operand effects before checking each destructive result write (D17.11, D17.15).
+A whole aggregate move reads its complete value, empties its abstract source, and then writes its
+destination.
+The proof applies that transfer to fixed temporaries even when LLVM omits their generated clearing.
+A same-slot result can therefore write into the source that its operand transfer just emptied.
+When a holding temporary exists, deferred effects precede the final _0 write.
+An alias can install a new owner in _0 during defer. Check that owner before the final replacement.
+Earlier completed result writes remain visible to later deferred effects.
+Neither result storage nor a holding temporary permits effect reordering or inline-address rebasing.
 
 ### 9.7 The statement index
 
