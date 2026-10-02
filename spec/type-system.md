@@ -1151,6 +1151,37 @@ lvalue cast to an `own` target is a copy into an `own` place and must be written
 (D17.5), which empties `x`. A `cast` to an `own` type yields an `own` rvalue, which must land
 (section 8.3), and a cast that drops `own` from an `own` rvalue is refused (D17.8).
 
+**Storage proof in casts (D17.17).** Pointer casts preserve known sources, offsets, byte windows,
+and alignment facts. A cast through `void*` does not erase those facts or enlarge the window.
+It also does not hide owning leaves in the original storage layout.
+A different pointee type still needs a valid extent and alignment at its typed access.
+The cast itself adds no runtime check.
+`memory-model.md` 2.8 defines complete and partial reference representation effects.
+Raw byte interpretation creates no owner and adds no mutability.
+
+Pointer-to-`u64` conversion exposes address bits as an integer (D3.14).
+Reconstruction from an integer supplies no proved storage source, including an exact unmodified
+round trip. A fort memory operation that needs that source therefore fails its proof (D17.17).
+The conversion itself remains legal. It supplies no ownership or foreign trust.
+Foreign reference results retain D17.13 trust through permitted pointer casts.
+Foreign integer results do not receive reference trust from their bits.
+
+```fort
+fn integer_round_trip(i32 value) i32 {
+    u64 bits = cast(&value, u64);
+    i32* restored = cast(bits, i32*);
+    return *restored;               // proof error: reconstructed pointer has no proved source
+}
+fn void_round_trip() u8 {
+    u8 mut@ own bytes = new(u8, 4);
+    void mut* raw = cast(bytes.ptr, void mut*);
+    u8* restored = cast(raw, u8*);
+    u8 value = *restored;            // proved source, four accessible bytes, alignment 1
+    del(bytes);
+    return value;
+}
+```
+
 ```fort
 i64 w = cast(cast(-1, i8), i64);     // -1: sign-extended because i8 is signed
 u64 z = cast(cast(-1, i8), u64);     // 18446744073709551615: the i8 is sign-extended to u64

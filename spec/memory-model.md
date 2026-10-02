@@ -1017,6 +1017,276 @@ Cleanup extracts the tail, deletes each byte allocation, then deletes each node.
 The complete empty-chain result discharges four obligations and invalidates that view of P.
 Deleting only A and B cannot prove cleanup of P and Q.
 
+### 2.8 Raw storage and reference representations
+
+#### 2.8.1 Sources, byte windows, and typed subobjects
+
+A raw fort reference retains these facts when the proof knows them (D17.17):
+
+| Fact | Meaning |
+|---|---|
+| Source | The original storage object, with its lifetime or allocation identity. |
+| Offset | The reference's byte offset within that source. |
+| Access window | The permitted byte interval inherited from the original object or view. |
+| Extent | The known or symbolic size of that interval. |
+| Alignment | The proved address alignment, including the effect of a byte offset. |
+| Layout | Typed subobjects, reference representations, owning leaves, and padding. |
+
+Record the storage containing a reference separately from its referenced source (D17.15, D17.17).
+Copying an eight-byte pointer slot does not copy its pointed-to allocation.
+An address of an owning slot designates that slot, not the allocation the slot owns.
+
+`new(T)` supplies a logical extent of `sizeof(T)` bytes.
+`new(T, n)` supplies a logical extent of `n * sizeof(T)` bytes on its successful path.
+Capture the count value at allocation. A later assignment to its local does not change that extent.
+The existing allocation checks govern negative counts, size overflow, and allocation failure
+(D10.2). Their normal continuation can supply the corresponding size facts.
+An extent need not be a source literal (D17.17).
+
+An object address supplies that object's byte window, including its layout padding.
+A field or element address supplies the selected subobject's window.
+A span's `.ptr` retains its selected backing window and offset.
+A span header has a separate storage window from its backing elements.
+A pointer cast, including a cast through `void*`, does not widen any of these windows.
+It retains known fort sources and their nested owning leaves.
+Recovering a different pointee type cannot hide an overlapping owner from a write or release
+(D17.17).
+
+#### 2.8.2 Ranges, access, and alignment
+
+For a raw fort range `p[lo..hi]`, prove a live source and `0 <= lo <= hi` (D6.9, D17.17).
+Measure its element size from the result's type.
+Prove that both resulting byte endpoints lie within the inherited access window.
+For element size k, pointer offset o, and window `[b, e)`, prove
+`b <= o + lo * k <= o + hi * k <= e`.
+Prove that their offset and size calculations fit the existing target address representation.
+Use mathematical size relations for that proof. Wrapped arithmetic supplies no extent evidence.
+If a required bound or relation remains unproved, reject the range.
+The operation adds no runtime range check.
+Foreign storage instead uses D17.13 trust without a static extent (D17.17).
+That extent trust does not override a known allocation's release or transfer state.
+
+An ordinary array, span, or string slice keeps its existing runtime bounds check (D6.9, D10.6).
+Its successful bounds path can establish a selected byte window in live backing storage.
+An ordinary span index likewise keeps its existing runtime bounds check.
+These checks do not revive a released backing source.
+They do not prove that forged reference bytes designate valid storage (D17.17).
+The proof does not make `--no-bounds-check` safe. That option keeps its D10.6 benchmarking contract.
+
+For a fort dereference or other typed access, prove enough accessible bytes for the accessed type.
+Prove the alignment that the existing type layout requires.
+A byte access requires alignment 1. A cast to a wider type does not improve that alignment.
+Apply offset facts to the original alignment; do not infer alignment from the new pointer type.
+A cast can remain legal even when a later access fails its extent or alignment proof.
+No cast adds a runtime check (D3.14, D17.17).
+
+These rules add no strict-aliasing restriction.
+Same-size reinterpretation still yields the object's bit pattern when the access obligations hold
+(D10.7). Existing mutability and ownership conversion rules still apply (D3.14).
+Foreign callers and implementations remain responsible for their alignment and storage validity
+(D17.13).
+
+#### 2.8.3 Byte reads, copies, and partial writes
+
+A fort byte operation first requires live containing storage and sufficient access extent (D17.17).
+Track the byte regions it reads and writes, with their actual order and possible overlap.
+Track reference representation fragments by their original value and byte position.
+Preserve only facts that those effects prove.
+Scalar and padding bytes do not supply a new reference source or allocation obligation.
+Padding also does not relocate an inline address (D17.15, D17.17).
+
+A complete copy of a borrowed reference preserves its original source, offset, and access window.
+A copied span or string must preserve a coherent pointer and length relation.
+Copying bytes from different reference versions does not establish that relation by itself.
+Infer a complete representation effect from fort operations or their inferred call effects.
+A function name, a copy-like loop shape, or a matching final byte count supplies no special trust.
+Apply actual caller aliases before establishing the effect (D17.15, D17.17).
+
+A partial write to a borrowed reference can leave its representation unproved.
+Reject a subsequent reference read, semantic use, or escape that requires the missing facts.
+A complete typed replacement can restore a valid reference without reading the previous value.
+A proved unchanged fragment preserves its existing representation facts.
+If writes rebuild a complete representation, prove their byte correspondence and pointer-length
+relations before a reference use. Imprecision does not establish a valid representation (D17.17).
+
+A write overlapping an owning leaf must also preserve its allocation obligation (D17.11, D17.17).
+Before a destructive write, prove the old overlapping owner empty or already transferred.
+This applies to partial writes, whole-object fills, and writes through an erased pointer.
+A later repair cannot recover an obligation that an earlier write discarded.
+A proved unchanged write preserves the existing obligation.
+A complete canonical zero representation can leave an already empty owning leaf empty.
+Zeroing a live owner without a transfer instead loses its obligation and fails.
+
+A raw byte copy never supplies a semantic ownership transfer (D17.17).
+Copying a live owner's representation into another owning leaf fails, even when the destination
+starts empty. An identical address does not supply two independent release rights.
+Copying those bytes into a scalar byte buffer creates no owner in that buffer.
+The original owner retains its obligation.
+Reinterpreting that buffer as an owning reference requires a transferable obligation that the raw
+copy did not supply. Reject the unproved owning interpretation.
+Full borrowed interpretations can retain proved source relations without acquiring ownership.
+Byte effects cannot add `mut` or bypass the existing ownership conversion rules (D3.14, D17.17).
+
+A complete representation copy that implements `move` uses the semantic owning operand's transfer.
+It empties the abstract source and gives the original obligation to the destination once.
+Require the old destination leaves empty after operand effects (D17.11, D17.15, D17.17).
+The generated byte copy creates no extra obligation.
+Generated omission of fixed temporary clearing still follows section 2.6.3.
+A byte copy followed by a manual clear is not an implicit move.
+
+For overlapping regions, preserve the actual read and write sequence (D17.17).
+Assume a complete source snapshot only when the operation establishes it.
+A forward copy can overwrite bytes that a later iteration reads.
+Do not interpret its result as the original reference without proof.
+A proved same-region no-op preserves its values and obligations.
+Unknown overlap retains the alternatives of section 2.6.2.
+Check each feasible alternative. Unknown overlap does not discharge an owner.
+
+#### 2.8.4 Integer reconstruction and foreign trust
+
+Pointer-to-`u64` conversion exposes the address bits (D3.14).
+Integer-to-pointer conversion remains a permitted cast, but supplies no proved storage source.
+This includes an exact unmodified round trip through `u64` (D17.17).
+Arithmetic, bitwise operations, narrowing, widening, and equal final bits do not establish a source.
+An identity integer copy also does not establish a source.
+Reject a fort memory operation that needs that reconstructed pointer's unproved source.
+The cast alone need not fail. Integer calculations and pointer comparisons are not storage accesses.
+A void-pointer round trip instead preserves the original reference facts (D17.17).
+Data-storage provenance does not establish a callable target.
+Existing function-pointer type and call-summary rules still apply (D3.10, D19.8).
+
+Foreign reference results and foreign entry arguments use D17.13 trust.
+Preserve that classification through complete reference copies, casts, fields, and fort wrappers.
+A foreign integer result supplies no trusted reference classification.
+Integer reconstruction cannot acquire foreign trust from its address bits (D17.17).
+Known fort sources supplied to an extern call still require their existing source proof.
+The call does not reclassify its arguments as trusted foreign sources for subsequent fort uses.
+The declaration supplies no inferred relation between pointer arguments and scalar size arguments.
+Hidden foreign byte writes, ownership duplication, and invalidation remain outside proof (D17.13).
+The caller must satisfy the foreign operation's requirements.
+An own foreign result still creates a tracked allocation obligation (D17.13).
+Borrows with that known allocation relation become invalid when fort releases it.
+Foreign extent trust does not erase this relation (D17.17).
+
+A fort wrapper that calls an extern byte operation retains that operation's foreign proof limit.
+For example, `std.mem.copy` calls `std.libc.memmove`.
+Its name does not create an intrinsic fort representation-copy effect.
+An LLVM byte copy that implements a typed fort operation instead keeps that fort operation's
+ownership effect. It does not become a foreign source exemption (D17.17).
+No compiler contract, unsafe construct, or lifetime annotation is required (D17.13).
+
+#### 2.8.5 Empty and interior storage
+
+An empty ordinary span can contain `{null, 0}` without a backing allocation (D17.17).
+Its length and pointer remain inspectable. It permits no element access.
+An ordinary empty slice keeps the existing bounds contract.
+A raw range from an unproved pointer still needs its live-source proof, even when its bounds match.
+
+A zero-length view into live storage retains its original source and boundary offset.
+An end pointer has offset at the access window's end and zero remaining accessible extent.
+A zero-length raw range at that boundary can pass while the source lives.
+A dereference or positive-length raw range there fails.
+Non-nullness alone supplies no accessible byte (D17.17).
+
+A zero-element allocation differs from a zero owner (D17.9, D17.17).
+`new(T, 0)` retains an allocation identity and a release or transfer obligation.
+Its logical element extent is zero, although the runtime allocates at least one physical byte
+(D10.2). That physical byte does not permit an element access.
+Moving or deleting this allocation remains legal under the ordinary ownership rules.
+Its zero length does not establish an empty destination or complete cleanup.
+
+Interior views never acquire ownership. A raw slice and `.ptr` remain borrowed (D17.3).
+An owning cast preserves only its original allocation ownership (D3.14, D17.17).
+Before shallow `del`, release or transfer residual owned descendants.
+Erasing their containing allocation's type does not remove that requirement (D17.7, D17.17).
+
+#### 2.8.6 Finite case traces
+
+These 12 traces state required proof verdicts (D17.17). They are not current compiler test results.
+`A` names a live allocation. `owns(A)` includes its cleanup obligation.
+`view(A, b, e)` designates bytes in the half-open interval `[b, e)`.
+`zero` means a canonical empty owner. Slot storage remains separate from its referenced source.
+Each trace covers its listed operation interval. Accepted intervals keep later cleanup obligations.
+Rejected intervals specify a diagnostic reason, not a diagnostic identifier or output format.
+
+##### R01. Complete borrow representation
+- Input: Distinct live source and destination slots contain borrowed span headers. The source is
+  `view(A, 0, 4)` with length 4. The proof knows both complete slot windows and layouts.
+- Operation: Fort byte effects copy the complete source header without intervening source writes.
+- Output: The destination retains A, its byte window, and the coherent length. No ownership moves.
+- Verdict: Accept. Complete representation correspondence preserves the original borrow.
+
+##### R02. Duplicate owner bytes
+- Input: Source slot s owns A. Destination owning slot d is zero. Both slot windows are live.
+- Operation: Fort byte effects copy s's complete owner representation into d without a semantic
+  move.
+- Output: No valid ownership transfer exists. Source s still holds A's obligation.
+- Verdict: Reject. Diagnostic reason: byte copying cannot create a second owner of A.
+
+##### R03. Moved owner representation
+- Input: Source aggregate s contains an owner of A and a borrow into A. Destination d is zero.
+- Operation: `d = move(s)` uses a complete representation copy after reading its operand.
+- Output: Source s is zero. Destination d owns A once and retains the borrow into A.
+- Verdict: Accept. The semantic move supplies the transfer. The byte copy creates no second owner.
+
+##### R04. Partial owner write
+- Input: An owning field holds A. An erased mutable byte view overlaps that field.
+- Operation: A fort store replaces one field byte with an unproved value before any transfer.
+- Output: The write cannot preserve the old obligation. A later typed repair does not discharge it.
+- Verdict: Reject. Diagnostic reason: the overlapping write can discard live ownership of A.
+
+##### R05. Overlapping reference copy
+- Input: Live source and destination reference windows can overlap. The proof has no source
+  snapshot.
+- Operation: A forward fort byte loop copies between them. A later read interprets the destination
+  as a reference. Earlier writes can change bytes that later iterations read.
+- Output: The proof cannot establish complete correspondence to one original reference value.
+- Verdict: Reject. Diagnostic reason: the copied reference's source relation remains unproved.
+
+##### R06. Exact integer round trip
+- Input: Local x is a live i32. Pointer p designates x with sufficient extent and alignment.
+- Operation: `u64 bits = cast(p, u64); i32* q = cast(bits, i32*);` then read `*q`.
+- Output: The address bits remain unchanged. Integer reconstruction supplies no source proof for q.
+- Verdict: Reject. Diagnostic reason: the reconstructed pointer has no proved storage source.
+
+##### R07. Changed integer bits
+- Input: Pointer p designates live fort bytes. Its address converts to u64.
+- Operation: Add one with `+%`, cast the result to `u8*`, then read through it.
+- Output: The computed integer supplies no source, extent, or alignment proof.
+- Verdict: Reject. Diagnostic reason: arithmetic on address bits does not establish live storage.
+
+##### R08. Arbitrary integer bits
+- Input: A u64 parameter contains arbitrary bits. No reference source accompanies them.
+- Operation: Cast the bits to `u8*`, then dereference the result.
+- Output: The cast creates neither a source relation nor foreign trust.
+- Verdict: Reject. Diagnostic reason: the pointer's storage source remains unproved.
+
+##### R09. Empty span
+- Input: Owner bytes holds A with four u8 elements. Its backing window is `[0, 4)`.
+- Operation: Take `bytes[4..4]`, inspect its zero length, then delete bytes after the last borrow
+  use.
+- Output: The empty view has offset 4 and no accessible element. Del discharges A's obligation.
+- Verdict: Accept. The empty view preserves its live source. Its later unused dangling value is
+  legal.
+
+##### R10. End-pointer access
+- Input: A remains live. Pointer tail comes from `bytes[4..4].ptr` at A's access-window end.
+- Operation: Read one u8 through `*tail`.
+- Output: Tail retains A, but its remaining access extent is zero.
+- Verdict: Reject. Diagnostic reason: the access requires one byte beyond the permitted window.
+
+##### R11. Misaligned access
+- Input: A live i32[2] object has alignment 4. A byte view selects offsets `[1, 5)`.
+- Operation: Cast that view's pointer to `u32*`, then read one u32.
+- Output: Four bytes fit the window. Offset 1 does not preserve alignment 4.
+- Verdict: Reject. Diagnostic reason: the typed access cannot establish the required alignment.
+
+##### R12. Zero-element allocation
+- Input: Owner z holds the non-null allocation from `new(u8, 0)`. Its logical extent is zero.
+- Operation: A normal return leaves z unreleased because the program treats `z.len == 0` as empty.
+- Output: The zero-element allocation still has a residual obligation.
+- Verdict: Reject. Diagnostic reason: the normal storage boundary loses an owned allocation.
+
 ## 3. Pointers
 
 A pointer `T*` holds the address of one `T` or is `null`. There is no pointer arithmetic, so
