@@ -175,6 +175,38 @@ A FIR module holds:
 
 A function holds its symbol, its fort function type, its locals (5.3) and its blocks (5.4).
 
+It can also hold non-emitting range-loan carriers (D17.10, D19.8).
+A declaration ID names one selected range node in the checked source tree.
+An expansion ID names one lowering occurrence of that declaration.
+Runtime iterations of one occurrence use the same expansion ID.
+An expansion records its declaration ID, deferred context, exit occurrence, and source positions.
+Distinct expansion IDs can have the same deferred context and exit occurrence.
+A loan ID names one whole-body loan of an expansion.
+A loan can name one enclosing loan in the same function.
+These structural IDs are separate from analyzer source and allocation IDs.
+
+A capture binds a loan to a captured FIR place and a source position.
+`borrowed_header` names a non-owning span or string header and its original protected place.
+`owning_fixed_array_place` names an owning fixed array and its original protected place.
+`non_owning_array_copy` names a copied non-owning fixed array without an original protected place.
+The two protected capture kinds keep both places, even when both places have one spelling.
+
+A boundary names a loan, a block, an operation gap, an order, a kind, and a source position.
+Gap 0 precedes the first statement. Gap `n` precedes the terminator after `n` statements.
+The order distinguishes boundaries at one gap.
+The kinds are `capture`, `body_entry`, `body_cleanup`, `loan_exit`, and `outer_cleanup`.
+A proposed absence record names a declaration with no expansion and one reason:
+`checked_selection`, `checked_unreachable`, or `no_lowered_operation`.
+An absence proposal alone proves no source suppression.
+
+The function owns these records and releases them with its other vectors.
+A clone copies each owned vector. A parsed function owns its new vectors.
+The structural completeness claim records seven counts: declarations, expansions, protected
+expansions, loans, bindings, boundaries, and absences.
+The manifest reports structural validity and selected-source completeness separately.
+Only independent source correspondence can set selected-source completeness.
+Ordinary FIR without a range declaration makes no source range-coverage claim.
+
 ### 5.3 Locals
 
 A local has a number, a fort type, a kind, a location, and, for a parameter or a named local,
@@ -851,6 +883,23 @@ statement index.
   the empty set and every other block with the set of all temporaries, so a block that no edge
   reaches, such as the block after a terminator (D14.2), passes. V13 follows every edge, the edge
   that V9 prunes on a constant `switch` included.
+- **V14**: each range carrier names a valid function record, place, block, and operation gap
+  (5.2). Declaration, expansion, loan, capture, and absence keys are unique in their respective
+  sets. An expansion names a declaration. A loan names an expansion. A parent names an existing
+  loan without a cycle. A protected capture names both a captured place and an original place.
+  Its type matches its capture kind. Boundaries have increasing gap positions and orders.
+  A complete structural claim matches its seven recorded counts. Each declared range has an
+  expansion or an absence. Each expansion has one loan. Each loan has one binding, a capture
+  boundary, and a body-entry boundary. Several normal exits can each have a cleanup triple.
+  On each normal path that enters the body, body cleanup precedes loan exit, and outer cleanup
+  follows loan exit. An abort-only body needs no normal cleanup triple.
+  A child enters while its parent body is active.
+  Active-loan states agree at a CFG join. A normal return has no active loan.
+  A boundary in an unreachable block cannot support a complete structural claim.
+  A constant switch reaches only its selected edge for this rule.
+  Different incoming capture histories merge conservatively and cannot establish a missing
+  capture. A partial record has no structural completeness claim and cannot establish source
+  completeness. A complete structural claim does not establish selected-source completeness.
 V9 closes the termination gap of section 1. The direct path wrote `unreachable` at the end of a
 body because `check_terminates` said that the body terminates, and the translator writes the
 `unreachable` that the lowering puts there for the same reason. With V9, a disagreement is an
@@ -902,6 +951,14 @@ changes the function, and the verifier runs after it. The passes run in this ord
 4. The verifier again.
 5. The translator (section 12).
 
+The build-mode pass relocates every range boundary when it removes a statement or merges blocks.
+When a store folds into an earlier assignment, boundaries between that assignment and the old
+store move before the combined write. They follow boundaries already at that gap, in order.
+Boundaries after the old store move after the combined write.
+The pass keeps each boundary's source position and relative order (D19.8).
+It can renumber order fields when gaps merge.
+Carrier references do not make a runtime-dead assignment live.
+
 FIR changes at two points of this order, and `--fir-after=<pass>` (D14.1) names them: `lower`
 is the output of the lowering (section 9), and `build-mode` is the output of step 3.
 
@@ -917,6 +974,8 @@ of a check holds only in the modes that keep that check (section 14).
 The translator writes one FIR function as LLVM IR text. It keeps every item of `toolchain.md` 6;
 12.5 records where its text deviated from the text of the direct path, which T-255 deleted. It
 does not read the tree and it does not read the build mode.
+It emits no instruction, table, field, call, check, or trap for a range carrier (D19.8).
+Equivalent executable FIR emits identical LLVM text with and without carriers.
 
 ### 12.1 Locals and places
 
@@ -1125,7 +1184,23 @@ parameter may carry its name in the same way.
 
 ```ebnf
 function    = "fn" name "(" [ param { "," param } ] ")" "->" ( type | "noreturn" ) "{" { local }
-              block { block } "}" ;
+              { range_carrier } block { block } "}" ;
+range_carrier = "range" ( range_complete | range_declaration | range_expansion | range_loan
+              | range_binding | range_boundary | range_absence ) ";" ;
+range_complete = "complete" uint uint uint uint uint uint uint ;
+range_declaration = "declaration" uint [ position ] ;
+range_expansion = "expansion" uint "declaration" uint "context" uint "exit" uint
+              [ position [ "exit" line_col ] ] ;
+range_loan = "loan" uint "expansion" uint "ordinal" uint [ "parent" uint ]
+              [ "whole_body" ] ;
+range_binding = "binding" uint capture_kind "captured" place [ "original" place ]
+              [ position ] ;
+range_boundary = "boundary" uint boundary_kind block_ref uint "order" uint
+              [ position ] ;
+range_absence = "absence" uint absence_kind [ position ] ;
+capture_kind = "borrowed_header" | "owning_fixed_array_place" | "non_owning_array_copy" ;
+boundary_kind = "capture" | "body_entry" | "body_cleanup" | "loan_exit" | "outer_cleanup" ;
+absence_kind = "checked_selection" | "checked_unreachable" | "no_lowered_operation" ;
 param       = local_ref [ "(" identifier ")" ] ":" type ;
 local       = "let" local_ref [ "(" identifier ")" ] ":" type [ position ] ";" ;
 block       = block_ref ":" "{" { statement } terminator "}" ;
@@ -1158,6 +1233,7 @@ location    = position [ "exit" line_col ] [ "s" dec_digit { dec_digit } ] ;
 position    = "#" line_col ;
 line_col    = dec_digit { dec_digit } ":" dec_digit { dec_digit } ;
 integer     = [ "-" ] ( dec_digit { dec_digit } | "0x" hex_digit { hex_digit } ) ;
+uint        = dec_digit { dec_digit } | "0x" hex_digit { hex_digit } ;
 local_ref   = "_" dec_digit { dec_digit } ;
 block_ref   = "bb" dec_digit { dec_digit } ;
 ```
@@ -1170,6 +1246,12 @@ rvalue names of section 6. A `mut` after `addr` gives the result a `mut` pointer
 after `slice`, which appears only on a slice of a fixed-array place, gives a `mut` span (section
 6). `kind` is one of the kinds of section 8. `name` is a dotted symbol name of D9.7. `identifier`,
 `string`, `dec_digit` and `hex_digit` are those of `grammar.md` 1.
+
+The seven numbers after `range complete` give the counts from section 5.2 in that order.
+They claim completeness only for the supplied structural contract.
+The textual form has no selected-source completeness claim (D17.10, D19.8).
+The parser keeps declaration, expansion, loan, binding, boundary, and absence records in order.
+It keeps the source and exit positions that the text gives.
 
 This program:
 

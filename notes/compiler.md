@@ -718,6 +718,17 @@ came here.
   `fort -S src/fort/main.ft` took 3.2 s to 3.4 s through FIR and 1.4 s to 1.6 s through the
   direct path, and `fort --fir` alone took 2.1 s to 2.2 s, so the lowering and the verifier take
   most of the difference.
+- **Range-loan carriers belong to one FIR function** (D17.10, D19.8, `spec/fir.md` 5.2, 8).
+  Declaration IDs name selected source nodes. Expansion IDs name lowering occurrences.
+  Loan IDs name whole-body loans. A clone copies the carrier vectors, and function teardown
+  releases them. V14 checks references, protected places, cleanup on each normal exit, parent
+  order, active-loan joins, and the supplied seven-count structural claim. It follows only the
+  selected edge of a constant switch. It cannot prove that the
+  supplied declarations cover the selected source. The source-coverage verdict needs an
+  independent source check. The build-mode pass remaps operation gaps, follows folded writes,
+  and keeps source positions.
+  The LLVM translator ignores all carrier records. The carrier suite compares LLVM text in four
+  build modes and detects any output change.
 
 ## 7. The runtime and the standard library
 

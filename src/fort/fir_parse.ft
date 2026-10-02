@@ -1852,6 +1852,145 @@ fn parse_let(fir_parser mut* p, fir.func mut* f, u32 lets) bool {
     return true;
 }
 
+fn take_range_capture_kind(fir_parser mut* p, fir.range_capture_kind mut* out) bool {
+    if (at_word(p, "borrowed_header")) {
+        *out = fir.range_capture_kind.borrowed_header;
+    } else if (at_word(p, "owning_fixed_array_place")) {
+        *out = fir.range_capture_kind.owning_fixed_array_place;
+    } else if (at_word(p, "non_owning_array_copy")) {
+        *out = fir.range_capture_kind.non_owning_array_copy;
+    } else { return fail_expected(p, "a range capture kind"); }
+    bump(p);
+    return true;
+}
+
+fn take_range_boundary_kind(fir_parser mut* p, fir.range_boundary_kind mut* out) bool {
+    if (at_word(p, "capture")) { *out = fir.range_boundary_kind.capture; }
+    else if (at_word(p, "body_entry")) { *out = fir.range_boundary_kind.body_entry; }
+    else if (at_word(p, "body_cleanup")) { *out = fir.range_boundary_kind.body_cleanup; }
+    else if (at_word(p, "loan_exit")) { *out = fir.range_boundary_kind.loan_exit; }
+    else if (at_word(p, "outer_cleanup")) { *out = fir.range_boundary_kind.outer_cleanup; }
+    else { return fail_expected(p, "a range boundary kind"); }
+    bump(p);
+    return true;
+}
+
+fn take_range_absence_kind(fir_parser mut* p, fir.range_absence_kind mut* out) bool {
+    if (at_word(p, "checked_selection")) {
+        *out = fir.range_absence_kind.checked_selection;
+    } else if (at_word(p, "checked_unreachable")) {
+        *out = fir.range_absence_kind.checked_unreachable;
+    } else if (at_word(p, "no_lowered_operation")) {
+        *out = fir.range_absence_kind.no_lowered_operation;
+    } else { return fail_expected(p, "a range absence kind"); }
+    bump(p);
+    return true;
+}
+
+fn take_range_loc(fir_parser mut* p, diag.loc mut* at) bool {
+    diag.loc mut ignored = diag.loc{};
+    u32 mut index = 0;
+    return parse_location(p, false, at, &ignored, &index);
+}
+
+// Reads one non-emitting range carrier line. The caller reads its final semicolon.
+fn parse_range(fir_parser mut* p, fir.func mut* f) bool {
+    bump(p);
+    if (at_word(p, "complete")) {
+        if (f->range_supplied_complete) { return fail_at(p, here_loc(p), "range complete twice"); }
+        bump(p);
+        fir.range_manifest mut c = fir.range_manifest{};
+        if (!take_u32(p, "a declaration count", &c.declarations)
+            || !take_u32(p, "an expansion count", &c.expansions)
+            || !take_u32(p, "a protected expansion count", &c.protected_expansions)
+            || !take_u32(p, "a loan count", &c.loans)
+            || !take_u32(p, "a binding count", &c.bindings)
+            || !take_u32(p, "a boundary count", &c.boundaries)
+            || !take_u32(p, "an absence count", &c.absences)) { return false; }
+        f->range_claim = c;
+        f->range_supplied_complete = true;
+        return true;
+    }
+    if (at_word(p, "declaration")) {
+        bump(p);
+        fir.range_declaration mut d = fir.range_declaration{};
+        if (!take_u32(p, "a declaration ID", &d.id) || !take_range_loc(p, &d.source)) {
+            return false;
+        }
+        fir.range_declaration_add(f, d);
+        return true;
+    }
+    if (at_word(p, "expansion")) {
+        bump(p);
+        fir.range_expansion mut ex = fir.range_expansion{};
+        if (!take_u32(p, "an expansion ID", &ex.id)
+            || !expect_word(p, "declaration")
+            || !take_u32(p, "a declaration ID", &ex.declaration)
+            || !expect_word(p, "context")
+            || !take_u32(p, "a deferred context", &ex.context)
+            || !expect_word(p, "exit")
+            || !take_u32(p, "an exit occurrence", &ex.exit_occurrence)
+            || !take_range_loc(p, &ex.source)) { return false; }
+        if (at_word(p, "exit")) {
+            bump(p);
+            if (!parse_line_col(p, &ex.exit_source)) { return false; }
+        }
+        fir.range_expansion_add(f, ex);
+        return true;
+    }
+    if (at_word(p, "loan")) {
+        bump(p);
+        fir.range_loan mut ln = fir.range_loan{};
+        if (!take_u32(p, "a loan ID", &ln.id) || !expect_word(p, "expansion")
+            || !take_u32(p, "an expansion ID", &ln.expansion) || !expect_word(p, "ordinal")
+            || !take_u32(p, "a loan ordinal", &ln.ordinal)) { return false; }
+        if (at_word(p, "parent")) {
+            bump(p);
+            if (!take_u32(p, "a parent loan ID", &ln.parent)) { return false; }
+            ln.parent_present = true;
+        }
+        if (at_word(p, "whole_body")) { ln.whole_body = true; bump(p); }
+        fir.range_loan_add(f, ln);
+        return true;
+    }
+    if (at_word(p, "binding")) {
+        bump(p);
+        fir.range_capture mut cap = fir.range_capture{};
+        if (!take_u32(p, "a loan ID", &cap.loan)
+            || !take_range_capture_kind(p, &cap.kind) || !expect_word(p, "captured")
+            || !parse_place(p, f, &cap.captured)) { return false; }
+        if (at_word(p, "original")) {
+            bump(p);
+            if (!parse_place(p, f, &cap.original)) { return false; }
+            cap.original_present = true;
+        }
+        if (!take_range_loc(p, &cap.source)) { return false; }
+        fir.range_capture_add(f, cap);
+        return true;
+    }
+    if (at_word(p, "boundary")) {
+        bump(p);
+        fir.range_boundary mut bd = fir.range_boundary{};
+        if (!take_u32(p, "a loan ID", &bd.loan)
+            || !take_range_boundary_kind(p, &bd.kind) || !take_block(p, &bd.block)
+            || !take_u32(p, "an operation gap", &bd.position) || !expect_word(p, "order")
+            || !take_u32(p, "a boundary order", &bd.order)
+            || !take_range_loc(p, &bd.source)) { return false; }
+        fir.range_boundary_add(f, bd);
+        return true;
+    }
+    if (at_word(p, "absence")) {
+        bump(p);
+        fir.range_absence mut ab = fir.range_absence{};
+        if (!take_u32(p, "a declaration ID", &ab.declaration)
+            || !take_range_absence_kind(p, &ab.reason)
+            || !take_range_loc(p, &ab.source)) { return false; }
+        fir.range_absence_add(f, ab);
+        return true;
+    }
+    return fail_expected(p, "a range carrier kind");
+}
+
 // Reads the body of `f` from its `{`: the `let` lines, the blocks and the `}`.
 fn parse_body(fir_parser mut* p, fir.func mut* f) bool {
     if (!expect(p, ftok_kind.ft_lbrace, "'{'")) {
@@ -1872,10 +2011,19 @@ fn parse_body(fir_parser mut* p, fir.func mut* f) bool {
         }
         lets += 1;
     }
+    p->refs.len = 0;
+    while (at_word(p, "range")) {
+        if (!parse_range(p, f)) {
+            ok = false;
+            recover(p);
+        } else if (!end_item(p, &resync)) {
+            ok = false;
+            if (resync) { recover(p); }
+        }
+    }
     if (kind(p) == ftok_kind.ft_rbrace) {
         return fail_at(p, here_loc(p), "a function has the entry block 'bb0'");
     }
-    p->refs.len = 0;
     u32 mut b = 0;
     while (kind(p) == ftok_kind.ft_block) {
         if (b > 0) {
