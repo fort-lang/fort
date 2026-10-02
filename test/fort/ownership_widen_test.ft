@@ -5,6 +5,7 @@
 //| G07.4 G09.3
 //| R P G H residuals
 //| trimmed history fixed point
+//| nested region residuals
 /// Tests residual widening with retained sources and obligations.
 import ownership_api;
 import ownership_events;
@@ -439,6 +440,93 @@ fn history_fixed_point(ownership_api.services* svc) void {
     ownership_state.free(&exact);
 }
 
+fn nested_region_bound(ownership_api.services* svc) void {
+    ownership_state.state mut left = ownership_state.empty();
+    ownership_state.state mut right = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(100, 100, 4);
+    ownership_state.append_allocations(&left, a);
+    ownership_state.append_allocations(&right, a);
+    ownership_api.source_fact mut storage = ownership_api.source_fact{};
+    storage.key = id(ownership_api.entity_kind.source, 100);
+    storage.kind = ownership_api.source_kind.heap;
+    storage.validity = ownership_api.validity_kind.live;
+    storage.allocation = a.key;
+    ownership_state.append_sources(&left, storage);
+    ownership_state.append_sources(&right, storage);
+    ownership_api.borrow_relation[1] mut left_loan = {};
+    left_loan[0].key = id(ownership_api.entity_kind.relation, 100);
+    left_loan[0].source = storage.key;
+    left_loan[0].range.key = id(ownership_api.entity_kind.region, 100);
+    left_loan[0].range.source = storage.key;
+    left_loan[0].representation_complete = true;
+    ownership_api.borrow_relation[1] mut right_loan = {};
+    right_loan[0].key = id(ownership_api.entity_kind.relation, 101);
+    right_loan[0].source = storage.key;
+    right_loan[0].range.key = id(ownership_api.entity_kind.region, 101);
+    right_loan[0].range.source = storage.key;
+    right_loan[0].representation_complete = true;
+    ownership_api.contents_fact mut left_value = ownership_api.contents_fact{};
+    left_value.place = place(100);
+    left_value.kind = ownership_api.contents_kind.reference;
+    left_value.borrows = left_loan[..];
+    ownership_api.contents_fact mut right_value = ownership_api.contents_fact{};
+    right_value.place = place(101);
+    right_value.kind = ownership_api.contents_kind.reference;
+    right_value.borrows = right_loan[..];
+    ownership_state.append_contents(&left, left_value);
+    ownership_state.append_contents(&right, right_value);
+    ownership_api.limit_table bound = limits(4, 2);
+    ownership_api.operation_position at = op(100);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut ab = ownership_join.join(&left, &right, svc,
+        &bound, at, source);
+    ownership_state.state mut ba = ownership_join.join(&right, &left, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&ab, &ba));
+    assert(has_loss(&ab, ownership_api.limit_category.r));
+    assert(ab.allocations_len == 1 && ab.allocations[0].obligation);
+    assert(ab.allocations[0].owner.place.residual);
+    assert(ab.sources_len == 1 && ab.sources[0].validity ==
+        ownership_api.validity_kind.unknown);
+    assert(ab.contents_len == 2 && ab.contents[0].borrows.len == 1 &&
+        ab.contents[1].borrows.len == 1);
+    assert(ab.contents[0].borrows[0].range.residual &&
+        ab.contents[1].borrows[0].range.residual);
+    assert(ab.contents[0].borrows[0].source.ordinal == 100 &&
+        ab.contents[1].borrows[0].source.ordinal == 100);
+    assert(!ab.contents[0].borrows[0].representation_complete &&
+        !ab.contents[1].borrows[0].representation_complete);
+    ownership_state.state mut widened = ownership_join.widen(&left, &right, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&ab, &widened));
+    ownership_state.state mut next = ownership_join.widen(&ab, &left, svc,
+        &bound, at, source);
+    assert(next.allocations[0].obligation && next.contents_len == 2);
+    assert(next.contents[0].borrows[0].range.residual);
+    assert(has_loss(&next, ownership_api.limit_category.r));
+    ownership_state.state mut partitioned = ownership_state.empty();
+    ownership_state.append_allocations(&partitioned, a);
+    ownership_state.append_sources(&partitioned, storage);
+    ownership_api.region_partition[1] mut partition = {};
+    partition[0].key = id(ownership_api.entity_kind.region, 102);
+    left_loan[0].range.partitions = partition[..];
+    left_value.borrows = left_loan[..];
+    ownership_state.append_contents(&partitioned, left_value);
+    ownership_state.state mut with_partition = ownership_join.join(&partitioned,
+        &partitioned, svc, &bound, at, source);
+    assert(has_loss(&with_partition, ownership_api.limit_category.r));
+    assert(with_partition.contents[0].borrows[0].range.residual);
+    assert(with_partition.contents[0].borrows[0].range.partitions[0].residual);
+    ownership_state.free(&with_partition);
+    ownership_state.free(&partitioned);
+    ownership_state.free(&next);
+    ownership_state.free(&widened);
+    ownership_state.free(&ba);
+    ownership_state.free(&ab);
+    ownership_state.free(&right);
+    ownership_state.free(&left);
+}
+
 fn main() i32 {
     ownership_events.store mut events = ownership_events.store{};
     ownership_api.services mut svc = ownership_api.services{};
@@ -456,6 +544,8 @@ fn main() i32 {
     println("R P G H residuals");
     history_fixed_point(&svc);
     println("trimmed history fixed point");
+    nested_region_bound(&svc);
+    println("nested region residuals");
     ownership_events.free(&events);
     return 0;
 }
