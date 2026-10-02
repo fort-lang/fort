@@ -713,6 +713,18 @@ as the location of their exit. The scope around a `for` falls off at the closing
 body. When an expansion holds an expansion of its own, the inner statements carry the location
 of the inner exit.
 
+For a range body, capture follows collection evaluation and precedes the loop head (5.2).
+Body entry precedes the loop variable's `live` marker and element copy on the true head edge.
+The loan stays active through the last element use and each deferred body statement.
+Body cleanup follows those defers and precedes the body's `dead` markers.
+Loan exit follows those markers. Outer cleanup follows loan exit before any outer scope effect.
+Each normal fall-off, continue, break from the loop, and return follows this order.
+A break from an inner `switch` leaves the range body active.
+A return evaluates its expression before this cleanup (9.6).
+An abort path has no fabricated normal loan exit or outer cleanup.
+The zero-iteration edge never enters the body, although the collection has a capture.
+Each deferred lowering occurrence has its own expansion ID; runtime iterations share that ID.
+
 ### 9.6 Return and the end of a body
 
 `return e`:

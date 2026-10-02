@@ -1,0 +1,645 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary groups 4 probes 9
+//| capture repeats 8
+//| suppressed defer proposal
+//| nested deferred context
+//| damaged candidates rejected
+/// Checks inactive range boundaries at FIR operation gaps.
+import fir;
+import fir_lower;
+import fir_print;
+import fir_verify;
+import lower_env;
+import std.strbuf;
+
+fn lower_case(lower_env.env mut* e, string@ source, string name, fir.func mut* f,
+              fir_lower.range_candidate_set mut* proposed) void {
+    lower_env.check_lines(e, source, true);
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function_with_range_candidates(&e->c.ck, lower_env.decl(e, name),
+                                                          f, proposed, &why)) {
+        panic("range boundary test: lowering refused checked source");
+    }
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(f, &e->rt, &bad));
+    assert(f->range_declarations.len == 0 && f->range_expansions.len == 0);
+    assert(f->range_loans.len == 0 && f->range_captures.len == 0);
+    assert(f->range_boundaries.len == 0 && f->range_absences.len == 0);
+    assert(!f->range_supplied_complete && !f->range_source_complete);
+    fir.func mut ordinary = fir.func{};
+    defer fir.func_free(&ordinary);
+    fir_lower.report mut ordinary_why = fir_lower.report{};
+    assert(fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name),
+                                    &ordinary, &ordinary_why));
+    assert(!fir_verify.find_violation(&ordinary, &e->rt, &bad));
+    strbuf.str_buf mut candidate_text = strbuf.create();
+    defer strbuf.free(&candidate_text);
+    strbuf.str_buf mut ordinary_text = strbuf.create();
+    defer strbuf.free(&ordinary_text);
+    fir_print.print_function(f, &candidate_text);
+    fir_print.print_function(&ordinary, &ordinary_text);
+    assert(strbuf.view(&candidate_text) == strbuf.view(&ordinary_text));
+    u64 mut i = 1;
+    while (i < proposed->boundaries.len) {
+        fir.range_boundary* a = &proposed->boundaries.items[i - 1].boundary;
+        fir.range_boundary* b = &proposed->boundaries.items[i].boundary;
+        assert(a->block < b->block || (a->block == b->block &&
+               (a->position < b->position || (a->position == b->position &&
+                a->order < b->order))));
+        i += 1;
+    }
+    fir.func mut partial = fir.func_clone(f);
+    defer fir.func_free(&partial);
+    u64 mut j = 0;
+    while (j < proposed->declarations.len) {
+        fir.range_declaration_add(&partial, proposed->declarations.items[j]);
+        j += 1;
+    }
+    j = 0;
+    while (j < proposed->captures.len) {
+        fir_lower.range_capture_candidate* c = &proposed->captures.items[j];
+        fir.range_expansion_add(&partial, c->occurrence);
+        fir.range_loan_add(&partial, c->loan);
+        fir.range_capture_add(&partial, c->binding);
+        j += 1;
+    }
+    j = 0;
+    while (j < proposed->boundaries.len) {
+        fir.range_boundary_add(&partial, proposed->boundaries.items[j].boundary);
+        j += 1;
+    }
+    assert(!partial.range_supplied_complete && !partial.range_source_complete);
+    assert(!fir_verify.find_violation(&partial, &e->rt, &bad));
+    if (proposed->suppressions.len == 0) {
+        partial.range_supplied_complete = true;
+        partial.range_claim = fir.range_counts(&partial);
+        assert(!fir_verify.find_violation(&partial, &e->rt, &bad));
+        assert(!partial.range_source_complete);
+    }
+}
+
+fn boundary(fir_lower.range_candidate_set* proposed, u32 loan,
+            fir.range_boundary_kind kind, u32 line) fir.range_boundary* {
+    u64 mut i = 0;
+    while (i < proposed->boundaries.len) {
+        fir.range_boundary* b = &proposed->boundaries.items[i].boundary;
+        if (b->loan == loan && b->kind == kind && b->source.line == line) {
+            return b;
+        }
+        i += 1;
+    }
+    panic("range boundary test: missing boundary");
+}
+
+fn boundary_count(fir_lower.range_candidate_set* proposed, u32 loan,
+                  fir.range_boundary_kind kind) u64 {
+    u64 mut result = 0;
+    u64 mut i = 0;
+    while (i < proposed->boundaries.len) {
+        fir.range_boundary* b = &proposed->boundaries.items[i].boundary;
+        if (b->loan == loan && b->kind == kind) {
+            result += 1;
+        }
+        i += 1;
+    }
+    return result;
+}
+
+fn defer_context(fir_lower.range_candidate_set* proposed,
+                 u32 id) fir_lower.range_defer_context_candidate* {
+    u64 mut i = 0;
+    while (i < proposed->deferred.len) {
+        fir_lower.range_defer_context_candidate* c = &proposed->deferred.items[i];
+        if (c->id == id) { return c; }
+        i += 1;
+    }
+    panic("range boundary test: missing deferred context");
+}
+
+fn cleanup_at(fir.func* f, fir_lower.range_candidate_set* proposed, u32 loan,
+              u32 line) void {
+    fir.range_boundary* start = boundary(proposed, loan, fir.range_boundary_kind.body_cleanup,
+                                         line);
+    fir.range_boundary* end = boundary(proposed, loan, fir.range_boundary_kind.loan_exit, line);
+    fir.range_boundary* outer = boundary(proposed, loan, fir.range_boundary_kind.outer_cleanup,
+                                         line);
+    assert(start->block == end->block && end->block == outer->block);
+    assert(start->position <= end->position && end->position == outer->position);
+    assert(end->order < outer->order);
+    assert(end->position <= fir.block_statement_count(f, end->block));
+}
+
+fn repeat_capture(string@ source, fir.range_capture_kind kind, bool original,
+                  bool projected) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source, "walk", &f, &cs);
+    assert(cs.declarations.len == 1 && cs.captures.len == 1);
+    fir_lower.range_capture_candidate* c = &cs.captures.items[0];
+    assert(c->declaration == 1 && c->expansion == 1);
+    assert(c->occurrence.id == 1 && c->occurrence.declaration == 1);
+    assert(c->occurrence.context == 0 && c->occurrence.exit_occurrence == 0);
+    assert(c->binding.kind == kind && c->binding.original_present == original);
+    assert(!projected || c->binding.original.proj_len > 0);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.capture) == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.body_entry) == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.outer_cleanup) == 1);
+}
+
+// Eight capture forms retain their bindings when boundary candidates are added.
+fn capture_repeats() void {
+    string[3] owned_span = {"fn walk(u8 mut@ own bytes) void {",
+                            "    for (u8 x : bytes) { }", "}"};
+    string[3] owned_string = {"fn walk(string own text) void {",
+                              "    for (char x : text) { }", "}"};
+    string[3] borrowed_span = {"fn walk(u8@ bytes) void {",
+                               "    for (u8 x : bytes) { }", "}"};
+    string[3] borrowed_string = {"fn walk(string text) void {",
+                                 "    for (char x : text) { }", "}"};
+    string[3] owned_array = {"fn walk(u8 mut* own[2] items) void {",
+                             "    for (u8 mut* x : items) { }", "}"};
+    string[5] copied_array = {"fn walk(i32[2] mut values) void {",
+                              "    for (i32 x : values) {",
+                              "        values[0] = 9;",
+                              "    }", "}"};
+    string[5] indirect = {"struct holder { u8 mut@ own items; }",
+                          "fn walk(holder mut* mut h, holder mut* next) void {",
+                          "    for (u8 x : h->items) { }",
+                          "    h = next;", "}"};
+    string[9] indexed = {"fn select(i32 mut* count) i32 {",
+                         "    *count +%= 1;", "    return 0;", "}",
+                         "fn walk(u8 mut@ own[2] items, i32 mut count) void {",
+                         "    for (u8 x : items[select(&count)]) {",
+                         "        count +%= 1;", "    }", "}"};
+    repeat_capture(owned_span[..], fir.range_capture_kind.borrowed_header, true, false);
+    repeat_capture(owned_string[..], fir.range_capture_kind.borrowed_header, true, false);
+    repeat_capture(borrowed_span[..], fir.range_capture_kind.borrowed_header, true, false);
+    repeat_capture(borrowed_string[..], fir.range_capture_kind.borrowed_header, true, false);
+    repeat_capture(owned_array[..], fir.range_capture_kind.owning_fixed_array_place, true, false);
+    repeat_capture(copied_array[..], fir.range_capture_kind.non_owning_array_copy, false, false);
+    repeat_capture(indirect[..], fir.range_capture_kind.borrowed_header, true, true);
+    repeat_capture(indexed[..], fir.range_capture_kind.borrowed_header, true, true);
+}
+
+// An inner exit ends its own loan. The outer body loan remains active.
+fn nested_loans() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] outer, i32[2] inner, bool stop) i32 {",
+        "    i32 mut sum = 0;",
+        "    for (i32 x : outer) {",
+        "        sum += x;",
+        "        for (i32 y : inner) {",
+        "            if (stop) { break; }",
+        "            sum += y;",
+        "        }",
+        "        sum += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.declarations.len == 2 && cs.captures.len == 2);
+    assert(cs.captures.items[1].loan.parent_present);
+    assert(cs.captures.items[1].loan.parent == cs.captures.items[0].loan.id);
+    cleanup_at(&f, &cs, 2, 6);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 1);
+    assert(boundary_count(&cs, 2, fir.range_boundary_kind.loan_exit) == 2);
+}
+
+// A final element read does not end protection before the branch tail.
+fn final_use_tail() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn walk(i32[2] values, bool stop) i32 {",
+        "    i32 mut sum = 0;",
+        "    for (i32 x : values) {",
+        "        sum += x;",
+        "        if (stop) { sum += 1; }",
+        "        sum += 2;",
+        "    }",
+        "    return sum;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.captures.len == 1);
+    fir.range_boundary* end = boundary(&cs, 1, fir.range_boundary_kind.body_cleanup, 7);
+    assert(end->position > 0);
+    fir.statement* before = fir.block_statement(&f, end->block, end->position - 1);
+    assert(before->loc.line == 6);
+    cleanup_at(&f, &cs, 1, 7);
+}
+
+// Continue runs both defers in reverse order. Fall-off uses the same capture.
+fn continue_and_falloff() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] values, bool skip) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer count +%= 1;",
+        "        defer count +%= 2;",
+        "        if (skip) {",
+        "            continue;",
+        "        }",
+        "        count +%= x;",
+        "    }",
+        "    return count;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.captures.len == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.capture) == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.body_entry) == 1);
+    cleanup_at(&f, &cs, 1, 7);
+    cleanup_at(&f, &cs, 1, 10);
+    fir.range_boundary* continued = boundary(&cs, 1, fir.range_boundary_kind.body_cleanup, 7);
+    u32 mut two_at = 0;
+    u32 mut one_at = 0;
+    u32 mut at = 0;
+    while (at < continued->position) {
+        fir.statement* s = fir.block_statement(&f, continued->block, at);
+        if (s->exit_loc.line == 7 && s->loc.line == 5) { two_at = at + 1; }
+        if (s->exit_loc.line == 7 && s->loc.line == 4) { one_at = at + 1; }
+        at += 1;
+    }
+    assert(two_at > 0 && one_at > two_at);
+    fir.range_boundary* next = boundary(&cs, 1, fir.range_boundary_kind.body_entry, 3);
+    assert(next->position == 0);
+    assert(fir.block_statement(&f, next->block, 0)->kind == fir.stmt_kind.st_live);
+    fir.statement* element = fir.block_statement(&f, next->block, 1);
+    fir.operand read = fir.rvalue_operand(&f, element->value, 0);
+    assert(read.kind == fir.operand_kind.ok_copy && read.place.proj_len == 1);
+    assert(read.place.local == cs.captures.items[0].binding.captured.local);
+    fir.range_boundary* ended = boundary(&cs, 1, fir.range_boundary_kind.outer_cleanup, 7);
+    fir.terminator* exit = &fir.block_at(&f, ended->block)->term;
+    assert(exit->kind == fir.term_kind.tk_goto);
+    fir.terminator* step = &fir.block_at(&f, exit->target)->term;
+    assert(step->kind == fir.term_kind.tk_goto);
+    fir.terminator* head = &fir.block_at(&f, step->target)->term;
+    assert(head->kind == fir.term_kind.tk_switch);
+    assert(fir.term_arm(&f, head, 0).target == next->block);
+}
+
+// A range in deferred code gets a separate lowering expansion for each exit.
+fn deferred_nested_range() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] values, bool skip) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer {",
+        "            for (i32 y : values) { count +%= y; }",
+        "        }",
+        "        if (skip) { continue; }",
+        "        count +%= x;",
+        "    }",
+        "    return count;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.declarations.len == 2 && cs.captures.len == 3);
+    assert(cs.captures.items[0].declaration == 1);
+    assert(cs.captures.items[1].declaration == 2 && cs.captures.items[2].declaration == 2);
+    assert(cs.captures.items[1].expansion != cs.captures.items[2].expansion);
+    assert(cs.captures.items[1].occurrence.context != 0);
+    assert(cs.captures.items[1].occurrence.context != cs.captures.items[2].occurrence.context);
+    assert(cs.captures.items[1].occurrence.exit_occurrence !=
+           cs.captures.items[2].occurrence.exit_occurrence);
+    assert(cs.captures.items[1].occurrence.source.line == 5);
+    assert(cs.captures.items[2].occurrence.source.line == 5);
+    u64 mut i = 1;
+    while (i < cs.captures.len) {
+        fir.range_expansion* occurrence = &cs.captures.items[i].occurrence;
+        fir_lower.range_defer_context_candidate* context = defer_context(&cs,
+                                                                          occurrence->context);
+        assert(context->source_node->loc.line == 4 && context->parent == 0);
+        assert(context->exit_occurrence == occurrence->exit_occurrence);
+        assert(context->exit_source.line == occurrence->exit_source.line);
+        i += 1;
+    }
+    assert(cs.captures.items[1].loan.parent == 1 && cs.captures.items[2].loan.parent == 1);
+    cleanup_at(&f, &cs, 1, 7);
+    cleanup_at(&f, &cs, 1, 9);
+    assert(cs.suppressions.len == 0);
+}
+
+// A switch break leaves its case. A later loop break leaves the range body.
+fn switch_and_loop_break() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[16] source = {
+        "fn walk(i32[2] values, i32 mode, bool stop) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        switch (mode) {",
+        "        case 0:",
+        "            count +%= x;",
+        "            break;",
+        "        default:",
+        "            count +%= 1;",
+        "        }",
+        "        if (stop) { break; }",
+        "        count +%= 2;",
+        "    }",
+        "    return count;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.captures.len == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 2);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.body_cleanup) == 2);
+    cleanup_at(&f, &cs, 1, 11);
+    cleanup_at(&f, &cs, 1, 13);
+    u64 mut i = 0;
+    while (i < cs.boundaries.len) {
+        fir.range_boundary* b = &cs.boundaries.items[i].boundary;
+        assert(b->source.line != 7);
+        i += 1;
+    }
+}
+
+// A direct loop break reaches done without an active body loan.
+fn break_done_path() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "fn walk(i32[2] values, bool stop) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer count +%= 1;",
+        "        if (stop) { break; }",
+        "        count +%= x;",
+        "    }",
+        "    count +%= 2;",
+        "    return count;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    cleanup_at(&f, &cs, 1, 5);
+    cleanup_at(&f, &cs, 1, 7);
+    fir.range_boundary* broken = boundary(&cs, 1, fir.range_boundary_kind.loan_exit, 5);
+    assert(fir.block_at(&f, broken->block)->term.kind == fir.term_kind.tk_goto);
+    assert(fir.block_at(&f, broken->block)->term.target !=
+           boundary(&cs, 1, fir.range_boundary_kind.body_entry, 3)->block);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 2);
+}
+
+// Return evaluates its value, runs the body defer, ends the loan, then runs the outer defer.
+fn return_cleanup_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn walk(i32[2] values, i32 mut base) i32 {",
+        "    defer base +%= 10;",
+        "    for (i32 x : values) {",
+        "        defer base +%= 1;",
+        "        return x + base;",
+        "    }",
+        "    return base;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    cleanup_at(&f, &cs, 1, 5);
+    fir.range_boundary* body = boundary(&cs, 1, fir.range_boundary_kind.body_cleanup, 5);
+    fir.range_boundary* outer = boundary(&cs, 1, fir.range_boundary_kind.outer_cleanup, 5);
+    assert(body->position > 1);
+    u32 mut result_at = 0;
+    u32 mut defer_at = 0;
+    u32 mut at = 0;
+    while (at < body->position) {
+        fir.statement* s = fir.block_statement(&f, body->block, at);
+        if (s->loc.line == 5) { result_at = at + 1; }
+        if (s->loc.line == 4 && s->exit_loc.line == 5) { defer_at = at + 1; }
+        at += 1;
+    }
+    assert(result_at > 0 && defer_at > result_at);
+    assert(outer->position < fir.block_statement_count(&f, outer->block));
+    assert(fir.block_statement(&f, outer->block, outer->position)->loc.line == 2);
+    assert(fir.block_at(&f, outer->block)->term.kind == fir.term_kind.tk_return);
+}
+
+// A terminating body has no normal cleanup boundary on its abort edge.
+fn abort_without_cleanup() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn walk(i32[2] values) noreturn {",
+        "    for (i32 x : values) {",
+        "        panic(\"stop\");",
+        "    }",
+        "    while (true) { }",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.captures.len == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.body_entry) == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.body_cleanup) == 0);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 0);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.outer_cleanup) == 0);
+}
+
+// Zero length still captures once. The body entry exists only on the unused true edge.
+fn zero_iterations() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn walk(i32[1] values) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values[0..0]) { count +%= x; }",
+        "    return count;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.captures.len == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.capture) == 1);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.body_entry) == 1);
+    fir.range_boundary* entry = boundary(&cs, 1, fir.range_boundary_kind.body_entry, 3);
+    assert(entry->position == 0 && entry->block != 0);
+    assert(fir.block_statement(&f, entry->block, 0)->kind == fir.stmt_kind.st_live);
+}
+
+// An aborting later defer skips the earlier range without creating a capture.
+fn suppressed_defer() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        for (i32 x : values) { }",
+        "    }",
+        "    defer panic(\"stop\");",
+        "    return;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.declarations.len == 1 && cs.captures.len == 0);
+    assert(cs.suppressions.len == 1);
+    assert(cs.suppressions.items[0].declaration == 1);
+    assert(cs.suppressions.items[0].context != 0);
+    assert(cs.suppressions.items[0].exit_occurrence != 0);
+    assert(cs.suppressions.items[0].source.line == 3);
+    assert(cs.suppressions.items[0].exit_source.line == 6);
+    fir_lower.range_defer_context_candidate* context =
+        defer_context(&cs, cs.suppressions.items[0].context);
+    assert(context->source_node->loc.line == 2 && context->parent == 0);
+    assert(context->exit_occurrence == cs.suppressions.items[0].exit_occurrence);
+    assert(!f.range_source_complete);
+}
+
+// A nested deferred range names the inner context and its outer context.
+fn nested_deferred_context() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        defer { for (i32 x : values) { } }",
+        "    }",
+        "}",
+        "",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.captures.len == 1 && cs.deferred.len == 2);
+    fir.range_expansion* occurrence = &cs.captures.items[0].occurrence;
+    fir_lower.range_defer_context_candidate* inner = defer_context(&cs, occurrence->context);
+    assert(inner->source_node->loc.line == 3 && inner->parent != 0);
+    fir_lower.range_defer_context_candidate* outer = defer_context(&cs, inner->parent);
+    assert(outer->source_node->loc.line == 2 && outer->parent == 0);
+    assert(inner->exit_occurrence == occurrence->exit_occurrence);
+}
+
+// A partial candidate set cannot claim source proof. A damaged gap fails V14.
+fn damaged_candidates() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {"fn walk(i32[2] values) void {",
+                        "    for (i32 x : values) { }", "}"};
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    fir.func mut bad = fir.func_clone(&f);
+    defer fir.func_free(&bad);
+    fir.range_declaration_add(&bad, cs.declarations.items[0]);
+    fir.range_expansion_add(&bad, cs.captures.items[0].occurrence);
+    fir.range_loan_add(&bad, cs.captures.items[0].loan);
+    fir.range_capture_add(&bad, cs.captures.items[0].binding);
+    u64 mut i = 0;
+    while (i < cs.boundaries.len) {
+        fir.range_boundary_add(&bad, cs.boundaries.items[i].boundary);
+        i += 1;
+    }
+    fir_verify.violation mut v = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&bad, &e.rt, &v));
+    bad.range_source_complete = true;
+    assert(fir_verify.find_violation(&bad, &e.rt, &v));
+    bad.range_source_complete = false;
+    u32 block = bad.range_boundaries.items[0].block;
+    u32 old = bad.range_boundaries.items[0].position;
+    bad.range_boundaries.items[0].position = fir.block_statement_count(&bad, block) + 1;
+    assert(fir_verify.find_violation(&bad, &e.rt, &v));
+    bad.range_boundaries.items[0].position = old;
+    bad.range_captures.len = 0;
+    bad.range_supplied_complete = true;
+    bad.range_claim = fir.range_counts(&bad);
+    assert(fir_verify.find_violation(&bad, &e.rt, &v));
+}
+
+fn main() i32 {
+    nested_loans();
+    final_use_tail();
+    continue_and_falloff();
+    deferred_nested_range();
+    switch_and_loop_break();
+    break_done_path();
+    return_cleanup_order();
+    abort_without_cleanup();
+    zero_iterations();
+    println("boundary groups 4 probes 9");
+    capture_repeats();
+    println("capture repeats 8");
+    suppressed_defer();
+    println("suppressed defer proposal");
+    nested_deferred_context();
+    println("nested deferred context");
+    damaged_candidates();
+    println("damaged candidates rejected");
+    return 0;
+}

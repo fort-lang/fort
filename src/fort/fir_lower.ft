@@ -89,6 +89,7 @@ struct scope {
     u32 continue_target;
     u64 defers_first;
     u64 locals_first;
+    u32 range_loan;
 }
 
 // `items[..len]` holds the open scopes, the innermost last.
@@ -109,12 +110,71 @@ struct local_list {
 struct range_capture_candidate {
     u32 declaration;
     u32 expansion;
+    fir.range_expansion occurrence;
+    fir.range_loan loan;
     fir.range_capture binding;
 }
 
 struct range_capture_candidate_vec {
     range_capture_candidate mut@ own items;
     u64 len;
+}
+
+struct range_boundary_candidate {
+    u32 declaration;
+    u32 expansion;
+    fir.range_boundary boundary;
+}
+
+struct range_boundary_candidate_vec {
+    range_boundary_candidate mut@ own items;
+    u64 len;
+}
+
+struct range_suppression_candidate {
+    u32 declaration;
+    u32 context;
+    u32 exit_occurrence;
+    diag.loc source;
+    diag.loc exit_source;
+}
+
+struct range_suppression_candidate_vec {
+    range_suppression_candidate mut@ own items;
+    u64 len;
+}
+
+// A deferred lowering occurrence identifies its source node and enclosing occurrence.
+struct range_defer_context_candidate {
+    u32 id;
+    u32 parent;
+    u32 exit_occurrence;
+    ast.node* source_node;
+    diag.loc exit_source;
+}
+
+struct range_defer_context_candidate_vec {
+    range_defer_context_candidate mut@ own items;
+    u64 len;
+}
+
+/// Inactive source proposals. Only independent source correspondence can publish FIR carriers.
+/// A deferred source node borrows the checked tree. Free the set before that tree.
+struct range_candidate_set {
+    fir.range_declaration_vec declarations;
+    range_capture_candidate_vec captures;
+    range_boundary_candidate_vec boundaries;
+    range_suppression_candidate_vec suppressions;
+    range_defer_context_candidate_vec deferred;
+}
+
+fn range_candidate_set_free(range_candidate_set mut* set) void {
+    del(set->declarations.items);
+    range_capture_candidates_free(&set->captures);
+    del(set->boundaries.items);
+    del(set->suppressions.items);
+    del(set->deferred.items);
+    *set = range_candidate_set{};
 }
 
 /// Releases the inactive range bindings that the test route receives.
@@ -132,6 +192,69 @@ fn range_capture_candidate_add(range_capture_candidate_vec mut* v, range_capture
         u64 cap = fir.grown_capacity(v->items.len,
                                       "fir_lower.range_capture_candidate_add: capacity overflow");
         range_capture_candidate mut@ own bigger = new(range_capture_candidate, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = c;
+    v->len += 1;
+}
+
+fn range_boundary_candidate_add(range_boundary_candidate_vec mut* v,
+                                range_boundary_candidate c) void {
+    if (v->len >= fir.U32_LIMIT) {
+        panic("fir_lower.range_boundary_candidate_add: too many records");
+    }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len,
+                                      "fir_lower.range_boundary_candidate_add: capacity overflow");
+        range_boundary_candidate mut@ own bigger = new(range_boundary_candidate, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = c;
+    v->len += 1;
+}
+
+fn range_suppression_candidate_add(range_suppression_candidate_vec mut* v,
+                                   range_suppression_candidate c) void {
+    if (v->len >= fir.U32_LIMIT) {
+        panic("fir_lower.range_suppression_candidate_add: too many records");
+    }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(
+            v->items.len, "fir_lower.range_suppression_candidate_add: capacity overflow");
+        range_suppression_candidate mut@ own bigger = new(range_suppression_candidate, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = c;
+    v->len += 1;
+}
+
+fn range_defer_context_candidate_add(range_defer_context_candidate_vec mut* v,
+                                     range_defer_context_candidate c) void {
+    if (v->len >= fir.U32_LIMIT) {
+        panic("fir_lower.range_defer_context_candidate_add: too many records");
+    }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len,
+                                      "fir_lower.range_defer_context_candidate_add: overflow");
+        range_defer_context_candidate mut@ own bigger = new(range_defer_context_candidate, cap);
         u64 mut i = 0;
         while (i < v->len) {
             bigger[i] = v->items[i];
@@ -163,8 +286,12 @@ struct lowerer {
     gen.node_ref_vec defers;
     local_list named;
     gen.node_ref_vec range_declarations;
-    range_capture_candidate_vec range_candidates;
+    range_candidate_set range_candidates;
     u32 next_range_expansion;
+    u32 next_defer_context;
+    u32 defer_context;
+    u32 next_exit_occurrence;
+    u32 exit_occurrence;
     u64 floor;
     diag.loc exit_at;
     ast.sym* str_eq;
@@ -234,7 +361,7 @@ fn write_report(report* r, strbuf.str_buf mut* out) void {
 /// releases what it built, leaves *out empty and returns false.
 fn lower_function(check.checker mut* ck, ast.node* decl, fir.func mut* out, report mut* why)
     bool {
-    return lower_function_with_capture_candidates(ck, decl, out, null, why);
+    return lower_function_with_range_candidates(ck, decl, out, null, why);
 }
 
 /// Lowers a function and returns inactive range bindings when `candidates` is non-null.
@@ -243,8 +370,21 @@ fn lower_function_with_capture_candidates(check.checker mut* ck, ast.node* decl,
                                           fir.func mut* out,
                                           range_capture_candidate_vec mut* candidates,
                                           report mut* why) bool {
+    range_candidate_set mut proposed = range_candidate_set{};
+    defer range_candidate_set_free(&proposed);
+    bool ok = lower_function_with_range_candidates(ck, decl, out, &proposed, why);
     if (candidates != null) {
-        *candidates = range_capture_candidate_vec{};
+        *candidates = move(proposed.captures);
+    }
+    return ok;
+}
+
+/// Returns incomplete source proposals outside verified FIR. No proposal proves coverage.
+fn lower_function_with_range_candidates(check.checker mut* ck, ast.node* decl,
+                                        fir.func mut* out, range_candidate_set mut* candidates,
+                                        report mut* why) bool {
+    if (candidates != null) {
+        *candidates = range_candidate_set{};
     }
     *out = fir.func_new(&ck->types, decl->sym, decl->sym->ty);
     lowerer mut lw = lowerer{.ck = ck, .f = out};
@@ -252,7 +392,7 @@ fn lower_function_with_capture_candidates(check.checker mut* ck, ast.node* decl,
     defer gen.refs_free(&lw.defers);
     defer locals_free(&lw.named);
     defer gen.refs_free(&lw.range_declarations);
-    defer range_capture_candidates_free(&lw.range_candidates);
+    defer range_candidate_set_free(&lw.range_candidates);
     prescan(&lw, decl->b);
     zero_owners(&lw);
     // the body is the scope of kind `fn` (spec/fir.md 9.2)
@@ -262,6 +402,7 @@ fn lower_function_with_capture_candidates(check.checker mut* ck, ast.node* decl,
         return false;
     }
     lower_end(&lw, decl->b);
+    range_boundaries_sort(&lw.range_candidates.boundaries);
     if (candidates != null) {
         *candidates = move(lw.range_candidates);
     }
@@ -301,6 +442,24 @@ fn prescan(lowerer mut* lw, ast.node* n) void {
     }
     if (n->kind == ast.ast_kind.k_range_for) {
         gen.refs_push(&lw->range_declarations, n);
+        fir.range_declaration_vec mut* v = &lw->range_candidates.declarations;
+        if (v->len >= fir.U32_LIMIT) {
+            panic("fir_lower.prescan: too many range declarations");
+        }
+        if (v->len == v->items.len) {
+            u64 cap = fir.grown_capacity(v->items.len,
+                                          "fir_lower.prescan: declaration capacity overflow");
+            fir.range_declaration mut@ own bigger = new(fir.range_declaration, cap);
+            u64 mut j = 0;
+            while (j < v->len) {
+                bigger[j] = v->items[j];
+                j += 1;
+            }
+            del(v->items);
+            v->items = move(bigger);
+        }
+        v->items[v->len] = fir.range_declaration{cast(v->len + 1, u32), n->loc};
+        v->len += 1;
     }
     prescan(lw, n->a);
     prescan(lw, n->b);
@@ -417,7 +576,8 @@ fn scope_push(lowerer mut* lw, scope_kind kind, u32 break_target, u32 continue_t
         del(v->items);
         v->items = move(bigger);
     }
-    v->items[v->len] = scope{kind, break_target, continue_target, lw->defers.len, lw->named.len};
+    v->items[v->len] = scope{kind, break_target, continue_target, lw->defers.len,
+                             lw->named.len, 0};
     v->len += 1;
 }
 
@@ -467,6 +627,61 @@ fn append(lowerer mut* lw, fir.statement s) void {
     fir.statement mut marked = s;
     marked.exit_loc = lw->exit_at;
     fir.block_append(lw->f, lw->block, marked);
+}
+
+// The candidate stands at an operation gap. Its order is local to that gap.
+fn range_boundary_record(lowerer mut* lw, u32 loan, fir.range_boundary_kind kind,
+                         diag.loc at) void {
+    u32 mut declaration = 0;
+    u64 mut i = 0;
+    while (i < lw->range_candidates.captures.len) {
+        range_capture_candidate* c = &lw->range_candidates.captures.items[i];
+        if (c->expansion == loan) {
+            declaration = c->declaration;
+            break;
+        }
+        i += 1;
+    }
+    if (declaration == 0) {
+        panic("fir_lower.range_boundary_record: missing capture candidate");
+    }
+    u32 position = fir.block_statement_count(lw->f, lw->block);
+    u32 mut order = 0;
+    i = 0;
+    while (i < lw->range_candidates.boundaries.len) {
+        fir.range_boundary* bd = &lw->range_candidates.boundaries.items[i].boundary;
+        if (bd->block == lw->block && bd->position == position && bd->order >= order) {
+            if (cast(bd->order, u64) >= fir.U32_LIMIT) {
+                panic("fir_lower.range_boundary_record: too many boundaries at one gap");
+            }
+            order = bd->order + 1;
+        }
+        i += 1;
+    }
+    fir.range_boundary bd = fir.range_boundary{loan, kind, lw->block, position, order, at};
+    range_boundary_candidate_add(&lw->range_candidates.boundaries,
+                                 range_boundary_candidate{declaration, loan, bd});
+}
+
+fn range_boundaries_sort(range_boundary_candidate_vec mut* v) void {
+    u64 mut i = 1;
+    while (i < v->len) {
+        range_boundary_candidate current = v->items[i];
+        u64 mut j = i;
+        while (j > 0) {
+            fir.range_boundary* before = &v->items[j - 1].boundary;
+            fir.range_boundary* after = &current.boundary;
+            if (before->block < after->block || (before->block == after->block
+                && (before->position < after->position || (before->position == after->position
+                && before->order <= after->order)))) {
+                break;
+            }
+            v->items[j] = v->items[j - 1];
+            j -= 1;
+        }
+        v->items[j] = current;
+        i += 1;
+    }
 }
 
 // Appends `p = r` to the current block, at `at` and with the index of the current statement.
@@ -646,11 +861,19 @@ fn lower_statements(lowerer mut* lw, ast.node* n) bool {
 fn close_scope(lowerer mut* lw, diag.loc at) bool {
     u64 depth = lw->scopes.len - 1;
     if (!terminated(lw)) {
+        u32 loan = lw->scopes.items[depth].range_loan;
         if (!expand(lw, depth, at)) {
             return false;
         }
         if (!terminated(lw)) {
+            if (loan != 0) {
+                range_boundary_record(lw, loan, fir.range_boundary_kind.body_cleanup, at);
+            }
             mark_dead(lw, depth, at);
+            if (loan != 0) {
+                range_boundary_record(lw, loan, fir.range_boundary_kind.loan_exit, at);
+                range_boundary_record(lw, loan, fir.range_boundary_kind.outer_cleanup, at);
+            }
         }
     }
     scope_pop(lw);
@@ -674,6 +897,43 @@ fn locals_end(lowerer* lw, u64 depth) u64 {
     return lw->named.len;
 }
 
+// A terminating deferred expansion can prevent earlier defers from lowering.
+// These proposals preserve that cause but do not prove source suppression.
+fn range_suppressed(lowerer mut* lw, ast.node* n, u32 context, u32 occurrence,
+                    diag.loc exit_source) void {
+    if (n == null) {
+        return;
+    }
+    if (n->kind == ast.ast_kind.k_compile_if) {
+        range_suppressed(lw, selected_branch(n), context, occurrence, exit_source);
+        return;
+    }
+    if (n->kind == ast.ast_kind.k_range_for) {
+        u32 declaration = range_declaration_id(lw, n);
+        range_suppression_candidate_add(&lw->range_candidates.suppressions,
+                                        range_suppression_candidate{declaration, context,
+                                                                    occurrence, n->loc,
+                                                                    exit_source});
+    }
+    range_suppressed(lw, n->a, context, occurrence, exit_source);
+    range_suppressed(lw, n->b, context, occurrence, exit_source);
+    range_suppressed(lw, n->c, context, occurrence, exit_source);
+    range_suppressed(lw, n->d, context, occurrence, exit_source);
+    u64 mut j = 0;
+    while (j < ast.ast_len(n)) {
+        range_suppressed(lw, ast.ast_child(n, j), context, occurrence, exit_source);
+        j += 1;
+    }
+}
+
+fn next_defer_context(lowerer mut* lw) u32 {
+    if (cast(lw->next_defer_context, u64) >= fir.U32_LIMIT) {
+        panic("fir_lower.next_defer_context: too many deferred expansions");
+    }
+    lw->next_defer_context += 1;
+    return lw->next_defer_context;
+}
+
 // Lowers the deferred statements of the scope at `depth`, the last one first, for the exit at
 // `at` (spec/fir.md 9.5, D7.8). Each is a new lowering whose statements carry `at` as their
 // `exit_loc`, and each statement node in it takes a new index (9.7). While one lowers, the floor
@@ -685,15 +945,38 @@ fn expand(lowerer mut* lw, u64 depth, diag.loc at) bool {
     u64 mut i = defers_end(lw, depth);
     u64 saved_floor = lw->floor;
     diag.loc saved_exit = lw->exit_at;
+    u32 saved_context = lw->defer_context;
+    u32 saved_occurrence = lw->exit_occurrence;
+    if (cast(lw->next_exit_occurrence, u64) >= fir.U32_LIMIT) {
+        panic("fir_lower.expand: too many exit occurrences");
+    }
+    lw->next_exit_occurrence += 1;
+    lw->exit_occurrence = lw->next_exit_occurrence;
+    u32 occurrence = lw->exit_occurrence;
     lw->floor = lw->scopes.len;
     lw->exit_at = at;
     bool mut ok = true;
     while (ok && i > first && !terminated(lw)) {
         i -= 1;
-        ok = lower_stmt(lw, gen.refs_at(&lw->defers, i)->a);
+        ast.node* deferred = gen.refs_at(&lw->defers, i);
+        lw->defer_context = next_defer_context(lw);
+        range_defer_context_candidate_add(&lw->range_candidates.deferred,
+            range_defer_context_candidate{lw->defer_context, saved_context, occurrence,
+                                          deferred, at});
+        ok = lower_stmt(lw, deferred->a);
+    }
+    while (ok && i > first && terminated(lw)) {
+        i -= 1;
+        ast.node* deferred = gen.refs_at(&lw->defers, i);
+        u32 context = next_defer_context(lw);
+        range_defer_context_candidate_add(&lw->range_candidates.deferred,
+            range_defer_context_candidate{context, saved_context, occurrence, deferred, at});
+        range_suppressed(lw, deferred->a, context, occurrence, at);
     }
     lw->floor = saved_floor;
     lw->exit_at = saved_exit;
+    lw->defer_context = saved_context;
+    lw->exit_occurrence = saved_occurrence;
     return ok;
 }
 
@@ -731,13 +1014,21 @@ fn unwind(lowerer mut* lw, ast.node* n, exit_kind x, u64 mut* stop) bool {
     u64 mut depth = lw->scopes.len;
     while (depth > lw->floor) {
         depth -= 1;
+        u32 loan = lw->scopes.items[depth].range_loan;
         if (!expand(lw, depth, n->loc)) {
             return false;
         }
         if (terminated(lw)) {
             return true;
         }
+        if (loan != 0) {
+            range_boundary_record(lw, loan, fir.range_boundary_kind.body_cleanup, n->loc);
+        }
         mark_dead(lw, depth, n->loc);
+        if (loan != 0) {
+            range_boundary_record(lw, loan, fir.range_boundary_kind.loan_exit, n->loc);
+            range_boundary_record(lw, loan, fir.range_boundary_kind.outer_cleanup, n->loc);
+        }
         if (exit_stops_at(x, lw->scopes.items[depth].kind)) {
             *stop = depth;
             return true;
@@ -1189,7 +1480,8 @@ fn range_collection(lowerer mut* lw, ast.node* coll, u32 declaration, u32 expans
         binding.captured = *out;
         binding.original = *out;
         binding.original_present = true;
-        *candidate = range_capture_candidate{declaration, expansion, binding};
+        *candidate = range_capture_candidate{.declaration = declaration, .expansion = expansion,
+                                              .binding = binding};
         return true;
     }
     types.node* ty = lent_type(lw, coll->ty);
@@ -1219,7 +1511,8 @@ fn range_collection(lowerer mut* lw, ast.node* coll, u32 declaration, u32 expans
         binding.original = *out;
         binding.original_present = true;
     }
-    *candidate = range_capture_candidate{declaration, expansion, binding};
+    *candidate = range_capture_candidate{.declaration = declaration, .expansion = expansion,
+                                          .binding = binding};
     return true;
 }
 
@@ -1243,7 +1536,21 @@ fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
     if (!range_collection(lw, n->b, declaration, expansion, &c, &candidate)) {
         return false;
     }
-    range_capture_candidate_add(&lw->range_candidates, candidate);
+    candidate.occurrence = fir.range_expansion{expansion, declaration, lw->defer_context,
+                                                lw->exit_occurrence, n->loc, lw->exit_at};
+    candidate.loan = fir.range_loan{.id = expansion, .expansion = expansion,
+                                     .whole_body = true};
+    u64 mut depth = lw->scopes.len;
+    while (depth > 0) {
+        depth -= 1;
+        if (lw->scopes.items[depth].range_loan != 0) {
+            candidate.loan.parent = lw->scopes.items[depth].range_loan;
+            candidate.loan.parent_present = true;
+            break;
+        }
+    }
+    range_capture_candidate_add(&lw->range_candidates.captures, candidate);
+    range_boundary_record(lw, expansion, fir.range_boundary_kind.capture, n->b->loc);
     types.node* wide = u64_ty(lw);
     u32 i = fir.local_add(lw->f, wide, fir.local_kind.lk_temp, null, n->loc);
     fir.place counter = fir.place_local(i);
@@ -1258,9 +1565,11 @@ fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
     fir.rvalue below = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_lt, index, length_of(lw, c));
     branch(lw, into_temp(lw, bool_ty(lw), below, n->loc), body, done, n->loc);
     lw->block = body;
+    range_boundary_record(lw, expansion, fir.range_boundary_kind.body_entry, n->loc);
     // `x` belongs to the scope of the body: each iteration starts it, and each exit of the body
     // ends it
     scope_push(lw, scope_kind.sc_loop, done, step);
+    lw->scopes.items[lw->scopes.len - 1].range_loan = expansion;
     u32 x = local_of(lw, n->sym);
     live(lw, x, n->name_loc);
     fir.operand element = fir.operand_copy(fir.place_index(lw->f, c, i));
