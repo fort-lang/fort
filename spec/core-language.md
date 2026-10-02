@@ -309,8 +309,10 @@ signature says `own` (D17.13), that `del` (8.2) may free. `own` is part of the t
 and `node*` are different types (`type-system.md` section 8), and it is erased at run time. `own` on
 a non-reference type or on a function-pointer type is an error; a struct or fixed array that
 contains an `own` reference by value is an owning aggregate (below). Ownership is a typing
-discipline, not a linear check: whether every allocation is freed exactly once is not tracked
-(D17.14, D15), and the idiom is `defer del(x);` (6.6).
+discipline with a static proof of temporal storage and allocation obligations (D17.14).
+The proof checks the complete import closure before build-mode transformations (D19.8).
+Its staged delivery preserves existing syntax and runtime behavior (`toolchain.md` 1).
+`defer del(x);` remains a cleanup idiom (6.6).
 
 **Placement (D17.2).** An `own` follows a `*` or an `@` and marks the reference that suffix
 introduces as owning its target; `string`, a reference without a suffix, takes it directly
@@ -592,15 +594,20 @@ indexing on an rvalue struct or array yield rvalues copied through a temporary. 
 lvalue and yields `T*` with the mutability of 3.6, never `own` at its outermost reference (D17.3):
 `&buf` for a `u8 mut@ own buf` is `u8 mut@ own mut*`, a borrowed pointer to an owned slot. `&f` for
 a function `f` is an error, because a function name is already a value. `*p` requires a pointer type
-other than `void*` or a function pointer and yields the pointee. There is no pointer arithmetic:
+other than `void*` or a function pointer and yields the pointee.
+The proof requires live source storage for fort access (D17.14). There is no pointer arithmetic:
 `p + 1`, `p++` and `p[i]` are errors (D10.4); the only ways to obtain a pointer are `null`, `&`,
-`new`, `.ptr`, `cast`, a function name and calls, and only `new`, a `cast` to an `own` type and
-calls yield `own` pointers (3.9). `null` is the zero pointer and function-pointer value (D10.5); it
-has no type of its own: it takes its type from context and is an error where no pointer, `void*` or
-function-pointer type is expected. `== null` and `!= null` are allowed on pointers, `void*` and
-function pointers only; spans and strings compare `.len` or `.ptr`. Dereferencing `null`, and
-returning the address of a local or a span of a local array, are undefined behavior and are not
-diagnosed.
+`new`, `.ptr`, `cast`, a function name and calls.
+Only `new`, ownership-preserving casts, and owning calls yield `own` pointers (3.9).
+`null` is the zero pointer and function-pointer value (D10.5).
+It has no type of its own. It takes its type from context.
+It is an error where no pointer, `void*`, or function-pointer type is expected.
+`== null` and `!= null` are allowed on pointers, `void*`, and function pointers only.
+Spans and strings compare `.len` or `.ptr`.
+Null dereference and foreign dangling-pointer access remain undefined behavior (D10.7, D17.13).
+The ownership proof rejects returned or retained borrows that outlive local or by-value parameter
+storage (D6.7, D17.14). This includes inline aggregate fields and local-array spans.
+Ending a borrowed parameter's slot does not end its symbolic caller storage.
 
 ```fort
 i32* a = &(x + 1);        // error: '&' requires an lvalue
@@ -659,9 +666,11 @@ error); a missing `lo` is 0 and a missing `hi` is the length. The result is a sp
 a view: never `own` at its outermost reference, while `own` marks inside the element type stay
 (`kids[1..]` on a `node mut* own mut@ own kids` is `node mut* own mut@`) (D17.3). The runtime
 check is `0 <= lo <= hi <= len` relative to the operand, not the original allocation; the result
-may be empty. `p[lo..hi]` on a `T*` or `T mut*` yields a `T@` or `T mut@` with no check: this
-is the explicit unsafe escape for foreign memory, and a range beyond the object is undefined
-behavior (D10.7). Only the two-bound form exists for pointers: `p[lo..]`, `p[..hi]` and `p[..]`
+may be empty. `p[lo..hi]` on a `T*` or `T mut*` yields a `T@` or `T mut@` without a runtime
+range check (D6.9). For fort storage, prove a live source and sufficient extent for the range.
+Foreign storage uses D17.13 trust. A range beyond a foreign object remains undefined behavior.
+This operation supplies no proof exemption. Only the two-bound form exists for pointers:
+`p[lo..]`, `p[..hi]` and `p[..]`
 are errors because a pointer has no length (D10.4). No span can be taken of a `void*`.
 
 ```fort
@@ -676,7 +685,7 @@ i32@ own o = t[..];       // error: taking a span yields a view; cannot add own
 u8 mut@ k = new(u8, 8)[..4];  // error: owning temporary would leak (D17.8)
 i32@ v = t[2..1];         // runtime error: span bounds 2..1 out of range for length 2
 i32 z = p[0];             // error: pointers cannot be indexed
-i32@ f = p[0..n];         // ok: unchecked view of n elements at p
+i32@ f = p[0..n];         // requires fort extent proof or trusted foreign storage
 i32@ h = p[0..];          // error: a pointer has no length
 i32@ g = vp[0..n];        // error: cannot take a span of a 'void*'
 ```
@@ -693,6 +702,12 @@ overloading or variable tails. A C extern with `...` accepts arguments after its
 qualified name `mod.f` are callable; calling a null function pointer is undefined behavior. A
 call statement to a `noreturn` function is a terminating statement (7.3). Arguments and results
 are passed by value (7.1).
+
+The proof infers summaries from available fort bodies (D19.8).
+It substitutes actual source and alias relations before applying ordered effects.
+An address of an owning output slot keeps its overwrite and cleanup obligations (D17.11, D17.14).
+An aggregate result uses caller storage, which can alias arguments or globals (`fir.md` 14).
+Foreign calls and results use the implicit trust boundary of D17.13.
 
 ```fort
 add(1);                   // error: 'add' takes 2 arguments, 1 given
@@ -935,7 +950,9 @@ checked builds the store traps with `overwriting owned value` when `lv` currentl
 non-zero value, because the old allocation would leak (D17.11, D11.4); the check runs after `e`
 is evaluated, immediately before the store, and is reported at the `=` token. `del` and `move` leave
 zero behind, so `del(v.data); v.data = new(...)` and `a = move(b)` after `move(a)` pass; release
-builds store without checking; assignments of owning aggregates are not checked field by field.
+builds store without runtime checking. Owning aggregate assignments have no fieldwise runtime check.
+The static proof separately checks previous ownership obligations in all build modes (D17.11).
+It checks each owning leaf after right-side effects, including aliased or nested destinations.
 
 ```fort
 i32 x = 1;
@@ -947,7 +964,7 @@ a[i] = f();               // a[i] is addressed and bounds-checked before f() run
 d++;                      // error: '++' on float type f64
 node mut* own mut h = null;
 h = new(node);            // ok: 'h' was null
-h = new(node);            // runtime error in checked builds: overwriting owned value
+h = new(node);            // proof error: the previous allocation would be lost
 h = k;                    // error: copying own lvalue 'k' needs move(k)
 del(h);
 h = move(k);              // ok: 'h' was emptied by del
@@ -1009,6 +1026,7 @@ inside the body, including operations through aliases. The checker permits a for
 ownership operation only when it proves that the operation preserves the collection storage.
 Element writes remain legal if they do not invalidate the collection storage.
 A loop that changes its collection storage uses `while`.
+The loan lasts for the whole loop body. Local last-use reasoning does not shorten it (D17.10).
 `T` is the element type without its outermost `own`, and an `own` range variable is an error.
 Moving an element out is explicit,
 `move(kids[i])` in an index loop. A range over elements that are owning aggregates (3.9) is an
@@ -1349,11 +1367,14 @@ mutability: an `own` pointer, `void* own`, `own` span or `string own`, as an lva
 rvalue (D17.9, D10.3). On an lvalue, `del` empties the operand as `move` does (3.9), so the
 binding need not be `mut` but a level reached through `*p`, `p->f` or `s[i]` must be; on an
 rvalue it only frees. `del(null)` (the literal adopts `void* own`) and `del` of a zero span or
-string are no-ops, so `del(buf); del(buf);` frees once and a use after `del` dereferences
-`null`. `del` is shallow:
+string are no-ops, so `del(buf); del(buf);` frees once.
+Zero-value inspections remain legal. The proof rejects a proved empty-owner dereference (D17.9).
+A zero-element allocation still requires release or transfer. Its zero length does not mean empty.
+`del` is shallow:
 `del(kids)` on a `node mut* own mut@ own` frees the slots, not the nodes, and `del` of a struct
-or
-array is an error. A view, a sub-span, a `.ptr`, a stack address, a literal and a `string` that
+or array is an error. Release or transfer live owned descendants before their container release
+(D17.7).
+A view, a sub-span, a `.ptr`, a stack address, a literal and a `string` that
 is not `own` are compile errors, because none of them has an `own` type. Allocations have no
 header, so `new`/`del` and C `malloc`/`free` are interchangeable, and C memory is owned when its
 `extern` says `own` (D17.13).
@@ -1447,6 +1468,6 @@ println(str.dup("x"));                      // error: owning temporary would lea
 A number of familiar features are deliberately absent from v1: generics, unions, methods,
 closures, variadic fort function definitions, variadic function-pointer types, overloading,
 visibility modifiers, type aliases, labeled `break`, string
-`switch`, linear ownership (compile-time detection of leaks and of use after `move`, D17.14) and
-others. D15 in `decisions.md` is the authoritative list; it names each feature with
+`switch` and others. The ownership proof belongs to v1 (D17.14, D19.8).
+D15 in `decisions.md` is the authoritative deferred-feature list; it names each feature with
 the idiom to use instead, and this document does not repeat it.
