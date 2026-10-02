@@ -1,0 +1,803 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| fresh identities and failed allocation rollback
+//| copy and move boundaries
+//| release and replacement boundaries
+//| nested and residual owners remain live
+//| address and storage boundaries
+//| service refusals preserve state
+//| owner facts and local paths require proof
+//| event identities preserve block positions
+//| delegated failures keep mapped identities
+/// Tests failed local effects and state rollback.
+import ownership_api;
+import ownership_local_env;
+import ownership_events;
+import ownership_keys;
+import ownership_limits;
+import ownership_state;
+import ownership_transfer;
+
+struct budget_probe {
+    ownership_limits.meter mut* meter;
+    u64 calls;
+}
+
+fn refuse_third_charge(void mut* opaque, ownership_api.charge_request* req)
+    ownership_api.charge_result {
+    budget_probe mut* probe = cast(opaque, budget_probe mut*);
+    probe->calls += 1;
+    if (probe->calls == 3 || probe->calls == 6) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.limit.present = true;
+        out.limit.category = ownership_api.limit_category.w;
+        out.limit.scope = ownership_api.limit_scope.computation;
+        out.limit.work = req->work;
+        out.limit.used = 2;
+        out.limit.bound = 2;
+        out.limit.attempted = 1;
+        out.limit.operation = req->operation;
+        out.limit.source = req->source;
+        return out;
+    }
+    return ownership_limits.callback(cast(probe->meter, void mut*), req);
+}
+
+fn ok(ownership_api.proof_status result) void {
+    assert(ownership_api.successful(result));
+}
+
+fn bad(ownership_api.proof_status result) void {
+    assert(!ownership_api.successful(result));
+    assert(result.failed);
+}
+
+fn no_change(ownership_local_env.env* e, ownership_state.state* before) void {
+    assert(ownership_state.equal(&e->state, before));
+}
+
+fn owner(ownership_local_env.env* e, u32 key, u32 slot) void {
+    u64 index = ownership_state.allocation_index(&e->state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, key));
+    assert(index != ownership_state.U64_MAX);
+    assert(e->state.allocations[index].obligation);
+    assert(ownership_transfer.same_place(e->state.allocations[index].owner.place,
+        ownership_local_env.place(slot)));
+}
+
+fn source(ownership_local_env.env* e, u32 key)
+    ownership_api.source_fact {
+    u64 index = ownership_state.source_index(&e->state,
+        ownership_local_env.id(ownership_api.entity_kind.source, key));
+    assert(index != ownership_state.U64_MAX);
+    return e->state.sources[index];
+}
+
+fn allocation_request(ownership_local_env.env mut* e, u32 slot, u32 key,
+    u32 source_key, i64 length, ownership_api.borrow_relation@ borrows)
+    ownership_transfer.request {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.allocation, slot, slot);
+    r.allocation = ownership_local_env.allocation(key, 100, slot, length);
+    r.fresh_source = ownership_local_env.source(source_key,
+        ownership_api.source_kind.heap, r.allocation.key);
+    r.value = ownership_local_env.reference(key, r.fresh_source.key, borrows);
+    return r;
+}
+
+fn fresh_identity() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 1, 11, 1));
+    ok(ownership_local_env.release(&e, 1, true));
+    ok(ownership_local_env.alloc(&e, 1, 2, 12, 1));
+    assert(source(&e, 11).validity == ownership_api.validity_kind.released);
+    assert(source(&e, 12).validity == ownership_api.validity_kind.live);
+    assert(e.state.allocations[0].site.ordinal == e.state.allocations[1].site.ordinal);
+    assert(e.state.allocations[0].key.ordinal != e.state.allocations[1].key.ordinal);
+    owner(&e, 2, 1);
+    ok(ownership_local_env.release(&e, 1, true));
+    ownership_local_env.free(&e);
+}
+
+fn duplicate_allocation_rolls_back() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 3, 13, 1));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.entity_id new_source = ownership_local_env.id(
+        ownership_api.entity_kind.source, 14);
+    ownership_api.borrow_relation[1] borrows = {
+        ownership_local_env.borrow(new_source, 4, ownership_local_env.place(2))};
+    ownership_transfer.request mut r = allocation_request(&e, 2, 3, 14, 1, borrows[..]);
+    bad(ownership_local_env.apply(&e, &r));
+    no_change(&e, &before);
+    assert(ownership_state.source_index(&e.state, new_source) == ownership_state.U64_MAX);
+    assert(e.state.sources_len == 1 && e.state.allocations_len == 1);
+    assert(e.counts.last_kind == ownership_api.event_kind.incomplete_proof);
+    ownership_state.free(&before);
+    ok(ownership_local_env.release(&e, 1, true));
+    ownership_local_env.free(&e);
+}
+
+fn invalid_allocation_facts() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.entity_id key = ownership_local_env.id(
+        ownership_api.entity_kind.source, 15);
+    ownership_api.borrow_relation[1] borrows = {
+        ownership_local_env.borrow(key, 5, ownership_local_env.place(1))};
+    ownership_transfer.request mut negative = allocation_request(
+        &e, 1, 5, 15, -1, borrows[..]);
+    bad(ownership_local_env.apply(&e, &negative));
+    assert(e.state.allocations_len == 0 && e.state.sources_len == 0);
+    ownership_transfer.request mut mismatch = allocation_request(
+        &e, 1, 5, 15, 0, borrows[..]);
+    mismatch.fresh_source.allocation = ownership_local_env.id(
+        ownership_api.entity_kind.allocation, 99);
+    bad(ownership_local_env.apply(&e, &mismatch));
+    assert(e.state.allocations_len == 0 && e.state.sources_len == 0);
+    ownership_transfer.request mut empty_borrow = allocation_request(
+        &e, 1, 5, 15, 0, borrows[..]);
+    ownership_api.borrow_relation@ none = {};
+    empty_borrow.value.borrows = none;
+    bad(ownership_local_env.apply(&e, &empty_borrow));
+    assert(e.state.allocations_len == 0 && e.state.sources_len == 0);
+    ownership_local_env.free(&e);
+}
+
+fn copy_and_move_boundaries() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 6, 16, 2));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    bad(ownership_local_env.copy(&e, 1, 2, true));
+    no_change(&e, &before);
+    assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    ok(ownership_local_env.copy(&e, 1, 2, false));
+    ok(ownership_local_env.move_owner(&e, 1, 1));
+    owner(&e, 6, 1);
+    assert(e.state.allocations[0].history.len == 1);
+    assert(source(&e, 16).validity == ownership_api.validity_kind.live);
+    ok(ownership_local_env.move_owner(&e, 1, 3));
+    owner(&e, 6, 3);
+    ok(ownership_local_env.move_owner(&e, 1, 4));
+    u64 index = ownership_transfer.contents_index(&e.state, ownership_local_env.place(4));
+    assert(index != ownership_transfer.U64_MAX);
+    assert(e.state.contents[index].owner_empty);
+    assert(e.state.allocations[0].history.len == 2);
+    ok(ownership_local_env.release(&e, 3, true));
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn lost_and_unknown_copy() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 7, 17, 1));
+    ok(ownership_local_env.copy(&e, 1, 2, false));
+    ok(ownership_local_env.release(&e, 1, true));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    bad(ownership_local_env.copy(&e, 2, 3, false));
+    no_change(&e, &before);
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn release_needs_descendants() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 8, 18, 1));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status result = ownership_local_env.release(&e, 1, false);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    owner(&e, 8, 1);
+    assert(source(&e, 18).validity == ownership_api.validity_kind.live);
+    ownership_state.free(&before);
+    ok(ownership_local_env.release(&e, 1, true));
+    ownership_local_env.free(&e);
+}
+
+fn assignment_reads_only_new_value() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 9, 19, 1));
+    ok(ownership_local_env.copy(&e, 1, 2, false));
+    ok(ownership_local_env.release(&e, 1, true));
+    assert(source(&e, 19).validity == ownership_api.validity_kind.released);
+    ok(ownership_local_env.assign_empty(&e, 2));
+    u64 index = ownership_transfer.contents_index(&e.state, ownership_local_env.place(2));
+    assert(index != ownership_transfer.U64_MAX);
+    assert(e.state.contents[index].borrows.len == 0);
+    ownership_api.borrow_relation[1] stale = {
+        ownership_local_env.borrow(ownership_local_env.id(
+            ownership_api.entity_kind.source, 19), 90, ownership_local_env.place(2))};
+    ownership_transfer.request mut r = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 2, 2);
+    r.value = ownership_local_env.reference(90, stale[0].source, stale[..]);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    bad(ownership_local_env.apply(&e, &r));
+    no_change(&e, &before);
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn incomplete_reference_facts() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 91, 92, 2));
+    u64 index = ownership_transfer.contents_index(&e.state, ownership_local_env.place(1));
+    assert(index != ownership_transfer.U64_MAX);
+    ownership_api.borrow_relation[1] mut incomplete_borrow = {
+        e.state.contents[index].borrows[0]};
+    incomplete_borrow[0].representation_complete = false;
+    ownership_transfer.request mut r = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 2, 2);
+    r.value = ownership_local_env.reference(93, incomplete_borrow[0].source,
+        incomplete_borrow[..]);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status mut result = ownership_local_env.apply(&e, &r);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    ownership_api.borrow_relation[1] valid_borrow = {
+        e.state.contents[index].borrows[0]};
+    ownership_transfer.request mut unknown_extent = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 2, 2);
+    unknown_extent.value = ownership_local_env.reference(94, valid_borrow[0].source,
+        valid_borrow[..]);
+    unknown_extent.value.span_length.kind = ownership_api.fact_kind.unknown;
+    ok(ownership_local_env.apply(&e, &unknown_extent));
+    before = ownership_state.clone(&e.state);
+    result = ownership_local_env.use(&e, 2);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    ok(ownership_local_env.release(&e, 1, true));
+    ownership_local_env.free(&e);
+}
+
+fn nested_owner_blocks_whole_slot() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_local_env.add_stack(&e, 70);
+    ownership_api.projection[1] mut projections = {};
+    projections[0].kind = ownership_api.projection_kind.field;
+    projections[0].field = 1;
+    ownership_api.allocation_fact mut child = ownership_local_env.allocation(71, 100, 1, 1);
+    child.owner.place.projections = projections[..];
+    ownership_api.operation_position at = ownership_api.operation_position{};
+    ownership_api.source_position origin = ownership_api.source_position{};
+    assert(ownership_state.add_allocation(&e.state, &e.service, child, at, origin).applied);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    bad(ownership_local_env.assign_empty(&e, 1));
+    no_change(&e, &before);
+    bad(ownership_local_env.dead(&e, 1, 70, true, false));
+    no_change(&e, &before);
+    assert(e.state.allocations[0].obligation);
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn residual_owner_blocks_other_slot() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.allocation_fact mut possible = ownership_local_env.allocation(72, 100, 1, 1);
+    possible.owner.place.residual = true;
+    ownership_api.operation_position at = ownership_api.operation_position{};
+    ownership_api.source_position origin = ownership_api.source_position{};
+    assert(ownership_state.add_allocation(&e.state, &e.service, possible, at, origin).applied);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    bad(ownership_local_env.assign_empty(&e, 2));
+    no_change(&e, &before);
+    assert(e.counts.last_kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.counts.last_evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(!e.counts.last_witness_validated);
+    assert(e.state.allocations[0].obligation);
+    assert(e.state.allocations[0].owner.place.residual);
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn owner_reference_facts() void {
+    u32 mut flaw = 0;
+    while (flaw < 4) {
+        ownership_local_env.env mut e = ownership_local_env.env{};
+        ownership_local_env.init(&e);
+        ok(ownership_local_env.alloc(&e, 1, 80, 81, 1));
+        u64 contents = ownership_transfer.contents_index(&e.state,
+            ownership_local_env.place(1));
+        assert(contents != ownership_transfer.U64_MAX);
+        ownership_api.borrow_relation[1] mut broken = {
+            e.state.contents[contents].borrows[0]};
+        if (flaw == 0) {
+            e.state.contents[contents].kind = ownership_api.contents_kind.unknown;
+        } else if (flaw == 1) {
+            broken[0].representation_complete = false;
+            e.state.contents[contents].borrows = broken[..];
+        } else if (flaw == 2) {
+            e.state.sources[0].key = ownership_local_env.id(
+                ownership_api.entity_kind.source, 99);
+        } else {
+            e.state.sources[0].allocation = ownership_local_env.id(
+                ownership_api.entity_kind.allocation, 99);
+        }
+        ownership_state.state mut before = ownership_state.clone(&e.state);
+        ownership_api.proof_status mut result = ownership_local_env.move_owner(&e, 1, 2);
+        bad(result);
+        assert(result.kind == ownership_api.proof_kind.incomplete);
+        no_change(&e, &before);
+        result = ownership_local_env.release(&e, 1, true);
+        bad(result);
+        assert(result.kind == ownership_api.proof_kind.incomplete);
+        no_change(&e, &before);
+        owner(&e, 80, 1);
+        ownership_state.free(&before);
+        ownership_local_env.free(&e);
+        flaw += 1;
+    }
+    ownership_local_env.env mut exact = ownership_local_env.env{};
+    ownership_local_env.init(&exact);
+    ok(ownership_local_env.alloc(&exact, 1, 84, 85, 1));
+    ownership_state.state mut before = ownership_state.clone(&exact.state);
+    ownership_api.proof_status mut result = ownership_local_env.assign_empty(&exact, 1);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.complete);
+    assert(exact.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    assert(exact.counts.last_evidence == ownership_api.evidence_kind.unconditional);
+    assert(exact.counts.last_witness_validated);
+    no_change(&exact, &before);
+    exact.state.allocations[0].count.zero = true;
+    ownership_state.state mut uncertain = ownership_state.clone(&exact.state);
+    result = ownership_local_env.assign_empty(&exact, 1);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    assert(exact.counts.last_evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(!exact.counts.last_witness_validated);
+    no_change(&exact, &uncertain);
+    ownership_state.free(&uncertain);
+    exact.state.allocations[0].count.zero = false;
+    ownership_state.free(&before);
+    ok(ownership_local_env.release(&exact, 1, true));
+    ownership_local_env.free(&exact);
+}
+
+fn unresolved_destinations() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 82, 83, 1));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.projection[1] mut projections = {};
+    projections[0].kind = ownership_api.projection_kind.dereference;
+    ownership_transfer.request mut r = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 2, 2);
+    r.value = ownership_local_env.empty_value();
+    r.destination.projections = projections[..];
+    ownership_api.proof_status mut result = ownership_local_env.apply(&e, &r);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    projections[0].kind = ownership_api.projection_kind.captured_index;
+    r = ownership_local_env.req(&e, ownership_transfer.action.assignment, 2, 2);
+    r.value = ownership_local_env.empty_value();
+    r.destination.projections = projections[..];
+    result = ownership_local_env.apply(&e, &r);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    r = ownership_local_env.req(&e, ownership_transfer.action.assignment, 2, 2);
+    r.value = ownership_local_env.empty_value();
+    r.direct_destination_proved = false;
+    result = ownership_local_env.apply(&e, &r);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    ok(ownership_local_env.release(&e, 1, true));
+    ownership_local_env.free(&e);
+}
+
+fn event_map_refusals() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_transfer.request mut missing = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 1);
+    missing.value = ownership_local_env.empty_value();
+    missing.operation.block = 3;
+    ownership_api.proof_status mut result = ownership_local_env.apply(&e, &missing);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    assert(result.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(e.counts.charges == 0 && e.counts.events == 0);
+    assert(e.state.contents_len == 0);
+    ownership_transfer.request mut duplicate = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 1);
+    duplicate.value = ownership_local_env.empty_value();
+    e.event_bindings[1].key = e.event_bindings[0].key;
+    result = ownership_local_env.apply(&e, &duplicate);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    assert(result.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(e.counts.charges == 0 && e.counts.events == 0);
+    assert(e.state.contents_len == 0);
+    ownership_local_env.free(&e);
+    u32 mut guard = 0;
+    while (guard < 5) {
+        ownership_local_env.env mut case_env = ownership_local_env.env{};
+        ownership_local_env.init(&case_env);
+        ownership_transfer.request mut r = ownership_local_env.req(&case_env,
+            ownership_transfer.action.assignment, 1, 1);
+        r.value = ownership_local_env.empty_value();
+        if (guard == 0) { r.event_bindings = case_env.event_bindings[..0]; }
+        else if (guard == 1) { r.event_map_complete_proved = false; }
+        else if (guard == 2) {
+            case_env.event_bindings[0].key.kind = ownership_api.entity_kind.slot;
+        } else if (guard == 3) {
+            case_env.event_bindings[0].key.function.instance = 1;
+        } else { r.operation.terminator = true; }
+        ownership_api.proof_status refused = ownership_local_env.apply(&case_env, &r);
+        bad(refused);
+        assert(refused.kind == ownership_api.proof_kind.incomplete);
+        assert(refused.terminal.reason ==
+            ownership_api.incomplete_reason.missing_correspondence);
+        assert(case_env.counts.charges == 0 && case_env.counts.events == 0);
+        assert(case_env.state.contents_len == 0);
+        ownership_local_env.free(&case_env);
+        guard += 1;
+    }
+    ownership_local_env.env mut repeated = ownership_local_env.env{};
+    ownership_local_env.init(&repeated);
+    ownership_transfer.request unused = ownership_local_env.req(&repeated,
+        ownership_transfer.action.assignment, 1, 1);
+    ownership_transfer.request mut r = ownership_local_env.req(&repeated,
+        ownership_transfer.action.assignment, 1, 1);
+    r.value = ownership_local_env.empty_value();
+    repeated.event_bindings[1].operation = unused.operation;
+    ownership_api.proof_status refusal = ownership_local_env.apply(&repeated, &r);
+    bad(refusal);
+    assert(refusal.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(repeated.counts.charges == 0 && repeated.counts.events == 0);
+    assert(repeated.state.contents_len == 0);
+    ownership_local_env.free(&repeated);
+}
+
+fn duplicate_position_guard() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_transfer.request first = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 1);
+    ownership_transfer.request second = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 1);
+    ownership_transfer.request mut current = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 1);
+    current.value = ownership_local_env.empty_value();
+    e.event_bindings[1].operation = first.operation;
+    assert(ownership_keys.operation(second.operation, current.operation) != 0);
+    assert(ownership_keys.operation(e.event_bindings[2].operation, current.operation) == 0);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status result = ownership_local_env.apply(&e, &current);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    assert(result.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(e.counts.charges == 0 && e.counts.events == 0);
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn block_event_identity() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_transfer.request mut first = ownership_local_env.req(&e,
+        ownership_transfer.action.copy, 1, 2);
+    first.operation.block = 0;
+    first.operation.operation = 0;
+    first.source_position.module = 7;
+    first.source_position.file = 8;
+    first.source_position.line = 10;
+    first.source_position.col = 3;
+    first.source_position.end_line = 11;
+    first.source_position.end_col = 4;
+    e.event_bindings[0].operation = first.operation;
+    ownership_transfer.request mut second = ownership_local_env.req(&e,
+        ownership_transfer.action.copy, 1, 2);
+    second.operation.block = 1;
+    second.operation.operation = 0;
+    second.source_position.module = 7;
+    second.source_position.file = 8;
+    second.source_position.line = 20;
+    e.event_bindings[1].operation = second.operation;
+    first.event_bindings = e.event_bindings[..e.event_bindings_len];
+    ownership_api.limit_table limits = ownership_limits.production();
+    ownership_events.store mut events = ownership_events.store{};
+    assert(ownership_events.bind(&events, &limits, &e.service));
+    ownership_api.proof_status first_result = ownership_local_env.apply(&e, &first);
+    ownership_api.proof_status second_result = ownership_local_env.apply(&e, &second);
+    bad(first_result);
+    bad(second_result);
+    assert(first_result.kind == ownership_api.proof_kind.incomplete);
+    assert(second_result.kind == ownership_api.proof_kind.incomplete);
+    assert(events.len == 2);
+    assert(ownership_events.at(&events, 0)->key.ordinal !=
+        ownership_events.at(&events, 1)->key.ordinal);
+    assert(ownership_events.at(&events, 0)->operation.block == 0);
+    assert(ownership_events.at(&events, 1)->operation.block == 1);
+    assert(ownership_events.at(&events, 0)->source.module == 7);
+    assert(ownership_events.at(&events, 0)->source.file == 8);
+    assert(ownership_events.at(&events, 0)->source.line == 10);
+    assert(ownership_events.at(&events, 0)->source.col == 3);
+    assert(ownership_events.at(&events, 0)->source.end_line == 11);
+    assert(ownership_events.at(&events, 0)->source.end_col == 4);
+    assert(ownership_events.at(&events, 1)->source.line == 20);
+    assert(ownership_events.at(&events, 0)->witnesses[0].key.ordinal !=
+        ownership_events.at(&events, 1)->witnesses[0].key.ordinal);
+    ownership_events.free(&events);
+    ownership_local_env.free(&e);
+}
+
+fn unknown_owning_assignment() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_transfer.request mut r = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 1);
+    r.destination_owns = true;
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status result = ownership_local_env.apply(&e, &r);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    assert(e.counts.last_kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.counts.last_evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(!e.counts.last_witness_validated);
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn delegated_allocation_events() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ok(ownership_local_env.alloc(&e, 1, 90, 91, 1));
+    ownership_api.entity_id first_source = ownership_local_env.id(
+        ownership_api.entity_kind.source, 92);
+    ownership_api.entity_id second_source = ownership_local_env.id(
+        ownership_api.entity_kind.source, 93);
+    ownership_api.borrow_relation[1] first_borrow = {
+        ownership_local_env.borrow(first_source, 90, ownership_local_env.place(2))};
+    ownership_api.borrow_relation[1] second_borrow = {
+        ownership_local_env.borrow(second_source, 90, ownership_local_env.place(3))};
+    ownership_transfer.request mut first = allocation_request(&e, 2, 90, 92, 1,
+        first_borrow[..]);
+    ownership_transfer.request mut second = allocation_request(&e, 3, 90, 93, 1,
+        second_borrow[..]);
+    first.operation.block = 0;
+    first.operation.operation = 0;
+    second.operation.block = 1;
+    second.operation.operation = 0;
+    e.event_bindings[1].operation = first.operation;
+    e.event_bindings[2].operation = second.operation;
+    first.event_bindings = e.event_bindings[..e.event_bindings_len];
+    ownership_api.limit_table limits = ownership_limits.production();
+    ownership_events.store mut events = ownership_events.store{};
+    assert(ownership_events.bind(&events, &limits, &e.service));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status first_result = ownership_local_env.apply(&e, &first);
+    ownership_api.proof_status second_result = ownership_local_env.apply(&e, &second);
+    bad(first_result);
+    bad(second_result);
+    assert(first_result.kind == ownership_api.proof_kind.incomplete);
+    assert(second_result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    assert(events.len == 2);
+    assert(ownership_events.at(&events, 0)->operation.block == 0);
+    assert(ownership_events.at(&events, 1)->operation.block == 1);
+    assert(ownership_events.at(&events, 0)->key.ordinal !=
+        ownership_events.at(&events, 1)->key.ordinal);
+    assert(ownership_state.source_index(&e.state, first_source) == ownership_state.U64_MAX);
+    assert(ownership_state.source_index(&e.state, second_source) == ownership_state.U64_MAX);
+    ownership_state.free(&before);
+    ownership_events.free(&events);
+    ownership_local_env.free(&e);
+}
+
+fn delegated_budget_events() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.entity_id first_source = ownership_local_env.id(
+        ownership_api.entity_kind.source, 94);
+    ownership_api.entity_id second_source = ownership_local_env.id(
+        ownership_api.entity_kind.source, 95);
+    ownership_api.borrow_relation[1] first_borrow = {
+        ownership_local_env.borrow(first_source, 94, ownership_local_env.place(1))};
+    ownership_api.borrow_relation[1] second_borrow = {
+        ownership_local_env.borrow(second_source, 95, ownership_local_env.place(2))};
+    ownership_transfer.request mut first = allocation_request(&e, 1, 94, 94, 1,
+        first_borrow[..]);
+    ownership_transfer.request mut second = allocation_request(&e, 2, 95, 95, 1,
+        second_borrow[..]);
+    first.operation.block = 0;
+    first.operation.operation = 0;
+    second.operation.block = 1;
+    second.operation.operation = 0;
+    e.event_bindings[0].operation = first.operation;
+    e.event_bindings[1].operation = second.operation;
+    first.event_bindings = e.event_bindings[..e.event_bindings_len];
+    ownership_api.limit_table limits = ownership_limits.production();
+    ownership_events.store mut events = ownership_events.store{};
+    assert(ownership_events.bind(&events, &limits, &e.service));
+    budget_probe mut probe = budget_probe{};
+    probe.meter = &events.budget;
+    e.service.budget_context = cast(&probe, void mut*);
+    e.service.budget = refuse_third_charge;
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status first_result = ownership_local_env.apply(&e, &first);
+    ownership_api.proof_status second_result = ownership_local_env.apply(&e, &second);
+    bad(first_result);
+    bad(second_result);
+    assert(first_result.kind == ownership_api.proof_kind.incomplete);
+    assert(second_result.kind == ownership_api.proof_kind.incomplete);
+    assert(first_result.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(second_result.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(probe.calls == 6);
+    no_change(&e, &before);
+    assert(events.len == 2);
+    assert(ownership_events.at(&events, 0)->kind == ownership_api.event_kind.work_failure);
+    assert(ownership_events.at(&events, 1)->kind == ownership_api.event_kind.work_failure);
+    assert(ownership_events.at(&events, 0)->key.ordinal !=
+        ownership_events.at(&events, 1)->key.ordinal);
+    u64 mut index = 0;
+    while (index < events.len) {
+        ownership_api.event_descriptor* stored = ownership_events.at(&events, index);
+        assert(stored->limit.present);
+        assert(stored->limit.category == ownership_api.limit_category.w);
+        assert(stored->limit.scope == ownership_api.limit_scope.computation);
+        assert(stored->limit.work == ownership_api.work_kind.transfer);
+        assert(stored->limit.used == 2 && stored->limit.bound == 2);
+        assert(stored->limit.attempted == 1);
+        assert(ownership_keys.operation(stored->limit.operation, stored->operation) == 0);
+        assert(ownership_keys.source(stored->limit.source, stored->source) == 0);
+        assert(stored->operation.block == cast(index, u32) &&
+            stored->operation.operation == 0);
+        assert(stored->source.line == cast(index + 1, u32));
+        index += 1;
+    }
+    ownership_state.free(&before);
+    ownership_events.free(&events);
+    ownership_local_env.free(&e);
+}
+
+fn later_charge_rollback() void {
+    u32 mut kind = 0;
+    while (kind < 2) {
+        ownership_local_env.env mut e = ownership_local_env.env{};
+        ownership_local_env.init(&e);
+        ok(ownership_local_env.alloc(&e, 1, 96, 97, 1));
+        ownership_transfer.action mut selected = ownership_transfer.action.move_owner;
+        if (kind == 1) { selected = ownership_transfer.action.release; }
+        ownership_transfer.request mut r = ownership_local_env.req(&e, selected, 1, 2);
+        if (kind == 1) {
+            r.destination = ownership_local_env.place(1);
+            r.leaves_empty_proved = true;
+        }
+        ownership_api.limit_table limits = ownership_limits.production();
+        ownership_events.store mut events = ownership_events.store{};
+        assert(ownership_events.bind(&events, &limits, &e.service));
+        budget_probe mut probe = budget_probe{};
+        probe.meter = &events.budget;
+        e.service.budget_context = cast(&probe, void mut*);
+        e.service.budget = refuse_third_charge;
+        ownership_state.state mut before = ownership_state.clone(&e.state);
+        ownership_api.proof_status result = ownership_local_env.apply(&e, &r);
+        bad(result);
+        assert(result.kind == ownership_api.proof_kind.incomplete);
+        assert(result.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(probe.calls == 3 && events.len == 1);
+        assert(ownership_events.at(&events, 0)->key.ordinal == r.event_bindings[1].key.ordinal);
+        no_change(&e, &before);
+        owner(&e, 96, 1);
+        assert(source(&e, 97).validity == ownership_api.validity_kind.live);
+        ownership_state.free(&before);
+        ownership_events.free(&events);
+        ownership_local_env.free(&e);
+        kind += 1;
+    }
+}
+
+fn address_and_storage_boundaries() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_local_env.add_stack(&e, 20);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status result = ownership_local_env.address(&e, 1, 2, 20, false);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    ok(ownership_local_env.address(&e, 1, 2, 20, true));
+    before = ownership_state.clone(&e.state);
+    bad(ownership_local_env.dead(&e, 1, 20, false, true));
+    no_change(&e, &before);
+    bad(ownership_local_env.dead(&e, 1, 20, true, true));
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    ok(ownership_local_env.dead(&e, 1, 20, true, false));
+    assert(source(&e, 20).validity == ownership_api.validity_kind.ended);
+    bad(ownership_local_env.address(&e, 1, 3, 20, true));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    assert(ownership_transfer.contents_index(&e.state,
+        ownership_local_env.place(3)) == ownership_transfer.U64_MAX);
+    ownership_local_env.free(&e);
+}
+
+fn denied_work() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    e.counts.deny = true;
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_api.proof_status result = ownership_local_env.alloc(&e, 1, 21, 31, 0);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    assert(result.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(result.terminal.limit.present);
+    assert(e.counts.charges == 1 && e.counts.events == 0);
+    no_change(&e, &before);
+    ownership_state.free(&before);
+    e.counts.deny = false;
+    ok(ownership_local_env.alloc(&e, 1, 21, 31, 0));
+    ok(ownership_local_env.release(&e, 1, true));
+    ownership_local_env.free(&e);
+}
+
+fn missing_event_service() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    e.service.event = null;
+    ownership_api.proof_status result = ownership_local_env.alloc(&e, 1, 22, 32, 0);
+    bad(result);
+    assert(result.kind == ownership_api.proof_kind.incomplete);
+    assert(result.terminal.reason == ownership_api.incomplete_reason.missing_events);
+    assert(e.state.allocations_len == 0 && e.state.sources_len == 0);
+    assert(e.counts.events == 0);
+    ownership_local_env.free(&e);
+}
+
+fn main() i32 {
+    fresh_identity();
+    duplicate_allocation_rolls_back();
+    invalid_allocation_facts();
+    println("fresh identities and failed allocation rollback");
+    copy_and_move_boundaries();
+    lost_and_unknown_copy();
+    println("copy and move boundaries");
+    release_needs_descendants();
+    assignment_reads_only_new_value();
+    incomplete_reference_facts();
+    println("release and replacement boundaries");
+    nested_owner_blocks_whole_slot();
+    residual_owner_blocks_other_slot();
+    println("nested and residual owners remain live");
+    address_and_storage_boundaries();
+    println("address and storage boundaries");
+    denied_work();
+    missing_event_service();
+    println("service refusals preserve state");
+    owner_reference_facts();
+    unresolved_destinations();
+    println("owner facts and local paths require proof");
+    event_map_refusals();
+    duplicate_position_guard();
+    block_event_identity();
+    unknown_owning_assignment();
+    println("event identities preserve block positions");
+    delegated_allocation_events();
+    delegated_budget_events();
+    later_charge_rollback();
+    println("delegated failures keep mapped identities");
+    return 0;
+}

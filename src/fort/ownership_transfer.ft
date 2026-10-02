@@ -1,0 +1,601 @@
+/// Applies local ownership effects to a finite proof state.
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+
+u64 U64_MAX = 18446744073709551615;
+
+enum action {
+    allocation,
+    copy,
+    move_owner,
+    release,
+    assignment,
+    address,
+    use,
+    inspect,
+    dead,
+}
+
+// The checked closure assigns one event key to each full operation position.
+struct event_binding {
+    ownership_api.operation_position operation;
+    ownership_api.entity_id key;
+}
+
+// The FIR adapter supplies facts that verified FIR and borrow liveness establish.
+struct request {
+    action kind;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source_position;
+    ownership_api.place_path source;
+    ownership_api.place_path destination;
+    ownership_api.entity_id source_key;
+    ownership_api.allocation_fact allocation;
+    ownership_api.source_fact fresh_source;
+    ownership_api.contents_fact value;
+    bool destination_owns;
+    bool leaves_empty_proved;
+    bool source_correspondence_proved;
+    bool liveness_proved;
+    bool retained_borrow;
+    bool direct_source_proved;
+    bool direct_destination_proved;
+    bool event_map_complete_proved;
+    event_binding@ event_bindings;
+}
+
+fn same_place(ownership_api.place_path a, ownership_api.place_path b) bool {
+    return ownership_state.same_place(a, b);
+}
+
+fn same_entity(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    return ownership_keys.entity(a, b) == 0;
+}
+
+fn event_key(request* req) ownership_api.entity_id {
+    u64 mut i = 0;
+    while (i < req->event_bindings.len) {
+        if (ownership_keys.operation(req->event_bindings[i].operation,
+            req->operation) == 0) { return req->event_bindings[i].key; }
+        i += 1;
+    }
+    return ownership_api.entity_id{};
+}
+
+fn valid_event_map(request* req) bool {
+    if (!req->event_map_complete_proved || req->event_bindings.len == 0) { return false; }
+    bool mut found = false;
+    u64 mut i = 0;
+    while (i < req->event_bindings.len) {
+        event_binding left = req->event_bindings[i];
+        if (left.key.kind != ownership_api.entity_kind.event ||
+            ownership_keys.function(left.key.function, left.operation.function) != 0) {
+            return false;
+        }
+        if (ownership_keys.operation(left.operation, req->operation) == 0) { found = true; }
+        u64 mut j = 0;
+        while (j < i) {
+            if (ownership_keys.operation(left.operation,
+                req->event_bindings[j].operation) == 0 ||
+                same_entity(left.key, req->event_bindings[j].key)) { return false; }
+            j += 1;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+struct event_route {
+    request* request;
+    ownership_api.services original;
+}
+
+fn mapped_event(void mut* opaque, ownership_api.event_request* report)
+    ownership_api.event_result {
+    event_route* route = cast(opaque, event_route*);
+    ownership_api.exhaustion limit = report->current.terminal.limit;
+    if (ownership_keys.operation(report->event.operation, route->request->operation) != 0 ||
+        (report->event.kind == ownership_api.event_kind.work_failure &&
+        (report->event.reason != ownership_api.incomplete_reason.work_limit ||
+        report->current.terminal.reason != ownership_api.incomplete_reason.work_limit ||
+        !limit.present ||
+        ownership_keys.operation(limit.operation, report->event.operation) != 0 ||
+        ownership_keys.source(limit.source, report->event.source) != 0))) {
+        ownership_api.event_result mut refused = ownership_api.event_result{};
+        refused.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            report->event.operation, report->event.source);
+        refused.retained = true;
+        return refused;
+    }
+    ownership_api.event_request mut mapped = *report;
+    mapped.event.key = event_key(route->request);
+    if (mapped.event.kind == ownership_api.event_kind.work_failure) {
+        mapped.event.limit = limit;
+    }
+    return route->original.event(route->original.event_context, &mapped);
+}
+
+fn failed(ownership_api.services* svc, request* req, ownership_api.event_kind kind,
+    ownership_api.incomplete_reason reason, ownership_api.entity_id relation,
+    string message) ownership_api.proof_status {
+    ownership_api.proof_status mut proof = ownership_api.proof_status{};
+    proof.kind = ownership_api.proof_kind.complete;
+    proof.failed = true;
+    if (reason != ownership_api.incomplete_reason.none) {
+        proof = ownership_api.incomplete(reason, req->operation, req->source_position);
+        proof.terminal.relation = relation;
+    }
+    ownership_api.event_descriptor mut event = ownership_api.event_descriptor{};
+    event.key = event_key(req);
+    event.operation = req->operation;
+    event.source = req->source_position;
+    event.kind = kind;
+    event.evidence = ownership_api.evidence_kind.unconditional;
+    if (reason != ownership_api.incomplete_reason.none) {
+        event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    }
+    event.reason = reason;
+    event.relation = relation;
+    event.source_path = req->source;
+    event.owner_path = req->destination;
+    event.text = message;
+    ownership_api.witness_link[1] mut witness = {};
+    witness[0].key = event.key;
+    witness[0].key.kind = ownership_api.entity_kind.witness;
+    witness[0].condition = relation;
+    witness[0].validated = reason == ownership_api.incomplete_reason.none;
+    event.witnesses = witness[..];
+    ownership_api.event_request report = ownership_api.event_request{event, proof};
+    return ownership_api.record_event(svc, &report).proof;
+}
+
+fn invalid(ownership_api.services* svc, request* req, ownership_api.event_kind kind,
+    ownership_api.entity_id relation, string message) ownership_api.proof_status {
+    return failed(svc, req, kind, ownership_api.incomplete_reason.none, relation, message);
+}
+
+fn unproved(ownership_api.services* svc, request* req,
+    ownership_api.entity_id relation) ownership_api.proof_status {
+    return failed(svc, req, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.unknown_effect, relation,
+        "local ownership effect needs a proved fact");
+}
+
+fn contents_index(ownership_state.state* s, ownership_api.place_path place) u64 {
+    u64 mut found = U64_MAX;
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        if (same_place(s->contents[i].place, place)) {
+            if (found != U64_MAX) { return U64_MAX; }
+            found = i;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+fn owner_index(ownership_state.state* s, ownership_api.place_path place) u64 {
+    u64 mut found = U64_MAX;
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (s->allocations[i].obligation && same_place(s->allocations[i].owner.place, place)) {
+            if (found != U64_MAX) { return U64_MAX; }
+            found = i;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+fn owner_count(ownership_state.state* s, ownership_api.place_path place) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (s->allocations[i].obligation && same_place(s->allocations[i].owner.place, place)) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+enum overlap_kind { none, possible, definite }
+
+// Local operations do not prove that two projections of one root are separate.
+fn owner_overlap(ownership_state.state* s, ownership_api.place_path place)
+    overlap_kind {
+    bool mut possible = false;
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (s->allocations[i].obligation) {
+            ownership_api.place_path owner = s->allocations[i].owner.place;
+            if (!ownership_state.has_residual(owner) && same_place(owner, place) &&
+                s->allocations[i].count.one && !s->allocations[i].count.zero &&
+                !s->allocations[i].count.many) {
+                return overlap_kind.definite;
+            }
+            if (ownership_state.has_residual(owner) ||
+                same_entity(owner.root, place.root)) { possible = true; }
+        }
+        i += 1;
+    }
+    if (possible) { return overlap_kind.possible; }
+    return overlap_kind.none;
+}
+
+fn other_owner_possible(ownership_state.state* s, ownership_api.place_path place,
+    ownership_api.entity_id selected) bool {
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (s->allocations[i].obligation &&
+            !same_entity(s->allocations[i].key, selected) &&
+            (ownership_state.has_residual(s->allocations[i].owner.place) ||
+            same_entity(s->allocations[i].owner.place.root, place.root))) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn owner_reference_proved(ownership_state.state* s,
+    ownership_api.contents_fact value, ownership_api.allocation_fact owner) bool {
+    if (value.kind != ownership_api.contents_kind.reference || value.owner_empty ||
+        value.borrows.len != 1 || !value.borrows[0].representation_complete ||
+        !same_entity(value.borrows[0].value_version, value.value_version) ||
+        owner.validity != ownership_api.validity_kind.live ||
+        !owner.obligation || !owner.count.one || owner.count.zero || owner.count.many ||
+        value.span_length.kind != ownership_api.fact_kind.exact ||
+        owner.logical_length.kind != ownership_api.fact_kind.exact ||
+        value.span_length.value != owner.logical_length.value) { return false; }
+    u64 source = source_index(s, value.borrows[0].source);
+    return source != U64_MAX &&
+        s->sources[source].kind == ownership_api.source_kind.heap &&
+        s->sources[source].validity == ownership_api.validity_kind.live &&
+        same_entity(s->sources[source].allocation, owner.key);
+}
+
+fn empty_owner_proved(ownership_api.contents_fact value) bool {
+    return value.kind == ownership_api.contents_kind.empty_owner && value.owner_empty &&
+        value.borrows.len == 0 && value.span_length.kind == ownership_api.fact_kind.exact &&
+        value.span_length.value == 0;
+}
+
+fn source_index(ownership_state.state* s, ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < s->sources_len) {
+        if (same_entity(s->sources[i].key, key)) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+
+fn borrows_valid(ownership_state.state* s, ownership_api.contents_fact value)
+    ownership_api.validity_kind {
+    u64 mut i = 0;
+    while (i < value.borrows.len) {
+        if (!value.borrows[i].representation_complete) {
+            return ownership_api.validity_kind.unknown;
+        }
+        u64 source = source_index(s, value.borrows[i].source);
+        if (source == U64_MAX) { return ownership_api.validity_kind.unknown; }
+        if (s->sources[source].validity != ownership_api.validity_kind.live) {
+            return s->sources[source].validity;
+        }
+        i += 1;
+    }
+    return ownership_api.validity_kind.live;
+}
+
+fn check_read(ownership_state.state* s, ownership_api.services* svc, request* req,
+    ownership_api.contents_fact value, bool dereference) ownership_api.proof_status {
+    if (value.kind == ownership_api.contents_kind.unknown) {
+        return unproved(svc, req, req->source.root);
+    }
+    if (dereference && value.kind != ownership_api.contents_kind.reference &&
+        value.kind != ownership_api.contents_kind.empty_owner) {
+        return unproved(svc, req, req->source.root);
+    }
+    if (value.kind == ownership_api.contents_kind.reference &&
+        value.borrows.len == 0 && !value.owner_empty) {
+        return unproved(svc, req, req->source.root);
+    }
+    ownership_api.validity_kind valid = borrows_valid(s, value);
+    if (valid == ownership_api.validity_kind.unknown) {
+        return unproved(svc, req, req->source_key);
+    }
+    if (valid != ownership_api.validity_kind.live) {
+        return invalid(svc, req, ownership_api.event_kind.invalid_use, req->source_key,
+            "reference source is no longer live");
+    }
+    if (dereference && (value.owner_empty ||
+        (value.span_length.kind == ownership_api.fact_kind.exact &&
+        value.span_length.value == 0))) {
+        return invalid(svc, req, ownership_api.event_kind.invalid_use, req->source_key,
+            "empty reference has no element");
+    }
+    if (dereference && (value.span_length.kind != ownership_api.fact_kind.exact ||
+        value.span_length.value < 0)) {
+        return unproved(svc, req, req->source.root);
+    }
+    ownership_api.proof_status mut proof = ownership_api.proof_status{};
+    proof.kind = ownership_api.proof_kind.complete;
+    return proof;
+}
+
+fn write(ownership_state.state mut* s, ownership_api.services* svc,
+    ownership_api.contents_fact value, ownership_api.place_path destination,
+    request* req) ownership_api.proof_status {
+    ownership_api.contents_fact mut next = value;
+    next.place = destination;
+    ownership_api.place_path[1] aliases = {destination};
+    ownership_api.mutation_result result = ownership_state.strong_contents(s, svc, next,
+        aliases[..], true, req->operation, req->source_position);
+    return result.proof;
+}
+
+fn empty_value(ownership_api.place_path place) ownership_api.contents_fact {
+    ownership_api.contents_fact mut value = ownership_api.contents_fact{};
+    value.place = place;
+    value.kind = ownership_api.contents_kind.empty_owner;
+    value.owner_empty = true;
+    value.span_length.kind = ownership_api.fact_kind.exact;
+    return value;
+}
+
+fn do_allocation(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    if (req->allocation.key.kind != ownership_api.entity_kind.allocation ||
+        req->allocation.site.kind != ownership_api.entity_kind.allocation ||
+        req->fresh_source.key.kind != ownership_api.entity_kind.source ||
+        req->fresh_source.kind != ownership_api.source_kind.heap ||
+        req->fresh_source.validity != ownership_api.validity_kind.live ||
+        !same_entity(req->fresh_source.allocation, req->allocation.key) ||
+        req->allocation.validity != ownership_api.validity_kind.live ||
+        !req->allocation.obligation || !req->allocation.count.one ||
+        req->allocation.count.zero || req->allocation.count.many ||
+        !same_place(req->allocation.owner.place, req->destination) ||
+        req->allocation.logical_length.kind == ownership_api.fact_kind.unknown ||
+        req->allocation.logical_length.value < 0 ||
+        owner_overlap(s, req->destination) != overlap_kind.none ||
+        ownership_state.has_residual(req->destination)) {
+        return unproved(svc, req, req->allocation.key);
+    }
+    ownership_api.contents_fact mut value = req->value;
+    if (value.kind != ownership_api.contents_kind.reference || value.owner_empty ||
+        value.borrows.len != 1 ||
+        !value.borrows[0].representation_complete ||
+        !same_entity(value.borrows[0].source, req->fresh_source.key)) {
+        return unproved(svc, req, req->allocation.key);
+    }
+    value.span_length = req->allocation.logical_length;
+    ownership_api.mutation_result mut added = ownership_state.add_source(s, svc,
+        req->fresh_source, req->operation, req->source_position);
+    if (!added.applied) { return added.proof; }
+    added = ownership_state.add_allocation(s, svc, req->allocation, req->operation,
+        req->source_position);
+    if (!added.applied) { return added.proof; }
+    return write(s, svc, value, req->destination, req);
+}
+
+fn do_copy(ownership_state.state mut* s, ownership_api.services* svc, request* req)
+    ownership_api.proof_status {
+    u64 index = contents_index(s, req->source);
+    if (index == U64_MAX || ownership_state.has_residual(req->source) ||
+        ownership_state.has_residual(req->destination)) {
+        return unproved(svc, req, req->source.root);
+    }
+    ownership_api.contents_fact value = s->contents[index];
+    ownership_api.proof_status read = check_read(s, svc, req, value, false);
+    if (!ownership_api.successful(read)) { return read; }
+    if (req->destination_owns && !value.owner_empty) {
+        return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+            req->source.root, "copy cannot create a second owner");
+    }
+    overlap_kind overlap = owner_overlap(s, req->destination);
+    if (overlap == overlap_kind.possible) {
+        return unproved(svc, req, req->destination.root);
+    }
+    if (overlap == overlap_kind.definite) {
+        return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+            req->destination.root, "copy would discard a live owner");
+    }
+    return write(s, svc, value, req->destination, req);
+}
+
+fn do_move(ownership_state.state mut* s, ownership_api.services* svc, request* req)
+    ownership_api.proof_status {
+    u64 index = contents_index(s, req->source);
+    if (index == U64_MAX || ownership_state.has_residual(req->source) ||
+        ownership_state.has_residual(req->destination)) {
+        return unproved(svc, req, req->source.root);
+    }
+    ownership_api.contents_fact value = s->contents[index];
+    u64 source_owners = owner_count(s, req->source);
+    u64 owner = owner_index(s, req->source);
+    if (source_owners > 1 || (source_owners == 0 && !value.owner_empty) ||
+        (source_owners == 0 && owner_overlap(s, req->source) != overlap_kind.none) ||
+        (source_owners == 1 && value.owner_empty)) {
+        return unproved(svc, req, req->source.root);
+    }
+    if (source_owners == 1 &&
+        (!owner_reference_proved(s, value, s->allocations[owner]) ||
+        other_owner_possible(s, req->source, s->allocations[owner].key))) {
+        return unproved(svc, req, s->allocations[owner].key);
+    }
+    if (source_owners == 0 && !empty_owner_proved(value)) {
+        return unproved(svc, req, req->source.root);
+    }
+    overlap_kind overlap = owner_overlap(s, req->destination);
+    if (!same_place(req->source, req->destination) && overlap == overlap_kind.possible) {
+        return unproved(svc, req, req->destination.root);
+    }
+    if (!same_place(req->source, req->destination) && overlap == overlap_kind.definite) {
+        return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+            req->destination.root, "move would discard a live owner");
+    }
+    if (source_owners == 1) {
+        ownership_api.owner_location mut after = ownership_api.owner_location{};
+        after.place = req->destination;
+        ownership_api.mutation_result moved = ownership_state.transfer_owner(s, svc,
+            s->allocations[owner].key, after, true, req->operation, req->source_position);
+        if (!moved.applied) { return moved.proof; }
+    }
+    if (!same_place(req->source, req->destination)) {
+        ownership_api.proof_status emptied = write(s, svc, empty_value(req->source),
+            req->source, req);
+        if (!ownership_api.successful(emptied)) { return emptied; }
+    }
+    return write(s, svc, value, req->destination, req);
+}
+
+fn do_release(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    u64 index = contents_index(s, req->source);
+    if (index == U64_MAX) { return unproved(svc, req, req->source.root); }
+    ownership_api.contents_fact value = s->contents[index];
+    u64 owners = owner_count(s, req->source);
+    u64 owner = owner_index(s, req->source);
+    if (empty_owner_proved(value) && owners == 0 &&
+        owner_overlap(s, req->source) == overlap_kind.none) {
+        ownership_api.proof_status mut proof = ownership_api.proof_status{};
+        proof.kind = ownership_api.proof_kind.complete;
+        return proof;
+    }
+    if (owners != 1 || value.owner_empty ||
+        !owner_reference_proved(s, value, s->allocations[owner]) ||
+        other_owner_possible(s, req->source, s->allocations[owner].key)) {
+        return unproved(svc, req, req->source.root);
+    }
+    if (!req->leaves_empty_proved) { return unproved(svc, req, s->allocations[owner].key); }
+    ownership_api.entity_id allocation = s->allocations[owner].key;
+    ownership_api.mutation_result released = ownership_state.release_member(s, svc,
+        allocation, true, req->operation, req->source_position);
+    if (!released.applied) { return released.proof; }
+    return write(s, svc, empty_value(req->source), req->source, req);
+}
+
+fn do_assignment(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    overlap_kind overlap = owner_overlap(s, req->destination);
+    if (overlap == overlap_kind.possible) {
+        return unproved(svc, req, req->destination.root);
+    }
+    if (overlap == overlap_kind.definite) {
+        return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+            req->destination.root, "assignment would discard a live owner");
+    }
+    ownership_api.proof_status read = check_read(s, svc, req, req->value, false);
+    if (!ownership_api.successful(read)) { return read; }
+    if (req->destination_owns && !req->value.owner_empty) {
+        if (req->value.kind != ownership_api.contents_kind.reference) {
+            return unproved(svc, req, req->destination.root);
+        }
+        return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+            req->destination.root, "assignment would create a second owner");
+    }
+    return write(s, svc, req->value, req->destination, req);
+}
+
+fn do_address(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    u64 source = source_index(s, req->source_key);
+    if (!req->source_correspondence_proved || source == U64_MAX ||
+        s->sources[source].kind != ownership_api.source_kind.stack ||
+        req->value.kind != ownership_api.contents_kind.reference ||
+        req->value.borrows.len != 1 ||
+        !req->value.borrows[0].representation_complete ||
+        !same_entity(req->value.borrows[0].source, req->source_key)) {
+        return unproved(svc, req, req->source_key);
+    }
+    if (s->sources[source].validity == ownership_api.validity_kind.ended) {
+        return invalid(svc, req, ownership_api.event_kind.invalid_use,
+            req->source_key, "address source storage has ended");
+    }
+    if (s->sources[source].validity != ownership_api.validity_kind.live) {
+        return unproved(svc, req, req->source_key);
+    }
+    overlap_kind overlap = owner_overlap(s, req->destination);
+    if (overlap == overlap_kind.possible) {
+        return unproved(svc, req, req->destination.root);
+    }
+    if (overlap == overlap_kind.definite) {
+        return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+            req->destination.root, "address store would discard a live owner");
+    }
+    return write(s, svc, req->value, req->destination, req);
+}
+
+fn do_dead(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    overlap_kind overlap = owner_overlap(s, req->source);
+    if (overlap == overlap_kind.possible) {
+        return unproved(svc, req, req->source.root);
+    }
+    if (overlap == overlap_kind.definite) {
+        return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+            req->source.root, "storage ends with a live owner");
+    }
+    u64 source = source_index(s, req->source_key);
+    if (!req->liveness_proved || !req->source_correspondence_proved ||
+        source == U64_MAX ||
+        s->sources[source].kind != ownership_api.source_kind.stack ||
+        s->sources[source].validity != ownership_api.validity_kind.live) {
+        return unproved(svc, req, req->source_key);
+    }
+    if (req->retained_borrow) {
+        return invalid(svc, req, ownership_api.event_kind.invalid_use,
+            req->source_key, "a retained view outlives local storage");
+    }
+    ownership_api.mutation_result ended = ownership_state.end_source(s, svc,
+        req->source_key, req->operation, req->source_position);
+    return ended.proof;
+}
+
+/// Applies one effect. A failed effect leaves the input state unchanged.
+fn apply(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    if (!ownership_api.successful(s->proof)) { return s->proof; }
+    if (!valid_event_map(req)) {
+        return ownership_api.incomplete(ownership_api.incomplete_reason.missing_correspondence,
+            req->operation, req->source_position);
+    }
+    if (req->source.root.kind != ownership_api.entity_kind.slot ||
+        req->destination.root.kind != ownership_api.entity_kind.slot ||
+        !req->direct_source_proved || !req->direct_destination_proved ||
+        req->source.projections.len != 0 || req->destination.projections.len != 0 ||
+        ownership_state.has_residual(req->source) ||
+        ownership_state.has_residual(req->destination)) {
+        return unproved(svc, req, req->source.root);
+    }
+    event_route mut route = event_route{};
+    route.request = req;
+    route.original = *svc;
+    ownership_api.services mut local = *svc;
+    if (svc->event != null) {
+        local.event_context = cast(&route, void mut*);
+        local.event = mapped_event;
+    }
+    ownership_api.charge_result charged = ownership_api.charge_work(&local,
+        ownership_api.work_kind.transfer, req->operation, req->source_position);
+    if (!charged.allowed) { return charged.proof; }
+    ownership_state.state mut next = ownership_state.clone(s);
+    ownership_api.proof_status mut proof = ownership_api.proof_status{};
+    if (req->kind == action.allocation) { proof = do_allocation(&next, &local, req); }
+    else if (req->kind == action.copy) { proof = do_copy(&next, &local, req); }
+    else if (req->kind == action.move_owner) { proof = do_move(&next, &local, req); }
+    else if (req->kind == action.release) { proof = do_release(&next, &local, req); }
+    else if (req->kind == action.assignment) { proof = do_assignment(&next, &local, req); }
+    else if (req->kind == action.address) { proof = do_address(&next, &local, req); }
+    else if (req->kind == action.dead) { proof = do_dead(&next, &local, req); }
+    else {
+        u64 index = contents_index(&next, req->source);
+        if (index == U64_MAX) { proof = unproved(&local, req, req->source.root); }
+        else { proof = check_read(&next, &local, req, next.contents[index],
+            req->kind == action.use); }
+    }
+    if (ownership_api.successful(proof)) {
+        ownership_state.free(s);
+        *s = move(next);
+    } else { ownership_state.free(&next); }
+    return proof;
+}
