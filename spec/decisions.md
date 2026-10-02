@@ -2356,6 +2356,34 @@ says ownership is "by convention", this section supersedes it.
 - history: Note 2026-10-02 (T-273): This entry refines D17.14 with dynamic places and aggregate
   storage boundaries. It changes no representation, runtime instruction, or calling convention.
 
+### D17.16 Finite heap obligations
+- owner: `memory-model.md` 2.7 (finite heap identities and inductive cleanup).
+- rule: Each successful allocation creates a fresh identity and one release or transfer obligation.
+  Repeated executions of one allocation expression do not identify their live allocations.
+  A finite heap state retains distinct obligations or their simultaneous multiplicity.
+  Alternative sources and simultaneous allocations are different facts.
+  A release discharges only the selected allocation. It does not clear other allocations at that
+  site.
+  Joining or widening states cannot remove a possible residual obligation.
+  Moving an owned edge transfers its target obligation and empties the source edge.
+  Del stays shallow. Prove each owned leaf in the selected allocation empty before releasing it.
+  A transferred descendant remains live until its new owner releases or transfers it.
+  Finite structural predicates can represent unbounded acyclic chains and trees.
+  Infer their construction, separation, and cleanup conditions from fort operations and summaries.
+  Prove destructive cleanup by separating one node from the remainder, emptying its owned leaves,
+  releasing that node, and preserving the remainder invariant.
+  Pool cleanup also releases each block's owned payload before the block.
+  A normal cleanup result requires an empty remainder and no detached residual obligation.
+  Owned cycles and shared ownership cannot use an acyclic separation argument.
+  A proved cycle cut can establish a shape that ordinary release rules accept.
+  Shared borrows remain legal. Their uses retain the source-validity obligations of D17.14.
+  Pool growth does not invalidate earlier block views. Pool cleanup invalidates the sources it
+  releases.
+  Lost shape, identity, or alias precision gives incomplete proof at an operation that needs it.
+  It never gives successful cleanup. Add no annotation, recursive del, or runtime identity data.
+- rationale: Allocation-site sets cannot count concurrent obligations or prove complete chain
+  cleanup. Inductive predicates retain those facts in a finite state.
+
 ## D18 Float printing in the runtime
 
 Names the entry points that produce D11.7's float text and settles what D11.7 leaves to the runtime.
