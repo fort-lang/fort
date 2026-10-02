@@ -2432,6 +2432,32 @@ says ownership is "by convention", this section supersedes it.
   It uses conservative rejection for integer reconstruction without a broader user ruling.
   It changes no representation, runtime instruction, arithmetic operator, or calling convention.
 
+### D17.18 Finite ownership analysis and incomplete proof
+- owner: `fir.md` (14.1), `toolchain.md` (4.2).
+- rule: The ownership analysis uses a finite domain and deterministic work budgets.
+  Bound paths, regions, predicates, identities, shape templates, target alternatives, and effects.
+  Joins represent all predecessor states. Widening can lose precision but cannot remove obligations.
+  Preserve release history, owned descendants, transferred regions, and retained source relations.
+  Infer recursive summaries to a fixed point over a bounded symbolic interface.
+  Keep provisional recursive results private. They prove neither absent effects nor absent return.
+  Export a complete sound summary or an incomplete summary with unknown effects and outcomes.
+  Incomplete fort summaries preserve possible caller continuation and its cleanup obligations.
+  A noreturn type proves no caller return. It supplies no abort or process-cleanup classification.
+  Keep normal process termination separate from function return, abort, and foreign termination.
+  Compose outcome conditions before removing continuations or applying cleanup boundaries.
+  Preserve normal-process-exit obligations even when a proved callee cannot return to its caller.
+  Unknown fort effects receive no foreign exemption (D17.13).
+  A precision loss gives no error when independent facts prove all affected obligations.
+  Otherwise report the affected obligation as incomplete proof. A work-budget failure is an error.
+  A validated reaching-path witness can establish an invalid operation.
+  An abstract possibility without that witness establishes only failure to prove safety.
+  Use canonical scheduling, stable event keys, and counted work for repeated-input determinism.
+  Publish the implementation's numeric limits, measured coverage, and reproduction commands.
+  A report limit cannot convert incomplete analysis into a successful verdict.
+  These rules add no annotation, unsafe construct, runtime identity data, or ABI change.
+- rationale: Finite summaries permit termination without accepting operations that lack proof.
+  Separate witness classes prevent an imprecise state from claiming a concrete memory error.
+
 ## D18 Float printing in the runtime
 
 Names the entry points that produce D11.7's float text and settles what D11.7 leaves to the runtime.

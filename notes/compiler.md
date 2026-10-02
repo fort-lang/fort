@@ -535,6 +535,18 @@ came here.
   These are analysis invariants. The current compiler does not implement this complete heap proof.
   The ten H01-H10 specification traces have read evidence, not compiler-probe evidence.
   T-286 implements the heap analysis. Keep `del` shallow and add no runtime identity data.
+- **Finite ownership proof preserves obligations when precision ends** (T-276, D17.18).
+  `spec/fir.md` 14.1 defines the finite domain, canonical solving, and counted budgets.
+  Publish numeric limits and reproduction commands before qualification. This rule ticket chooses
+  no numeric production defaults. Bound symbolic keys rather than concrete loop or recursion depth.
+  A residual region keeps sources, owned descendants, release history, and transferred obligations.
+  Provisional recursive summaries remain private. Missing returns or effects supply no safety fact.
+  Export complete sound summaries or unknown. Keep unknown caller continuations and cleanup facts.
+  Function return and process termination remain separate under the global-boundary rules.
+  A noreturn type proves no caller return. It proves neither abort nor completed process cleanup.
+  `spec/toolchain.md` 4.2 separates validated invalidity witnesses from abstract possibility.
+  Keep proof events independent of rendered diagnostic limits. Suppression cannot change a verdict.
+  The seven A01-A07 traces have read evidence. They do not measure current compiler acceptance.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by

@@ -611,6 +611,70 @@ several:
   compiler reaches a verdict: a usage error, a toolchain error or an internal error leaves stdout
   empty and exits 2 (D14.1).
 
+### 4.2 Ownership proof diagnostics (D17.18)
+
+Selected ownership analysis uses the text format of section 4 and the JSON form of section 4.1.
+Ownership rejection and incomplete proof are compilation errors with exit 1.
+Use the same source ranges, messages, notes, and order in both forms.
+JSON version 1 gains no ownership-specific fields.
+
+**Evidence classes.** A concrete reaching-path witness identifies feasible input conditions and
+ordered FIR effects that reach the invalid operation.
+Validate its alias substitutions, branch conditions, source identities, and effect order.
+A witness can cross loops or recursive summaries only with a validated path or inductive argument.
+A collection of independent may-facts does not supply that validation.
+
+A validated witness permits a path-dependent error: the operation fails on that reaching path.
+Use unconditional wording only when the invalidity holds on all represented reaching paths.
+An abstract possibility without a validated witness permits only an incomplete-proof error.
+It does not establish that the program has an actual memory error.
+Loss of witness precision cannot remove the safety obligation or produce successful compilation.
+
+| Event | Primary error location and content |
+|---|---|
+| Invalid use | The use; identify the place and invalid source on the validated path. |
+| Lost ownership | The overwrite, shallow release, or storage end; identify the residual owner. |
+| Failed caller requirement | The call; identify its unsatisfied substituted requirement. |
+| Incomplete proof | The affected operation; name the unproved storage or cleanup requirement. |
+| Work-budget failure | The attempted operation; identify the work category and bound. |
+
+Each event retains the responsible function and operation key, source range, reason, and evidence
+class. It also retains the relevant source and owner paths, conditions, and finite witness links.
+A precision-limit event names its category, numeric bound, and first source point that loses the
+required fact. A work-budget event records its used count and the attempted operation.
+These internal events are compiler interfaces. They require no source or foreign contract syntax.
+
+Attach notes for allocation, lending, release, transfer, or storage end when they explain the error.
+An unsatisfied caller requirement notes the callee operation and the substituted caller source or
+alias. A deferred-effect note includes its registration range and the applicable exit range.
+A limit note states what the abstraction loses. Do not state that widening releases storage.
+Use "cannot prove" for missing proof. Do not use "use after release" without validated invalidity.
+
+Representative primary messages follow. The named paths and counts come from the event.
+
+```sh
+case.ft:8:5: error: cannot prove that 'view' designates live storage
+case.ft:4:13: note: access-path depth 2 loses the required source relation here
+case.ft:9:5: error: ownership analysis exceeds the transfer-work bound 2
+case.ft:9:5: note: 2 work units complete; this operation needs another work unit
+case.ft:12:5: error: cannot prove completed cleanup at this return
+case.ft:7:5: note: this incomplete fort summary preserves a possible caller return
+```
+
+The numbers in these examples illustrate event rendering. They select no production limit.
+Do not emit both an incomplete-proof and budget error for the same unresolved obligation.
+Preserve proved independent errors when another operation gives incomplete proof.
+Suppress a dependent cascade only for the same operation, source relation, and underlying reason.
+Do not silence a separate owner, call requirement, storage boundary, or termination outcome.
+Diagnostic suppression affects rendering, not abstract state, obligations, or the final verdict.
+
+Order ownership events by canonical module and function keys, then source range, operation key,
+event class, and source relation key. Sort notes by causal role and then their stable source keys.
+Use that same order for duplicate selection and report-budget exhaustion.
+Do not use work-queue arrival or allocation addresses to select the first diagnostic.
+If a report bound omits detail, preserve a terminal incomplete-proof error and exit 1.
+The implementation records its numeric bounds and measured coverage under FIR 14.1.
+
 ## 5. The runtime
 
 The runtime is `std.rt`, an ordinary fort module (`<std-dir>/rt.ft`) that the compiler loads into
