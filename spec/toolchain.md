@@ -201,10 +201,18 @@ file (D14.1). Options and the entry file may appear in any order.
   <function> bb<k> statement <i> (s<N>)`, where the location is the name of the function. It
   exits 0 whatever it found. A function that the lowering does not support writes nothing.
   `--fir-after` does not change the report (`spec/fir.md` 16.5).
-- A build writes each function through the FIR path when the lowering supports it, and through
-  the direct path otherwise (`spec/fir.md` 16.1). `--fir-stats` then writes one line to stdout
-  after the module is written, `lowered N of M`: N functions of the FIR path of M definitions of
-  fort functions in the closure, the compiler-emitted `main` not counted. A compile error writes
+- A build writes each function through FIR: the lowering, the verifier, the build-mode pass and
+  the translator (`spec/fir.md` 3). Each of two cases is a compile error with exit 1 and no
+  module (`spec/fir.md` 9.8): a function that the lowering does not support, and a function that
+  needs a print function or `str_eq` of `std.rt` that the closure lacks, or the entry of a check
+  kind that the closure lacks or declares with other parameters. A check that the selected mode
+  removes needs no entry. The compiler does not test the parameters of a print function or of
+  `str_eq` (T-310). It assumes the other `std.rt` functions that it calls (`alloc`, `free`,
+  `args_init`, `args`, `flush_all`) and does not test them.
+  `--fir-stats` then writes one line to stdout after the module is written, `lowered N of M`: N
+  functions that the translator wrote of M definitions of fort functions in the closure, the
+  compiler-emitted `main` not counted. A refusal is a compile error, so in a line that a build
+  writes N equals M. A compile error writes
   no line. It combines with `-S`, `-c`, `--release` and `--no-bounds-check`, and it is a usage
   error together with `--tokens`, `--ast`, `--check`, `--index`, `--fir`, `--fir-after`,
   `--fir-verify-report` or `--fir-test`, which emit no module.
@@ -818,7 +826,7 @@ where a module the compiler builds holds the whole of `std.rt` (item 8, D9.10, D
 to the emitter's text is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
-   the whole program (D9.10, D19.1) and is built by appending text in one forward pass. It
+   the whole program (D9.10, D19.1) and is built by appending text. It
    begins with
 
    ```llvm
@@ -1044,7 +1052,8 @@ to the emitter's text is a change here.
     compiler temporary is an `alloca` in the entry block, before any other instruction, in
     declaration order; nothing is variable-length. Names are fixed by D19.5, per function and
     reset at each definition: `%t<N>` for an instruction result in emission order, `%L<N>` for a
-    block in creation order with the entry block always literally `entry`, `%<ident>.<slot>` for
+    block by its FIR block number with FIR block 0 always literally `entry` and the failure blocks
+    after the last FIR block (`fir.md` 12.4), `%<ident>.<slot>` for
     a local or parameter slot, `%<ident>.in` for an incoming parameter, `%ret.sret` for an
     aggregate result pointer, and `%tmp<K>` from a third counter for a place the compiler
     invents (an aggregate argument copy, a short-circuit slot). A name that embeds a fort
@@ -1061,12 +1070,12 @@ to the emitter's text is a change here.
     `default` clause, a failure block calling `std.rt.fail_enum` with the operand
     sign-extended to 64 bits and the enum's name, which is the default D7.7 gives it and which
     neither build mode removes; `&&`, `||` and
-    `?:` short-circuit through a stack slot rather than a `phi`, so the tree walk never has to
-    know its predecessors; after a terminating statement the emitter opens a fresh `%L<N>` block
-    for the unreachable statements D14.2 allows. Evaluation order needs nothing: LLVM keeps the
-    order of side effects and the walk emits calls, loads and stores in source order, `fd` once
-    (D6.3, D12.2). Deferred statements are already expanded at each exit by the front end
-    (D7.8).
+    `?:` short-circuit through a stack slot rather than a `phi`; after a terminating statement
+    the lowering opens a fresh block for the unreachable statements D14.2 allows. Evaluation
+    order needs nothing: LLVM keeps the order of side effects, the lowering orders the calls,
+    loads and stores as D6.3 requires, `fd` once (D6.3, D12.2), and the translator keeps that
+    order. Deferred statements are already expanded at each exit by the lowering (D7.8,
+    `fir.md` 9.5).
 
 11. **SSA discipline** (D19.4). Because every user-visible value lives in an `alloca`, a
     temporary `%tN` is used only in the block that defines it or in a block that block dominates
@@ -1947,13 +1956,13 @@ implementable; the design is to be planned in the implementation phase.
   detection, so declaration order never matters; then each body is checked against D3 to D8 and
   D17 and the AST is annotated with types, constant values, lvalue mutability, resolved symbols
   and, on each assignment, whether the target is an `own` lvalue that needs the overwrite check.
-- **Codegen.** One forward pass over the annotated AST appending text to a single LLVM IR
-  module (D19.1, section 6), with no intermediate representation of its own, no libLLVM and no
-  register allocation: locals are `alloca`s in the entry block, intermediates are SSA
-  temporaries, and deferred statements are expanded statically at each exit (D7.8). This is the
-  direct path of `fir.md`. D19.8 replaces it one function at a time: the lowering makes FIR from
-  the annotated AST, the verifier tests it, and the translator writes the text of section 6 from
-  it. The direct path goes when the migration of `fir.md` 16 ends.
+- **Codegen.** For each function, the lowering makes FIR from the annotated AST and expands the
+  deferred statements statically at each exit (D7.8, D19.8); the verifier tests the FIR, the
+  build-mode pass applies the selected mode, and the verifier tests it again; the translator then
+  appends the text of section 6 to a single LLVM IR module (D19.1), with no libLLVM and no
+  register allocation: locals are `alloca`s in the entry block and intermediates are SSA
+  temporaries or `%tmp` slots (`fir.md` 3, 11, 12). A function that the lowering does not
+  support is a compile error (`fir.md` 9.8).
 - **Memory.** Arenas per compilation; nothing is freed before exit.
 
 ## 9. Editor support

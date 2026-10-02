@@ -1215,23 +1215,37 @@ fn fir_stats_combines_only_with_a_build() void {
     assert(opts.fir_stats && opts.emit_ir && opts.compile_only && opts.release);
 }
 
-// A build writes each function through the FIR path when the lowering supports it, and through
-// the direct path otherwise (spec/fir.md 16.1). --fir-stats adds `lowered N of M` to stdout after
-// the module is written: N functions of the FIR path, of M definitions of fort functions, the C
-// `main` not counted. The empty runtime of this test lacks the print of `helper` in FIR_MIXED, so
-// the lowering refuses `helper`, and the direct path writes it.
-fn fir_stats_counts_the_functions_of_each_path() void {
+// A build writes each function through FIR (spec/fir.md 3). --fir-stats adds `lowered N of M` to
+// stdout after the module is written: N functions that the translator wrote, of M definitions of
+// fort functions, the C `main` not counted. A refusal is a compile error with no module, so a
+// count that a build writes has N equal to M. The empty runtime of this test lacks the print of
+// `helper` in FIR_MIXED: a compile error at the argument that needs it, with no module and no
+// count (spec/fir.md 9.8). std_prints holds the two print functions, and the build writes both
+// functions.
+fn fir_stats_counts_the_functions_that_the_translator_wrote() void {
     write_file("fir_mixed.ft", FIR_MIXED);
+    remove_file("fir_mixed.ll");
     string[6] mut argv = {"fort", "--fir-stats", "-S", "fir_mixed.ft", "-o", "fir_mixed.ll"};
-    assert(run(argv[0..6]) == EXIT_OK);
+    assert(run(argv[0..6]) == EXIT_COMPILE_ERROR);
+    assert(err_has("fir_mixed.ft:2:13: error: the runtime `std.rt` has no entry `print_i64`, "));
+    assert(err_has("which `helper` needs\n"));
+    string own refused = captured_out();
+    defer del(refused);
+    assert(refused == "");
+    assert(!file_exists("fir_mixed.ll"));
+    assert(libc.mkdir("std_prints".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    write_lines("std_prints/rt.ft", PRINT_RUNTIME[..]);
+    string[8] mut printed = {"fort", "--std-dir", "std_prints", "--fir-stats", "-S",
+                             "fir_mixed.ft", "-o", "fir_mixed.ll"};
+    assert(run(printed[0..8]) == EXIT_OK);
     assert(captured_err_is_empty());
     string own out = captured_out();
     defer del(out);
-    assert(out == "lowered 1 of 2\n");
+    assert(out == "lowered 4 of 4\n");
     string own module = capture.text("fir_mixed.ll");
     defer del(module);
-    // The FIR path keeps the scalar result of `main` in the alloca `%result` (spec/fir.md 12.1),
-    // and the direct path writes the print of `helper`, which the lowering refused.
+    // The translator keeps the scalar result of `main` in the alloca `%result` (spec/fir.md 12.1),
+    // and writes the print of `helper`.
     string define = "define dso_local i32 @\"fir_mixed.main\"() #0 {\n";
     i64 at = str.find(module, define);
     assert(at >= 0);
@@ -1239,8 +1253,9 @@ fn fir_stats_counts_the_functions_of_each_path() void {
     assert(str.starts_with(module[cast(at, u64) + define.len..], entry));
     assert(str.find(module, "call void @\"std.rt.print_i64\"(i32 1, i64 %t0)\n") >= 0);
     // Without the flag the run writes nothing to stdout and the same module.
-    string[5] mut plain = {"fort", "-S", "fir_mixed.ft", "-o", "fir_plain.ll"};
-    assert(run(plain[0..5]) == EXIT_OK);
+    string[7] mut plain = {"fort", "--std-dir", "std_prints", "-S", "fir_mixed.ft", "-o",
+                           "fir_plain.ll"};
+    assert(run(plain[0..7]) == EXIT_OK);
     string own quiet = captured_out();
     defer del(quiet);
     assert(quiet == "");
@@ -1249,20 +1264,34 @@ fn fir_stats_counts_the_functions_of_each_path() void {
     assert(again == module);
 }
 
-// A function whose check names a runtime entry that the closure lacks takes the direct path: the
-// lowering supports it, but rule V7 refuses its FIR. The empty runtime lacks `fail_overflow`, and
-// std_checks holds it, whose own definition is a function of the closure too.
-fn fir_stats_counts_a_check_with_no_runtime_entry_as_direct() void {
+// A function whose check names a runtime entry that the closure lacks is a compile error at the
+// name of the function: the lowering supports it, but rule V7 would refuse its FIR. The empty
+// runtime lacks `fail_overflow`, and std_checks holds it, whose own definition is a function of
+// the closure too.
+fn a_check_with_no_runtime_entry_is_a_compile_error() void {
     write_check_runtime();
     write_file("fir_add.ft", FIR_ADD);
+    remove_file("fir_add.ll");
     string[6] mut empty = {"fort", "--fir-stats", "-S", "fir_add.ft", "-o", "fir_add.ll"};
-    assert(run(empty[0..6]) == EXIT_OK);
+    assert(run(empty[0..6]) == EXIT_COMPILE_ERROR);
+    assert(err_has("fir_add.ft:1:4: error: the runtime `std.rt` has no entry `fail_overflow` "));
+    assert(err_has("with the parameters that `main` needs\n"));
+    string own refused = captured_out();
+    defer del(refused);
+    assert(refused == "");
+    assert(!file_exists("fir_add.ll"));
+    // --release removes the check, so the build needs no entry and writes the module.
+    string[7] mut released = {"fort", "--release", "--fir-stats", "-S", "fir_add.ft", "-o",
+                              "fir_add.ll"};
+    assert(run(released[0..7]) == EXIT_OK);
     assert(captured_err_is_empty());
-    string own direct = captured_out();
-    defer del(direct);
-    assert(direct == "lowered 0 of 1\n");
-    // The FIR path runs the build-mode pass of each mode over both functions: --release removes
-    // the overflow check of `a + 3`, and the other two modes keep it.
+    string own one = captured_out();
+    defer del(one);
+    assert(one == "lowered 1 of 1\n");
+    assert(file_exists("fir_add.ll"));
+    remove_file("fir_add.ll");
+    // The build-mode pass runs in each mode over both functions: --release removes the overflow
+    // check of `a + 3`, and the other two modes keep it.
     string[9] mut held = {"fort", "--std-dir", "std_checks", "--fir-stats", "-S", "-S",
                           "fir_add.ft", "-o", "fir_add.ll"};
     for (string mode : MODES) {
@@ -1279,17 +1308,19 @@ fn fir_stats_counts_a_check_with_no_runtime_entry_as_direct() void {
         assert(str.find(module, "%result = alloca i32, align 4\n") >= 0);
     }
     // An entry of the name of the check with other parameters, as an old --std-dir may hold,
-    // fits no check either (fir_verify.entry_fits): `main` takes the direct path and nothing
-    // panics, while the entry itself is a function that the FIR path writes.
+    // fits no check either (fir_verify.entry_fits): `main` is the same compile error and nothing
+    // panics, while the entry itself is a function that the translator writes.
     assert(libc.mkdir("std_old".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
     write_lines("std_old/rt.ft", OLD_RUNTIME[..]);
+    remove_file("fir_add.ll");
     string[8] mut old = {"fort", "--std-dir", "std_old", "--fir-stats", "-S", "fir_add.ft", "-o",
                          "fir_add.ll"};
-    assert(run(old[0..8]) == EXIT_OK);
-    assert(captured_err_is_empty());
+    assert(run(old[0..8]) == EXIT_COMPILE_ERROR);
+    assert(err_has("fir_add.ft:1:4: error: the runtime `std.rt` has no entry `fail_overflow` "));
     string own mixed = captured_out();
     defer del(mixed);
-    assert(mixed == "lowered 1 of 2\n");
+    assert(mixed == "");
+    assert(!file_exists("fir_add.ll"));
     // A program that the checker refuses writes no module and no count.
     write_file("fir_bad.ft", "fn main() i32 {\n    return true;\n}\n");
     string[4] mut bad = {"fort", "--fir-stats", "-S", "fir_bad.ft"};
@@ -1298,6 +1329,14 @@ fn fir_stats_counts_a_check_with_no_runtime_entry_as_direct() void {
     defer del(none);
     assert(none == "");
 }
+
+// A runtime with the two print functions that the `println(1)` of FIR_MIXED calls.
+string[4] PRINT_RUNTIME = {
+    "fn print_i64(i32 fd, i64 v) void {",
+    "}",
+    "fn print_char(i32 fd, char c) void {",
+    "}",
+};
 
 // A runtime whose entry of the overflow check lacks the column parameter.
 string[4] OLD_RUNTIME = {
@@ -1334,6 +1373,20 @@ string[2] FIR_V7_LINES = {
 };
 
 // Writes the lines of `lines` to `path`, each ended by a newline.
+// Removes the file `path` when it is there, so that a later test sees whether a run wrote it.
+fn remove_file(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.unlink(c_path.ptr);
+}
+
+// Whether the file `path` is there.
+fn file_exists(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.access(c_path.ptr, 0) == 0;
+}
+
 fn write_lines(string path, string@ lines) void {
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
@@ -1875,8 +1928,8 @@ fn main() i32 {
     fir_of_a_program_with_a_type_error_exits_one();
     fir_stats_and_fir_verify_report_parse();
     fir_stats_combines_only_with_a_build();
-    fir_stats_counts_the_functions_of_each_path();
-    fir_stats_counts_a_check_with_no_runtime_entry_as_direct();
+    fir_stats_counts_the_functions_that_the_translator_wrote();
+    a_check_with_no_runtime_entry_is_a_compile_error();
     fir_verify_report_writes_one_line_for_each_function();
     fir_verify_report_holds_a_function_built_by_hand();
     no_bounds_check_reaches_the_build_mode_pass();

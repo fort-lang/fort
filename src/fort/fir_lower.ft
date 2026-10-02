@@ -40,10 +40,12 @@ u64 FD_STDERR = 2;
 u64 NEWLINE = 10;
 
 /// Why the lowering of a function stopped: the kind of the tree node that it does not lower, and
-/// the location of that node.
+/// the location of that node. `entry` is the name of the `std.rt` function that the node needs
+/// and the closure lacks, or empty when the lowering does not lower the node at all.
 struct report {
     ast.ast_kind kind;
     diag.loc at;
+    string entry;
 }
 
 // The runtime functions of the print family, one for each form of argument (spec/toolchain.md 6
@@ -222,7 +224,7 @@ fn zero_owners(lowerer mut* lw) void {
     }
 }
 
-// Adds a named local for each declaration below `n`, in the order of gen_stmt.collect_locals: a
+// Adds a named local for each declaration below `n`, in the order of a walk of the tree: a
 // declaration before its children, and the selected branch of a statement `$if` alone
 // (spec/fir.md 5.3). A range `for` declares its variable on the loop node.
 fn prescan(fir.func mut* f, ast.node* n) void {
@@ -278,7 +280,14 @@ fn end_of(ast.node* n) diag.loc {
 // Records that the lowering does not lower the node `n`, and returns false, so that a caller
 // returns what this returns.
 fn unsupported(lowerer mut* lw, ast.node* n) bool {
-    lw->why = report{n->kind, n->loc};
+    lw->why = report{n->kind, n->loc, ""};
+    return false;
+}
+
+// Records that the node `n` needs the `std.rt` function `entry`, which the closure lacks, and
+// returns false, as unsupported does.
+fn no_runtime(lowerer mut* lw, ast.node* n, string entry) bool {
+    lw->why = report{n->kind, n->loc, entry};
     return false;
 }
 
@@ -788,9 +797,8 @@ fn owning_temp(lowerer mut* lw, ast.node* e, u32 mut* out) bool {
     return true;
 }
 
-// The rvalue operator of the compound assignment token `op`, or `assign` for `=`. It copies
-// gen_stmt.compound_operator, and the copy stays until the migration removes the direct path
-// (T-255).
+// The rvalue operator of the compound assignment token `op`, or `assign` for `=`. `lv op= e`
+// follows the rules and overflow behavior of `lv op e`.
 fn compound_operator(lexer.tok_kind op) lexer.tok_kind {
     switch (op) {
     case lexer.tok_kind.plus_assign:
@@ -1158,8 +1166,7 @@ fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
 }
 
 // The clause of the switch `n` that is its `default`, or the count of its clauses when it has
-// none. It copies gen_stmt.default_clause, and the copy stays until the migration removes the
-// direct path (T-255).
+// none.
 fn default_clause(ast.node* n) u64 {
     u64 clauses = ast.ast_len(n);
     u64 mut i = 0;
@@ -1381,12 +1388,11 @@ fn aggregate_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     return built_operand(lw, n, false, out);
 }
 
-// aggregate_operand, where `zeroing` says that the direct path builds the value in its
-// destination: a member of a literal and the operand of a cast. Then a new temporary of a type
-// with padding is `const zero` first. The direct path leaves the padding of its destination as it
-// was, which is zero in a designated literal (D6.5), so the FIR path leaves zero padding wherever
-// the direct path does. A designated literal and a cast write the whole temporary, so they need
-// no zero first.
+// aggregate_operand, where `zeroing` says that the value is a member of a literal or the operand
+// of a cast, which the translator copies whole into its destination. Then a new temporary of a
+// type with padding is `const zero` first, so that the copy writes zero padding into a designated
+// literal, whose padding is zero (D6.5), and never stale bytes. A designated literal and a cast
+// write the whole temporary, so they need no zero first.
 fn built_operand(lowerer mut* lw, ast.node* n, bool zeroing, fir.operand mut* out) bool {
     if (n->kind == ast.ast_kind.k_call && (n->ann & check.ANN_MOVE) != 0) {
         return lower_move(lw, n, out);
@@ -1809,8 +1815,8 @@ fn lower_into(lowerer mut* lw, ast.node* n, fir.place dst) bool {
 // `new(T, n)` into `dst` (spec/fir.md 9.4, D10.2): `_n = cast<i64>(n)`; for a signed count `_f =
 // lt(copy _n, const i64 0)` and `check(copy _f, alloc_count, copy _n)`; then `_u = cast<u64>(copy
 // _n)`, `_p = alloc<T>(copy _u)` and `dst = aggregate T mut@ own(move _p, copy _u)`. Each stands at
-// the `new`, where the direct path reports the count. An unsigned count is never negative, so it
-// takes no check, and a zero count is legal.
+// the `new`, whose location the report of the count carries. An unsigned count is never negative,
+// so it takes no check, and a zero count is legal.
 fn lower_new_span(lowerer mut* lw, ast.node* n, fir.place dst) bool {
     fir.operand mut raw = fir.operand{};
     if (!lower_operand(lw, n->b, &raw)) {
@@ -1937,7 +1943,7 @@ fn lower_literal(lowerer mut* lw, ast.node* n, types.node* t, fir.place dst, dia
         k += 1;
     }
     if ((n->flags & ast.FLAG_DESIGNATED) != 0) {
-        // the designated form zeroes the whole value, padding included, as the direct path does
+        // the designated form zeroes the whole value, padding included (D6.5)
         assign(lw, dst, fir.rvalue_aggregate_zeroed(t, first, cast(slots, u32)), at);
         return true;
     }
@@ -2204,7 +2210,7 @@ fn lower_print(lowerer mut* lw, ast.node* n, fir.operand fd, u64 first, bool new
     }
     ast.sym* entry = print_entry(lw, print_kind.pk_char);
     if (entry == null) {
-        return unsupported(lw, n);
+        return no_runtime(lw, n, print_name(print_kind.pk_char));
     }
     fir.constant nl = fir.const_int(param_type(entry, 1), consts.cv_from_char(NEWLINE));
     u32 at = fir.operand_push(lw->f, fd);
@@ -2260,7 +2266,7 @@ fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
     print_kind k = print_kind_of(a->ty);
     ast.sym* entry = print_entry(lw, k);
     if (entry == null) {
-        return unsupported(lw, a);
+        return no_runtime(lw, a, print_name(k));
     }
     if (k == print_kind.pk_str) {
         fir.operand mut ptr = fir.operand{};
@@ -2294,7 +2300,7 @@ fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
 }
 
 // The pointer and the length of the `string` expression `m`, in *ptr and *len: `const bytes
-// "..."` and its length for a folded constant, as the direct path passes a literal, and else
+// "..."` and its length for a folded constant, which the call passes as a literal, and else
 // `copy p.0` and `copy p.1` of the place of `m`.
 fn string_parts(lowerer mut* lw, ast.node* m, fir.operand mut* ptr, fir.operand mut* len) bool {
     if (string_constant(lw, m)) {
@@ -2316,9 +2322,9 @@ fn string_parts(lowerer mut* lw, ast.node* m, fir.operand mut* ptr, fir.operand 
     return true;
 }
 
-// The byte offset of the position `line`:`col` in `src`, or the length of `src` past its end. It
-// copies gen_expr.source_offset, and the copy stays until the migration removes the direct path
-// (T-255).
+// The byte offset of the position `line`:`col` in `src`, or the length of `src` past its end. A
+// column of 0 and a position past the end clamp to the length, and the arithmetic wraps, so that
+// a range that the parser did not fill never traps.
 fn source_offset(string src, u32 line, u32 col) u64 {
     u64 mut at = 0;
     u32 mut here = 1;
@@ -2328,7 +2334,7 @@ fn source_offset(string src, u32 line, u32 col) u64 {
         }
         at += 1;
     }
-    // A zero column wraps and then reads as past the end, as in the direct path.
+    // A zero column wraps and then reads as past the end.
     at +%= cast(col, u64) -% 1;
     if (at < src.len) {
         return at;
@@ -2337,8 +2343,8 @@ fn source_offset(string src, u32 line, u32 col) u64 {
 }
 
 // The source text of the argument of the `assert` call `call`, whose range runs from its `(` to
-// after its `)`: the text between the two, as gen_expr.assert_text reads it. The session holds the
-// text of every module that the closure loaded.
+// after its `)`: the text between the two. The session holds the text of every module that the
+// closure loaded.
 fn assert_text(lowerer mut* lw, ast.node* call) string {
     string mut src = "";
     session.session mut* s = lw->ck->sess;
@@ -2596,15 +2602,15 @@ fn lower_logical(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
 
 // `a == b` and `a != b` on strings: `call fn std.rt.str_eq(copy a.0, copy a.1, copy b.0, copy
 // b.1)`, and `not` of it for `!=` (spec/fir.md 9.4). The place of `a` is read before `b` runs when
-// `b` contains a writer. A closure without std.rt.str_eq, such as a sandbox of a test, leaves the
-// comparison to the direct path.
+// `b` contains a writer. In a closure without std.rt.str_eq, such as a sandbox of a test, the
+// lowering refuses the comparison.
 fn lower_string_eq(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     if (!lw->str_eq_known) {
         lw->str_eq = runtime_fn(lw->ck, STR_EQ);
         lw->str_eq_known = true;
     }
     if (lw->str_eq == null) {
-        return unsupported(lw, n);
+        return no_runtime(lw, n, STR_EQ);
     }
     fir.operand mut a = fir.operand{};
     if (!aggregate_operand(lw, n->a, &a)) {

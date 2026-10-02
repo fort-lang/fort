@@ -13,7 +13,7 @@ import fir_passes;
 import fir_print;
 import fir_verify;
 import gen;
-import gen_stmt;
+import gen_fir;
 import index;
 import json;
 import lexer;
@@ -1087,20 +1087,19 @@ fn front_end(session.session mut* s, options* opts, string program, analysis mut
 // An unsupported construct is a compile error with exit 1. Neither case sends partial IR to `--cc`.
 // The emitter is initialized at the address it is used at, since it stores the session it reports
 // through (gen.ft).
-// Each function goes through the FIR path when the lowering supports it, and through the direct
-// path otherwise (spec/fir.md 16.1). With --fir-stats, a module that was written adds the line
-// `lowered N of M` to stdout: N functions that the FIR path wrote, of M definitions of fort
+// Each function goes through FIR (spec/fir.md 3). A function that the lowering does not support
+// is a compile error (spec/fir.md 9.8). With --fir-stats, a module that was written adds the line
+// `lowered N of M` to stdout: N functions that the translator wrote, of M definitions of fort
 // functions, the C `main` excluded.
 fn emit_module(session.session mut* s, options* opts, analysis mut* an, string ir_path) i32 {
     gen.gen_options mut gopts = gen.gen_options{};
     gopts.release = opts->release;
     gopts.no_bounds_check = opts->no_bounds_check;
     gopts.target = opts->target;
-    gopts.fir = true;
     gen.emitter mut g = gen.emitter{};
     gen.gen_init(&g, s, gopts);
     defer gen.gen_free(&g);
-    if (!gen_stmt.gen_program(&g, &an->ck, &an->set)) {
+    if (!gen_fir.gen_program(&g, &an->ck, &an->set)) {
         return EXIT_COMPILE_ERROR;
     }
     if (!io.write_file(ir_path, strbuf.bytes(&g.out))) {

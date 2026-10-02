@@ -7,8 +7,8 @@
 //| switch ok
 //| stores ok
 //| ok
-/// Checks statements from src/fort/gen_stmt.ft. Cases cover control-flow
-/// blocks, label order, loop exits, assignment forms, and overwrite checks.
+/// Checks the text that the FIR translator writes for statements: control-flow blocks, label
+/// order, loop exits, assignment forms, and overwrite checks.
 import gen_env;
 import std.str;
 import std.strbuf;
@@ -16,7 +16,9 @@ import std.strbuf;
 //
 // bootstrap0/test/gen_control_test.c checks the bootstrap implementation. Each
 // `do`-`while` and conditional block here has
-// a named expected shape in its test comment.
+// a named expected shape in its test comment. Block n of FIR is `%L<n>`, the
+// translator writes the blocks in number order, and the failure blocks follow
+// the normal blocks (spec/fir.md 9.3, 12.4).
 //
 // Every one of the fifteen cases emits a definition through the `emit` helper below. The helper
 // checks that each block has one terminator because `opt -passes=verify` accepts an instruction
@@ -26,7 +28,7 @@ import std.strbuf;
 
 // One function of `src` emitted, with the structural check run over it.
 fn emit(gen_env.env mut* e, string src, string name) string {
-    assert(gen_env.open_module(e, src));
+    assert(gen_env.open_module_rt(e, src));
     string got = gen_env.emit_function(e, name);
     gen_env.expect_blocks(e, got);
     return got;
@@ -46,8 +48,9 @@ fn wrap(strbuf.str_buf mut* b, string decls) string {
 
 // The condition branches to the then block and to the else block, or to the
 // continuation when there is no `else`. And each branch that has not
-// terminated branches to the continuation. The labels are allocated then,
-// else, done, so an `else if` chain numbers its blocks in that order.
+// terminated branches to the continuation. The blocks are numbered then,
+// else, done, so an `else if` chain numbers its blocks in that order, and the
+// translator writes them in number order (spec/fir.md 9.3, 12.4).
 fn an_if_else_chain_opens_its_blocks_in_allocation_order() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -59,29 +62,41 @@ fn an_if_else_chain_opens_its_blocks_in_allocation_order() void {
     strbuf.append(&src, "fn branch(i64 n) i64 {\n    if (n > 0) {\n        return 1;\n");
     strbuf.append(&src, "    } else if (n < 0) {\n        return 2;\n    }\n    return 0;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "branch");
-    string[20] mut want = {
+    string[32] want = {
         "define dso_local i64 @\"main.branch\"(i64 %n.in) #0 {\n",
         "entry:\n",
+        "  %result = alloca i64, align 8\n",
         "  %n.0 = alloca i64, align 8\n",
         "  store i64 %n.in, ptr %n.0, align 8\n",
         "  %t0 = load i64, ptr %n.0, align 8\n",
         "  %t1 = icmp sgt i64 %t0, 0\n",
-        "  br i1 %t1, label %L0, label %L1\n",
-        "\nL0:\n",
-        "  ret i64 1\n",
-        "\nL1:\n",
-        "  %t2 = load i64, ptr %n.0, align 8\n",
-        "  %t3 = icmp slt i64 %t2, 0\n",
-        "  br i1 %t3, label %L3, label %L4\n",
-        "\nL3:\n",
-        "  ret i64 2\n",
-        "\nL4:\n",
-        "  br label %L2\n",
-        "\nL2:\n",
-        "  ret i64 0\n",
+        "  br i1 %t1, label %L1, label %L2\n",
+        "\n",
+        "L1:\n",
+        "  store i64 1, ptr %result, align 8\n",
+        "  %t2 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t2\n",
+        "\n",
+        "L2:\n",
+        "  %t3 = load i64, ptr %n.0, align 8\n",
+        "  %t4 = icmp slt i64 %t3, 0\n",
+        "  br i1 %t4, label %L4, label %L5\n",
+        "\n",
+        "L3:\n",
+        "  store i64 0, ptr %result, align 8\n",
+        "  %t5 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t5\n",
+        "\n",
+        "L4:\n",
+        "  store i64 2, ptr %result, align 8\n",
+        "  %t6 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t6\n",
+        "\n",
+        "L5:\n",
+        "  br label %L3\n",
         "}\n",
     };
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..20]));
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[..]));
 }
 
 // ---- while, for and the range for ---------------------------------------------------
@@ -100,28 +115,28 @@ fn a_while_loop_is_a_head_a_body_and_a_continuation() void {
     strbuf.append(&src, "fn spin(bool go) void {\n    while (go) {\n        break;\n");
     strbuf.append(&src, "    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "spin");
-    string[11] mut want = {
-        "  br label %L0\n",
-        "\nL0:\n",
+    string[12] want = {
+        "  br label %L1\n",
+        "\n",
+        "L1:\n",
         "  %t1 = load i8, ptr %go.0, align 1\n",
         "  %t2 = trunc i8 %t1 to i1\n",
-        "  br i1 %t2, label %L1, label %L2\n",
-        "\nL1:\n",
+        "  br i1 %t2, label %L2, label %L3\n",
+        "\n",
+        "L2:\n",
         // The `break` leaves the body for the continuation, so the back edge
         // to the head is not written: the block already ended.
-        "  br label %L2\n",
-        "\nL2:\n",
+        "  br label %L3\n",
+        "\n",
+        "L3:\n",
         "  ret void\n",
-        "}\n",
-        "",
     };
-    gen_env.expect_text(got[cast(str.find(got, "  br label %L0\n"), u64)..],
-                        gen_env.join_lines(&e, want[0..10]));
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // `for (init; cond; step) { }`: `init` runs in the block the loop stands in. The head tests the
 // condition. The body branches to the step block and the step branches back to the head, so
-// `continue` runs `step`.
+// `continue` runs `step`. The blocks are head, body, step and done.
 fn a_for_loop_branches_through_its_step_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -133,33 +148,37 @@ fn a_for_loop_branches_through_its_step_block() void {
     strbuf.append(&src, "fn walk(bool go) void {\n    for (;;) {\n        if (go) {\n");
     strbuf.append(&src, "            continue;\n        }\n        break;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "walk");
-    string[16] mut want = {
-        "  br label %L0\n",
-        "\nL0:\n",
-        // An empty condition is `true`, so the head branches straight in.
+    string[21] want = {
         "  br label %L1\n",
-        "\nL1:\n",
+        "\n",
+        "L1:\n",
+        // An empty condition is `true`, so the head branches straight in.
+        "  br label %L2\n",
+        "\n",
+        "L2:\n",
         "  %t1 = load i8, ptr %go.0, align 1\n",
         "  %t2 = trunc i8 %t1 to i1\n",
-        "  br i1 %t2, label %L4, label %L5\n",
-        "\nL4:\n",
-        // `continue` branches to the step block, not to the head.
-        "  br label %L2\n",
-        "\nL5:\n",
-        "  br label %L3\n",
-        "\nL2:\n",
-        "  br label %L0\n",
-        "\nL3:\n",
+        "  br i1 %t2, label %L5, label %L6\n",
+        "\n",
+        "L3:\n",
+        "  br label %L1\n",
+        "\n",
+        "L4:\n",
         "  ret void\n",
-        "}\n",
+        "\n",
+        "L5:\n",
+        // `continue` branches to the step block, not to the head.
+        "  br label %L3\n",
+        "\n",
+        "L6:\n",
+        "  br label %L4\n",
     };
-    gen_env.expect_text(got[cast(str.find(got, "  br label %L0\n"), u64)..],
-                        gen_env.join_lines(&e, want[0..16]));
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // `do { } while (cond);`: the body runs once before the first test, so the
 // entry edge goes to the body. `continue` branches to the test block and the
-// test branches back to the body. The labels are allocated body, test, done.
+// test branches back to the body. The blocks are body, test, done.
 fn a_do_while_tests_after_its_body() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -171,24 +190,25 @@ fn a_do_while_tests_after_its_body() void {
     strbuf.append(&src, "fn spin(bool go) void {\n    do {\n        continue;\n");
     strbuf.append(&src, "    } while (go);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "spin");
-    string[10] mut want = {
+    string[12] want = {
         // The entry edge goes to the body, which is what makes the body run
         // before the first test.
-        "  br label %L0\n",
-        "\nL0:\n",
+        "  br label %L1\n",
+        "\n",
+        "L1:\n",
         // `continue` branches to the test block and not to the top of the
         // body.
-        "  br label %L1\n",
-        "\nL1:\n",
+        "  br label %L2\n",
+        "\n",
+        "L2:\n",
         "  %t1 = load i8, ptr %go.0, align 1\n",
         "  %t2 = trunc i8 %t1 to i1\n",
-        "  br i1 %t2, label %L0, label %L2\n",
-        "\nL2:\n",
+        "  br i1 %t2, label %L1, label %L3\n",
+        "\n",
+        "L3:\n",
         "  ret void\n",
-        "}\n",
     };
-    gen_env.expect_text(got[cast(str.find(got, "  br label %L0\n"), u64)..],
-                        gen_env.join_lines(&e, want[0..10]));
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // `break` in a `do` leaves the loop without running the test, which is the
@@ -205,25 +225,26 @@ fn a_break_in_a_do_while_skips_the_test() void {
     strbuf.append(&src, "fn once(bool go) void {\n    do {\n        break;\n");
     strbuf.append(&src, "    } while (go);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "once");
-    string[10] mut want = {
-        "  br label %L0\n",
-        "\nL0:\n",
+    string[12] want = {
+        "  br label %L1\n",
+        "\n",
+        "L1:\n",
         // The `break` wrote the body's one terminator, so the back edge to
         // the test is not written after it.
-        "  br label %L2\n",
-        "\nL1:\n",
+        "  br label %L3\n",
+        "\n",
+        "L2:\n",
         "  %t1 = load i8, ptr %go.0, align 1\n",
         "  %t2 = trunc i8 %t1 to i1\n",
-        "  br i1 %t2, label %L0, label %L2\n",
-        "\nL2:\n",
+        "  br i1 %t2, label %L1, label %L3\n",
+        "\n",
+        "L3:\n",
         "  ret void\n",
-        "}\n",
     };
-    gen_env.expect_text(got[cast(str.find(got, "  br label %L0\n"), u64)..],
-                        gen_env.join_lines(&e, want[0..10]));
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
-// `for (T x: coll) { }`: an invented `i64` counter walks the collection. The
+// `for (T x: coll) { }`: an invented counter walks the collection. The
 // loop variable is a fresh copy of each element at the start of its iteration.
 // The counter is bounded by the length, so the
 // compare is unsigned and its increment is a plain `add`.
@@ -238,7 +259,7 @@ fn a_range_for_walks_an_invented_counter() void {
     strbuf.append(&src, "fn sum(i64[3] xs) void {\n    for (i64 x : xs) {\n");
     strbuf.append(&src, "        break;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "sum");
-    string[17] mut want = {
+    string[27] want = {
         // The collection owns nothing, so it is evaluated once into a
         // temporary and the loop iterates over the copy.
         "  %tmp0 = alloca [3 x i64], align 8\n",
@@ -246,20 +267,30 @@ fn a_range_for_walks_an_invented_counter() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %xs.in, i64 24,",
         " i1 false)\n",
         "  store i64 0, ptr %tmp1, align 8\n",
-        "  br label %L0\n",
-        "\nL0:\n",
+        "  br label %L1\n",
+        "\n",
+        "L1:\n",
         "  %t0 = load i64, ptr %tmp1, align 8\n",
         "  %t1 = icmp ult i64 %t0, 3\n",
-        "  br i1 %t1, label %L1, label %L3\n",
-        "\nL1:\n",
-        "  %t2 = getelementptr inbounds [3 x i64], ptr %tmp0, i64 0, i64 %t0\n",
-        "  %t3 = load i64, ptr %t2, align 8\n",
-        "  store i64 %t3, ptr %x.1, align 8\n",
-        "  br label %L3\n",
-        "\nL2:\n",
-        "  %t4 = load i64, ptr %tmp1, align 8\n  %t5 = add i64 %t4, 1\n",
+        "  br i1 %t1, label %L2, label %L4\n",
+        "\n",
+        "L2:\n",
+        "  %t2 = load i64, ptr %tmp1, align 8\n",
+        "  %t3 = getelementptr inbounds [3 x i64], ptr %tmp0, i64 0, i64 %t2\n",
+        "  %t4 = load i64, ptr %t3, align 8\n",
+        "  store i64 %t4, ptr %x.1, align 8\n",
+        "  br label %L4\n",
+        "\n",
+        "L3:\n",
+        "  %t5 = load i64, ptr %tmp1, align 8\n",
+        "  %t6 = add i64 %t5, 1\n",
+        "  store i64 %t6, ptr %tmp1, align 8\n",
+        "  br label %L1\n",
+        "\n",
+        "L4:\n",
+        "  ret void\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..17])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // `break` targets the innermost enclosing loop or `switch` and `continue` the
@@ -278,23 +309,32 @@ fn a_break_in_a_switch_in_a_loop_leaves_the_switch_alone() void {
     strbuf.append(&src, "        case 0:\n            break;\n        default:\n");
     strbuf.append(&src, "            continue;\n        }\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "mixed");
-    string[12] mut want = {
-        "  switch i64 %t0, label %L5 [\n",
-        "    i64 0, label %L4\n",
+    string[20] want = {
+        "  switch i64 %t0, label %L6 [\n",
+        "    i64 0, label %L5\n",
         "  ]\n",
-        "\nL4:\n",
+        "\n",
+        "L3:\n",
+        "  br label %L1\n",
+        "\n",
+        "L4:\n",
+        "  ret void\n",
+        "\n",
+        "L5:\n",
         // The `break` of the case body branches to the switch's continuation.
-        "  br label %L6\n",
-        "\nL5:\n",
+        "  br label %L7\n",
+        "\n",
+        "L6:\n",
         // The `continue` of the default clause branches to the loop's step.
-        "  br label %L2\n",
-        "\nL6:\n",
-        "  br label %L2\n",
-        "\nL2:\n",
-        "  br label %L0\n",
+        "  br label %L3\n",
+        "\n",
+        "L7:\n",
+        // The continuation of the switch falls to the step too.
+        "  br label %L3\n",
+        "}\n",
         "",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..11])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // ---- the conditional in a definition ------------------------------------------------
@@ -313,30 +353,34 @@ fn a_conditional_in_a_return_ends_every_block_it_opens() void {
     defer strbuf.free(&src);
     strbuf.append(&src, "fn pick(bool go, i64 a, i64 b) i64 {\n    return go ? a : b;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "pick");
-    string[13] mut want = {
+    string[20] want = {
         "  %t1 = load i8, ptr %go.0, align 1\n",
         "  %t2 = trunc i8 %t1 to i1\n",
-        "  br i1 %t2, label %L0, label %L1\n",
-        "\nL0:\n",
+        "  br i1 %t2, label %L1, label %L2\n",
+        "\n",
+        "L1:\n",
         "  %t3 = load i64, ptr %a.1, align 8\n",
         "  store i64 %t3, ptr %tmp0, align 8\n",
-        "  br label %L2\n",
-        "\nL1:\n",
+        "  br label %L3\n",
+        "\n",
+        "L2:\n",
         "  %t4 = load i64, ptr %b.2, align 8\n",
         "  store i64 %t4, ptr %tmp0, align 8\n",
-        "  br label %L2\n",
-        "\nL2:\n",
-        "  %t5 = load i64, ptr %tmp0, align 8\n  ret i64 %t5\n}\n",
+        "  br label %L3\n",
+        "\n",
+        "L3:\n",
+        "  %t5 = load i64, ptr %tmp0, align 8\n",
+        "  store i64 %t5, ptr %result, align 8\n",
+        "  %t6 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t6\n",
+        "}\n",
     };
-    gen_env.expect_text(got[cast(str.find(got, "  %t1 = load i8"), u64)..],
-                        gen_env.join_lines(&e, want[0..13]));
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
-// An aggregate conditional writes through gen_expr_into, which is the other
-// half of the lowering. Each arm writes the whole value into the one
-// destination and the two blocks meet at the continuation. The structural
-// block check runs over this definition because
-// the aggregate path duplicates a memcpy per arm.
+// An aggregate conditional writes each arm into the destination. Each arm writes the whole
+// value into the one destination and the two blocks meet at the continuation. The structural
+// block check runs over this definition because the aggregate path duplicates a memcpy per arm.
 fn an_aggregate_conditional_writes_each_arm_into_the_destination() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -349,9 +393,10 @@ fn an_aggregate_conditional_writes_each_arm_into_the_destination() void {
     strbuf.append(&src, "fn take(bool go, buf mut* a, buf mut* b) buf {\n");
     strbuf.append(&src, "    return go ? move(*a) : move(*b);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "take");
-    string[14] mut want = {
-        "  br i1 %t2, label %L0, label %L1\n",
-        "\nL0:\n",
+    string[20] want = {
+        "  br i1 %t2, label %L1, label %L2\n",
+        "\n",
+        "L1:\n",
         "  %t3 = load ptr, ptr %a.1, align 8\n",
         // The move reads the operand into an intermediate, empties it and only
         // then copies it into the destination.
@@ -360,14 +405,19 @@ fn an_aggregate_conditional_writes_each_arm_into_the_destination() void {
         "  call void @llvm.memset.p0.i64(ptr align 8 %t3, i8 0, i64 24, i1 false)\n",
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp0, i64 24,",
         " i1 false)\n",
-        "  br label %L2\n",
-        "\nL1:\n",
+        "  br label %L3\n",
+        "\n",
+        "L2:\n",
         "  %t4 = load ptr, ptr %b.2, align 8\n",
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t4, i64 24,",
         " i1 false)\n",
         "  call void @llvm.memset.p0.i64(ptr align 8 %t4, i8 0, i64 24, i1 false)\n",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp1, i64 24,",
+        " i1 false)\n",
+        "  br label %L3\n",
+        "\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..14])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // ---- switch --------------------------------------------------------------------------
@@ -387,30 +437,37 @@ fn a_switch_lists_every_label_and_falls_into_no_clause() void {
     strbuf.append(&src, "        return 5;\n    default:\n        break;\n    }\n");
     strbuf.append(&src, "    return 6;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "chosen");
-    string[13] mut want = {
+    string[19] want = {
         "  %t0 = load i64, ptr %n.0, align 8\n",
-        "  switch i64 %t0, label %L1 [\n",
-        "    i64 0, label %L0\n",
-        "    i64 1, label %L0\n",
+        "  switch i64 %t0, label %L2 [\n",
+        "    i64 0, label %L1\n",
+        "    i64 1, label %L1\n",
         "  ]\n",
-        "\nL0:\n",
-        "  ret i64 5\n",
-        "\nL1:\n",
-        "  br label %L2\n",
-        "\nL2:\n",
-        "  ret i64 6\n",
+        "\n",
+        "L1:\n",
+        "  store i64 5, ptr %result, align 8\n",
+        "  %t1 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t1\n",
+        "\n",
+        "L2:\n",
+        "  br label %L3\n",
+        "\n",
+        "L3:\n",
+        "  store i64 6, ptr %result, align 8\n",
+        "  %t2 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t2\n",
         "}\n",
-        "",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..12])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
 }
 
 // A `switch` over an enum with no `default` still meets values outside the
 // member set. This is because a zeroed enum holds 0 whether or not 0 is a member and
 // int-to-enum is unchecked. So the compiler gives it a `default` of its own
-// that reports the enum and the value. The switch block
-// widens the value and dominates the failure block. The
-// failure block follows each normal block in the definition.
+// that reports the enum and the value. The block of the switch
+// widens the value and dominates the failure block. The fail block takes the
+// smallest number, bb1, so it is the first failure block after the normal
+// blocks (spec/fir.md 9.3).
 fn an_enum_switch_with_no_default_gets_a_failure_block() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
@@ -423,25 +480,33 @@ fn an_enum_switch_with_no_default_gets_a_failure_block() void {
     strbuf.append(&src, "fn pick(colour c) i64 {\n    switch (c) {\n    case colour.red:\n");
     strbuf.append(&src, "        return 1;\n    case colour.green:\n        return 2;\n    }\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "pick");
-    string[16] mut want = {
+    string[24] want = {
         "  %t0 = load i32, ptr %c.0, align 4\n",
         "  %t1 = sext i32 %t0 to i64\n",
-        "  switch i32 %t0, label %L3 [\n",
-        "    i32 0, label %L0\n",
-        "    i32 1, label %L1\n",
+        "  %t2 = load i32, ptr %c.0, align 4\n",
+        "  switch i32 %t2, label %L5 [\n",
+        "    i32 0, label %L2\n",
+        "    i32 1, label %L3\n",
         "  ]\n",
-        "\nL0:\n",
-        "  ret i64 1\n",
-        "\nL1:\n",
-        "  ret i64 2\n",
-        "\nL2:\n",
+        "\n",
+        "L2:\n",
+        "  store i64 1, ptr %result, align 8\n",
+        "  %t3 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t3\n",
+        "\n",
+        "L3:\n",
+        "  store i64 2, ptr %result, align 8\n",
+        "  %t4 = load i64, ptr %result, align 8\n",
+        "  ret i64 %t4\n",
+        "\n",
+        "L4:\n",
         "  unreachable\n",
-        "\nL3:\n",
-        "  call void @\"std.rt.fail_enum\"(i64 %t1, ptr @.str.0, ptr @.file.0, i32 ",
-        "",
-        "",
+        "\n",
+        "L5:\n",
+        "  call void @\"std.rt.fail_enum\"(i64 %t1, ptr @.str.0, ptr @.file.0, i32 6, i32 5)\n",
+        "  unreachable\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..14])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
     // The table the failure names is the enum's own name, a string constant
     // of the module.
     assert(gen_env.record_text(&e, 0) == "colour");
@@ -461,25 +526,31 @@ fn a_compound_assignment_and_an_increment_use_the_operator_s_intrinsic() void {
     defer strbuf.free(&src);
     strbuf.append(&src, "fn count() void {\n    i64 mut n = 0;\n    n += 2;\n    n++;\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "count");
-    string[6] mut want = {
+    string[17] want = {
         "  %t0 = load i64, ptr %n.0, align 8\n",
         "  %t1 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %t0, i64 2)\n",
         "  %t2 = extractvalue { i64, i1 } %t1, 0\n",
         "  %t3 = extractvalue { i64, i1 } %t1, 1\n",
-        "  br i1 %t3, label %L1, label %L0\n",
-        "",
-    };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..5])) >= 0);
-    string[3] mut inc = {
+        "  br i1 %t3, label %L3, label %L1\n",
+        "\n",
+        "L1:\n",
+        "  store i64 %t2, ptr %n.0, align 8\n",
+        "  %t4 = load i64, ptr %n.0, align 8\n",
         "  %t5 = call { i64, i1 } @llvm.sadd.with.overflow.i64(i64 %t4, i64 1)\n",
-        "",
-        "",
+        "  %t6 = extractvalue { i64, i1 } %t5, 0\n",
+        "  %t7 = extractvalue { i64, i1 } %t5, 1\n",
+        "  br i1 %t7, label %L4, label %L2\n",
+        "\n",
+        "L2:\n",
+        "  store i64 %t6, ptr %n.0, align 8\n",
+        "  ret void\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, inc[0..1])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
     // Each check's failure block is emitted after every normal block, in
     // ascending label order.
-    assert(str.find(got, "\nL1:\n  call void @\"std.rt.fail_overflow\"(") <
-           str.find(got, "\nL3:\n  call void @\"std.rt.fail_overflow\"("));
+    i64 first = str.find(got, "\nL3:\n  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 3,");
+    i64 second = str.find(got, "\nL4:\n  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 4,");
+    assert(first > str.find(got, "  ret void\n") && second > first);
 }
 
 // Storing over a live `own` value is a runtime error in a checked build, the previous
@@ -498,21 +569,20 @@ fn an_assignment_to_an_own_reference_checks_what_it_overwrites() void {
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "hold");
     // The new value is in a register before the check, and the store stands
     // in the continuation.
-    string[5] mut want = {
-        "  %t4 = call ptr @\"std.rt.alloc\"(",
-        "",
-        "",
-        "",
-        "",
-    };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..1])) >= 0);
-    string[4] mut check = {
+    string[7] want = {
+        "  %t4 = call ptr @\"std.rt.alloc\"(i64 8, i64 1, ptr @.file.0, i32 4, i32 9)\n",
         "  %t5 = load ptr, ptr %p.0, align 8\n",
         "  %t6 = icmp ne ptr %t5, null\n",
-        "  br i1 %t6, label %L3, label %L2\n",
-        "\nL2:\n  store ptr %t4, ptr %p.0, align 8\n",
+        "  br i1 %t6, label %L4, label %L2\n",
+        "\n",
+        "L2:\n",
+        "  store ptr %t4, ptr %p.0, align 8\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, check[0..4])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(
+        got, gen_env.join3(&e, "L4:\n",
+                           "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 4, i32 7)\n",
+                           "  unreachable\n"));
 }
 
 
@@ -530,23 +600,24 @@ fn an_own_span_is_checked_through_its_header_and_copied_after() void {
     strbuf.append(&src, "fn hold() void {\n    i64 mut@ own mut xs = new(i64, 2);\n");
     strbuf.append(&src, "    del(xs);\n    xs = new(i64, 3);\n    del(xs);\n}\n");
     string got = emit(&e, wrap(&b, strbuf.view(&src)), "hold");
-    string[6] mut want = {
+    string[7] want = {
         "  %t15 = getelementptr inbounds %fort.span, ptr %xs.0, i32 0, i32 0\n",
         "  %t16 = load ptr, ptr %t15, align 8\n",
         "  %t17 = icmp ne ptr %t16, null\n",
-        "  br i1 %t17, label %L7, label %L6\n",
-        "\nL6:\n",
+        "  br i1 %t17, label %L8, label %L4\n",
+        "\n",
+        "L4:\n",
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %xs.0, ptr align 8 %tmp1, i64 16,",
     };
-    assert(str.find(got, gen_env.join_lines(&e, want[0..6])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
     // The entry block zeroes an owning
     // local once. `del` zeroes it
     // again without an assignment check.
-    string[2] mut zeroed = {
+    string[2] zeroed = {
         "  call void @llvm.memset.p0.i64(ptr align 8 %xs.0, i8 0, i64 16, i1 false)\n",
         "  %t0 = sext i32 2 to i64\n",
     };
-    assert(str.find(got, gen_env.join_lines(&e, zeroed[0..2])) >= 0);
+    gen_env.expect_in(got, gen_env.join_lines(&e, zeroed[..]));
 }
 
 // `--release` drops the overwrite check with the rest of the checked

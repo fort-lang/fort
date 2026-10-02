@@ -13,14 +13,16 @@
 /// signatures, and module output.
 import gen;
 import gen_env;
-import gen_stmt;
+import gen_fir;
 import std.str;
 import std.strbuf;
 
 //
 // bootstrap-0 rejects floats, so it provides no reference output. The assertions
 // instead check the cast table, fast-math flags,
-// print routing, constant forms, and NaN behavior.
+// print routing, constant forms, and NaN behavior. A probe emits `main`
+// through FIR (gen_env.main_text) and holds the lines of its expression in
+// the definition.
 //
 // A run test can see the selected fcmp predicate only through a NaN comparison.
 // It cannot see a fast-math flag. The assembler also rejects an f32 constant
@@ -67,8 +69,7 @@ fn probe1(string one, string two, string three, string name, string x1) void {
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open3(&e, one, two, three));
-    gen_env.emit_value(&e, name);
-    gen_env.expect_text(gen_env.body(&e), x1);
+    gen_env.expect_in(gen_env.main_text(&e), x1);
 }
 
 fn probe2(string one, string two, string three, string name, string x1, string x2) void {
@@ -76,8 +77,7 @@ fn probe2(string one, string two, string three, string name, string x1, string x
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open3(&e, one, two, three));
-    gen_env.emit_value(&e, name);
-    gen_env.expect_text(gen_env.body(&e), gen_env.join2(&e, x1, x2));
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join2(&e, x1, x2));
 }
 
 fn probe3(string one, string two, string three, string name, string x1, string x2,
@@ -86,8 +86,7 @@ fn probe3(string one, string two, string three, string name, string x1, string x
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open3(&e, one, two, three));
-    gen_env.emit_value(&e, name);
-    gen_env.expect_text(gen_env.body(&e), gen_env.join3(&e, x1, x2, x3));
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join3(&e, x1, x2, x3));
 }
 
 // The same for a cast to an integer, which also asserts the intrinsic slot the
@@ -98,17 +97,16 @@ fn probe_conv(string one, string two, string three, string name, string x1, stri
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open3(&e, one, two, three));
-    gen_env.emit_value(&e, name);
-    gen_env.expect_text(gen_env.body(&e), gen_env.join2(&e, x1, x2));
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join2(&e, x1, x2));
     assert(gen.gen_uses_intrinsic(&e.g, slot));
     assert(gen.gen_uses_attr(&e.g, gen.ATTR_OVERFLOW));
 }
 
 // ---- a float constant ----------------------------------------------------
 
-// A folded constant is a literal and emits nothing. Its text is `0x` and the
-// sixteen hex digits of the binary64 pattern, which is the form LLVM 18 reads
-// a float constant in.
+// A folded constant is a literal, which the store into its local names. Its
+// text is `0x` and the sixteen hex digits of the binary64 pattern, which is
+// the form LLVM 18 reads a float constant in.
 fn a_float_constant_is_the_hex_form_of_its_pattern() void {
     want_const(A_F64, B_F64, "    f64 mut c = 0.1;", "c", "double", "0x3FB999999999999A");
 }
@@ -122,18 +120,24 @@ fn an_f32_constant_is_a_binary64_the_type_holds_exactly() void {
 }
 
 // The same for a constant folded from an expression, and for an integer
-// constant the context gave a float type. A constant value of the local `name`,
-// asserted as a type and a text: the sandbox is its own, as in the probes
-// above.
+// constant the context gave a float type. The constant value of the local
+// `name`, the third local, asserted as the type and the text of its store:
+// the sandbox is its own, as in the probes above.
 fn want_const(string one, string two, string three, string name, string ty, string val) void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open3(&e, one, two, three));
-    gen.gen_val v = gen_env.emit_value(&e, name);
-    gen_env.expect_text(gen_env.body(&e), "");
-    gen_env.expect_text(v.ty, ty);
-    gen_env.expect_text(v.val, val);
+    strbuf.str_buf mut store = strbuf.create();
+    defer strbuf.free(&store);
+    strbuf.append(&store, "  store ");
+    strbuf.append(&store, ty);
+    strbuf.push(&store, ' ');
+    strbuf.append(&store, val);
+    strbuf.append(&store, ", ptr %");
+    strbuf.append(&store, name);
+    strbuf.append(&store, ".2, align ");
+    gen_env.expect_in(gen_env.main_text(&e), strbuf.view(&store));
 }
 
 fn a_folded_expression_and_an_integer_take_the_float_form() void {
@@ -176,10 +180,10 @@ fn a_float_division_has_no_zero_check() void {
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open3(&e, A_F64, B_F64, "    f64 mut c = a / b;"));
-    gen_env.emit_value(&e, "c");
-    gen_env.expect_text(gen_env.body(&e),
-                        gen_env.join3(&e, LOAD_A, LOAD_B, "  %t2 = fdiv double %t0, %t1\n"));
-    gen_env.expect_text(gen_env.fail(&e), "");
+    string got = gen_env.main_text(&e);
+    gen_env.expect_in(got, gen_env.join3(&e, LOAD_A, LOAD_B, "  %t2 = fdiv double %t0, %t1\n"));
+    assert(str.find(got, "br i1") < 0);
+    assert(str.find(got, "@\"std.rt.fail_") < 0);
 }
 
 // The same four in binary32, which differ only in the type text.
@@ -300,7 +304,7 @@ fn want_print(string one, string two, string three, string x1, string x2) void {
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open3(&e, one, two, three));
-    gen_env.expect_text(gen_env.discard_at(&e, 2), gen_env.join2(&e, x1, x2));
+    gen_env.expect_in(gen_env.main_text(&e), gen_env.join2(&e, x1, x2));
 }
 
 fn a_float_prints_through_the_entry_point_of_its_type() void {
@@ -318,7 +322,7 @@ fn a_constant_argument_prints_as_a_literal() void {
     defer gen_env.close(&e);
     assert(open3(&e, A_F64, B_F64, "    print(0.5);"));
     string call = "  call void @\"std.rt.print_f64\"(i32 1, double 0x3FE0000000000000)\n";
-    gen_env.expect_text(gen_env.discard_at(&e, 2), call);
+    gen_env.expect_in(gen_env.main_text(&e), call);
 }
 
 fn printing() void {
@@ -339,9 +343,10 @@ fn a_float_signature_carries_no_extension_attribute() void {
     string[5] src = {"fn narrow(f64 a, f32 b, i8 c) f32 {\n", "    return b;\n", "}\n",
                      "fn main() i32 {\n", "    return 0;\n}\n"};
     assert(gen_env.open_module(&e, gen_env.join_lines(&e, src[..])));
-    string[11] mut want = {
+    string[14] mut want = {
         DEFINE_NARROW,
         "entry:\n",
+        "  %result = alloca float, align 4\n",
         "  %a.0 = alloca double, align 8\n",
         "  %b.1 = alloca float, align 4\n",
         "  %c.2 = alloca i8, align 1\n",
@@ -349,11 +354,13 @@ fn a_float_signature_carries_no_extension_attribute() void {
         "  store float %b.in, ptr %b.1, align 4\n",
         "  store i8 %c.in, ptr %c.2, align 1\n",
         "  %t0 = load float, ptr %b.1, align 4\n",
-        "  ret float %t0\n",
+        "  store float %t0, ptr %result, align 4\n",
+        "  %t1 = load float, ptr %result, align 4\n",
+        "  ret float %t1\n",
         "}\n",
     };
     string got = gen_env.emit_function(&e, "narrow");
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..11]));
+    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..14]));
     gen_env.expect_blocks(&e, got);
 }
 
@@ -368,7 +375,7 @@ fn a_float_global_holds_its_constant() void {
     string[4] src = {"f64 SCALE = 3.5;\n", "f32 mut STEP = 0.5;\n", "fn main() i32 {\n",
                      "    return 0;\n}\n"};
     assert(gen_env.open_module(&e, gen_env.join_lines(&e, src[..])));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
     string scale = "@\"main.SCALE\" = dso_local constant double 0x400C000000000000, align 8\n";
     string step = "@\"main.STEP\" = dso_local global float 0x3FE0000000000000, align 4\n";
@@ -385,7 +392,7 @@ fn a_float_aggregate_is_zeroinitializer_only_for_positive_zeros() void {
                      "f64[2] SIGNS = {0.0, -0.0};\n", "fn main() i32 {\n",
                      "    return 0;\n}\n"};
     assert(gen_env.open_module(&e, gen_env.join_lines(&e, src[..])));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string[3] mut want = {
         "@\"main.STEPS\" = dso_local constant [2 x double] [double 0x3FE0000000000000, ",
         "double 0x3FF0000000000000], align 8\n",
@@ -411,7 +418,7 @@ fn the_conversion_intrinsics_are_declared_in_the_order_of_item_8() void {
                      "    i32 mut b = cast(a, i32);\n", "    u8 mut c = cast(a, u8);\n",
                      "    return 0;\n}\n"};
     assert(gen_env.open_module(&e, gen_env.join_lines(&e, src[..])));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
     string text = gen_env.module_text(&e);
     assert(str.find(text, "declare i8 @llvm.fptoui.sat.i8.f64(double) #4\n") >= 0);
@@ -436,8 +443,8 @@ fn no_float_instruction_carries_a_fast_math_flag() void {
                       "    i64 mut k = cast(h, i64);\n", "    f64 mut m = cast(k, f64);\n",
                       "    bool mut p = a < b;\n", "    bool mut q = a == b;\n",
                       "    println(a, g, m, p, q);\n", "    return 0;\n}\n"};
-    assert(gen_env.open_module(&e, gen_env.join_lines(&e, src[..])));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_env.open_module_rt(&e, gen_env.join_lines(&e, src[..])));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
     string text = gen_env.module_text(&e);
     // The module really does hold the instructions the flags would sit on.

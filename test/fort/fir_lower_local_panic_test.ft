@@ -1,0 +1,41 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_lower.local_of: a name without a local
+//! stdout:
+//| bound
+/// Every parameter and named local of the function being lowered has a FIR local, which the
+/// prescan gives it before the walk of the body (spec/fir.md 5.3). Asking for the local of a
+/// symbol that has none is a broken precondition and not a program the lowering refuses. It
+/// panics at the call that broke it, where bootstrap0/src/gen.c calls fatal_internal for a local
+/// with no slot.
+import ast;
+import fir;
+import fir_lower;
+import lower_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn f(i32 a) void {",
+        "    i32 mut b = a;",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "f");
+    ast.node* local = ast.ast_child(decl->b, 0);
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.prescan(&f, decl->b);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    // The parameter and the local the body declares have one each.
+    assert(fir_lower.local_of(&lw, ast.ast_child(decl, 0)->sym) == 1);
+    assert(fir_lower.local_of(&lw, local->sym) == 2);
+    println("bound");
+    // The function itself is a declaration of the module and never a local of
+    // the body being lowered.
+    fir_lower.local_of(&lw, decl->sym);
+    return 0;
+}

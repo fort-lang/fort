@@ -66,7 +66,7 @@ string[45] MOVES = {
 // `move p` of a pointer that is no temporary: the load, `store ptr null`, and only then the store
 // into the destination (toolchain.md 6 item 18). In checked mode the value waits in the register
 // `_3` across the overwrite check, and `q = move _3` of that register zeroes nothing. Under
-// --release the fold leaves `q = move p`, which is the direct path's text.
+// --release the fold leaves `q = move p`.
 fn a_pointer_move_zeroes_before_the_store() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -91,8 +91,6 @@ fn a_pointer_move_zeroes_before_the_store() void {
         "  store ptr %t1, ptr %result, align 8",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "mv", want[2..8]);
-    llvm_env.in_direct(&e, "mv", want[10..11]);
     string[12] release = {
         "entry:",
         "  %result = alloca ptr, align 8",
@@ -108,13 +106,12 @@ fn a_pointer_move_zeroes_before_the_store() void {
         "  store ptr %t1, ptr %result, align 8",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "mv", pass_env.RELEASE), release[..]);
-    llvm_env.in_direct(&e, "mv", release[2..11]);
 }
 
 // `move s` of a span: `llvm.memcpy` into a new `%tmp`, `llvm.memset` of `s`, then `llvm.memcpy`
 // out (toolchain.md 6 item 18). In checked mode the value goes into the slot `_3`, `%tmp0`, and
-// `t = move _3` copies it out with no intermediate and no zeroing, as the direct path copies its
-// temporary. The implicit move of `return t` goes through an intermediate of its own.
+// `t = move _3` copies it out with no intermediate and no zeroing. The implicit move of `return t`
+// goes through an intermediate of its own.
 fn a_span_move_goes_through_an_intermediate() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -145,9 +142,6 @@ fn a_span_move_goes_through_an_intermediate() void {
         "i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    llvm_env.in_direct(&e, "mvs", want[0..4]);
-    llvm_env.in_direct(&e, "mvs", want[5..11]);
-    llvm_env.in_direct(&e, "mvs", want[13..15]);
     // under --release the fold writes `t = move s`: into %tmp0, memset, then out into `t`
     string[15] release = {
         "entry:",
@@ -167,8 +161,6 @@ fn a_span_move_goes_through_an_intermediate() void {
         "i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "mvs", pass_env.RELEASE), release[..]);
-    llvm_env.in_direct(&e, "mvs", release[0..3]);
-    llvm_env.in_direct(&e, "mvs", release[4..10]);
 }
 
 // `s = move(s)`: the destination is the operand itself, so the value must leave `s` before the
@@ -194,8 +186,6 @@ fn a_move_into_its_own_place_keeps_the_value() void {
         "i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "self", pass_env.RELEASE), release[..]);
-    llvm_env.in_direct(&e, "self", release[0..2]);
-    llvm_env.in_direct(&e, "self", release[3..8]);
     // in checked mode the slot `_2` holds the value across the overwrite check of `s`
     string[18] checked = {
         "entry:",
@@ -218,13 +208,10 @@ fn a_move_into_its_own_place_keeps_the_value() void {
         "i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "self", pass_env.CHECKED), checked[..]);
-    llvm_env.in_direct(&e, "self", checked[4..9]);
-    llvm_env.in_direct(&e, "self", checked[11..13]);
 }
 
 // `*h = move(*g)`: the lowering holds the address of `*h` in the register `_3`, and the move
-// copies `*g` into `%tmp0`, zeroes it, then copies out through that register, as the direct path
-// does.
+// copies `*g` into `%tmp0`, zeroes it, then copies out through that register.
 fn a_move_through_two_pointers() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -245,7 +232,6 @@ fn a_move_through_two_pointers() void {
         "i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "mh", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "mh", want[..]);
 }
 
 // A `cast` of `move p` carries the owner: the load and the zeroing, then nothing for a pointer
@@ -264,7 +250,6 @@ fn a_cast_of_a_move() void {
         "  store ptr %t0, ptr %result, align 8",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "cp", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "cp", want[2..6]);
 }
 
 // `return *p` of an aggregate copies `*p` into `%ret.sret` with one `llvm.memcpy`, as the direct
@@ -283,14 +268,12 @@ fn a_copy_through_a_pointer_into_the_result() void {
         "i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "swap", pass_env.CHECKED), want[..]);
-    llvm_env.in_direct(&e, "swap", want[..]);
 }
 
 // ---- deletes ------------------------------------------------------------------------------------
 
 // `del(move p)` of a pointer: the load, the call of `std.rt.free`, `store ptr null`; of a span:
-// the load of field 0, the call, and a 16-byte `llvm.memset` (toolchain.md 6 item 17). The whole
-// body is the direct path's.
+// the load of field 0, the call, and a 16-byte `llvm.memset` (toolchain.md 6 item 17).
 fn a_delete_frees_and_zeroes() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -304,7 +287,6 @@ fn a_delete_frees_and_zeroes() void {
         "  store ptr null, ptr %p.0, align 8",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "dp", pass_env.CHECKED), dp[..]);
-    llvm_env.in_direct(&e, "dp", dp[..]);
     string[5] ds = {
         "entry:",
         "  %t0 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 0",
@@ -313,7 +295,6 @@ fn a_delete_frees_and_zeroes() void {
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "ds", pass_env.CHECKED), ds[..]);
-    llvm_env.in_direct(&e, "ds", ds[..]);
     // a field reached through a pointer is zeroed at the address that the load read
     string[8] df = {
         "entry:",
@@ -326,12 +307,11 @@ fn a_delete_frees_and_zeroes() void {
         "  store ptr null, ptr %t1, align 8",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "df", pass_env.CHECKED), df[..]);
-    llvm_env.in_direct(&e, "df", df[..]);
 }
 
 // `del(e)` of an rvalue deletes a temporary, whose zeroing nothing could read (V12): the register
 // of `new(u8)` is freed with no store, and the `%tmp0` header of `new(u8, 4)` is freed with no
-// `llvm.memset`. Both bodies are the direct path's.
+// `llvm.memset`.
 fn a_delete_of_a_temporary_zeroes_nothing() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -342,7 +322,6 @@ fn a_delete_of_a_temporary_zeroes_nothing() void {
         "  call void @\"std.rt.free\"(ptr %t0)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "dt", pass_env.CHECKED), dt[..]);
-    llvm_env.in_direct(&e, "dt", dt[..]);
     string[14] dts = {
         "entry:",
         "  %tmp0 = alloca %fort.span, align 8",
@@ -360,13 +339,11 @@ fn a_delete_of_a_temporary_zeroes_nothing() void {
         "  call void @\"std.rt.free\"(ptr %t6)",
     };
     llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "dts", pass_env.CHECKED), dts[..]);
-    llvm_env.in_direct(&e, "dts", dts[0..4]);
-    llvm_env.in_direct(&e, "dts", dts[6..14]);
 }
 
 // ---- temporaries --------------------------------------------------------------------------------
 
-// Hand-written moves and deletes of temporaries that the direct path has no form for: a slot of
+// Hand-written moves and deletes of temporaries that no source program lowers to: a slot of
 // a pointer that two arms assign, a field of an aggregate temporary, a field of a named local,
 // and a slot that a `del` frees.
 string[53] TEMPS = {

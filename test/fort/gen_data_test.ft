@@ -12,7 +12,7 @@
 import gen;
 import gen_data;
 import gen_env;
-import gen_stmt;
+import gen_fir;
 import std.str;
 import std.strbuf;
 
@@ -24,8 +24,10 @@ import std.strbuf;
 // `grep -c '^ *gen_env.expect_blocks('` reports 6 call sites. Those sites
 // cover 9 cases, not all 12.
 //
-// bootstrap0/test/gen_global_test.c checks the bootstrap implementation. Direct emitter
-// tests pin the expected text here.
+// bootstrap0/test/gen_global_test.c checks the bootstrap implementation. The
+// emitter tests here pin the text that gen_fir.gen_program writes. A case whose
+// function checks or prints opens its source with gen_env.open_module_rt, so
+// that the runtime of the closure defines the entries it calls.
 
 // The globals section of a module whose declarations are `decls`.
 fn globals_of(gen_env.env mut* e, strbuf.str_buf mut* b, string decls) string {
@@ -33,7 +35,7 @@ fn globals_of(gen_env.env mut* e, strbuf.str_buf mut* b, string decls) string {
     strbuf.append(b, decls);
     strbuf.append(b, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module(e, strbuf.view(b)));
-    assert(gen_stmt.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    assert(gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set));
     // Every module a case here emits goes through the structural check of
     // the block structure as well, which is what this helper checks.
     gen_env.expect_blocks(e, gen_env.module_text(e));
@@ -160,8 +162,8 @@ fn the_private_data_is_the_three_lists_in_order() void {
     strbuf.append(&b, "enum colour {\n    red,\n    green,\n}\n");
     strbuf.append(&b, "fn main() i32 {\n    println(\"a\\tb\");\n");
     strbuf.append(&b, "    println(\"a\\tb\");\n    println(colour.red);\n    return 0;\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&b)));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_env.open_module_rt(&e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string got = gen_env.module_text(&e);
     gen_env.expect_blocks(&e, got);
     string[7] mut want = {
@@ -194,8 +196,8 @@ fn an_enum_table_holds_the_value_of_every_member() void {
     defer strbuf.free(&b);
     strbuf.append(&b, "enum code {\n    ok = 0,\n    bad = 7,\n    worse = -1,\n}\n");
     strbuf.append(&b, "fn main() i32 {\n    println(code.bad);\n    return 0;\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&b)));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_env.open_module_rt(&e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string got = gen_env.module_text(&e);
     gen_env.expect_blocks(&e, got);
     string[4] mut want = {
@@ -216,8 +218,8 @@ fn one_file_constant_stands_per_file() void {
     defer strbuf.free(&b);
     strbuf.append(&b, "fn main() i32 {\n    i64 mut n = 0;\n    n += 1;\n    n += 2;\n");
     strbuf.append(&b, "    return 0;\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&b)));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_env.open_module_rt(&e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
     assert(e.g.files.len == 1);
     // The path exactly as the compiler opened it, which in the sandbox is the
@@ -240,8 +242,8 @@ fn the_declaration_groups_stand_in_their_fixed_order() void {
     strbuf.append(&b, "extern fn puts(char* s) i32;\nextern fn swap(u8 a, i16 b) void;\n");
     strbuf.append(&b, "fn main() i32 {\n    i64 mut n = 0;\n    n += 1;\n");
     strbuf.append(&b, "    println(n);\n    swap(1, 2);\n    return puts(\"hi\".ptr);\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&b)));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_env.open_module_rt(&e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string got = gen_env.module_text(&e);
     gen_env.expect_blocks(&e, got);
     // Two groups and no third: the runtime is defined in the module rather
@@ -262,12 +264,16 @@ fn the_declaration_groups_stand_in_their_fixed_order() void {
         "memory(none) }\n",
     };
     assert(str.find(got, gen_env.join_lines(&e, groups[0..4])) >= 0);
-    // The groups a module does not use leave no trace, so #1, #2 and #5 to #8
-    // are absent here. `#2` is never emitted at all.
+    // The groups a module does not use leave no trace, so #1, #2, #5 and #6
+    // are absent here. `#2` is never emitted at all. The runtime of the
+    // closure defines its `noreturn` entry points under `#8`, and the end of
+    // each body is the trap of `#7` (D19.7).
     assert(str.find(got, "attributes #1 =") < 0);
     assert(str.find(got, "attributes #2 =") < 0);
     assert(str.find(got, "attributes #5 =") < 0);
-    assert(str.find(got, "attributes #8 =") < 0);
+    assert(str.find(got, "attributes #6 =") < 0);
+    assert(str.find(got, "attributes #7 =") >= 0);
+    assert(str.find(got, "attributes #8 =") >= 0);
 }
 
 // Mac marks each extern declaration `nobuiltin`. This test checks two
@@ -275,7 +281,7 @@ fn the_declaration_groups_stand_in_their_fixed_order() void {
 // declaration bytes tested above.
 fn mac_extern_declarations_protect_allocator_effects() void {
     gen_env.env mut e = gen_env.env{};
-    gen_env.open_with(&e, gen.gen_options{false, false, "arm64-apple-macosx15.0.0", false});
+    gen_env.open_with(&e, gen.gen_options{false, false, "arm64-apple-macosx15.0.0"});
     defer gen_env.close(&e);
     strbuf.str_buf mut source = strbuf.create();
     defer strbuf.free(&source);
@@ -283,7 +289,7 @@ fn mac_extern_declarations_protect_allocator_effects() void {
     strbuf.append(&source, "extern fn free(void* p) void;\n");
     strbuf.append(&source, "fn main() i32 {\n    free(calloc(1, 16));\n    return 0;\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&source)));
-    assert(gen_stmt.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string got = gen_env.module_text(&e);
     gen_env.expect_blocks(&e, got);
     assert(str.find(got, "declare ptr @calloc(i64, i64) nobuiltin\n") >= 0);

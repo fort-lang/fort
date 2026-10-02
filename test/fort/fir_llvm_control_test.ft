@@ -7,11 +7,7 @@
 /// Checks the whole definitions that the FIR translator writes (spec/fir.md 12.4, 12.5): each
 /// terminator kind, the failure blocks after the normal blocks in the order of the blocks that
 /// make them, and the labels `entry`, `%L<n>` and `%L<B + k>`. Each definition passes the block
-/// rule of llvm_env.verified, and the lines that 12.5 lists no difference for are the direct
-/// path's.
-import fir;
-import fir_llvm;
-import gen;
+/// rule of llvm_env.verified.
 import llvm_env;
 import pass_env;
 
@@ -85,19 +81,6 @@ fn the_worked_example_translates_whole() void {
     string got = llvm_env.lowered_whole(&e, WORKED[..], "f", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    // the signature, the entry block up to the check, the check and its failure call
-    llvm_env.in_direct(&e, "f", want[0..1]);
-    string[6] entry = {
-        "  %c.0 = alloca i8, align 1",
-        "  %p.1 = alloca ptr, align 8",
-        "  %t0 = zext i1 %c.in to i8",
-        "  store i8 %t0, ptr %c.0, align 1",
-        "  store ptr null, ptr %p.1, align 8",
-        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
-    };
-    llvm_env.in_direct(&e, "f", entry[..]);
-    llvm_env.in_direct(&e, "f", want[9..11]);
-    llvm_env.in_direct(&e, "f", want[40..42]);
 }
 
 // Under --release the build-mode pass removes the check and merges `bb1` into `bb0`, so three
@@ -145,7 +128,6 @@ fn the_worked_example_in_release_mode() void {
     string got = llvm_env.lowered_whole(&e, WORKED[..], "f", pass_env.RELEASE);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "f", want[5..12]);
 }
 
 // ---- the terminators ----------------------------------------------------------------------------
@@ -256,8 +238,6 @@ fn an_integer_switch_and_unreachable() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "ints", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "ints", want[0..1]);
-    llvm_env.in_direct(&e, "ints", want[3..6]);
 }
 
 // An enum `switch` with no `default` names the block of `fail(enum, ...)` as `otherwise`. That
@@ -302,10 +282,6 @@ fn an_enum_switch_and_its_failure_block() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "which", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    // the direct path numbers its data again at each emission, so the data comes first
-    llvm_env.in_direct(&e, "which", want[27..29]);
-    llvm_env.in_direct(&e, "which", want[0..1]);
-    llvm_env.in_direct(&e, "which", want[3..7]);
 }
 
 // `return` of a `void` function is `ret void`. The kind `user` branches to the continuation
@@ -334,8 +310,6 @@ fn a_user_check_branches_to_the_continuation_first() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "check_user", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "check_user", want[12..14]);
-    llvm_env.in_direct(&e, "check_user", want[0..6]);
 }
 
 // A bounds check branches with the failure label first, and its failure block reports the index
@@ -375,8 +349,6 @@ fn a_bounds_check_branches_to_its_failure_block_first() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "idx", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "idx", want[0..1]);
-    llvm_env.in_direct(&e, "idx", want[3..9]);
 }
 
 // A `while` loop: `goto` is `br`, the condition a `bool` `switch`, and the check of `s += 1` a
@@ -427,13 +399,9 @@ fn a_loop_writes_goto_and_its_failure_block_last() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "loop", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "loop", want[0..1]);
-    llvm_env.in_direct(&e, "loop", want[3..5]);
-    llvm_env.in_direct(&e, "loop", want[10..13]);
-    llvm_env.in_direct(&e, "loop", want[33..35]);
 }
 
-// A `noreturn` callee ends its block with the trap of D19.7, which the direct path writes too.
+// A `noreturn` callee ends its block with the trap of D19.7.
 fn a_trap_follows_a_noreturn_call() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -463,12 +431,10 @@ fn a_trap_follows_a_noreturn_call() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_stop", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "call_stop", want[3..8]);
-    llvm_env.in_direct(&e, "call_stop", want[11..14]);
 }
 
-// An aggregate result is written through `%ret.sret`, and `return` is `ret void`. The signature
-// and the entry block are the direct path's; the literal reads its member first (spec/fir.md 6).
+// An aggregate result is written through `%ret.sret`, and `return` is `ret void`. The literal
+// reads its member first (spec/fir.md 6).
 fn an_aggregate_result_returns_void() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -490,7 +456,6 @@ fn an_aggregate_result_returns_void() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "make", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "make", want[0..5]);
 }
 
 // ---- failures -----------------------------------------------------------------------------------
@@ -527,8 +492,6 @@ fn a_panic_alone_in_its_block_is_a_failure_block() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "msg", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "msg", want[0..7]);
-    llvm_env.in_direct(&e, "msg", want[13..19]);
 }
 
 // `panic` after statements is the call and `unreachable` in place, in the block `%L1` that holds
@@ -563,12 +526,10 @@ fn a_panic_after_statements_stands_in_place() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "boom", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "boom", want[13..17]);
-    llvm_env.in_direct(&e, "boom", want[0..10]);
 }
 
 // `bb0` that holds only `fail` stays the entry block, with the call in place, because LLVM needs
-// an entry block. A `noreturn` function takes `#1`. The whole definition is the direct path's.
+// an entry block. A `noreturn` function takes `#1`.
 fn a_panic_in_the_entry_block_stands_in_place() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -583,7 +544,6 @@ fn a_panic_in_the_entry_block_stands_in_place() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "stop", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
     llvm_env.verified(&e, got);
-    llvm_env.expect(&e, llvm_env.direct(&e, "stop"), want[..]);
 }
 
 // The failure blocks stand after the normal blocks in the order of the numbers of the blocks that
@@ -659,33 +619,6 @@ fn the_failure_blocks_follow_the_blocks_that_make_them() void {
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "order", pass_env.CHECKED);
     llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
-    llvm_env.in_direct(&e, "order", want[47..49]);
-    llvm_env.in_direct(&e, "order", want[51..53]);
-}
-
-// Translates block 0 of the function `name` of `lines` with its terminator, and gives whether the
-// emitter then holds the block as terminated.
-fn first_block_terminated(llvm_env.env mut* e, string@ lines, string name) bool {
-    fir.func mut f = llvm_env.lower(e, lines, name, pass_env.CHECKED);
-    defer fir.func_free(&f);
-    gen.function_begin(&e->g);
-    fir_llvm.translator mut t = fir_llvm.open(&e->g, &f);
-    defer fir_llvm.close(&t);
-    fir_llvm.write_locals(&t);
-    fir_llvm.translate_block(&t, 0);
-    fir_llvm.translate_terminator(&t, 0);
-    return e->g.terminated;
-}
-
-// A `check` and `check(overwrite)` leave their block terminated, although their failure block
-// opened a block of its own, so a caller that reads `g->terminated` after a terminator reads true.
-fn a_check_leaves_its_block_terminated() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
-    assert(first_block_terminated(&e, SOURCE[..], "idx"));
-    assert(first_block_terminated(&e, WORKED[..], "f"));
-    assert(first_block_terminated(&e, SOURCE[..], "ints"));
 }
 
 fn main() i32 {
@@ -704,7 +637,6 @@ fn main() i32 {
     a_panic_after_statements_stands_in_place();
     a_panic_in_the_entry_block_stands_in_place();
     the_failure_blocks_follow_the_blocks_that_make_them();
-    a_check_leaves_its_block_terminated();
     println("failures ok");
     return 0;
 }

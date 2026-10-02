@@ -354,11 +354,12 @@ came here.
   `movzbl` -- and it stops being invisible the moment a lowering compares or widens the narrow
   result instead of truncating it straight to `i1`.
   **The emitter reads lvalue-ness from the checker.** `check_expr` in `src/fort/check.ft` sets
-  `ANN_LVALUE` on each node whose `expr.lvalue` is true (D6.7). `gen_del` in
-  `src/fort/gen_expr.ft` reads that bit to decide whether `del` empties its operand (D17.9). The
-  checker also sets `ANN_MOVE` on a call of the builtin `move`, and the emitter reads that bit and
-  not the name of the callee. A new place form changes the checker's lvalue rule and
-  `gen_expr_place`, and nothing else. The bit and the kind of the node differ for `e[i]` on an
+  `ANN_LVALUE` on each node whose `expr.lvalue` is true (D6.7). `fir_lower.lower_del` reads that
+  bit to decide whether `del` empties its operand (D17.9); until T-255, `gen_del` of the direct
+  path's `src/fort/gen_expr.ft` read it. The checker also sets `ANN_MOVE` on a call of the builtin
+  `move`, and the lowering reads that bit and not the name of the callee. A new place form changes
+  the checker's lvalue rule and the place forms of the lowering (`fir_lower.designates` and
+  `lower_place`). The bit and the kind of the node differ for `e[i]` on an
   rvalue array `e`, for `e.f` on an rvalue `e` (D6.7) and for a function name. The emitted IR
   stays the same, because the checker refuses `del` of each of the three forms. Before T-193,
   `is_place_expr` derived the answer from the kind of the node. bootstrap-0 keeps that rule in
@@ -490,15 +491,15 @@ came here.
   own storage, so no writer reaches it. A held copy takes `fir_lower.lent_type`, which drops `own`
   at the top level and in the elements of a fixed array; a held copy that keeps `own` breaks rule
   V6. A place is also read late: `P->arr[swap()]` read `P` after `swap()` until review round 1 of
-  T-239 found it, and the direct path reads it before. So an index or a span expression whose index
+  T-239 found it, and the direct path read it before. So an index or a span expression whose index
   or bound holds a writer holds `_a = addr(base)` first when the base reads memory to find its
   storage. The target of `lv = e` is held under a wider condition: any target that is no fixed
   storage, a global included (`spec/fir.md` 9.3), while an index or a span holds only a base that
-  reads memory (9.4). The header of a span and the element are still read where they are used, on
-  both paths. A check stands where the direct path reports it, because the runtime prints that
-  location: the `check(user)` of `assert` and the `fail(panic)` of `panic` stand at the name of the
-  builtin and not at its `(`. T-239 moved `fort --fir` over the 450 run programs from 1795 lowered
-  functions to 30161, with no panic.
+  reads memory (9.4). The header of a span and the element are still read where they are used, as
+  the direct path read them. A check stands where the direct path reported it, because the runtime
+  prints that location: the `check(user)` of `assert` and the `fail(panic)` of `panic` stand at the
+  name of the builtin and not at its `(`. T-239 moved `fort --fir` over the 450 run programs from
+  1795 lowered functions to 30161, with no panic.
   **An exit finds its target on a stack of scopes, and never on a counter** (T-242):
   `fir_lower.lower_scope` pushes one scope for each block, of kind `fn`, `loop`, `case` or `block`,
   and `lower_exit` walks the stack from the innermost scope. `break` stops at the first `loop` or
@@ -557,9 +558,9 @@ came here.
   translator reads every operand before it computes the address of the destination, so a place
   operand is loaded once for each rvalue that names it (spec/fir.md 12.5). A `move` or a `del`
   of fixed storage of a temporary zeroes nothing, and an aggregate `move` of any other place
-  goes through a new `%tmp` intermediate. `gen_expr.gen_cast_value` and
-  `gen_expr.gen_overflow_call` write the cast and the overflow intrinsic for both paths, so the
-  ticket that deletes the direct path (T-255) moves them first. T-249 translated the 1822
+  goes through a new `%tmp` intermediate. `fir_llvm.cast_value` and `fir_llvm.overflow_call`
+  write the cast and the overflow intrinsic; until T-255 they were `gen_expr.gen_cast_value` and
+  `gen_overflow_call`, which both paths called. T-249 translated the 1822
   functions of `src/fort/main.ft` and 43793 functions of `test/lang/run` and
   `test/lang/programs` in the four modes, with a stand-in terminator for each block, and
   `opt-18 -passes=verify` accepted each module. The stand-ins read only the operand of a
@@ -571,16 +572,16 @@ came here.
 - **One signature map writes every definition, extern declaration and call** (T-251).
   `gen.signature_of` maps a fort function type to the result type and its extension attribute,
   the `sret` type, each parameter with its attribute, and the variadic flag of an `extern fn`.
-  `gen.gen_define`, `gen_data.emit_extern`, `gen_expr.gen_call`, `gen.gen_main` and
-  `fir_llvm.call_of` all read it, and `gen.gen_call_sig` writes each `call`. A fixed argument
-  takes the attribute of its parameter, and an argument of the variadic tail none. The move did
+  `gen.gen_define`, `gen_data.emit_extern`, `gen.gen_main` and `fir_llvm.call_of` all read it
+  (and `gen_expr.gen_call` of the direct path did, until T-255 deleted it), and
+  `gen.gen_call_sig` writes each `call`. A fixed argument takes the attribute of its parameter,
+  and an argument of the variadic tail none. The move did
   not change the direct path's text: `tools/ir_snapshot.sh` of `main` and of the branch gave an
   empty `diff -r` over 427 run tests in three modes. The calls that the translator makes itself,
   `std.rt.alloc`, `std.rt.free` and the failure entries, still come from the rows of
-  `runtime_sig`, as the direct path's do. `gen.function_begin`, `gen.function_end` and
-  `gen.gen_main` moved out of `gen_stmt`, because `fir_llvm` must not import `gen_stmt`: the
-  fallback of T-253 calls the translator from `gen_stmt`, and a circular import is an error
-  (D9.5).
+  `runtime_sig`, as the direct path's did. `gen.function_begin`, `gen.function_end` and
+  `gen.gen_main` stand in `gen`, because `fir_llvm` must not import the module that writes a
+  program: `gen_fir` calls the translator, and a circular import is an error (D9.5).
   **The translator numbers the failure blocks before it writes a block** (T-251).
   `fir_llvm.open` gives the `k`-th block that ends in a `check` or holds only `fail`, in block
   order, the label `%L<B + k>`, and a branch to a block that holds only `fail` names that label.
@@ -596,39 +597,54 @@ came here.
   built by that one write one module for the compiler source. That module is not the direct
   path's: `diff` of the two gives 261291 lines on Linux. The probe passed the 702 language tests
   with `--verify-ir` and the 255 module tests of `test/fort`.
-- **The compiler writes each function through FIR when the lowering supports it** (T-253,
-  `spec/fir.md` 16.1). `gen_stmt.emit_function` counts the definition in `g->functions`, and
-  with the option `gen_options.fir`, which the driver sets, it lowers the function, runs the
-  verifier, the build-mode pass and the verifier again, and translates a FIR module of that one
-  function, whose extern list gives its `declare` lines. It counts `g->lowered` and returns.
-  Otherwise `gen_stmt.gen_function`, the direct path, writes the function. The emitter suites
-  leave the option false, so they test the direct path, and `llvm_env.direct` still gives its
-  text. Two cases take the direct path. The first is a function that the lowering refuses: a
-  construct that it does not lower refuses the function whatever the runtime, and today it
-  refuses only a function that needs a print or a string equality that the closure lacks
-  (T-244). The second is a function whose `check` or `fail` names a runtime entry that the
-  closure lacks or declares with other parameters, which rule V7 refuses
-  (`fir_verify.runtime_holds` and `entry_fits`); only a test with a stub `std.rt`, or an old
-  `--std-dir`, meets it. Over `test/lang`, `src/fort`, `src/lsp` and `std`, `--fir-stats` gives
-  `lowered N of N` in every module. A violation of a rule of the verifier ends the compiler with
-  a panic (`gen_stmt.emit_fir` runs `check_fir` before the translator), so T-210's program was
-  an internal error of `fort -S` until T-210 made the checker refuse it. No known source program
-  then breaks V9, so `gen_fir_v9_panic_test.ft` gives a FIR function built by hand to
-  `emit_fir`, and `driver_test.ft` gives it to `driver.report_function`, the path of
+- **The compiler writes each function through FIR** (T-253, T-255, `spec/fir.md` 3, 9.8).
+  `gen_fir.emit_function` counts the definition in `g->functions`, lowers the function, runs the
+  verifier, the build-mode pass and the verifier again (`gen_fir.check_fir`), and translates a FIR
+  module of that one function, whose extern list gives its `declare` lines; it counts
+  `g->lowered`, which `--fir-stats` prints. Three cases write no text, and each is a compile
+  error (`gen.gen_error`) that fails the compilation (spec/fir.md 9.8). The first is a
+  construct that the lowering does not lower, at that node: `cannot lower `<f>` to FIR: the
+  lowering does not support the node `<kind>``; no checked program meets it, so
+  `gen_fir_test.ft` makes a statement a struct declaration by hand. The second is a print or a
+  string equality whose `std.rt` function the closure lacks (`fir_lower.report.entry`, T-244), at
+  that node: `the runtime `std.rt` has no entry `<name>`, which `<f>` needs`. The third is a
+  `check` or `fail` that the build-mode pass of the mode keeps and whose entry the closure lacks
+  or declares with other parameters (`fir_verify.runtime_holds`, `entry_fits`), at the name of
+  the function. `fir_verify.excuse_mode` marks the kinds that the mode removes, so that V7 and
+  `runtime_holds` accept a missing entry of such a kind on a `check`, never on a `fail`: under
+  `--release` an overflow check needs no `fail_overflow`, because the pass removes it before the
+  translator runs. The verifier after the pass reads `fir_verify.unexcused`, so a check that the
+  pass keeps needs its entry (review round 2 of T-255: a pass that kept shift checks under
+  `--release` passed the verifier and called a missing `fail_shift`). Only a test with a stub
+  `std.rt`, or an old `--std-dir`, meets the second or the third. The compiler tests no other
+  `std.rt` function: `alloc`, `free`, `args_init`, `args` and `flush_all` are assumed, so
+  `del(p)` under `--release` with an empty `std.rt` writes a call to an undefined `std.rt.free`.
+  Until T-255 the direct path (`gen_stmt.ft`, `gen_expr.ft`) wrote both. On T-253's tree and on
+  414d8b7c, `--fir-stats` gave `lowered N of N` over `test/lang`, `src/fort`, `src/lsp` and `std`
+  in the three modes, so no program of the corpus took the direct path, and T-255's
+  `tools/ir_snapshot.sh` of 414d8b7c and of its branch gave an empty `diff -r` over 431 run tests
+  in three modes. So a test whose sandbox has an empty `std.rt` and whose program checks or prints
+  needs a stub runtime: `gen_env.open_body`, `open_src` and `open_module_rt` write
+  `lower_env.RUNTIME`, `lifetime.write_check_runtime` does for the emitter probe, and the stub of
+  `comptime_test.ft` holds the two print functions. A violation of a rule of the verifier ends
+  the compiler with a panic (`gen_fir.emit_fir` runs `check_fir` before the translator), so
+  T-210's program was an internal error of `fort -S` until T-210 made the checker refuse it. No
+  known source program then breaks V9, so `gen_fir_v9_panic_test.ft` gives a FIR function built by
+  hand to `emit_fir`, and `driver_test.ft` gives it to `driver.report_function`, the path of
   `--fir-verify-report`. A designated literal is `aggregate zeroed`, which the translator writes
-  as the direct path does: a memset of the whole value, the padding included, then the named
-  fields (`run/structs/012_designated_padding`, review round 2). A member of a literal that the
+  as the direct path did: a memset of the whole value, the padding included, then the named fields
+  (`run/structs/012_designated_padding`, review round 2 of T-253). A member of a literal that the
   lowering builds in a `%tmp` slot of a type with padding, and the operand of a cast, start as
-  `const zero` (`fir_lower.built_operand`), because the direct path builds them in a field whose
-  padding a designated literal has zeroed. A first fix zeroed them in a designated literal alone,
-  and `deep()` of `run/structs/013_designated_member_padding` printed stale padding at `-O0`: a
-  callee's positional literal copied a stale `%tmp` slot into the zeroed field that the caller
-  passed as its `sret` pointer (review round 3). The direct path
-  records an extern where it writes the call, after the calls of the arguments, so that the
-  `declare` lines follow the text of the definitions on both paths (`spec/fir.md` 12.5). The FIR
-  path costs time: in three runs in the VM on T-253's tree, `fort -S src/fort/main.ft` took 3.2 s
-  to 3.4 s through FIR and 1.4 s to 1.6 s through the direct path, and `fort --fir` alone took
-  2.1 s to 2.2 s, so the lowering and the verifier take most of the difference.
+  `const zero` (`fir_lower.built_operand`), so that the copy of the slot writes zero padding into
+  a designated literal. A first fix zeroed them in a designated literal alone, and `deep()` of
+  `run/structs/013_designated_member_padding` printed stale padding at `-O0`: a callee's positional
+  literal copied a stale `%tmp` slot into the zeroed field that the caller passed as its `sret`
+  pointer (review round 3 of T-253). The `declare` lines follow the first call of each extern in
+  the text of the definitions, because the FIR module of a function lists its externs in block
+  order (`spec/fir.md` 12.5). The FIR path costs time: in three runs in the VM on T-253's tree,
+  `fort -S src/fort/main.ft` took 3.2 s to 3.4 s through FIR and 1.4 s to 1.6 s through the
+  direct path, and `fort --fir` alone took 2.1 s to 2.2 s, so the lowering and the verifier take
+  most of the difference.
 
 ## 7. The runtime and the standard library
 
@@ -1000,26 +1016,29 @@ library (T-160).
     in `src/fort` (D13.3), a panic ends the program (D11.4), and a `test/fort` test cannot fork,
     so each broken precondition is a `<module>_<case>_panic_test.ft` that prints one line, calls
     the site and carries the message in a `//! stderr:` directive.
-  - **`fort -S` run by bootstrap-0 is the oracle for the emitter port** (T-037). The IR of a program
-    is a function of the program alone (D19.5), so the expected text of a fort emitter test is
-    read off bootstrap-0's own output over a program whose body the test writes, and never
-    transcribed from the fort under test. One mechanical step makes the two comparable: a suite
-    that drives one expression at a time renumbers `%tN` and `%LN` from zero, which is what the
-    emitter produces when the expression is a function's first, so a probe body puts only
-    integer-constant declarations before the expression under test (a `bool` or a `string`
-    initializer emits instructions and shifts the numbering). It earns its keep: the port and
-    the reading of D10.2 disagreed about whether `new(T, 3)` checks its literal count, and the
-    oracle said the emitter was right.
+  - **`fort -S` run by bootstrap-0 was the oracle for the emitter port** (T-037). The IR of a
+    program is a function of the program alone (D19.5), so the expected text of a fort emitter
+    test was read off bootstrap-0's own output over a program whose body the test writes, and
+    never transcribed from the fort under test. One mechanical step made the two comparable: a
+    suite that drove one expression at a time renumbered `%tN` and `%LN` from zero, which is what
+    the emitter produced when the expression was a function's first. It earned its keep: the
+    port and the reading of D10.2 disagreed about whether `new(T, 3)` checks its literal count,
+    and the oracle said the emitter was right. Since T-255 deleted the direct path, the
+    expression suites hold the FIR translator's text of the whole `main` (`gen_env.main_text`),
+    numbered as it stands there; the line and column of each failure call are still the ones
+    bootstrap-0 wrote for the same operator.
   - **The C emitter's four files are one dependency cycle, so the fort port is layered and not
     cut where the C is.** `gen.c` calls `gen_data.c` (`gen_file_ref`, `gen_call_rt`,
     `gen_append_name`) and `gen_stmt.c` (`gen_block_scoped`), and both call back, which no set of
     fort modules can express (D9.5). `src/fort/gen.ft` is therefore gen.c's primitives together
     with gen_data.c's private data, name spelling and runtime calls -- what the checks of D19.6
-    need -- `gen_expr.ft` sits above it, and gen.c's function definitions (`gen_function`,
-    `gen_main`, `gen_module`, `gen_program`) belong with the statements and the module
-    assembly they call. Every function keeps its C name, so the two emitters are still read side
-    by side name by name. The one exception since T-212 is gen.c's `gen_fort_entry`, which the fort
-    emitter no longer has: the emitted `main` calls the program's `main` directly.
+    need -- and `gen_data.ft` holds the data and the assembly of the sections. The port of
+    `gen_expr.c` and `gen_stmt.c`, the direct path, went in T-255: `fir_lower.ft` and
+    `fir_llvm.ft` do its work, and `gen_fir.ft` holds gen.c's `gen_module` and `gen_program`
+    over them, while `gen_main` stands in `gen.ft`. The functions that remain keep their C names,
+    so the primitives of the two emitters are still read side by side name by name. The one
+    exception since T-212 is gen.c's `gen_fort_entry`, which the fort emitter no longer has: the
+    emitted `main` calls the program's `main` directly.
 
 **The fort compiler can implement language forms that the C compiler does not implement.**
 Product tests hold these forms directly. The project does not maintain C-to-fort parity (T-160).

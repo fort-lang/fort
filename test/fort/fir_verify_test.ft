@@ -1667,6 +1667,45 @@ fn v7_a_runtime_entry_matches_its_kind() void {
         fir_verify.V7_ENTRY, 0, 0);
 }
 
+// The excuse of a build mode (fir_verify.excuse_mode): before the build-mode pass, a `check` of a
+// kind that the mode removes needs no entry; a `fail` of that kind still needs one, the other
+// mode excuses no such check, and the runtime after the pass (unexcused) excuses no kind.
+fn v7_an_excused_kind_needs_no_entry_before_the_pass() void {
+    env mut e = env{};
+    open_with(&e, BOUNDS, "fail_overflow", false);
+    defer close(&e);
+    string lets = "let _1: bool; let _2: i64; bb0: {";
+    string check = "check(copy _1, overflow) -> bb1; } bb1: { return; }";
+    red(&e, lets, check, 7, fir_verify.V7_NO_ENTRY, 0, 0);
+    fir_verify.excuse_mode(&e.rt, true, false);
+    green(&e, lets, check);
+    red(&e, lets, "fail(overflow); }", 7, fir_verify.V7_NO_ENTRY, 0, 0);
+    fir_verify.runtime after = fir_verify.unexcused(&e.rt);
+    e.rt = after;
+    red(&e, lets, check, 7, fir_verify.V7_NO_ENTRY, 0, 0);
+    fir_verify.excuse_mode(&e.rt, false, true);
+    red(&e, lets, check, 7, fir_verify.V7_NO_ENTRY, 0, 0);
+    // --no-bounds-check excuses a bounds check; the overwrite check is excused under --release
+    env mut b = env{};
+    open_with(&b, BOUNDS, "fail_bounds", false);
+    defer close(&b);
+    string bounds = "check(copy _1, bounds, copy _2, copy _3) -> bb1; } bb1: { return; }";
+    string blets = "let _1: bool; let _2: i64; let _3: u64; bb0: {";
+    fir_verify.excuse_mode(&b.rt, true, false);
+    red(&b, blets, bounds, 7, fir_verify.V7_NO_ENTRY, 0, 0);
+    fir_verify.excuse_mode(&b.rt, false, true);
+    green(&b, blets, bounds);
+    env mut o = env{};
+    open_with(&o, BOUNDS, "fail_overwrite", false);
+    defer close(&o);
+    string olets = "let _1: u8 mut* own; bb0: {";
+    string over = "check(overwrite: _1) -> bb1; } bb1: { return; }";
+    fir_verify.excuse_mode(&o.rt, true, false);
+    green(&o, olets, over);
+    o.rt = fir_verify.unexcused(&o.rt);
+    red(&o, olets, over, 7, fir_verify.V7_NO_ENTRY, 0, 0);
+}
+
 // Each check kind with one reported operand of another type, and with one operand too many. The
 // lets of every case: _1 bool, _2 i64, _3 u64, _4 char*, _5 i32 and _6 u8 mut* own.
 u64 KIND_COUNT = 11;
@@ -2605,6 +2644,7 @@ fn main() i32 {
     v7_a_call_matches_its_callee();
     v7_a_check_reports_what_its_runtime_entry_takes();
     v7_a_runtime_entry_matches_its_kind();
+    v7_an_excused_kind_needs_no_entry_before_the_pass();
     v7_every_kind_holds_its_operands_against_its_entry();
     println("V7 ok");
     v8_a_noreturn_call_ends_its_block_in_trap();

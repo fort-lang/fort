@@ -10,13 +10,13 @@
 #   <out-dir>/nobounds/<name>.ll   `--no-bounds-check` and the flags of the test
 # <name> is the test path without `.ft`, with each `/` changed to `_`.
 # Two snapshots compare with `diff -r` (D19.5). A ticket that must not change the emitted IR
-# uses them as its identity check. The FIR migration compares two snapshots with `llvm-diff`
-# (notes/testing.md 6).
+# uses them as its identity check. A snapshot of a compiler before T-253, whose direct path wrote
+# every function, compares with a later one through tools/fir_diff.py (notes/testing.md 6).
 #
 # With --fir-stats, each `-S` run also gets `--fir-stats` (D14.1), and the script writes the line
 # `<mode> <test path> lowered N of M` of each module to <out-dir>/stats.txt: N functions that the
-# FIR path wrote, of M definitions (spec/fir.md 16.1). It prints the sums of each mode at the end.
-# A compiler before T-253 has no --fir-stats and refuses every test in this mode.
+# translator wrote, of M definitions. It prints the sums of each mode at the end. A compiler
+# before T-253 has no --fir-stats and refuses every test in this mode.
 #
 # The emitter reads two build options (`gen_options`, src/fort/gen.ft).
 # `--release` controls the overflow checks and the overwrite checks.

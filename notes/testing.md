@@ -453,6 +453,9 @@ bullet at a time and without a rewrite.
   rule above twice: `strbuf.free(&doc)` in `driver.write_document` had no witness at all until the
   width of the index probe came down from 40 to 27, which takes the document from 92003 bytes to
   62541 and its buffer from an mmap block of 131072 to a heap block of 65536 (T-094).
+  T-255 deleted the `slots_free` pair, `scopes_free` and the release of `defers` with the direct
+  path, so 43 of those releases remain; the emitter probe then emitted 155159 bytes, still an
+  mmap block, and nobody measured the 43 again.
   **A probe also sizes its round**: a release of one small block per round is seen by neither view,
   because the allocator serves the next round's block out of the chunk the round just freed while
   the break stands still -- deleting `del(t->params)` in `types.ft` left `types_table_test.ft`
@@ -588,15 +591,22 @@ bullet at a time and without a rewrite.
   small `std/rt.ft` in the sandbox and names that directory. A `fn noreturn` in such a stub needs a
   terminating statement (D8.4, D8.5): an empty body is `a noreturn function must end in a
   terminating statement`, and `while (true) { }` is the shortest one that asks for no intrinsic of
-  its own.
+  its own. **The fort gen suites need a runtime in the closure.** `test/fort/gen_*_test.ft` emit
+  through FIR, which refuses a check or a print whose runtime function the closure lacks, so
+  `gen_env.open_body`, `open_src` and `open_module_rt` write `lower_env.RUNTIME` as the
+  `std/rt.ft` of the sandbox, and `open_module` keeps the empty one for a case that holds the
+  refusal (`gen_fir_test.ft`). A suite of one expression reads the FIR text of the whole `main`
+  (`gen_env.main_text`, which runs the block check), so its expected lines carry the numbers
+  that they have in that definition (T-255).
 - **`tools/ir_snapshot.sh <fort> <std-dir> <out-dir>` writes the `-S` output of the run
   tests of `run_tests.py --list run/`** in three modes: `default`, `release` and `nobounds`
   (T-192). `<std-dir>` is the staged `build/<Host>/debug/std`, not `std/`, which the compiler
   refuses. A ticket that must not change the emitted IR uses it as its identity check (T-193).
   Take one snapshot with `main` and one with the branch, then run `diff -r`; an empty diff is the
   evidence.
-  The FIR migration compares the two paths with `llvm-diff` over two snapshots instead
-  (`spec/fir.md` 16.2). Give both snapshots the same
+  T-255 measured that the deletion of the direct path changed no module: the snapshots of
+  414d8b7c and of its branch gave an empty `diff -r` over 1293 modules of 431 tests. Give both
+  snapshots the same
   `<std-dir>` path, because every module holds the paths of the standard modules. A test that the
   compiler refuses goes into `<out-dir>/skipped.txt`. Measured on T-192: two snapshots of one
   compiler gave an empty `diff -r` on both hosts, and a mutant that wrote `align 2` for each
@@ -605,8 +615,12 @@ bullet at a time and without a rewrite.
   (D14.1) and writes the line `<mode> <test> lowered N of M` of each module to
   `<out-dir>/stats.txt`, with the sums of each mode at the end (T-253).
 - **The oracle of the FIR migration is `tools/fir_diff.py <before> <after> <out>`, and not
-  `llvm-diff` alone** (T-253, `spec/fir.md` 16.2). `llvm-diff-18` reported no difference for a
-  dropped `zeroext`, a doubled `align` or a dropped `sret`, at a call or on a definition: three
+  `llvm-diff` alone** (T-253, `spec/fir.md` 16.2). It compares a snapshot of a compiler before
+  T-253, whose direct path wrote every function, with a snapshot of a later compiler. Since T-255
+  every compiler writes each function through FIR, so the snapshots of two such compilers compare
+  with `diff -r` as above, and the script stays for a comparison with an old snapshot.
+  `llvm-diff-18` reported no difference for a dropped `zeroext`, a doubled `align` or a dropped
+  `sret`, at a call or on a definition: three
   mutants of `fir_llvm.ft` and five edits by hand of one module left its report empty. Its report
   is also no record of instructions: for an added `%tmp1` slot it printed
   `> %fd.0 = alloca i32`. The script runs `llvm-diff` over each pair of modules of two
