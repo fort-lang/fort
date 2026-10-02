@@ -1,0 +1,184 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| range checks ok
+/// Checks the storage loan of a range loop (D7.5, D17.10).
+import check_env;
+import std.strbuf;
+
+// Each case creates its own checker, so symbols and aliases cannot reach another case.
+fn refused4(string prefix, string body, string more, string suffix, string message) void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    e.want_main = false;
+    defer check_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, prefix);
+    strbuf.append(&source, body);
+    strbuf.append(&source, more);
+    strbuf.append(&source, suffix);
+    assert(!check_env.check_src(&e, strbuf.view(&source)));
+    bool found = check_env.said(&e, message);
+    if (!found) {
+        println(strbuf.view(&source));
+        println(check_env.report_text(&e, 0));
+    }
+    assert(found);
+}
+
+fn accepted4(string prefix, string body, string more, string suffix) void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    e.want_main = false;
+    defer check_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, prefix);
+    strbuf.append(&source, body);
+    strbuf.append(&source, more);
+    strbuf.append(&source, suffix);
+    bool ok = check_env.check_src(&e, strbuf.view(&source));
+    if (!ok) {
+        println(strbuf.view(&source));
+        println(check_env.report_text(&e, 0));
+    }
+    assert(ok);
+}
+
+fn refused(string prefix, string body, string suffix, string message) void {
+    refused4(prefix, body, "", suffix, message);
+}
+
+fn accepted(string prefix, string body, string suffix) void {
+    accepted4(prefix, body, "", suffix);
+}
+
+string STORAGE = "cannot change collection storage during a range loop";
+string LEND = "cannot prove call preserves collection storage";
+string OWN_PROOF = "cannot prove ownership operation preserves collection storage";
+string SPAN = "fn main() void { u8 mut@ own mut s = new(u8, 2); ";
+string END = " del(s); }";
+string HOLDER = "struct holder { u8 mut@ own data; u8 mut@ own other; } ";
+string FIELD = "fn main() void { holder mut h = {}; for (u8 x : h.data) { ";
+string FIELD_END = " } del(h.data); del(h.other); }";
+
+fn direct_storage_writes_fail() void {
+    refused(SPAN, "for (u8 x : s) { del(s); }", END, STORAGE);
+    refused(SPAN, "for (u8 x : s) { s = new(u8, 5); }", END, STORAGE);
+    refused(SPAN, "for (u8 x : s) { u8 mut@ own t = move(s); del(t); }", END, STORAGE);
+    refused("fn take(u8 mut@ own s) void { del(s); } ",
+            "fn main() void { u8 mut@ own s = new(u8, 2); for (u8 x : s) { take(move(s)); }",
+            "del(s); }", STORAGE);
+    refused("fn give(u8 mut@ own s) u8 mut@ own { for (u8 x : s) { return s; } return s; }",
+            "fn main() void { }", "", STORAGE);
+    refused("fn main() void { string own mut s = {}; ",
+            "for (char x : s) { string own t = {}; s = move(t); }", "del(s); }", STORAGE);
+    refused("fn main() void { string own s = {}; ",
+            "for (char x : s) { del(s); }", "del(s); }", STORAGE);
+    refused("fn main() void { string own s = {}; ",
+            "for (char x : s) { string own t = move(s); del(t); }", "del(s); }", STORAGE);
+}
+
+fn nested_storage_writes_fail() void {
+    refused4(HOLDER, FIELD, "del(h.data);", FIELD_END, STORAGE);
+    refused4(HOLDER, FIELD, "h.data = new(u8, 3);", FIELD_END, STORAGE);
+    refused4(HOLDER, FIELD, "holder t = move(h); del(t.data); del(t.other);", FIELD_END,
+             STORAGE);
+    refused(HOLDER, "fn f(holder mut* own h) void { for (u8 x : h->data) { del(h); } }",
+            "fn main() void {}", STORAGE);
+    refused(HOLDER, "fn f(holder mut* h) void { for (u8 x : h->data) { del((*h).data); } }",
+            "fn main() void {}", STORAGE);
+    refused(HOLDER, "struct outer { holder inner; } fn f(outer mut* o) void { ",
+            "for (u8 x : o->inner.data) { del(o->inner.data); } } fn main() void {}", STORAGE);
+    refused("fn main() void { u8 mut@ own[2] mut a = {}; ",
+            "for (u8 x : a[0]) { u8 mut@ own[2] t = {}; a = move(t); }",
+            "del(a[0]); del(a[1]); }", STORAGE);
+    refused("fn f(u8 mut@ own mut@ s, u64 i, u64 j) void { ",
+            "for (u8 x : s[i]) { del(s[j]); }", "} fn main() void {}", STORAGE);
+}
+
+fn known_alias_writes_fail() void {
+    refused(SPAN, "u8 mut@ own mut* p = &s; for (u8 x : s) { del(*p); }", END, STORAGE);
+    refused(SPAN, "u8 mut@ own mut* p = &s; for (u8 x : *p) { del(s); }", END, STORAGE);
+    refused(SPAN, "u8 mut@ v = s; for (u8 x : v) { del(s); }", END, STORAGE);
+    refused(SPAN, "u8 mut@ v = s[0..1]; for (u8 x : v) { del(s); }", END, STORAGE);
+    refused(SPAN, "u8 mut@ v = s; u8 mut@ w = v; for (u8 x : w) { del(s); }", END,
+            STORAGE);
+    refused(HOLDER, "fn main() void { holder mut h = {}; holder mut* p = &h; ",
+            "for (u8 x : p->data) { del(h.data); } del(h.data); del(h.other); }", STORAGE);
+    refused(HOLDER, "fn f(holder mut* h) void { holder mut* p = h; ",
+            "for (u8 x : h->data) { del(p->data); } } fn main() void {}", STORAGE);
+}
+
+fn nested_control_and_defer_keep_the_loan() void {
+    refused(SPAN, "for (u8 x : s) { if (x == 0) { del(s); } }", END, STORAGE);
+    refused(SPAN, "for (u8 x : s) { while (false) { del(s); } }", END, STORAGE);
+    refused(SPAN, "for (u8 x : s) { for (u8 y : s) { del(s); } }", END, STORAGE);
+    refused(SPAN, "for (u8 x : s) { defer del(s); }", END, STORAGE);
+    refused(SPAN, "for (u8 x : s) { switch (x) { case 0: del(s); } }", END, STORAGE);
+    refused(SPAN, "for (u8 x : s) { $if (true) { del(s); } }", END, STORAGE);
+}
+
+fn mutable_storage_calls_fail() void {
+    refused("fn wipe(u8 mut@ own mut* p) void { del(*p); } ", SPAN,
+            "for (u8 x : s) { wipe(&s); } del(s); }", LEND);
+    refused("fn wipe(u8 mut@ own mut* p) void { del(*p); } ", SPAN,
+            "fn (u8 mut@ own mut*) void f = wipe; for (u8 x : s) { f(&s); } del(s); }", LEND);
+    refused4(HOLDER, "fn wipe(holder mut* h) void { del(h->data); } ",
+             "fn main() void { holder mut h = {}; for (u8 x : h.data) { wipe(&h);",
+             FIELD_END, LEND);
+    refused("fn wipe(u8 mut@ own mut* p) void { del(*p); } ", SPAN,
+            "u8 mut@ own mut* p = &s; for (u8 x : s) { wipe(p); } del(s); }", LEND);
+}
+
+fn scalar_elements_stay_legal_and_ownership_writes_need_proof() void {
+    accepted(SPAN, "for (u8 x : s) { s[0] = x; s[1]++; }", END);
+    accepted(SPAN, "u8 mut@ v = s; for (u8 x : s) { v[0] = x; }", END);
+    refused(SPAN, "u8 mut@ own t = new(u8, 1); for (u8 x : s) { del(t); } del(t);", END,
+            OWN_PROOF);
+    refused4(HOLDER, FIELD, "del(h.other);", FIELD_END, OWN_PROOF);
+    refused4(HOLDER, FIELD, "h.other = new(u8, 1);", FIELD_END, OWN_PROOF);
+    refused("fn main() void { u8 mut@ own[2] mut a = {}; ",
+            "for (u8 x : a[0]) { del(a[1]); }", "del(a[0]); del(a[1]); }", OWN_PROOF);
+    accepted("fn main() void { u8[2] mut a = {1, 2}; ",
+             "for (u8 x : a) { u8[2] t = {}; a = t; }", "}");
+    accepted(SPAN, "for (u8 x : s) { $if (false) { del(s); } }", END);
+    accepted(SPAN, "for (u8 x : s) { println(s.len, x); }", END);
+    accepted("extern fn trust(u8 mut* p) void; ", SPAN,
+             "for (u8 x : s) { trust(s.ptr); } del(s); }");
+    refused("fn use(u8 mut* p) void { *p = 1; } ", SPAN,
+            "for (u8 x : s) { use(&s[0]); } del(s); }", LEND);
+    refused("fn use(u8 mut@ s) void { s[0] = 1; } ", SPAN,
+            "for (u8 x : s) { use(s); } del(s); }", LEND);
+    refused("fn main() void { u8 mut* own[2] mut a = {}; ",
+            "for (u8 mut* p : a) { del(a[0]); }", "del(a[0]); del(a[1]); }", OWN_PROOF);
+}
+
+// The current checker has no proof for these operations. T-291 and T-292 replace this limit.
+fn hidden_effects_and_aliases_need_ownership_proof() void {
+    refused("u8 mut@ own mut DATA = {}; fn wipe() void { del(*(&DATA)); } ",
+            "fn main() void { u8 mut@ own mut* p = &DATA; *p = new(u8, 2); ",
+            "for (u8 x : *p) { wipe(); } del(*p); }", LEND);
+    refused("fn alias(u8 mut@ own mut* p) u8 mut@ own mut* { return p; } ", SPAN,
+            "u8 mut@ own mut* p = alias(&s); for (u8 x : s) { del(*p); } del(s); }", OWN_PROOF);
+    refused(SPAN, "u8 mut@ own mut* mut p = null; p = &s; for (u8 x : s) { del(*p); }",
+            END, OWN_PROOF);
+    refused(SPAN, "u8 mut@ v = s; u8 mut@ own t = move(s); for (u8 x : v) { del(t); }",
+            "del(t); }", OWN_PROOF);
+    refused("struct holder { holder mut* own[2] items; } fn main() void { ",
+            "holder mut* own mut h = new(holder); holder mut* p = h; h->items[0] = move(h); ",
+            "for (holder mut* x : p->items) { del(p->items[0]); } }", OWN_PROOF);
+}
+
+fn main() i32 {
+    direct_storage_writes_fail();
+    nested_storage_writes_fail();
+    known_alias_writes_fail();
+    nested_control_and_defer_keep_the_loan();
+    mutable_storage_calls_fail();
+    scalar_elements_stay_legal_and_ownership_writes_need_proof();
+    hidden_effects_and_aliases_need_ownership_proof();
+    println("range checks ok");
+    return 0;
+}

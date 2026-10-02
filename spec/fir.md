@@ -457,8 +457,12 @@ A parameter needs no statement. The translator stores each scalar parameter into
 - **`for`**: init in the current block; the blocks head, body, step and done; an empty condition
   is `goto body`; `continue` goes to step. A scope of kind `block` holds the whole `for`, so the
   local that init declares lives once for the loop and its `dead` stands in done (9.5).
-- **A range `for`**: the collection into a place: an owning collection stays in its place, and
-  another collection is copied into a temporary (D17.10). A counter `_i: u64 = const u64 0`; the
+- **A range `for`**: the collection into a place before the loop (D7.5, D17.10).
+  An owning fixed array stays in its place. Another fixed array goes into a value copy.
+  A span or string header goes into a temporary with its outermost `own` removed.
+  That header copy holds the pointer and length once, and lends the collection storage.
+  The checker refuses operations that invalidate that storage inside the body (D17.10).
+  A counter `_i: u64 = const u64 0`; the
   blocks head, body, step and done; `_c = lt(copy _i, len)` and `switch(copy _c)` in head, where
   `len` is the constant length of an array or `copy c.1` of a span or `string`; `live(_x)` and
   `_x = copy c[_i]` in body; the body as a scope of kind `loop`; `_i = add(copy _i, const u64 1)`
@@ -666,7 +670,8 @@ tree decides, not the grammar: each `else if` is a `k_if` node of its own and ta
 index, and the init and the step of a `for` are nodes of their own and take their own indices.
 The walk meets the step of a `for` after the body, where the step block stands, so the step takes
 its index after the statements of the body. A nested statement advances the counter when the walk
-meets it, so an `if` takes an index and each statement of its arms takes a later one. An expansion of a deferred statement lowers the
+meets it, so an `if` takes an index and each statement of its arms takes a later one.
+An expansion of a deferred statement lowers the
 deferred statement again and advances the counter at each expansion, once for each statement
 node inside it, so `defer { a(); b(); }` takes two new indices at each exit, and its inner
 statements take none at the `defer` itself, which has its own index as a `k_defer` node. A

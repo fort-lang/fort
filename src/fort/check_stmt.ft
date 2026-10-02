@@ -266,6 +266,152 @@ fn check_for(check.checker mut* ck, ast.node mut* n) void {
     scope.free(&header);
 }
 
+u64 RANGE_ALIAS_DEPTH = 32;
+
+// The initial value of a local reference alias. The depth limit stops malformed cycles.
+// This check has no dataflow or call-effect analysis. The ownership pass supplies those facts.
+fn range_alias(ast.node* n, u64 depth) ast.node* {
+    if (n == null || depth == RANGE_ALIAS_DEPTH) {
+        return n;
+    }
+    if (n->kind == ast.ast_kind.k_cast || n->kind == ast.ast_kind.k_span) {
+        return range_alias(n->a, depth + 1);
+    }
+    if (n->kind == ast.ast_kind.k_ident && n->sym != null && n->sym->node != null
+        && n->sym->kind == ast.sym_kind.s_local
+        && n->sym->node->kind == ast.ast_kind.k_var_decl && n->ty != null
+        && types.type_is_reference(n->ty) && !n->ty->is_own) {
+        ast.node* init = n->sym->node->b;
+        if (init != null) {
+            return range_alias(init, depth + 1);
+        }
+    }
+    if (n->kind == ast.ast_kind.k_unary && check.op_of(n->op) == lexer.tok_kind.star) {
+        ast.node* base = range_alias(n->a, depth + 1);
+        if (base != null && base->kind == ast.ast_kind.k_unary
+            && check.op_of(base->op) == lexer.tok_kind.amp) {
+            return range_alias(base->a, depth + 1);
+        }
+    }
+    return n;
+}
+
+// The base of a field path. `p->f` and `(*p).f` use the same indirection.
+fn range_field_base(ast.node* n) ast.node* {
+    ast.node* base = range_alias(n->a, 0);
+    if (n->kind == ast.ast_kind.k_arrow && base->kind == ast.ast_kind.k_unary
+        && check.op_of(base->op) == lexer.tok_kind.amp) {
+        return base->a;
+    }
+    if (n->kind == ast.ast_kind.k_field && base->kind == ast.ast_kind.k_unary
+        && check.op_of(base->op) == lexer.tok_kind.star) {
+        return base->a;
+    }
+    return base;
+}
+
+// Whether two checked paths can name the same storage. Unknown array indices can overlap.
+// Field symbols distinguish sibling fields. Symbols distinguish locals with the same spelling.
+fn range_same_place(ast.node* left, ast.node* right, u64 depth) bool {
+    if (left == null || right == null || depth == RANGE_ALIAS_DEPTH) {
+        return false;
+    }
+    ast.node* a = range_alias(left, depth);
+    ast.node* b = range_alias(right, depth);
+    if (a == b) {
+        return true;
+    }
+    bool a_field = a->kind == ast.ast_kind.k_field || a->kind == ast.ast_kind.k_arrow;
+    bool b_field = b->kind == ast.ast_kind.k_field || b->kind == ast.ast_kind.k_arrow;
+    if (a_field && b_field) {
+        return a->sym != null && a->sym == b->sym
+            && range_same_place(range_field_base(a), range_field_base(b), depth + 1);
+    }
+    if (a->kind != b->kind) {
+        return false;
+    }
+    switch (a->kind) {
+    case ast.ast_kind.k_ident:
+        return a->sym != null && a->sym == b->sym;
+    case ast.ast_kind.k_index:
+        if (a->b->kind == ast.ast_kind.k_int && b->b->kind == ast.ast_kind.k_int
+            && a->b->ival != b->b->ival) {
+            return false;
+        }
+        return range_same_place(a->a, b->a, depth + 1);
+    case ast.ast_kind.k_unary:
+        return a->op == b->op && range_same_place(a->a, b->a, depth + 1);
+    default:
+        return false;
+    }
+}
+
+// A write to the collection or containing storage can invalidate the loop's loan.
+// A write below the collection, such as `s[i] = v`, does not replace its storage.
+fn range_storage_write(ast.node* target, ast.node* coll, u64 depth) bool {
+    if (target == null || coll == null || depth == RANGE_ALIAS_DEPTH) {
+        return false;
+    }
+    ast.node* c = range_alias(coll, depth);
+    if (range_same_place(target, c, 0)) {
+        return true;
+    }
+    switch (c->kind) {
+    case ast.ast_kind.k_field, ast.ast_kind.k_arrow, ast.ast_kind.k_index:
+        return range_storage_write(target, c->a, depth + 1);
+    case ast.ast_kind.k_unary:
+        if (check.op_of(c->op) == lexer.tok_kind.star
+            || check.op_of(c->op) == lexer.tok_kind.amp) {
+            return range_storage_write(target, c->a, depth + 1);
+        }
+    default:
+        return false;
+    }
+    return false;
+}
+
+// Checks direct writes after the body resolves its paths and local aliases.
+// Until ownership analysis proves loan preservation, fort calls and other ownership writes fail.
+// An owning element can own the object that contains the collection, so its release also fails.
+// A trusted extern call keeps its D17.13 contract. Scalar element writes remain legal.
+fn check_range_writes(check.checker mut* ck, ast.node* n, ast.node* coll) void {
+    if (n == null) {
+        return;
+    }
+    ast.node* mut target = null;
+    if (n->kind == ast.ast_kind.k_assign || n->kind == ast.ast_kind.k_incdec
+        || (n->kind == ast.ast_kind.k_return && (n->ann & check.ANN_MOVE) != 0)) {
+        target = n->a;
+    } else if (n->kind == ast.ast_kind.k_call && n->a->sym != null
+               && n->a->sym->kind == ast.sym_kind.s_builtin && ast.ast_len(n) == 1
+               && (n->a->sym->name == "del" || n->a->sym->name == "move")) {
+        target = ast.ast_child(n, 0);
+    }
+    if (target != null && (target->ann & check.ANN_LVALUE) != 0) {
+        if (range_storage_write(target, coll, 0)) {
+            check.check_error(ck, target->loc,
+                              "cannot change collection storage during a range loop");
+        } else if (target->ty != null && check.check_owning(target->ty)) {
+            check.check_error(ck, target->loc,
+                "cannot prove ownership operation preserves collection storage");
+        }
+    }
+    if (n->kind == ast.ast_kind.k_call && n->ty != null
+        && (n->a->sym == null || (n->a->sym->kind != ast.sym_kind.s_builtin
+                                 && n->a->sym->kind != ast.sym_kind.s_extern_fn))) {
+        check.check_error(ck, n->loc, "cannot prove call preserves collection storage");
+    }
+    check_range_writes(ck, n->a, coll);
+    check_range_writes(ck, n->b, coll);
+    check_range_writes(ck, n->c, coll);
+    check_range_writes(ck, n->d, coll);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        check_range_writes(ck, ast.ast_child(n, i), coll);
+        i += 1;
+    }
+}
+
 // Checks `for (T x: coll) { }`. The collection is an array, span, or string.
 // The variable gets a fresh element copy. The loop borrows an owning collection.
 fn check_range_for(check.checker mut* ck, ast.node mut* n) void {
@@ -313,6 +459,10 @@ fn check_range_for(check.checker mut* ck, ast.node mut* n) void {
     check_declare_local(ck, n, ast.sym_kind.s_local, decl.ty, decl.mut0);
     ck->loops += 1;
     check_block(ck, n->c);
+    if (elem != null && (coll.ty->kind != types.type_kind.k_array
+                         || check.check_owning(coll.ty))) {
+        check_range_writes(ck, n->c, n->b);
+    }
     ck->loops -= 1;
     ck->scope = header.parent;
     scope.free(&header);
