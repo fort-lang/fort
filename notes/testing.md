@@ -833,7 +833,10 @@ bullet at a time and without a rewrite.
   project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
   `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
-  `test/lsp` and `test/tty` -- and `CORPUS_FILES` is the exact number of files in it, so a
+  `test/lsp`, `test/tty` and `test/ownership/approved` (T-308).
+  Approved ownership examples receive lexical coverage during fixture preparation.
+  T-292 later qualifies their ownership verdicts.
+  `CORPUS_FILES` is the exact number of files in this list, so a
   ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
   writes it there, as it does for `CORPUS_FILES` in `bootstrap0/test/parser_recovery_test.c`.
   The other `.ft` files are listed in `EXCLUDED_DIRS`, each
