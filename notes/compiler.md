@@ -579,6 +579,16 @@ came here.
   Keep proof events independent of rendered diagnostic limits. Suppression cannot change a verdict.
   The T-317 event store owns its meter because teardown releases caller state before event storage.
   The seven A01-A07 traces have read evidence. They do not measure current compiler acceptance.
+- **Ownership flow retains FIR path alternatives** (D17.14, D17.18).
+  `ownership_flow.solve` consumes verified FIR and complete supplied effects.
+  It follows reachable edges and keeps null facts by value version until a write invalidates them.
+  The worklist keeps path alternatives up to G, then widens while it retains ownership obligations.
+  A whole-body range loan starts at body entry and ends at loan exit.
+  Direct and summarized writes to captured storage use one overlap test.
+  At normal return, the pass checks returned borrows after expanded effects.
+  It also checks parameter obligations.
+  It then ends parameter stack sources. Abort and trap paths do not require normal cleanup.
+  Unknown call outcomes keep a possible return. This pass does not construct source effects.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by
