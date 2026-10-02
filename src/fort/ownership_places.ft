@@ -1,0 +1,661 @@
+/// Applies aggregate ownership effects to proved storage places.
+import ast;
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+import ownership_transfer;
+import types;
+
+u64 MAX_LEAVES = 256;
+u64 MAX_DEPTH = 16;
+u64 U64_MAX = 18446744073709551615;
+
+enum action { copy_value, move_value, release_value, end_storage }
+
+enum overlap { same, disjoint, partial, possible }
+
+struct request {
+    ownership_transfer.request base;
+    action kind;
+    types.node* ty;
+    ownership_api.entity_id storage_source;
+    bool source_region_proved;
+    bool destination_region_proved;
+    bool alias_substituted_proved;
+    bool liveness_proved;
+    bool retained_borrow;
+}
+
+struct leaf {
+    ownership_api.place_path path;
+    types.node* ty;
+}
+
+struct leaf_plan {
+    leaf mut@ own items;
+    u64 len;
+    ownership_state.state storage;
+}
+
+struct owned_path {
+    ownership_api.place_path path;
+    ownership_api.projection mut@ own parts;
+}
+
+fn same_entity(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    return ownership_keys.entity(a, b) == 0;
+}
+
+fn has_indirection(ownership_api.place_path path) bool {
+    u64 mut i = 0;
+    while (i < path.projections.len) {
+        if (path.projections[i].kind == ownership_api.projection_kind.dereference ||
+            path.projections[i].kind == ownership_api.projection_kind.captured_index) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn begins(ownership_api.place_path whole, ownership_api.place_path part) bool {
+    if (!same_entity(whole.root, part.root) ||
+        whole.projections.len < part.projections.len) { return false; }
+    u64 mut i = 0;
+    while (i < part.projections.len) {
+        if (!ownership_state.same_projection(whole.projections[i], part.projections[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+/// Compare only after the caller substitutes actual aliases into storage roots.
+fn compare(ownership_api.place_path left, ownership_api.place_path right,
+    bool aliases_substituted) overlap {
+    if (ownership_state.has_residual(left) || ownership_state.has_residual(right)) {
+        return overlap.possible;
+    }
+    if (!same_entity(left.root, right.root)) {
+        if (!aliases_substituted) { return overlap.possible; }
+        if (has_indirection(left) || has_indirection(right)) { return overlap.possible; }
+        return overlap.disjoint;
+    }
+    u64 mut i = 0;
+    while (i < left.projections.len && i < right.projections.len) {
+        ownership_api.projection a = left.projections[i];
+        ownership_api.projection b = right.projections[i];
+        if (a.kind == ownership_api.projection_kind.dereference ||
+            b.kind == ownership_api.projection_kind.dereference ||
+            a.kind == ownership_api.projection_kind.captured_index ||
+            b.kind == ownership_api.projection_kind.captured_index) {
+            return overlap.possible;
+        }
+        if (!ownership_state.same_projection(a, b)) {
+            if (a.kind == ownership_api.projection_kind.field &&
+                b.kind == ownership_api.projection_kind.field && a.field != b.field) {
+                return overlap.disjoint;
+            }
+            if (a.kind == ownership_api.projection_kind.fixed_index &&
+                b.kind == ownership_api.projection_kind.fixed_index &&
+                a.index.kind == ownership_api.fact_kind.exact &&
+                b.index.kind == ownership_api.fact_kind.exact &&
+                a.index.value != b.index.value) { return overlap.disjoint; }
+            return overlap.possible;
+        }
+        i += 1;
+    }
+    if (left.projections.len == right.projections.len) { return overlap.same; }
+    return overlap.partial;
+}
+
+fn append(ownership_api.place_path base, ownership_api.projection part) owned_path {
+    owned_path mut out = owned_path{};
+    u64 len = base.projections.len;
+    out.parts = new(ownership_api.projection, len + 1);
+    u64 mut i = 0;
+    while (i < len) { out.parts[i] = base.projections[i]; i += 1; }
+    out.parts[len] = part;
+    out.path = base;
+    out.path.projections = out.parts[..];
+    return out;
+}
+
+fn rebase(ownership_api.place_path path, ownership_api.place_path source,
+    ownership_api.place_path destination) owned_path {
+    owned_path mut out = owned_path{};
+    u64 tail = path.projections.len - source.projections.len;
+    u64 len = destination.projections.len + tail;
+    out.parts = new(ownership_api.projection, len);
+    u64 mut i = 0;
+    while (i < destination.projections.len) {
+        out.parts[i] = destination.projections[i];
+        i += 1;
+    }
+    u64 mut j = 0;
+    while (j < tail) {
+        out.parts[i] = path.projections[source.projections.len + j];
+        i += 1;
+        j += 1;
+    }
+    out.path.root = destination.root;
+    out.path.projections = out.parts[..];
+    return out;
+}
+
+fn has_reference(types.node* ty, u64 depth) bool {
+    if (ty == null || depth > MAX_DEPTH) { return true; }
+    if (types.type_is_reference(ty)) { return true; }
+    if (ty->kind == types.type_kind.k_array) {
+        return has_reference(ty->elem, depth + 1);
+    }
+    if (ty->kind != types.type_kind.k_struct || ty->decl == null) { return false; }
+    ast.sym* record = cast(ty->decl, ast.sym*);
+    if (record->node == null) { return true; }
+    u64 mut i = 0;
+    while (i < ast.ast_len(record->node)) {
+        ast.node* member = ast.ast_child(record->node, i);
+        if (member->kind == ast.ast_kind.k_field_decl &&
+            has_reference(member->ty, depth + 1)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn walk(types.node* ty, ownership_api.place_path path, leaf_plan mut* plan,
+    u64 depth) bool {
+    if (ty == null || depth > MAX_DEPTH) { return false; }
+    if (ty->kind == types.type_kind.k_array) {
+        if (!has_reference(ty->elem, depth + 1)) { return true; }
+        if (ty->len > MAX_LEAVES - plan->len) { return false; }
+        u64 mut i = 0;
+        while (i < ty->len) {
+            ownership_api.projection mut part = ownership_api.projection{};
+            part.kind = ownership_api.projection_kind.fixed_index;
+            part.index.kind = ownership_api.fact_kind.exact;
+            part.index.value = cast(i, i64);
+            owned_path mut child = append(path, part);
+            bool good = walk(ty->elem, child.path, plan, depth + 1);
+            del(child.parts);
+            if (!good) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+    if (ty->kind == types.type_kind.k_struct) {
+        if (ty->layout == null || ty->layout->state != types.layout_state.l_resolved ||
+            ty->decl == null) { return false; }
+        ast.sym* record = cast(ty->decl, ast.sym*);
+        if (record->node == null) { return false; }
+        u64 mut i = 0;
+        u32 mut field = 0;
+        while (i < ast.ast_len(record->node)) {
+            ast.node* member = ast.ast_child(record->node, i);
+            if (member->kind == ast.ast_kind.k_field_decl) {
+                if (member->ty == null) { return false; }
+                ownership_api.projection mut part = ownership_api.projection{};
+                part.kind = ownership_api.projection_kind.field;
+                part.field = field;
+                owned_path mut child = append(path, part);
+                bool good = walk(member->ty, child.path, plan, depth + 1);
+                del(child.parts);
+                if (!good) { return false; }
+                field += 1;
+            }
+            i += 1;
+        }
+        return field > 0;
+    }
+    if (!types.type_is_reference(ty)) { return true; }
+    if (plan->len >= MAX_LEAVES) { return false; }
+    plan->items[plan->len].path = ownership_state.copy_place(&plan->storage, path);
+    plan->items[plan->len].ty = ty;
+    plan->len += 1;
+    return true;
+}
+
+/// A reference is a leaf. The walker does not follow its pointee type.
+fn leaves(types.node* ty, ownership_api.place_path root, leaf_plan mut* out) bool {
+    out->storage = ownership_state.empty();
+    out->items = new(leaf, MAX_LEAVES);
+    return walk(ty, root, out, 0);
+}
+
+fn free_plan(leaf_plan mut* plan) void {
+    ownership_state.free(&plan->storage);
+    del(plan->items);
+}
+
+fn failed(ownership_api.services* svc, request* req,
+    ownership_api.event_kind kind, ownership_api.entity_id relation,
+    string message) ownership_api.proof_status {
+    return ownership_transfer.invalid(svc, &req->base, kind, relation, message);
+}
+
+fn unproved(ownership_api.services* svc, request* req,
+    ownership_api.entity_id relation) ownership_api.proof_status {
+    return ownership_transfer.unproved(svc, &req->base, relation);
+}
+
+fn complete() ownership_api.proof_status {
+    ownership_api.proof_status mut proof = ownership_api.proof_status{};
+    proof.kind = ownership_api.proof_kind.complete;
+    return proof;
+}
+
+fn fact_index(ownership_state.state* s, ownership_api.place_path path) u64 {
+    return ownership_transfer.contents_index(s, path);
+}
+
+fn owner_index(ownership_state.state* s, ownership_api.place_path path) u64 {
+    return ownership_transfer.owner_index(s, path);
+}
+
+fn source_leaves(ownership_state.state* s, leaf_plan* plan,
+    ownership_api.services* svc, request* req) ownership_api.proof_status {
+    u64 mut i = 0;
+    while (i < plan->len) {
+        leaf item = plan->items[i];
+        u64 content = fact_index(s, item.path);
+        if (content == U64_MAX || ownership_state.has_residual(item.path)) {
+            return unproved(svc, req, item.path.root);
+        }
+        ownership_api.contents_fact value = s->contents[content];
+        if (types.type_is_reference(item.ty)) {
+            if (value.owner_empty &&
+                (value.borrows.len != 0 ||
+                value.span_length.kind != ownership_api.fact_kind.exact ||
+                value.span_length.value != 0)) {
+                return unproved(svc, req, item.path.root);
+            }
+            if (value.kind == ownership_api.contents_kind.reference &&
+                value.borrows.len == 0 && !value.owner_empty) {
+                return unproved(svc, req, item.path.root);
+            }
+            u64 mut borrow = 0;
+            while (borrow < value.borrows.len) {
+                u64 source = ownership_transfer.source_index(s,
+                    value.borrows[borrow].source);
+                if (!value.borrows[borrow].representation_complete ||
+                    !same_entity(value.borrows[borrow].value_version,
+                        value.value_version) ||
+                    source == U64_MAX ||
+                    s->sources[source].validity == ownership_api.validity_kind.unknown) {
+                    return unproved(svc, req, item.path.root);
+                }
+                if (s->sources[source].validity != ownership_api.validity_kind.live) {
+                    return failed(svc, req, ownership_api.event_kind.invalid_use,
+                        value.borrows[borrow].source,
+                        "reference source is no longer live");
+                }
+                borrow += 1;
+            }
+            if (item.ty->is_own) {
+                u64 count = ownership_transfer.owner_count(s, item.path);
+                if (count > 1) { return unproved(svc, req, item.path.root); }
+                if (count == 1) {
+                    u64 owner = owner_index(s, item.path);
+                    if (owner == U64_MAX ||
+                        !ownership_transfer.owner_reference_proved(s, value,
+                        s->allocations[owner])) {
+                        return unproved(svc, req, item.path.root);
+                    }
+                } else if (!ownership_transfer.empty_owner_proved(value)) {
+                    return unproved(svc, req, item.path.root);
+                }
+            } else if (value.kind != ownership_api.contents_kind.reference &&
+                value.kind != ownership_api.contents_kind.empty_owner) {
+                return unproved(svc, req, item.path.root);
+            }
+        } else if (value.kind != ownership_api.contents_kind.scalar) {
+            return unproved(svc, req, item.path.root);
+        }
+        i += 1;
+    }
+    return complete();
+}
+
+fn owners_covered(ownership_state.state* s, leaf_plan* plan,
+    ownership_api.place_path root, bool aliases_substituted) bool {
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        ownership_api.allocation_fact owner = s->allocations[i];
+        if (owner.obligation && compare(owner.owner.place, root,
+            aliases_substituted) != overlap.disjoint) {
+            if (!begins(owner.owner.place, root)) { return false; }
+            bool mut found = false;
+            u64 mut j = 0;
+            while (j < plan->len) {
+                leaf item = plan->items[j];
+                if (types.type_is_reference(item.ty) && item.ty->is_own &&
+                    ownership_state.same_place(item.path, owner.owner.place)) {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            if (!found) { return false; }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn destination_clear(ownership_state.state* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (s->allocations[i].obligation) {
+            ownership_api.place_path owner = s->allocations[i].owner.place;
+            overlap region = compare(owner, req->base.destination,
+                req->alias_substituted_proved);
+            if (region == overlap.possible) {
+                return unproved(svc, req, s->allocations[i].key);
+            }
+            if (region != overlap.disjoint) {
+                if (!(req->kind == action.move_value &&
+                    compare(req->base.source, req->base.destination,
+                        req->alias_substituted_proved) == overlap.same &&
+                    begins(owner, req->base.source))) {
+                    return failed(svc, req, ownership_api.event_kind.lost_ownership,
+                        s->allocations[i].key, "aggregate write would discard a live owner");
+                }
+            }
+        }
+        i += 1;
+    }
+    return complete();
+}
+
+fn remove_contents(ownership_state.state mut* s, ownership_api.place_path root) void {
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        if (begins(s->contents[i].place, root)) {
+            u64 mut j = i + 1;
+            while (j < s->contents_len) {
+                s->contents[j - 1] = s->contents[j];
+                j += 1;
+            }
+            s->contents_len -= 1;
+        } else { i += 1; }
+    }
+}
+
+fn invalidate_aggregate_ancestors(ownership_state.state mut* s,
+    ownership_api.place_path root) void {
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        ownership_api.contents_fact value = s->contents[i];
+        if (value.kind == ownership_api.contents_kind.aggregate &&
+            value.place.projections.len < root.projections.len &&
+            begins(root, value.place)) {
+            u64 mut j = i + 1;
+            while (j < s->contents_len) {
+                s->contents[j - 1] = s->contents[j];
+                j += 1;
+            }
+            s->contents_len -= 1;
+        } else { i += 1; }
+    }
+}
+
+fn owning_leaf(leaf_plan* plan, ownership_api.place_path path) bool {
+    u64 mut i = 0;
+    while (i < plan->len) {
+        if (ownership_state.same_place(plan->items[i].path, path)) {
+            return plan->items[i].ty->is_own;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn zero_value(ownership_api.contents_fact prior, bool owning)
+    ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = ownership_api.contents_fact{};
+    out.place = prior.place;
+    out.kind = prior.kind;
+    if (owning) { out.kind = ownership_api.contents_kind.empty_owner; }
+    if (prior.kind == ownership_api.contents_kind.reference ||
+        prior.kind == ownership_api.contents_kind.empty_owner) {
+        out.owner_empty = true;
+        out.span_length.kind = ownership_api.fact_kind.exact;
+    }
+    return out;
+}
+
+fn copied(ownership_state.state mut* next, ownership_api.contents_fact prior,
+    ownership_api.place_path path, ownership_api.place_path source,
+    ownership_api.place_path destination) ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = prior;
+    out.place = ownership_state.copy_place(next, path);
+    ownership_api.borrow_relation mut@ own borrows =
+        new(ownership_api.borrow_relation, prior.borrows.len);
+    u64 mut i = 0;
+    while (i < prior.borrows.len) {
+        borrows[i] = prior.borrows[i];
+        if (begins(borrows[i].containing, source)) {
+            owned_path mut mapped = rebase(borrows[i].containing, source, destination);
+            borrows[i].containing = ownership_state.copy_place(next, mapped.path);
+            del(mapped.parts);
+        }
+        i += 1;
+    }
+    out.borrows = ownership_state.copy_borrows(next, borrows[..]);
+    del(borrows);
+    return out;
+}
+
+fn transfer_value(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    leaf_plan mut plan = leaf_plan{};
+    bool walked = leaves(req->ty, req->base.source, &plan);
+    if (!walked) {
+        free_plan(&plan);
+        return unproved(svc, req, req->base.source.root);
+    }
+    ownership_api.proof_status mut proof = source_leaves(s, &plan, svc, req);
+    if (!ownership_api.successful(proof)) { free_plan(&plan); return proof; }
+    if (!owners_covered(s, &plan, req->base.source,
+        req->alias_substituted_proved)) {
+        free_plan(&plan);
+        return unproved(svc, req, req->base.source.root);
+    }
+    if (req->kind == action.copy_value &&
+        ((types.type_is_reference(req->ty) && req->ty->is_own) ||
+        types.type_is_owning_aggregate(req->ty))) {
+        free_plan(&plan);
+        return failed(svc, req, ownership_api.event_kind.lost_ownership,
+            req->base.source.root, "owning aggregate copy needs move");
+    }
+    overlap relation = compare(req->base.source, req->base.destination,
+        req->alias_substituted_proved);
+    if (relation == overlap.possible || relation == overlap.partial) {
+        free_plan(&plan);
+        return unproved(svc, req, req->base.destination.root);
+    }
+    proof = destination_clear(s, svc, req);
+    if (!ownership_api.successful(proof)) { free_plan(&plan); return proof; }
+    ownership_state.state mut next = ownership_state.clone(s);
+    if (req->kind == action.move_value) {
+        u64 mut i = 0;
+        while (i < next.allocations_len) {
+            ownership_api.allocation_fact owner = next.allocations[i];
+            if (owner.obligation && begins(owner.owner.place, req->base.source)) {
+                owned_path mut path = rebase(owner.owner.place, req->base.source,
+                    req->base.destination);
+                ownership_api.owner_location mut after = ownership_api.owner_location{};
+                after.place = path.path;
+                ownership_api.mutation_result moved = ownership_state.transfer_owner(&next,
+                    svc, owner.key, after, true, req->base.operation,
+                    req->base.source_position);
+                del(path.parts);
+                if (!moved.applied) {
+                    proof = moved.proof;
+                    ownership_state.free(&next);
+                    free_plan(&plan);
+                    return proof;
+                }
+            }
+            i += 1;
+        }
+    }
+    remove_contents(&next, req->base.destination);
+    invalidate_aggregate_ancestors(&next, req->base.destination);
+    if (req->kind == action.move_value && relation == overlap.disjoint) {
+        remove_contents(&next, req->base.source);
+        invalidate_aggregate_ancestors(&next, req->base.source);
+    }
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        ownership_api.contents_fact prior = s->contents[i];
+        if (begins(prior.place, req->base.source)) {
+            owned_path mut path = rebase(prior.place, req->base.source,
+                req->base.destination);
+            ownership_api.contents_fact fact = copied(&next, prior, path.path,
+                req->base.source, req->base.destination);
+            ownership_api.mutation_result mut added = ownership_state.add_contents(&next, svc,
+                fact, req->base.operation, req->base.source_position);
+            del(path.parts);
+            if (!added.applied) {
+                proof = added.proof;
+                ownership_state.free(&next);
+                free_plan(&plan);
+                return proof;
+            }
+            if (req->kind == action.move_value && relation == overlap.disjoint) {
+                added = ownership_state.add_contents(&next, svc,
+                    zero_value(prior, owning_leaf(&plan, prior.place)),
+                    req->base.operation, req->base.source_position);
+                if (!added.applied) {
+                    proof = added.proof;
+                    ownership_state.free(&next);
+                    free_plan(&plan);
+                    return proof;
+                }
+            }
+        }
+        i += 1;
+    }
+    ownership_state.free(s);
+    *s = move(next);
+    free_plan(&plan);
+    return complete();
+}
+
+fn release_value(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    if (!types.type_is_reference(req->ty) || !req->ty->is_own ||
+        !req->base.leaves_empty_proved) {
+        return unproved(svc, req, req->base.source.root);
+    }
+    u64 content = fact_index(s, req->base.source);
+    if (content == U64_MAX) { return unproved(svc, req, req->base.source.root); }
+    ownership_api.contents_fact value = s->contents[content];
+    u64 count = ownership_transfer.owner_count(s, req->base.source);
+    if (count == 0 && ownership_transfer.empty_owner_proved(value)) { return complete(); }
+    if (count != 1) { return unproved(svc, req, req->base.source.root); }
+    u64 owner = owner_index(s, req->base.source);
+    if (owner == U64_MAX ||
+        !ownership_transfer.owner_reference_proved(s, value, s->allocations[owner])) {
+        return unproved(svc, req, req->base.source.root);
+    }
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (i != owner && s->allocations[i].obligation &&
+            compare(s->allocations[i].owner.place, req->base.source,
+                req->alias_substituted_proved) != overlap.disjoint) {
+            return unproved(svc, req, s->allocations[i].key);
+        }
+        i += 1;
+    }
+    ownership_state.state mut next = ownership_state.clone(s);
+    ownership_api.mutation_result mut released = ownership_state.release_member(&next, svc,
+        next.allocations[owner].key, true, req->base.operation,
+        req->base.source_position);
+    if (!released.applied) { ownership_state.free(&next); return released.proof; }
+    remove_contents(&next, req->base.source);
+    invalidate_aggregate_ancestors(&next, req->base.source);
+    released = ownership_state.add_contents(&next, svc, zero_value(value, true),
+        req->base.operation, req->base.source_position);
+    if (!released.applied) { ownership_state.free(&next); return released.proof; }
+    ownership_state.free(s);
+    *s = move(next);
+    return complete();
+}
+
+fn end(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    if (!req->base.source_correspondence_proved ||
+        !same_entity(req->base.source_key, req->storage_source)) {
+        return unproved(svc, req, req->storage_source);
+    }
+    u64 source = ownership_transfer.source_index(s, req->storage_source);
+    if (source == U64_MAX ||
+        s->sources[source].kind != ownership_api.source_kind.stack ||
+        s->sources[source].validity != ownership_api.validity_kind.live) {
+        return unproved(svc, req, req->storage_source);
+    }
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (s->allocations[i].obligation) {
+            overlap region = compare(s->allocations[i].owner.place, req->base.source,
+                req->alias_substituted_proved);
+            if (region == overlap.possible) {
+                return unproved(svc, req, s->allocations[i].key);
+            }
+            if (region != overlap.disjoint) {
+                return failed(svc, req, ownership_api.event_kind.lost_ownership,
+                    s->allocations[i].key, "aggregate storage ends with a live owner");
+            }
+        }
+        i += 1;
+    }
+    if (!req->liveness_proved) { return unproved(svc, req, req->storage_source); }
+    if (req->retained_borrow) {
+        return failed(svc, req, ownership_api.event_kind.invalid_use,
+            req->storage_source, "retained view outlives aggregate storage");
+    }
+    ownership_state.state mut next = ownership_state.clone(s);
+    ownership_api.mutation_result ended = ownership_state.end_source(&next, svc,
+        req->storage_source, req->base.operation, req->base.source_position);
+    if (!ended.applied) { ownership_state.free(&next); return ended.proof; }
+    ownership_state.free(s);
+    *s = move(next);
+    return ended.proof;
+}
+
+/// A failed effect keeps the input state unchanged.
+fn apply(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    if (!ownership_api.successful(s->proof)) { return s->proof; }
+    if (!ownership_transfer.valid_event_map(&req->base)) {
+        return ownership_api.incomplete(ownership_api.incomplete_reason.missing_correspondence,
+            req->base.operation, req->base.source_position);
+    }
+    ownership_transfer.event_route mut route = ownership_transfer.event_route{};
+    route.request = &req->base;
+    route.original = *svc;
+    ownership_api.services mut local = *svc;
+    if (svc->event != null) {
+        local.event_context = cast(&route, void mut*);
+        local.event = ownership_transfer.mapped_event;
+    }
+    if (req->base.source.root.kind != ownership_api.entity_kind.slot ||
+        req->base.destination.root.kind != ownership_api.entity_kind.slot ||
+        !req->source_region_proved || !req->destination_region_proved ||
+        !req->alias_substituted_proved ||
+        ownership_state.has_residual(req->base.source) ||
+        ownership_state.has_residual(req->base.destination)) {
+        return unproved(&local, req, req->base.source.root);
+    }
+    ownership_api.charge_result charged = ownership_api.charge_work(&local,
+        ownership_api.work_kind.transfer, req->base.operation,
+        req->base.source_position);
+    if (!charged.allowed) { return charged.proof; }
+    if (req->kind == action.end_storage) { return end(s, &local, req); }
+    if (req->ty == null) { return unproved(&local, req, req->base.source.root); }
+    if (req->kind == action.release_value) { return release_value(s, &local, req); }
+    return transfer_value(s, &local, req);
+}
