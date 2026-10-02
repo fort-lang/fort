@@ -103,11 +103,16 @@ commit messages. Agents that cannot run an interactive rebase use the equivalent
 if `main` moved since the branch was cut, that commits the branch's old tree on top of the
 new `main` and silently reverts its newer commits). A feature branch made of several self-contained
 units of work (for example the language design, or a compiler pass plus its tests plus its
-documentation) keeps its individual commits. **Every merge is `--ff-only`** (the user, 2026-09-17):
-rebase onto the target first, then merge. A merge that cannot fast-forward means the target moved
-and the rebase is missing. No merge commit enters the history. Before a merge, push the branch to
-`origin`, run `gh workflow run ci.yml --ref <branch>` and wait for its green `ci-status` (T-268).
-Then push `main` and delete the branch. A red `ci-status` on `main` blocks the next merge (T-261).
+documentation) keeps its individual commits.
+GitHub PR CI supplies the merge gate (2026-10-01, T-306). Local final gates are not required.
+Push the branch and open a PR against `main`. Require green PR `ci-status`.
+Require enforced `ci-status` and an up-to-date branch. Permit no ruleset bypass actors.
+The coordinator verifies these requirements before merging. Never bypass them.
+GitHub has no `--ff-only` PR option. Rebase merge preserves linear history.
+Merge only through GitHub. Do not merge or push `main` locally.
+Use `gh pr merge <number> --rebase --match-head-commit <reviewed-head-sha>` without `--admin`.
+Record the reviewed PR head, CI run, tested revision, and merged `main` SHA separately.
+Delete the branch after GitHub reports the merge. A red `ci-status` on `main` blocks the next merge.
 
 ### Tickets
 - Keep one markdown ticket per deliverable in `.tickets/` in the main checkout, not a worktree.
@@ -126,9 +131,9 @@ Then push `main` and delete the branch. A red `ci-status` on `main` blocks the n
   template reaches no commit and a reader verifies it by reading the file in the main checkout.
 - Assign a ticket only when each dependency is in `done/` after its merge into `main`. Assign
   independent tickets concurrently, one implementor each.
-- Acceptance criteria are verifiable inside the VM or on a named native host. The ticket log names
-  that host and records each hand-off with
-  evidence (commands run, results, review rounds, merge sha). Evidence must outlive the agent that
+- Acceptance criteria are verifiable in GitHub CI, the VM, or on a named native host.
+  The ticket log names that host and records each hand-off with evidence:
+  commands, results, review rounds, and merge SHA. Evidence must outlive the agent that
   produced it: a command anyone can re-run, a commit sha, a file in the repository. A criterion
   ticked against "the report" is ticked against prose that exists nowhere once the agent returns,
   and nobody can ever re-check it -- T-069's audit of all 86 amended decisions is gone for exactly
@@ -152,8 +157,8 @@ Then push `main` and delete the branch. A red `ci-status` on `main` blocks the n
 
 ### Agents
 - The coordinator is the main Codex session. Seven TOML roles live in `.codex/agents/` (T-139).
-  Each role inherits the coordinator model and sets effort. Give its text and effort to a built-in
-  worker until named loading is proved. Restart Codex after a role changes.
+  Each role inherits the coordinator model and sets effort. Pass its text and effort to a worker.
+  Use named roles only after loading is proved. Restart Codex after a role changes.
 - Implementors use full tools: `impl-mech` (medium) for work the specification
   pins completely, transcription and coverage; `impl-std` (high) for ordinary tickets that need
   data-structure design; `impl-hard` (xhigh) for cross-cutting invariants, the calling
@@ -173,37 +178,32 @@ Then push `main` and delete the branch. A red `ci-status` on `main` blocks the n
 
 ### Review Workflow
 - Coordinator: picks an unblocked ticket. Create `.worktrees/fort-<id>` and branch
-  `feat/<id>-<slug>`. Fill its branch, worktree, and assignee; move it to `inprogress/`.
-  Give a worker role text, effort, ticket path, and worktree.
-  Use named roles after Codex proves that it loads them.
-- Implementor: reads only the ticket and its cited specification sections; codes and tests there.
-  Keep each commit green under `tools/vm check`. Squash a single-unit ticket first.
-  Hand off a clean SHA and `tools/vm check` evidence in 40 lines. Do not start the gate or review.
-- Coordinator: a worker starts one ticket-worktree `tools/vm gate` and waits.
-  The worker messages at exit or for help. Start read-only review on that SHA; move the ticket to
-  `inreview/`. For `rev-std`, use:
+  `feat/<id>-<slug>`. Record branch, worktree, and assignee. Move the ticket to `inprogress/`.
+  Give the worker its role text, effort, ticket path, and worktree.
+- Implementor: reads the ticket and its cited specification sections; codes and tests there.
+  Run relevant tests, format checks, and lint checks before committing. Keep commits self-contained.
+  Squash a single-unit ticket first. Hand off a clean SHA and development evidence in 40 lines.
+  Do not run a local final gate or start review.
+- Coordinator: pushes the branch and opens a PR. Start independent read-only review on its head SHA.
+  Move the ticket to `inreview/`. PR CI and review can run concurrently. For `rev-std`, use:
 
       codex review --strict-config -c 'sandbox_mode="read-only"' \
         -c 'model_reasoning_effort="high"' \
         -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base main
   Add the ticket's absolute path to `developer_instructions`. Use the selected tier and effort.
   Never pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes. Relay findings.
-  After a source fix, discard its gate. Gate the fixed SHA; review if behavior changes.
-- Reviewer: follows its TOML. Effort differs from depth. Check tests, citations, commits, and scope.
-  Check xfail and the ticket. Route learning below. A live gate is pending; never edit or merge.
-- Coordinator: uses gate-worker messages for live state. Do not poll a responsive worker.
-  Make at most one fallback poll per 20 message-free minutes, only when the worker appears stuck.
-  Require `tools/vm gate: green`. Log the counts and the source SHA.
-  Reuse a green gate only on the same SHA with untouched `build/` outputs. Log reuse.
-  If `main` moved, rebase, then rerun the gate.
-  Review again if rebase changes behavior. Read `git diff --stat main...HEAD` and new files.
-  Merge per the Change Implementation Loop. Record the merge sha and agent tokens in the Log.
-  Tick merge criteria. Move the ticket to `done/`. Remove its worktree and branch. Assign tickets.
-  Before worktree removal, write gate numbers into the ticket log, not the gate-log path.
-  The log dies with the worktree. Record exit status, the self-hosted count, and the ctest line.
-  Re-read each count constant that two branches changed after a rebase or merge.
-  Equal increments can merge silently and leave a wrong total. T-097 found two wrong totals.
-  Run the tool that owns each count and read its failure.
+  A source fix needs new PR CI. Review again if behavior changes.
+- Reviewer: follows its TOML. Check tests, citations, commits, scope, xfail, and the ticket.
+  Pending PR CI remains pending. Never edit or merge. Route learning below.
+- Coordinator: require zero open must-fix findings and green PR `ci-status` for the current head.
+  Record the PR URL, head SHA, tested revision, base SHA, CI run URL, and relevant job counts.
+  Local test results do not replace PR CI. A new head invalidates the previous CI result.
+  If `main` moves, update the branch and require fresh PR CI. Review again if behavior changes.
+  Read `git diff --stat main...HEAD` and new files. Merge through GitHub as specified above.
+  Record merged SHA and agent tokens. Tick merge criteria after GitHub reports merged state.
+  Move the ticket to `done/`. Remove its worktree and branch. Assign newly ready tickets.
+  Preserve CI evidence before removal. Record job results, self-hosted counts, and ctest totals.
+  Re-read each count constant that two branches change. Run the tool that owns each count.
 
 ### Self-Updating Context (the routing rule)
 

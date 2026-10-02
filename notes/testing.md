@@ -32,12 +32,18 @@ bullet at a time and without a rewrite.
   `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit
   tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
   On linux each target runs as `tools/vm <target>`.
-- The merge gate is the `gate` target of the `debug` preset (`ninja -C build/<Host>/debug gate` on
-  both hosts): `check-all`, then the workflow -- configure, build, test -- of the `asan-debug` and
-  `ubsan-debug` presets. On darwin run
-  `cmake --preset debug && cmake --build --preset debug --target gate`; `tools/vm gate` does the
-  same in the VM. The same tests register on both targets: the test graph
-  has no target-only branch since 2026-09-25.
+- **GitHub PR CI supplies the merge gate** (2026-10-01; T-306).
+  `.github/workflows/ci.yml` runs on PRs against the repository.
+  The `bootstrap0` and `fort` jobs call component workflows. `ci-status` requires both to pass.
+  Read those workflows for the current OS, sanitizer, format, lint, test, and fixpoint matrices.
+  Record the PR head SHA and the tested revision. PR CI can test a generated merge revision.
+  Record run URLs, job conclusions, and relevant test counts in the ticket.
+  A missing, pending, cancelled, or failed required result does not pass the gate.
+  Local tests provide development evidence. They do not replace PR CI.
+  `AGENTS.md` defines the review, branch-update, and GitHub merge procedure.
+- The local `gate` target remains available for diagnosis. It is not a merge requirement.
+  It runs `check-all`, then the configure, build, and test steps for `asan-debug` and `ubsan-debug`.
+  Run `tools/vm gate` in the VM, or build the `gate` target of the `debug` preset on Darwin.
   **Never kill a guest process by pattern.** The VM is shared by every worktree, so
   `tools/vm run 'pkill -f ctest'` or `pkill -f run_tests.py` ends the runs of the other agents as
   well, and each of them reads the kill as a test failure in their own branch. T-043 did it to
