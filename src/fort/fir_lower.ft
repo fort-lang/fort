@@ -104,6 +104,46 @@ struct local_list {
     u64 len;
 }
 
+/// One inactive range binding. The IDs name a selected range node and this lowering occurrence.
+/// The binding uses the FIR carrier layout. No candidate asserts complete body coverage.
+struct range_capture_candidate {
+    u32 declaration;
+    u32 expansion;
+    fir.range_capture binding;
+}
+
+struct range_capture_candidate_vec {
+    range_capture_candidate mut@ own items;
+    u64 len;
+}
+
+/// Releases the inactive range bindings that the test route receives.
+fn range_capture_candidates_free(range_capture_candidate_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+fn range_capture_candidate_add(range_capture_candidate_vec mut* v, range_capture_candidate c)
+    void {
+    if (v->len >= fir.U32_LIMIT) {
+        panic("fir_lower.range_capture_candidate_add: too many records");
+    }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len,
+                                      "fir_lower.range_capture_candidate_add: capacity overflow");
+        range_capture_candidate mut@ own bigger = new(range_capture_candidate, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = c;
+    v->len += 1;
+}
+
 // The state of the lowering of one function. `block` receives the next statement. `counter` is
 // the last statement index that the walk gave, and `stmt` is the index of the statement that the
 // walk lowers now: 0 outside every statement (spec/fir.md 9.7). `scopes` is the stack of the open
@@ -122,6 +162,9 @@ struct lowerer {
     scope_vec scopes;
     gen.node_ref_vec defers;
     local_list named;
+    gen.node_ref_vec range_declarations;
+    range_capture_candidate_vec range_candidates;
+    u32 next_range_expansion;
     u64 floor;
     diag.loc exit_at;
     ast.sym* str_eq;
@@ -191,12 +234,26 @@ fn write_report(report* r, strbuf.str_buf mut* out) void {
 /// releases what it built, leaves *out empty and returns false.
 fn lower_function(check.checker mut* ck, ast.node* decl, fir.func mut* out, report mut* why)
     bool {
+    return lower_function_with_capture_candidates(ck, decl, out, null, why);
+}
+
+/// Lowers a function and returns inactive range bindings when `candidates` is non-null.
+/// Production leaves it null. No candidate enters the verified FIR function.
+fn lower_function_with_capture_candidates(check.checker mut* ck, ast.node* decl,
+                                          fir.func mut* out,
+                                          range_capture_candidate_vec mut* candidates,
+                                          report mut* why) bool {
+    if (candidates != null) {
+        *candidates = range_capture_candidate_vec{};
+    }
     *out = fir.func_new(&ck->types, decl->sym, decl->sym->ty);
     lowerer mut lw = lowerer{.ck = ck, .f = out};
     defer scopes_free(&lw.scopes);
     defer gen.refs_free(&lw.defers);
     defer locals_free(&lw.named);
-    prescan(out, decl->b);
+    defer gen.refs_free(&lw.range_declarations);
+    defer range_capture_candidates_free(&lw.range_candidates);
+    prescan(&lw, decl->b);
     zero_owners(&lw);
     // the body is the scope of kind `fn` (spec/fir.md 9.2)
     if (!lower_scope(&lw, decl->b, scope_kind.sc_fn, 0, 0)) {
@@ -205,6 +262,9 @@ fn lower_function(check.checker mut* ck, ast.node* decl, fir.func mut* out, repo
         return false;
     }
     lower_end(&lw, decl->b);
+    if (candidates != null) {
+        *candidates = move(lw.range_candidates);
+    }
     return true;
 }
 
@@ -227,27 +287,42 @@ fn zero_owners(lowerer mut* lw) void {
 // Adds a named local for each declaration below `n`, in the order of a walk of the tree: a
 // declaration before its children, and the selected branch of a statement `$if` alone
 // (spec/fir.md 5.3). A range `for` declares its variable on the loop node.
-fn prescan(fir.func mut* f, ast.node* n) void {
+fn prescan(lowerer mut* lw, ast.node* n) void {
     if (n == null) {
         return;
     }
     if (n->kind == ast.ast_kind.k_compile_if) {
-        prescan(f, selected_branch(n));
+        prescan(lw, selected_branch(n));
         return;
     }
     if ((n->kind == ast.ast_kind.k_var_decl || n->kind == ast.ast_kind.k_range_for)
         && n->sym != null) {
-        fir.local_add(f, n->sym->ty, fir.local_kind.lk_named, n->sym, n->name_loc);
+        fir.local_add(lw->f, n->sym->ty, fir.local_kind.lk_named, n->sym, n->name_loc);
     }
-    prescan(f, n->a);
-    prescan(f, n->b);
-    prescan(f, n->c);
-    prescan(f, n->d);
+    if (n->kind == ast.ast_kind.k_range_for) {
+        gen.refs_push(&lw->range_declarations, n);
+    }
+    prescan(lw, n->a);
+    prescan(lw, n->b);
+    prescan(lw, n->c);
+    prescan(lw, n->d);
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
-        prescan(f, ast.ast_child(n, i));
+        prescan(lw, ast.ast_child(n, i));
         i += 1;
     }
+}
+
+// The ID of one selected range node. Prescan gives IDs in selected source order.
+fn range_declaration_id(lowerer* lw, ast.node* n) u32 {
+    u64 mut i = 0;
+    while (i < lw->range_declarations.len) {
+        if (gen.refs_at(&lw->range_declarations, i) == n) {
+            return cast(i + 1, u32);
+        }
+        i += 1;
+    }
+    panic("fir_lower.range_declaration_id: range node absent from prescan");
 }
 
 // Ends the body when its last block has no terminator: `return` for a `void` function, `trap` for
@@ -1098,31 +1173,54 @@ fn lower_for(lowerer mut* lw, ast.node* n) bool {
     return close_scope(lw, end_of(n));
 }
 
-// The collection storage of a range `for` (D7.5, D17.10). An owning fixed array stays
-// in its place. A span or string header goes into a temporary with `own` removed.
-// The header copy lends the storage and holds its pointer and length before the loop.
-// Another fixed array goes into a value copy.
-fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out) bool {
+// Selects the collection once (D7.5, D17.10, spec/fir.md 5.2).
+// The returned candidate keeps the selected protected place.
+// It does not enter the FIR carriers until the complete body boundaries exist.
+fn range_collection(lowerer mut* lw, ast.node* coll, u32 declaration, u32 expansion,
+                    fir.place mut* out, range_capture_candidate mut* candidate) bool {
+    fir.range_capture mut binding = fir.range_capture{.loan = expansion, .source = coll->loc};
     if (fir.type_owning(coll->ty) && coll->ty->kind == types.type_kind.k_array) {
         fir.place mut p = fir.place{};
         if (!lower_place(lw, coll, &p)) {
             return false;
         }
         *out = hold_base(lw, p, true, coll->loc);
+        binding.kind = fir.range_capture_kind.owning_fixed_array_place;
+        binding.captured = *out;
+        binding.original = *out;
+        binding.original_present = true;
+        *candidate = range_capture_candidate{declaration, expansion, binding};
         return true;
     }
     types.node* ty = lent_type(lw, coll->ty);
     u32 t = fir.local_add(lw->f, ty, fir.local_kind.lk_temp, null, coll->loc);
     *out = fir.place_local(t);
-    if (fir.type_owning(coll->ty)) {
+    binding.captured = *out;
+    if (coll->ty->kind == types.type_kind.k_array) {
+        binding.kind = fir.range_capture_kind.non_owning_array_copy;
+        if (!lower_into(lw, coll, *out)) {
+            return false;
+        }
+    } else if (fir.type_owning(coll->ty) || designates(coll)) {
         fir.place mut p = fir.place{};
         if (!lower_place(lw, coll, &p)) {
             return false;
         }
+        p = hold_base(lw, p, true, coll->loc);
         assign(lw, *out, fir.rvalue_use(lw->f, fir.operand_copy(p)), coll->loc);
-        return true;
+        binding.kind = fir.range_capture_kind.borrowed_header;
+        binding.original = p;
+        binding.original_present = true;
+    } else {
+        if (!lower_into(lw, coll, *out)) {
+            return false;
+        }
+        binding.kind = fir.range_capture_kind.borrowed_header;
+        binding.original = *out;
+        binding.original_present = true;
     }
-    return lower_into(lw, coll, *out);
+    *candidate = range_capture_candidate{declaration, expansion, binding};
+    return true;
 }
 
 // `for (T x : c) B` (spec/fir.md 9.3): the place of `c`, then the counter `_i: u64 = const u64 0`;
@@ -1134,10 +1232,18 @@ fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out) bool {
 // (D17.10). The statements of the loop stand at the `for`, `live(_x)` at the name, and the copy of
 // the element at `c`.
 fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
+    if (cast(lw->next_range_expansion, u64) >= fir.U32_LIMIT) {
+        panic("fir_lower.lower_range_for: too many expansions");
+    }
+    lw->next_range_expansion += 1;
+    u32 declaration = range_declaration_id(lw, n);
+    u32 expansion = lw->next_range_expansion;
     fir.place mut c = fir.place{};
-    if (!range_collection(lw, n->b, &c)) {
+    range_capture_candidate mut candidate = range_capture_candidate{};
+    if (!range_collection(lw, n->b, declaration, expansion, &c, &candidate)) {
         return false;
     }
+    range_capture_candidate_add(&lw->range_candidates, candidate);
     types.node* wide = u64_ty(lw);
     u32 i = fir.local_add(lw->f, wide, fir.local_kind.lk_temp, null, n->loc);
     fir.place counter = fir.place_local(i);

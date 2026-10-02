@@ -111,6 +111,13 @@ came here.
   Trusted extern calls retain their D17.13 contracts. T-291 replaces the temporary refusal with
   inferred loan proof. T-292 accepts proven safe helpers and refuses helpers that free storage.
   The T-263 ticket records the probes and the cost. Do not treat this AST check as exact loan proof.
+  `range_collection` fills an inactive FIR-layout capture candidate (D17.10, `spec/fir.md` 5.2).
+  It records the captured place and the original protected place.
+  A non-owning fixed array copy has no original protected place.
+  An indirect collection place holds its selected address before use.
+  Later pointer writes therefore cannot retarget the candidate's original place.
+  Selected range nodes have declaration IDs; repeated deferred lowering has separate expansion IDs.
+  Production releases unused candidates. No candidate enters verified FIR or proves source coverage.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a
