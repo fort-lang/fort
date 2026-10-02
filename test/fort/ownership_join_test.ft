@@ -375,6 +375,41 @@ fn duplicate_union(ownership_api.services* svc) void {
     ownership_state.free(&corr_left);
 }
 
+fn duplicate_proofs(ownership_api.services* svc) void {
+    ownership_state.state mut left = ownership_state.empty();
+    ownership_state.state mut right = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(95, 95, 95);
+    ownership_state.append_allocations(&left, a);
+    ownership_state.append_allocations(&right, a);
+    ownership_api.predicate_atom mut predicate = ownership_api.predicate_atom{};
+    predicate.key = id(ownership_api.entity_kind.predicate, 95);
+    predicate.kind = ownership_api.predicate_kind.equality;
+    ownership_state.append_predicates(&left, predicate);
+    ownership_state.append_predicates(&left, predicate);
+    ownership_state.append_predicates(&right, predicate);
+    ownership_api.guard_fact mut guard = ownership_api.guard_fact{};
+    guard.key = id(ownership_api.entity_kind.guard, 95);
+    ownership_state.append_guards(&left, guard);
+    ownership_state.append_guards(&left, guard);
+    ownership_state.append_guards(&right, guard);
+    ownership_api.limit_table mut bound = ownership_limits.production();
+    bound.p = 1;
+    bound.g = 1;
+    ownership_api.operation_position at = op(95);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut ab = ownership_join.join(&left, &right, svc,
+        &bound, at, source);
+    ownership_state.state mut ba = ownership_join.join(&right, &left, svc,
+        &bound, at, source);
+    assert(ownership_state.equal(&ab, &ba));
+    assert(ab.predicates_len == 1 && ab.guards_len == 1);
+    assert(ab.losses_len == 0 && ab.allocations[0].obligation);
+    ownership_state.free(&ba);
+    ownership_state.free(&ab);
+    ownership_state.free(&right);
+    ownership_state.free(&left);
+}
+
 fn main() i32 {
     ownership_events.store mut events = ownership_events.store{};
     ownership_api.services mut svc = ownership_api.services{};
@@ -389,6 +424,7 @@ fn main() i32 {
     cycle(&svc);
     println("G06.3 cycle join and widening");
     duplicate_union(&svc);
+    duplicate_proofs(&svc);
     println("duplicate union records");
     ownership_events.free(&events);
     return 0;
