@@ -137,27 +137,9 @@ fn history_less(ownership_api.history_fact a, ownership_api.history_fact b) bool
     return owner_order(a.after, b.after) < 0;
 }
 
-fn merge_histories(ownership_state.state mut* out,
-    ownership_api.history_fact@ a, ownership_api.history_fact@ b)
-    ownership_api.history_fact@ {
-    if (a.len > U64_MAX - b.len) { panic("ownership_join: history length overflow"); }
-    ownership_api.history_fact mut@ own all = new(ownership_api.history_fact, a.len + b.len);
-    u64 mut len = 0;
-    u64 mut i = 0;
-    while (i < a.len) { all[len] = a[i]; len += 1; i += 1; }
-    i = 0;
-    while (i < b.len) {
-        bool mut found = false;
-        u64 mut j = 0;
-        while (j < len) {
-            if (ownership_state.same_history(all[j], b[i])) { found = true; break; }
-            j += 1;
-        }
-        if (!found) { all[len] = b[i]; len += 1; }
-        i += 1;
-    }
-    i = 1;
-    while (i < len) {
+fn canonical_histories(ownership_api.history_fact mut@ all) u64 {
+    u64 mut i = 1;
+    while (i < all.len) {
         ownership_api.history_fact value = all[i];
         u64 mut j = i;
         while (j > 0 && history_less(value, all[j - 1])) {
@@ -167,7 +149,29 @@ fn merge_histories(ownership_state.state mut* out,
         all[j] = value;
         i += 1;
     }
-    ownership_api.history_fact@ result = ownership_state.copy_histories(out, all[0..len]);
+    u64 mut kept = 0;
+    i = 0;
+    while (i < all.len) {
+        if (kept == 0 || !ownership_state.same_history(all[kept - 1], all[i])) {
+            all[kept] = all[i];
+            kept += 1;
+        }
+        i += 1;
+    }
+    return kept;
+}
+
+fn merge_histories(ownership_state.state mut* out,
+    ownership_api.history_fact@ a, ownership_api.history_fact@ b)
+    ownership_api.history_fact@ {
+    if (a.len > U64_MAX - b.len) { panic("ownership_join: history length overflow"); }
+    ownership_api.history_fact mut@ own all = new(ownership_api.history_fact, a.len + b.len);
+    u64 mut i = 0;
+    while (i < a.len) { all[i] = a[i]; i += 1; }
+    u64 mut j = 0;
+    while (j < b.len) { all[i] = b[j]; i += 1; j += 1; }
+    u64 kept = canonical_histories(all[..]);
+    ownership_api.history_fact@ result = ownership_state.copy_histories(out, all[0..kept]);
     del(all);
     return result;
 }
@@ -1091,7 +1095,8 @@ fn trim_allocations(ownership_state.state mut* s, ownership_api.limit_table* lim
                 pending[j].after.place = trim_place(s, old[j].after.place, limits->d, at);
                 j += 1;
             }
-            s->allocations[i].history = ownership_state.copy_histories(s, pending[..]);
+            u64 kept = canonical_histories(pending[..]);
+            s->allocations[i].history = ownership_state.copy_histories(s, pending[0..kept]);
             del(pending);
         }
         i += 1;

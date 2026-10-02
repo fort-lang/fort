@@ -4,6 +4,7 @@
 //| G04.4 G05.3 G05.4
 //| G07.4 G09.3
 //| R P G H residuals
+//| trimmed history fixed point
 /// Tests residual widening with retained sources and obligations.
 import ownership_api;
 import ownership_events;
@@ -397,6 +398,47 @@ fn shape_bound(ownership_api.services* svc) void {
     ownership_state.free(&exact);
 }
 
+fn history_fixed_point(ownership_api.services* svc) void {
+    ownership_state.state mut exact = ownership_state.empty();
+    ownership_api.allocation_fact mut a = allocation(80, 80, 4);
+    ownership_api.projection[3] mut fields = {};
+    u64 mut i = 0;
+    while (i < fields.len) {
+        fields[i].kind = ownership_api.projection_kind.field;
+        fields[i].field = cast(i, u32);
+        i += 1;
+    }
+    ownership_api.history_fact[1] mut events = {};
+    events[0].allocation = a.key;
+    events[0].kind = ownership_api.effect_kind.transfer;
+    events[0].operation = op(80);
+    events[0].before.place = place(80);
+    events[0].before.place.projections = fields[..];
+    events[0].after.place = place(81);
+    a.history = events[..];
+    ownership_state.append_allocations(&exact, a);
+    ownership_api.limit_table bound = limits(2, 4);
+    ownership_api.operation_position at = op(81);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut current = ownership_join.widen(&exact, &exact, svc,
+        &bound, at, source);
+    assert(current.allocations[0].history.len == 1);
+    assert(current.allocations[0].history[0].before.place.residual);
+    u64 mut round = 0;
+    while (round < 6) {
+        ownership_state.state mut next = ownership_join.widen(&current, &exact, svc,
+            &bound, at, source);
+        assert(next.allocations[0].history.len == 1);
+        assert(next.allocations[0].obligation);
+        assert(ownership_state.equal(&current, &next));
+        ownership_state.free(&current);
+        current = move(next);
+        round += 1;
+    }
+    ownership_state.free(&current);
+    ownership_state.free(&exact);
+}
+
 fn main() i32 {
     ownership_events.store mut events = ownership_events.store{};
     ownership_api.services mut svc = ownership_api.services{};
@@ -412,6 +454,8 @@ fn main() i32 {
     guard_bound(&svc);
     shape_bound(&svc);
     println("R P G H residuals");
+    history_fixed_point(&svc);
+    println("trimmed history fixed point");
     ownership_events.free(&events);
     return 0;
 }
