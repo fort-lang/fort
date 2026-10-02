@@ -1,0 +1,48 @@
+/// Exercises target and shape requests without an ownership graph implementation.
+import ownership_api;
+import ownership_keys;
+
+struct context {
+    ownership_api.entity_id[2] targets;
+    ownership_api.shape_description[1] shapes;
+    u64 calls;
+}
+
+fn query(void mut* opaque, ownership_api.graph_request* req) ownership_api.graph_result {
+    context mut* ctx = cast(opaque, context mut*);
+    assert(req->candidates.len == 2);
+    assert(ownership_keys.entity(req->candidates[0], req->candidates[1]) < 0);
+    ctx->calls += 1;
+    ownership_api.graph_result mut out = ownership_api.graph_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    out.targets = ctx->targets[..];
+    out.shapes = ctx->shapes[..];
+    out.residual_fort = true;
+    return out;
+}
+
+fn service(context mut* ctx) ownership_api.services {
+    ownership_api.services mut out = ownership_api.services{};
+    out.budget_context = cast(ctx, void mut*);
+    out.event_context = cast(ctx, void mut*);
+    out.graph_context = cast(ctx, void mut*);
+    out.budget = budget;
+    out.event = event;
+    out.graph = query;
+    return out;
+}
+
+// These callbacks establish only the test service contract.
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    out.allowed = true;
+    return out;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = req->current;
+    out.retained = false;
+    return out;
+}

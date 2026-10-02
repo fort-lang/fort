@@ -1,0 +1,548 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| E01 transfer ok
+//| E02 graph ok
+//| E03 boundaries ok
+//| E04 diagnostics ok
+//| E05 E06 E07 E08 E09 missing handlers ok
+//| X-315-budget X-315-event ok
+//| service failures ok
+//| other service boundaries ok
+//| numeric tables ok
+//| teardown ok
+//| reporting statuses ok
+/// Tests independent extension contracts and failures without production analyzer modules.
+import ownership_api;
+import ownership_keys;
+import ownership_transfer_client;
+import ownership_graph_client;
+import ownership_boundary_client;
+import ownership_diag_client;
+import std.strbuf;
+
+fn allocation() ownership_api.allocation_fact {
+    ownership_api.allocation_fact mut out = ownership_api.allocation_fact{};
+    out.key.kind = ownership_api.entity_kind.allocation;
+    out.key.ordinal = 12;
+    out.site.kind = ownership_api.entity_kind.allocation;
+    out.site.ordinal = 3;
+    out.validity = ownership_api.validity_kind.live;
+    out.count.one = true;
+    out.obligation = true;
+    out.owner.place.root.kind = ownership_api.entity_kind.slot;
+    out.owner.place.root.ordinal = 8;
+    out.logical_length.kind = ownership_api.fact_kind.exact;
+    out.logical_length.value = 0;
+    return out;
+}
+
+fn source_fact() ownership_api.source_fact {
+    ownership_api.source_fact mut out = ownership_api.source_fact{};
+    out.key.kind = ownership_api.entity_kind.source;
+    out.key.ordinal = 7;
+    out.kind = ownership_api.source_kind.heap;
+    out.validity = ownership_api.validity_kind.live;
+    out.allocation = allocation().key;
+    return out;
+}
+
+fn transfer_client() void {
+    ownership_transfer_client.storage mut state = ownership_transfer_client.storage{};
+    state.allocations[0] = allocation();
+    state.sources[0] = source_fact();
+    ownership_transfer_client.event_storage mut events = ownership_transfer_client.event_storage{};
+    events.state = &state;
+    ownership_transfer_client.context mut ctx = ownership_transfer_client.context{};
+    ctx.permit = true;
+    ctx.events = &events;
+    ownership_api.services mut svc = ownership_transfer_client.service(&ctx);
+    ownership_api.state_handle mut handle = ownership_api.state_handle{};
+    handle.context = cast(&state, void mut*);
+    handle.destroy = ownership_transfer_client.destroy_state;
+    ownership_api.transfer_request mut req = ownership_api.transfer_request{};
+    req.before.allocations = state.allocations[..];
+    req.before.sources = state.sources[..];
+    req.destination = &handle;
+    req.operation = ownership_api.operation_position{ownership_api.function_id{
+        ownership_api.declaration_id{1, 2}, 0}, 0, 3, false};
+    req.source = ownership_api.source_position{1, 0, 9, 2, 9, 3};
+    ownership_api.transfer_result out = ownership_api.transfer(&svc, &req);
+    assert(ownership_api.successful(out.proof) && out.mutated);
+    assert(ctx.charges == 1 && ctx.calls == 1 && state.mutations == 1);
+    assert(ctx.last_work == ownership_api.work_kind.transfer);
+    assert(out.retained.allocations[0].obligation);
+    assert(out.retained.allocations[0].logical_length.value == 0);
+    assert(!out.retained.allocations[0].count.zero);
+    assert(out.retained.sources[0].validity == ownership_api.validity_kind.live);
+    assert(ownership_keys.entity(out.retained.sources[0].allocation,
+        state.allocations[0].key) == 0);
+    // A test callback changes a marker. It proves no production ownership transfer.
+    assert(ownership_keys.entity(state.allocations[0].key, allocation().key) == 0);
+    println("E01 transfer ok");
+}
+
+fn graph_client() void {
+    ownership_graph_client.context mut ctx = ownership_graph_client.context{};
+    ctx.targets[0].kind = ownership_api.entity_kind.target;
+    ctx.targets[0].ordinal = 1;
+    ctx.targets[1].kind = ownership_api.entity_kind.target;
+    ctx.targets[1].ordinal = 2;
+    ctx.shapes[0].key.kind = ownership_api.entity_kind.template;
+    ctx.shapes[0].residual = true;
+    ownership_api.services svc = ownership_graph_client.service(&ctx);
+    ownership_api.graph_request mut req = ownership_api.graph_request{};
+    req.query = ownership_api.graph_query_kind.targets;
+    req.candidates = ctx.targets[..];
+    ownership_api.graph_result out = ownership_api.graph(&svc, &req);
+    assert(ownership_api.successful(out.proof));
+    assert(out.targets.len == 2 && out.shapes.len == 1 && out.residual_fort);
+    assert(ownership_keys.entity(out.targets[1], ctx.targets[1]) == 0);
+    assert(out.shapes[0].residual && !out.shapes[0].acyclic_proved);
+    assert(!out.shapes[0].separation_proved);
+    assert(ctx.calls == 1);
+    println("E02 graph ok");
+}
+
+fn boundary_client() void {
+    ownership_boundary_client.context mut ctx = ownership_boundary_client.context{};
+    ctx.sources[0] = source_fact();
+    ctx.sources[1].key.kind = ownership_api.entity_kind.source;
+    ctx.sources[1].key.ordinal = 11;
+    ctx.sources[1].kind = ownership_api.source_kind.trusted_foreign;
+    ctx.sources[1].validity = ownership_api.validity_kind.unknown;
+    ownership_api.outcome_kind[6] kinds = {
+        ownership_api.outcome_kind.unknown_fort, ownership_api.outcome_kind.function_return,
+        ownership_api.outcome_kind.normal_process_exit, ownership_api.outcome_kind.abort,
+        ownership_api.outcome_kind.unresolved_foreign, ownership_api.outcome_kind.divergence,
+    };
+    u64 mut i = 0;
+    while (i < kinds.len) {
+        ctx.outcomes[i].kind = kinds[i];
+        ctx.outcomes[i].possible_caller_return = i == 0 || i == 1;
+        ctx.outcomes[i].cleanup_required = i == 0 || i == 1 || i == 2;
+        i += 1;
+    }
+    ownership_api.allocation_fact[1] known = {allocation()};
+    ownership_api.services svc = ownership_boundary_client.service(&ctx);
+    ownership_api.ffi_request mut foreign = ownership_api.ffi_request{};
+    foreign.before.allocations = known[..];
+    ownership_api.ffi_result out = ownership_api.foreign(&svc, &foreign);
+    assert(ownership_api.successful(out.proof) && out.hidden_effects_outside_proof);
+    assert(out.trusted_sources.len == 2);
+    assert(out.trusted_sources[0].kind == ownership_api.source_kind.heap);
+    assert(out.trusted_sources[1].kind == ownership_api.source_kind.trusted_foreign);
+    assert(out.trusted_sources[1].validity == ownership_api.validity_kind.unknown);
+    assert(out.outcomes.len == 6 && out.signature_transfers.len == 0);
+    assert(out.outcomes[0].possible_caller_return && out.outcomes[0].cleanup_required);
+    assert(out.outcomes[1].possible_caller_return);
+    assert(!out.outcomes[2].possible_caller_return && out.outcomes[2].cleanup_required);
+    assert(!out.outcomes[3].cleanup_required && !out.outcomes[3].cleanup_proved);
+    assert(!out.outcomes[4].cleanup_proved);
+    assert(!out.outcomes[5].cleanup_proved);
+    assert(known[0].obligation && known[0].validity == ownership_api.validity_kind.live);
+    ctx.persistent[0].persistent = true;
+    ctx.persistent[0].symbolic = true;
+    ctx.cleanup[0].kind = ownership_api.effect_kind.release;
+    ctx.cleanup[0].allocation = known[0].key;
+    ctx.cleanup[1].kind = ownership_api.effect_kind.storage_end;
+    ownership_api.global_request mut global = ownership_api.global_request{};
+    global.entry.kind = ownership_api.entry_kind.library_symbolic;
+    global.entry.host_cleanup_required = true;
+    global.outcome.kind = ownership_api.outcome_kind.function_return;
+    ownership_api.global_result lib = ownership_api.globals(&svc, &global);
+    assert(ownership_api.successful(lib.proof) && !lib.boundary_proved);
+    assert(lib.persistent[0].persistent && lib.persistent[0].symbolic);
+    assert(global.entry.host_cleanup_required);
+    global.entry.kind = ownership_api.entry_kind.generated_executable;
+    global.entry.boundary_present = true;
+    global.outcome.kind = ownership_api.outcome_kind.normal_process_exit;
+    global.outcome.cleanup_required = true;
+    ownership_api.global_result unfinished = ownership_api.globals(&svc, &global);
+    assert(!unfinished.boundary_proved);
+    global.outcome.cleanup_proved = true;
+    global.entry.cleanup = ctx.cleanup[..];
+    ownership_api.global_result process = ownership_api.globals(&svc, &global);
+    assert(process.boundary_proved && process.cleanup.len == 2);
+    assert(process.cleanup[0].kind == ownership_api.effect_kind.release);
+    assert(process.cleanup[1].kind == ownership_api.effect_kind.storage_end);
+    assert(ctx.foreign_calls == 1 && ctx.global_calls == 3);
+    println("E03 boundaries ok");
+}
+
+fn diagnostic_client() void {
+    ownership_diag_client.context mut ctx = ownership_diag_client.context{};
+    ctx.render = true;
+    ownership_api.services svc = ownership_diag_client.service(&ctx);
+    ownership_api.event_descriptor[1] mut events = {};
+    events[0].kind = ownership_api.event_kind.incomplete_proof;
+    events[0].evidence = ownership_api.evidence_kind.abstract_possibility;
+    events[0].reason = ownership_api.incomplete_reason.unknown_effect;
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{};
+    req.events = events[..];
+    req.verdict = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_api.diagnostic_result out = ownership_api.render(&svc, &req);
+    assert(out.rendered && out.proof.failed && out.proof.terminal.present);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(ctx.calls == 1 && ctx.events == 1);
+    ctx.render = false;
+    req.events = events[0..0];
+    ownership_api.diagnostic_result suppressed = ownership_api.render(&svc, &req);
+    assert(!suppressed.rendered && suppressed.proof.failed);
+    assert(suppressed.proof.terminal.present);
+    assert(!ownership_api.successful(suppressed.proof));
+    println("E04 diagnostics ok");
+}
+
+fn missing_handlers() void {
+    ownership_api.services svc = ownership_api.services{};
+    ownership_api.allocation_fact[1] known = {allocation()};
+    ownership_api.source_fact[1] sources = {source_fact()};
+    ownership_api.transfer_request mut transfer = ownership_api.transfer_request{};
+    transfer.before.allocations = known[..];
+    transfer.before.sources = sources[..];
+    ownership_api.transfer_result t = ownership_api.transfer(&svc, &transfer);
+    assert(t.proof.failed && t.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(t.proof.terminal.reason == ownership_api.incomplete_reason.missing_transfer);
+    assert(!t.mutated && t.retained.allocations[0].obligation);
+    assert(t.retained.sources[0].validity == ownership_api.validity_kind.live);
+    ownership_api.graph_request graph = ownership_api.graph_request{};
+    ownership_api.graph_result g = ownership_api.graph(&svc, &graph);
+    assert(g.proof.failed && !ownership_api.successful(g.proof));
+    assert(g.proof.terminal.reason == ownership_api.incomplete_reason.missing_graph);
+    assert(g.residual_fort && g.targets.len == 0 && g.shapes.len == 0);
+    ownership_api.ffi_request foreign = ownership_api.ffi_request{};
+    ownership_api.ffi_result f = ownership_api.foreign(&svc, &foreign);
+    assert(f.proof.failed && !ownership_api.successful(f.proof));
+    assert(f.proof.terminal.reason == ownership_api.incomplete_reason.missing_ffi);
+    assert(f.trusted_sources.len == 0 && f.signature_transfers.len == 0);
+    assert(f.outcomes.len == 0 && !f.hidden_effects_outside_proof);
+    ownership_api.global_request globals = ownership_api.global_request{};
+    ownership_api.global_result p = ownership_api.globals(&svc, &globals);
+    assert(p.proof.failed && !ownership_api.successful(p.proof));
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.missing_globals);
+    assert(p.cleanup.len == 0 && !p.boundary_proved);
+    ownership_api.diagnostic_request mut diagnostic = ownership_api.diagnostic_request{};
+    ownership_api.diagnostic_result d = ownership_api.render(&svc, &diagnostic);
+    assert(d.proof.failed && !ownership_api.successful(d.proof) && !d.rendered);
+    assert(d.proof.terminal.reason == ownership_api.incomplete_reason.missing_renderer);
+    diagnostic.verdict = t.proof;
+    ownership_api.diagnostic_result failed = ownership_api.render(&svc, &diagnostic);
+    assert(failed.proof.failed && failed.proof.terminal.present);
+    assert(failed.proof.terminal.reason == ownership_api.incomplete_reason.missing_transfer);
+    assert(known[0].obligation && sources[0].validity == ownership_api.validity_kind.live);
+    println("E05 E06 E07 E08 E09 missing handlers ok");
+}
+
+fn missing_services() void {
+    ownership_transfer_client.storage mut state = ownership_transfer_client.storage{};
+    state.allocations[0] = allocation();
+    state.sources[0] = source_fact();
+    ownership_transfer_client.context mut ctx = ownership_transfer_client.context{};
+    ctx.permit = true;
+    ownership_api.services mut svc = ownership_transfer_client.service(&ctx);
+    ownership_api.state_handle mut destination = ownership_api.state_handle{};
+    destination.context = cast(&state, void mut*);
+    ownership_api.transfer_request mut req = ownership_api.transfer_request{};
+    req.before.allocations = state.allocations[..];
+    req.before.sources = state.sources[..];
+    req.destination = &destination;
+    svc.budget = null;
+    ownership_api.transfer_result budget = ownership_api.transfer(&svc, &req);
+    assert(budget.proof.failed && budget.proof.terminal.present && !budget.mutated);
+    assert(budget.proof.terminal.reason == ownership_api.incomplete_reason.missing_budget);
+    assert(budget.retained.allocations[0].obligation && ctx.calls == 0 && ctx.charges == 0);
+    assert(state.mutations == 0);
+    svc = ownership_transfer_client.service(&ctx);
+    svc.event = null;
+    ownership_api.transfer_result event = ownership_api.transfer(&svc, &req);
+    assert(event.proof.failed && event.proof.terminal.present && !event.mutated);
+    assert(event.proof.terminal.reason == ownership_api.incomplete_reason.missing_events);
+    assert(event.retained.allocations[0].obligation && ctx.calls == 0 && ctx.charges == 0);
+    assert(event.retained.sources[0].validity == ownership_api.validity_kind.live);
+    ownership_api.event_request mut descriptor = ownership_api.event_request{};
+    descriptor.current = budget.proof;
+    ownership_api.event_result missed = ownership_api.record_event(&svc, &descriptor);
+    assert(missed.proof.failed && !missed.retained);
+    assert(missed.proof.terminal.reason == ownership_api.incomplete_reason.missing_budget);
+    svc.budget = null;
+    svc.event = ownership_transfer_client.event;
+    ownership_api.event_result no_budget = ownership_api.record_event(&svc, &descriptor);
+    assert(no_budget.proof.failed && !no_budget.retained);
+    assert(no_budget.proof.terminal.reason == ownership_api.incomplete_reason.missing_budget);
+    assert(ctx.calls == 0 && ctx.charges == 0 && state.allocations[0].obligation);
+    println("X-315-budget X-315-event ok");
+}
+
+fn deny(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn lose_event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn service_failures() void {
+    ownership_transfer_client.storage mut state = ownership_transfer_client.storage{};
+    state.allocations[0] = allocation();
+    ownership_transfer_client.context mut ctx = ownership_transfer_client.context{};
+    ownership_api.services mut svc = ownership_transfer_client.service(&ctx);
+    ownership_api.transfer_request mut req = ownership_api.transfer_request{};
+    req.before.allocations = state.allocations[..];
+    ownership_api.transfer_result denied = ownership_api.transfer(&svc, &req);
+    assert(denied.proof.failed && denied.proof.terminal.limit.present && !denied.mutated);
+    assert(denied.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(denied.proof.terminal.limit.used == 2 && denied.proof.terminal.limit.bound == 2);
+    assert(denied.retained.allocations[0].obligation && ctx.calls == 0 && state.mutations == 0);
+    ctx.permit = true;
+    ctx.saturate = true;
+    ownership_api.transfer_result saturated = ownership_api.transfer(&svc, &req);
+    assert(saturated.proof.failed && saturated.proof.terminal.limit.saturated);
+    assert(!saturated.mutated && ctx.calls == 0 && state.allocations[0].obligation);
+    svc.budget = deny;
+    ownership_api.transfer_result malformed = ownership_api.transfer(&svc, &req);
+    assert(malformed.proof.failed && malformed.proof.terminal.present && !malformed.mutated);
+    assert(malformed.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(malformed.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(malformed.retained.allocations[0].obligation && ctx.calls == 0);
+    ownership_api.event_request mut event = ownership_api.event_request{};
+    event.current = denied.proof;
+    svc.event = lose_event;
+    ownership_api.event_result lost = ownership_api.record_event(&svc, &event);
+    assert(lost.proof.failed && lost.proof.terminal.present && !lost.retained);
+    assert(lost.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    ownership_api.proof_status mut bottom = ownership_api.proof_status{};
+    bottom.kind = ownership_api.proof_kind.bottom;
+    assert(!ownership_api.successful(bottom));
+    bottom.kind = ownership_api.proof_kind.complete;
+    assert(ownership_api.successful(bottom));
+    bottom.terminal.present = true;
+    assert(!ownership_api.successful(bottom));
+    println("service failures ok");
+}
+
+fn other_service_boundaries() void {
+    ownership_graph_client.context mut graph_ctx = ownership_graph_client.context{};
+    ownership_boundary_client.context mut boundary_ctx = ownership_boundary_client.context{};
+    ownership_diag_client.context mut diag_ctx = ownership_diag_client.context{};
+    ownership_api.graph_request graph = ownership_api.graph_request{};
+    ownership_api.ffi_request foreign = ownership_api.ffi_request{};
+    ownership_api.global_request globals = ownership_api.global_request{};
+    ownership_api.diagnostic_request diagnostic = ownership_api.diagnostic_request{};
+    u64 mut i = 0;
+    while (i < 2) {
+        ownership_api.services mut gs = ownership_graph_client.service(&graph_ctx);
+        ownership_api.services mut bs = ownership_boundary_client.service(&boundary_ctx);
+        ownership_api.services mut ds = ownership_diag_client.service(&diag_ctx);
+        ownership_api.incomplete_reason reason = i == 0 ?
+            ownership_api.incomplete_reason.missing_budget :
+            ownership_api.incomplete_reason.missing_events;
+        if (i == 0) { gs.budget = null; bs.budget = null; ds.budget = null; }
+        else { gs.event = null; bs.event = null; ds.event = null; }
+        ownership_api.graph_result g = ownership_api.graph(&gs, &graph);
+        ownership_api.ffi_result f = ownership_api.foreign(&bs, &foreign);
+        ownership_api.global_result p = ownership_api.globals(&bs, &globals);
+        ownership_api.diagnostic_result d = ownership_api.render(&ds, &diagnostic);
+        assert(g.proof.failed && g.proof.terminal.reason == reason && g.residual_fort);
+        assert(g.targets.len == 0 && graph_ctx.calls == 0);
+        assert(f.proof.failed && f.proof.terminal.reason == reason);
+        assert(f.trusted_sources.len == 0 && boundary_ctx.foreign_calls == 0);
+        assert(p.proof.failed && p.proof.terminal.reason == reason);
+        assert(p.cleanup.len == 0 && !p.boundary_proved && boundary_ctx.global_calls == 0);
+        assert(d.proof.failed && d.proof.terminal.reason == reason && !d.rendered);
+        assert(diag_ctx.calls == 0);
+        i += 1;
+    }
+    println("other service boundaries ok");
+}
+
+fn numeric_tables() void {
+    ownership_api.limit_table mut table = ownership_api.limit_table{
+        ownership_api.LIMIT_VERSION, 1, 2, 3, 4, 5, 6, 7, 8, ownership_api.U64_MAX};
+    assert(ownership_api.valid_limits(&table));
+    ownership_api.limit_table valid = table;
+    u64 mut i = 0;
+    while (i < ownership_api.LIMIT_COUNT) {
+        table = valid;
+        switch (i) {
+        case 0: table.d = 0; break;
+        case 1: table.r = 0; break;
+        case 2: table.p = 0; break;
+        case 3: table.g = 0; break;
+        case 4: table.h = 0; break;
+        case 5: table.t = 0; break;
+        case 6: table.e = 0; break;
+        case 7: table.w = 0; break;
+        case 8: table.v = 0; break;
+        }
+        assert(!ownership_api.valid_limits(&table));
+        i += 1;
+    }
+    table = valid;
+    table.version = 0;
+    assert(!ownership_api.valid_limits(&table));
+    table.version = ownership_api.LIMIT_VERSION + 1;
+    assert(!ownership_api.valid_limits(&table));
+    ownership_transfer_client.context mut ctx = ownership_transfer_client.context{};
+    ctx.permit = true;
+    ownership_api.services svc = ownership_transfer_client.service(&ctx);
+    ownership_api.work_kind[5] kinds = {
+        ownership_api.work_kind.transfer, ownership_api.work_kind.join,
+        ownership_api.work_kind.widening, ownership_api.work_kind.substitution,
+        ownership_api.work_kind.summary_solver,
+    };
+    i = 0;
+    while (i < kinds.len) {
+        ownership_api.charge_result charged = ownership_api.charge_work(&svc, kinds[i],
+            ownership_api.operation_position{}, ownership_api.source_position{});
+        assert(charged.allowed && ownership_api.successful(charged.proof));
+        assert(ctx.last_work == kinds[i] && ctx.charges == i + 1);
+        i += 1;
+    }
+    println("numeric tables ok");
+}
+
+fn teardown() void {
+    ownership_transfer_client.storage mut state = ownership_transfer_client.storage{};
+    ownership_transfer_client.event_storage mut events = ownership_transfer_client.event_storage{};
+    events.state = &state;
+    ownership_transfer_client.context mut ctx = ownership_transfer_client.context{};
+    ctx.events = &events;
+    ownership_api.services svc = ownership_transfer_client.service(&ctx);
+    ownership_api.event_request mut req = ownership_api.event_request{};
+    char[4] mut text = {'t', 'e', 's', 't'};
+    req.event.text = cast(text[..], string);
+    req.current = ownership_transfer_client.complete();
+    ownership_api.event_result stored = ownership_api.record_event(&svc, &req);
+    assert(stored.retained && ownership_api.successful(stored.proof));
+    text[0] = 'x';
+    assert(strbuf.view(&events.text) == "test");
+    assert(events.record.text == "test");
+    ownership_api.state_handle mut sh = ownership_api.state_handle{};
+    sh.context = cast(&state, void mut*);
+    sh.destroy = ownership_transfer_client.destroy_state;
+    ownership_api.event_handle mut eh = ownership_api.event_handle{};
+    eh.context = cast(&events, void mut*);
+    eh.destroy = ownership_transfer_client.destroy_events;
+    ownership_api.teardown(&sh, &eh);
+    assert(state.destroyed == 1 && events.destroyed == 1);
+    assert(events.text.data.len == 0);
+    assert(sh.context == null && sh.destroy == null && eh.context == null && eh.destroy == null);
+    ownership_api.teardown(&sh, &eh);
+    assert(state.destroyed == 1 && events.destroyed == 1);
+    println("teardown ok");
+}
+
+fn optimistic_event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    out.retained = true;
+    return out;
+}
+
+fn reporting_statuses() void {
+    ownership_diag_client.context mut ctx = ownership_diag_client.context{};
+    ctx.render = true;
+    ownership_api.services mut svc = ownership_diag_client.service(&ctx);
+    svc.event = optimistic_event;
+    ownership_api.proof_status[5] mut inputs = {};
+    inputs[0].kind = ownership_api.proof_kind.unknown;
+    inputs[1].kind = ownership_api.proof_kind.bottom;
+    inputs[2].kind = ownership_api.proof_kind.incomplete;
+    inputs[3].kind = ownership_api.proof_kind.complete;
+    inputs[3].terminal.present = true;
+    inputs[3].terminal.reason = ownership_api.incomplete_reason.work_limit;
+    inputs[3].terminal.source.line = 17;
+    inputs[3].terminal.operation.operation = 9;
+    inputs[3].terminal.limit.present = true;
+    inputs[3].terminal.limit.category = ownership_api.limit_category.w;
+    inputs[3].terminal.limit.used = 7;
+    inputs[3].terminal.limit.bound = 7;
+    inputs[4].kind = ownership_api.proof_kind.complete;
+    u64 mut i = 0;
+    while (i < inputs.len) {
+        ownership_api.diagnostic_request mut diagnostic = ownership_api.diagnostic_request{};
+        diagnostic.verdict = inputs[i];
+        ownership_api.diagnostic_result shown = ownership_api.render(&svc, &diagnostic);
+        assert(shown.rendered && shown.proof.kind == inputs[i].kind && !shown.proof.failed);
+        assert(ownership_api.successful(shown.proof) == ownership_api.successful(inputs[i]));
+        assert(shown.proof.terminal.present == inputs[i].terminal.present);
+        ownership_api.event_request mut request = ownership_api.event_request{};
+        request.current = inputs[i];
+        ownership_api.event_result kept = ownership_api.record_event(&svc, &request);
+        assert(kept.retained && kept.proof.kind == inputs[i].kind && !kept.proof.failed);
+        assert(ownership_api.successful(kept.proof) == ownership_api.successful(inputs[i]));
+        assert(kept.proof.terminal.present == inputs[i].terminal.present);
+        if (inputs[i].terminal.present) {
+            assert(shown.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(kept.proof.terminal.reason == shown.proof.terminal.reason);
+            assert(shown.proof.terminal.source.line == 17 && kept.proof.terminal.source.line == 17);
+            assert(shown.proof.terminal.operation.operation == 9);
+            assert(kept.proof.terminal.operation.operation == 9);
+            assert(shown.proof.terminal.limit.present && kept.proof.terminal.limit.present);
+            assert(shown.proof.terminal.limit.category == ownership_api.limit_category.w);
+            assert(kept.proof.terminal.limit.category == ownership_api.limit_category.w);
+            assert(shown.proof.terminal.limit.used == 7 && kept.proof.terminal.limit.used == 7);
+            assert(shown.proof.terminal.limit.bound == 7 && kept.proof.terminal.limit.bound == 7);
+        }
+        svc.event = lose_event;
+        ownership_api.event_result refused = ownership_api.record_event(&svc, &request);
+        assert(!refused.retained && refused.proof.failed);
+        assert(refused.proof.kind == ownership_api.proof_kind.incomplete);
+        assert(refused.proof.terminal.present && !ownership_api.successful(refused.proof));
+        assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+        assert(request.current.kind == inputs[i].kind && !request.current.failed);
+        assert(request.current.terminal.present == inputs[i].terminal.present);
+        svc.event = optimistic_event;
+        if (inputs[i].terminal.present) {
+            ownership_api.services mut absent = svc;
+            absent.renderer = null;
+            ownership_api.diagnostic_result mut missing =
+                ownership_api.render(&absent, &diagnostic);
+            assert(missing.proof.failed &&
+                missing.proof.kind == ownership_api.proof_kind.incomplete);
+            assert(missing.proof.terminal.present && missing.proof.terminal.limit.used == 7);
+            assert(missing.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            absent = svc;
+            absent.budget = null;
+            missing = ownership_api.render(&absent, &diagnostic);
+            ownership_api.event_result mut not_stored =
+                ownership_api.record_event(&absent, &request);
+            assert(missing.proof.failed && not_stored.proof.failed);
+            assert(missing.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(not_stored.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(missing.proof.terminal.limit.used == 7 &&
+                not_stored.proof.terminal.limit.used == 7);
+            absent = svc;
+            absent.event = null;
+            missing = ownership_api.render(&absent, &diagnostic);
+            not_stored = ownership_api.record_event(&absent, &request);
+            assert(missing.proof.failed && not_stored.proof.failed);
+            assert(missing.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(not_stored.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        }
+        i += 1;
+    }
+    println("reporting statuses ok");
+}
+
+fn main() i32 {
+    transfer_client();
+    graph_client();
+    boundary_client();
+    diagnostic_client();
+    missing_handlers();
+    missing_services();
+    service_failures();
+    other_service_boundaries();
+    numeric_tables();
+    teardown();
+    reporting_statuses();
+    return 0;
+}

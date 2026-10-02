@@ -1,0 +1,297 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| identity order ok
+//| event order ok
+//| boundary order ok
+//| budget order ok
+/// Tests stable semantic order and canonical charge requests.
+import ownership_api;
+import ownership_keys;
+
+fn identity_order() void {
+    ownership_api.declaration_id a = ownership_api.declaration_id{0, 4294967295};
+    ownership_api.declaration_id b = ownership_api.declaration_id{1, 0};
+    assert(ownership_keys.declaration(a, b) == -1);
+    assert(ownership_keys.declaration(b, a) == 1);
+    assert(ownership_keys.declaration(a, a) == 0);
+    ownership_api.declaration_id c = ownership_api.declaration_id{0, 0};
+    assert(ownership_keys.declaration(c, a) == -1);
+    assert(ownership_keys.declaration(c, b) == -1);
+    ownership_api.function_id f = ownership_api.function_id{a, 0};
+    ownership_api.function_id g = ownership_api.function_id{a, 4294967295};
+    assert(ownership_keys.function(f, g) == -1);
+    assert(ownership_keys.function(g, f) == 1);
+    assert(ownership_keys.function(f, f) == 0);
+    ownership_api.function_id h = ownership_api.function_id{b, 0};
+    assert(ownership_keys.function(g, h) == -1);
+    ownership_api.entity_id p = ownership_api.entity_id{f, ownership_api.entity_kind.source, 0};
+    ownership_api.entity_id q = ownership_api.entity_id{f, ownership_api.entity_kind.source,
+        4294967295};
+    assert(ownership_keys.entity(p, q) == -1);
+    assert(ownership_keys.entity(q, p) == 1);
+    assert(ownership_keys.entity(p, p) == 0);
+    ownership_api.entity_id r = ownership_api.entity_id{f, ownership_api.entity_kind.allocation, 0};
+    assert(ownership_keys.entity(q, r) == -1);
+    ownership_api.entity_id s = ownership_api.entity_id{g, ownership_api.entity_kind.none, 0};
+    assert(ownership_keys.entity(r, s) == -1);
+    ownership_api.operation_position x = ownership_api.operation_position{f, 0, 1, false};
+    ownership_api.operation_position y = ownership_api.operation_position{f, 0, 1, true};
+    assert(ownership_keys.operation(x, y) == -1);
+    assert(ownership_keys.operation(y, x) == 1);
+    assert(ownership_keys.operation(x, x) == 0);
+    ownership_api.operation_position z = ownership_api.operation_position{f, 0, 2, false};
+    assert(ownership_keys.operation(y, z) == -1);
+    ownership_api.operation_position next = ownership_api.operation_position{f, 1, 0, false};
+    assert(ownership_keys.operation(z, next) == -1);
+    ownership_api.operation_position other = ownership_api.operation_position{g, 0, 0, false};
+    assert(ownership_keys.operation(next, other) == -1);
+    // L01: Equal source positions do not merge expansion identities.
+    ownership_api.expansion_id first = ownership_api.expansion_id{f, a, 0};
+    ownership_api.expansion_id second = ownership_api.expansion_id{f, a, 1};
+    assert(ownership_keys.expansion(first, second) == -1);
+    assert(ownership_keys.expansion(second, first) == 1);
+    assert(ownership_keys.expansion(first, first) == 0);
+    ownership_api.expansion_id declared = ownership_api.expansion_id{f, b, 0};
+    assert(ownership_keys.expansion(second, declared) == -1);
+    ownership_api.expansion_id specialized = ownership_api.expansion_id{g, c, 0};
+    assert(ownership_keys.expansion(declared, specialized) == -1);
+    ownership_api.loan_id l = ownership_api.loan_id{first, 0};
+    ownership_api.loan_id m = ownership_api.loan_id{first, 1};
+    ownership_api.loan_id n = ownership_api.loan_id{second, 0};
+    assert(ownership_keys.loan(l, m) == -1);
+    assert(ownership_keys.loan(m, n) == -1);
+    assert(ownership_keys.loan(n, l) == 1);
+    assert(ownership_keys.loan(l, l) == 0);
+    // All six insertion orders produce the same sorted semantic keys.
+    u32[6][3] orders = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    ownership_api.entity_id[3] values = {p, q, r};
+    u64 mut trial = 0;
+    while (trial < orders.len) {
+        ownership_api.entity_id[3] mut sorted = {};
+        u64 mut i = 0;
+        while (i < sorted.len) { sorted[i] = values[orders[trial][i]]; i += 1; }
+        i = 1;
+        while (i < sorted.len) {
+            u64 mut j = i;
+            while (j > 0 && ownership_keys.entity(sorted[j], sorted[j - 1]) < 0) {
+                ownership_api.entity_id old = sorted[j - 1];
+                sorted[j - 1] = sorted[j];
+                sorted[j] = old;
+                j -= 1;
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < sorted.len) {
+            assert(ownership_keys.entity(sorted[i], values[i]) == 0);
+            i += 1;
+        }
+        trial += 1;
+    }
+    println("identity order ok");
+}
+
+fn event_order() void {
+    ownership_api.source_position mut a = ownership_api.source_position{1, 2, 3, 4, 3, 5};
+    ownership_api.source_position mut b = a;
+    assert(ownership_keys.source(a, b) == 0);
+    b.end_col = 6;
+    assert(ownership_keys.source(a, b) == -1);
+    b = a;
+    b.end_line = 4;
+    assert(ownership_keys.source(a, b) == -1);
+    b = a;
+    b.col = 5;
+    assert(ownership_keys.source(a, b) == -1);
+    b = a;
+    b.line = 4;
+    assert(ownership_keys.source(a, b) == -1);
+    b = a;
+    b.file = 3;
+    assert(ownership_keys.source(a, b) == -1);
+    b = a;
+    b.module = 2;
+    assert(ownership_keys.source(a, b) == -1);
+    assert(ownership_keys.source(b, a) == 1);
+    ownership_api.event_descriptor mut left = ownership_api.event_descriptor{};
+    left.source = a;
+    left.operation.function.declaration = ownership_api.declaration_id{1, 4};
+    left.operation.block = 2;
+    left.operation.operation = 3;
+    left.relation.kind = ownership_api.entity_kind.source;
+    left.relation.ordinal = 8;
+    left.key.kind = ownership_api.entity_kind.event;
+    left.key.ordinal = 10;
+    ownership_api.event_descriptor mut right = left;
+    assert(ownership_keys.event(&left, &right) == 0);
+    right.key.ordinal += 1;
+    assert(ownership_keys.event(&left, &right) == -1);
+    assert(ownership_keys.event(&right, &left) == 1);
+    right = left;
+    right.relation.ordinal += 1;
+    right.key.ordinal = 0;
+    assert(ownership_keys.event(&left, &right) == -1);
+    right = left;
+    right.kind = ownership_api.event_kind.lost_ownership;
+    right.relation.ordinal = 0;
+    assert(ownership_keys.event(&left, &right) == -1);
+    right = left;
+    right.operation.operation += 1;
+    right.kind = ownership_api.event_kind.invalid_use;
+    assert(ownership_keys.event(&left, &right) == -1);
+    right = left;
+    right.source.col += 1;
+    right.operation.operation = 0;
+    assert(ownership_keys.event(&left, &right) == -1);
+    right = left;
+    right.operation.function.declaration.declaration += 1;
+    right.source.line = 1;
+    assert(ownership_keys.event(&left, &right) == -1);
+    ownership_api.event_note mut allocation = ownership_api.event_note{};
+    allocation.source = a;
+    allocation.relation = left.relation;
+    ownership_api.event_note mut lending = allocation;
+    lending.role = ownership_api.note_role.lending;
+    lending.source.line = 1;
+    assert(ownership_keys.note(&allocation, &lending) == -1);
+    assert(ownership_keys.note(&lending, &allocation) == 1);
+    lending = allocation;
+    lending.source.col += 1;
+    assert(ownership_keys.note(&allocation, &lending) == -1);
+    lending = allocation;
+    lending.relation.ordinal += 1;
+    assert(ownership_keys.note(&allocation, &lending) == -1);
+    lending = allocation;
+    assert(ownership_keys.note(&allocation, &lending) == 0);
+    println("event order ok");
+}
+
+fn boundary_order() void {
+    ownership_api.deferred_occurrence mut a = ownership_api.deferred_occurrence{};
+    a.registration = ownership_api.declaration_id{1, 3};
+    a.context = 2;
+    a.exit_occurrence = 4;
+    a.exit_source = ownership_api.source_position{1, 0, 8, 2, 8, 3};
+    ownership_api.deferred_occurrence mut b = a;
+    assert(ownership_keys.deferred(a, b) == 0);
+    b.exit_source.col += 1;
+    assert(ownership_keys.deferred(a, b) == -1);
+    b = a;
+    b.exit_occurrence += 1;
+    b.exit_source.line = 1;
+    assert(ownership_keys.deferred(a, b) == -1);
+    b = a;
+    b.context += 1;
+    b.exit_occurrence = 0;
+    assert(ownership_keys.deferred(a, b) == -1);
+    b = a;
+    b.registration.declaration += 1;
+    b.context = 0;
+    assert(ownership_keys.deferred(a, b) == -1);
+    assert(ownership_keys.deferred(b, a) == 1);
+    ownership_api.range_boundary mut cleanup = ownership_api.range_boundary{};
+    cleanup.position.block = 2;
+    cleanup.position.operation = 3;
+    cleanup.kind = ownership_api.boundary_kind.body_cleanup;
+    cleanup.order = 4;
+    ownership_api.range_boundary mut exit = cleanup;
+    exit.kind = ownership_api.boundary_kind.loan_exit;
+    exit.order = 5;
+    ownership_api.range_boundary mut outer = exit;
+    outer.kind = ownership_api.boundary_kind.outer_cleanup;
+    outer.order = 6;
+    assert(ownership_keys.boundary(cleanup, exit) == -1);
+    assert(ownership_keys.boundary(exit, outer) == -1);
+    assert(ownership_keys.boundary(outer, cleanup) == 1);
+    assert(ownership_keys.boundary(cleanup, cleanup) == 0);
+    outer = cleanup;
+    outer.loan.ordinal = 1;
+    assert(ownership_keys.boundary(cleanup, outer) == -1);
+    outer = cleanup;
+    outer.kind = ownership_api.boundary_kind.outer_cleanup;
+    assert(ownership_keys.boundary(cleanup, outer) == -1);
+    outer = cleanup;
+    outer.position.operation += 1;
+    outer.order = 0;
+    assert(ownership_keys.boundary(cleanup, outer) == -1);
+    println("boundary order ok");
+}
+
+fn budget_order() void {
+    ownership_api.limit_category[9] categories = {
+        ownership_api.limit_category.d, ownership_api.limit_category.r,
+        ownership_api.limit_category.p, ownership_api.limit_category.g,
+        ownership_api.limit_category.h, ownership_api.limit_category.t,
+        ownership_api.limit_category.e, ownership_api.limit_category.w,
+        ownership_api.limit_category.v,
+    };
+    ownership_api.limit_scope[9] scopes = {
+        ownership_api.limit_scope.path, ownership_api.limit_scope.state,
+        ownership_api.limit_scope.state, ownership_api.limit_scope.state,
+        ownership_api.limit_scope.computation, ownership_api.limit_scope.call,
+        ownership_api.limit_scope.function, ownership_api.limit_scope.computation,
+        ownership_api.limit_scope.report,
+    };
+    ownership_api.charge_item[9] mut items = {};
+    u64 mut i = 0;
+    while (i < categories.len) {
+        assert(ownership_api.scope_of(categories[i]) == scopes[i]);
+        items[i] = ownership_api.charge_item{categories[i], scopes[i], 1};
+        u64 mut j = 0;
+        while (j < categories.len) {
+            i32 c = ownership_keys.category(categories[i], categories[j]);
+            if (i < j) { assert(c == -1); }
+            if (i == j) { assert(c == 0); }
+            if (i > j) { assert(c == 1); }
+            j += 1;
+        }
+        i += 1;
+    }
+    ownership_api.charge_request mut req = ownership_api.charge_request{};
+    req.items = items[..];
+    assert(ownership_keys.canonical_charges(&req));
+    i = 0;
+    while (i < items.len) {
+        ownership_api.charge_item saved = items[i];
+        items[i].amount = 0;
+        assert(!ownership_keys.canonical_charges(&req));
+        items[i] = saved;
+        items[i].scope = ownership_api.limit_scope.report;
+        if (i != 8) { assert(!ownership_keys.canonical_charges(&req)); }
+        items[i] = saved;
+        i += 1;
+    }
+    ownership_api.charge_item old = items[0];
+    items[0] = items[1];
+    assert(!ownership_keys.canonical_charges(&req));
+    items[1] = old;
+    assert(!ownership_keys.canonical_charges(&req));
+    req.items = items[0..0];
+    assert(!ownership_keys.canonical_charges(&req));
+    ownership_api.exhaustion mut left = ownership_api.exhaustion{};
+    ownership_api.exhaustion mut right = left;
+    right.category = ownership_api.limit_category.r;
+    assert(ownership_keys.exhaustion(&left, &right) == -1);
+    right = left;
+    right.scope = ownership_api.limit_scope.state;
+    assert(ownership_keys.exhaustion(&left, &right) == -1);
+    right = left;
+    right.work = ownership_api.work_kind.join;
+    assert(ownership_keys.exhaustion(&left, &right) == -1);
+    right = left;
+    right.operation.block = 1;
+    assert(ownership_keys.exhaustion(&left, &right) == -1);
+    assert(ownership_keys.exhaustion(&right, &left) == 1);
+    right = left;
+    assert(ownership_keys.exhaustion(&left, &right) == 0);
+    println("budget order ok");
+}
+
+fn main() i32 {
+    identity_order();
+    event_order();
+    boundary_order();
+    budget_order();
+    return 0;
+}

@@ -1,0 +1,997 @@
+/// Defines finite ownership proof inputs and typed analyzer services.
+// These descriptors add no fields to emitted user programs.
+import ast;
+import types;
+
+u32 LIMIT_VERSION = 1;
+u64 U64_MAX = 18446744073709551615;
+u64 LIMIT_COUNT = 9;
+
+enum entity_kind {
+    none,
+    slot,
+    source,
+    allocation,
+    value,
+    region,
+    graph_node,
+    predicate,
+    guard,
+    template,
+    relation,
+    event,
+    witness,
+    target,
+}
+
+enum projection_kind {
+    field,
+    fixed_index,
+    captured_index,
+    dereference,
+    residual,
+}
+
+enum fact_kind {
+    unknown,
+    exact,
+    symbolic,
+}
+
+enum source_kind {
+    unknown_fort,
+    stack,
+    heap,
+    static_storage,
+    symbolic_caller,
+    trusted_foreign,
+}
+
+enum validity_kind {
+    unknown,
+    live,
+    ended,
+    released,
+}
+
+enum contents_kind {
+    unknown,
+    scalar,
+    reference,
+    aggregate,
+    empty_owner,
+}
+
+enum edge_kind {
+    owned,
+    borrowed,
+    residual,
+}
+
+enum predicate_kind {
+    nullness,
+    equality,
+    inequality,
+    membership,
+    separation,
+    shape,
+}
+
+enum proof_kind {
+    unknown,
+    bottom,
+    complete,
+    incomplete,
+}
+
+enum incomplete_reason {
+    none,
+    missing_transfer,
+    missing_graph,
+    missing_ffi,
+    missing_globals,
+    missing_renderer,
+    missing_budget,
+    missing_events,
+    work_limit,
+    report_limit,
+    missing_capture,
+    missing_path,
+    missing_boundary,
+    missing_correspondence,
+    source_coverage,
+    unknown_effect,
+    invalid_input,
+}
+
+enum effect_kind {
+    read,
+    write,
+    invalidate,
+    transfer,
+    release,
+    storage_end,
+}
+
+enum overlap_kind {
+    unknown,
+    same,
+    disjoint,
+    partial,
+}
+
+enum outcome_kind {
+    unknown_fort,
+    function_return,
+    normal_process_exit,
+    abort,
+    unresolved_foreign,
+    divergence,
+}
+
+enum entry_kind {
+    library_symbolic,
+    foreign_symbolic,
+    generated_executable,
+}
+
+enum event_kind {
+    invalid_use,
+    lost_ownership,
+    caller_requirement,
+    incomplete_proof,
+    work_failure,
+}
+
+enum evidence_kind {
+    abstract_possibility,
+    validated_path,
+    unconditional,
+}
+
+enum note_role {
+    allocation,
+    lending,
+    release,
+    transfer,
+    storage_end,
+    callee,
+    substitution,
+    defer_registration,
+    defer_exit,
+    precision_loss,
+}
+
+enum limit_category {
+    d,
+    r,
+    p,
+    g,
+    h,
+    t,
+    e,
+    w,
+    v,
+}
+
+enum limit_scope {
+    path,
+    state,
+    function,
+    call,
+    computation,
+    report,
+}
+
+enum work_kind {
+    transfer,
+    join,
+    widening,
+    substitution,
+    summary_solver,
+}
+
+enum capture_kind {
+    borrowed_header,
+    owning_fixed_array_place,
+    non_owning_array_copy,
+}
+
+enum boundary_kind {
+    capture,
+    body_entry,
+    body_cleanup,
+    loan_exit,
+    outer_cleanup,
+}
+
+enum absence_kind {
+    none,
+    checked_selection,
+    checked_unreachable,
+    no_lowered_operation,
+}
+
+enum graph_query_kind {
+    targets,
+    components,
+    shape,
+}
+
+struct declaration_id {
+    u32 module;
+    u32 declaration;
+}
+
+struct function_id {
+    declaration_id declaration;
+    u32 instance;
+}
+
+struct entity_id {
+    function_id function;
+    entity_kind kind;
+    u32 ordinal;
+}
+
+struct operation_position {
+    function_id function;
+    u32 block;
+    u32 operation;
+    bool terminator;
+}
+
+struct source_position {
+    u32 module;
+    u32 file;
+    u32 line;
+    u32 col;
+    u32 end_line;
+    u32 end_col;
+}
+
+struct deferred_occurrence {
+    declaration_id registration;
+    u32 context;
+    u32 exit_occurrence;
+    source_position exit_source;
+}
+
+struct checked_binding {
+    declaration_id declaration;
+    ast.sym* symbol;
+    types.node* ty;
+}
+
+struct scalar_fact {
+    fact_kind kind;
+    i64 value;
+    entity_id symbol;
+}
+
+struct projection {
+    projection_kind kind;
+    u32 field;
+    scalar_fact index;
+    entity_id captured_version;
+}
+
+struct place_path {
+    entity_id root;
+    projection@ projections;
+    bool residual;
+}
+
+struct byte_window {
+    scalar_fact begin;
+    scalar_fact end;
+    bool arithmetic_proved;
+}
+
+struct layout_leaf {
+    byte_window bytes;
+    types.node* ty;
+    bool owning;
+    bool padding;
+}
+
+struct region_partition {
+    entity_id key;
+    entity_id membership;
+    byte_window bytes;
+    bool residual;
+}
+
+struct region {
+    entity_id key;
+    entity_id source;
+    scalar_fact offset;
+    byte_window access;
+    scalar_fact extent;
+    u64 alignment;
+    types.node* layout;
+    layout_leaf@ leaves;
+    region_partition@ partitions;
+    bool residual;
+}
+
+struct source_fact {
+    entity_id key;
+    source_kind kind;
+    validity_kind validity;
+    entity_id allocation;
+    operation_position boundary;
+}
+
+struct borrow_relation {
+    entity_id key;
+    entity_id value_version;
+    place_path containing;
+    entity_id source;
+    region range;
+    bool representation_complete;
+}
+
+struct contents_fact {
+    place_path place;
+    contents_kind kind;
+    entity_id value_version;
+    borrow_relation@ borrows;
+    scalar_fact span_length;
+    bool owner_empty;
+}
+
+struct multiplicity {
+    bool zero;
+    bool one;
+    bool many;
+}
+
+struct owner_location {
+    place_path place;
+    bool detached;
+    bool transfer_pending;
+}
+
+struct history_fact {
+    entity_id allocation;
+    operation_position operation;
+    source_position source;
+    effect_kind kind;
+    owner_location before;
+    owner_location after;
+}
+
+struct allocation_fact {
+    entity_id key;
+    entity_id site;
+    validity_kind validity;
+    multiplicity count;
+    bool obligation;
+    owner_location owner;
+    scalar_fact logical_length;
+    history_fact@ history;
+}
+
+struct graph_node {
+    entity_id key;
+    entity_id allocation;
+    entity_id structural_template;
+    bool residual;
+}
+
+struct graph_edge {
+    entity_id key;
+    entity_id from;
+    entity_id to;
+    edge_kind kind;
+    place_path place;
+    region range;
+}
+
+struct shape_description {
+    entity_id key;
+    entity_id@ parameters;
+    entity_id@ clauses;
+    entity_id@ descendants;
+    bool acyclic_proved;
+    bool separation_proved;
+    bool residual;
+}
+
+struct predicate_atom {
+    entity_id key;
+    predicate_kind kind;
+    entity_id left;
+    entity_id right;
+    scalar_fact lower;
+    scalar_fact upper;
+}
+
+struct guard_fact {
+    entity_id key;
+    entity_id@ positive;
+    entity_id@ negative;
+}
+
+struct correlation {
+    entity_id guard;
+    entity_id value_version;
+    entity_id relation;
+}
+
+struct lost_fact {
+    limit_category category;
+    u64 bound;
+    source_position first_source;
+    entity_id relation;
+    incomplete_reason reason;
+}
+
+struct exhaustion {
+    bool present;
+    limit_category category;
+    limit_scope scope;
+    work_kind work;
+    u64 used;
+    u64 bound;
+    u64 attempted;
+    operation_position operation;
+    source_position source;
+    bool saturated;
+}
+
+struct terminal_failure {
+    bool present;
+    incomplete_reason reason;
+    operation_position operation;
+    source_position source;
+    entity_id relation;
+    exhaustion limit;
+}
+
+struct proof_status {
+    proof_kind kind;
+    bool failed;
+    terminal_failure terminal;
+}
+
+struct ordering_constraint {
+    entity_id before;
+    entity_id after;
+    bool proved;
+}
+
+struct ordered_effect {
+    entity_id key;
+    effect_kind kind;
+    operation_position operation;
+    place_path place;
+    entity_id source;
+    entity_id allocation;
+    entity_id guard;
+}
+
+struct alias_binding {
+    entity_id formal;
+    place_path actual;
+    entity_id captured_version;
+}
+
+struct overlap_alternative {
+    entity_id guard;
+    place_path left;
+    place_path right;
+    overlap_kind overlap;
+}
+
+struct result_binding {
+    place_path actual_slot;
+    alias_binding@ aliases;
+    entity_id holding_value;
+    ordered_effect@ writes;
+    ordering_constraint@ order;
+}
+
+struct outcome_fact {
+    outcome_kind kind;
+    entity_id guard;
+    bool possible_caller_return;
+    bool cleanup_required;
+    bool cleanup_proved;
+    ordered_effect@ effects;
+}
+
+struct global_input {
+    declaration_id declaration;
+    place_path place;
+    contents_fact initial;
+    bool persistent;
+    bool symbolic;
+}
+
+struct entry_input {
+    entry_kind kind;
+    function_id function;
+    global_input@ globals;
+    ordered_effect@ startup;
+    ordered_effect@ cleanup;
+    operation_position final_boundary;
+    bool boundary_present;
+    bool host_cleanup_required;
+}
+
+struct witness_link {
+    entity_id key;
+    entity_id event;
+    entity_id predecessor;
+    function_id summary;
+    entity_id condition;
+    bool validated;
+}
+
+struct event_note {
+    note_role role;
+    source_position source;
+    entity_id relation;
+    string text;
+}
+
+struct event_descriptor {
+    entity_id key;
+    operation_position operation;
+    source_position source;
+    event_kind kind;
+    evidence_kind evidence;
+    incomplete_reason reason;
+    entity_id relation;
+    place_path source_path;
+    place_path owner_path;
+    entity_id@ conditions;
+    witness_link@ witnesses;
+    event_note@ notes;
+    string text;
+    lost_fact precision;
+    exhaustion limit;
+}
+
+struct limit_table {
+    u32 version;
+    u64 d;
+    u64 r;
+    u64 p;
+    u64 g;
+    u64 h;
+    u64 t;
+    u64 e;
+    u64 w;
+    u64 v;
+}
+
+struct used_counts {
+    u64 d;
+    u64 r;
+    u64 p;
+    u64 g;
+    u64 h;
+    u64 t;
+    u64 e;
+    u64 w;
+    u64 v;
+}
+
+struct charge_item {
+    limit_category category;
+    limit_scope scope;
+    u64 amount;
+}
+
+struct charge_request {
+    work_kind work;
+    operation_position operation;
+    source_position source;
+    charge_item@ items;
+}
+
+struct charge_result {
+    proof_status proof;
+    bool allowed;
+    exhaustion limit;
+}
+
+struct range_declaration {
+    declaration_id key;
+    function_id function;
+    source_position source;
+    bool selected;
+}
+
+struct expansion_id {
+    function_id function;
+    declaration_id declaration;
+    u32 ordinal;
+}
+
+struct range_expansion {
+    expansion_id key;
+    deferred_occurrence deferred;
+    source_position source;
+}
+
+struct loan_id {
+    expansion_id expansion;
+    u32 ordinal;
+}
+
+struct range_capture {
+    loan_id loan;
+    capture_kind kind;
+    types.node* ty;
+    entity_id captured_value;
+    entity_id@ sources;
+    place_path original_path;
+    bool value_present;
+    bool path_present;
+}
+
+struct range_loan {
+    loan_id key;
+    loan_id parent;
+    bool parent_present;
+    bool whole_body;
+}
+
+struct range_boundary {
+    loan_id loan;
+    boundary_kind kind;
+    operation_position position;
+    u32 order;
+}
+
+struct absence_evidence {
+    declaration_id declaration;
+    absence_kind proposed;
+    bool checked_source;
+    bool verified_fir;
+    bool correspondence;
+}
+
+struct coverage_status {
+    bool structural_valid;
+    bool supplied_complete;
+    bool actual_source_complete;
+}
+
+struct range_input {
+    range_declaration@ declarations;
+    range_expansion@ expansions;
+    range_loan@ loans;
+    range_capture@ captures;
+    range_boundary@ boundaries;
+    absence_evidence@ absences;
+    coverage_status coverage;
+}
+
+struct state_view {
+    contents_fact@ contents;
+    source_fact@ sources;
+    allocation_fact@ allocations;
+    region@ regions;
+    graph_node@ nodes;
+    graph_edge@ edges;
+    shape_description@ shapes;
+    predicate_atom@ predicates;
+    guard_fact@ guards;
+    correlation@ correlations;
+    lost_fact@ losses;
+    proof_status proof;
+}
+
+struct state_handle {
+    void mut* context;
+    fn (void mut*) void destroy;
+}
+
+struct event_handle {
+    void mut* context;
+    fn (void mut*) void destroy;
+}
+
+struct transfer_request {
+    operation_position operation;
+    source_position source;
+    state_view before;
+    ordered_effect effect;
+    state_handle* destination;
+}
+
+struct transfer_result {
+    proof_status proof;
+    state_view retained;
+    bool mutated;
+}
+
+struct graph_request {
+    graph_query_kind query;
+    operation_position operation;
+    source_position source;
+    state_view before;
+    entity_id@ candidates;
+}
+
+struct graph_result {
+    proof_status proof;
+    entity_id@ targets;
+    shape_description@ shapes;
+    bool residual_fort;
+}
+
+struct ffi_request {
+    operation_position operation;
+    source_position source;
+    checked_binding declaration;
+    state_view before;
+    contents_fact@ arguments;
+}
+
+struct ffi_result {
+    proof_status proof;
+    source_fact@ trusted_sources;
+    ordered_effect@ signature_transfers;
+    outcome_fact@ outcomes;
+    bool hidden_effects_outside_proof;
+}
+
+struct global_request {
+    operation_position operation;
+    source_position source;
+    state_view before;
+    entry_input entry;
+    outcome_fact outcome;
+}
+
+struct global_result {
+    proof_status proof;
+    global_input@ persistent;
+    ordered_effect@ cleanup;
+    bool boundary_proved;
+}
+
+struct event_request {
+    event_descriptor event;
+    proof_status current;
+}
+
+struct event_result {
+    proof_status proof;
+    bool retained;
+    entity_id stored_key;
+}
+
+struct diagnostic_request {
+    event_descriptor@ events;
+    proof_status verdict;
+}
+
+struct diagnostic_result {
+    proof_status proof;
+    bool rendered;
+}
+
+struct services {
+    void mut* budget_context;
+    void mut* event_context;
+    void mut* transfer_context;
+    void mut* graph_context;
+    void mut* ffi_context;
+    void mut* global_context;
+    void mut* renderer_context;
+    fn (void mut*, charge_request*) charge_result budget;
+    fn (void mut*, event_request*) event_result event;
+    fn (void mut*, transfer_request*) transfer_result transfer;
+    fn (void mut*, graph_request*) graph_result graph;
+    fn (void mut*, ffi_request*) ffi_result ffi;
+    fn (void mut*, global_request*) global_result globals;
+    fn (void mut*, diagnostic_request*) diagnostic_result renderer;
+}
+
+/// Constructs an incomplete verdict without ordinary event storage.
+fn incomplete(incomplete_reason reason, operation_position op, source_position at) proof_status {
+    proof_status mut out = proof_status{};
+    out.kind = proof_kind.incomplete;
+    out.failed = true;
+    out.terminal.present = true;
+    out.terminal.reason = reason;
+    out.terminal.operation = op;
+    out.terminal.source = at;
+    return out;
+}
+
+fn successful(proof_status p) bool {
+    return p.kind == proof_kind.complete && !p.failed && !p.terminal.present;
+}
+
+/// Returns the scope of a numeric limit.
+fn scope_of(limit_category c) limit_scope {
+    switch (c) {
+    case limit_category.d: return limit_scope.path;
+    case limit_category.r: return limit_scope.state;
+    case limit_category.p: return limit_scope.state;
+    case limit_category.g: return limit_scope.state;
+    case limit_category.h: return limit_scope.computation;
+    case limit_category.t: return limit_scope.call;
+    case limit_category.e: return limit_scope.function;
+    case limit_category.w: return limit_scope.computation;
+    case limit_category.v: return limit_scope.report;
+    }
+}
+
+/// Returns false for a zero slot or an unsupported table version.
+fn valid_limits(limit_table* t) bool {
+    return t->version == LIMIT_VERSION && t->d > 0 && t->r > 0 && t->p > 0 && t->g > 0 &&
+        t->h > 0 && t->t > 0 && t->e > 0 && t->w > 0 && t->v > 0;
+}
+
+/// Dispatches a charge. An absent service supplies no permission to mutate.
+fn charge(services* svc, charge_request* req) charge_result {
+    if (svc->budget == null) {
+        charge_result mut out = charge_result{};
+        out.proof = incomplete(incomplete_reason.missing_budget, req->operation, req->source);
+        return out;
+    }
+    if (svc->event == null) {
+        charge_result mut out = charge_result{};
+        out.proof = incomplete(incomplete_reason.missing_events, req->operation, req->source);
+        return out;
+    }
+    charge_result mut out = svc->budget(svc->budget_context, req);
+    if (out.limit.saturated) { out.limit.present = true; }
+    if (!out.allowed || !successful(out.proof) || out.limit.present || out.limit.saturated) {
+        out.allowed = false;
+        if (!out.proof.failed || !out.proof.terminal.present) {
+            incomplete_reason reason = out.limit.present ? incomplete_reason.work_limit :
+                incomplete_reason.invalid_input;
+            out.proof = incomplete(reason, req->operation, req->source);
+        }
+        out.proof.kind = proof_kind.incomplete;
+        out.proof.terminal.limit = out.limit;
+    }
+    return out;
+}
+
+// One work unit charges before the callback can change its destination.
+fn charge_work(services* svc, work_kind work, operation_position op, source_position at)
+    charge_result {
+    charge_item[1] items = {charge_item{limit_category.w, limit_scope.computation, 1}};
+    charge_request req = charge_request{work, op, at, items[..]};
+    return charge(svc, &req);
+}
+
+fn transfer(services* svc, transfer_request* req) transfer_result {
+    transfer_result mut out = transfer_result{};
+    out.retained = req->before;
+    if (svc->transfer == null) {
+        out.proof = incomplete(incomplete_reason.missing_transfer, req->operation, req->source);
+        return out;
+    }
+    charge_result charged = charge_work(svc, work_kind.transfer, req->operation, req->source);
+    if (!charged.allowed) {
+        out.proof = charged.proof;
+        return out;
+    }
+    return svc->transfer(svc->transfer_context, req);
+}
+
+fn graph(services* svc, graph_request* req) graph_result {
+    if (svc->graph == null) {
+        graph_result mut out = graph_result{};
+        out.proof = incomplete(incomplete_reason.missing_graph, req->operation, req->source);
+        out.residual_fort = true;
+        return out;
+    }
+    charge_result charged = charge_work(svc, work_kind.summary_solver, req->operation, req->source);
+    if (!charged.allowed) {
+        graph_result mut out = graph_result{};
+        out.proof = charged.proof;
+        out.residual_fort = true;
+        return out;
+    }
+    return svc->graph(svc->graph_context, req);
+}
+
+fn foreign(services* svc, ffi_request* req) ffi_result {
+    if (svc->ffi == null) {
+        ffi_result mut out = ffi_result{};
+        out.proof = incomplete(incomplete_reason.missing_ffi, req->operation, req->source);
+        return out;
+    }
+    charge_result charged = charge_work(svc, work_kind.substitution, req->operation, req->source);
+    if (!charged.allowed) {
+        ffi_result mut out = ffi_result{};
+        out.proof = charged.proof;
+        return out;
+    }
+    return svc->ffi(svc->ffi_context, req);
+}
+
+fn globals(services* svc, global_request* req) global_result {
+    if (svc->globals == null) {
+        global_result mut out = global_result{};
+        out.proof = incomplete(incomplete_reason.missing_globals, req->operation, req->source);
+        return out;
+    }
+    charge_result charged = charge_work(svc, work_kind.transfer, req->operation, req->source);
+    if (!charged.allowed) {
+        global_result mut out = global_result{};
+        out.proof = charged.proof;
+        return out;
+    }
+    return svc->globals(svc->global_context, req);
+}
+
+fn record_event(services* svc, event_request* req) event_result {
+    if (svc->event == null) {
+        event_result mut out = event_result{};
+        out.proof = incomplete(incomplete_reason.missing_events, req->event.operation,
+            req->event.source);
+        if (req->current.terminal.present) { out.proof.terminal = req->current.terminal; }
+        return out;
+    }
+    if (svc->budget == null) {
+        event_result mut out = event_result{};
+        out.proof = incomplete(incomplete_reason.missing_budget, req->event.operation,
+            req->event.source);
+        if (req->current.terminal.present) { out.proof.terminal = req->current.terminal; }
+        return out;
+    }
+    event_result mut out = svc->event(svc->event_context, req);
+    if (!successful(req->current)) {
+        out.proof = req->current;
+    }
+    if (!out.retained) {
+        out.proof = incomplete(incomplete_reason.report_limit, req->event.operation,
+            req->event.source);
+    }
+    return out;
+}
+
+fn render(services* svc, diagnostic_request* req) diagnostic_result {
+    if (svc->renderer == null) {
+        diagnostic_result mut out = diagnostic_result{};
+        out.proof = incomplete(incomplete_reason.missing_renderer, operation_position{},
+            source_position{});
+        if (req->verdict.terminal.present) { out.proof.terminal = req->verdict.terminal; }
+        return out;
+    }
+    if (svc->budget == null || svc->event == null) {
+        diagnostic_result mut out = diagnostic_result{};
+        incomplete_reason reason = svc->budget == null ? incomplete_reason.missing_budget :
+            incomplete_reason.missing_events;
+        out.proof = incomplete(reason, operation_position{}, source_position{});
+        if (req->verdict.terminal.present) { out.proof.terminal = req->verdict.terminal; }
+        return out;
+    }
+    diagnostic_result mut out = svc->renderer(svc->renderer_context, req);
+    if (!successful(req->verdict)) {
+        out.proof = req->verdict;
+    }
+    return out;
+}
+
+/// Releases caller state before the separate event store.
+fn teardown(state_handle mut* state, event_handle mut* events) void {
+    if (state->context != null && state->destroy == null) {
+        panic("ownership_api.teardown: state destructor is absent");
+    }
+    if (events->context != null && events->destroy == null) {
+        panic("ownership_api.teardown: event destructor is absent");
+    }
+    if (state->destroy != null) {
+        state->destroy(state->context);
+    }
+    *state = state_handle{};
+    if (events->destroy != null) {
+        events->destroy(events->context);
+    }
+    *events = event_handle{};
+}
