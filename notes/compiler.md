@@ -612,6 +612,33 @@ came here.
   A named zero pair can coexist with an unnamed source without a false filename.
   The renderer does not call a filename resolver when the source has no filename.
   This pass does not construct source effects.
+- **Dynamic element proof keeps guarded update states** (D17.15).
+  `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
+  Captured index versions stay separate from local slot names.
+  Choice-local predicates constrain only their copied state. Guard facts own their positive keys.
+  Index membership inputs use half-open ranges.
+  Equality, inequality, and membership facts compare element slots through substituted storage.
+  Index inequality supplies no source or allocation separation.
+  A strong write changes supplied aliases and known equivalent content paths.
+  A whole write removes covered child facts. Possible overlap keeps unknown child facts.
+  Aggregate transfer requires a resolved type and complete reference-leaf and owner correspondence.
+  It restores covered facts by decreasing projection depth. Input order does not change the result.
+  Each parent follows its children. A move empties the complete selected source value.
+  An owning aggregate type requires move. A false destination classification cannot permit its copy.
+  Copies and moves preserve original borrow sources and byte ranges, including inline sources.
+  A summary write retains old sources and guarded new child alternatives.
+  Unknown child facts prevent stale singleton read proof after a possible whole write.
+  Each release or move checks the selected source and destination before it changes a cloned state.
+  The result keeps one state per choice up to G. Further choices use existing residual widening.
+  Widening keeps possible sources, release history, and residual allocation obligations.
+  Complete range cleanup needs coverage and empty nested leaves. It preserves borrowed siblings.
+  Backing replacement moves element facts and owner paths while it keeps original borrow sources.
+  It releases the old backing source and preserves the separate container slot source.
+  First backing allocation accepts a proved empty header and creates no release of an absent owner.
+  Proved unchanged backing keeps the input facts unchanged, including an empty header.
+  Element partition byte windows require a proved element stride and checked multiplication.
+  The source producer supplies storage, choice, and full-range correspondence.
+  This module adds no source producer, LLVM instruction, or runtime field.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by
