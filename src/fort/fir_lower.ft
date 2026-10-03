@@ -168,6 +168,104 @@ struct range_candidate_set {
     range_defer_context_candidate_vec deferred;
 }
 
+enum range_audit_fault {
+    none,
+    declaration,
+    operation,
+    expansion_key,
+    context,
+    exit_source,
+    capture,
+    protected_path,
+    boundary,
+}
+
+// A key stays in the report after the caller releases candidate storage.
+struct range_audit_key {
+    ast.sym* function;
+    u32 declaration;
+    u32 expansion;
+    u32 context;
+    u32 exit_occurrence;
+    diag.loc source;
+    diag.loc exit_source;
+}
+
+struct range_audit_row {
+    range_audit_key key;
+    fir.range_capture binding;
+    u32 boundaries_first;
+    u32 boundaries_len;
+}
+
+struct range_audit_row_vec {
+    range_audit_row mut@ own items;
+    u64 len;
+}
+
+struct range_audit_boundary_vec {
+    fir.range_boundary mut@ own items;
+    u64 len;
+}
+
+struct range_audit_failure {
+    range_audit_key key;
+    range_audit_fault reason;
+}
+
+/// An inactive report borrows the checked tree through its keys and locations.
+/// Release it before the checked tree. No field grants source or ownership proof.
+struct range_source_audit {
+    range_audit_row_vec rows;
+    range_audit_boundary_vec boundaries;
+    u32 selected_declarations;
+    u32 produced_expansions;
+    u32 matched_captures;
+    u32 protected_paths;
+    u32 matched_boundaries;
+    bool structural_valid;
+    bool source_complete;
+    bool ownership_proved;
+    range_audit_failure failure;
+}
+
+fn range_source_audit_free(range_source_audit mut* audit) void {
+    del(audit->rows.items);
+    del(audit->boundaries.items);
+    *audit = range_source_audit{};
+}
+
+fn range_audit_row_add(range_audit_row_vec mut* v, range_audit_row row) void {
+    if (v->len >= fir.U32_LIMIT) { panic("fir_lower.range_audit_row_add: too many rows"); }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir_lower.range_audit_row_add: overflow");
+        range_audit_row mut@ own bigger = new(range_audit_row, cap);
+        u64 mut i = 0;
+        while (i < v->len) { bigger[i] = v->items[i]; i += 1; }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = row;
+    v->len += 1;
+}
+
+fn range_audit_boundary_add(range_audit_boundary_vec mut* v, fir.range_boundary value) void {
+    if (v->len >= fir.U32_LIMIT) {
+        panic("fir_lower.range_audit_boundary_add: too many boundaries");
+    }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len,
+                                      "fir_lower.range_audit_boundary_add: overflow");
+        fir.range_boundary mut@ own bigger = new(fir.range_boundary, cap);
+        u64 mut i = 0;
+        while (i < v->len) { bigger[i] = v->items[i]; i += 1; }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = value;
+    v->len += 1;
+}
+
 fn range_candidate_set_free(range_candidate_set mut* set) void {
     del(set->declarations.items);
     range_capture_candidates_free(&set->captures);
@@ -482,6 +580,68 @@ fn range_declaration_id(lowerer* lw, ast.node* n) u32 {
         i += 1;
     }
     panic("fir_lower.range_declaration_id: range node absent from prescan");
+}
+
+fn range_audit_loc_eq(diag.loc a, diag.loc b) bool {
+    return a.file == b.file && a.line == b.line && a.col == b.col
+        && a.end_line == b.end_line && a.end_col == b.end_col;
+}
+
+// This walk does not read the producer's declaration vector.
+fn range_audit_selected(ast.node* n, gen.node_ref_vec mut* selected) void {
+    if (n == null) { return; }
+    if (n->kind == ast.ast_kind.k_compile_if) {
+        range_audit_selected(selected_branch(n), selected);
+        return;
+    }
+    if (n->kind == ast.ast_kind.k_range_for) { gen.refs_push(selected, n); }
+    range_audit_selected(n->a, selected);
+    range_audit_selected(n->b, selected);
+    range_audit_selected(n->c, selected);
+    range_audit_selected(n->d, selected);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        range_audit_selected(ast.ast_child(n, i), selected);
+        i += 1;
+    }
+}
+
+fn range_audit_fail(range_source_audit mut* out, range_audit_key key,
+                    range_audit_fault reason) bool {
+    out->failure = range_audit_failure{key, reason};
+    return false;
+}
+
+// A fresh report compares selected source nodes with supplied declaration records.
+// The full produced-expansion audit uses this inventory before it reads any binding.
+fn audit_range_inventory(ast.node* decl, range_candidate_set* proposed,
+                         range_source_audit mut* out) bool {
+    *out = range_source_audit{};
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    range_audit_selected(decl->b, &selected);
+    out->selected_declarations = cast(selected.len, u32);
+    u64 mut i = 0;
+    while (i < selected.len) {
+        ast.node* n = gen.refs_at(&selected, i);
+        range_audit_key key = range_audit_key{.function = decl->sym,
+                                              .declaration = cast(i + 1, u32),
+                                              .source = n->loc};
+        if (i >= proposed->declarations.len ||
+            proposed->declarations.items[i].id != key.declaration ||
+            !range_audit_loc_eq(proposed->declarations.items[i].source, n->loc)) {
+            return range_audit_fail(out, key, range_audit_fault.declaration);
+        }
+        i += 1;
+    }
+    if (proposed->declarations.len != selected.len) {
+        fir.range_declaration* extra = &proposed->declarations.items[selected.len];
+        range_audit_key key = range_audit_key{.function = decl->sym,
+                                              .declaration = extra->id,
+                                              .source = extra->source};
+        return range_audit_fail(out, key, range_audit_fault.declaration);
+    }
+    return true;
 }
 
 // Ends the body when its last block has no terminator: `return` for a `void` function, `trap` for

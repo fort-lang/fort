@@ -1,0 +1,48 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| selected inventory 1
+/// Checks selected source inventory against inactive range proposals.
+import ast;
+import fir;
+import fir_lower;
+import lower_env;
+
+fn selected_inventory() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(i32[2] values) void {",
+        "    for (i32 x : values) { }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_range_inventory(decl, &proposed, &audit));
+    assert(audit.selected_declarations == 1 && !audit.source_complete);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.declarations.len = 0;
+    proposed.captures.len = 0;
+    proposed.boundaries.len = 0;
+    assert(!fir_lower.audit_range_inventory(decl, &proposed, &audit));
+    assert(audit.selected_declarations == 1);
+    assert(audit.failure.reason == fir_lower.range_audit_fault.declaration);
+    assert(audit.failure.key.declaration == 1);
+    assert(!audit.source_complete && !f.range_source_complete);
+}
+
+fn main() i32 {
+    selected_inventory();
+    println("selected inventory 1");
+    return 0;
+}
