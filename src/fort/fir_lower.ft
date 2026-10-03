@@ -963,8 +963,9 @@ fn range_audit_cleanup_end(fir.func* f, ast.node* n, fir.range_boundary start,
     return true;
 }
 
-fn range_audit_dead_count(fir.func* f, ast.node* n) u32 {
-    u32 mut count = 0;
+// Each required dead gap has exactly one cleanup candidate for this expansion.
+fn range_audit_dead_gaps_covered(fir.func* f, ast.node* n,
+                                 range_candidate_set* proposed, u32 expansion) bool {
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         u32 mut p = 0;
@@ -972,13 +973,25 @@ fn range_audit_dead_count(fir.func* f, ast.node* n) u32 {
             fir.statement* s = fir.block_statement(f, b, p);
             if (s->kind == fir.stmt_kind.st_dead && s->local < fir.local_count(f)
                 && fir.local_at(f, s->local)->sym == cast(n->sym, ast.sym*)) {
-                count += 1;
+                u32 mut matches = 0;
+                u64 mut i = 0;
+                while (i < proposed->boundaries.len) {
+                    range_boundary_candidate* c = &proposed->boundaries.items[i];
+                    if (c->expansion == expansion
+                        && c->boundary.kind == fir.range_boundary_kind.body_cleanup
+                        && c->boundary.block == b && c->boundary.position == p) {
+                        matches += 1;
+                        if (matches > 1) { return false; }
+                    }
+                    i += 1;
+                }
+                if (matches != 1) { return false; }
             }
             p += 1;
         }
         b += 1;
     }
-    return count;
+    return true;
 }
 
 // Match boundary gaps to FIR live and dead markers, not to candidate counts alone.
@@ -1047,7 +1060,7 @@ fn range_audit_boundaries(fir.func* f, ast.node* n, range_audit_operation op,
         i += 1;
     }
     return cleanup_phase == 0 && capture_count == 1 && entry_count == 1
-        && cleanup_count == range_audit_dead_count(f, n)
+        && range_audit_dead_gaps_covered(f, n, proposed, expansion)
         && cleanup_count == exit_count
         && exit_count == outer_count;
 }
