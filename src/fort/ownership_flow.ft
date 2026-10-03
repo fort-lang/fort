@@ -54,6 +54,12 @@ struct event_binding {
     ownership_api.entity_id key;
 }
 
+struct source_file_binding {
+    u32 module;
+    u32 file;
+    string filename;
+}
+
 struct program {
     fir.func* function;
     ownership_api.function_id identity;
@@ -64,6 +70,7 @@ struct program {
     edge_fact@ edges;
     parameter@ parameters;
     event_binding@ events;
+    source_file_binding@ source_files;
     ownership_api.entity_id result_slot;
     bool supplied_complete;
     bool verified_fir;
@@ -256,6 +263,36 @@ fn valid(program* in) bool {
         in->limits == null || !ownership_api.valid_limits(in->limits) ||
         !in->verified_fir || !in->supplied_complete ||
         fir.block_count(in->function) == 0) { return false; }
+    u64 mut file_i = 0;
+    while (file_i < in->source_files.len) {
+        source_file_binding item = in->source_files[file_i];
+        if (item.module == 0 || item.file == 0 || item.filename.len == 0) { return false; }
+        u64 mut earlier = 0;
+        while (earlier < file_i) {
+            source_file_binding prior = in->source_files[earlier];
+            if (prior.filename == item.filename ||
+                (prior.module == item.module && prior.file == item.file)) { return false; }
+            earlier += 1;
+        }
+        file_i += 1;
+    }
+    u32 mut block = 0;
+    while (block < fir.block_count(in->function)) {
+        fir.block* current = fir.block_at(in->function, block);
+        if (current->term.loc.file.len > 0) {
+            bool mut mapped = false;
+            file_i = 0;
+            while (file_i < in->source_files.len) {
+                if (in->source_files[file_i].filename == current->term.loc.file) {
+                    mapped = true;
+                    break;
+                }
+                file_i += 1;
+            }
+            if (!mapped) { return false; }
+        }
+        block += 1;
+    }
     u64 mut i = 0;
     while (i < in->steps.len) {
         step s = in->steps[i];
@@ -603,11 +640,43 @@ fn return_position(program* in, u32 block) ownership_api.operation_position {
 fn return_source(program* in, u32 block) ownership_api.source_position {
     ownership_api.source_position mut at = ownership_api.source_position{};
     fir.block* current = fir.block_at(in->function, block);
+    u64 mut i = 0;
+    while (i < in->source_files.len) {
+        source_file_binding file_at = in->source_files[i];
+        if (file_at.filename == current->term.loc.file) {
+            at.module = file_at.module;
+            at.file = file_at.file;
+            break;
+        }
+        i += 1;
+    }
     at.line = current->term.loc.line;
     at.col = current->term.loc.col;
     at.end_line = current->term.loc.end_line;
     at.end_col = current->term.loc.end_col;
     return at;
+}
+
+fn source_filename(void mut* opaque, ownership_api.source_position at) string {
+    if (opaque == null) { return ""; }
+    program* in = cast(opaque, program*);
+    u64 mut i = 0;
+    while (i < in->source_files.len) {
+        source_file_binding file_at = in->source_files[i];
+        if (file_at.module == at.module && file_at.file == at.file) {
+            return file_at.filename;
+        }
+        i += 1;
+    }
+    return "";
+}
+
+fn complete_return_relation(ownership_api.contents_fact value,
+    ownership_api.borrow_relation relation) bool {
+    return !value.place.residual && value.kind == ownership_api.contents_kind.reference &&
+        !value.owner_empty && value.value_version.kind == ownership_api.entity_kind.value &&
+        relation.representation_complete &&
+        same_entity(relation.value_version, value.value_version);
 }
 
 fn check_returned_borrows(program* in, analysis mut* out, path* p,
@@ -650,8 +719,7 @@ fn check_returned_borrows(program* in, analysis mut* out, path* p,
             u64 mut b = 0;
             while (b < value.borrows.len) {
                 ownership_api.borrow_relation relation = value.borrows[b];
-                if (!relation.representation_complete ||
-                    !same_entity(relation.value_version, value.value_version)) {
+                if (!complete_return_relation(value, relation)) {
                     note_failure(out, failure(in, op, at,
                         ownership_api.event_kind.incomplete_proof,
                         ownership_api.incomplete_reason.missing_correspondence, relation.source,
@@ -721,11 +789,22 @@ fn parameter_return(program* in, analysis mut* out, path mut* p, u32 block) void
             if (same_entity(value.place.root, in->result_slot)) {
                 u64 mut b = 0;
                 while (b < value.borrows.len) {
-                    if (same_entity(value.borrows[b].source, param.source)) {
-                        note_failure(out, failure(in, op, at,
-                            ownership_api.event_kind.invalid_use,
-                            ownership_api.incomplete_reason.none, param.source,
-                            "returned view outlives parameter storage"));
+                    ownership_api.borrow_relation relation = value.borrows[b];
+                    if (same_entity(relation.source, param.source)) {
+                        u64 source = ownership_state.source_index(&p->facts, param.source);
+                        if (!complete_return_relation(value, relation) || source == U64_MAX ||
+                            p->facts.sources[source].validity ==
+                            ownership_api.validity_kind.unknown) {
+                            note_failure(out, failure(in, op, at,
+                                ownership_api.event_kind.incomplete_proof,
+                                ownership_api.incomplete_reason.missing_correspondence,
+                                param.source, "parameter borrow escape has no complete proof"));
+                        } else {
+                            note_failure(out, failure(in, op, at,
+                                ownership_api.event_kind.invalid_use,
+                                ownership_api.incomplete_reason.none, param.source,
+                                "returned view outlives parameter storage"));
+                        }
                     }
                     b += 1;
                 }

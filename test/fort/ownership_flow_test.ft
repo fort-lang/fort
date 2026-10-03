@@ -18,6 +18,7 @@ import ownership_limits;
 import ownership_state;
 import ownership_transfer;
 import prim;
+import std.str;
 import std.strbuf;
 import types;
 
@@ -28,6 +29,8 @@ struct fixture {
     ownership_api.limit_table limits;
     ownership_api.services services;
     u64 events;
+    ownership_flow.source_file_binding[32] source_files;
+    u64 source_files_len;
 }
 
 struct event_order {
@@ -763,11 +766,32 @@ fn input_of(fixture mut* f, fir.func* function, ownership_state.state mut* entry
         eprintln(strbuf.view(&report));
         panic("ownership_flow_test: FIR fixture is invalid");
     }
+    f->source_files_len = 0;
+    u32 mut block = 0;
+    while (block < fir.block_count(function)) {
+        string filename = fir.block_at(function, block)->term.loc.file;
+        if (filename.len > 0) {
+            bool mut found = false;
+            u64 mut i = 0;
+            while (i < f->source_files_len) {
+                if (f->source_files[i].filename == filename) { found = true; break; }
+                i += 1;
+            }
+            if (!found) {
+                assert(f->source_files_len < f->source_files.len);
+                f->source_files[f->source_files_len] = ownership_flow.source_file_binding{
+                    1, cast(f->source_files_len + 1, u32), filename};
+                f->source_files_len += 1;
+            }
+        }
+        block += 1;
+    }
     ownership_flow.program mut input = ownership_flow.program{};
     input.function = function;
     input.entry = entry;
     input.services = &f->services;
     input.limits = &f->limits;
+    input.source_files = f->source_files[0..f->source_files_len];
     input.supplied_complete = true;
     input.verified_fir = true;
     return input;
@@ -1072,7 +1096,7 @@ fn predicate_bound_keeps_return() void {
     types.node* signature = types.type_fn(tt, types.type_void(tt), params[..], false);
     fir.func mut function = fir.func_new(tt, null, signature);
     defer fir.func_free(&function);
-    diag.loc where = diag.loc{};
+    diag.loc where = diag.loc_make("predicate.ft", 70, 4);
     assert(fir.block_new(&function) == 1 && fir.block_new(&function) == 2);
     u32 first = fir.arm_push(&function, consts.cv_from_bool(true), 1);
     fir.block_set_terminator(&function, 0,
@@ -1086,6 +1110,9 @@ fn predicate_bound_keeps_return() void {
     f.limits.p = 1;
     assert(ownership_limits.configure(&f.meter, &f.limits));
     ownership_flow.program mut input = input_of(&f, &function, &entry);
+    assert(f.source_files_len == 1);
+    f.source_files[0].module = 7;
+    f.source_files[0].file = 12;
     ownership_flow.edge_fact[4] edges = {
         ownership_flow.edge_fact{0, 0, id(ownership_api.entity_kind.value, 1), false},
         ownership_flow.edge_fact{0, 1, id(ownership_api.entity_kind.value, 1), true},
@@ -1100,6 +1127,9 @@ fn predicate_bound_keeps_return() void {
     while (i < result.blocks[2].len) {
         assert(result.blocks[2].paths[i].facts.predicates_len == 1);
         assert(result.blocks[2].paths[i].facts.losses_len == 1);
+        ownership_api.lost_fact lost = result.blocks[2].paths[i].facts.losses[0];
+        assert(lost.first_source.module == 7 && lost.first_source.file == 12);
+        assert(lost.first_source.line == 70);
         i += 1;
     }
     ownership_flow.free(&result);
@@ -1292,6 +1322,177 @@ fn widened_optional_parameter_uses_incomplete_evidence() void {
     ownership_flow.free(&result);
 }
 
+fn widened_parameter_borrow_stays_incomplete() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* boolean = types.type_prim(tt, prim.prim_kind.prim_bool);
+    types.node* borrowed = types.type_ptr(tt, integer, false, false);
+    types.node*[3] params = {integer, boolean, borrowed};
+    types.node* signature = types.type_fn(tt, borrowed, params[..], false);
+    fir.func mut function = fir.func_new(tt, null, signature);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc_make("escape.ft", 81, 5);
+    assert(fir.block_new(&function) == 1 && fir.block_new(&function) == 2 &&
+        fir.block_new(&function) == 3);
+    u32 first = fir.arm_push(&function, consts.cv_from_bool(true), 1);
+    fir.block_set_terminator(&function, 0,
+        fir.term_switch(fir.operand_copy(fir.place_local(2)), first, 1, 2, where, 0));
+    fir.rvalue address = fir.rvalue_addr(&function, fir.place_local(1), false);
+    fir.block_append(&function, 1,
+        fir.stmt_assign(fir.place_local(0), address, where, 0));
+    fir.block_set_terminator(&function, 1, fir.term_goto(3, where, 1));
+    fir.rvalue caller_value = fir.rvalue_use(&function,
+        fir.operand_copy(fir.place_local(3)));
+    fir.block_append(&function, 2,
+        fir.stmt_assign(fir.place_local(0), caller_value, where, 0));
+    fir.block_set_terminator(&function, 2, fir.term_goto(3, where, 1));
+    fir.block_set_terminator(&function, 3, fir.term_return(where, 0));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.source_fact mut parameter_source = ownership_api.source_fact{};
+    parameter_source.key = id(ownership_api.entity_kind.source, 1);
+    parameter_source.kind = ownership_api.source_kind.stack;
+    parameter_source.validity = ownership_api.validity_kind.live;
+    ownership_state.append_sources(&entry, parameter_source);
+    ownership_api.source_fact mut caller_source = ownership_api.source_fact{};
+    caller_source.key = id(ownership_api.entity_kind.source, 2);
+    caller_source.kind = ownership_api.source_kind.symbolic_caller;
+    caller_source.validity = ownership_api.validity_kind.live;
+    ownership_state.append_sources(&entry, caller_source);
+    ownership_api.borrow_relation[1] caller_borrow = {
+        ownership_local_env.borrow(caller_source.key, 2, slot(3)),
+    };
+    ownership_api.contents_fact mut caller_contents = ownership_local_env.reference(2,
+        caller_source.key, caller_borrow[..]);
+    caller_contents.place = slot(3);
+    ownership_state.append_contents(&entry, caller_contents);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_flow.step[2] mut steps = {
+        local_step(&e, ownership_transfer.action.address, 1, 1, 0, 0),
+        local_step(&e, ownership_transfer.action.copy, 3, 2, 0, 0),
+    };
+    steps[0].local.destination = slot(0);
+    steps[0].local.source_key = parameter_source.key;
+    steps[0].local.source_correspondence_proved = true;
+    ownership_api.borrow_relation[1] parameter_borrow = {
+        ownership_local_env.borrow(parameter_source.key, 1, slot(0)),
+    };
+    steps[0].local.value = ownership_local_env.reference(1, parameter_source.key,
+        parameter_borrow[..]);
+    steps[1].local.destination = slot(0);
+    f.limits.g = 1;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    ownership_events.store mut events = ownership_events.store{};
+    defer ownership_events.free(&events);
+    assert(ownership_events.bind(&events, &f.limits, &f.services));
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    assert(f.source_files_len == 1);
+    f.source_files[0].module = 7;
+    f.source_files[0].file = 13;
+    input.steps = steps[..];
+    input.result_slot = slot(0).root;
+    ownership_flow.parameter[1] parameters = {
+        ownership_flow.parameter{slot(1).root, parameter_source.key},
+    };
+    input.parameters = parameters[..];
+    ownership_flow.event_binding[2] bindings = {
+        flow_event(ownership_api.operation_position{.block = 3, .terminator = true},
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}, 1),
+        flow_event(ownership_api.operation_position{.block = 3, .terminator = true},
+            ownership_api.event_kind.incomplete_proof, parameter_source.key, 2),
+    };
+    input.events = bindings[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.blocks[3].widened && result.blocks[3].len == 1);
+    assert(result.normal_returns == 1 && result.failures > 0);
+    assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
+    assert(events.len == 2);
+    ownership_api.event_descriptor[2] mut items = {};
+    u64 mut i = 0;
+    bool mut saw_parameter = false;
+    while (i < events.len) {
+        ownership_api.event_descriptor* stored = ownership_events.at(&events, i);
+        assert(stored->kind == ownership_api.event_kind.incomplete_proof);
+        assert(stored->evidence == ownership_api.evidence_kind.abstract_possibility);
+        assert(stored->source.module == 7 && stored->source.file == 13);
+        if (stored->relation.kind == ownership_api.entity_kind.source &&
+            stored->relation.ordinal == parameter_source.key.ordinal) {
+            saw_parameter = true;
+            assert(stored->text == "parameter borrow escape has no complete proof");
+        }
+        items[i] = *stored;
+        i += 1;
+    }
+    assert(saw_parameter);
+    diag.sink mut diagnostics = diag.create();
+    defer diag.free(&diagnostics);
+    ownership_diag.renderer mut render_at = ownership_diag.renderer{};
+    ownership_diag.bind(&render_at, &diagnostics, &events, cast(&input, void mut*),
+        ownership_flow.source_filename, &f.services);
+    ownership_api.diagnostic_request request = ownership_api.diagnostic_request{
+        items[0..events.len], result.first_failure};
+    ownership_api.diagnostic_result rendered = ownership_api.render(&f.services, &request);
+    assert(rendered.rendered && diag.count(&diagnostics) >= 1);
+    i = 0;
+    bool mut saw_rendered_parameter = false;
+    while (i < diag.count(&diagnostics)) {
+        assert(diag.record_at(&diagnostics, i).loc.file == "escape.ft");
+        assert(str.starts_with(diag.record_at(&diagnostics, i).msg, "cannot prove"));
+        if (diag.record_at(&diagnostics, i).msg ==
+            "cannot prove parameter borrow escape has no complete proof") {
+            saw_rendered_parameter = true;
+        }
+        i += 1;
+    }
+    assert(saw_rendered_parameter);
+    ownership_flow.free(&result);
+}
+
+fn return_source_map_requires_complete_identity() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node*[1] params = {types.type_void(tt)};
+    types.node* signature = types.type_fn(tt, types.type_void(tt), params[0..0], false);
+    fir.func mut function = fir.func_new(tt, null, signature);
+    defer fir.func_free(&function);
+    fir.block_set_terminator(&function, 0,
+        fir.term_return(diag.loc_make("mapped.ft", 9, 3), 0));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    assert(f.source_files_len == 1);
+    input.source_files = f.source_files[0..0];
+    ownership_flow.analysis mut missing = ownership_flow.solve(&input);
+    assert(missing.first_failure.terminal.reason ==
+        ownership_api.incomplete_reason.invalid_input);
+    ownership_flow.free(&missing);
+    input.source_files = f.source_files[0..f.source_files_len];
+    f.source_files[0].module = 0;
+    ownership_flow.analysis mut zero = ownership_flow.solve(&input);
+    assert(zero.first_failure.terminal.reason ==
+        ownership_api.incomplete_reason.invalid_input);
+    ownership_flow.free(&zero);
+    f.source_files[0].module = 7;
+    f.source_files[0].file = 14;
+    f.source_files[1] = ownership_flow.source_file_binding{7, 14, "other.ft"};
+    input.source_files = f.source_files[0..2];
+    ownership_flow.analysis mut conflict = ownership_flow.solve(&input);
+    assert(conflict.first_failure.terminal.reason ==
+        ownership_api.incomplete_reason.invalid_input);
+    ownership_flow.free(&conflict);
+    input.source_files = f.source_files[0..1];
+    ownership_flow.analysis mut mapped = ownership_flow.solve(&input);
+    assert(mapped.failures == 0 && mapped.normal_returns == 1);
+    ownership_flow.free(&mapped);
+}
+
 fn return_events_keep_function_identity() void {
     fixture mut f = fixture{};
     init(&f);
@@ -1329,6 +1530,9 @@ fn return_events_keep_function_identity() void {
     input.identity.declaration.module = 3;
     input.identity.declaration.declaration = 4;
     input.identity.instance = 5;
+    assert(f.source_files_len == 1);
+    f.source_files[0].module = 7;
+    f.source_files[0].file = 9;
     ownership_flow.parameter[1] parameters = {
         ownership_flow.parameter{slot(1).root, storage.key},
     };
@@ -1351,6 +1555,24 @@ fn return_events_keep_function_identity() void {
     assert(ownership_events.at(&events, 1)->operation.block == 2);
     assert(ownership_events.at(&events, 0)->source.line == 11);
     assert(ownership_events.at(&events, 1)->source.line == 12);
+    assert(ownership_events.at(&events, 0)->source.module == 7 &&
+        ownership_events.at(&events, 0)->source.file == 9);
+    assert(ownership_events.at(&events, 1)->source.module == 7 &&
+        ownership_events.at(&events, 1)->source.file == 9);
+    diag.sink mut diagnostics = diag.create();
+    defer diag.free(&diagnostics);
+    ownership_diag.renderer mut render_at = ownership_diag.renderer{};
+    ownership_diag.bind(&render_at, &diagnostics, &events, cast(&input, void mut*),
+        ownership_flow.source_filename, &f.services);
+    ownership_api.event_descriptor[2] items = {
+        *ownership_events.at(&events, 0), *ownership_events.at(&events, 1),
+    };
+    ownership_api.diagnostic_request request = ownership_api.diagnostic_request{
+        items[..], result.first_failure};
+    ownership_api.diagnostic_result rendered = ownership_api.render(&f.services, &request);
+    assert(rendered.rendered && diag.count(&diagnostics) == 2);
+    assert(diag.record_at(&diagnostics, 0).loc.file == "return.ft");
+    assert(diag.record_at(&diagnostics, 1).loc.file == "return.ft");
     ownership_flow.free(&result);
 }
 
@@ -1358,8 +1580,8 @@ fn delegated_events_keep_return_identity() void {
     fixture mut f = fixture{};
     string[3] blocks = {
         "bb0: { _0 = const i32 0; switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
-        "bb1: { return; }",
-        "bb2: { return; }",
+        "bb1: { return #21:2 s1; }",
+        "bb2: { return #22:2 s2; }",
     };
     fir.func* function = open(&f, "", blocks[..]);
     defer close(&f);
@@ -1379,6 +1601,9 @@ fn delegated_events_keep_return_identity() void {
     input.identity.declaration.module = 3;
     input.identity.declaration.declaration = 5;
     input.identity.instance = 7;
+    assert(f.source_files_len == 1);
+    f.source_files[0].module = 7;
+    f.source_files[0].file = 10;
     ownership_flow.step[1] mut steps = {};
     steps[0].kind = ownership_flow.step_kind.collection_write;
     steps[0].block = 0;
@@ -1418,13 +1643,16 @@ fn delegated_events_keep_return_identity() void {
         assert(stored->limit.used == 1 && stored->limit.bound == 1);
         assert(stored->limit.work == ownership_api.work_kind.transfer);
         assert(stored->limit.source.line == stored->source.line);
+        assert(stored->source.module == 7 && stored->source.file == 10);
+        assert(stored->limit.source.module == 7 && stored->limit.source.file == 10);
         assert(stored->limit.operation.block == stored->operation.block);
         i += 1;
     }
     diag.sink mut diagnostics = diag.create();
     defer diag.free(&diagnostics);
     ownership_diag.renderer mut render_at = ownership_diag.renderer{};
-    ownership_diag.bind(&render_at, &diagnostics, &events, null, null, &f.services);
+    ownership_diag.bind(&render_at, &diagnostics, &events, cast(&input, void mut*),
+        ownership_flow.source_filename, &f.services);
     ownership_api.event_descriptor[2] items = {
         *ownership_events.at(&events, 0), *ownership_events.at(&events, 1),
     };
@@ -1441,6 +1669,8 @@ fn delegated_events_keep_return_identity() void {
         "ownership analysis exceeds the transfer-work bound 1");
     assert(diag.record_at(&diagnostics, 3).msg ==
         "1 work units complete; this operation needs another work unit");
+    assert(diag.record_at(&diagnostics, 0).loc.file == "flow.fir");
+    assert(diag.record_at(&diagnostics, 2).loc.file == "flow.fir");
     ownership_flow.free(&result);
 }
 
@@ -1605,7 +1835,7 @@ fn widening_work_limit() void {
     types.node* signature = types.type_fn(tt, types.type_void(tt), params[..], false);
     fir.func mut function = fir.func_new(tt, null, signature);
     defer fir.func_free(&function);
-    diag.loc where = diag.loc{};
+    diag.loc where = diag.loc_make("widen.ft", 60, 4);
     assert(fir.block_new(&function) == 1);
     assert(fir.block_new(&function) == 2);
     assert(fir.block_new(&function) == 3);
@@ -1623,6 +1853,9 @@ fn widening_work_limit() void {
     f.limits.w = 1;
     assert(ownership_limits.configure(&f.meter, &f.limits));
     ownership_flow.program mut input = input_of(&f, &function, &entry);
+    assert(f.source_files_len == 1);
+    f.source_files[0].module = 7;
+    f.source_files[0].file = 11;
     ownership_flow.edge_fact[4] edges = {
         ownership_flow.edge_fact{0, 0, id(ownership_api.entity_kind.value, 1), false},
         ownership_flow.edge_fact{0, 1, id(ownership_api.entity_kind.value, 1), true},
@@ -1640,6 +1873,9 @@ fn widening_work_limit() void {
     assert(result.failures == 1 && result.normal_returns == 0);
     assert(result.first_failure.terminal.reason == ownership_api.incomplete_reason.work_limit);
     assert(result.first_failure.terminal.limit.work == ownership_api.work_kind.widening);
+    assert(result.first_failure.terminal.source.module == 7 &&
+        result.first_failure.terminal.source.file == 11);
+    assert(result.first_failure.terminal.source.line == 60);
     ownership_flow.free(&result);
 }
 
@@ -1821,6 +2057,8 @@ fn main() i32 {
     call_invalidates_null_fact(3);
     widened_parameter_keeps_obligation();
     widened_optional_parameter_uses_incomplete_evidence();
+    widened_parameter_borrow_stays_incomplete();
+    return_source_map_requires_complete_identity();
     return_events_keep_function_identity();
     delegated_events_keep_return_identity();
     flow_work_limit(0);
