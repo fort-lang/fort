@@ -1,0 +1,249 @@
+/// Supplies captured raw facts and separate input and allocator observations.
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_local_env;
+import ownership_raw;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import types;
+
+ownership_raw.captured_bound@ NO_BOUNDS = {};
+ownership_raw.relation@ NO_RELATIONS = {};
+
+struct charges {
+    ownership_limits.meter meter;
+    u64 calls;
+    u64 deny_at;
+}
+struct env {
+    ownership_local_env.env local;
+    types.table table;
+    charges budget;
+    ownership_raw.result root;
+    types.node* byte;
+}
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    charges mut* counts = cast(opaque, charges mut*);
+    assert(ownership_keys.canonical_charges(req));
+    counts->calls += 1;
+    if (counts->deny_at != 0 && counts->calls == counts->deny_at) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.limit = ownership_api.exhaustion{true, req->items[0].category, req->items[0].scope,
+            req->work, 7, 7, req->items[0].amount, req->operation, req->source, false};
+        return out;
+    }
+    return ownership_limits.try_charge(&counts->meter, req);
+}
+fn request(env mut* e) ownership_raw.request {
+    ownership_raw.request mut out = ownership_raw.request{};
+    out.base = ownership_local_env.req(&e->local, ownership_transfer.action.use, 1, 1);
+    out.limits = ownership_limits.production();
+    out.alternatives_complete = true;
+    out.captured_values = true;
+    return out;
+}
+fn open(env mut* e) void {
+    ownership_local_env.init(&e->local);
+    types.type_table_init(&e->table);
+    e->byte = types.type_prim(&e->table, prim.prim_kind.prim_u8);
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_limits.configure(&e->budget.meter, &limits));
+    e->local.service.budget_context = cast(&e->budget, void mut*);
+    e->local.service.budget = budget;
+}
+fn close(env mut* e) void {
+    ownership_raw.free_result(&e->root);
+    ownership_local_env.free(&e->local);
+    types.type_table_free(&e->table);
+}
+fn origin(env mut* e, u32 source, types.node* layout, ownership_raw.expression count,
+    ownership_raw.expression extent, bool heap) ownership_raw.origin {
+    ownership_raw.origin mut out = ownership_raw.origin{};
+    out.source = ownership_local_env.id(ownership_api.entity_kind.source, source);
+    if (heap) { out.allocation = ownership_local_env.id(ownership_api.entity_kind.allocation, 1); }
+    out.place = ownership_local_env.place(1);
+    out.layout = layout;
+    out.count = count;
+    out.begin = ownership_raw.literal(0);
+    out.end = extent;
+    out.alignment = 8;
+    out.correspondence = true;
+    out.repeated = heap;
+    return out;
+}
+fn heap(env mut* e, u64 count) void {
+    open(e);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e->local, 1, 1, 1,
+        cast(count, i64))));
+    ownership_raw.origin input = origin(e, 1, e->byte,
+        ownership_raw.literal(count), ownership_raw.literal(count), true);
+    ownership_raw.request mut req = request(e);
+    e->root = ownership_raw.capture_origin(&e->local.state, &e->local.service, &input, NO_BOUNDS,
+        NO_RELATIONS, &req);
+    assert(ownership_api.successful(e->root.proof));
+}
+fn object(env mut* e, u64 bytes) void {
+    open(e);
+    ownership_local_env.add_stack(&e->local, 1);
+    types.node* layout = types.type_array(&e->table, e->byte, bytes);
+    ownership_raw.origin input = origin(e, 1, layout,
+        ownership_raw.literal(1), ownership_raw.literal(bytes), false);
+    ownership_raw.request mut req = request(e);
+    e->root = ownership_raw.capture_origin(&e->local.state, &e->local.service, &input, NO_BOUNDS,
+        NO_RELATIONS, &req);
+    assert(ownership_api.successful(e->root.proof));
+}
+fn access(env mut* e, ownership_raw.result mut* value, types.node* ty)
+    ownership_api.proof_status {
+    ownership_raw.request mut req = request(e);
+    return ownership_raw.access(&value->storage, &e->local.service, value->addresses[..], ty, &req);
+}
+fn slice(env mut* e, ownership_raw.result mut* value, ownership_raw.expression lo,
+    ownership_raw.expression hi, types.node* element) ownership_raw.result {
+    ownership_raw.request mut req = request(e);
+    return ownership_raw.slice_ptr(&value->storage, &e->local.service,
+        value->addresses[..], lo, hi, element, &req);
+}
+fn window(env mut* e, ownership_raw.result mut* value, u64 lo, u64 hi) ownership_raw.result {
+    ownership_raw.request mut req = request(e);
+    return ownership_raw.derive_address(&value->storage, &e->local.service, value->addresses[..],
+        ownership_raw.literal(lo), ownership_raw.literal(hi), e->byte, &req);
+}
+fn cast_value(env mut* e, ownership_raw.result mut* value, types.node* from,
+    types.node* to) ownership_raw.result {
+    ownership_raw.request mut req = request(e);
+    return ownership_raw.cast_reference(&value->storage, &e->local.service,
+        value->addresses[..], from, to, &req);
+}
+fn integer(env mut* e) ownership_raw.result {
+    ownership_raw.request mut req = request(e);
+    return ownership_raw.reconstruct_integer(&e->local.state, &e->local.service, &req);
+}
+fn accepted(ownership_api.proof_status proof) void { assert(ownership_api.successful(proof)); }
+fn rejected(ownership_api.proof_status proof) void {
+    assert(!ownership_api.successful(proof) && proof.failed);
+}
+fn accepts(ownership_raw.result mut* value) void {
+    accepted(value->proof);
+    assert(value->addresses.len > 0);
+}
+fn rejects(ownership_raw.result mut* value) void {
+    rejected(value->proof);
+    assert(value->addresses.len == 0 && value->storage.core == null);
+    ownership_raw.free_result(value);
+}
+fn source(ownership_raw.result* value, u32 key, u64 begin, u64 end) void {
+    assert(value->addresses.len == 1);
+    ownership_raw.address item = value->addresses[0];
+    assert(item.source.ordinal == key && item.source.kind == ownership_api.entity_kind.source);
+    assert(ownership_raw.same_expression(item.begin, ownership_raw.literal(begin)));
+    assert(ownership_raw.same_expression(item.end, ownership_raw.literal(end)));
+}
+fn symbol(u32 version, ownership_raw.term mut@ terms, u64 coefficient)
+    ownership_raw.expression {
+    terms[0] = ownership_raw.term{ownership_local_env.id(ownership_api.entity_kind.value, version),
+        ownership_raw.natural(coefficient)};
+    ownership_raw.expression mut out = ownership_raw.literal(0);
+    out.terms = terms[..1];
+    return out;
+}
+
+fn typed_heap(env mut* e, prim.prim_kind kind, u64 count) void {
+    open(e);
+    types.node* element = types.type_prim(&e->table, kind);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e->local, 1, 1, 1,
+        cast(count, i64))));
+    u64 mut stride = 0;
+    assert(types.size_checked(element, &stride));
+    ownership_raw.origin input = origin(e, 1, element,
+        ownership_raw.literal(count), ownership_raw.literal(count * stride), true);
+    ownership_raw.request mut req = request(e);
+    e->root = ownership_raw.capture_origin(&e->local.state, &e->local.service, &input, NO_BOUNDS,
+        NO_RELATIONS, &req);
+    accepted(e->root.proof);
+}
+fn symbolic_heap(env mut* e, u64 stride, u64 lower, u64 upper) void {
+    open(e);
+    accepted(ownership_local_env.alloc(&e->local, 1, 1, 1, 0));
+    ownership_api.scalar_fact mut count = ownership_api.scalar_fact{};
+    count.kind = ownership_api.fact_kind.symbolic;
+    count.symbol = ownership_local_env.id(ownership_api.entity_kind.value, 10);
+    e->local.state.allocations[0].logical_length = count;
+    e->local.state.contents[0].span_length = count;
+    ownership_raw.term[1] mut count_terms = {};
+    ownership_raw.term[1] mut extent_terms = {};
+    ownership_raw.expression n = symbol(10, count_terms[..], 1);
+    ownership_raw.expression extent = symbol(10, extent_terms[..], stride);
+    ownership_raw.captured_bound[1] bounds = {ownership_raw.captured_bound{
+        count.symbol, ownership_raw.natural(lower), ownership_raw.natural(upper)}};
+    types.node* element = stride == 1 ? e->byte :
+        types.type_prim(&e->table, prim.prim_kind.prim_i32);
+    ownership_raw.origin input = origin(e, 1, element, n, extent, true);
+    ownership_raw.request mut req = request(e);
+    e->root = ownership_raw.capture_origin(&e->local.state, &e->local.service, &input,
+        bounds[..], NO_RELATIONS, &req);
+    accepted(e->root.proof);
+}
+fn trusted(env mut* e) void {
+    open(e);
+    ownership_api.source_fact fact = ownership_local_env.source(1,
+        ownership_api.source_kind.trusted_foreign, ownership_api.entity_id{});
+    assert(ownership_state.add_source(&e->local.state, &e->local.service, fact,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_raw.origin input = origin(e, 1, e->byte,
+        ownership_raw.literal(0), ownership_raw.literal(0), false);
+    ownership_raw.request mut req = request(e);
+    e->root = ownership_raw.capture_origin(&e->local.state, &e->local.service, &input, NO_BOUNDS,
+        NO_RELATIONS, &req);
+    accepted(e->root.proof);
+}
+
+fn zero_bound_heap(env mut* e) void {
+    heap(e, 8);
+    ownership_raw.origin input = e->root.storage.origins[0];
+    ownership_raw.captured_bound[1] bounds = {ownership_raw.captured_bound{
+        ownership_local_env.id(ownership_api.entity_kind.value, 10),
+        ownership_raw.natural(0), ownership_raw.natural(0)}};
+    ownership_raw.request mut req = request(e);
+    ownership_raw.result mut captured = ownership_raw.capture_origin(&e->local.state,
+        &e->local.service, &input, bounds[..], NO_RELATIONS, &req);
+    accepts(&captured);
+    ownership_raw.free_result(&e->root);
+    e->root = move(captured);
+}
+fn zero_terms(ownership_raw.term mut@ terms) ownership_raw.expression {
+    u64 mut i = 0;
+    while (i < terms.len) {
+        terms[i] = ownership_raw.term{ownership_local_env.id(ownership_api.entity_kind.value, 10),
+            ownership_raw.natural(1)};
+        i += 1;
+    }
+    ownership_raw.expression mut out = ownership_raw.literal(0);
+    out.terms = terms[..];
+    return out;
+}
+fn remaining_work(env mut* e, u64 remaining) void {
+    assert(remaining <= e->budget.meter.bounds.w);
+    e->budget.meter.used.w = e->budget.meter.bounds.w - remaining;
+}
+fn work_failure(env* e, ownership_api.proof_status proof, ownership_raw.request* req) void {
+    rejected(proof);
+    assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    ownership_api.exhaustion limit = proof.terminal.limit;
+    assert(limit.present && limit.category == ownership_api.limit_category.w &&
+        limit.used == e->budget.meter.bounds.w && limit.bound == limit.used &&
+        limit.attempted == 1 && !limit.saturated);
+    assert(ownership_keys.operation(limit.operation, req->base.operation) == 0);
+    assert(e->local.counts.last_kind == ownership_api.event_kind.work_failure);
+}
+fn projections(ownership_api.projection mut@ parts) void {
+    u64 mut i = 0;
+    while (i < parts.len) {
+        parts[i].kind = ownership_api.projection_kind.fixed_index;
+        parts[i].index.kind = ownership_api.fact_kind.exact;
+        parts[i].index.value = 0;
+        i += 1;
+    }
+}
