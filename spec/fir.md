@@ -208,11 +208,24 @@ Only independent source correspondence can set selected-source completeness.
 Ordinary FIR without a range declaration makes no source range-coverage claim.
 The first source audit enumerates selected checked-source range nodes without reading the
 producer's declaration list. It counts produced range lowering operations independently.
-For a direct operation whose path it can prove, the audit matches the declaration, expansion,
+For a produced operation whose path it can prove, the audit matches the declaration, expansion,
 capture, original protected path, and ordered boundaries against checked source and verified FIR.
-Each normal cleanup triple matches FIR body-scope `dead` markers at its operation gaps.
-A deferred context or call-result path without independent proof remains incomplete.
-Its keyed failure retains source and exit evidence. The audit keeps rows and failures outside FIR.
+A source-only scope replay derives enclosing defer chains and exit occurrences without candidate
+records. It counts scope expansions that produce no range operation.
+It matches source exits with verified FIR exit locations before comparing candidate context records.
+Repeated lowerings keep one declaration ID and distinct expansion identities.
+The FIR loop edge and range-variable live marker identify each body entry independently.
+Source traversal derives cleanup events and disjoint statement intervals for each expansion.
+A verified CFG walk derives the required body-scope dead gaps from that entry.
+The two derivations must agree. Each required gap matches exactly one cleanup triple.
+Candidate order, numbering, parent links, or selected subsets cannot establish this correspondence.
+Missing, duplicate, moved, or cross-expansion records cause keyed refusal.
+An ambiguous context or gap partition remains incomplete. Call-result paths remain incomplete until
+an independent result-materialization proof exists.
+This refusal includes either conditional result arm and nested conditionals.
+Dereference, member, span-header, and cast wrappers retain the call-result refusal.
+The keyed failure retains checked-source defer and verified FIR exit evidence.
+The audit keeps its rows and failures outside FIR.
 It proves no deferred absence and sets no structural or selected-source completeness claim.
 Independent context and absence validation and V14 verification precede source publication.
 
