@@ -188,6 +188,7 @@ struct range_audit_key {
     u32 context;
     u32 exit_occurrence;
     diag.loc source;
+    diag.loc context_source;
     diag.loc exit_source;
 }
 
@@ -805,39 +806,36 @@ fn range_audit_contains(ast.node* root, ast.node* target) bool {
     return false;
 }
 
-fn range_audit_context_at(range_candidate_set* proposed, u32 id)
-    range_defer_context_candidate* {
+// Returns the nearest selected source defer that contains this range.
+fn range_audit_defer_at(ast.node* root, ast.node* target) ast.node* {
+    if (root == null || root == target) { return null; }
+    if (root->kind == ast.ast_kind.k_compile_if) {
+        return range_audit_defer_at(selected_branch(root), target);
+    }
+    ast.node* mut found = range_audit_defer_at(root->a, target);
+    if (found == null) { found = range_audit_defer_at(root->b, target); }
+    if (found == null) { found = range_audit_defer_at(root->c, target); }
+    if (found == null) { found = range_audit_defer_at(root->d, target); }
     u64 mut i = 0;
-    while (i < proposed->deferred.len) {
-        if (proposed->deferred.items[i].id == id) { return &proposed->deferred.items[i]; }
+    while (found == null && i < ast.ast_len(root)) {
+        found = range_audit_defer_at(ast.ast_child(root, i), target);
         i += 1;
+    }
+    if (found != null) { return found; }
+    if (root->kind == ast.ast_kind.k_defer && range_audit_contains(root->a, target)) {
+        return root;
     }
     return null;
 }
 
-fn range_audit_context_matches(range_candidate_set* proposed, ast.node* n,
-                               fir.range_expansion occurrence, diag.loc exit_source) bool {
-    if (!range_audit_loc_eq(occurrence.exit_source, exit_source)) { return false; }
-    if (exit_source.line == 0) {
-        return occurrence.context == 0 && occurrence.exit_occurrence == 0;
+// A call in the storage root needs a separate result-materialization proof.
+fn range_audit_call_root(ast.node* n) bool {
+    ast.node* mut current = n;
+    while (current != null) {
+        if (current->kind == ast.ast_kind.k_call) { return true; }
+        current = current->a;
     }
-    if (occurrence.context == 0 || occurrence.exit_occurrence == 0) { return false; }
-    range_defer_context_candidate* inner = range_audit_context_at(proposed, occurrence.context);
-    if (inner == null || inner->exit_occurrence != occurrence.exit_occurrence
-        || !range_audit_loc_eq(inner->exit_source, exit_source)) { return false; }
-    ast.node* mut child = n;
-    u32 mut context = occurrence.context;
-    u64 mut steps = 0;
-    while (context != 0 && steps < proposed->deferred.len) {
-        range_defer_context_candidate* current = range_audit_context_at(proposed, context);
-        if (current == null || current->source_node == null
-            || current->source_node->kind != ast.ast_kind.k_defer
-            || !range_audit_contains(current->source_node->a, child)) { return false; }
-        child = current->source_node;
-        context = current->parent;
-        steps += 1;
-    }
-    return context == 0;
+    return false;
 }
 
 fn range_audit_source_sym(ast.node* n) ast.sym* {
@@ -941,7 +939,49 @@ fn range_audit_binding(fir.func* f, ast.node* n, range_audit_operation op,
     return true;
 }
 
-// Match every boundary by its expansion, then require the capture and body-entry gaps.
+// A dead range variable starts the body-scope dead run after all body defers.
+fn range_audit_cleanup_end(fir.func* f, ast.node* n, fir.range_boundary start,
+                           u32 mut* end) bool {
+    if (start.position >= fir.block_statement_count(f, start.block)) { return false; }
+    fir.statement* first = fir.block_statement(f, start.block, start.position);
+    if (first->kind != fir.stmt_kind.st_dead || first->local >= fir.local_count(f)
+        || fir.local_at(f, first->local)->sym != cast(n->sym, ast.sym*)
+        || !range_audit_loc_eq(first->loc, start.source)) { return false; }
+    u32 mut p = start.position + 1;
+    while (p < fir.block_statement_count(f, start.block)) {
+        fir.statement* next = fir.block_statement(f, start.block, p);
+        if (next->kind != fir.stmt_kind.st_dead || next->local >= fir.local_count(f)
+            || !range_audit_loc_eq(next->loc, first->loc)) { break; }
+        ast.sym* source_sym = fir.local_at(f, next->local)->sym;
+        if (source_sym == null || source_sym->node == null
+            || !range_audit_contains(n->c, source_sym->node)) {
+            break;
+        }
+        p += 1;
+    }
+    *end = p;
+    return true;
+}
+
+fn range_audit_dead_count(fir.func* f, ast.node* n) u32 {
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, p);
+            if (s->kind == fir.stmt_kind.st_dead && s->local < fir.local_count(f)
+                && fir.local_at(f, s->local)->sym == cast(n->sym, ast.sym*)) {
+                count += 1;
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    return count;
+}
+
+// Match boundary gaps to FIR live and dead markers, not to candidate counts alone.
 fn range_audit_boundaries(fir.func* f, ast.node* n, range_audit_operation op,
                           range_candidate_set* proposed, u32 expansion,
                           u32 body_block, range_source_audit mut* out,
@@ -952,6 +992,7 @@ fn range_audit_boundaries(fir.func* f, ast.node* n, range_audit_operation op,
     u32 mut exit_count = 0;
     u32 mut outer_count = 0;
     u32 mut cleanup_phase = 0;
+    u32 mut cleanup_end = 0;
     fir.range_boundary mut cleanup = fir.range_boundary{};
     fir.range_boundary mut loan_exit = fir.range_boundary{};
     row->boundaries_first = cast(out->boundaries.len, u32);
@@ -981,13 +1022,14 @@ fn range_audit_boundaries(fir.func* f, ast.node* n, range_audit_operation op,
                 }
             case fir.range_boundary_kind.body_cleanup:
                 cleanup_count += 1;
-                if (cleanup_phase != 0) { return false; }
+                if (cleanup_phase != 0
+                    || !range_audit_cleanup_end(f, n, bd, &cleanup_end)) { return false; }
                 cleanup = bd;
                 cleanup_phase = 1;
             case fir.range_boundary_kind.loan_exit:
                 exit_count += 1;
                 if (cleanup_phase != 1 || bd.block != cleanup.block
-                    || bd.position < cleanup.position
+                    || bd.position != cleanup_end
                     || !range_audit_loc_eq(bd.source, cleanup.source)) { return false; }
                 loan_exit = bd;
                 cleanup_phase = 2;
@@ -1005,6 +1047,7 @@ fn range_audit_boundaries(fir.func* f, ast.node* n, range_audit_operation op,
         i += 1;
     }
     return cleanup_phase == 0 && capture_count == 1 && entry_count == 1
+        && cleanup_count == range_audit_dead_count(f, n)
         && cleanup_count == exit_count
         && exit_count == outer_count;
 }
@@ -1033,6 +1076,14 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
         if (i > 0 && operations.items[i - 1].statement_index == op.statement_index) {
             return range_audit_fail(out, key, range_audit_fault.operation);
         }
+        ast.node* source_defer = range_audit_defer_at(decl->b, n);
+        if (source_defer != null) { key.context_source = source_defer->loc; }
+        if (source_defer != null || op.exit_source.line != 0) {
+            return range_audit_fail(out, key, range_audit_fault.context);
+        }
+        if (range_audit_call_root(n->b)) {
+            return range_audit_fail(out, key, range_audit_fault.protected_path);
+        }
         if (i >= proposed->captures.len) {
             return range_audit_fail(out, key, range_audit_fault.expansion_key);
         }
@@ -1050,7 +1101,7 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
         if (!range_audit_loc_eq(c->occurrence.exit_source, op.exit_source)) {
             return range_audit_fail(out, key, range_audit_fault.exit_source);
         }
-        if (!range_audit_context_matches(proposed, n, c->occurrence, op.exit_source)) {
+        if (c->occurrence.context != 0 || c->occurrence.exit_occurrence != 0) {
             return range_audit_fail(out, key, range_audit_fault.context);
         }
         range_audit_fault mut fault = range_audit_fault.none;
@@ -1080,7 +1131,37 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
         return range_audit_fail(out, key, range_audit_fault.expansion_key);
     }
     if (cast(out->matched_boundaries, u64) != proposed->boundaries.len) {
-        range_audit_key key = range_audit_key{.function = decl->sym};
+        u64 mut extra_at = 0;
+        while (extra_at < proposed->boundaries.len) {
+            range_boundary_candidate* candidate = &proposed->boundaries.items[extra_at];
+            bool mut found = false;
+            u64 mut row_at = 0;
+            while (row_at < out->rows.len) {
+                if (out->rows.items[row_at].key.expansion == candidate->expansion) {
+                    found = true;
+                    break;
+                }
+                row_at += 1;
+            }
+            if (!found) { break; }
+            extra_at += 1;
+        }
+        range_boundary_candidate* extra = &proposed->boundaries.items[extra_at];
+        range_audit_key mut key = range_audit_key{.function = decl->sym,
+                                                  .declaration = extra->declaration,
+                                                  .expansion = extra->expansion,
+                                                  .source = extra->boundary.source};
+        u64 mut capture_at = 0;
+        while (capture_at < proposed->captures.len) {
+            range_capture_candidate* c = &proposed->captures.items[capture_at];
+            if (c->expansion == extra->expansion) {
+                key.context = c->occurrence.context;
+                key.exit_occurrence = c->occurrence.exit_occurrence;
+                key.exit_source = c->occurrence.exit_source;
+                break;
+            }
+            capture_at += 1;
+        }
         return range_audit_fail(out, key, range_audit_fault.boundary);
     }
     return true;

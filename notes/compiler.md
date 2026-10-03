@@ -136,8 +136,10 @@ came here.
 - **The inactive range audit compares checked source with FIR operations** (`spec/fir.md` 5.2).
   A separate selected-source walk assigns declaration IDs without reading producer records.
   Counter-zero FIR operations identify produced expansions, including disconnected blocks.
-  The audit matches each operation to one expansion key, capture, protected path, and boundary set.
-  Its owned rows retain source exits and failure reasons after candidate teardown.
+  A direct match requires its expansion key, capture, protected path, and FIR-supported boundaries.
+  Normal cleanup triples match body-scope `dead` gaps. Missing or moved triples cause refusal.
+  A deferred range or call-result path stays incomplete until independent proof exists.
+  Its owned rows and failures retain source and exit evidence after candidate teardown.
   Structural validity, source coverage, and ownership proof remain separate false verdicts.
   Deferred absence validation and publication follow in a later pass.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
