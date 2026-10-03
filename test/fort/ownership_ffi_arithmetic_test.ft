@@ -1,0 +1,277 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| reject F02-F
+//| reject F02-G
+//| accept F02-H
+//| reject F02-I
+//| complete checked foreign declaration
+//| reject missing fort alignment
+//| complete symbolic endpoint refusal sweep
+//| complete successful scratch cleanup
+//| complete early refusal scratch cleanup
+//| complete late refusal scratch cleanup
+/// Checks foreign endpoint arithmetic, refusal atomicity, and scratch cleanup.
+import ast;
+import check_env;
+import heap;
+import ownership_api;
+import ownership_ffi_arithmetic_env;
+import ownership_keys;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+import prim;
+import std.io;
+import std.libc;
+import std.str;
+import types;
+
+fn checked_foreign_declaration() void {
+    check_env.env mut e = {};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check_env.check_decls(&e, "extern fn foreign_view() u8*;"));
+    ast.sym* symbol = check_env.sym_main(&e, "foreign_view");
+    assert(symbol->kind == ast.sym_kind.s_extern_fn && symbol->ty->kind == types.type_kind.k_fn);
+    assert(symbol->ty->elem->kind == types.type_kind.k_ptr && !symbol->ty->elem->is_own);
+    println("complete checked foreign declaration");
+}
+fn slice_endpoint_overflow() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_arithmetic_env.open(&e, 175, 133, ownership_raw_env.NO_BOUNDS);
+    defer ownership_ffi_arithmetic_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw.request mut req = ownership_ffi_arithmetic_env.request(&e, 176, 133);
+    types.node* element = types.type_prim(&e.raw.table, prim.prim_kind.prim_u64);
+    ownership_raw.result mut out = ownership_raw.slice_ptr(&e.raw.root.storage,
+        &e.raw.local.service, e.raw.root.addresses[..], ownership_raw.literal(0),
+        ownership_raw.literal(ownership_raw.U64_MAX), element, &req);
+    ownership_ffi_arithmetic_env.incomplete(&e, out.proof, &req);
+    ownership_raw_env.rejects(&out);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    ownership_ffi_arithmetic_env.unknown_extent(&e);
+    println("reject F02-F");
+}
+fn typed_endpoint(u32 operation, u32 line, ownership_raw.expression offset, bool accepted) void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_arithmetic_env.open(&e, operation, line, ownership_raw_env.NO_BOUNDS);
+    defer ownership_ffi_arithmetic_env.close(&e);
+    e.raw.root.addresses[0].offset = offset;
+    e.raw.root.addresses[0].begin = offset;
+    e.raw.root.addresses[0].end = ownership_raw.literal(ownership_raw.U64_MAX);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw.address input = e.raw.root.addresses[0];
+    ownership_raw.request mut req = ownership_ffi_arithmetic_env.request(&e, operation + 1, line);
+    types.node* ty = types.type_prim(&e.raw.table, prim.prim_kind.prim_u64);
+    ownership_api.proof_status proof = ownership_raw.access(&e.raw.root.storage,
+        &e.raw.local.service, e.raw.root.addresses[..], ty, &req);
+    if (accepted) {
+        ownership_raw_env.accepted(proof);
+        assert(e.observed.events == 0);
+    } else { ownership_ffi_arithmetic_env.incomplete(&e, proof, &req); }
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    assert(ownership_raw.same_expression(e.raw.root.addresses[0].offset, input.offset));
+    assert(ownership_raw.same_expression(e.raw.root.addresses[0].begin, input.begin));
+    assert(ownership_raw.same_expression(e.raw.root.addresses[0].end, input.end));
+    ownership_ffi_arithmetic_env.unknown_extent(&e);
+}
+fn endpoint_overflow() void {
+    typed_endpoint(1888, 1351, ownership_raw.literal(ownership_raw.U64_MAX - 1), false);
+    println("reject F02-G");
+}
+fn endpoint_boundary() void {
+    typed_endpoint(1904, 1354, ownership_raw.literal(ownership_raw.U64_MAX - 8), true);
+    println("accept F02-H");
+}
+fn negative_offset() void {
+    ownership_raw.expression mut offset = ownership_raw.literal(0);
+    offset.constant = ownership_raw.signed(-1);
+    typed_endpoint(1920, 1357, offset, false);
+    println("reject F02-I");
+}
+fn fort_alignment_remains_required() void {
+    ownership_raw_env.env mut e = {};
+    ownership_raw_env.heap(&e, 8);
+    defer ownership_raw_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw.origin mut input = e.root.storage.origins[0];
+    input.alignment = 0;
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.result mut captured = ownership_raw.capture_origin(&e.local.state,
+        &e.local.service, &input, ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS,
+        &req);
+    ownership_raw_env.rejects(&captured);
+    assert(ownership_state.equal(&before, &e.local.state));
+    println("reject missing fort alignment");
+}
+fn symbolic_open(ownership_ffi_arithmetic_env.env mut* e) void {
+    ownership_raw.captured_bound[32] mut bounds = {};
+    u64 mut i = 0;
+    while (i < bounds.len) {
+        bounds[i] = ownership_raw.captured_bound{
+            ownership_ffi_arithmetic_env.id(ownership_api.entity_kind.value, cast(100 + i, u32)),
+            ownership_raw.natural(0), ownership_raw.natural(2)};
+        i += 1;
+    }
+    ownership_ffi_arithmetic_env.open(e, 2000, 1400, bounds[..]);
+    assert(e->raw.root.storage.bounds.len == 32 && e->raw.root.storage.terms == null);
+}
+fn symbolic_offset(ownership_raw.term mut@ terms) ownership_raw.expression {
+    u64 mut i = 0;
+    while (i < terms.len) {
+        terms[i] = ownership_raw.term{
+            ownership_ffi_arithmetic_env.id(ownership_api.entity_kind.value, cast(100 + i, u32)),
+            ownership_raw.natural(1)};
+        i += 1;
+    }
+    ownership_raw.expression mut out = ownership_raw.literal(0);
+    out.terms = terms[..];
+    return out;
+}
+fn symbolic_access(ownership_ffi_arithmetic_env.env mut* e, ownership_raw.request* req)
+    ownership_api.proof_status {
+    ownership_raw.term[32] mut terms = {};
+    ownership_raw.address[1] mut addresses = {e->raw.root.addresses[0]};
+    addresses[0].offset = symbolic_offset(terms[..]);
+    return ownership_raw.access(&e->raw.root.storage, &e->raw.local.service,
+        addresses[..], e->raw.byte, req);
+}
+fn refusal_sweep() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    symbolic_open(&e);
+    defer ownership_ffi_arithmetic_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw.request mut req = ownership_ffi_arithmetic_env.request(&e, 2001, 1400);
+    ownership_ffi_arithmetic_env.reset_budget(&e);
+    u64 start = e.raw.budget.calls;
+    ownership_raw_env.accepted(symbolic_access(&e, &req));
+    u64 cost = e.raw.budget.calls - start;
+    assert(cost > 32 && cost < req.limits.w);
+    u64 mut position = 1;
+    while (position <= cost) {
+        ownership_ffi_arithmetic_env.reset_budget(&e);
+        e.raw.budget.deny_at = e.raw.budget.calls + position;
+        u64 events = e.observed.events;
+        ownership_api.proof_status proof = symbolic_access(&e, &req);
+        ownership_raw_env.rejected(proof);
+        assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        if (position == 1) { assert(e.observed.events == events); }
+        else {
+            assert(e.observed.events == events + 1);
+            assert(e.observed.kind == ownership_api.event_kind.work_failure);
+        }
+        assert(ownership_keys.operation(proof.terminal.limit.operation, req.base.operation) == 0);
+        assert(ownership_keys.source(proof.terminal.limit.source, req.base.source_position) == 0);
+        assert(ownership_state.equal(&before, &e.raw.local.state));
+        ownership_ffi_arithmetic_env.unknown_extent(&e);
+        position += 1;
+    }
+    ownership_ffi_arithmetic_env.reset_budget(&e);
+    ownership_raw_env.accepted(symbolic_access(&e, &req));
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    println("complete symbolic endpoint refusal sweep");
+}
+
+// Linux allocator metadata excludes free bins from the live-byte measurement.
+$if ($cfg(target_os) == "linux") {
+    extern fn open_memstream(char mut* own mut* buffer, u64 mut* length) void mut*;
+    extern fn malloc_info(i32 options, void mut* stream) i32;
+    extern fn fclose(void mut* stream) i32;
+    fn metric(string data, string prefix) u64 {
+        i64 mut found = str.find(data, prefix);
+        assert(found >= 0);
+        string mut tail = data[cast(found, u64)..];
+        while (true) {
+            found = str.find(tail[prefix.len..], prefix);
+            if (found < 0) { break; }
+            tail = tail[prefix.len + cast(found, u64)..];
+        }
+        found = str.find(tail, "size=\"");
+        assert(found >= 0);
+        tail = tail[cast(found, u64) + 6..];
+        found = str.index_of(tail, '\"');
+        assert(found >= 0);
+        u64 mut value = 0;
+        assert(str.parse_u64(tail[..cast(found, u64)], 10, &value));
+        return value;
+    }
+    fn live_bytes() u64 {
+        char mut* own mut buffer = null;
+        u64 mut length = 0;
+        void mut* stream = open_memstream(&buffer, &length);
+        assert(stream != null && malloc_info(0, stream) == 0 && fclose(stream) == 0);
+        string data = cast(buffer[0..length], string);
+        u64 arena = metric(data, "<system type=\"current\"");
+        u64 fast = metric(data, "<total type=\"fast\"");
+        u64 rest = metric(data, "<total type=\"rest\"");
+        u64 mapped = metric(data, "<total type=\"mmap\"");
+        libc.free(cast(move(buffer), void* own));
+        assert(arena >= fast && arena - fast >= rest);
+        return arena - fast - rest + mapped;
+    }
+} else {
+    fn live_bytes() u64 { return heap.system_view(); }
+}
+fn scratch_cleanup(u32 mode) void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    symbolic_open(&e);
+    defer ownership_ffi_arithmetic_env.close(&e);
+    ownership_raw.request mut req = ownership_ffi_arithmetic_env.request(&e, 2001, 1400);
+    ownership_ffi_arithmetic_env.reset_budget(&e);
+    u64 start = e.raw.budget.calls;
+    ownership_raw_env.accepted(symbolic_access(&e, &req));
+    u64 cost = e.raw.budget.calls - start;
+    u64 mut warm = 0;
+    while (warm < 32) {
+        ownership_ffi_arithmetic_env.reset_budget(&e);
+        ownership_raw_env.accepted(symbolic_access(&e, &req));
+        live_bytes();
+        heap.system_view();
+        warm += 1;
+    }
+    u64 live_before = live_bytes();
+    u64 system_before = heap.system_view();
+    u64 mut best_live = ownership_raw.U64_MAX;
+    u64 mut best_system = ownership_raw.U64_MAX;
+    u64 mut trial = 0;
+    while (trial < 128) {
+        ownership_ffi_arithmetic_env.reset_budget(&e);
+        if (mode != 0) { e.raw.budget.deny_at = e.raw.budget.calls + (mode == 1 ? 1 : cost); }
+        ownership_api.proof_status proof = symbolic_access(&e, &req);
+        if (mode == 0) { ownership_raw_env.accepted(proof); }
+        else {
+            ownership_raw_env.rejected(proof);
+            assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        }
+        u64 live_distance = heap.distance(live_before, live_bytes());
+        u64 system_distance = heap.distance(system_before, heap.system_view());
+        if (trial >= 112 && live_distance < best_live) { best_live = live_distance; }
+        if (trial >= 112 && system_distance < best_system) { best_system = system_distance; }
+        trial += 1;
+    }
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 2048 : 256;
+    if (best_live >= bound) { println("allocator live bytes ", mode, " ", best_live); }
+    assert(best_live < bound);
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+}
+fn main() i32 {
+    slice_endpoint_overflow();
+    endpoint_overflow();
+    endpoint_boundary();
+    negative_offset();
+    checked_foreign_declaration();
+    fort_alignment_remains_required();
+    refusal_sweep();
+    scratch_cleanup(0);
+    println("complete successful scratch cleanup");
+    scratch_cleanup(1);
+    println("complete early refusal scratch cleanup");
+    scratch_cleanup(2);
+    println("complete late refusal scratch cleanup");
+    return 0;
+}
