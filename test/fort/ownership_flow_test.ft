@@ -10,6 +10,7 @@ import fir_verify;
 import diag;
 import consts;
 import ownership_api;
+import ownership_diag;
 import ownership_events;
 import ownership_flow;
 import ownership_local_env;
@@ -254,6 +255,120 @@ fn returned_borrow_proof(u32 variant) void {
     if (variant != 0) {
         assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
         assert(result.first_failure.terminal.source.line == 27);
+    }
+    ownership_flow.free(&result);
+}
+
+fn returned_null_result(u32 variant) void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* borrowed = types.type_ptr(tt, integer, false, false);
+    types.node*[1] params = {borrowed};
+    types.node* signature = types.type_fn(tt, borrowed, params[..], false);
+    fir.func mut function = fir.func_new(tt, null, signature);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc_make("null.ft", 31, 4);
+    fir.rvalue zero = fir.rvalue_use(&function, fir.operand_const(fir.const_null(borrowed)));
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(0), zero, where, 0));
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 1));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.contents_fact mut returned = ownership_api.contents_fact{};
+    returned.place = slot(0);
+    returned.kind = variant == 1 ? ownership_api.contents_kind.empty_owner :
+        ownership_api.contents_kind.reference;
+    returned.owner_empty = variant != 2;
+    if (variant != 3) { returned.span_length.kind = ownership_api.fact_kind.exact; }
+    ownership_state.append_contents(&entry, returned);
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    input.result_slot = slot(0).root;
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.operation = 1, .terminator = true},
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}, 1),
+    };
+    if (variant >= 2) { input.events = events[..]; }
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.normal_returns == 1);
+    assert(result.failures == (variant < 2 ? cast(0, u64) : cast(1, u64)));
+    if (variant >= 2) {
+        assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
+        assert(result.first_failure.terminal.source.line == 31);
+    }
+    ownership_flow.free(&result);
+}
+
+fn mixed_aggregate_result(u32 variant) void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    strbuf.str_buf mut program_text = strbuf.create();
+    defer strbuf.free(&program_text);
+    strbuf.append(&program_text, "fn main.mixed(_1 (v): enum_member) -> enum_member {\n");
+    strbuf.append(&program_text, "let _0: enum_member;\n");
+    strbuf.append(&program_text, "bb0: { _0 = copy _1; return; }\n}\n");
+    u64 before = fir_env.errors(&f.environment);
+    f.module = fir_parse.parse_module(&f.environment.c.m.s, "mixed.fir",
+        strbuf.view(&program_text),
+        fir_env.prelude(&f.environment));
+    assert(fir_env.errors(&f.environment) == before);
+    fir.func* function = fir.module_function_at(&f.module, 0);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.source_fact mut caller = ownership_api.source_fact{};
+    caller.key = id(ownership_api.entity_kind.source, 6);
+    caller.kind = ownership_api.source_kind.symbolic_caller;
+    caller.validity = ownership_api.validity_kind.live;
+    ownership_state.append_sources(&entry, caller);
+    ownership_api.contents_fact mut aggregate = ownership_api.contents_fact{};
+    aggregate.place = slot(0);
+    aggregate.kind = ownership_api.contents_kind.aggregate;
+    ownership_state.append_contents(&entry, aggregate);
+    ownership_api.projection[1] scalar_part = {
+        ownership_api.projection{.kind = ownership_api.projection_kind.field, .field = 0},
+    };
+    ownership_api.contents_fact mut scalar = ownership_api.contents_fact{};
+    scalar.place = slot(0);
+    scalar.place.projections = scalar_part[..];
+    scalar.kind = ownership_api.contents_kind.scalar;
+    ownership_state.append_contents(&entry, scalar);
+    if (variant != 2) {
+        ownership_api.projection[1] reference_part = {
+            ownership_api.projection{.kind = ownership_api.projection_kind.field, .field = 1},
+        };
+        ownership_api.contents_fact mut reference = ownership_api.contents_fact{};
+        reference.place = slot(0);
+        reference.place.projections = reference_part[..];
+        reference.kind = variant == 1 ? ownership_api.contents_kind.unknown :
+            ownership_api.contents_kind.reference;
+        reference.value_version = id(ownership_api.entity_kind.value, 6);
+        ownership_api.borrow_relation[1] mut relations = {};
+        relations[0].key = id(ownership_api.entity_kind.relation, 6);
+        relations[0].value_version = reference.value_version;
+        relations[0].source = caller.key;
+        relations[0].representation_complete = true;
+        if (variant == 0) { reference.borrows = relations[..]; }
+        if (variant == 3) {
+            reference.owner_empty = true;
+            reference.span_length.kind = ownership_api.fact_kind.exact;
+        }
+        ownership_state.append_contents(&entry, reference);
+    }
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    input.result_slot = slot(0).root;
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.operation = 1, .terminator = true},
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}, 1),
+    };
+    if (variant == 1 || variant == 2) { input.events = events[..]; }
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.normal_returns == 1);
+    assert(result.failures == (variant == 1 || variant == 2 ?
+        cast(1, u64) : cast(0, u64)));
+    if (variant == 1 || variant == 2) {
+        assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
     }
     ownership_flow.free(&result);
 }
@@ -1085,6 +1200,98 @@ fn widened_parameter_keeps_obligation() void {
     ownership_flow.free(&result);
 }
 
+fn widened_optional_parameter_uses_incomplete_evidence() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* owner = types.type_ptr(tt, integer, true, true);
+    types.node* boolean = types.type_prim(tt, prim.prim_kind.prim_bool);
+    types.node*[2] params = {owner, boolean};
+    types.node* signature = types.type_fn(tt, types.type_void(tt), params[..], false);
+    fir.func mut function = fir.func_new(tt, null, signature);
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc_make("optional.ft", 43, 5);
+    assert(fir.block_new(&function) == 1 && fir.block_new(&function) == 2 &&
+        fir.block_new(&function) == 3);
+    u32 first = fir.arm_push(&function, consts.cv_from_bool(true), 1);
+    fir.block_set_terminator(&function, 0,
+        fir.term_switch(fir.operand_copy(fir.place_local(2)), first, 1, 2, where, 0));
+    fir.block_append(&function, 1, fir.stmt_del(fir.place_local(1), where, 0));
+    types.node* count_type = types.type_prim(tt, prim.prim_kind.prim_u64);
+    fir.operand one = fir.operand_const(fir.const_int(count_type, consts.cv_from_u64(1)));
+    fir.rvalue allocation_value = fir.rvalue_alloc(&function, integer, one);
+    fir.block_append(&function, 1,
+        fir.stmt_assign(fir.place_local(1), allocation_value, where, 1));
+    fir.block_set_terminator(&function, 1, fir.term_goto(3, where, 2));
+    fir.block_set_terminator(&function, 2, fir.term_goto(3, where, 0));
+    fir.block_set_terminator(&function, 3, fir.term_return(where, 0));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.source_fact mut storage = ownership_api.source_fact{};
+    storage.key = id(ownership_api.entity_kind.source, 1);
+    storage.kind = ownership_api.source_kind.stack;
+    storage.validity = ownership_api.validity_kind.live;
+    ownership_state.append_sources(&entry, storage);
+    ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+    empty.place = slot(1);
+    ownership_state.append_contents(&entry, empty);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_flow.step[1] mut steps = {
+        local_step(&e, ownership_transfer.action.allocation, 1, 1, 1, 0),
+    };
+    steps[0].local.allocation = ownership_local_env.allocation(1, 100, 1, 1);
+    steps[0].local.fresh_source = ownership_local_env.source(101,
+        ownership_api.source_kind.heap, steps[0].local.allocation.key);
+    ownership_api.borrow_relation[1] borrow = {
+        ownership_local_env.borrow(steps[0].local.fresh_source.key, 1, slot(1)),
+    };
+    steps[0].local.value = ownership_local_env.reference(1,
+        steps[0].local.fresh_source.key, borrow[..]);
+    steps[0].local.source_key = steps[0].local.fresh_source.key;
+    f.limits.g = 1;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    ownership_events.store mut events = ownership_events.store{};
+    defer ownership_events.free(&events);
+    assert(ownership_events.bind(&events, &f.limits, &f.services));
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    input.steps = steps[..];
+    ownership_flow.parameter[1] parameters = {
+        ownership_flow.parameter{slot(1).root, storage.key},
+    };
+    input.parameters = parameters[..];
+    ownership_flow.event_binding[1] bindings = {
+        flow_event(ownership_api.operation_position{.block = 3, .terminator = true},
+            ownership_api.event_kind.incomplete_proof, steps[0].local.allocation.key, 1),
+    };
+    input.events = bindings[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.blocks[3].widened && result.blocks[3].len == 1);
+    assert(result.blocks[3].paths[0].facts.allocations_len == 1);
+    assert(result.blocks[3].paths[0].facts.allocations[0].count.zero);
+    assert(result.blocks[3].paths[0].facts.allocations[0].count.one);
+    assert(result.failures == 1 && result.normal_returns == 1 && events.len == 1);
+    ownership_api.event_descriptor* stored = ownership_events.at(&events, 0);
+    assert(stored->kind == ownership_api.event_kind.incomplete_proof);
+    assert(stored->evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(stored->reason == ownership_api.incomplete_reason.missing_path);
+    diag.sink mut diagnostics = diag.create();
+    defer diag.free(&diagnostics);
+    ownership_diag.renderer mut render_at = ownership_diag.renderer{};
+    ownership_diag.bind(&render_at, &diagnostics, &events, null, null, &f.services);
+    ownership_api.event_descriptor[1] items = {*stored};
+    ownership_api.diagnostic_request request = ownership_api.diagnostic_request{
+        items[..], result.first_failure};
+    ownership_api.diagnostic_result rendered = ownership_api.render(&f.services, &request);
+    assert(rendered.rendered && diag.count(&diagnostics) == 1);
+    assert(diag.record_at(&diagnostics, 0).msg ==
+        "cannot prove parameter storage has no live owner");
+    ownership_flow.free(&result);
+}
+
 fn return_events_keep_function_identity() void {
     fixture mut f = fixture{};
     init(&f);
@@ -1203,6 +1410,37 @@ fn delegated_events_keep_return_identity() void {
         ownership_api.incomplete_reason.work_limit);
     assert(ownership_events.at(&events, 1)->reason ==
         ownership_api.incomplete_reason.work_limit);
+    u64 mut i = 0;
+    while (i < events.len) {
+        ownership_api.event_descriptor* stored = ownership_events.at(&events, i);
+        assert(stored->limit.present &&
+            stored->limit.category == ownership_api.limit_category.w);
+        assert(stored->limit.used == 1 && stored->limit.bound == 1);
+        assert(stored->limit.work == ownership_api.work_kind.transfer);
+        assert(stored->limit.source.line == stored->source.line);
+        assert(stored->limit.operation.block == stored->operation.block);
+        i += 1;
+    }
+    diag.sink mut diagnostics = diag.create();
+    defer diag.free(&diagnostics);
+    ownership_diag.renderer mut render_at = ownership_diag.renderer{};
+    ownership_diag.bind(&render_at, &diagnostics, &events, null, null, &f.services);
+    ownership_api.event_descriptor[2] items = {
+        *ownership_events.at(&events, 0), *ownership_events.at(&events, 1),
+    };
+    ownership_api.diagnostic_request request = ownership_api.diagnostic_request{
+        items[..], result.first_failure};
+    ownership_api.diagnostic_result rendered = ownership_api.render(&f.services, &request);
+    assert(rendered.rendered && diag.count(&diagnostics) == 2 &&
+        diag.record_count(&diagnostics) == 4);
+    assert(diag.record_at(&diagnostics, 0).msg ==
+        "ownership analysis exceeds the transfer-work bound 1");
+    assert(diag.record_at(&diagnostics, 1).msg ==
+        "1 work units complete; this operation needs another work unit");
+    assert(diag.record_at(&diagnostics, 2).msg ==
+        "ownership analysis exceeds the transfer-work bound 1");
+    assert(diag.record_at(&diagnostics, 3).msg ==
+        "1 work units complete; this operation needs another work unit");
     ownership_flow.free(&result);
 }
 
@@ -1255,6 +1493,64 @@ fn flow_work_limit(u32 variant) void {
         assert(result.first_failure.terminal.limit.category == ownership_api.limit_category.w);
         assert(result.first_failure.terminal.limit.bound == 1);
     }
+    ownership_flow.free(&result);
+}
+
+fn direct_budget_event_renders_once() void {
+    fixture mut f = fixture{};
+    string[1] blocks = {
+        "bb0: { _2 = const u64 1; _2 = const u64 2; _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "let _2: u64;", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    f.limits.w = 1;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    ownership_events.store mut events = ownership_events.store{};
+    defer ownership_events.free(&events);
+    assert(ownership_events.bind(&events, &f.limits, &f.services));
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.step[2] mut steps = {};
+    steps[0].kind = ownership_flow.step_kind.collection_write;
+    steps[0].written = fir.place_local(2);
+    steps[1].kind = ownership_flow.step_kind.collection_write;
+    steps[1].gap = 1;
+    steps[1].written = fir.place_local(2);
+    steps[1].source.line = 50;
+    steps[1].source.col = 3;
+    steps[1].operation.operation = 1;
+    input.steps = steps[..];
+    ownership_flow.event_binding[1] bindings = {
+        flow_event(steps[1].operation, ownership_api.event_kind.work_failure,
+            ownership_api.entity_id{}, 1),
+    };
+    input.events = bindings[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 1 && result.normal_returns == 0 && events.len == 1);
+    ownership_api.event_descriptor* stored = ownership_events.at(&events, 0);
+    assert(stored->kind == ownership_api.event_kind.work_failure);
+    assert(stored->limit.present && stored->limit.category == ownership_api.limit_category.w);
+    assert(stored->limit.used == 1 && stored->limit.bound == 1);
+    assert(stored->limit.work == ownership_api.work_kind.transfer);
+    assert(stored->limit.source.line == 50 && stored->source.line == 50);
+    ownership_api.event_request duplicate = ownership_api.event_request{
+        *stored, result.first_failure};
+    assert(ownership_api.record_event(&f.services, &duplicate).retained && events.len == 1);
+    diag.sink mut diagnostics = diag.create();
+    defer diag.free(&diagnostics);
+    ownership_diag.renderer mut render_at = ownership_diag.renderer{};
+    ownership_diag.bind(&render_at, &diagnostics, &events, null, null, &f.services);
+    ownership_api.event_descriptor[2] items = {*stored, *stored};
+    ownership_api.diagnostic_request request = ownership_api.diagnostic_request{
+        items[..], result.first_failure};
+    ownership_api.diagnostic_result rendered = ownership_api.render(&f.services, &request);
+    assert(rendered.rendered && diag.count(&diagnostics) == 1 &&
+        diag.record_count(&diagnostics) == 2);
+    assert(diag.record_at(&diagnostics, 0).msg ==
+        "ownership analysis exceeds the transfer-work bound 1");
+    assert(diag.record_at(&diagnostics, 1).msg ==
+        "1 work units complete; this operation needs another work unit");
     ownership_flow.free(&result);
 }
 
@@ -1524,12 +1820,14 @@ fn main() i32 {
     call_invalidates_null_fact(2);
     call_invalidates_null_fact(3);
     widened_parameter_keeps_obligation();
+    widened_optional_parameter_uses_incomplete_evidence();
     return_events_keep_function_identity();
     delegated_events_keep_return_identity();
     flow_work_limit(0);
     flow_work_limit(1);
     flow_work_limit(2);
     flow_work_limit(3);
+    direct_budget_event_renders_once();
     parameter_end_work_limit();
     widening_work_limit();
     repeated_allocation_site(false);
@@ -1547,6 +1845,14 @@ fn main() i32 {
     returned_borrow_proof(2);
     returned_borrow_proof(3);
     returned_borrow_proof(4);
+    returned_null_result(0);
+    returned_null_result(1);
+    returned_null_result(2);
+    returned_null_result(3);
+    mixed_aggregate_result(0);
+    mixed_aggregate_result(1);
+    mixed_aggregate_result(2);
+    mixed_aggregate_result(3);
     call_case(0);
     call_case(1);
     call_case(2);
