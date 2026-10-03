@@ -151,8 +151,19 @@ came here.
   Stored header reads follow index and explicit-bound effects.
   An absent upper bound reads length then.
   The proof rejects missing, duplicate, overwritten, substituted, and cross-expansion links.
-  Conditional calls and ambiguous partitions stay keyed incomplete, including deferred expansions.
-  Unknown forms, joins, and folded constants without their value table also stay incomplete.
+  A top-level conditional result proves its predicate, exact switch edges, both arms, and join.
+  Aggregate arms write the joined destination directly.
+  Scalar arms copy their exact produced operands.
+  Nested result arms repeat that proof. Constant predicates still require both emitted arms.
+  Each arm retains its checked source, statement index, and observed FIR exit.
+  Extra predecessors, extra writes, arm swaps, and substituted joins cause keyed refusal.
+  Literal boolean selections of two string literals can prove folded bytes without a value table.
+  Other folded values stay incomplete. Predicate calls retain their refusal policy.
+  Conditional operands and wrappers after a join stay incomplete until their separate proof exists.
+  Session vectors keep numeric indices across growth.
+  Report copies survive session and candidate teardown.
+  Checked source and types outlive the report. FIR stays alive during binding inspection.
+  Unknown forms and ambiguous partitions stay keyed incomplete, including deferred expansions.
   This correspondence proves no returned-storage liveness or callee ownership effect.
   The report retains source and exit evidence after candidate teardown.
   Structural validity, source coverage, and ownership proof remain separate false verdicts.
