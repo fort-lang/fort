@@ -1475,13 +1475,8 @@ fn return_source_map_requires_complete_identity() void {
     ownership_flow.free(&missing);
     input.source_files = f.source_files[0..f.source_files_len];
     f.source_files[0].module = 0;
-    ownership_flow.analysis mut zero = ownership_flow.solve(&input);
-    assert(zero.first_failure.terminal.reason ==
-        ownership_api.incomplete_reason.invalid_input);
-    ownership_flow.free(&zero);
-    f.source_files[0].module = 7;
-    f.source_files[0].file = 14;
-    f.source_files[1] = ownership_flow.source_file_binding{7, 14, "other.ft"};
+    f.source_files[0].file = 0;
+    f.source_files[1] = ownership_flow.source_file_binding{0, 0, "other.ft"};
     input.source_files = f.source_files[0..2];
     ownership_flow.analysis mut conflict = ownership_flow.solve(&input);
     assert(conflict.first_failure.terminal.reason ==
@@ -1493,7 +1488,7 @@ fn return_source_map_requires_complete_identity() void {
     ownership_flow.free(&mapped);
 }
 
-fn return_events_keep_function_identity() void {
+fn return_events_keep_function_identity(u32 module, u32 file) void {
     fixture mut f = fixture{};
     init(&f);
     defer close(&f);
@@ -1531,8 +1526,8 @@ fn return_events_keep_function_identity() void {
     input.identity.declaration.declaration = 4;
     input.identity.instance = 5;
     assert(f.source_files_len == 1);
-    f.source_files[0].module = 7;
-    f.source_files[0].file = 9;
+    f.source_files[0].module = module;
+    f.source_files[0].file = file;
     ownership_flow.parameter[1] parameters = {
         ownership_flow.parameter{slot(1).root, storage.key},
     };
@@ -1555,10 +1550,16 @@ fn return_events_keep_function_identity() void {
     assert(ownership_events.at(&events, 1)->operation.block == 2);
     assert(ownership_events.at(&events, 0)->source.line == 11);
     assert(ownership_events.at(&events, 1)->source.line == 12);
-    assert(ownership_events.at(&events, 0)->source.module == 7 &&
-        ownership_events.at(&events, 0)->source.file == 9);
-    assert(ownership_events.at(&events, 1)->source.module == 7 &&
-        ownership_events.at(&events, 1)->source.file == 9);
+    assert(ownership_events.at(&events, 0)->source.col == 2 &&
+        ownership_events.at(&events, 0)->source.end_line == 11 &&
+        ownership_events.at(&events, 0)->source.end_col == 2);
+    assert(ownership_events.at(&events, 1)->source.col == 4 &&
+        ownership_events.at(&events, 1)->source.end_line == 12 &&
+        ownership_events.at(&events, 1)->source.end_col == 4);
+    assert(ownership_events.at(&events, 0)->source.module == module &&
+        ownership_events.at(&events, 0)->source.file == file);
+    assert(ownership_events.at(&events, 1)->source.module == module &&
+        ownership_events.at(&events, 1)->source.file == file);
     diag.sink mut diagnostics = diag.create();
     defer diag.free(&diagnostics);
     ownership_diag.renderer mut render_at = ownership_diag.renderer{};
@@ -1573,6 +1574,10 @@ fn return_events_keep_function_identity() void {
     assert(rendered.rendered && diag.count(&diagnostics) == 2);
     assert(diag.record_at(&diagnostics, 0).loc.file == "return.ft");
     assert(diag.record_at(&diagnostics, 1).loc.file == "return.ft");
+    assert(diag.record_at(&diagnostics, 0).loc.line == 11 &&
+        diag.record_at(&diagnostics, 0).loc.col == 2);
+    assert(diag.record_at(&diagnostics, 1).loc.line == 12 &&
+        diag.record_at(&diagnostics, 1).loc.col == 4);
     ownership_flow.free(&result);
 }
 
@@ -2059,7 +2064,10 @@ fn main() i32 {
     widened_optional_parameter_uses_incomplete_evidence();
     widened_parameter_borrow_stays_incomplete();
     return_source_map_requires_complete_identity();
-    return_events_keep_function_identity();
+    return_events_keep_function_identity(7, 9);
+    return_events_keep_function_identity(0, 9);
+    return_events_keep_function_identity(7, 0);
+    return_events_keep_function_identity(0, 0);
     delegated_events_keep_return_identity();
     flow_work_limit(0);
     flow_work_limit(1);
