@@ -4,16 +4,56 @@
 //| selected inventory 1
 //| produced expansion 1
 //| repeated expansion 3
+//| context damage 4
 //| damaged keys 5
-//| capture kinds 4
+//| boundary damage 4
+//| call result incomplete
+//| capture kinds 7
 //| selected paths 2
-//| boundary repeats 9
+//| boundary repeats 10
 //| absence remains open
 /// Checks selected source inventory against inactive range proposals.
 import ast;
+import diag;
 import fir;
+import fir_llvm;
 import fir_lower;
+import fir_print;
+import fir_verify;
+import gen;
+import gen_env;
 import lower_env;
+import std.strbuf;
+
+fn check_output(lower_env.env mut* e, ast.node* decl, fir.func* f) void {
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(f, &e->rt, &bad));
+    fir.func mut ordinary = fir.func{};
+    defer fir.func_free(&ordinary);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function(&e->c.ck, decl, &ordinary, &why));
+    assert(!fir_verify.find_violation(&ordinary, &e->rt, &bad));
+    strbuf.str_buf mut audited_text = strbuf.create();
+    defer strbuf.free(&audited_text);
+    strbuf.str_buf mut ordinary_text = strbuf.create();
+    defer strbuf.free(&ordinary_text);
+    fir_print.print_function(f, &audited_text);
+    fir_print.print_function(&ordinary, &ordinary_text);
+    assert(strbuf.view(&audited_text) == strbuf.view(&ordinary_text));
+    gen.emitter mut audited_ir = gen.emitter{};
+    gen.gen_init(&audited_ir, &e->c.m.s, gen.gen_options{});
+    defer gen.gen_free(&audited_ir);
+    gen.emitter mut ordinary_ir = gen.emitter{};
+    gen.gen_init(&ordinary_ir, &e->c.m.s, gen.gen_options{});
+    defer gen.gen_free(&ordinary_ir);
+    fir_llvm.translate_function(&audited_ir, f);
+    fir_llvm.translate_function(&ordinary_ir, &ordinary);
+    assert(strbuf.view(&audited_ir.funcs) == strbuf.view(&ordinary_ir.funcs));
+    strbuf.str_buf mut report = strbuf.create();
+    defer strbuf.free(&report);
+    assert(gen_env.block_report(&report, strbuf.view(&audited_ir.funcs))
+           == gen_env.BLOCKS_OK);
+}
 
 fn selected_inventory() void {
     lower_env.env mut e = lower_env.env{};
@@ -42,6 +82,7 @@ fn selected_inventory() void {
     assert(audit.produced_expansions == 1 && audit.matched_captures == 1);
     assert(audit.rows.len == 1 && audit.rows.items[0].key.expansion == 1);
     assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+    check_output(&e, decl, &f);
     fir_lower.range_source_audit_free(&audit);
     proposed.captures.len = 0;
     assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
@@ -86,42 +127,97 @@ fn repeated_expansion() void {
                                                            &proposed, &why));
     fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
     defer fir_lower.range_source_audit_free(&audit);
-    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
-    assert(audit.selected_declarations == 2 && audit.produced_expansions == 3);
-    assert(audit.matched_captures == 3 && audit.rows.len == 3);
-    assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
-    assert(audit.rows.items[0].key.declaration == 1);
-    assert(audit.rows.items[1].key.declaration == 2);
-    assert(audit.rows.items[2].key.declaration == 2);
-    assert(audit.rows.items[1].key.context != audit.rows.items[2].key.context);
-    assert(audit.rows.items[1].key.exit_source.line == 7);
-    assert(audit.rows.items[2].key.exit_source.line == 9);
-    assert(audit.rows.items[1].binding.loan != audit.rows.items[2].binding.loan);
-    assert(!audit.source_complete && !f.range_source_complete);
-    fir_lower.range_source_audit_free(&audit);
-    u64 mut first_entry = 0;
-    u64 mut second_entry = 0;
-    u64 mut i = 0;
-    while (i < proposed.boundaries.len) {
-        fir_lower.range_boundary_candidate* c = &proposed.boundaries.items[i];
-        if (c->boundary.kind == fir.range_boundary_kind.body_entry) {
-            if (c->expansion == 2) { first_entry = i; }
-            if (c->expansion == 3) { second_entry = i; }
-        }
-        i += 1;
-    }
-    assert(first_entry != second_entry);
-    u32 held = proposed.boundaries.items[first_entry].boundary.block;
-    proposed.boundaries.items[first_entry].boundary.block =
-        proposed.boundaries.items[second_entry].boundary.block;
     assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
-    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
-    fir_lower.range_source_audit_free(&audit);
-    proposed.boundaries.items[first_entry].boundary.block = held;
-    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.selected_declarations == 2 && audit.produced_expansions == 3);
+    assert(audit.matched_captures == 1 && audit.rows.len == 1);
+    assert(audit.rows.items[0].key.declaration == 1);
+    assert(audit.failure.reason == fir_lower.range_audit_fault.context);
+    assert(audit.failure.key.declaration == 2 && audit.failure.key.expansion == 2);
+    assert(audit.failure.key.context_source.line == 4);
+    assert(audit.failure.key.exit_source.line == 7);
+    assert(!audit.source_complete && !f.range_source_complete);
+    check_output(&e, decl, &f);
     fir_lower.range_candidate_set_free(&proposed);
-    assert(audit.boundaries.len == cast(audit.matched_boundaries, u64));
-    assert(audit.rows.items[2].boundaries_len > 0);
+    assert(audit.rows.items[0].boundaries_len > 0);
+}
+
+fn produced_exit(fir.func* f, u32 source_line) diag.loc {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, p);
+            if (s->loc.line == source_line && s->exit_loc.line != 0) {
+                return s->exit_loc;
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    panic("range audit test: missing FIR exit");
+}
+
+fn expect_context_refusal(ast.node* decl, fir.func* f,
+                          fir_lower.range_candidate_set* proposed,
+                          diag.loc exit_source) void {
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(!fir_lower.audit_produced_ranges(decl, f, proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.context);
+    assert(audit.failure.key.declaration == 1 && audit.failure.key.expansion == 1);
+    assert(audit.failure.key.source.line == 3);
+    assert(audit.failure.key.context_source.line == 3);
+    assert(audit.failure.key.exit_source.line == exit_source.line);
+    assert(audit.failure.key.exit_source.col == exit_source.col);
+    assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+}
+
+fn deferred_context_damage() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        defer { for (i32 x : values) { } }",
+        "    }",
+        "}",
+        "",
+        "",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    assert(proposed.captures.len == 1 && proposed.deferred.len == 2);
+    diag.loc exit_source = produced_exit(&f, 3);
+    expect_context_refusal(decl, &f, &proposed, exit_source);
+    check_output(&e, decl, &f);
+    u64 captures = proposed.captures.len;
+    proposed.captures.len = 0;
+    expect_context_refusal(decl, &f, &proposed, exit_source);
+    proposed.captures.len = captures;
+    u64 contexts = proposed.deferred.len;
+    proposed.deferred.len = 1;
+    expect_context_refusal(decl, &f, &proposed, exit_source);
+    proposed.deferred.len = contexts;
+    u32 parent = proposed.deferred.items[1].parent;
+    assert(parent != 0);
+    proposed.deferred.items[1].parent = 0;
+    expect_context_refusal(decl, &f, &proposed, exit_source);
+    proposed.deferred.items[1].parent = parent;
+    u32 occurrence = proposed.captures.items[0].occurrence.exit_occurrence;
+    u32 inner_occurrence = proposed.deferred.items[1].exit_occurrence;
+    proposed.captures.items[0].occurrence.exit_occurrence = 99;
+    proposed.deferred.items[1].exit_occurrence = 99;
+    expect_context_refusal(decl, &f, &proposed, exit_source);
+    proposed.captures.items[0].occurrence.exit_occurrence = occurrence;
+    proposed.deferred.items[1].exit_occurrence = inner_occurrence;
 }
 
 fn damaged_keys() void {
@@ -165,6 +261,144 @@ fn damaged_keys() void {
     assert(!audit.source_complete && !f.range_source_complete);
 }
 
+fn cleanup_damage() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(i32[2] values) void {",
+        "    for (i32 x : values) { }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    assert(proposed.boundaries.len == 5);
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    check_output(&e, decl, &f);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.boundaries.len = 2;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    assert(audit.failure.key.declaration == 1 && audit.failure.key.expansion == 1);
+    assert(!audit.source_complete);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.boundaries.len = 5;
+    fir.range_boundary a = proposed.boundaries.items[2].boundary;
+    fir.range_boundary b = proposed.boundaries.items[3].boundary;
+    fir.range_boundary c = proposed.boundaries.items[4].boundary;
+    u32 entry_block = proposed.boundaries.items[1].boundary.block;
+    proposed.boundaries.items[2].boundary.block = entry_block;
+    proposed.boundaries.items[3].boundary.block = entry_block;
+    proposed.boundaries.items[4].boundary.block = entry_block;
+    proposed.boundaries.items[2].boundary.position = 0;
+    proposed.boundaries.items[3].boundary.position = 0;
+    proposed.boundaries.items[4].boundary.position = 0;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.boundaries.items[2].boundary = a;
+    proposed.boundaries.items[3].boundary = b;
+    proposed.boundaries.items[4].boundary = c;
+    fir_lower.range_boundary_candidate_add(&proposed.boundaries,
+        fir_lower.range_boundary_candidate{.declaration = 77, .expansion = 88,
+            .boundary = fir.range_boundary{.loan = 88,
+                .kind = fir.range_boundary_kind.capture,
+                .source = diag.loc{.line = 99}}});
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    assert(audit.failure.key.declaration == 77 && audit.failure.key.expansion == 88);
+    assert(audit.failure.key.source.line == 99);
+    assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+}
+
+fn multi_exit_cleanup_damage() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn walk(i32[2] values, bool stop) void {",
+        "    for (i32 x : values) {",
+        "        if (stop) { break; }",
+        "    }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(proposed.boundaries.len == 8);
+    fir_lower.range_source_audit_free(&audit);
+    u64 mut read_at = 0;
+    u64 mut write_at = 0;
+    u32 mut removed = 0;
+    while (read_at < proposed.boundaries.len) {
+        fir_lower.range_boundary_candidate item = proposed.boundaries.items[read_at];
+        bool cleanup = item.boundary.kind == fir.range_boundary_kind.body_cleanup
+            || item.boundary.kind == fir.range_boundary_kind.loan_exit
+            || item.boundary.kind == fir.range_boundary_kind.outer_cleanup;
+        if (cleanup && item.boundary.source.line == 3) {
+            removed += 1;
+        } else {
+            proposed.boundaries.items[write_at] = item;
+            write_at += 1;
+        }
+        read_at += 1;
+    }
+    assert(removed == 3 && write_at == 5);
+    proposed.boundaries.len = write_at;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    assert(audit.failure.key.declaration == 1 && audit.failure.key.expansion == 1);
+    assert(!audit.source_complete && !f.range_source_complete);
+}
+
+fn call_result_incomplete() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "struct holder { i32@ items; }",
+        "fn pick(holder* h) holder* { return h; }",
+        "fn walk(holder* h) void {",
+        "    for (i32 x : pick(h)->items) { }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.selected_declarations == 1 && audit.produced_expansions == 1);
+    assert(audit.failure.reason == fir_lower.range_audit_fault.protected_path);
+    assert(audit.failure.key.source.line == 4 && audit.rows.len == 0);
+    assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+    check_output(&e, decl, &f);
+}
+
 fn capture_case(string@ source, fir.range_capture_kind kind, u32 protected) void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -184,6 +418,7 @@ fn capture_case(string@ source, fir.range_capture_kind kind, u32 protected) void
     assert(audit.selected_declarations == 1 && audit.produced_expansions == 1);
     assert(audit.rows.items[0].binding.kind == kind && audit.protected_paths == protected);
     assert(!audit.source_complete && !f.range_source_complete);
+    check_output(&e, decl, &f);
 }
 
 fn capture_kinds() void {
@@ -222,6 +457,24 @@ fn capture_kinds() void {
         "}",
     };
     capture_case(projected[..], fir.range_capture_kind.borrowed_header, 1);
+    string[3] owning_span = {
+        "fn walk(u8 mut@ own bytes) void {",
+        "    for (u8 x : bytes) { }",
+        "}",
+    };
+    capture_case(owning_span[..], fir.range_capture_kind.borrowed_header, 1);
+    string[3] owning_string = {
+        "fn walk(string own text) void {",
+        "    for (char x : text) { }",
+        "}",
+    };
+    capture_case(owning_string[..], fir.range_capture_kind.borrowed_header, 1);
+    string[3] borrowed_string = {
+        "fn walk(string text) void {",
+        "    for (char x : text) { }",
+        "}",
+    };
+    capture_case(borrowed_string[..], fir.range_capture_kind.borrowed_header, 1);
 }
 
 fn selected_paths() void {
@@ -244,7 +497,8 @@ fn selected_paths() void {
     capture_case(disconnected[..], fir.range_capture_kind.non_owning_array_copy, 0);
 }
 
-fn boundary_case(string@ source, u32 declarations, u32 expansions) void {
+fn boundary_case(string@ source, u32 declarations, u32 expansions,
+                 bool deferred) void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
@@ -259,12 +513,39 @@ fn boundary_case(string@ source, u32 declarations, u32 expansions) void {
                                                            &proposed, &why));
     fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
     defer fir_lower.range_source_audit_free(&audit);
-    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    bool matched = fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit);
+    assert(matched != deferred);
     assert(audit.selected_declarations == declarations);
     assert(audit.produced_expansions == expansions);
-    assert(audit.matched_captures == expansions);
-    assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+    if (deferred) {
+        assert(audit.failure.reason == fir_lower.range_audit_fault.context);
+        assert(audit.failure.key.context_source.line == 2);
+        assert(audit.failure.key.exit_source.line != 0);
+    } else {
+        assert(audit.matched_captures == expansions);
+        assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+    }
     assert(!audit.source_complete && !f.range_source_complete);
+    if (declarations == 2 && !deferred) {
+        fir_lower.range_source_audit_free(&audit);
+        u64 mut first = proposed.boundaries.len;
+        u64 mut second = proposed.boundaries.len;
+        u64 mut i = 0;
+        while (i < proposed.boundaries.len) {
+            fir_lower.range_boundary_candidate* c = &proposed.boundaries.items[i];
+            if (c->boundary.kind == fir.range_boundary_kind.body_entry) {
+                if (c->expansion == 1) { first = i; }
+                if (c->expansion == 2) { second = i; }
+            }
+            i += 1;
+        }
+        assert(first < proposed.boundaries.len && second < proposed.boundaries.len);
+        proposed.boundaries.items[first].boundary.block =
+            proposed.boundaries.items[second].boundary.block;
+        assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+        assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+        assert(!audit.source_complete);
+    }
 }
 
 fn boundary_repeats() void {
@@ -282,7 +563,7 @@ fn boundary_repeats() void {
         "    return sum;",
         "}",
     };
-    boundary_case(nested[..], 2, 2);
+    boundary_case(nested[..], 2, 2, false);
     string[9] tail = {
         "fn walk(i32[2] values, bool stop) i32 {",
         "    i32 mut sum = 0;",
@@ -294,7 +575,7 @@ fn boundary_repeats() void {
         "    return sum;",
         "}",
     };
-    boundary_case(tail[..], 1, 1);
+    boundary_case(tail[..], 1, 1, false);
     string[12] continued = {
         "fn walk(i32[2] values, bool skip) i32 {",
         "    i32 mut count = 0;",
@@ -309,7 +590,7 @@ fn boundary_repeats() void {
         "    return count;",
         "}",
     };
-    boundary_case(continued[..], 1, 1);
+    boundary_case(continued[..], 1, 1, false);
     string[16] switched = {
         "fn walk(i32[2] values, i32 mode, bool stop) i32 {",
         "    i32 mut count = 0;",
@@ -328,7 +609,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(switched[..], 1, 1);
+    boundary_case(switched[..], 1, 1, false);
     string[10] broken = {
         "fn walk(i32[2] values, bool stop) i32 {",
         "    i32 mut count = 0;",
@@ -341,7 +622,7 @@ fn boundary_repeats() void {
         "    return count;",
         "}",
     };
-    boundary_case(broken[..], 1, 1);
+    boundary_case(broken[..], 1, 1, false);
     string[9] returned = {
         "fn walk(i32[2] values, i32 mut base) i32 {",
         "    defer base +%= 10;",
@@ -353,7 +634,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(returned[..], 1, 1);
+    boundary_case(returned[..], 1, 1, false);
     string[7] function_defer = {
         "fn walk(i32[2] values) void {",
         "    defer { for (i32 y : values) { } }",
@@ -363,7 +644,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(function_defer[..], 2, 3);
+    boundary_case(function_defer[..], 2, 3, true);
     string[7] aborted = {
         "fn walk(i32[2] values) noreturn {",
         "    for (i32 x : values) {",
@@ -373,7 +654,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(aborted[..], 1, 1);
+    boundary_case(aborted[..], 1, 1, false);
     string[6] zero = {
         "fn walk(i32[1] values) i32 {",
         "    i32 mut count = 0;",
@@ -382,7 +663,18 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(zero[..], 1, 1);
+    boundary_case(zero[..], 1, 1, false);
+    string[8] body_locals = {
+        "fn walk(i32[2] values) i32 {",
+        "    i32 mut total = 0;",
+        "    for (i32 x : values) {",
+        "        i32 saved = x;",
+        "        total += saved;",
+        "    }",
+        "    return total;",
+        "}",
+    };
+    boundary_case(body_locals[..], 1, 1, false);
 }
 
 fn absence_stays_open() void {
@@ -423,14 +715,21 @@ fn main() i32 {
     println("produced expansion 1");
     repeated_expansion();
     println("repeated expansion 3");
+    deferred_context_damage();
+    println("context damage 4");
     damaged_keys();
     println("damaged keys 5");
+    cleanup_damage();
+    multi_exit_cleanup_damage();
+    println("boundary damage 4");
+    call_result_incomplete();
+    println("call result incomplete");
     capture_kinds();
-    println("capture kinds 4");
+    println("capture kinds 7");
     selected_paths();
     println("selected paths 2");
     boundary_repeats();
-    println("boundary repeats 9");
+    println("boundary repeats 10");
     absence_stays_open();
     println("absence remains open");
     return 0;
