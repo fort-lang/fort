@@ -2,6 +2,13 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| selected inventory 1
+//| produced expansion 1
+//| repeated expansion 3
+//| damaged keys 5
+//| capture kinds 4
+//| selected paths 2
+//| boundary repeats 9
+//| absence remains open
 /// Checks selected source inventory against inactive range proposals.
 import ast;
 import fir;
@@ -31,8 +38,17 @@ fn selected_inventory() void {
     assert(fir_lower.audit_range_inventory(decl, &proposed, &audit));
     assert(audit.selected_declarations == 1 && !audit.source_complete);
     fir_lower.range_source_audit_free(&audit);
-    proposed.declarations.len = 0;
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.produced_expansions == 1 && audit.matched_captures == 1);
+    assert(audit.rows.len == 1 && audit.rows.items[0].key.expansion == 1);
+    assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+    fir_lower.range_source_audit_free(&audit);
     proposed.captures.len = 0;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.expansion_key);
+    assert(audit.failure.key.declaration == 1 && audit.failure.key.expansion == 1);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.declarations.len = 0;
     proposed.boundaries.len = 0;
     assert(!fir_lower.audit_range_inventory(decl, &proposed, &audit));
     assert(audit.selected_declarations == 1);
@@ -41,8 +57,381 @@ fn selected_inventory() void {
     assert(!audit.source_complete && !f.range_source_complete);
 }
 
+fn repeated_expansion() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] values, bool skip) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer {",
+        "            for (i32 y : values) { count +%= y; }",
+        "        }",
+        "        if (skip) { continue; }",
+        "        count +%= x;",
+        "    }",
+        "    return count;",
+        "}",
+        "",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.selected_declarations == 2 && audit.produced_expansions == 3);
+    assert(audit.matched_captures == 3 && audit.rows.len == 3);
+    assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+    assert(audit.rows.items[0].key.declaration == 1);
+    assert(audit.rows.items[1].key.declaration == 2);
+    assert(audit.rows.items[2].key.declaration == 2);
+    assert(audit.rows.items[1].key.context != audit.rows.items[2].key.context);
+    assert(audit.rows.items[1].key.exit_source.line == 7);
+    assert(audit.rows.items[2].key.exit_source.line == 9);
+    assert(audit.rows.items[1].binding.loan != audit.rows.items[2].binding.loan);
+    assert(!audit.source_complete && !f.range_source_complete);
+    fir_lower.range_source_audit_free(&audit);
+    u64 mut first_entry = 0;
+    u64 mut second_entry = 0;
+    u64 mut i = 0;
+    while (i < proposed.boundaries.len) {
+        fir_lower.range_boundary_candidate* c = &proposed.boundaries.items[i];
+        if (c->boundary.kind == fir.range_boundary_kind.body_entry) {
+            if (c->expansion == 2) { first_entry = i; }
+            if (c->expansion == 3) { second_entry = i; }
+        }
+        i += 1;
+    }
+    assert(first_entry != second_entry);
+    u32 held = proposed.boundaries.items[first_entry].boundary.block;
+    proposed.boundaries.items[first_entry].boundary.block =
+        proposed.boundaries.items[second_entry].boundary.block;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.boundaries.items[first_entry].boundary.block = held;
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    fir_lower.range_candidate_set_free(&proposed);
+    assert(audit.boundaries.len == cast(audit.matched_boundaries, u64));
+    assert(audit.rows.items[2].boundaries_len > 0);
+}
+
+fn damaged_keys() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(i32@ values) void {",
+        "    for (i32 x : values) { }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.protected_paths == 1 && audit.rows.items[0].boundaries_len == 5);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.captures.items[0].expansion = 9;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.expansion_key);
+    assert(audit.failure.key.declaration == 1 && audit.failure.key.expansion == 1);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.captures.items[0].expansion = 1;
+    proposed.captures.items[0].occurrence.exit_source.line = 3;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.exit_source);
+    assert(audit.failure.key.source.line == 2);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.captures.items[0].occurrence.exit_source.line = 0;
+    proposed.captures.items[0].binding.original = proposed.captures.items[0].binding.captured;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.protected_path);
+    assert(!audit.source_complete && !f.range_source_complete);
+}
+
+fn capture_case(string@ source, fir.range_capture_kind kind, u32 protected) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source, true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.selected_declarations == 1 && audit.produced_expansions == 1);
+    assert(audit.rows.items[0].binding.kind == kind && audit.protected_paths == protected);
+    assert(!audit.source_complete && !f.range_source_complete);
+}
+
+fn capture_kinds() void {
+    string[3] owning = {
+        "fn walk(u8 mut* own[2] items) void {",
+        "    for (u8 mut* item : items) { }",
+        "}",
+    };
+    capture_case(owning[..], fir.range_capture_kind.owning_fixed_array_place, 1);
+    string[5] copied = {
+        "fn walk(i32[2] mut values) void {",
+        "    for (i32 x : values) {",
+        "        values[0] = 9;",
+        "    }",
+        "}",
+    };
+    capture_case(copied[..], fir.range_capture_kind.non_owning_array_copy, 0);
+    string[5] indirect = {
+        "struct holder { u8 mut@ own items; }",
+        "fn walk(holder mut* mut h, holder mut* next) void {",
+        "    for (u8 x : h->items) { }",
+        "    h = next;",
+        "}",
+    };
+    capture_case(indirect[..], fir.range_capture_kind.borrowed_header, 1);
+    string[10] projected = {
+        "fn select(i32 mut* count) i32 {",
+        "    *count += 1;",
+        "    return 0;",
+        "}",
+        "fn walk(u8 mut@ own[2] items, i32 mut count) i32 {",
+        "    for (u8 x : items[select(&count)]) {",
+        "        count += 1;",
+        "    }",
+        "    return count;",
+        "}",
+    };
+    capture_case(projected[..], fir.range_capture_kind.borrowed_header, 1);
+}
+
+fn selected_paths() void {
+    string[7] branch = {
+        "fn walk(i32[2] values) void {",
+        "    $if (true) {",
+        "        for (i32 x : values) { }",
+        "    } else {",
+        "        for (i32 y : values) { }",
+        "    }",
+        "}",
+    };
+    capture_case(branch[..], fir.range_capture_kind.non_owning_array_copy, 0);
+    string[4] disconnected = {
+        "fn walk(i32[2] values) void {",
+        "    return;",
+        "    for (i32 x : values) { }",
+        "}",
+    };
+    capture_case(disconnected[..], fir.range_capture_kind.non_owning_array_copy, 0);
+}
+
+fn boundary_case(string@ source, u32 declarations, u32 expansions) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source, true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.selected_declarations == declarations);
+    assert(audit.produced_expansions == expansions);
+    assert(audit.matched_captures == expansions);
+    assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+    assert(!audit.source_complete && !f.range_source_complete);
+}
+
+fn boundary_repeats() void {
+    string[12] nested = {
+        "fn walk(i32[2] outer, i32[2] inner, bool stop) i32 {",
+        "    i32 mut sum = 0;",
+        "    for (i32 x : outer) {",
+        "        sum += x;",
+        "        for (i32 y : inner) {",
+        "            if (stop) { break; }",
+        "            sum += y;",
+        "        }",
+        "        sum += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+    };
+    boundary_case(nested[..], 2, 2);
+    string[9] tail = {
+        "fn walk(i32[2] values, bool stop) i32 {",
+        "    i32 mut sum = 0;",
+        "    for (i32 x : values) {",
+        "        sum += x;",
+        "        if (stop) { sum += 1; }",
+        "        sum += 2;",
+        "    }",
+        "    return sum;",
+        "}",
+    };
+    boundary_case(tail[..], 1, 1);
+    string[12] continued = {
+        "fn walk(i32[2] values, bool skip) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer count +%= 1;",
+        "        defer count +%= 2;",
+        "        if (skip) {",
+        "            continue;",
+        "        }",
+        "        count +%= x;",
+        "    }",
+        "    return count;",
+        "}",
+    };
+    boundary_case(continued[..], 1, 1);
+    string[16] switched = {
+        "fn walk(i32[2] values, i32 mode, bool stop) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        switch (mode) {",
+        "        case 0:",
+        "            count +%= x;",
+        "            break;",
+        "        default:",
+        "            count +%= 1;",
+        "        }",
+        "        if (stop) { break; }",
+        "        count +%= 2;",
+        "    }",
+        "    return count;",
+        "}",
+        "",
+    };
+    boundary_case(switched[..], 1, 1);
+    string[10] broken = {
+        "fn walk(i32[2] values, bool stop) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer count +%= 1;",
+        "        if (stop) { break; }",
+        "        count +%= x;",
+        "    }",
+        "    count +%= 2;",
+        "    return count;",
+        "}",
+    };
+    boundary_case(broken[..], 1, 1);
+    string[9] returned = {
+        "fn walk(i32[2] values, i32 mut base) i32 {",
+        "    defer base +%= 10;",
+        "    for (i32 x : values) {",
+        "        defer base +%= 1;",
+        "        return x + base;",
+        "    }",
+        "    return base;",
+        "}",
+        "",
+    };
+    boundary_case(returned[..], 1, 1);
+    string[7] function_defer = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 y : values) { } }",
+        "    for (i32 x : values) {",
+        "        return;",
+        "    }",
+        "}",
+        "",
+    };
+    boundary_case(function_defer[..], 2, 3);
+    string[7] aborted = {
+        "fn walk(i32[2] values) noreturn {",
+        "    for (i32 x : values) {",
+        "        panic(\"stop\");",
+        "    }",
+        "    while (true) { }",
+        "}",
+        "",
+    };
+    boundary_case(aborted[..], 1, 1);
+    string[6] zero = {
+        "fn walk(i32[1] values) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values[0..0]) { count +%= x; }",
+        "    return count;",
+        "}",
+        "",
+    };
+    boundary_case(zero[..], 1, 1);
+}
+
+fn absence_stays_open() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        for (i32 x : values) { }",
+        "    }",
+        "    defer panic(\"stop\");",
+        "    return;",
+        "}",
+        "",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f,
+                                                           &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.selected_declarations == 1 && audit.produced_expansions == 0);
+    assert(audit.rows.len == 0 && proposed.suppressions.len == 1);
+    assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+    assert(!f.range_supplied_complete && !f.range_source_complete);
+}
+
 fn main() i32 {
     selected_inventory();
     println("selected inventory 1");
+    println("produced expansion 1");
+    repeated_expansion();
+    println("repeated expansion 3");
+    damaged_keys();
+    println("damaged keys 5");
+    capture_kinds();
+    println("capture kinds 4");
+    selected_paths();
+    println("selected paths 2");
+    boundary_repeats();
+    println("boundary repeats 9");
+    absence_stays_open();
+    println("absence remains open");
     return 0;
 }

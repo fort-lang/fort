@@ -206,6 +206,12 @@ expansions, loans, bindings, boundaries, and absences.
 The manifest reports structural validity and selected-source completeness separately.
 Only independent source correspondence can set selected-source completeness.
 Ordinary FIR without a range declaration makes no source range-coverage claim.
+The first source audit enumerates selected checked-source range nodes without reading the
+producer's declaration list. It matches each produced range lowering operation to a distinct
+declaration and expansion key, capture, original protected path, and ordered boundary set.
+It keeps keyed rows and failure evidence outside FIR. This audit does not prove that deferred
+code has no missing expansion. It sets no structural or selected-source completeness claim.
+Absence validation and V14 verification precede source publication.
 
 ### 5.3 Locals
 
