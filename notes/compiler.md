@@ -582,13 +582,21 @@ came here.
 - **Ownership flow retains FIR path alternatives** (D17.14, D17.18).
   `ownership_flow.solve` consumes verified FIR and complete supplied effects.
   It follows reachable edges and keeps null facts by value version until a write invalidates them.
+  A known call invalidates its supplied value versions. An unknown fort call removes all null facts.
   The worklist keeps path alternatives up to G, then widens while it retains ownership obligations.
+  At P, the pass records a lost predicate and keeps the successor.
+  It reports an error only if a later operation needs the lost fact.
+  Collection and call effects charge W before they change facts.
+  A repeated allocation site keeps a bounded record of released allocations and their histories.
+  A retained borrow prevents reuse of that site's current identity.
   A whole-body range loan starts at body entry and ends at loan exit.
   Direct and summarized writes to captured storage use one overlap test.
-  At normal return, the pass checks returned borrows after expanded effects.
+  At normal return, the pass checks complete returned-borrow relations after expanded effects.
   It also checks parameter obligations.
+  A widened owner with no known root keeps its parameter obligation.
   It then ends parameter stack sources. Abort and trap paths do not require normal cleanup.
-  Unknown call outcomes keep a possible return. This pass does not construct source effects.
+  Unknown call outcomes keep a possible return. A guarded return needs a condition proof.
+  This pass does not construct source effects.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by
