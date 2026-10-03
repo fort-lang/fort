@@ -738,6 +738,107 @@ fn size(types.node* ty, ownership_api.services* svc, request* req, u64 depth,
     }
     return complete();
 }
+
+fn expression_copy_price(expression input) u64 {
+    return input.terms.len == 0 ? 1 : add_work(4, input.terms.len);
+}
+fn place_copy_price(ownership_api.place_path input) u64 {
+    return input.projections.len == 0 ? 1 : add_work(4, input.projections.len);
+}
+fn copy_expression_work(calculation mut* work, context mut* target, expression input)
+    expression {
+    expression mut refused = {};
+    if (!spend(work, 1)) { return refused; }
+    u64 price = input.terms.len == 0 ? 0 : add_work(3, input.terms.len);
+    if (!spend(work, price)) { return refused; }
+    return copy_expression(target, input);
+}
+fn copy_place_work(calculation mut* work, context mut* target, ownership_api.place_path input)
+    ownership_api.place_path {
+    ownership_api.place_path mut refused = {};
+    if (!spend(work, 1)) { return refused; }
+    u64 price = input.projections.len == 0 ? 0 : add_work(3, input.projections.len);
+    if (!spend(work, price)) { return refused; }
+    return ownership_state.copy_place(&target->paths, input);
+}
+fn scale_work(calculation mut* work, context mut* target, expression input, u64 stride)
+    expression {
+    expression mut refused = {};
+    if (!spend(work, 1)) { return refused; }
+    u64 price = add_work(expression_copy_price(input), add_work(1, input.terms.len));
+    if (!spend(work, price)) { return refused; }
+    return scale(target, input, stride);
+}
+fn sum_work(calculation mut* work, context mut* target, expression a, expression b) expression {
+    expression mut refused = {};
+    if (!spend(work, 3)) { return refused; }
+    if (a.terms.len <= U64_MAX - b.terms.len) {
+        u64 count = a.terms.len + b.terms.len;
+        if (count > 0 && !spend(work, add_work(3, count))) { return refused; }
+    }
+    return sum(target, a, b);
+}
+fn source_index_work(calculation mut* work, ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < work->storage->core->sources_len) {
+        if (!spend(work, 1)) { return U64_MAX; }
+        if (same_key(work->storage->core->sources[i].key, key)) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+fn allocation_index_work(calculation mut* work, ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < work->storage->core->allocations_len) {
+        if (!spend(work, 1)) { return U64_MAX; }
+        if (same_key(work->storage->core->allocations[i].key, key)) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+fn origin_index_work(calculation mut* work, ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < work->storage->origins.len) {
+        if (!spend(work, 1)) { return U64_MAX; }
+        if (same_key(work->storage->origins[i].source, key)) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+fn foreign_work(calculation mut* work, address value) bool {
+    u64 index = source_index_work(work, value.source);
+    if (index == U64_MAX || !spend(work, 1)) { return false; }
+    return work->storage->core->sources[index].kind == ownership_api.source_kind.trusted_foreign;
+}
+fn residual_work(calculation mut* work, ownership_api.place_path path) bool {
+    if (!spend(work, 1)) { return false; }
+    if (path.residual) { return true; }
+    u64 mut i = 0;
+    while (i < path.projections.len) {
+        if (!spend(work, 1)) { return false; }
+        if (path.projections[i].kind == ownership_api.projection_kind.residual) { return true; }
+        i += 1;
+    }
+    return false;
+}
+fn alignment_work(calculation mut* work, types.node* ty, u64 depth, u64 mut* alignment) bool {
+    if (depth >= work->selected->limits.d) {
+        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
+            "raw type alignment exceeds its depth limit");
+        return false;
+    }
+    if (!spend(work, 1)) { return false; }
+    if (ty == null) {
+        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
+            "raw type alignment needs checked metadata");
+        return false;
+    }
+    if (ty->kind == types.type_kind.k_array) {
+        return alignment_work(work, ty->elem, depth + 1, alignment);
+    }
+    *alignment = types.type_alignof(ty);
+    return true;
+}
 fn append_leaf(context mut* ctx, ownership_api.services* svc, request* req,
     storage_leaf mut item) ownership_api.proof_status {
     if (ctx->leaves_len >= req->limits.r ||
@@ -749,7 +850,7 @@ fn append_leaf(context mut* ctx, ownership_api.services* svc, request* req,
     if (!ownership_api.successful(proof)) { return proof; }
     u64 len = ctx->leaves_len;
     proof = charge(svc, req, ownership_api.limit_category.w,
-        add_work(len + 1, item.place.projections.len));
+        add_work(add_work(len, 2), place_copy_price(item.place)));
     if (!ownership_api.successful(proof)) { return proof; }
     storage_leaf mut@ own next = new(storage_leaf, len + 1);
     u64 mut i = 0;
@@ -782,7 +883,7 @@ fn layout(context mut* ctx, ownership_api.services* svc, request* req, types.nod
         u64 mut i = 0;
         while (i < ty->len) {
             proof = charge(svc, req, ownership_api.limit_category.w,
-                path.projections.len + 1);
+                add_work(path.projections.len, 2));
             if (!ownership_api.successful(proof)) { return proof; }
             ownership_api.projection mut part = ownership_api.projection{};
             part.kind = ownership_api.projection_kind.fixed_index;
@@ -810,6 +911,8 @@ fn layout(context mut* ctx, ownership_api.services* svc, request* req, types.nod
         u64 mut i = 0;
         u32 mut field = 0;
         while (i < ast.ast_len(record->node)) {
+            proof = charge(svc, req, ownership_api.limit_category.w, 1);
+            if (!ownership_api.successful(proof)) { return proof; }
             ast.node* member = ast.ast_child(record->node, i);
             if (member->kind == ast.ast_kind.k_field_decl) {
                 if (member->aux > bytes || offset + member->aux < end) {
@@ -822,7 +925,7 @@ fn layout(context mut* ctx, ownership_api.services* svc, request* req, types.nod
                     if (!ownership_api.successful(proof)) { return proof; }
                 }
                 proof = charge(svc, req, ownership_api.limit_category.w,
-                    path.projections.len + 1);
+                    add_work(path.projections.len, 2));
                 if (!ownership_api.successful(proof)) { return proof; }
                 ownership_api.projection mut part = ownership_api.projection{};
                 part.kind = ownership_api.projection_kind.field;
@@ -910,40 +1013,56 @@ fn origin_index(context* ctx, ownership_api.entity_id source) u64 {
     }
     return U64_MAX;
 }
+
 fn live(context* ctx, ownership_api.services* svc, address value, request* req)
     ownership_api.proof_status {
-    u64 index = origin_index(ctx, value.source);
-    u64 source = ownership_state.source_index(ctx->core, value.source);
-    if (!value.complete || index == U64_MAX || source == U64_MAX ||
-        ctx->core->sources[source].kind == ownership_api.source_kind.unknown_fort) {
+    calculation mut work = calculation{ctx, svc, req, complete()};
+    if (!spend(&work, 1)) { return work.proof; }
+    u64 index = origin_index_work(&work, value.source);
+    u64 source = source_index_work(&work, value.source);
+    if (!ownership_api.successful(work.proof)) { return work.proof; }
+    if (!value.complete || index == U64_MAX || source == U64_MAX) {
         return fail(svc, req, value.source, false, "raw access needs a proved original source");
     }
+    if (!spend(&work, 2)) { return work.proof; }
     ownership_api.source_fact fact = ctx->core->sources[source];
+    origin original = ctx->origins[index];
+    if (fact.kind == ownership_api.source_kind.unknown_fort) {
+        return fail(svc, req, value.source, false, "raw access needs a proved original source");
+    }
     if (fact.validity == ownership_api.validity_kind.unknown) {
         return fail(svc, req, value.source, false, "raw source validity remains unproved");
     }
     if (fact.validity != ownership_api.validity_kind.live) {
         return fail(svc, req, value.source, true, "raw source is no longer live");
     }
-    origin original = ctx->origins[index];
-    if (value.alignment == 0 || value.alignment > original.alignment ||
-        original.alignment % value.alignment != 0 ||
-        (fact.kind != ownership_api.source_kind.trusted_foreign &&
-        (!le(ctx, original.begin, value.begin) || !le(ctx, value.begin, value.end) ||
-        !le(ctx, value.end, original.end)))) {
+    bool mut inherited = value.alignment != 0 && value.alignment <= original.alignment &&
+        original.alignment % value.alignment == 0;
+    if (inherited && fact.kind != ownership_api.source_kind.trusted_foreign) {
+        inherited = le_work(&work, original.begin, value.begin) &&
+            le_work(&work, value.begin, value.end) && le_work(&work, value.end, original.end);
+    }
+    if (!ownership_api.successful(work.proof)) { return work.proof; }
+    if (!inherited) {
         return fail(svc, req, value.source, false, "raw address does not inherit its source facts");
     }
-    if (!same_key(fact.allocation, ctx->origins[index].allocation)) {
+    if (!same_key(fact.allocation, original.allocation)) {
         return fail(svc, req, value.source, false, "raw allocation correspondence is missing");
     }
     if (fact.allocation.kind != ownership_api.entity_kind.none) {
-        u64 allocation = ownership_state.allocation_index(ctx->core, fact.allocation);
-        if (allocation == U64_MAX ||
-            ctx->core->allocations[allocation].validity == ownership_api.validity_kind.unknown) {
+        u64 allocation = allocation_index_work(&work, fact.allocation);
+        if (!ownership_api.successful(work.proof)) { return work.proof; }
+        if (allocation == U64_MAX) {
             return fail(svc, req, fact.allocation, false,
                 "raw allocation validity remains unproved");
         }
-        if (ctx->core->allocations[allocation].validity != ownership_api.validity_kind.live) {
+        if (!spend(&work, 1)) { return work.proof; }
+        ownership_api.validity_kind valid = ctx->core->allocations[allocation].validity;
+        if (valid == ownership_api.validity_kind.unknown) {
+            return fail(svc, req, fact.allocation, false,
+                "raw allocation validity remains unproved");
+        }
+        if (valid != ownership_api.validity_kind.live) {
             return fail(svc, req, fact.allocation, true, "raw allocation is no longer live");
         }
     }
@@ -954,51 +1073,59 @@ fn foreign(context* ctx, address value) bool {
     return source != U64_MAX &&
         ctx->core->sources[source].kind == ownership_api.source_kind.trusted_foreign;
 }
+
 fn measure_context_work(calculation mut* work, address@ values, u64 operands,
     u64 mut* price) bool {
     if (!spend(work, 1)) { return false; }
     context* ctx = work->storage;
-    u64 mut total = add_work(add_work(1, ctx->origins.len), ctx->leaves_len);
-    total = add_work(total, add_work(ctx->bounds.len, ctx->relations.len));
+    // Two output frames and five array allocations precede the copied records.
+    u64 mut total = add_work(7, operands);
     term_block* mut block = ctx->terms;
     while (block != null) {
         if (!spend(work, 1)) { return false; }
-        total = add_work(total, block->items.len);
         block = block->next;
     }
     u64 mut i = 0;
     while (i < ctx->origins.len) {
         if (!spend(work, 1)) { return false; }
         origin item = ctx->origins[i];
-        total = add_work(total, item.place.projections.len);
-        total = add_work(total, add_work(item.count.terms.len,
-            add_work(item.begin.terms.len, item.end.terms.len)));
+        total = add_work(total, add_work(1, place_copy_price(item.place)));
+        total = add_work(total, expression_copy_price(item.count));
+        total = add_work(total, expression_copy_price(item.begin));
+        total = add_work(total, expression_copy_price(item.end));
         i += 1;
     }
     i = 0;
     while (i < ctx->leaves_len) {
         if (!spend(work, 1)) { return false; }
-        total = add_work(total, ctx->leaves[i].place.projections.len);
+        total = add_work(total, add_work(1, place_copy_price(ctx->leaves[i].place)));
+        i += 1;
+    }
+    i = 0;
+    while (i < ctx->bounds.len) {
+        if (!spend(work, 1)) { return false; }
+        total = add_work(total, 1);
         i += 1;
     }
     i = 0;
     while (i < ctx->relations.len) {
         if (!spend(work, 1)) { return false; }
         relation item = ctx->relations[i];
-        total = add_work(total, add_work(item.left.terms.len, item.right.terms.len));
+        total = add_work(total, add_work(1, expression_copy_price(item.left)));
+        total = add_work(total, expression_copy_price(item.right));
         i += 1;
     }
     i = 0;
     while (i < values.len) {
         if (!spend(work, 1)) { return false; }
         address item = values[i];
-        u64 mut count = add_work(item.offset.terms.len, item.begin.terms.len);
-        count = add_work(count, item.end.terms.len);
-        total = add_work(total, add_work(add_work(count, 1), operands));
+        total = add_work(total, add_work(1, expression_copy_price(item.offset)));
+        total = add_work(total, expression_copy_price(item.begin));
+        total = add_work(total, expression_copy_price(item.end));
         i += 1;
     }
-    // Metadata charges do not pay for nested comparisons.
-    *price = square_work(total);
+    // This price pays for copies only. Each later comparison has its own charge.
+    *price = total;
     return true;
 }
 fn type_nodes_work(calculation mut* work, types.node* ty, u64 depth, u64 mut* nodes) bool {
@@ -1118,6 +1245,8 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
     }
     out.proof = charge(svc, req, ownership_api.limit_category.p, 1 + bounds.len + relations.len);
     if (!ownership_api.successful(out.proof)) { return out; }
+    calculation mut work = calculation{&out.storage, svc, req, complete()};
+    if (!spend(&work, 4)) { out.proof = work.proof; return out; }
     out.storage.core = core;
     out.storage.paths = ownership_state.empty();
     out.storage.bounds = new(captured_bound, bounds.len);
@@ -1126,6 +1255,7 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
     out.addresses = new(address, inputs.len);
     u64 mut i = 0;
     while (i < bounds.len) {
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
         captured_bound item = bounds[i];
         if (!value_key(item.version) || !less_equal(item.lower, item.upper)) {
             discard(&out, fail(svc, req, item.version, false, "captured value bounds are invalid"));
@@ -1133,49 +1263,66 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
         }
         u64 mut j = 0;
         while (j < i) {
+            if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
             if (same_key(bounds[j].version, item.version)) {
                 discard(&out, fail(svc, req, item.version, false, "captured value bounds repeat"));
                 return out;
             }
             j += 1;
         }
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
         out.storage.bounds[i] = item;
         i += 1;
     }
     i = 0;
     while (i < relations.len) {
-        if (!bounded_expression(relations[i].left, req) ||
-            !bounded_expression(relations[i].right, req)) {
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
+        relation item = relations[i];
+        bool valid = item.left.terms.len <= req->limits.p &&
+            item.right.terms.len <= req->limits.p &&
+            validate_expression_work(&work, item.left) &&
+            validate_expression_work(&work, item.right);
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
+        if (!valid) {
             discard(&out, fail(svc, req, ownership_api.entity_id{}, false,
                 "captured arithmetic relation is incomplete"));
             return out;
         }
-        out.proof = charge(svc, req, ownership_api.limit_category.w,
-            1 + relations[i].left.terms.len + relations[i].right.terms.len);
-        if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-        out.storage.relations[i].left = copy_expression(&out.storage, relations[i].left);
-        out.storage.relations[i].right = copy_expression(&out.storage, relations[i].right);
+        expression left = copy_expression_work(&work, &out.storage, item.left);
+        expression right = copy_expression_work(&work, &out.storage, item.right);
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
+        out.storage.relations[i] = relation{left, right};
         i += 1;
     }
     i = 0;
     while (i < inputs.len) {
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
         origin mut item = inputs[i];
-        u64 source = ownership_state.source_index(core, item.source);
+        u64 source = source_index_work(&work, item.source);
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
+        if (source != U64_MAX && !spend(&work, 1)) {
+            discard(&out, work.proof); return out;
+        }
         if (item.source.kind != ownership_api.entity_kind.source || item.source.ordinal == 0 ||
             source == U64_MAX || !item.correspondence || item.residual ||
-            !bounded_expression(item.count, req) || !bounded_expression(item.begin, req) ||
-            !bounded_expression(item.end, req) ||
-            ownership_state.has_residual(item.place) ||
+            item.count.terms.len > req->limits.p || item.begin.terms.len > req->limits.p ||
+            item.end.terms.len > req->limits.p || !validate_expression_work(&work, item.count) ||
+            !validate_expression_work(&work, item.begin) ||
+            !validate_expression_work(&work, item.end) || residual_work(&work, item.place) ||
             item.place.projections.len >= req->limits.d ||
             !same_key(item.allocation,
             core->sources[source].allocation) || item.alignment == 0 ||
             (item.alignment & (item.alignment - 1)) != 0) {
+            if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
             discard(&out, fail(svc, req, item.source, false,
                 "raw source correspondence is incomplete"));
             return out;
         }
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
         u64 mut j = 0;
         while (j < i) {
+            if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
             if (same_key(item.source, inputs[j].source)) {
                 discard(&out, fail(svc, req, item.source, false, "raw source capture repeats"));
                 return out;
@@ -1184,14 +1331,11 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
         }
         out.proof = charge(svc, req, ownership_api.limit_category.g, 1);
         if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-        out.proof = charge(svc, req, ownership_api.limit_category.w,
-            add_work(1 + item.count.terms.len + item.begin.terms.len + item.end.terms.len,
-            item.place.projections.len));
-        if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-        item.count = copy_expression(&out.storage, item.count);
-        item.begin = copy_expression(&out.storage, item.begin);
-        item.end = copy_expression(&out.storage, item.end);
-        item.place = ownership_state.copy_place(&out.storage.paths, item.place);
+        item.count = copy_expression_work(&work, &out.storage, item.count);
+        item.begin = copy_expression_work(&work, &out.storage, item.begin);
+        item.end = copy_expression_work(&work, &out.storage, item.end);
+        item.place = copy_place_work(&work, &out.storage, item.place);
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
         item.first_leaf = out.storage.leaves_len;
         out.proof = layout(&out.storage, svc, req, item.layout, item.place, 0, 0);
         if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
@@ -1200,27 +1344,36 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
             u64 mut stride = 0;
             out.proof = size(item.layout, svc, req, item.place.projections.len, &stride);
             if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-            if (!fits(&out.storage, item.count) || !same_expression(item.begin, literal(0))) {
+            if (!fits_work(&work, item.count) ||
+                !same_expression_work(&work, item.begin, literal(0))) {
+                if (!ownership_api.successful(work.proof)) {
+                    discard(&out, work.proof); return out;
+                }
                 discard(&out, fail(svc, req, item.source, false,
                     "raw logical extent is incomplete"));
                 return out;
             }
-            out.proof = charge(svc, req, ownership_api.limit_category.w,
-                1 + item.count.terms.len);
-            if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-            expression extent = scale(&out.storage, item.count, stride);
-            if (!fits(&out.storage, extent) || !same_expression(extent, item.end)) {
+            expression extent = scale_work(&work, &out.storage, item.count, stride);
+            if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
+            if (!fits_work(&work, extent) || !same_expression_work(&work, extent, item.end)) {
+                if (!ownership_api.successful(work.proof)) {
+                    discard(&out, work.proof); return out;
+                }
                 discard(&out, fail(svc, req, item.source, false,
                     "raw extent arithmetic does not fit"));
                 return out;
             }
             if (item.allocation.kind != ownership_api.entity_kind.none) {
-                u64 allocation = ownership_state.allocation_index(core, item.allocation);
+                u64 allocation = allocation_index_work(&work, item.allocation);
+                if (!ownership_api.successful(work.proof)) {
+                    discard(&out, work.proof); return out;
+                }
                 if (allocation == U64_MAX) {
                     discard(&out, fail(svc, req, item.allocation, false,
                         "raw allocation is missing"));
                     return out;
                 }
+                if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
                 ownership_api.scalar_fact count = core->allocations[allocation].logical_length;
                 expression mut expected = literal(0);
                 term[1] mut terms = {};
@@ -1231,16 +1384,23 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
                     terms[0] = term{count.symbol, natural(1)};
                     expected.terms = terms[..];
                 } else { expected.complete = false; }
-                if (!same_expression(item.count, expected)) {
+                if (!same_expression_work(&work, item.count, expected)) {
+                    if (!ownership_api.successful(work.proof)) {
+                        discard(&out, work.proof); return out;
+                    }
                     discard(&out, fail(svc, req, item.allocation, false,
                         "raw extent does not match its captured allocation count"));
                     return out;
                 }
-            } else if (!same_expression(item.count, literal(1))) {
+            } else if (!same_expression_work(&work, item.count, literal(1))) {
+                if (!ownership_api.successful(work.proof)) {
+                    discard(&out, work.proof); return out;
+                }
                 discard(&out, fail(svc, req, item.source, false, "object layout count is not one"));
                 return out;
             }
         }
+        if (!spend(&work, 2)) { discard(&out, work.proof); return out; }
         out.storage.origins[i] = item;
         out.addresses[i] = address{item.source, item.begin, item.begin, item.end,
             item.layout, item.alignment, true};
@@ -1250,13 +1410,22 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
     out.proof = complete();
     return out;
 }
-fn capture_origin(ownership_state.state* core, ownership_api.services* svc, origin* input,
-    captured_bound@ bounds, relation@ relations, request* req) result {
-    origin[1] inputs = {*input};
-    return capture_origins(core, svc, inputs[..], bounds, relations, req);
-}
 
-// The producer supplies a checked subobject or a successful ordinary-bounds window.
+fn capture_origin(ownership_state.state* core, ownership_api.services* svc, origin* input,
+    captured_bound@ bounds, relation@ relations, request* supplied) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status mut proof = begin_work(core, svc, supplied, &cursor);
+    if (ownership_api.successful(proof)) {
+        proof = charge(svc, &cursor.selected, ownership_api.limit_category.w, 1);
+    }
+    if (!ownership_api.successful(proof)) {
+        result mut out = {};
+        out.proof = proof;
+        return out;
+    }
+    origin[1] inputs = {*input};
+    return capture_origins(core, svc, inputs[..], bounds, relations, &cursor.selected);
+}
 fn derive_address(context* ctx, ownership_api.services* svc, address@ values,
     expression lower, expression upper, types.node* selected, request* supplied) result {
     work_cursor mut cursor = {};
@@ -1269,21 +1438,26 @@ fn derive_address(context* ctx, ownership_api.services* svc, address@ values,
     }
     result mut out = start_range(ctx, svc, values, lower, upper, req);
     if (!ownership_api.successful(out.proof)) { return out; }
+    calculation mut work = calculation{ctx, svc, req, complete()};
     u64 mut i = 0;
     while (i < values.len) {
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
         address mut item = out.addresses[i];
         out.proof = live(ctx, svc, item, req);
         if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-        if (!fits(ctx, lower) || !fits(ctx, upper) || !le(ctx, item.begin, lower) ||
-            !le(ctx, lower, upper) || !le(ctx, upper, item.end)) {
+        if (!fits_work(&work, lower) || !fits_work(&work, upper) ||
+            !le_work(&work, item.begin, lower) || !le_work(&work, lower, upper) ||
+            !le_work(&work, upper, item.end)) {
+            if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
             discard(&out, fail(svc, req, item.source, false,
                 "selected byte window remains unproved"));
             return out;
         }
-        item.offset = copy_expression(&out.storage, lower);
+        item.offset = copy_expression_work(&work, &out.storage, lower);
         item.begin = item.offset;
-        item.end = copy_expression(&out.storage, upper);
+        item.end = copy_expression_work(&work, &out.storage, upper);
         item.ty = selected;
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
         out.addresses[i] = item;
         i += 1;
     }
@@ -1301,6 +1475,11 @@ fn cast_reference(context* ctx, ownership_api.services* svc, address@ values,
     }
     result mut out = start(ctx, svc, values, req, 0);
     if (!ownership_api.successful(out.proof)) { return out; }
+    calculation mut work = calculation{ctx, svc, req, complete()};
+    u64 mut price = 0;
+    if (!type_work(&work, from, to, &price) || !spend(&work, price)) {
+        discard(&out, work.proof); return out;
+    }
     if (from == null || to == null || !types.type_cast_allowed(to, from) ||
         !types.type_is_reference(from) || !types.type_is_reference(to)) {
         discard(&out, fail(svc, req, ownership_api.entity_id{}, false,
@@ -1308,7 +1487,11 @@ fn cast_reference(context* ctx, ownership_api.services* svc, address@ values,
         return out;
     }
     u64 mut i = 0;
-    while (i < out.addresses.len) { out.addresses[i].ty = to; i += 1; }
+    while (i < out.addresses.len) {
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
+        out.addresses[i].ty = to;
+        i += 1;
+    }
     return out;
 }
 fn reconstruct_integer(ownership_state.state* core, ownership_api.services* svc, request* supplied)
@@ -1319,7 +1502,7 @@ fn reconstruct_integer(ownership_state.state* core, ownership_api.services* svc,
     result mut out = result{};
     out.proof = prepared;
     if (!ownership_api.successful(out.proof)) { return out; }
-    out.proof = charge(svc, req, ownership_api.limit_category.w, 1);
+    out.proof = charge(svc, req, ownership_api.limit_category.w, 2);
     if (!ownership_api.successful(out.proof)) { return out; }
     out.storage.core = core;
     out.storage.paths = ownership_state.empty();
@@ -1330,6 +1513,7 @@ fn reconstruct_integer(ownership_state.state* core, ownership_api.services* svc,
         null, 0, false};
     return out;
 }
+
 fn scalar_expression(context mut* ctx, ownership_api.scalar_fact fact) expression {
     expression mut out = literal(0);
     if (fact.kind == ownership_api.fact_kind.exact) {
@@ -1341,7 +1525,14 @@ fn scalar_expression(context mut* ctx, ownership_api.scalar_fact fact) expressio
     } else { out.complete = false; }
     return out;
 }
-// Header correspondence is separate from the header slot's own storage source.
+fn scalar_expression_work(calculation mut* work, context mut* target,
+    ownership_api.scalar_fact fact) expression {
+    expression mut refused = {};
+    if (!spend(work, 1)) { return refused; }
+    if (fact.kind == ownership_api.fact_kind.symbolic &&
+        !spend(work, 6)) { return refused; }
+    return scalar_expression(target, fact);
+}
 fn extract_pointer(context* ctx, ownership_api.services* svc, address@ backing,
     ownership_api.contents_fact* header, request* supplied) result {
     work_cursor mut cursor = {};
@@ -1354,6 +1545,8 @@ fn extract_pointer(context* ctx, ownership_api.services* svc, address@ backing,
     }
     result mut out = start(ctx, svc, backing, req, 0);
     if (!ownership_api.successful(out.proof)) { return out; }
+    calculation mut work = calculation{ctx, svc, req, complete()};
+    if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
     if (header->kind != ownership_api.contents_kind.reference || header->borrows.len != backing.len)
         {
         discard(&out, fail(svc, req, header->place.root, false,
@@ -1362,15 +1555,19 @@ fn extract_pointer(context* ctx, ownership_api.services* svc, address@ backing,
     }
     u64 mut i = 0;
     while (i < backing.len) {
+        if (!spend(&work, 2)) { discard(&out, work.proof); return out; }
         ownership_api.borrow_relation borrow = header->borrows[i];
-        expression offset = scalar_expression(&out.storage, borrow.range.offset);
-        expression begin = scalar_expression(&out.storage, borrow.range.access.begin);
-        expression end = scalar_expression(&out.storage, borrow.range.access.end);
+        expression offset = scalar_expression_work(&work, &out.storage, borrow.range.offset);
+        expression begin = scalar_expression_work(&work, &out.storage, borrow.range.access.begin);
+        expression end = scalar_expression_work(&work, &out.storage, borrow.range.access.end);
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
         if (!borrow.representation_complete || !borrow.range.access.arithmetic_proved ||
-            !same_expression(offset, backing[i].offset) ||
-            !same_expression(begin, backing[i].begin) || !same_expression(end, backing[i].end) ||
+            !same_expression_work(&work, offset, backing[i].offset) ||
+            !same_expression_work(&work, begin, backing[i].begin) ||
+            !same_expression_work(&work, end, backing[i].end) ||
             !same_key(borrow.source, backing[i].source) ||
             !same_key(borrow.value_version, header->value_version)) {
+            if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
             discard(&out, fail(svc, req, header->place.root, false,
                 "header representation is incomplete"));
             return out;
@@ -1394,20 +1591,33 @@ fn slice_ptr(context* ctx, ownership_api.services* svc, address@ values,
     u64 mut stride = 0;
     out.proof = size(element, svc, req, 0, &stride);
     if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-    if (!le(ctx, literal(0), lower) || !le(ctx, lower, upper)) {
+    calculation mut work = calculation{ctx, svc, req, complete()};
+    if (!le_work(&work, literal(0), lower) || !le_work(&work, lower, upper)) {
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
         discard(&out, fail(svc, req, ownership_api.entity_id{}, false,
             "raw range bounds remain unproved"));
         return out;
     }
     u64 mut i = 0;
     while (i < values.len) {
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
         address mut item = out.addresses[i];
         out.proof = live(ctx, svc, item, req);
         if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
-        expression lo = sum(&out.storage, item.offset, scale(&out.storage, lower, stride));
-        expression hi = sum(&out.storage, item.offset, scale(&out.storage, upper, stride));
-        if (!fits(ctx, lo) || !fits(ctx, hi) || (!foreign(ctx, item) &&
-            (!le(ctx, item.begin, lo) || !le(ctx, lo, hi) || !le(ctx, hi, item.end)))) {
+        expression lo = sum_work(&work, &out.storage, item.offset,
+            scale_work(&work, &out.storage, lower, stride));
+        expression hi = sum_work(&work, &out.storage, item.offset,
+            scale_work(&work, &out.storage, upper, stride));
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
+        bool mut proved = fits_work(&work, lo) && fits_work(&work, hi);
+        bool mut trusted = false;
+        if (proved) { trusted = foreign_work(&work, item); }
+        if (proved && !trusted) {
+            proved = le_work(&work, item.begin, lo) && le_work(&work, lo, hi) &&
+                le_work(&work, hi, item.end);
+        }
+        if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
+        if (!proved) {
             discard(&out, fail(svc, req, item.source, false, "raw range exceeds proved storage"));
             return out;
         }
@@ -1415,6 +1625,7 @@ fn slice_ptr(context* ctx, ownership_api.services* svc, address@ values,
         item.begin = lo;
         item.end = hi;
         item.ty = element;
+        if (!spend(&work, 1)) { discard(&out, work.proof); return out; }
         out.addresses[i] = item;
         i += 1;
     }
@@ -1452,10 +1663,6 @@ fn access(context* ctx, ownership_api.services* svc, address@ values,
         if (!ownership_api.successful(work.proof)) { return work.proof; }
         return fail(svc, req, ownership_api.entity_id{}, false, "raw alternatives are incomplete");
     }
-    u64 mut price = 0;
-    if (!measure_context_work(&work, values, 0, &price)) { return work.proof; }
-    proof = charge(svc, req, ownership_api.limit_category.w, price);
-    if (!ownership_api.successful(proof)) { return proof; }
     u64 mut bytes = 0;
     proof = size(accessed, svc, req, 0, &bytes);
     if (!ownership_api.successful(proof)) { return proof; }
@@ -1463,19 +1670,26 @@ fn access(context* ctx, ownership_api.services* svc, address@ values,
     defer free(&scratch);
     u64 mut i = 0;
     while (i < values.len) {
+        if (!spend(&work, 1)) { return work.proof; }
         address item = values[i];
         proof = live(ctx, svc, item, req);
         if (!ownership_api.successful(proof)) { return proof; }
-        if (!foreign(ctx, item)) {
-            expression end = sum(&scratch, item.offset, literal(bytes));
-            if (!fits(ctx, item.offset) || !fits(ctx, end) || !le(ctx, item.begin, item.offset) ||
-                !le(ctx, end, item.end)) {
+        bool trusted = foreign_work(&work, item);
+        if (!ownership_api.successful(work.proof)) { return work.proof; }
+        if (!trusted) {
+            expression end = sum_work(&work, &scratch, item.offset, literal(bytes));
+            if (!fits_work(&work, item.offset) || !fits_work(&work, end) ||
+                !le_work(&work, item.begin, item.offset) || !le_work(&work, end, item.end)) {
+                if (!ownership_api.successful(work.proof)) { return work.proof; }
                 return fail(svc, req, item.source, false,
                     "typed access exceeds its inherited window");
             }
-            u64 alignment = types.type_alignof(accessed);
+            if (!ownership_api.successful(work.proof)) { return work.proof; }
+            u64 mut alignment = 0;
+            if (!alignment_work(&work, accessed, 0, &alignment)) { return work.proof; }
             if (item.alignment < alignment || item.alignment % alignment != 0 ||
-                !aligned(ctx, item.offset, alignment)) {
+                !aligned_work(&work, item.offset, alignment)) {
+                if (!ownership_api.successful(work.proof)) { return work.proof; }
                 return fail(svc, req, item.source, false,
                     "typed access alignment remains unproved");
             }
@@ -1498,5 +1712,10 @@ fn inspect_empty_header(ownership_state.state* core, ownership_api.services* svc
         header->span_length.value == 0 && header->borrows.len == 0 &&
         (header->kind == ownership_api.contents_kind.reference ||
         header->kind == ownership_api.contents_kind.empty_owner)) { return complete(); }
+    u64 per_borrow = add_work(core->sources_len, 2);
+    u64 count = header->borrows.len;
+    u64 price = count > 0 && per_borrow > U64_MAX / count ? U64_MAX : count * per_borrow;
+    proof = charge(svc, req, ownership_api.limit_category.w, add_work(price, 3));
+    if (!ownership_api.successful(proof)) { return proof; }
     return ownership_transfer.check_read(core, svc, &req->base, *header, false);
 }
