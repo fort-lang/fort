@@ -159,7 +159,15 @@ came here.
   Extra predecessors, extra writes, arm swaps, and substituted joins cause keyed refusal.
   Literal boolean selections of two string literals can prove folded bytes without a value table.
   Other folded values stay incomplete. Predicate calls retain their refusal policy.
-  Conditional operands and wrappers after a join stay incomplete until their separate proof exists.
+  Conditional callees and arguments prove both arms and the joined operand consumed by the call.
+  The proof retains held values before later writers.
+  Dereference, member, header, cast, index, and slice links repeat the operand proof after joins.
+  Conditional indices and both bounds retain their conversions and evaluation order.
+  Function-name selections retain both arms even with literal predicates.
+  Replacing their consumed join with a selected function symbol causes keyed refusal.
+  Arm destination stores can precede unrelated backing-storage reads.
+  Fixed temporary slot exposure keeps its separate refusal policy.
+  Operand intervals use stack values. Their traversal crosses only fully proved joins.
   Session vectors keep numeric indices across growth.
   Report copies survive session and candidate teardown.
   Checked source and types outlive the report. FIR stays alive during binding inspection.

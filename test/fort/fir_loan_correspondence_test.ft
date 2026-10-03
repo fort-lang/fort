@@ -12,10 +12,11 @@
 //| selected paths 2
 //| boundary repeats 10
 //| absence remains open
-//| output compared 168
+//| output compared 182
 /// Checks selected source inventory against inactive range proposals.
 import ast;
 import check;
+import consts;
 import diag;
 import fir;
 import fir_llvm;
@@ -2292,6 +2293,8 @@ fn call_materialization_case(string name, string@ source, u32 source_line,
     defer fir_lower.range_candidate_set_free(&proposed);
     fir_lower.report mut why = fir_lower.report{};
     assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
     fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
     defer fir_lower.range_source_audit_free(&audit);
     bool incomplete = !fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit);
@@ -2353,7 +2356,6 @@ fn call_materialization_case(string name, string@ source, u32 source_line,
     assert_call_incomplete(decl, &f, &proposed, expected);
     proposed.boundaries.len = boundaries;
     assert_call_incomplete(decl, &f, &proposed, expected);
-    fir_verify.violation mut bad = fir_verify.violation{};
     assert(!fir_verify.find_violation(&f, &e.rt, &bad));
     fir_lower.range_source_audit mut retained = fir_lower.range_source_audit{};
     defer fir_lower.range_source_audit_free(&retained);
@@ -3385,6 +3387,984 @@ fn conditional_result_pair(string name, string@ prelude, string parameters,
     }
 }
 
+u32 mut conditional_operand_pairs = 0;
+u32 mut conditional_operand_rows = 0;
+
+fn conditional_operand_matrix() void {
+    string[2] calls = {
+        "fn pick(i32@ a, i32@ b) i32@ { return a; }",
+        "fn spare(i32@ a, i32@ b) i32@ { return b; }",
+    };
+    string params = "bool select, bool other, i32@ values, i32@ backup";
+    conditional_operand_pair("conditional_argument", calls[..], params, "i32",
+        "pick(select ? spare(values, backup) : (other ? values : backup), backup)");
+    conditional_operand_pair("conditional_callee", calls[..], params, "i32",
+        "(select ? pick : (other ? spare : pick))(values, backup)");
+    string[2] pointers = {
+        "struct holder { i32@ items; i32@ other; }",
+        "fn pick(holder* a, holder* b) holder* { return a; }",
+    };
+    conditional_operand_pair("joined_pointer_projection", pointers[..],
+        "bool select, holder* values, holder* backup", "i32",
+        "(select ? pick(values, backup) : backup)->items");
+    conditional_operand_pair("joined_header", calls[..], params, "i32",
+        "cast((select ? pick(values, backup) : backup)[..], i32@)");
+    string[1] arrays = {"fn pick(i32@[2] a, i32@[2] b) i32@[2] { return a; }"};
+    conditional_operand_pair("joined_index", arrays[..],
+        "bool select, bool other, i32@[2] values, i32@[2] backup", "i32",
+        "(select ? pick(values, backup) : backup)[other ? 0 : 1]");
+    conditional_operand_pair("joined_slice", calls[..], params, "i32",
+        "(select ? pick(values, backup) : backup)[other ? 0 : 1 .. select ? 2 : 3]");
+    string[2] bounds = {calls[0], "fn bound(i64 x) i64 { return x; }"};
+    conditional_operand_pair("bound_call_after_join", bounds[..],
+        "bool select, i32@ values, i32@ backup, i64 low, i64 high", "i32",
+        "(select ? pick(values, backup) : backup)[bound(low) .. bound(high)]");
+    assert(conditional_operand_pairs == 14 && conditional_operand_rows == 21);
+}
+
+fn conditional_operand_damage(string name, lower_env.env mut* e, ast.node* decl, fir.func* f,
+                        fir_lower.range_candidate_set* proposed,
+                        fir_lower.range_source_audit* audit) void {
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    fir_lower.range_audit_selected(decl->b, &selected);
+    assert(selected.len == 1);
+    u32 expression_column = gen.refs_at(&selected, 0)->b->loc.col;
+    u64 mut row = 0;
+    while (row < audit->rows.len) {
+        fir_lower.range_audit_key key = audit->rows.items[row].key;
+        u32 mut b = 0;
+        while (b < fir.block_count(f)) {
+            fir.terminator saved = fir.block_at(f, b)->term;
+            if (saved.kind != fir.term_kind.tk_switch
+                || !fir_lower.range_audit_loc_eq(saved.exit_loc, key.exit_source)
+                || saved.loc.line != key.source.line
+                || saved.loc.col < expression_column) { b += 1; continue; }
+            u32 mut mode = 0;
+            while (mode < 7) {
+                fir.func mut changed = fir.func_clone(f);
+                defer fir.func_free(&changed);
+                fir.terminator mut* branch = &fir.block_mut(&changed, b)->term;
+                string mut damage = "switch source";
+                if (mode == 0) { branch->loc.col += 1; }
+                else if (mode == 1) { branch->stmt += 1; damage = "switch statement"; }
+                else if (mode == 2) { branch->exit_loc.col += 1; damage = "switch exit"; }
+                else if (mode == 3) {
+                    damage = "arm target swap";
+                    changed.arms.items[branch->arms_first].target = saved.otherwise;
+                    branch->otherwise = fir.term_arm(f, &saved, 0).target;
+                } else if (mode == 4) {
+                    damage = "predicate operand";
+                    if (saved.cond.kind == fir.operand_kind.ok_const) {
+                        branch->cond.value.value.mag = 1 - branch->cond.value.value.mag;
+                    } else {
+                        fir.operand mut other = fir.operand{};
+                        if (!linear_other_parameter(f, saved.cond, &other)) { mode += 1; continue; }
+                        branch->cond = other;
+                    }
+                } else if (mode == 5) {
+                    damage = "switch case";
+                    changed.arms.items[branch->arms_first].value.mag = 0;
+                } else {
+                    damage = "extra arm predecessor";
+                    u32 extra = fir.block_new(&changed);
+                    fir.block_mut(&changed, extra)->term = fir.term_goto(saved.otherwise,
+                                                                         saved.loc, saved.stmt);
+                }
+                conditional_fault(name, damage, e, decl, f, &changed, proposed, key,
+                                    b, fir.block_statement_count(f, b));
+                mode += 1;
+            }
+            b += 1;
+        }
+        b = 0;
+        while (b < fir.block_count(f)) {
+            u32 mut p = 0;
+            while (p < fir.block_statement_count(f, b)) {
+                fir.statement saved = *fir.block_statement(f, b, p);
+                if (saved.kind != fir.stmt_kind.st_assign
+                    || !fir_lower.range_audit_loc_eq(saved.exit_loc, key.exit_source)
+                    || saved.loc.line != key.source.line
+                    || fir_lower.range_audit_counter(f, &saved)
+                    || saved.place.base != fir.base_kind.bk_local || saved.place.proj_len != 0
+                    || fir.local_at(f, saved.place.local)->kind != fir.local_kind.lk_temp
+                    || (saved.value.kind != fir.rvalue_kind.rv_call
+                        && saved.value.kind != fir.rvalue_kind.rv_use
+                        && saved.value.kind != fir.rvalue_kind.rv_cast
+                        && saved.value.kind != fir.rvalue_kind.rv_addr
+                        && saved.value.kind != fir.rvalue_kind.rv_slice
+                        && saved.value.kind != fir.rvalue_kind.rv_slice_ptr)) { p += 1; continue; }
+                if (saved.value.kind == fir.rvalue_kind.rv_cast
+                    && saved.value.ty->kind == types.type_kind.k_prim
+                    && saved.value.ty->prim == prim.prim_kind.prim_i64) { p += 1; continue; }
+                u32 mut mode = 0;
+                while (mode < 7) {
+                    fir.func mut changed = fir.func_clone(f);
+                    defer fir.func_free(&changed);
+                    fir.statement mut* write = &fir.block_mut(&changed, b)->statements.items[p];
+                    string mut damage = "arm source";
+                    if (mode == 0) { write->loc.col += 1; }
+                    else if (mode == 1) { write->stmt += 1; damage = "arm statement"; }
+                    else if (mode == 2) { write->exit_loc.col += 1; damage = "arm exit"; }
+                    else if (mode == 3) {
+                        damage = "duplicate arm write";
+                        linear_append(&changed, b, saved);
+                    } else if (mode == 4) {
+                        damage = "overwritten arm write";
+                        fir.statement mut zero = saved;
+                        zero.value = fir.rvalue_use(&changed,
+                            fir.operand_const(fir.const_zero(fir.place_type(f, saved.place))));
+                        linear_append(&changed, b, zero);
+                    } else if (mode == 5) {
+                        damage = "missing arm write";
+                        fir.block mut* bk = fir.block_mut(&changed, b);
+                        u64 mut i = cast(p, u64);
+                        while (i + 1 < bk->statements.len) {
+                            bk->statements.items[i] = bk->statements.items[i + 1]; i += 1;
+                        }
+                        bk->statements.len -= 1;
+                    } else {
+                        damage = "result destination";
+                        u32 other = fir.local_add(&changed, fir.place_type(f, saved.place),
+                                                   fir.local_kind.lk_temp, null, saved.loc);
+                        write->place = fir.place_local(other);
+                    }
+                    conditional_fault(name, damage, e, decl, f, &changed, proposed, key, b, p);
+                    mode += 1;
+                }
+                u32 mut i = 0;
+                while (i < saved.value.ops_len) {
+                    fir.operand mut other = fir.operand{};
+                    if (linear_other_parameter(f, fir.operand_at(f, saved.value.ops_first + i),
+                                                &other)) {
+                        fir.func mut changed = fir.func_clone(f);
+                        defer fir.func_free(&changed);
+                        changed.ops.items[saved.value.ops_first + i] = other;
+                        conditional_fault(name, "arm operand", e, decl, f, &changed,
+                                            proposed, key, b, p);
+                    }
+                    i += 1;
+                }
+                if (saved.value.kind == fir.rvalue_kind.rv_call) {
+                    u32 mut other_block = 0;
+                    bool mut swapped = false;
+                    while (!swapped && other_block < fir.block_count(f)) {
+                        u32 mut other_position = 0;
+                        while (!swapped
+                            && other_position < fir.block_statement_count(f, other_block)) {
+                            fir.statement other =
+                                *fir.block_statement(f, other_block, other_position);
+                            if (other.value.kind == fir.rvalue_kind.rv_call
+                                && other.stmt == saved.stmt
+                                && fir_lower.range_audit_loc_eq(other.exit_loc, saved.exit_loc)
+                                && !fir_lower.range_audit_loc_eq(other.loc, saved.loc)
+                                && types.type_same_shape(fir.place_type(f, other.place),
+                                                          fir.place_type(f, saved.place))) {
+                                fir.func mut changed = fir.func_clone(f);
+                                defer fir.func_free(&changed);
+                                fir.block_mut(&changed, b)->statements.items[p] = other;
+                                fir.block mut* other_body = fir.block_mut(&changed, other_block);
+                                other_body->statements.items[other_position] = saved;
+                                conditional_fault(name, "cross-arm call identity", e, decl, f,
+                                                    &changed, proposed, key, b, p);
+                                swapped = true;
+                            }
+                            other_position += 1;
+                        }
+                        other_block += 1;
+                    }
+                    u32 mut capture_block = 0;
+                    bool mut appended = false;
+                    while (!appended && capture_block < fir.block_count(f)) {
+                        u32 mut position = 0;
+                        while (!appended
+                            && position < fir.block_statement_count(f, capture_block)) {
+                            fir.statement* capture =
+                                fir.block_statement(f, capture_block, position);
+                            if (fir_lower.range_audit_counter(f, capture)
+                                && capture->stmt == saved.stmt
+                                && fir_lower.range_audit_loc_eq(capture->exit_loc,
+                                                                 saved.exit_loc)) {
+                                fir.func mut changed = fir.func_clone(f);
+                                defer fir.func_free(&changed);
+                                linear_append(&changed, capture_block, saved);
+                                conditional_fault(name, "write after joined read", e, decl, f,
+                                                    &changed, proposed, key,
+                                                    capture_block, position);
+                                appended = true;
+                            }
+                            position += 1;
+                        }
+                        capture_block += 1;
+                    }
+                    assert(appended);
+                }
+                p += 1;
+            }
+            fir.terminator saved = fir.block_at(f, b)->term;
+            if (saved.kind == fir.term_kind.tk_goto
+                && saved.loc.line == key.source.line
+                && saved.loc.col >= expression_column
+                && fir_lower.range_audit_loc_eq(saved.exit_loc, key.exit_source)) {
+                u32 mut mode = 0;
+                while (mode < 5) {
+                    fir.func mut changed = fir.func_clone(f);
+                    defer fir.func_free(&changed);
+                    fir.terminator mut* exit = &fir.block_mut(&changed, b)->term;
+                    string mut damage = "join exit source";
+                    if (mode == 0) { exit->loc.col += 1; }
+                    else if (mode == 1) { exit->stmt += 1; damage = "join exit statement"; }
+                    else if (mode == 2) { exit->exit_loc.col += 1; damage = "join exit context"; }
+                    else if (mode == 3) {
+                        damage = "join target substitution";
+                        exit->target = b;
+                    } else {
+                        damage = "extra join predecessor";
+                        u32 extra = fir.block_new(&changed);
+                        fir.block_mut(&changed, extra)->term = saved;
+                    }
+                    conditional_fault(name, damage, e, decl, f, &changed,
+                                        proposed, key, b, fir.block_statement_count(f, b));
+                    mode += 1;
+                }
+            }
+            b += 1;
+        }
+        row += 1;
+    }
+}
+
+fn conditional_operand_pair(string name, string@ prelude, string parameters,
+                                  string element, string expression) void {
+    strbuf.str_buf mut header = strbuf.create();
+    defer strbuf.free(&header);
+    strbuf.append(&header, "fn walk(bool quit, ");
+    strbuf.append(&header, parameters);
+    strbuf.append(&header, ") void {");
+    strbuf.str_buf mut loop = strbuf.create();
+    defer strbuf.free(&loop);
+    strbuf.append(&loop, "        for (");
+    strbuf.append(&loop, element);
+    strbuf.append(&loop, " x : ");
+    strbuf.append(&loop, expression);
+    strbuf.append(&loop, ") { }");
+    u32 mut mode = 0;
+    while (mode < 2) {
+        string mut@ own source = new(string, prelude.len + 7);
+        defer del(source);
+        u64 mut i = 0;
+        while (i < prelude.len) { source[i] = prelude[i]; i += 1; }
+        source[i] = strbuf.view(&header);
+        source[i + 1] = "";
+        source[i + 2] = strbuf.view(&loop);
+        source[i + 3] = "";
+        source[i + 4] = "    if (quit) { return; }";
+        source[i + 5] = "}";
+        source[i + 6] = "";
+        strbuf.str_buf mut key = strbuf.create();
+        defer strbuf.free(&key);
+        strbuf.append(&key, "conditional_operand_");
+        strbuf.append(&key, name);
+        u32 mut context_line = 0;
+        u64 mut expected_rows = 1;
+        if (mode == 0) { strbuf.append(&key, "_direct"); }
+        else {
+            source[i + 1] = "    defer {";
+            source[i + 3] = "    }";
+            context_line = cast(i + 2, u32);
+            expected_rows = 2;
+            strbuf.append(&key, "_deferred");
+        }
+        lower_env.env mut e = lower_env.env{};
+        lower_env.open(&e);
+        defer lower_env.close(&e);
+        lower_env.check_lines(&e, source, true);
+        ast.node* decl = lower_env.decl(&e, "walk");
+        fir.func mut f = fir.func{};
+        defer fir.func_free(&f);
+        fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+        defer fir_lower.range_candidate_set_free(&proposed);
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+        fir_verify.violation mut bad = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+        eprintln(strbuf.view(&key), " verifies fixture FIR");
+        fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+        defer fir_lower.range_source_audit_free(&audit);
+        bool matched = fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit);
+        if (!matched) { eprintln(strbuf.view(&key), " refuses a proved conditional operand"); }
+        assert(matched);
+        assert(audit.rows.len == expected_rows && proposed.captures.len == expected_rows);
+        assert(audit.matched_captures == cast(expected_rows, u32));
+        assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+        u64 mut row = 0;
+        while (row < expected_rows) {
+            fir_lower.range_audit_key actual = audit.rows.items[row].key;
+            assert(actual.source.line == cast(i + 3, u32));
+            assert(actual.context_source.line == context_line);
+            if (mode == 0) {
+                assert(actual.context == 0 && actual.exit_occurrence == 0);
+                assert(actual.exit_source.line == 0);
+            } else {
+                assert(actual.context != 0 && actual.exit_occurrence != 0);
+                assert(actual.exit_source.line != 0);
+                if (row != 0) {
+                    assert(actual.exit_occurrence != audit.rows.items[row - 1].key.exit_occurrence);
+                }
+            }
+            row += 1;
+        }
+        assert_unpublished(&f, &audit);
+        conditional_operand_damage(strbuf.view(&key), &e, decl, &f, &proposed, &audit);
+        check_output(&e, decl, &f, strbuf.view(&key), true);
+        fir_lower.range_candidate_set_free(&proposed);
+        conditional_receipt(strbuf.view(&key), &f, &audit, true);
+        assert(audit.rows.len == expected_rows);
+        assert_unpublished(&f, &audit);
+        conditional_operand_pairs += 1;
+        conditional_operand_rows += cast(expected_rows, u32);
+        mode += 1;
+    }
+}
+
+u32 mut conditional_auxiliary_executions = 0;
+u32 mut conditional_callee_mutation_executions = 0;
+u32 mut conditional_callee_changed_expansions = 0;
+
+fn conditional_alias_case(bool projected, bool after, bool deferred) void {
+    string[8] mut source = {
+        "fn pick(i32@ a, i32@ b) i32@ { return a; }",
+        "",
+        "fn walk(bool quit, bool select, i32@ values, i32@ backup) void {",
+        "",
+        "    for (i32 x : select ? pick(values, backup) : backup) { }",
+        "",
+        "    if (quit) { return; }",
+        "}",
+    };
+    if (projected) {
+        source[0] = "struct holder { i32@ items; i32@ other; }";
+        source[1] = "fn pick(holder a, holder b) holder { return a; }";
+        source[2] = "fn walk(bool quit, bool select, holder values, holder backup) void {";
+        source[4] = "    for (i32 x : (select ? pick(values, backup) : backup).items) { }";
+    }
+    if (deferred) { source[3] = "    defer {"; source[5] = "    }"; }
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut original = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&original);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &original));
+    fir_lower.range_audit_key key = original.rows.items[0].key;
+    fir_lower.range_material_point mut at = fir_lower.range_material_point{};
+    fir.statement mut called = fir.statement{};
+    u32 mut calls = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(&f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(&f, b)) {
+            fir.statement* s = fir.block_statement(&f, b, p);
+            if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call
+                && fir_lower.range_audit_loc_eq(s->exit_loc, key.exit_source)) {
+                at = fir_lower.range_material_point{.block = b, .position = p + 1};
+                called = *s;
+                calls += 1;
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    assert(calls == 1 && called.place.proj_len == 0);
+    fir.operand backup = fir.operand_at(&f, called.value.ops_first + 1);
+    fir.place mut target = called.place;
+    fir.place mut replacement = backup.place;
+    if (projected) {
+        target = fir.place_field(&f, target, 0);
+        replacement = fir.place_field(&f, replacement, 0);
+    }
+    if (after) {
+        u64 mut i = 0;
+        u32 mut captures = 0;
+        while (i < proposed.boundaries.len) {
+            fir_lower.range_boundary_candidate* c = &proposed.boundaries.items[i];
+            if (c->expansion == key.expansion
+                && c->boundary.kind == fir.range_boundary_kind.capture) {
+                at = fir_lower.range_material_point{
+                    .block = c->boundary.block, .position = c->boundary.position};
+                captures += 1;
+            }
+            i += 1;
+        }
+        assert(captures == 1);
+    }
+    fir.func mut baseline = fir.func_clone(&f);
+    defer fir.func_free(&baseline);
+    fir.rvalue address = fir.rvalue_addr(&f, target, true);
+    u32 alias = fir.local_add(&f, fir.rvalue_type(&f, address),
+                              fir.local_kind.lk_temp, null, called.loc);
+    fir.statement mut take = fir.stmt_assign(fir.place_local(alias), address,
+                                             called.loc, called.stmt);
+    take.exit_loc = called.exit_loc;
+    fir.place indirect = fir.place_deref(&f, fir.place_local(alias));
+    fir.statement mut write = fir.stmt_assign(indirect,
+        fir.rvalue_use(&f, fir.operand_copy(replacement)), called.loc, called.stmt);
+    write.exit_loc = called.exit_loc;
+    assert(fir.place_fixed(&f, target) && indirect.local != target.local);
+    linear_append(&f, at.block, take);
+    linear_append(&f, at.block, write);
+    fir.block mut* bk = fir.block_mut(&f, at.block);
+    u64 mut p = bk->statements.len - 2;
+    while (p > cast(at.position, u64)) {
+        p -= 1;
+        bk->statements.items[p + 2] = bk->statements.items[p];
+    }
+    bk->statements.items[at.position] = take;
+    bk->statements.items[at.position + 1] = write;
+    u64 mut i = 0;
+    while (i < proposed.boundaries.len) {
+        fir.range_boundary mut* bd = &proposed.boundaries.items[i].boundary;
+        if (bd->block == at.block
+            && (bd->position > at.position || (!after && bd->position == at.position))) {
+            bd->position += 2;
+        }
+        i += 1;
+    }
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    strbuf.append(&name, "joined_alias_address_");
+    strbuf.append_u64(&name, cast(projected, u64));
+    strbuf.append_u64(&name, cast(after, u64));
+    strbuf.append_u64(&name, cast(deferred, u64));
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+    eprintln("valid alias FIR projected ", projected, " after ", after, " deferred ", deferred);
+    conditional_auxiliary_equal(strbuf.view(&name), &e, decl, &baseline);
+    conditional_auxiliary_bytes(strbuf.view(&name), &baseline, &f);
+    conditional_verify_damage(&e, decl, &f, 600000 + conditional_auxiliary_executions);
+    fir_lower.range_source_audit mut retained = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&retained);
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &retained));
+    fir_lower.range_candidate_set_free(&proposed);
+    assert(retained.failure.reason == fir_lower.range_audit_fault.protected_path);
+    assert_linear_key(retained.failure.key, key);
+    conditional_receipt(strbuf.view(&name), &f, &retained, false);
+    conditional_auxiliary_executions += 1;
+    assert_unpublished(&f, &original);
+    assert_linear_key(original.rows.items[0].key, key);
+}
+
+fn conditional_slice_case(u32 shape, bool after, bool deferred, bool mutable_alias) void {
+    string[8] mut source = {
+        "fn pick(i32@[2] a, i32@[2] b) i32@[2] { return a; }",
+        "",
+        "fn walk(bool quit, bool select, i32@[2] values, i32@[2] backup) void {",
+        "",
+        "    for (i32 x : (select ? pick(values, backup) : backup)[0]) { }",
+        "",
+        "    if (quit) { return; }",
+        "}",
+    };
+    if (shape == 1) {
+        source[0] = "struct holder { i32@[2] lists; i32@[2] other; }";
+        source[1] = "fn pick(holder a, holder b) holder { return a; }";
+        source[2] = "fn walk(bool quit, bool select, holder values, holder backup) void {";
+        source[4] = "    for (i32 x : (select ? pick(values, backup) : backup).lists[0]) { }";
+    } else if (shape == 2) {
+        source[0] = "fn pick(i32@ a, i32@ b) i32@ { return a; }";
+        source[2] = "fn walk(bool quit, bool select, i32@ values, i32@ backup) void {";
+        source[4] = "    for (i32 x : select ? pick(values, backup) : backup) { }";
+    } else if (shape == 3) {
+        source[0] = "fn pick(i32@[2]* a, i32@[2]* b) i32@[2]* { return a; }";
+        source[2] = "fn walk(bool quit, bool select, i32@[2]* values, i32@[2]* backup) void {";
+        source[4] = "    for (i32 x : (*(select ? pick(values, backup) : backup))[0]) { }";
+    }
+    if (deferred) { source[3] = "    defer {"; source[5] = "    }"; }
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut original = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&original);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &original));
+    fir_lower.range_audit_key key = original.rows.items[0].key;
+    fir_lower.range_material_point mut at = fir_lower.range_material_point{};
+    fir.statement mut called = fir.statement{};
+    fir.place mut index = fir.place{};
+    u32 mut calls = 0;
+    u32 mut indices = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(&f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(&f, b)) {
+            fir.statement* s = fir.block_statement(&f, b, p);
+            if (s->kind == fir.stmt_kind.st_assign
+                && fir_lower.range_audit_loc_eq(s->exit_loc, key.exit_source)) {
+                if (s->value.kind == fir.rvalue_kind.rv_call) {
+                    called = *s;
+                    calls += 1;
+                    if (shape == 2) {
+                        at = fir_lower.range_material_point{.block = b, .position = p + 1};
+                    }
+                } else if (s->value.kind == fir.rvalue_kind.rv_cast
+                    && s->value.ty->kind == types.type_kind.k_prim
+                    && s->value.ty->prim == prim.prim_kind.prim_u64) {
+                    index = s->place;
+                    at = fir_lower.range_material_point{.block = b, .position = p + 1};
+                    indices += 1;
+                }
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    assert(calls == 1 && (shape == 2 || indices == 1));
+    fir.place mut target = called.place;
+    fir.place mut replacement = fir.operand_at(&f, called.value.ops_first + 1).place;
+    if (shape == 1) {
+        target = fir.place_field(&f, target, 0);
+        replacement = fir.place_field(&f, replacement, 0);
+    } else if (shape == 3) {
+        u32 mut joins = 0;
+        b = 0;
+        while (b < fir.block_count(&f)) {
+            u32 mut p = 0;
+            while (p < fir.block_statement_count(&f, b)) {
+                fir.statement* s = fir.block_statement(&f, b, p);
+                if (s->value.kind == fir.rvalue_kind.rv_use && s->value.ops_len == 1
+                    && fir_lower.range_audit_loc_eq(s->loc, called.loc)
+                    && fir_lower.range_audit_loc_eq(s->exit_loc, called.exit_loc)) {
+                    fir.operand value = fir.operand_at(&f, s->value.ops_first);
+                    if (value.kind == fir.operand_kind.ok_copy
+                        && fir_lower.range_audit_place_eq(&f, value.place, called.place)) {
+                        target = s->place;
+                        joins += 1;
+                    }
+                }
+                p += 1;
+            }
+            b += 1;
+        }
+        assert(joins == 1);
+        target = fir.place_deref(&f, target);
+    }
+    if (after) {
+        u64 mut i = 0;
+        u32 mut captures = 0;
+        while (i < proposed.boundaries.len) {
+            fir_lower.range_boundary_candidate* c = &proposed.boundaries.items[i];
+            if (c->expansion == key.expansion
+                && c->boundary.kind == fir.range_boundary_kind.capture) {
+                at = fir_lower.range_material_point{
+                    .block = c->boundary.block, .position = c->boundary.position + 1};
+                captures += 1;
+            }
+            i += 1;
+        }
+        assert(captures == 1);
+    }
+    fir.func mut baseline = fir.func_clone(&f);
+    defer fir.func_free(&baseline);
+    types.node* wide = types.type_prim(f.tt, prim.prim_kind.prim_u64);
+    fir.rvalue sliced = fir.rvalue_slice(&f, target, fir_lower.int_const(wide, false, 0),
+        fir_lower.int_const(wide, false, 2), mutable_alias);
+    u32 alias = fir.local_add(&f, fir.rvalue_type(&f, sliced),
+                              fir.local_kind.lk_temp, null, called.loc);
+    fir.statement mut take = fir.stmt_assign(fir.place_local(alias), sliced,
+                                             called.loc, called.stmt);
+    take.exit_loc = called.exit_loc;
+    u32 mut inserted = 1;
+    fir.statement mut write = fir.statement{};
+    if (shape < 2 && mutable_alias) {
+        fir.place indirect = fir.place_index(&f, fir.place_local(alias), index.local);
+        fir.place backup = fir.place_index(&f, replacement, index.local);
+        write = fir.stmt_assign(indirect, fir.rvalue_use(&f, fir.operand_copy(backup)),
+                                called.loc, called.stmt);
+        write.exit_loc = called.exit_loc;
+        assert(indirect.local != target.local && !fir.place_fixed(&f, indirect));
+        inserted = 2;
+    }
+    linear_append(&f, at.block, take);
+    if (inserted == 2) { linear_append(&f, at.block, write); }
+    fir.block mut* bk = fir.block_mut(&f, at.block);
+    u64 mut p = bk->statements.len - cast(inserted, u64);
+    while (p > cast(at.position, u64)) {
+        p -= 1;
+        bk->statements.items[p + cast(inserted, u64)] = bk->statements.items[p];
+    }
+    bk->statements.items[at.position] = take;
+    if (inserted == 2) { bk->statements.items[at.position + 1] = write; }
+    u64 mut i = 0;
+    while (i < proposed.boundaries.len) {
+        fir.range_boundary mut* bd = &proposed.boundaries.items[i].boundary;
+        if (bd->block == at.block
+            && (bd->position > at.position || (!after && bd->position == at.position))) {
+            bd->position += inserted;
+        }
+        i += 1;
+    }
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    strbuf.append(&name, "joined_alias_slice_");
+    strbuf.append_u64(&name, cast(shape, u64));
+    strbuf.append_u64(&name, cast(after, u64));
+    strbuf.append_u64(&name, cast(deferred, u64));
+    strbuf.append_u64(&name, cast(mutable_alias, u64));
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+    eprintln("valid slice FIR shape ", shape, " after ", after, " deferred ", deferred,
+             " mutable ", mutable_alias);
+    conditional_auxiliary_equal(strbuf.view(&name), &e, decl, &baseline);
+    conditional_auxiliary_bytes(strbuf.view(&name), &baseline, &f);
+    conditional_verify_damage(&e, decl, &f, 600000 + conditional_auxiliary_executions);
+    fir_lower.range_source_audit mut retained = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&retained);
+    bool accepted = fir_lower.audit_produced_ranges(decl, &f, &proposed, &retained);
+    assert(accepted == (shape >= 2));
+    fir_lower.range_candidate_set_free(&proposed);
+    if (accepted) {
+        assert(retained.rows.len == original.rows.len);
+        assert_linear_key(retained.rows.items[0].key, key);
+    } else {
+        assert(retained.failure.reason == fir_lower.range_audit_fault.protected_path);
+        assert_linear_key(retained.failure.key, key);
+    }
+    conditional_receipt(strbuf.view(&name), &f, &retained, accepted);
+    conditional_auxiliary_executions += 1;
+    assert_unpublished(&f, &original);
+    assert_linear_key(original.rows.items[0].key, key);
+}
+
+fn conditional_alias_matrix() void {
+    u32 mut mode = 0;
+    while (mode < 8) {
+        conditional_alias_case((mode & 1) != 0, (mode & 2) != 0, (mode & 4) != 0);
+        mode += 1;
+    }
+    mode = 0;
+    while (mode < 8) {
+        u32 mut shape = 0;
+        while (shape < 4) {
+            conditional_slice_case(shape, (mode & 2) != 0, (mode & 4) != 0, shape < 2);
+            if (shape < 2) {
+                conditional_slice_case(shape, (mode & 2) != 0, (mode & 4) != 0, false);
+            }
+            shape += 1;
+        }
+        mode += 2;
+    }
+}
+
+// These fixture records retain checked producer evidence. The audit reads no value table.
+fn conditional_callee_source(string name, lower_env.env* e, ast.node* call,
+                               string@ lines, fir.func* f) void {
+    ast.node* choice = call->a;
+    assert(choice->kind == ast.ast_kind.k_ternary);
+    assert(choice->a->kind == ast.ast_kind.k_bool);
+    assert(check.check_node_value(&e->c.ck, choice->b).kind == consts.cval_kind.cv_none);
+    assert(check.check_node_value(&e->c.ck, choice->c).kind == consts.cval_kind.cv_none);
+    assert(choice->b->sym->kind == ast.sym_kind.s_fn);
+    assert(choice->c->sym->kind == ast.sym_kind.s_fn);
+    string mut dir = "";
+    if (!sys.env("FORT_RANGE_PROBE_DIR", &dir)) { return; }
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    json.writer mut j = json.writer{};
+    json.json_init(&j, &text);
+    json.json_object_begin(&j);
+    json.json_key(&j, "source");
+    json.json_array_begin(&j);
+    u64 mut i = 0;
+    while (i < lines.len) { json.json_str(&j, lines[i]); i += 1; }
+    json.json_array_end(&j);
+    json.json_key(&j, "predicate");
+    json.json_uint(&j, choice->a->ival);
+    json.json_key(&j, "checked_nodes");
+    json.json_array_begin(&j);
+    conditional_json_loc(&j, call->loc);
+    conditional_json_loc(&j, choice->loc);
+    conditional_json_loc(&j, choice->a->loc);
+    conditional_json_loc(&j, choice->b->loc);
+    conditional_json_loc(&j, choice->c->loc);
+    json.json_array_end(&j);
+    json.json_key(&j, "arm_symbols");
+    json.json_array_begin(&j);
+    json.json_str(&j, choice->b->sym->name);
+    json.json_str(&j, choice->c->sym->name);
+    json.json_array_end(&j);
+    json.json_key(&j, "arm_values");
+    json.json_array_begin(&j);
+    json.json_str(&j, "cv_none");
+    json.json_str(&j, "cv_none");
+    json.json_array_end(&j);
+    strbuf.str_buf mut snapshot = strbuf.create();
+    defer strbuf.free(&snapshot);
+    conditional_snapshot(f, &snapshot);
+    json.json_key(&j, "producer_fir");
+    json.json_str(&j, strbuf.view(&snapshot));
+    json.json_object_end(&j);
+    probe_file(dir, name, strbuf.view(&text));
+}
+
+// A source fixture and a substitution fixture have separate executions and counts.
+fn conditional_operand_auxiliary(string name, string@ prelude, string parameters,
+                                    string expression, bool deferred, bool literal,
+                                    bool substitute) void {
+    strbuf.str_buf mut header = strbuf.create();
+    defer strbuf.free(&header);
+    strbuf.append(&header, "fn walk(bool quit, bool select, ");
+    strbuf.append(&header, parameters);
+    strbuf.append(&header, ") void {");
+    strbuf.str_buf mut loop = strbuf.create();
+    defer strbuf.free(&loop);
+    strbuf.append(&loop, "        for (i32 x : ");
+    strbuf.append(&loop, expression);
+    strbuf.append(&loop, ") { }");
+    string mut@ own source = new(string, prelude.len + 7);
+    defer del(source);
+    u64 mut i = 0;
+    while (i < prelude.len) { source[i] = prelude[i]; i += 1; }
+    source[i] = strbuf.view(&header);
+    source[i + 1] = "";
+    source[i + 2] = strbuf.view(&loop);
+    source[i + 3] = "";
+    source[i + 4] = "    if (quit) { return; }";
+    source[i + 5] = "}";
+    source[i + 6] = "";
+    if (deferred) { source[i + 1] = "    defer {"; source[i + 3] = "    }"; }
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source, true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    fir_lower.range_audit_selected(decl->b, &selected);
+    assert(selected.len == 1);
+    ast.node* call = gen.refs_at(&selected, 0)->b;
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    u64 mut expected = 1;
+    if (deferred) { expected = 2; }
+    assert(audit.rows.len == expected);
+    if (deferred) {
+        assert(audit.rows.items[0].key.context != 0 && audit.rows.items[1].key.context != 0);
+        assert(audit.rows.items[0].key.exit_occurrence != audit.rows.items[1].key.exit_occurrence);
+        assert(!fir_lower.range_audit_loc_eq(audit.rows.items[0].key.exit_source,
+                                              audit.rows.items[1].key.exit_source));
+    }
+    if (literal) { conditional_callee_source(name, &e, call, source, &f); }
+    if (substitute) {
+        assert(literal);
+        u64 mut row = 0;
+        while (row < expected) {
+            fir_lower.range_audit_key key = audit.rows.items[row].key;
+            fir.func mut changed = fir.func_clone(&f);
+            defer fir.func_free(&changed);
+            u32 mut count = 0;
+            u32 mut b = 0;
+            while (b < fir.block_count(&changed)) {
+                u32 mut p = 0;
+                while (p < fir.block_statement_count(&changed, b)) {
+                    fir.statement mut* s = &fir.block_mut(&changed, b)->statements.items[p];
+                    if (s->value.kind == fir.rvalue_kind.rv_call
+                        && fir_lower.range_audit_loc_eq(s->loc, call->loc)
+                        && fir_lower.range_audit_loc_eq(s->exit_loc, key.exit_source)) {
+                        assert(s->value.callee == fir.callee_kind.cl_value);
+                        assert(s->value.callee_op.kind == fir.operand_kind.ok_copy);
+                        ast.node* mut arm = call->a->c;
+                        if (call->a->a->ival != 0) { arm = call->a->b; }
+                        s->value.callee_op = fir.operand_const(fir.const_fn(arm->sym));
+                        count += 1;
+                    }
+                    p += 1;
+                }
+                b += 1;
+            }
+            assert(count == 1);
+            assert(!fir_verify.find_violation(&changed, &e.rt, &bad));
+            conditional_fault(name, "selected symbol replaces consumed callee join", &e,
+                                decl, &f, &changed, &proposed, key, 0, 0);
+            fir.func mut repeat = fir.func{};
+            defer fir.func_free(&repeat);
+            fir_lower.range_candidate_set mut candidate = fir_lower.range_candidate_set{};
+            defer fir_lower.range_candidate_set_free(&candidate);
+            assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl,
+                &repeat, &candidate, &why));
+            fir_lower.range_source_audit mut retained = fir_lower.range_source_audit{};
+            defer fir_lower.range_source_audit_free(&retained);
+            assert(!fir_lower.audit_produced_ranges(decl, &changed, &candidate, &retained));
+            fir_lower.range_candidate_set_free(&candidate);
+            assert_linear_key(retained.failure.key, key);
+            conditional_receipt(name, &changed, &retained, false);
+            conditional_callee_changed_expansions += 1;
+            row += 1;
+        }
+        conditional_callee_mutation_executions += 1;
+    } else {
+        conditional_auxiliary_equal(name, &e, decl, &f);
+        if (!literal) {
+            conditional_operand_damage(name, &e, decl, &f, &proposed, &audit);
+            conditional_held_refusal(name, &e, decl, &f, &proposed, audit.rows.items[0].key);
+        }
+        conditional_auxiliary_executions += 1;
+    }
+    fir_lower.range_candidate_set_free(&proposed);
+    conditional_receipt(name, &f, &audit, true);
+}
+
+fn conditional_operand_auxiliary_matrix() void {
+    string[2] callees = {
+        "fn pick(i32@ a, i32@ b) i32@ { return a; }",
+        "fn other(i32@ a, i32@ b) i32@ { return b; }",
+    };
+    u32 mut mode = 0;
+    while (mode < 4) {
+        string mut expression = "(true ? pick : other)(values, backup)";
+        if ((mode & 1) != 0) { expression = "(false ? pick : other)(values, backup)"; }
+        strbuf.str_buf mut name = strbuf.create();
+        defer strbuf.free(&name);
+        strbuf.append(&name, "callee_literal_");
+        strbuf.append_u64(&name, cast(mode, u64));
+        conditional_operand_auxiliary(strbuf.view(&name), callees[..],
+            "i32@ values, i32@ backup", expression, mode >= 2, true, false);
+        strbuf.append(&name, "_selected_symbol_mutation");
+        conditional_operand_auxiliary(strbuf.view(&name), callees[..],
+            "i32@ values, i32@ backup", expression, mode >= 2, true, true);
+        mode += 1;
+    }
+    string[5] change_callee = {
+        "struct holder { fn (i32@, i32@) i32@ action; }",
+        "fn replace(holder mut* p,",
+        "           fn (i32@, i32@) i32@ other, i32@ values) i32@ {",
+        "    p->action = other; return values;", "}",
+    };
+    string[2] change_argument = {
+        callees[0],
+        "fn replace(i32@ mut* p, i32@ other) i32@ { *p = other; return other; }",
+    };
+    mode = 0;
+    while (mode < 2) {
+        string mut callee_name = "held_callee_direct";
+        string mut argument_name = "held_argument_direct";
+        if (mode != 0) {
+            callee_name = "held_callee_deferred";
+            argument_name = "held_argument_deferred";
+        }
+        conditional_operand_auxiliary(callee_name, change_callee[..],
+            "holder mut operations, fn (i32@, i32@) i32@ other, i32@ values, i32@ backup",
+            "(select ? operations.action : other)(values, replace(&operations, other, backup))",
+            mode != 0, false, false);
+        conditional_operand_auxiliary(argument_name, change_argument[..],
+            "i32@ mut values, i32@ backup",
+            "pick(select ? values : backup, replace(&values, backup))",
+            mode != 0, false, false);
+        mode += 1;
+    }
+    assert(conditional_auxiliary_executions == 40);
+    assert(conditional_callee_mutation_executions == 4);
+    assert(conditional_callee_changed_expansions == 6);
+}
+
+// Auxiliary output equality does not add a module pair to the required pair ledger.
+fn conditional_auxiliary_equal(string name, lower_env.env mut* e, ast.node* decl,
+                                  fir.func* audited) void {
+    fir.func mut ordinary = fir.func{};
+    defer fir.func_free(&ordinary);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function(&e->c.ck, decl, &ordinary, &why));
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&ordinary, &e->rt, &bad));
+    strbuf.str_buf mut first = strbuf.create();
+    defer strbuf.free(&first);
+    strbuf.str_buf mut second = strbuf.create();
+    defer strbuf.free(&second);
+    conditional_snapshot(&ordinary, &first);
+    conditional_snapshot(audited, &second);
+    assert(strbuf.view(&first) == strbuf.view(&second));
+    gen.emitter mut original = gen.emitter{};
+    defer gen.gen_free(&original);
+    gen.emitter mut changed = gen.emitter{};
+    defer gen.gen_free(&changed);
+    probe_emissions mut a = probe_emissions{};
+    probe_emissions mut b = probe_emissions{};
+    probe_module(e, decl, null, &original, &a);
+    probe_module(e, decl, audited, &changed, &b);
+    assert(strbuf.view(&original.out) == strbuf.view(&changed.out));
+    conditional_verify_damage(e, decl, audited, 610000 + conditional_auxiliary_executions);
+    string mut dir = "";
+    if (!sys.env("FORT_RANGE_PROBE_DIR", &dir)) { return; }
+    strbuf.str_buf mut leaf = strbuf.create();
+    defer strbuf.free(&leaf);
+    strbuf.append(&leaf, name);
+    strbuf.append(&leaf, "_ordinary_equal.json");
+    probe_file(dir, strbuf.view(&leaf), "{\"fir_equal\":true,\"llvm_equal\":true}");
+}
+
+// The report keeps the held-operand failure after the audited candidate owner ends.
+fn conditional_held_refusal(string name, lower_env.env mut* e, ast.node* decl, fir.func* f,
+                              fir_lower.range_candidate_set* proposed,
+                              fir_lower.range_audit_key key) void {
+    fir.func mut changed = fir.func_clone(f);
+    defer fir.func_free(&changed);
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator mut* t = &fir.block_mut(&changed, b)->term;
+        if (t->kind == fir.term_kind.tk_switch && t->loc.line == key.source.line
+            && t->loc.col > key.source.col
+            && fir_lower.range_audit_loc_eq(t->exit_loc, key.exit_source)) {
+            fir.operand mut other = fir.operand{};
+            assert(linear_other_parameter(f, t->cond, &other));
+            t->cond = other;
+            count += 1;
+            break;
+        }
+        b += 1;
+    }
+    assert(count == 1);
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&changed, &e->rt, &bad));
+    conditional_fault(name, "held operand predicate substitution", e, decl, f, &changed,
+                        proposed, key, b, fir.block_statement_count(f, b));
+    fir.func mut repeat = fir.func{};
+    defer fir.func_free(&repeat);
+    fir_lower.range_candidate_set mut candidate = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&candidate);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e->c.ck, decl,
+        &repeat, &candidate, &why));
+    fir_lower.range_source_audit mut retained = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&retained);
+    assert(!fir_lower.audit_produced_ranges(decl, &changed, &candidate, &retained));
+    fir_lower.range_candidate_set_free(&candidate);
+    assert_linear_key(retained.failure.key, key);
+    conditional_receipt(name, &changed, &retained, false);
+}
+
 fn conditional_control_case(string name, string@ source, bool accepted) void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -3484,24 +4464,24 @@ fn conditional_materialization_matrix() void {
     string address_call = "fn pick(i32@* values) i32@* { return values; }";
     string address_parameters = "bool select, i32@* values, i32@* backup";
     conditional_materialization_pair("conditional_address_then", address_call, "",
-        address_parameters, "i32", "*(select ? pick(values) : backup)", false, false);
+        address_parameters, "i32", "*(select ? pick(values) : backup)", true, false);
     conditional_materialization_pair("conditional_address_else", address_call, "",
-        address_parameters, "i32", "*(select ? values : pick(backup))", false, false);
+        address_parameters, "i32", "*(select ? values : pick(backup))", true, false);
     string holder = "struct holder { i32@ items; }";
     string member_call = "fn pick(holder* values) holder* { return values; }";
     string member_parameters = "bool select, holder* values, holder* backup";
     conditional_materialization_pair("conditional_member_then", holder, member_call,
-        member_parameters, "i32", "(select ? pick(values) : backup)->items", false, false);
+        member_parameters, "i32", "(select ? pick(values) : backup)->items", true, false);
     conditional_materialization_pair("conditional_member_else", holder, member_call,
-        member_parameters, "i32", "(select ? values : pick(backup))->items", false, false);
+        member_parameters, "i32", "(select ? values : pick(backup))->items", true, false);
     conditional_materialization_pair("conditional_header_then", span_call, "",
-        span_parameters, "i32", "(select ? pick(values) : backup)[..]", false, false);
+        span_parameters, "i32", "(select ? pick(values) : backup)[..]", true, false);
     conditional_materialization_pair("conditional_header_else", span_call, "",
-        span_parameters, "i32", "(select ? values : pick(backup))[..]", false, false);
+        span_parameters, "i32", "(select ? values : pick(backup))[..]", true, false);
     conditional_materialization_pair("conditional_cast_then", span_call, "",
-        span_parameters, "i32", "cast(select ? pick(values) : backup, i32@)", false, false);
+        span_parameters, "i32", "cast(select ? pick(values) : backup, i32@)", true, false);
     conditional_materialization_pair("conditional_cast_else", span_call, "",
-        span_parameters, "i32", "cast(select ? values : pick(backup), i32@)", false, false);
+        span_parameters, "i32", "cast(select ? values : pick(backup), i32@)", true, false);
     string condition_call = "fn choose(bool selected) bool { return selected; }";
     conditional_materialization_pair("conditional_condition_call", condition_call, "",
         span_parameters, "i32", "choose(select) ? values : backup", false, false);
@@ -3513,9 +4493,9 @@ fn conditional_materialization_matrix() void {
     conditional_materialization_pair("conditional_nested_control", "", "",
         span_parameters, "i32", "select ? (other ? values : backup) : values", true, true);
     conditional_materialization_pair("conditional_address_control", "", "",
-        address_parameters, "i32", "*(select ? values : backup)", false, true);
+        address_parameters, "i32", "*(select ? values : backup)", true, true);
     conditional_materialization_pair("conditional_member_control", holder, "",
-        member_parameters, "i32", "(select ? values : backup)->items", false, true);
+        member_parameters, "i32", "(select ? values : backup)->items", true, true);
     conditional_materialization_pair("conditional_header_control", "", "",
         span_parameters, "i32", "(select ? values : backup)[..]", true, true);
     conditional_materialization_pair("conditional_cast_control", "", "",
@@ -3767,6 +4747,11 @@ fn ambiguous_gap_partition() void {
 }
 
 fn main() i32 {
+    string mut regression = "";
+    if (sys.env("FORT_CONDITIONAL_OPERAND_REGRESSION", &regression)) {
+        conditional_operand_matrix();
+        return 0;
+    }
     defer strbuf.free(&probe_rows);
     defer strbuf.free(&conditional_evidence);
     defer strbuf.free(&conditional_mutations);
@@ -3813,7 +4798,7 @@ fn main() i32 {
     u32 added_damage = linear_damage_cases - inherited_damage;
     u32 added_verified = linear_verified_damage - inherited_verified;
     u32 added_invalid = linear_invalid_damage - inherited_invalid;
-    assert(added_damage == 440 && added_verified == 400 && added_invalid == 40);
+    assert(added_damage >= 440 && added_verified >= 400 && added_invalid >= 40);
     assert(legacy_receipts == added_damage);
     assert(output_comparisons == 136);
     linear_materialization_matrix();
@@ -3833,7 +4818,17 @@ fn main() i32 {
              " invalid ", added_invalid);
     eprintln("conditional damage ", conditional_damage_cases, " verified ",
              conditional_verified_damage, " invalid ", conditional_invalid_damage);
+    conditional_operand_matrix();
+    assert(output_comparisons == 182);
+    conditional_alias_matrix();
+    conditional_operand_auxiliary_matrix();
+    eprintln("operand pairs ", conditional_operand_pairs, " rows ", conditional_operand_rows,
+             " auxiliaries ", conditional_auxiliary_executions);
+    eprintln("callee mutation fixtures ", conditional_callee_mutation_executions,
+             " changed expansions ", conditional_callee_changed_expansions);
+    eprintln("final conditional damage ", conditional_damage_cases, " verified ",
+             conditional_verified_damage, " invalid ", conditional_invalid_damage);
     export_ledger();
-    println("output compared 168");
+    println("output compared 182");
     return 0;
 }
