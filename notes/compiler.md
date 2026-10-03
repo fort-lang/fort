@@ -366,6 +366,12 @@ came here.
   Array sizing uses checked multiplication and never calls recursive size_checked on an array.
   Range copies charge lower and upper operands before output allocation.
   Projection copies charge each retained path element before allocation or copying.
+  Entry charges map validation and keeps its route in stack storage.
+  Each raw consumer charges repeated source searches, comparisons, copies, and allocations.
+  A metadata copy price pays no later arithmetic work. Each address alternative pays its own work.
+  Type casts pay the bounded borrowed predicate price before pure type comparison.
+  Header reads pay for their delegated borrow and source walks before transfer inspection.
+  Cleanup requires no work permission after the first terminal refusal.
   Its producer validates actual source correspondence before driver integration.
   Typed subobject windows do not grow when a cast erases the pointee type.
   Raw ranges require proved bounds and sufficient extent. Extents can remain symbolic.
