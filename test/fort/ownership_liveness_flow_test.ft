@@ -1,0 +1,448 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| flow liveness ok
+/// Checks reachable paths, loops, returns, deferred effects, and separate scope instances.
+import fir;
+import fir_lower;
+import lower_env;
+import ownership_api;
+import ownership_liveness;
+import ownership_liveness_env;
+
+fn diamond_future_read() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 yes = fir.block_new(&e.function);
+    u32 no = fir.block_new(&e.function);
+    u32 joined = fir.block_new(&e.function);
+    ownership_liveness_env.branch(&e, 0, yes, no, false);
+    ownership_liveness_env.read(&e, yes, ownership_liveness_env.VALUE);
+    ownership_liveness_env.goto(&e, yes, joined);
+    ownership_liveness_env.goto(&e, no, joined);
+    ownership_liveness_env.return_from(&e, joined);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 2, 0, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 1, 0, 0, true,
+        ownership_liveness_env.VALUE, false);
+}
+
+fn diamond_both_replace() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 yes = fir.block_new(&e.function);
+    u32 no = fir.block_new(&e.function);
+    u32 joined = fir.block_new(&e.function);
+    ownership_liveness_env.branch(&e, 0, yes, no, false);
+    ownership_liveness_env.assign(&e, yes, ownership_liveness_env.VALUE,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.VALUE));
+    ownership_liveness_env.assign(&e, no, ownership_liveness_env.VALUE,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.VALUE));
+    ownership_liveness_env.goto(&e, yes, joined);
+    ownership_liveness_env.goto(&e, no, joined);
+    ownership_liveness_env.read(&e, joined, ownership_liveness_env.VALUE);
+    ownership_liveness_env.return_from(&e, joined);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 1, 0, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 1, 0, 0, true,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 2, 0, 0, true,
+        ownership_liveness_env.VALUE, true);
+}
+
+fn constant_switch() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 excluded = fir.block_new(&e.function);
+    u32 selected = fir.block_new(&e.function);
+    ownership_liveness_env.branch(&e, 0, excluded, selected, true);
+    ownership_liveness_env.read(&e, excluded, ownership_liveness_env.VALUE);
+    ownership_liveness_env.return_from(&e, excluded);
+    ownership_liveness_env.return_from(&e, selected);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, false);
+    assert(!result.blocks[cast(excluded, u64)].reachable);
+    assert(result.blocks[cast(selected, u64)].reachable);
+}
+
+fn zero_iteration_loop() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 header = fir.block_new(&e.function);
+    u32 body = fir.block_new(&e.function);
+    u32 exit = fir.block_new(&e.function);
+    ownership_liveness_env.goto(&e, 0, header);
+    ownership_liveness_env.branch(&e, header, body, exit, false);
+    ownership_liveness_env.assign(&e, body, ownership_liveness_env.VALUE,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.VALUE));
+    ownership_liveness_env.goto(&e, body, header);
+    ownership_liveness_env.read(&e, exit, ownership_liveness_env.VALUE);
+    ownership_liveness_env.return_from(&e, exit);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 2, 0, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 2, 0, 0, true,
+        ownership_liveness_env.VALUE, true);
+}
+
+fn back_edge_use() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 body = fir.block_new(&e.function);
+    u32 test = fir.block_new(&e.function);
+    u32 exit = fir.block_new(&e.function);
+    ownership_liveness_env.goto(&e, 0, body);
+    ownership_liveness_env.read(&e, body, ownership_liveness_env.VALUE);
+    ownership_liveness_env.goto(&e, body, test);
+    ownership_liveness_env.branch(&e, test, body, exit, false);
+    ownership_liveness_env.return_from(&e, exit);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 1, 0, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 1, 0, 0, true,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 2, 0, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 3, 0, 0, false,
+        ownership_liveness_env.VALUE, false);
+}
+
+fn self_loop() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 body = fir.block_new(&e.function);
+    ownership_liveness_env.goto(&e, 0, body);
+    ownership_liveness_env.read(&e, body, ownership_liveness_env.VALUE);
+    ownership_liveness_env.goto(&e, body, body);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 1, 0, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 1, 0, 0, true,
+        ownership_liveness_env.VALUE, true);
+    assert(ownership_api.successful(result.proof));
+    assert(e.counts.charges < 10000);
+}
+
+fn unreachable_block() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 excluded = fir.block_new(&e.function);
+    ownership_liveness_env.read(&e, excluded, ownership_liveness_env.VALUE);
+    fir.block_set_terminator(&e.function, excluded,
+        fir.term_unreachable(ownership_liveness_env.at(), 1));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness.answer got = ownership_liveness.query(&result,
+        ownership_liveness.point{excluded, 0, 0, false},
+        ownership_liveness_env.slot(ownership_liveness_env.VALUE));
+    assert(got.proof.kind == ownership_api.proof_kind.bottom);
+    assert(!ownership_api.successful(got.proof));
+    assert(ownership_liveness.effect_count(&result, excluded, 0) == 0);
+    ownership_liveness.answer invalid = ownership_liveness.query(&result,
+        ownership_liveness.point{excluded, 99, 0, false},
+        ownership_liveness_env.slot(ownership_liveness_env.VALUE));
+    assert(invalid.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(invalid.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+
+}
+
+fn abort_exit() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 abort = fir.block_new(&e.function);
+    u32 normal = fir.block_new(&e.function);
+    ownership_liveness_env.branch(&e, 0, abort, normal, false);
+    fir.block_set_terminator(&e.function, abort,
+        fir.term_trap(ownership_liveness_env.at(), 0));
+    ownership_liveness_env.read(&e, normal, ownership_liveness_env.VALUE);
+    ownership_liveness_env.return_from(&e, normal);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 1, 0, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 1, 0, 0, false,
+        ownership_liveness_env.OWNER, false);
+    ownership_liveness_env.expect(&result, 2, 0, 0, false,
+        ownership_liveness_env.VALUE, true);
+}
+
+fn result_return_read() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false, 0, true);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true, 0, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false,
+        ownership_liveness_env.VALUE, false);
+}
+
+fn parameter_binding() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    assert(result.bindings[2].local == ownership_liveness_env.VALUE);
+    assert(result.bindings[2].slot.kind == ownership_api.entity_kind.slot);
+    assert(result.bindings[2].slot.ordinal == 12);
+    e.bindings[2].slot.kind = ownership_api.entity_kind.source;
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    assert(result.bindings[2].slot.kind == ownership_api.entity_kind.slot);
+}
+
+fn live_marker_boundary() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    fir.statement marker = fir.stmt_live(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 3);
+    fir.block_append(&e.function, 0, marker);
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.INNER);
+    fir.read mut read_value = fir.read{};
+    fir.place mut destination = fir.place{};
+    assert(!fir.stmt_read(&e.function, &marker, 0, &read_value));
+    assert(!fir.stmt_writes_place(&marker, &destination));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.INNER, true);
+    assert(result.steps[3].kind == ownership_liveness.effect_kind.scope_begin);
+}
+
+fn dead_marker_boundary() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.INNER);
+    fir.statement marker = fir.stmt_dead(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 4);
+    fir.block_append(&e.function, 0, marker);
+    fir.read mut read_value = fir.read{};
+    fir.place mut destination = fir.place{};
+    assert(!fir.stmt_read(&e.function, &marker, 0, &read_value));
+    assert(!fir.stmt_writes_place(&marker, &destination));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.INNER, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true,
+        ownership_liveness_env.INNER, false);
+    assert(result.steps[5].kind == ownership_liveness.effect_kind.scope_end);
+}
+
+fn sequential_scope_reentry() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.INNER);
+    fir.block_append(&e.function, 0, fir.stmt_dead(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 4));
+    fir.block_append(&e.function, 0, fir.stmt_live(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 5));
+    ownership_liveness_env.assign(&e, 0, ownership_liveness_env.INNER,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.INNER));
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.INNER);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 0, 5, 0, false,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 0, 6, 0, true,
+        ownership_liveness_env.INNER, true);
+    ownership_liveness_env.expect(&result, 0, 7, 0, true,
+        ownership_liveness_env.INNER, false);
+}
+
+fn loop_scope_reentry() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 body = fir.block_new(&e.function);
+    u32 test = fir.block_new(&e.function);
+    u32 exit = fir.block_new(&e.function);
+    ownership_liveness_env.goto(&e, 0, body);
+    fir.block_append(&e.function, body, fir.stmt_live(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 0));
+    ownership_liveness_env.assign(&e, body, ownership_liveness_env.INNER,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.INNER));
+    ownership_liveness_env.read(&e, body, ownership_liveness_env.INNER);
+    fir.block_append(&e.function, body, fir.stmt_dead(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 3));
+    ownership_liveness_env.goto(&e, body, test);
+    ownership_liveness_env.branch(&e, test, body, exit, false);
+    ownership_liveness_env.return_from(&e, exit);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 1, 0, 0, false,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 1, 1, 0, true,
+        ownership_liveness_env.INNER, true);
+    ownership_liveness_env.expect(&result, 1, 2, 0, true,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 1, 3, 0, false,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 2, 0, 0, false,
+        ownership_liveness_env.INNER, false);
+}
+
+fn crossed_scope_reentry() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 body = fir.block_new(&e.function);
+    u32 test = fir.block_new(&e.function);
+    u32 exit = fir.block_new(&e.function);
+    ownership_liveness_env.goto(&e, 0, body);
+    fir.block_append(&e.function, body, fir.stmt_live(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 0));
+    ownership_liveness_env.assign(&e, body, ownership_liveness_env.INNER,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.INNER));
+    ownership_liveness_env.read(&e, body, ownership_liveness_env.INNER);
+    fir.block_append(&e.function, body, fir.stmt_dead(ownership_liveness_env.INNER,
+        ownership_liveness_env.at(), 3));
+    ownership_liveness_env.goto(&e, body, test);
+    ownership_liveness_env.read(&e, test, ownership_liveness_env.OUTER);
+    ownership_liveness_env.branch(&e, test, body, exit, false);
+    ownership_liveness_env.read(&e, exit, ownership_liveness_env.OUTER);
+    ownership_liveness_env.return_from(&e, exit);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 1, 3, 0, false,
+        ownership_liveness_env.INNER, false);
+    ownership_liveness_env.expect(&result, 1, 3, 0, false,
+        ownership_liveness_env.OUTER, true);
+    ownership_liveness_env.expect(&result, 2, 0, 0, true,
+        ownership_liveness_env.OUTER, true);
+    ownership_liveness_env.expect(&result, 3, 0, 0, true,
+        ownership_liveness_env.OUTER, false);
+}
+
+fn expanded_defer() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    lower_env.env mut lowered = lower_env.env{};
+    lower_env.open(&lowered);
+    defer lower_env.close(&lowered);
+    string[6] source = {
+        "fn f(i32 x) i32 {",
+        "    i32 mut y = x;",
+        "    defer y = y;",
+        "    return 0;",
+        "}",
+        "fn main() i32 { return 0; }",
+    };
+    lower_env.check_lines(&lowered, source[..], true);
+    fir.func_free(&e.function);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function(&lowered.c.ck, lower_env.decl(&lowered, "f"),
+        &e.function, &why));
+    ownership_liveness.program input = ownership_liveness_env.input_with_runtime(&e, &lowered.rt);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    u32 mut local = 0;
+    while (local < fir.local_count(&e.function) &&
+        fir.local_name(fir.local_at(&e.function, local)) != "y") { local += 1; }
+    assert(local < fir.local_count(&e.function));
+    u32 mut deferred_reads = 0;
+    u32 mut endings = 0;
+    u32 mut block = 0;
+    while (block < fir.block_count(&e.function)) {
+        u32 mut gap = 0;
+        while (gap < fir.block_statement_count(&e.function, block)) {
+            fir.statement* statement_value = fir.block_statement(&e.function, block, gap);
+            fir.read mut read_value = fir.read{};
+            if (statement_value->exit_loc.file.len > 0 &&
+                fir.stmt_read(&e.function, statement_value, 0, &read_value) &&
+                read_value.place.local == local) {
+                deferred_reads += 1;
+                ownership_liveness_env.expect(&result, block, gap, 0, false, local, true);
+                ownership_liveness_env.expect(&result, block, gap, 0, true, local, false);
+            }
+            if (statement_value->kind == fir.stmt_kind.st_dead && statement_value->local == local) {
+                endings += 1;
+                ownership_liveness_env.expect(&result, block, gap, 0, false, local, false);
+            }
+            gap += 1;
+        }
+        block += 1;
+    }
+    assert(deferred_reads == 1 && endings == 1);
+}
+
+fn main() i32 {
+    diamond_future_read();
+    diamond_both_replace();
+    constant_switch();
+    zero_iteration_loop();
+    back_edge_use();
+    self_loop();
+    unreachable_block();
+    abort_exit();
+    result_return_read();
+    parameter_binding();
+    live_marker_boundary();
+    dead_marker_boundary();
+    sequential_scope_reentry();
+    loop_scope_reentry();
+    crossed_scope_reentry();
+    expanded_defer();
+    println("flow liveness ok");
+    return 0;
+}

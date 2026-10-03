@@ -48,7 +48,7 @@ CORPUS_DIRS = (
 # The number of files those directories hold. A floor cannot detect a directory
 # that the scan stopped using. When a `.ft` file changes this count, use the
 # number from the failure. bootstrap0/test/parser_recovery_test.c uses the same method.
-CORPUS_FILES = 879
+CORPUS_FILES = 886
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor and CORPUS_FILES asserts the exact total.
 # A floor of 1 only proves that the directory exists.

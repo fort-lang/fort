@@ -1,0 +1,818 @@
+/// Computes possible future semantic use over verified FIR and supplied access correspondence.
+// Retained sources, source validity, and whole-body range loans remain separate facts.
+import fir;
+import fir_flow;
+import ownership_api;
+import ownership_keys;
+import types;
+
+struct binding {
+    u32 local;
+    ownership_api.entity_id slot;
+}
+
+enum effect_kind {
+    read,
+    empty,
+    write,
+    scope_begin,
+    scope_end,
+    none,
+}
+
+struct point {
+    u32 block;
+    u32 gap;
+    u32 effect;
+    bool after;
+}
+
+// A row covers one indirect FIR read or the final destination write.
+struct access {
+    ownership_api.operation_position operation;
+    u32 read;
+    bool write;
+    bool complete;
+    ownership_api.place_path@ targets;
+}
+
+// The caller substitutes aliases before supplying these ordered effects.
+struct call_effect {
+    effect_kind kind;
+    bool complete;
+    ownership_api.place_path@ targets;
+}
+
+struct call {
+    ownership_api.operation_position operation;
+    bool complete;
+    call_effect@ effects;
+}
+
+struct program {
+    fir.func* function;
+    ownership_api.function_id identity;
+    bool verified_fir;
+    ownership_api.services* services;
+    binding@ bindings;
+    access@ accesses;
+    call@ calls;
+}
+
+struct step {
+    point position;
+    effect_kind kind;
+    fir_flow.bits uses;
+    fir_flow.bits kills;
+    fir_flow.bits before;
+    fir_flow.bits after;
+}
+
+struct block_result {
+    bool reachable;
+    u32 statements;
+    u64 first;
+    u64 len;
+    fir_flow.bits entry;
+}
+
+struct analysis {
+    ownership_api.function_id identity;
+    ownership_api.proof_status proof;
+    binding mut@ own bindings;
+    step mut@ own steps;
+    u64 steps_len;
+    block_result mut@ own blocks;
+}
+
+struct answer {
+    ownership_api.proof_status proof;
+    bool used;
+}
+
+fn free(analysis mut* result) void {
+    u64 mut i = 0;
+    while (i < result->steps_len) {
+        fir_flow.bits_free(&result->steps[i].uses);
+        fir_flow.bits_free(&result->steps[i].kills);
+        fir_flow.bits_free(&result->steps[i].before);
+        fir_flow.bits_free(&result->steps[i].after);
+        i += 1;
+    }
+    i = 0;
+    while (i < result->blocks.len) {
+        fir_flow.bits_free(&result->blocks[i].entry);
+        i += 1;
+    }
+    del(result->bindings);
+    del(result->steps);
+    del(result->blocks);
+    result->steps_len = 0;
+    result->proof = ownership_api.proof_status{};
+    result->identity = ownership_api.function_id{};
+}
+
+fn position(program* input, u32 block, u32 gap) ownership_api.operation_position {
+    return ownership_api.operation_position{input->identity, block, gap,
+        gap == fir.block_statement_count(input->function, block)};
+}
+
+fn fail(analysis mut* result, ownership_api.incomplete_reason reason,
+    ownership_api.operation_position op) bool {
+    result->proof = ownership_api.incomplete(reason, op, ownership_api.source_position{});
+    return false;
+}
+
+fn charge_amount(program* input, analysis mut* result, ownership_api.work_kind work,
+    ownership_api.operation_position op, u64 amount) bool {
+    u64 mut remaining = amount;
+    while (remaining > 0) {
+        ownership_api.charge_result charged = ownership_api.charge_work(input->services, work, op,
+            ownership_api.source_position{});
+        if (!charged.allowed) {
+            result->proof = charged.proof;
+            return false;
+        }
+        remaining -= 1;
+    }
+    return true;
+}
+
+fn charge(program* input, analysis mut* result, ownership_api.work_kind work,
+    ownership_api.operation_position op) bool {
+    return charge_amount(input, result, work, op, 1);
+}
+
+fn charge_sets(program* input, analysis mut* result, ownership_api.work_kind work,
+    ownership_api.operation_position op, u64 sets) bool {
+    u64 words = (result->bindings.len + 63) / 64;
+    return charge_amount(input, result, work, op, 1 + words * sets);
+}
+
+fn charge_place(program* input, analysis mut* result,
+    ownership_api.operation_position op, fir.place place_value) bool {
+    u64 projections = cast(place_value.proj_len, u64);
+    return charge_amount(input, result, ownership_api.work_kind.substitution, op,
+        1 + projections * (projections + 1) / 2);
+}
+
+fn valid_operation(program* input, ownership_api.operation_position op) bool {
+    if (ownership_keys.function(op.function, input->identity) != 0 ||
+        op.block >= fir.block_count(input->function)) { return false; }
+    u32 count = fir.block_statement_count(input->function, op.block);
+    return op.operation <= count && op.terminator == (op.operation == count);
+}
+
+fn slot_index(analysis* result, ownership_api.entity_id slot) u32 {
+    u64 mut i = 0;
+    while (i < result->bindings.len) {
+        if (ownership_keys.entity(result->bindings[i].slot, slot) == 0) {
+            return cast(i, u32);
+        }
+        i += 1;
+    }
+    return cast(result->bindings.len, u32);
+}
+
+fn local_index(analysis* result, u32 local) u32 {
+    return local;
+}
+
+fn resolve_slot(program* input, analysis mut* result, ownership_api.operation_position op,
+    ownership_api.entity_id slot, u32 mut* index) bool {
+    u64 mut i = 0;
+    while (i < result->bindings.len) {
+        if (!charge(input, result, ownership_api.work_kind.substitution, op)) { return false; }
+        if (ownership_keys.entity(result->bindings[i].slot, slot) == 0) {
+            *index = cast(i, u32);
+            return true;
+        }
+        i += 1;
+    }
+    return fail(result, ownership_api.incomplete_reason.invalid_input, op);
+}
+
+fn valid_targets(program* input, analysis mut* result, ownership_api.operation_position op,
+    ownership_api.place_path@ targets) bool {
+    u64 mut i = 0;
+    while (i < targets.len) {
+        ownership_api.place_path target = targets[i];
+        i += 1;
+        u32 mut index = 0;
+        if (!charge(input, result, ownership_api.work_kind.substitution, op)) { return false; }
+        if (target.root.kind != ownership_api.entity_kind.slot) {
+            return fail(result, ownership_api.incomplete_reason.invalid_input, op);
+        }
+        if (!resolve_slot(input, result, op, target.root, &index)) { return false; }
+    }
+    return true;
+}
+
+fn indirect(fir.func* function, fir.place place_value) bool {
+    u32 mut i = 0;
+    while (i < place_value.proj_len) {
+        fir.projection projection_value = fir.place_projection(function, place_value, i);
+        fir.place mut prefix = place_value;
+        prefix.proj_len = i;
+        types.type_kind kind = fir.place_type(function, prefix)->kind;
+        if (projection_value.kind == fir.proj_kind.pj_deref ||
+            (projection_value.kind == fir.proj_kind.pj_index &&
+                (kind == types.type_kind.k_span || kind == types.type_kind.k_string))) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn operation_read(program* input, ownership_api.operation_position op, u32 index,
+    fir.read mut* out) bool {
+    if (op.terminator) {
+        return fir.term_read(input->function, &fir.block_at(input->function, op.block)->term,
+            index, out);
+    }
+    return fir.stmt_read(input->function,
+        fir.block_statement(input->function, op.block, op.operation), index, out);
+}
+
+// Price the complete read walk before FIR visits operand and projection lists.
+fn charge_read(program* input, analysis mut* result,
+    ownership_api.operation_position op) bool {
+    if (op.terminator) {
+        fir.terminator* term = &fir.block_at(input->function, op.block)->term;
+        if (!charge_amount(input, result, ownership_api.work_kind.substitution, op,
+                1 + cast(term->args_len, u64))) { return false; }
+        if (term->kind == fir.term_kind.tk_check_overwrite &&
+            !charge_place(input, result, op, term->place)) { return false; }
+        if ((term->kind == fir.term_kind.tk_switch || term->kind == fir.term_kind.tk_check) &&
+            term->cond.kind != fir.operand_kind.ok_const &&
+            !charge_place(input, result, op, term->cond.place)) { return false; }
+        u32 mut i = 0;
+        while (i < term->args_len) {
+            fir.operand value = fir.operand_at(input->function, term->args_first + i);
+            if (value.kind != fir.operand_kind.ok_const &&
+                !charge_place(input, result, op, value.place)) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+    fir.statement* statement_value = fir.block_statement(input->function, op.block, op.operation);
+    fir.rvalue value = statement_value->value;
+    if (!charge_amount(input, result, ownership_api.work_kind.substitution, op,
+            1 + cast(value.ops_len, u64))) { return false; }
+    if (statement_value->kind == fir.stmt_kind.st_live ||
+        statement_value->kind == fir.stmt_kind.st_dead) { return true; }
+    if (!charge_place(input, result, op, statement_value->place)) { return false; }
+    if (statement_value->kind == fir.stmt_kind.st_del) { return true; }
+    if ((value.kind == fir.rvalue_kind.rv_addr || value.kind == fir.rvalue_kind.rv_slice) &&
+        !charge_place(input, result, op, value.place)) { return false; }
+    if (value.kind == fir.rvalue_kind.rv_call && value.callee == fir.callee_kind.cl_value &&
+        value.callee_op.kind != fir.operand_kind.ok_const &&
+        !charge_place(input, result, op, value.callee_op.place)) { return false; }
+    u32 mut i = 0;
+    while (i < value.ops_len) {
+        fir.operand operand_value = fir.rvalue_operand(input->function, value, i);
+        if (operand_value.kind != fir.operand_kind.ok_const &&
+            !charge_place(input, result, op, operand_value.place)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn find_access(program* input, analysis mut* result, ownership_api.operation_position op,
+    u32 index, bool write)
+    access* {
+    u64 mut i = 0;
+    while (i < input->accesses.len) {
+        if (!charge(input, result, ownership_api.work_kind.substitution, op)) { return null; }
+        access* candidate = &input->accesses[i];
+        if (ownership_keys.operation(candidate->operation, op) == 0 &&
+            candidate->write == write && (write || candidate->read == index)) {
+            return candidate;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+fn find_call(program* input, analysis mut* result, ownership_api.operation_position op) call* {
+    u64 mut i = 0;
+    while (i < input->calls.len) {
+        if (!charge(input, result, ownership_api.work_kind.substitution, op)) { return null; }
+        if (ownership_keys.operation(input->calls[i].operation, op) == 0) {
+            return &input->calls[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+
+fn validate(program* input, analysis mut* result) bool {
+    ownership_api.operation_position op = ownership_api.operation_position{
+        .function = input->identity};
+    if (input->function == null || !input->verified_fir || input->services == null) {
+        return fail(result, ownership_api.incomplete_reason.invalid_input, op);
+    }
+    u32 locals = fir.local_count(input->function);
+    if (input->bindings.len != cast(locals, u64) || fir.block_count(input->function) == 0) {
+        return fail(result, ownership_api.incomplete_reason.missing_correspondence, op);
+    }
+    if (!charge_amount(input, result, ownership_api.work_kind.transfer, op,
+            1 + input->bindings.len)) { return false; }
+    result->bindings = new(binding, input->bindings.len);
+    u64 mut i = 0;
+    while (i < input->bindings.len) {
+        if (!charge(input, result, ownership_api.work_kind.substitution, op)) { return false; }
+        binding row = input->bindings[i];
+        if (row.local >= locals || row.slot.kind != ownership_api.entity_kind.slot ||
+            ownership_keys.function(row.slot.function, input->identity) != 0) {
+            return fail(result, ownership_api.incomplete_reason.invalid_input, op);
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!charge(input, result, ownership_api.work_kind.substitution, op)) { return false; }
+            if (input->bindings[j].local == row.local ||
+                ownership_keys.entity(input->bindings[j].slot, row.slot) == 0) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, op);
+            }
+            j += 1;
+        }
+        if (!charge(input, result, ownership_api.work_kind.transfer, op)) { return false; }
+        result->bindings[cast(row.local, u64)] = row;
+        i += 1;
+    }
+    i = 0;
+    while (i < input->accesses.len) {
+        access row = input->accesses[i];
+        if (!charge(input, result, ownership_api.work_kind.substitution, row.operation)) {
+            return false;
+        }
+        if (!valid_operation(input, row.operation)) {
+            return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+        }
+        if (!valid_targets(input, result, row.operation, row.targets)) { return false; }
+        if (row.write) {
+            fir.place mut destination = fir.place{};
+            if (row.operation.terminator || row.read != 0 ||
+                !fir.stmt_writes_place(fir.block_statement(input->function, row.operation.block,
+                    row.operation.operation), &destination)) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+            }
+            if (!charge_place(input, result, row.operation, destination)) { return false; }
+            if (!indirect(input->function, destination)) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+            }
+        } else {
+            fir.read mut read_value = fir.read{};
+            if (!charge_read(input, result, row.operation)) { return false; }
+            if (!operation_read(input, row.operation, row.read, &read_value) ||
+                !read_value.is_use) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+            }
+            if (!charge_place(input, result, row.operation, read_value.place)) { return false; }
+            if (!indirect(input->function, read_value.place)) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+            }
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!charge(input, result, ownership_api.work_kind.substitution, row.operation)) {
+                return false;
+            }
+            access prior = input->accesses[j];
+            if (ownership_keys.operation(prior.operation, row.operation) == 0 &&
+                prior.write == row.write && (row.write || prior.read == row.read)) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < input->calls.len) {
+        call row = input->calls[i];
+        if (!charge(input, result, ownership_api.work_kind.substitution, row.operation)) {
+            return false;
+        }
+        if (!valid_operation(input, row.operation) || row.operation.terminator) {
+            return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+        }
+        fir.statement* statement_value = fir.block_statement(input->function,
+            row.operation.block, row.operation.operation);
+        if (statement_value->kind != fir.stmt_kind.st_assign ||
+            statement_value->value.kind != fir.rvalue_kind.rv_call) {
+            return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+        }
+        u64 mut effect_index = 0;
+        while (effect_index < row.effects.len) {
+            call_effect effect = row.effects[effect_index];
+            effect_index += 1;
+            if (!charge(input, result, ownership_api.work_kind.substitution, row.operation)) {
+                return false;
+            }
+            if ((effect.kind != effect_kind.read && effect.kind != effect_kind.empty &&
+                    effect.kind != effect_kind.write)) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+            }
+            if (!valid_targets(input, result, row.operation, effect.targets)) { return false; }
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!charge(input, result, ownership_api.work_kind.substitution, row.operation)) {
+                return false;
+            }
+            if (ownership_keys.operation(input->calls[j].operation, row.operation) == 0) {
+                return fail(result, ownership_api.incomplete_reason.invalid_input, row.operation);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn append(program* input, analysis mut* result, ownership_api.operation_position op,
+    u32 ordinal, effect_kind kind) step mut* {
+    if (!charge_sets(input, result, ownership_api.work_kind.transfer, op, 4)) { return null; }
+    if (result->steps_len == result->steps.len) {
+        u64 capacity = result->steps.len == 0 ? 16 : result->steps.len * 2;
+        if (!charge_amount(input, result, ownership_api.work_kind.transfer, op,
+                capacity + result->steps_len)) { return null; }
+        step mut@ own grown = new(step, capacity);
+        u64 mut i = 0;
+        while (i < result->steps_len) {
+            grown[i] = move(result->steps[i]);
+            i += 1;
+        }
+        del(result->steps);
+        result->steps = move(grown);
+    }
+    step mut* out = &result->steps[result->steps_len];
+    out->position = point{op.block, op.operation, ordinal, false};
+    out->kind = kind;
+    u32 count = cast(result->bindings.len, u32);
+    out->uses = fir_flow.bits_new(count);
+    out->kills = fir_flow.bits_new(count);
+    out->before = fir_flow.bits_new(count);
+    out->after = fir_flow.bits_new(count);
+    result->steps_len += 1;
+    return out;
+}
+
+fn target_uses(program* input, analysis mut* result, ownership_api.operation_position op,
+    step mut* out, ownership_api.place_path@ targets) bool {
+    u64 mut i = 0;
+    while (i < targets.len) {
+        u32 mut index = 0;
+        if (!resolve_slot(input, result, op, targets[i].root, &index)) { return false; }
+        if (!charge(input, result, ownership_api.work_kind.transfer, op)) { return false; }
+        fir_flow.bits_set(&out->uses, index);
+        i += 1;
+    }
+    return true;
+}
+
+fn target_kill(program* input, analysis mut* result, ownership_api.operation_position op,
+    step mut* out, bool complete, ownership_api.place_path@ targets) bool {
+    if (!charge(input, result, ownership_api.work_kind.substitution, op)) { return false; }
+    if (complete && targets.len == 1 && !targets[0].residual &&
+        targets[0].projections.len == 0) {
+        u32 mut index = 0;
+        if (!resolve_slot(input, result, op, targets[0].root, &index)) { return false; }
+        if (!charge(input, result, ownership_api.work_kind.transfer, op)) { return false; }
+        fir_flow.bits_set(&out->kills, index);
+    }
+    return true;
+}
+
+fn local_kill(analysis* result, step mut* out, fir.place destination) void {
+    if (destination.base == fir.base_kind.bk_local && destination.proj_len == 0) {
+        fir_flow.bits_set(&out->kills, local_index(result, destination.local));
+    }
+}
+
+fn emit_read(program* input, analysis mut* result, ownership_api.operation_position op,
+    u32 read_index, u32 mut* ordinal, fir.read read_value) bool {
+    access* mut correspondence = null;
+    if (!charge_place(input, result, op, read_value.place)) { return false; }
+    if (read_value.is_use && indirect(input->function, read_value.place)) {
+        correspondence = find_access(input, result, op, read_index, false);
+        if (result->proof.failed) { return false; }
+        if (correspondence == null || !correspondence->complete) {
+            return fail(result, ownership_api.incomplete_reason.missing_correspondence, op);
+        }
+    }
+    step mut* mut out = append(input, result, op, *ordinal, effect_kind.read);
+    if (out == null) { return false; }
+    *ordinal += 1;
+    if (read_value.is_use && read_value.place.base == fir.base_kind.bk_local) {
+        fir_flow.bits_set(&out->uses, local_index(result, read_value.place.local));
+    }
+    if (correspondence != null &&
+        !target_uses(input, result, op, out, correspondence->targets)) { return false; }
+    if (read_value.empties) {
+        out = append(input, result, op, *ordinal, effect_kind.empty);
+        if (out == null) { return false; }
+        *ordinal += 1;
+        if (correspondence != null) {
+            if (!target_kill(input, result, op, out, correspondence->complete,
+                correspondence->targets)) { return false; }
+        } else {
+            local_kill(result, out, read_value.place);
+        }
+    }
+    return true;
+}
+
+fn emit_call(program* input, analysis mut* result, ownership_api.operation_position op,
+    u32 mut* ordinal) bool {
+    call* correspondence = find_call(input, result, op);
+    if (result->proof.failed) { return false; }
+    if (correspondence == null || !correspondence->complete) {
+        return fail(result, ownership_api.incomplete_reason.missing_correspondence, op);
+    }
+    u64 mut effect_index = 0;
+    while (effect_index < correspondence->effects.len) {
+        call_effect effect = correspondence->effects[effect_index];
+        effect_index += 1;
+        if (!effect.complete && effect.kind != effect_kind.write) {
+            return fail(result, ownership_api.incomplete_reason.missing_correspondence, op);
+        }
+        effect_kind kind = effect.kind == effect_kind.empty ? effect_kind.read : effect.kind;
+        step mut* mut out = append(input, result, op, *ordinal, kind);
+        if (out == null) { return false; }
+        *ordinal += 1;
+        if (effect.kind == effect_kind.read || effect.kind == effect_kind.empty) {
+            if (!target_uses(input, result, op, out, effect.targets)) { return false; }
+        }
+        if (effect.kind == effect_kind.write) {
+            if (!target_kill(input, result, op, out, effect.complete, effect.targets)) {
+                return false;
+            }
+        } else if (effect.kind == effect_kind.empty) {
+            out = append(input, result, op, *ordinal, effect_kind.empty);
+            if (out == null) { return false; }
+            *ordinal += 1;
+            if (!target_kill(input, result, op, out, effect.complete, effect.targets)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn extract_operation(program* input, analysis mut* result,
+    ownership_api.operation_position op) bool {
+    u32 mut ordinal = 0;
+    u32 mut reads = 0;
+    fir.read mut read_value = fir.read{};
+    while (true) {
+        if (!charge_read(input, result, op)) { return false; }
+        if (!operation_read(input, op, reads, &read_value)) { break; }
+        reads += 1;
+    }
+    bool mut is_call = false;
+    u32 mut call_gap = reads;
+    fir.statement* mut statement_value = null;
+    if (!op.terminator) {
+        statement_value = fir.block_statement(input->function, op.block, op.operation);
+        is_call = statement_value->kind == fir.stmt_kind.st_assign &&
+            statement_value->value.kind == fir.rvalue_kind.rv_call;
+        if (is_call) {
+            fir.read_cursor mut cursor = fir.read_cursor{};
+            fir.read_pointers(input->function, &cursor, statement_value->place);
+            call_gap -= cursor.seen;
+        }
+    }
+    u32 mut i = 0;
+    while (i <= reads) {
+        if (is_call && i == call_gap && !emit_call(input, result, op, &ordinal)) {
+            return false;
+        }
+        if (i < reads) {
+            if (!charge_read(input, result, op)) { return false; }
+            assert(operation_read(input, op, i, &read_value));
+            if (!emit_read(input, result, op, i, &ordinal, read_value)) { return false; }
+        }
+        i += 1;
+    }
+    if (statement_value != null) {
+        if (statement_value->kind == fir.stmt_kind.st_live ||
+            statement_value->kind == fir.stmt_kind.st_dead) {
+            effect_kind kind = statement_value->kind == fir.stmt_kind.st_live ?
+                effect_kind.scope_begin : effect_kind.scope_end;
+            step mut* out = append(input, result, op, ordinal, kind);
+            if (out == null) { return false; }
+            ordinal += 1;
+            fir_flow.bits_set(&out->kills, local_index(result, statement_value->local));
+        } else if (statement_value->kind == fir.stmt_kind.st_assign) {
+            step mut* out = append(input, result, op, ordinal, effect_kind.write);
+            if (out == null) { return false; }
+            ordinal += 1;
+            if (!charge_place(input, result, op, statement_value->place)) { return false; }
+            if (indirect(input->function, statement_value->place)) {
+                access* correspondence = find_access(input, result, op, 0, true);
+                if (result->proof.failed) { return false; }
+                if (correspondence != null) {
+                    if (!target_kill(input, result, op, out, correspondence->complete,
+                            correspondence->targets)) { return false; }
+                }
+            } else {
+                local_kill(result, out, statement_value->place);
+            }
+        }
+    }
+    if (ordinal == 0 && append(input, result, op, 0, effect_kind.none) == null) { return false; }
+    return true;
+}
+
+fn reach(program* input, analysis mut* result) bool {
+    u32 count = fir.block_count(input->function);
+    ownership_api.operation_position op = position(input, 0, 0);
+    if (!charge_amount(input, result, ownership_api.work_kind.transfer, op,
+            1 + cast(count, u64))) { return false; }
+    result->blocks = new(block_result, cast(count, u64));
+    u32 mut b = 0;
+    while (b < count) {
+        if (!charge_sets(input, result, ownership_api.work_kind.transfer, position(input, b, 0),
+                1)) {
+            return false;
+        }
+        result->blocks[cast(b, u64)].statements = fir.block_statement_count(input->function, b);
+        result->blocks[cast(b, u64)].entry = fir_flow.bits_new(cast(result->bindings.len, u32));
+        b += 1;
+    }
+    result->blocks[0].reachable = true;
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        b = 0;
+        while (b < count) {
+            if (!charge(input, result, ownership_api.work_kind.join, position(input, b, 0))) {
+                return false;
+            }
+            if (result->blocks[cast(b, u64)].reachable) {
+                fir.terminator* term = &fir.block_at(input->function, b)->term;
+                u32 mut edge = 0;
+                u32 mut target = 0;
+                while (fir.term_targets(input->function, term, edge, &target)) {
+                    if (!charge_amount(input, result, ownership_api.work_kind.join, op,
+                            1 + cast(term->arms_len, u64))) { return false; }
+                    if (fir_flow.reachable_target(input->function, term, edge, &target) &&
+                        !result->blocks[cast(target, u64)].reachable) {
+                        if (!charge(input, result, ownership_api.work_kind.join,
+                                position(input, b,
+                                    fir.block_statement_count(input->function, b)))) {
+                            return false;
+                        }
+                        result->blocks[cast(target, u64)].reachable = true;
+                        changed = true;
+                    }
+                    edge += 1;
+                }
+            }
+            b += 1;
+        }
+    }
+    b = 0;
+    while (b < count) {
+        if (!charge(input, result, ownership_api.work_kind.transfer, position(input, b, 0))) {
+            return false;
+        }
+        block_result mut* block_value = &result->blocks[cast(b, u64)];
+        block_value->first = result->steps_len;
+        if (block_value->reachable) {
+            u32 mut gap = 0;
+            u32 statements = fir.block_statement_count(input->function, b);
+            while (gap <= statements) {
+                if (!extract_operation(input, result, position(input, b, gap))) { return false; }
+                gap += 1;
+            }
+        }
+        block_value->len = result->steps_len - block_value->first;
+        b += 1;
+    }
+    return true;
+}
+
+fn fixed_point(program* input, analysis mut* result) bool {
+    if (!charge_sets(input, result, ownership_api.work_kind.transfer, position(input, 0, 0), 1)) {
+        return false;
+    }
+    fir_flow.bits mut current = fir_flow.bits_new(cast(result->bindings.len, u32));
+    defer fir_flow.bits_free(&current);
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        u64 mut b = result->blocks.len;
+        while (b > 0) {
+            b -= 1;
+            if (!charge(input, result, ownership_api.work_kind.join,
+                    position(input, cast(b, u32), 0))) { return false; }
+            block_result mut* block_value = &result->blocks[b];
+            if (!block_value->reachable) { continue; }
+            u32 gap = fir.block_statement_count(input->function, cast(b, u32));
+            ownership_api.operation_position mut op = position(input, cast(b, u32), gap);
+            if (!charge_sets(input, result, ownership_api.work_kind.join, op, 1)) { return false; }
+            u64 mut word = 0;
+            while (word < current.words.len) { current.words[word] = 0; word += 1; }
+            fir.terminator* term = &fir.block_at(input->function, cast(b, u32))->term;
+            u32 mut edge = 0;
+            u32 mut target = 0;
+            while (fir.term_targets(input->function, term, edge, &target)) {
+                if (!charge_amount(input, result, ownership_api.work_kind.join, op,
+                        1 + cast(term->arms_len, u64))) { return false; }
+                if (fir_flow.reachable_target(input->function, term, edge, &target)) {
+                    if (!charge_sets(input, result, ownership_api.work_kind.join, op, 1)) {
+                        return false;
+                    }
+                    fir_flow.bits_union(&current, &result->blocks[cast(target, u64)].entry);
+                }
+                edge += 1;
+            }
+            u64 mut i = block_value->first + block_value->len;
+            while (i > block_value->first) {
+                i -= 1;
+                step mut* effect = &result->steps[i];
+                op = position(input, effect->position.block, effect->position.gap);
+                if (!charge_sets(input, result, ownership_api.work_kind.transfer, op, 3)) {
+                    return false;
+                }
+                fir_flow.bits_copy(&effect->after, &current);
+                word = 0;
+                while (word < current.words.len) {
+                    current.words[word] = (current.words[word] & ~effect->kills.words[word]) |
+                        effect->uses.words[word];
+                    word += 1;
+                }
+                fir_flow.bits_copy(&effect->before, &current);
+            }
+            if (!charge_sets(input, result, ownership_api.work_kind.join, op, 1)) { return false; }
+            if (!fir_flow.bits_equal(&block_value->entry, &current)) {
+                if (!charge_sets(input, result, ownership_api.work_kind.join, op, 1)) {
+                    return false;
+                }
+                fir_flow.bits_copy(&block_value->entry, &current);
+                changed = true;
+            }
+        }
+    }
+    return true;
+}
+
+fn solve(program* input) analysis {
+    analysis mut result = analysis{.identity = input->identity};
+    if (!validate(input, &result) || !reach(input, &result) ||
+        !fixed_point(input, &result)) { return result; }
+    result.proof = ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+    return result;
+}
+
+fn effect_count(analysis* result, u32 block, u32 gap) u32 {
+    u32 mut count = 0;
+    u64 mut i = 0;
+    while (i < result->steps_len) {
+        point at = result->steps[i].position;
+        if (at.block == block && at.gap == gap) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn query(analysis* result, point at, ownership_api.entity_id slot) answer {
+    answer mut out = answer{.proof = result->proof};
+    if (!ownership_api.successful(result->proof)) { return out; }
+    ownership_api.operation_position mut op = ownership_api.operation_position{
+        result->identity, at.block, at.gap, false};
+    u32 index = slot_index(result, slot);
+    if (cast(index, u64) >= result->bindings.len || cast(at.block, u64) >= result->blocks.len) {
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            op, ownership_api.source_position{});
+        return out;
+    }
+    op.terminator = at.gap == result->blocks[cast(at.block, u64)].statements;
+    if (at.gap > result->blocks[cast(at.block, u64)].statements ||
+        (!result->blocks[cast(at.block, u64)].reachable && at.effect != 0)) {
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            op, ownership_api.source_position{});
+        return out;
+    }
+    if (!result->blocks[cast(at.block, u64)].reachable) {
+        out.proof = ownership_api.proof_status{.kind = ownership_api.proof_kind.bottom};
+        return out;
+    }
+    u64 mut i = result->blocks[cast(at.block, u64)].first;
+    u64 end = i + result->blocks[cast(at.block, u64)].len;
+    while (i < end) {
+        step* effect = &result->steps[i];
+        if (effect->position.gap == at.gap && effect->position.effect == at.effect) {
+            out.used = at.after ? fir_flow.bits_get(&effect->after, index) :
+                fir_flow.bits_get(&effect->before, index);
+            return out;
+        }
+        i += 1;
+    }
+    out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        op, ownership_api.source_position{});
+    return out;
+}

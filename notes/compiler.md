@@ -645,6 +645,22 @@ came here.
   Element partition byte windows require a proved element stride and checked multiplication.
   The source producer supplies storage, choice, and full-range correspondence.
   This module adds no source producer, LLVM instruction, or runtime field.
+- **Semantic liveness separates current values from retained sources** (D17.14, D17.15).
+  `ownership_liveness.solve` reads verified FIR before build-mode changes.
+  Its result owns copied local bindings, ordered effect records, and point bit sets.
+  Destination indices precede operand reads. Destination pointers follow operand and call effects.
+  A move reads its value before emptiness. A whole proved replacement kills only its prior value.
+  Projected and unproved writes preserve possible use of the containing prior value.
+  Complete supplied correspondence maps indirect reads and ordered substituted call effects.
+  Missing correspondence prevents a successful query. A supplied success establishes no source coverage.
+  The backward solver unions reachable successor uses and preserves loop back edges and zero iterations.
+  Live and dead delimit local instances. Neither marker supplies a semantic read or replacement write.
+  Deferred reads remain before dead markers. Ending an inner instance preserves outer local uses.
+  Instance boundaries remove no retained relation, referenced source obligation, or range loan.
+  Validation, alias resolution, buffer growth, bit-set work, transfers, and joins charge W before changes.
+  Array initialization, FIR read walks, and unreachable-block scans also charge their work.
+  Failed results stay safe to free. Partial results provide no successful absence query.
+  The module adds no driver selection, lifetime syntax, LLVM instruction, ABI field, or runtime field.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by

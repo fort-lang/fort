@@ -1,0 +1,459 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| direct liveness ok
+/// Checks semantic reads, replacement order, address reads, and projected writes.
+import consts;
+import fir;
+import ownership_api;
+import ownership_liveness;
+import ownership_liveness_env;
+import prim;
+import types;
+
+fn fir_env_table(ownership_liveness_env.env mut* e) types.table mut* {
+    return e->function.tt;
+}
+
+fn unused_local() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, ownership_liveness_env.START, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, ownership_liveness_env.START, 0, true,
+        ownership_liveness_env.VALUE, false);
+}
+
+fn last_use_before_release() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+    fir.block_append(&e.function, 0, fir.stmt_del(
+        fir.place_local(ownership_liveness_env.OWNER), ownership_liveness_env.at(), 4));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false,
+        ownership_liveness_env.OWNER, true);
+}
+
+fn future_use_after_release() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    fir.block_append(&e.function, 0, fir.stmt_del(
+        fir.place_local(ownership_liveness_env.OWNER), ownership_liveness_env.at(), 3));
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true,
+        ownership_liveness_env.VALUE, false);
+}
+
+fn whole_reinitialization() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.assign(&e, 0, ownership_liveness_env.VALUE,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.VALUE));
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.VALUE, true);
+}
+
+fn self_replacement() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.assign(&e, 0, ownership_liveness_env.VALUE,
+        ownership_liveness_env.copy(&e, ownership_liveness_env.VALUE));
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true,
+        ownership_liveness_env.VALUE, true);
+}
+
+fn clear_before_future_read() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.assign(&e, 0, ownership_liveness_env.OWNER,
+        ownership_liveness_env.zero(&e, ownership_liveness_env.OWNER));
+    fir.block_append(&e.function, 0, fir.stmt_del(
+        fir.place_local(ownership_liveness_env.OWNER), ownership_liveness_env.at(), 4));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.OWNER, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.OWNER, true);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false,
+        ownership_liveness_env.OWNER, true);
+}
+
+fn move_reads_then_empties() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    fir.rvalue moved = fir.rvalue_use(&e.function,
+        fir.operand_move(fir.place_local(ownership_liveness_env.OWNER)));
+    ownership_liveness_env.assign(&e, 0, ownership_liveness_env.OTHER_OWNER, moved);
+    fir.block_append(&e.function, 0, fir.stmt_del(
+        fir.place_local(ownership_liveness_env.OWNER), ownership_liveness_env.at(), 4));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.OWNER, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.OWNER, false);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true,
+        ownership_liveness_env.OWNER, true);
+    assert(ownership_liveness.effect_count(&result, 0, 3) == 3);
+}
+
+fn release_reads_owner() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    fir.block_append(&e.function, 0, fir.stmt_del(
+        fir.place_local(ownership_liveness_env.OWNER), ownership_liveness_env.at(), 3));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.OWNER, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.OWNER, false);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true,
+        ownership_liveness_env.OWNER, false);
+}
+
+fn overwrite_validation() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 continuation = fir.block_new(&e.function);
+    ownership_liveness_env.return_from(&e, continuation);
+    fir.block_set_terminator(&e.function, 0, fir.term_check_overwrite(
+        fir.place_local(ownership_liveness_env.OWNER), continuation,
+        ownership_liveness_env.at(), 3));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.OWNER, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.OWNER, false);
+}
+
+fn overwrite_index() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    types.table mut* type_table = fir_env_table(&e);
+    types.node* owner = fir.local_at(&e.function, ownership_liveness_env.OWNER)->ty;
+    u32 array_value = fir.local_add(&e.function, types.type_array(type_table, owner, 3),
+        fir.local_kind.lk_temp, null, ownership_liveness_env.at());
+    ownership_liveness_env.assign(&e, 0, array_value,
+        ownership_liveness_env.zero(&e, array_value));
+    fir.place indexed = fir.place_index(&e.function, fir.place_local(array_value),
+        ownership_liveness_env.INDEX);
+    u32 continuation = fir.block_new(&e.function);
+    ownership_liveness_env.return_from(&e, continuation);
+    fir.block_set_terminator(&e.function, 0, fir.term_check_overwrite(indexed, continuation,
+        ownership_liveness_env.at(), 4));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false,
+        ownership_liveness_env.INDEX, true);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true,
+        ownership_liveness_env.INDEX, false);
+    ownership_liveness_env.expect(&result, 0, 4, 1, false, array_value, false);
+    ownership_liveness_env.expect(&result, 0, 4, 1, true, array_value, false);
+}
+
+fn overwrite_pointer() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    types.table mut* type_table = fir_env_table(&e);
+    types.node* owner = fir.local_at(&e.function, ownership_liveness_env.OWNER)->ty;
+    u32 pointer_value = fir.local_add(&e.function, types.type_ptr(type_table, owner, false, true),
+        fir.local_kind.lk_temp, null, ownership_liveness_env.at());
+    ownership_liveness_env.assign(&e, 0, pointer_value,
+        ownership_liveness_env.zero(&e, pointer_value));
+    fir.place selected = fir.place_deref(&e.function, fir.place_local(pointer_value));
+    u32 continuation = fir.block_new(&e.function);
+    ownership_liveness_env.return_from(&e, continuation);
+    fir.block_set_terminator(&e.function, 0, fir.term_check_overwrite(selected, continuation,
+        ownership_liveness_env.at(), 4));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false, pointer_value, true);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true, pointer_value, false);
+    ownership_liveness_env.expect(&result, 0, 4, 1, false, pointer_value, false);
+    assert(ownership_liveness.effect_count(&result, 0, 4) == 2);
+}
+
+fn store_address_order() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    fir.place selected = fir.place_index(&e.function,
+        fir.place_local(ownership_liveness_env.SPAN), ownership_liveness_env.INDEX);
+    fir.block_append(&e.function, 0, fir.stmt_assign(selected,
+        ownership_liveness_env.copy(&e, ownership_liveness_env.VALUE),
+        ownership_liveness_env.at(), 3));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.INDEX, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.INDEX, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true,
+        ownership_liveness_env.SPAN, true);
+    ownership_liveness_env.expect(&result, 0, 3, 2, true,
+        ownership_liveness_env.SPAN, false);
+    assert(ownership_liveness.effect_count(&result, 0, 3) == 4);
+}
+
+fn projected_store() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    fir.place field_value = fir.place_field(&e.function,
+        fir.place_local(ownership_liveness_env.RECORD), 0);
+    fir.block_append(&e.function, 0, fir.stmt_assign(field_value,
+        ownership_liveness_env.copy(&e, ownership_liveness_env.VALUE),
+        ownership_liveness_env.at(), 3));
+    u32 held = fir.local_add(&e.function,
+        fir.local_at(&e.function, ownership_liveness_env.RECORD)->ty,
+        fir.local_kind.lk_temp, null, ownership_liveness_env.at());
+    ownership_liveness_env.assign(&e, 0, held,
+        ownership_liveness_env.copy(&e, ownership_liveness_env.RECORD));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.RECORD, true);
+    ownership_liveness_env.expect(&result, 0, 3, 1, false,
+        ownership_liveness_env.RECORD, true);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true,
+        ownership_liveness_env.RECORD, true);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true,
+        ownership_liveness_env.RECORD, false);
+}
+
+fn copy_read() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 3, 1, false,
+        ownership_liveness_env.VALUE, false);
+}
+
+fn cast_read() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    types.table mut* type_table = fir_env_table(&e);
+    types.node* integer = types.type_prim(type_table, prim.prim_kind.prim_i64);
+    u32 held = fir.local_add(&e.function, integer, fir.local_kind.lk_temp, null,
+        ownership_liveness_env.at());
+    ownership_liveness_env.assign(&e, 0, held, fir.rvalue_cast(&e.function, integer,
+        fir.operand_copy(fir.place_local(ownership_liveness_env.VALUE))));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.VALUE, false);
+}
+
+fn span_slice() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    types.table mut* type_table = fir_env_table(&e);
+    types.node* integer = types.type_prim(type_table, prim.prim_kind.prim_i32);
+    u32 held = fir.local_add(&e.function, types.type_span(type_table, integer, false, true),
+        fir.local_kind.lk_temp, null, ownership_liveness_env.at());
+    fir.operand bound = fir.operand_const(fir.const_zero(
+        fir.local_at(&e.function, ownership_liveness_env.INDEX)->ty));
+    ownership_liveness_env.assign(&e, 0, held, fir.rvalue_slice(&e.function,
+        fir.place_local(ownership_liveness_env.SPAN), bound, bound, false));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.SPAN, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.SPAN, false);
+}
+
+fn fixed_array_slice() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    types.table mut* type_table = fir_env_table(&e);
+    types.node* integer = types.type_prim(type_table, prim.prim_kind.prim_i32);
+    u32 held = fir.local_add(&e.function, types.type_span(type_table, integer, false, true),
+        fir.local_kind.lk_temp, null, ownership_liveness_env.at());
+    fir.operand bound = fir.operand_const(fir.const_zero(
+        fir.local_at(&e.function, ownership_liveness_env.INDEX)->ty));
+    ownership_liveness_env.assign(&e, 0, held, fir.rvalue_slice(&e.function,
+        fir.place_local(ownership_liveness_env.ARRAY), bound, bound, true));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false,
+        ownership_liveness_env.ARRAY, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true,
+        ownership_liveness_env.ARRAY, false);
+}
+
+fn fixed_array_destination_order() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    fir.place selected = fir.place_index(&e.function,
+        fir.place_local(ownership_liveness_env.ARRAY), ownership_liveness_env.INDEX);
+    fir.block_append(&e.function, 0, fir.stmt_assign(selected,
+        ownership_liveness_env.copy(&e, ownership_liveness_env.VALUE),
+        ownership_liveness_env.at(), 3));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    assert(ownership_liveness.effect_count(&result, 0, 3) == 3);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false, ownership_liveness_env.INDEX, true);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true, ownership_liveness_env.INDEX, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, true, ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 3, 1, true, ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 3, 0, false, ownership_liveness_env.ARRAY, false);
+}
+
+fn string_destination_order() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 character = fir.local_add(&e.function,
+        types.type_prim(e.function.tt, prim.prim_kind.prim_char),
+        fir.local_kind.lk_temp, null, ownership_liveness_env.at());
+    ownership_liveness_env.assign(&e, 0, character, ownership_liveness_env.zero(&e, character));
+    fir.place selected = fir.place_index(&e.function,
+        fir.place_local(ownership_liveness_env.TEXT), ownership_liveness_env.INDEX);
+    fir.block_append(&e.function, 0, fir.stmt_assign(selected,
+        ownership_liveness_env.copy(&e, character), ownership_liveness_env.at(), 4));
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    assert(ownership_liveness.effect_count(&result, 0, 4) == 4);
+    ownership_liveness_env.expect(&result, 0, 4, 0, false, ownership_liveness_env.INDEX, true);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true, ownership_liveness_env.INDEX, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true, character, true);
+    ownership_liveness_env.expect(&result, 0, 4, 1, true, character, false);
+    ownership_liveness_env.expect(&result, 0, 4, 1, true, ownership_liveness_env.TEXT, true);
+    ownership_liveness_env.expect(&result, 0, 4, 2, true, ownership_liveness_env.TEXT, false);
+}
+
+fn nested_destination_pointer_order() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    types.node* span_value = fir.local_at(&e.function, ownership_liveness_env.SPAN)->ty;
+    u32 pointer_value = fir.local_add(&e.function,
+        types.type_ptr(e.function.tt, span_value, false, true),
+        fir.local_kind.lk_temp, null, ownership_liveness_env.at());
+    ownership_liveness_env.assign(&e, 0, pointer_value,
+        ownership_liveness_env.zero(&e, pointer_value));
+    fir.place selected = fir.place_index(&e.function,
+        fir.place_deref(&e.function, fir.place_local(pointer_value)), ownership_liveness_env.INDEX);
+    fir.block_append(&e.function, 0, fir.stmt_assign(selected,
+        ownership_liveness_env.copy(&e, ownership_liveness_env.VALUE),
+        ownership_liveness_env.at(), 4));
+    ownership_liveness.program mut input = ownership_liveness_env.input(&e);
+    ownership_api.place_path[1] target = {ownership_liveness_env.path(ownership_liveness_env.SPAN)};
+    ownership_liveness.access[1] rows = {ownership_liveness.access{
+        .operation = ownership_liveness_env.operation(&e, 0, 4), .read = 3,
+        .complete = true, .targets = target[..]}};
+    input.accesses = rows[..];
+    ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+    defer ownership_liveness.free(&result);
+    assert(ownership_liveness.effect_count(&result, 0, 4) == 5);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true, ownership_liveness_env.INDEX, false);
+    ownership_liveness_env.expect(&result, 0, 4, 0, true, ownership_liveness_env.VALUE, true);
+    ownership_liveness_env.expect(&result, 0, 4, 1, true, ownership_liveness_env.VALUE, false);
+    ownership_liveness_env.expect(&result, 0, 4, 1, true, pointer_value, true);
+    ownership_liveness_env.expect(&result, 0, 4, 2, true, pointer_value, true);
+    ownership_liveness_env.expect(&result, 0, 4, 3, true, pointer_value, false);
+    ownership_liveness_env.expect(&result, 0, 4, 2, true, ownership_liveness_env.SPAN, true);
+    ownership_liveness_env.expect(&result, 0, 4, 3, true, ownership_liveness_env.SPAN, false);
+}
+
+fn main() i32 {
+    unused_local();
+    last_use_before_release();
+    future_use_after_release();
+    whole_reinitialization();
+    self_replacement();
+    clear_before_future_read();
+    move_reads_then_empties();
+    release_reads_owner();
+    overwrite_validation();
+    overwrite_index();
+    overwrite_pointer();
+    store_address_order();
+    projected_store();
+    copy_read();
+    cast_read();
+    span_slice();
+    fixed_array_slice();
+    fixed_array_destination_order();
+    string_destination_order();
+    nested_destination_pointer_order();
+    println("direct liveness ok");
+    return 0;
+}

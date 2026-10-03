@@ -1,0 +1,215 @@
+/// Builds verified FIR inputs and counted services for semantic-liveness tests.
+import consts;
+import diag;
+import fir;
+import fir_env;
+import fir_verify;
+import ownership_api;
+import ownership_keys;
+import ownership_liveness;
+import prim;
+import std.strbuf;
+import types;
+
+u32 CONDITION = 1;
+u32 VALUE = 2;
+u32 OTHER = 3;
+u32 INDEX = 4;
+u32 OWNER = 5;
+u32 SPAN = 6;
+u32 TEXT = 7;
+u32 ARRAY = 8;
+u32 RECORD = 9;
+u32 POINTER = 10;
+u32 OTHER_OWNER = 11;
+u32 INNER = 12;
+u32 OUTER = 13;
+u32 START = 3;
+
+struct counter {
+    u64 charges;
+    u64 units;
+    u64[33] amounts;
+    u64 deny_at;
+}
+
+struct env {
+    fir_env.env fixture;
+    fir.func function;
+    ownership_api.services services;
+    counter counts;
+    ownership_liveness.binding[128] bindings;
+    u64 bindings_len;
+}
+
+fn budget(void mut* context, ownership_api.charge_request* request)
+    ownership_api.charge_result {
+    counter mut* counts = cast(context, counter mut*);
+    assert(ownership_keys.canonical_charges(request));
+    assert(request->items.len == 1);
+    assert(request->items[0].category == ownership_api.limit_category.w);
+    assert(request->items[0].amount == 1);
+    counts->charges += 1;
+    counts->units += request->items[0].amount;
+    if (request->items[0].amount < counts->amounts.len) {
+        counts->amounts[request->items[0].amount] += 1;
+    }
+    ownership_api.charge_result mut out = ownership_api.charge_result{};
+    if (counts->deny_at > 0 && counts->charges >= counts->deny_at) {
+        out.limit = ownership_api.exhaustion{
+            .present = true,
+            .category = ownership_api.limit_category.w,
+            .scope = ownership_api.limit_scope.computation,
+            .work = request->work,
+            .used = counts->units - request->items[0].amount,
+            .bound = counts->units - request->items[0].amount,
+            .attempted = request->items[0].amount,
+        };
+        return out;
+    }
+    out.allowed = true;
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+
+fn event(void mut* context, ownership_api.event_request* request)
+    ownership_api.event_result {
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+
+fn slot(u32 local) ownership_api.entity_id {
+    return ownership_api.entity_id{ownership_api.function_id{
+        ownership_api.declaration_id{4, 9}, 2}, ownership_api.entity_kind.slot, local + 10};
+}
+
+fn path(u32 local) ownership_api.place_path {
+    return ownership_api.place_path{.root = slot(local)};
+}
+
+fn at() diag.loc { return diag.loc{}; }
+
+fn zero(env mut* e, u32 local) fir.rvalue {
+    return fir.rvalue_use(&e->function,
+        fir.operand_const(fir.const_zero(fir.local_at(&e->function, local)->ty)));
+}
+
+fn copy(env mut* e, u32 local) fir.rvalue {
+    return fir.rvalue_use(&e->function, fir.operand_copy(fir.place_local(local)));
+}
+
+fn assign(env mut* e, u32 block, u32 destination, fir.rvalue value) void {
+    u32 gap = fir.block_statement_count(&e->function, block);
+    fir.block_append(&e->function, block,
+        fir.stmt_assign(fir.place_local(destination), value, at(), gap));
+}
+
+fn read(env mut* e, u32 block, u32 local) void {
+    assign(e, block, 0, copy(e, local));
+}
+
+fn return_from(env mut* e, u32 block) void {
+    fir.block_set_terminator(&e->function, block,
+        fir.term_return(at(), fir.block_statement_count(&e->function, block)));
+}
+
+fn goto(env mut* e, u32 block, u32 target) void {
+    fir.block_set_terminator(&e->function, block,
+        fir.term_goto(target, at(), fir.block_statement_count(&e->function, block)));
+}
+
+fn branch(env mut* e, u32 block, u32 yes, u32 no, bool constant) void {
+    u32 first = fir.arm_push(&e->function, consts.cv_from_bool(true), yes);
+    fir.operand condition = constant ? fir.operand_const(fir.const_bool(false)) :
+        fir.operand_copy(fir.place_local(CONDITION));
+    fir.block_set_terminator(&e->function, block,
+        fir.term_switch(condition, first, 1, no, at(),
+            fir.block_statement_count(&e->function, block)));
+}
+
+fn open(env mut* e) void {
+    fir_env.open(&e->fixture);
+    types.table mut* type_table = fir_env.tt(&e->fixture);
+    types.node* integer = fir_env.i32_ty(&e->fixture);
+    types.node* owner = types.type_ptr(type_table, integer, true, true);
+    types.node* span_value = types.type_span(type_table, integer, false, true);
+    types.node*[11] parameters = {
+        fir_env.bool_ty(&e->fixture), integer, integer, fir_env.u64_ty(&e->fixture),
+        owner, span_value, types.type_string(type_table, false),
+        types.type_array(type_table, integer, 4),
+        fir_env.ty(&e->fixture, "pair"), types.type_ptr(type_table, integer, false, true), owner,
+    };
+    types.node* function_type = types.type_fn(type_table, integer, parameters[..], false);
+    e->function = fir.func_new(type_table, null, function_type);
+    assert(fir.local_add(&e->function, integer, fir.local_kind.lk_named, null, at()) == INNER);
+    assert(fir.local_add(&e->function, integer, fir.local_kind.lk_named, null, at()) == OUTER);
+    fir.local_mut(&e->function, INNER)->name = "inner";
+    fir.local_mut(&e->function, OUTER)->name = "outer";
+    assign(e, 0, 0, zero(e, 0));
+    assign(e, 0, INNER, zero(e, INNER));
+    assign(e, 0, OUTER, zero(e, OUTER));
+    e->services.budget_context = cast(&e->counts, void mut*);
+    e->services.budget = budget;
+    e->services.event = event;
+}
+
+fn close(env mut* e) void {
+    fir.func_free(&e->function);
+    fir_env.close(&e->fixture);
+}
+
+fn input_with_runtime(env mut* e, fir_verify.runtime* runtime_value) ownership_liveness.program {
+    if (!fir.block_at(&e->function, 0)->terminated) { return_from(e, 0); }
+    strbuf.str_buf mut report = strbuf.create();
+    defer strbuf.free(&report);
+    if (!fir_verify.verify_report(&e->function, runtime_value, &report)) {
+        eprintln(strbuf.view(&report));
+        panic("ownership_liveness_env: FIR verification fails");
+    }
+    e->bindings_len = cast(fir.local_count(&e->function), u64);
+    assert(e->bindings_len <= e->bindings.len);
+    u64 mut i = 0;
+    while (i < e->bindings_len) {
+        e->bindings[i] = ownership_liveness.binding{cast(i, u32), slot(cast(i, u32))};
+        i += 1;
+    }
+    return ownership_liveness.program{
+        .function = &e->function,
+        .identity = slot(0).function,
+        .verified_fir = true,
+        .services = &e->services,
+        .bindings = e->bindings[..e->bindings_len],
+    };
+}
+
+fn input(env mut* e) ownership_liveness.program {
+    fir_verify.runtime mut runtime_value = fir_verify.runtime_of(&e->fixture.c.ck);
+    runtime_value.excused[cast(fir.check_kind.chk_overwrite, u64)] = true;
+    return input_with_runtime(e, &runtime_value);
+}
+
+fn operation(env* e, u32 block, u32 gap) ownership_api.operation_position {
+    return ownership_api.operation_position{slot(0).function, block, gap,
+        gap == fir.block_statement_count(&e->function, block)};
+}
+
+fn expect(ownership_liveness.analysis* result, u32 block, u32 gap, u32 effect,
+    bool after, u32 local, bool used) void {
+    ownership_liveness.answer got = ownership_liveness.query(result,
+        ownership_liveness.point{block, gap, effect, after}, slot(local));
+    assert(ownership_api.successful(got.proof));
+    if (got.used != used) {
+        eprintln("liveness differs: bb", block, " gap ", gap, " effect ", effect,
+            " after ", after, " local ", local, " expected ", used);
+        panic("ownership_liveness_env.expect: semantic use differs");
+    }
+}
+
+fn incomplete(ownership_liveness.analysis* result, ownership_api.incomplete_reason reason) void {
+    assert(!ownership_api.successful(result->proof));
+    assert(result->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(result->proof.terminal.present);
+    assert(result->proof.terminal.reason == reason);
+    ownership_liveness.answer got = ownership_liveness.query(result,
+        ownership_liveness.point{0, START, 0, false}, slot(VALUE));
+    assert(!ownership_api.successful(got.proof) && !got.used);
+}

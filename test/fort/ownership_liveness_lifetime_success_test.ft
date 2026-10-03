@@ -1,0 +1,75 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| successful teardown ok
+/// Measures successful result teardown with allocator views.
+import fir;
+import heap;
+import ownership_api;
+import ownership_liveness;
+import ownership_liveness_env;
+
+u64 ROUNDS = 32;
+u64 CALLS = 64;
+u64 LATE_START = 16;
+
+fn result_teardown() void {
+    ownership_liveness_env.env mut e = ownership_liveness_env.env{};
+    ownership_liveness_env.open(&e);
+    defer ownership_liveness_env.close(&e);
+    u32 mut read_index = 0;
+    while (read_index < 24) {
+        ownership_liveness_env.read(&e, 0, ownership_liveness_env.VALUE);
+        read_index += 1;
+    }
+    ownership_liveness.program input = ownership_liveness_env.input(&e);
+    u64 mut early_system = 0;
+    u64 mut early_block = 0;
+    u64 mut system_distance = ownership_api.U64_MAX;
+    u64 mut block_distance = ownership_api.U64_MAX;
+    u64 mut round = 0;
+    while (round < ROUNDS) {
+        u64 mut index = 0;
+        while (index < CALLS) {
+            e.counts.charges = 0;
+            e.counts.units = 0;
+            ownership_liveness.analysis mut result = ownership_liveness.solve(&input);
+            assert(ownership_api.successful(result.proof));
+            assert(result.steps_len == 52 && result.blocks.len == 1);
+            ownership_liveness_env.expect(&result, 0, 26, 0, false,
+                ownership_liveness_env.VALUE, true);
+            ownership_liveness.free(&result);
+            assert(result.steps_len == 0 && result.steps.len == 0);
+            assert(result.bindings.len == 0 && result.blocks.len == 0);
+            assert(!ownership_api.successful(result.proof));
+            ownership_liveness.free(&result);
+            index += 1;
+        }
+        u64 system_value = heap.system_view();
+        u64 block_value = heap.block_view();
+        if (round == 4) {
+            early_system = system_value;
+            early_block = block_value;
+        }
+        if (round >= LATE_START) {
+            u64 mut distance_value = heap.distance(early_system, system_value);
+            if (distance_value < system_distance) { system_distance = distance_value; }
+            distance_value = heap.distance(early_block, block_value);
+            if (distance_value < block_distance) { block_distance = distance_value; }
+        }
+        round += 1;
+    }
+    // Each steps buffer stays below the Linux mmap threshold of 131072 bytes.
+    // Darwin reports live bytes. Its bound stays below one lost release per round.
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 8192 : 1024;
+    if (system_distance >= bound || (heap.ADDRESS_IS_A_VIEW && block_distance >= bound)) {
+        eprintln("allocator distances: system ", system_distance, " block ", block_distance);
+        panic("semantic-liveness teardown retains allocations");
+    }
+}
+
+fn main() i32 {
+    result_teardown();
+    println("successful teardown ok");
+    return 0;
+}
