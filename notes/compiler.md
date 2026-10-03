@@ -599,6 +599,8 @@ came here.
   It then ends parameter stack sources. Abort and trap paths do not require normal cleanup.
   Unknown call outcomes keep a possible return. A guarded return needs a condition proof.
   Direct and delegated W failures store the exhaustion record used by diagnostic rendering.
+  Source positions keep filename presence apart from numeric module and file IDs.
+  A named zero pair can coexist with an unnamed source without a false filename.
   This pass does not construct source effects.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
