@@ -249,7 +249,17 @@ Missing, extra, overwritten, substituted, or cross-expansion writes cause keyed 
 A literal boolean selection of two string literals can prove its folded literal bytes.
 The proof also checks the constant shape.
 Other folded expressions remain incomplete when the audit lacks their checker value table.
-Conditional callees, arguments, indices, bounds, and wrappers after a join remain incomplete.
+Conditional callees and arguments prove both arms and the joined value consumed by their call.
+Held joined values precede later writers. Complete intervals retain operand evaluation order.
+Dereference, member, header, cast, index, and slice operations repeat that proof after joins.
+Conditional indices and both bounds retain their u64 conversions and base-before-bound order.
+Lower bounds precede upper bounds. Stored header reads follow explicit bound effects.
+Function-name selections retain both emitted arms even with literal predicates.
+The call must consume their joined function temporary.
+A selected-symbol substitution supplies no producer-correspondence proof and causes keyed refusal.
+An arm destination store can precede unrelated backing-storage reads.
+The proof still refuses unproved exposure of a joined temporary's fixed storage.
+Stack operand intervals cross only regions whose two arms and exact exits already prove their join.
 Calls in conditional predicates retain keyed refusal.
 Direct and deferred result proofs use separate keys.
 Proof sessions own their vectors. Stored record indices remain valid across vector growth.

@@ -1729,10 +1729,23 @@ fn conditional_gap_before(conditional_proof_session* session, range_material_poi
     u32 mut steps = 0;
     while (steps < fir.block_count(session->proof.f)) {
         if (current.block == before.block) { return before.position <= current.position; }
-        u32 mut parent = 0;
-        if (!range_material_parent(&session->proof, current.block, &parent)) { return false; }
-        current = range_material_point{parent,
-                    fir.block_statement_count(session->proof.f, parent)};
+        bool mut joined = false;
+        u64 mut r = 0;
+        while (r < session->regions.len) {
+            conditional_region_fact region = session->regions.items[r];
+            if (region.proved && region.join == current.block) {
+                current = region.branch;
+                joined = true;
+                break;
+            }
+            r += 1;
+        }
+        if (!joined) {
+            u32 mut parent = 0;
+            if (!range_material_parent(&session->proof, current.block, &parent)) { return false; }
+            current = range_material_point{parent,
+                        fir.block_statement_count(session->proof.f, parent)};
+        }
         steps += 1;
     }
     return false;
@@ -1802,7 +1815,7 @@ fn conditional_region_find(conditional_proof_session* session, ast.node* n, fir.
     return true;
 }
 
-// Match an arm's last store. Aggregate calls write it directly; scalar calls supply its operand.
+// Match the arm destination store. Unrelated trailing reads cannot replace that store.
 fn conditional_arm_prove(conditional_proof_session mut* session, u32 region, bool side,
                           ast.node* n, u32 entry, u32 exit, u32 depth) bool {
     fir.func* f = session->proof.f;
@@ -1815,9 +1828,20 @@ fn conditional_arm_prove(conditional_proof_session mut* session, u32 region, boo
             || !conditional_gap_before(session, start, matched.first)) { return false; }
         return true;
     }
-    if (read.position == 0 || (n->kind != ast.ast_kind.k_ternary
-        && !conditional_gap_before(session, start, read))) { return false; }
-    range_material_point at = range_material_point{exit, read.position - 1};
+    if (read.position == 0) { return false; }
+    range_material_point mut at = range_material_point{};
+    u32 mut count = 0;
+    u32 mut p = 0;
+    while (p < read.position) {
+        fir.statement* write = fir.block_statement(f, exit, p);
+        if (write->kind == fir.stmt_kind.st_assign
+            && range_audit_place_eq(f, write->place, fact.destination)) {
+            at = range_material_point{exit, p};
+            count += 1;
+        }
+        p += 1;
+    }
+    if (count != 1) { return false; }
     fir.statement* s = fir.block_statement(f, at.block, at.position);
     if (s->kind != fir.stmt_kind.st_assign
         || !range_audit_place_eq(f, s->place, fact.destination)
@@ -1833,12 +1857,13 @@ fn conditional_arm_prove(conditional_proof_session mut* session, u32 region, boo
             if (produced.kind != fir.operand_kind.ok_copy
                 || !conditional_region_prove(session, n, produced.place, at,
                                               depth + 1, &matched)) { return false; }
-        } else if (!range_material_operand(&session->proof, n, produced, at, false,
+        } else if (!conditional_operand(session, n, produced, at, false,
                                             depth + 1, &matched)) { return false; }
     } else if (n->kind == ast.ast_kind.k_call) {
-        if (!range_material_call(&session->proof, n, s, at, depth + 1, &matched)) { return false; }
+        if (!conditional_call(session, n, s, at, depth + 1, &matched)) { return false; }
     } else { return false; }
     if (matched.emitted && !conditional_gap_before(session, start, matched.first)) { return false; }
+    if (!conditional_gap_before(session, start, read)) { return false; }
     return conditional_arm_add(session, conditional_arm_fact{region, side, n, at,
                                                                fact.destination, produced});
 }
@@ -1849,14 +1874,14 @@ fn conditional_region_prove(conditional_proof_session mut* session, ast.node* n,
     if (depth >= 64 || n->kind != ast.ast_kind.k_ternary) { return false; }
     conditional_region_fact mut fact = conditional_region_fact{};
     if (!conditional_region_find(session, n, dst, &fact)
-        || !conditional_gap_before(session, range_material_point{fact.join, 0}, read)) {
+        || !conditional_join_before(session, range_material_point{fact.join, 0}, read)) {
         return false;
     }
     u32 mut index = 0;
     if (!conditional_region_add(session, fact, &index)) { return false; }
     fir.terminator* branch = &fir.block_at(session->proof.f, fact.branch.block)->term;
     range_material_match mut predicate = range_material_match{};
-    if (!range_material_operand(&session->proof, n->a, branch->cond, fact.branch, false,
+    if (!conditional_operand(session, n->a, branch->cond, fact.branch, false,
                                 depth + 1, &predicate)) { return false; }
     // Exit discovery is independent of arm ordering. The entry relation assigns each exit.
     bool first_yes = conditional_arm_path(session, n->b, dst, fact.yes, fact.yes_exit);
@@ -1882,7 +1907,11 @@ fn conditional_arm_path(conditional_proof_session* session, ast.node* n, fir.pla
     fir.func* f = session->proof.f;
     range_material_point end = range_material_point{exit, fir.block_statement_count(f, exit)};
     if (n->kind != ast.ast_kind.k_ternary) {
-        return conditional_gap_before(session, range_material_point{entry, 0}, end);
+        if (conditional_gap_before(session, range_material_point{entry, 0}, end)) { return true; }
+        if (end.position == 0) { return false; }
+        fir.statement* s = fir.block_statement(f, exit, end.position - 1);
+        return s->kind == fir.stmt_kind.st_assign && range_audit_loc_eq(s->loc, n->loc)
+            && range_audit_place_eq(f, s->place, dst);
     }
     fir.place mut target = dst;
     if (!fir.type_aggregate(n->ty)) {
@@ -1940,7 +1969,7 @@ fn conditional_writes_proved(conditional_proof_session* session) bool {
     return true;
 }
 
-// Only a top-level result conditional enters this proof. Operand and wrapper joins stay incomplete.
+// The root conditional proves its joined result before the range capture.
 fn conditional_capture_prove(conditional_proof_session mut* session, ast.node* n,
                               u32 body, fir.range_capture mut* expected) bool {
     fir.func* f = session->proof.f;
@@ -2018,6 +2047,493 @@ fn conditional_capture_prove(conditional_proof_session mut* session, ast.node* n
                                   .original_present = protected};
     return true;
 }
+
+// A proved region supplies both paths before traversal continues at its branch gap.
+// Stack matches retain operand intervals. They borrow no growing vector element.
+fn conditional_order_before(conditional_proof_session* session, range_material_point before,
+                             range_material_point read) bool {
+    range_material_point mut current = read;
+    u32 mut steps = 0;
+    while (steps < fir.block_count(session->proof.f)) {
+        if (current.block == before.block) {
+            if (before.position < current.position) { return true; }
+            u64 mut r = 0;
+            while (r < session->regions.len) {
+                conditional_region_fact region = session->regions.items[r];
+                if (region.proved && region.join == before.block && before.position == 0
+                    && current.position == 0) { return true; }
+                r += 1;
+            }
+            return false;
+        }
+        bool mut joined = false;
+        u64 mut r = 0;
+        while (r < session->regions.len) {
+            conditional_region_fact region = session->regions.items[r];
+            if (region.proved && region.join == current.block) {
+                current = region.branch;
+                joined = true;
+                break;
+            }
+            r += 1;
+        }
+        if (!joined) {
+            u32 mut parent = 0;
+            if (!range_material_parent(&session->proof, current.block, &parent)) { return false; }
+            current = range_material_point{parent,
+                        fir.block_statement_count(session->proof.f, parent)};
+        }
+        steps += 1;
+    }
+    return false;
+}
+
+fn conditional_join_before(conditional_proof_session* session, range_material_point before,
+                            range_material_point read) bool {
+    return conditional_gap_before(session, before, read);
+}
+
+fn conditional_source_present(ast.node* n) bool {
+    if (n == null) { return false; }
+    if (n->kind == ast.ast_kind.k_ternary) { return true; }
+    if (conditional_source_present(n->a) || conditional_source_present(n->b)
+        || conditional_source_present(n->c) || conditional_source_present(n->d)) { return true; }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (conditional_source_present(ast.ast_child(n, i))) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn conditional_definition(conditional_proof_session mut* session, fir.place target,
+                              range_material_point read, range_material_point mut* at,
+                              fir.statement* mut* definition) bool {
+    range_material_context* proof = &session->proof;
+    fir.func* f = proof->f;
+    if (!range_audit_place_valid(f, target) || target.base != fir.base_kind.bk_local
+        || target.proj_len != 0 || fir.local_at(f, target.local)->kind != fir.local_kind.lk_temp) {
+        return false;
+    }
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, p);
+            // An address or array slice permits writes that name another local.
+            if (s->kind == fir.stmt_kind.st_assign
+                && (s->value.kind == fir.rvalue_kind.rv_addr
+                    || (s->value.kind == fir.rvalue_kind.rv_slice
+                        && fir.place_type(f, s->value.place)->kind == types.type_kind.k_array))
+                && s->value.place.base == fir.base_kind.bk_local
+                && s->value.place.local == target.local && fir.place_fixed(f, s->value.place)) {
+                return false;
+            }
+            fir.place mut written = fir.place{};
+            if (fir.stmt_writes_place(s, &written) && written.base == fir.base_kind.bk_local
+                && written.local == target.local) {
+                if (s->kind != fir.stmt_kind.st_assign || written.proj_len != 0) { return false; }
+                *at = range_material_point{.block = b, .position = p};
+                *definition = s;
+                count += 1;
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    if (count != 1 || (*definition)->stmt != proof->operation.statement_index
+        || !range_audit_loc_eq((*definition)->exit_loc, proof->operation.exit_source)) {
+        return false;
+    }
+    return conditional_order_before(session, *at, read);
+}
+
+
+fn conditional_operand(conditional_proof_session mut* session, ast.node* n, fir.operand actual,
+                           range_material_point read, bool later, u32 depth,
+                           range_material_match mut* matched) bool {
+    range_material_context* proof = &session->proof;
+    if (n == null || depth >= 64) { return false; }
+    if (actual.kind == fir.operand_kind.ok_const) {
+        return range_material_constant(n, actual.value);
+    }
+    if (!range_audit_place_valid(proof->f, actual.place)) { return false; }
+    if (later && !range_material_fixed_temp(proof->f, actual.place)) { return false; }
+    if (later && actual.place.proj_len == 0) {
+        range_material_point mut at = range_material_point{};
+        fir.statement* mut held = null;
+        if (conditional_definition(session, actual.place, read, &at, &held)
+            && held->value.kind == fir.rvalue_kind.rv_use && held->value.ops_len == 1
+            && range_audit_loc_eq(held->loc, n->loc)) {
+            fir.operand original = fir.operand_at(proof->f, held->value.ops_first);
+            if (original.kind == fir.operand_kind.ok_const || original.kind != actual.kind
+                || range_material_fixed_temp(proof->f, original.place)) { return false; }
+            if (!conditional_operand(session, n, original, at, false, depth + 1, matched)) {
+                return false;
+            }
+            if (!matched->emitted) { matched->first = at; }
+            matched->emitted = true;
+            matched->last = at;
+            return true;
+        }
+    }
+    bool moved = n->kind == ast.ast_kind.k_call && (n->ann & check.ANN_MOVE) != 0;
+    if (moved) {
+        return actual.kind == fir.operand_kind.ok_move
+            && conditional_place(session, ast.ast_child(n, 0), actual.place, read, false,
+                                     depth + 1, matched);
+    }
+    bool owns_result = !designates(n) && fir.type_owning(n->ty);
+    if ((actual.kind == fir.operand_kind.ok_move) != owns_result) { return false; }
+    return conditional_place(session, n, actual.place, read, false, depth + 1, matched);
+}
+
+
+fn conditional_call(conditional_proof_session mut* session, ast.node* n, fir.statement* s,
+                        range_material_point at, u32 depth,
+                        range_material_match mut* matched) bool {
+    range_material_context* proof = &session->proof;
+    if (s->value.kind != fir.rvalue_kind.rv_call || builtin_call(n)
+        || cast(s->value.ops_len, u64) != ast.ast_len(n) || !range_audit_loc_eq(s->loc, n->loc)) {
+        return false;
+    }
+    u32 mut copies = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(proof->f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(proof->f, b)) {
+            fir.statement* other = fir.block_statement(proof->f, b, p);
+            if (other->kind == fir.stmt_kind.st_assign
+                && other->value.kind == fir.rvalue_kind.rv_call
+                && other->stmt == s->stmt && range_audit_loc_eq(other->loc, n->loc)
+                && range_audit_loc_eq(other->exit_loc, s->exit_loc)) { copies += 1; }
+            p += 1;
+        }
+        b += 1;
+    }
+    if (copies != 1) { return false; }
+    range_material_point mut first = at;
+    bool mut later = false;
+    u64 mut i = ast.ast_len(n);
+    while (i > 0) {
+        i -= 1;
+        ast.node* arg = ast.ast_child(n, i);
+        fir.operand actual = fir.operand_at(proof->f, s->value.ops_first + cast(i, u32));
+        range_material_match mut child = range_material_match{};
+        if (!conditional_operand(session, arg, actual, at, later, depth + 1, &child)) {
+            return false;
+        }
+        if (child.emitted) {
+            if (!conditional_order_before(session, child.last, first)) { return false; }
+            first = child.first;
+        }
+        later = later || contains_writer(arg);
+    }
+    ast.sym* callee = n->a->sym;
+    if (callee != null && (callee->kind == ast.sym_kind.s_fn
+        || callee->kind == ast.sym_kind.s_extern_fn)) {
+        fir.callee_kind mut expected = fir.callee_kind.cl_fn;
+        if (callee->kind == ast.sym_kind.s_extern_fn) { expected = fir.callee_kind.cl_extern; }
+        if (s->value.callee != expected || s->value.callee_sym != callee) { return false; }
+    } else {
+        range_material_match mut value = range_material_match{};
+        if (s->value.callee != fir.callee_kind.cl_value
+            || !conditional_operand(session, n->a, s->value.callee_op, at, later,
+                                       depth + 1, &value)) {
+            return false;
+        }
+        if (value.emitted) {
+            if (!conditional_order_before(session, value.last, first)) { return false; }
+            first = value.first;
+        }
+    }
+    *matched = range_material_match{.emitted = true, .first = first, .last = at};
+    return true;
+}
+
+
+fn conditional_bound(conditional_proof_session mut* session, ast.node* n, fir.operand actual,
+                         diag.loc source, range_material_point read, u32 depth,
+                         range_material_match mut* matched) bool {
+    range_material_context* proof = &session->proof;
+    if (actual.kind != fir.operand_kind.ok_copy) { return false; }
+    range_material_point mut at = range_material_point{};
+    fir.statement* mut casted = null;
+    if (!conditional_definition(session, actual.place, read, &at, &casted)
+        || casted->value.kind != fir.rvalue_kind.rv_cast || casted->value.ops_len != 1
+        || casted->value.ty->kind != types.type_kind.k_prim
+        || casted->value.ty->prim != prim.prim_kind.prim_u64
+        || !range_audit_loc_eq(casted->loc, source)) { return false; }
+    if (!conditional_operand(session, n, fir.operand_at(proof->f, casted->value.ops_first),
+                                at, false, depth + 1, matched)) { return false; }
+    if (!matched->emitted) { matched->first = at; }
+    matched->emitted = true;
+    matched->last = at;
+    return true;
+}
+
+
+fn conditional_deref(conditional_proof_session mut* session, ast.node* n, fir.place p,
+                         range_material_point read, u32 depth,
+                        range_material_match mut* matched) bool {
+    range_material_context* proof = &session->proof;
+    if (p.proj_len == 0
+        || fir.place_projection(proof->f, p, p.proj_len - 1).kind != fir.proj_kind.pj_deref) {
+        return false;
+    }
+    fir.place mut pointer = p;
+    pointer.proj_len -= 1;
+    return conditional_operand(session, n, fir.operand_copy(pointer), read, false,
+                                  depth + 1, matched);
+}
+
+
+fn conditional_place(conditional_proof_session mut* session, ast.node* n, fir.place p,
+                         range_material_point read, bool held, u32 depth,
+                         range_material_match mut* matched) bool {
+    range_material_context* proof = &session->proof;
+    if (n == null || depth >= 64 || !range_audit_place_valid(proof->f, p)) { return false; }
+    fir.func* f = proof->f;
+    if (n->kind == ast.ast_kind.k_ternary) {
+        return conditional_region_prove(session, n, p, read, depth + 1, matched);
+    }
+    if (held && p.base == fir.base_kind.bk_local && p.proj_len == 1
+        && fir.place_projection(f, p, 0).kind == fir.proj_kind.pj_deref) {
+        range_material_point mut at = range_material_point{};
+        fir.statement* mut address = null;
+        if (conditional_definition(session, fir.place_local(p.local), read, &at, &address)
+            && address->value.kind == fir.rvalue_kind.rv_addr
+            && range_audit_loc_eq(address->loc, n->loc)) {
+            if (!fir.place_indirect(f, address->value.place)
+                || !conditional_place(session, n, address->value.place, at, false,
+                                          depth + 1, matched)) { return false; }
+            if (!matched->emitted) { matched->first = at; }
+            matched->emitted = true;
+            matched->last = at;
+            return true;
+        }
+    }
+    if (held && fir.place_indirect(f, p)) { return false; }
+    if ((n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field) && n->sym != null) {
+        ast.sym* source = n->sym;
+        if (source->kind == ast.sym_kind.s_global || source->kind == ast.sym_kind.s_const) {
+            return p.base == fir.base_kind.bk_global && p.global == source && p.proj_len == 0;
+        }
+        if (source->kind == ast.sym_kind.s_param || source->kind == ast.sym_kind.s_local) {
+            return p.base == fir.base_kind.bk_local && p.proj_len == 0
+                && fir.local_at(f, p.local)->sym == source;
+        }
+    }
+    if (n->kind == ast.ast_kind.k_field || n->kind == ast.ast_kind.k_arrow) {
+        u32 mut field = 0;
+        if (p.proj_len == 0 || !range_material_field(n, &field)) { return false; }
+        fir.projection actual = fir.place_projection(f, p, p.proj_len - 1);
+        if (actual.kind != fir.proj_kind.pj_field || actual.field != field) { return false; }
+        fir.place mut base = p;
+        base.proj_len -= 1;
+        if (n->kind == ast.ast_kind.k_arrow) {
+            return conditional_deref(session, n->a, base, read, depth + 1, matched);
+        }
+        return conditional_place(session, n->a, base, read, false, depth + 1, matched);
+    }
+    if (n->kind == ast.ast_kind.k_unary && cast(n->op, lexer.tok_kind) == lexer.tok_kind.star) {
+        return conditional_deref(session, n->a, p, read, depth + 1, matched);
+    }
+    if (n->kind == ast.ast_kind.k_index) {
+        if (p.proj_len == 0) { return false; }
+        fir.projection index = fir.place_projection(f, p, p.proj_len - 1);
+        if (index.kind != fir.proj_kind.pj_index) { return false; }
+        range_material_match mut bound = range_material_match{};
+        if (!conditional_bound(session, n->b, fir.operand_copy(fir.place_local(index.index)),
+                                  n->loc, read, depth + 1, &bound)) { return false; }
+        fir.place mut base = p;
+        base.proj_len -= 1;
+        range_material_match mut root = range_material_match{};
+        bool writer = contains_writer(n->b);
+        if (!conditional_place(session, n->a, base, read, writer, depth + 1, &root)) {
+            return false;
+        }
+        if (root.emitted && !conditional_order_before(session, root.last, bound.first)) {
+            return false;
+        }
+        *matched = bound;
+        if (root.emitted) { matched->first = root.first; }
+        return true;
+    }
+    range_material_point mut at = range_material_point{};
+    fir.statement* mut definition = null;
+    if (!conditional_definition(session, p, read, &at, &definition)
+        || !range_audit_loc_eq(definition->loc, n->loc)
+        || !types.type_same_shape(fir.place_type(f, p), n->ty)) { return false; }
+    if (n->kind == ast.ast_kind.k_call) {
+        return conditional_call(session, n, definition, at, depth + 1, matched);
+    }
+    fir.rvalue value = definition->value;
+    if (n->kind == ast.ast_kind.k_unary && cast(n->op, lexer.tok_kind) == lexer.tok_kind.amp) {
+        if (value.kind != fir.rvalue_kind.rv_addr || value.is_mut != n->ty->is_mut
+            || !conditional_place(session, n->a, value.place, at, false, depth + 1, matched)) {
+            return false;
+        }
+    } else if (n->kind == ast.ast_kind.k_cast) {
+        if (value.kind != fir.rvalue_kind.rv_cast || value.ops_len != 1
+            || !types.type_equal(value.ty, n->ty)
+            || !conditional_operand(session, n->a, fir.operand_at(f, value.ops_first),
+                                        at, false, depth + 1, matched)) { return false; }
+    } else if (n->kind == ast.ast_kind.k_span) {
+        if (!conditional_slice(session, n, value, at, depth + 1, matched)) { return false; }
+    } else { return false; }
+    if (!matched->emitted) { matched->first = at; }
+    matched->emitted = true;
+    matched->last = at;
+    return true;
+}
+
+
+fn conditional_slice(conditional_proof_session mut* session, ast.node* n, fir.rvalue value,
+                         range_material_point at, u32 depth,
+                        range_material_match mut* matched) bool {
+    range_material_context* proof = &session->proof;
+    fir.func* f = proof->f;
+    bool pointer = n->a->ty->kind == types.type_kind.k_ptr;
+    u32 mut expected = 2;
+    if (pointer) { expected = 3; }
+    if (value.ops_len != expected
+        || (pointer && value.kind != fir.rvalue_kind.rv_slice_ptr)
+        || (!pointer && value.kind != fir.rvalue_kind.rv_slice)) { return false; }
+    range_material_match mut base = range_material_match{};
+    bool writer = contains_writer(n->b) || contains_writer(n->c);
+    range_material_point mut first = at;
+    range_material_match mut low = range_material_match{};
+    range_material_match mut high = range_material_match{};
+    u32 mut offset = 0;
+    if (pointer) { offset = 1; }
+    fir.operand lo = fir.operand_at(f, value.ops_first + offset);
+    fir.operand hi = fir.operand_at(f, value.ops_first + offset + 1);
+    if (n->c != null) {
+        if (pointer) {
+            if (!conditional_operand(session, n->c, hi, at, false, depth + 1, &high)) {
+                return false;
+            }
+        } else if (!conditional_bound(session, n->c, hi, n->loc, at, depth + 1, &high)) {
+            return false;
+        }
+    } else {
+        if (n->a->ty->kind == types.type_kind.k_array) {
+            if (hi.kind != fir.operand_kind.ok_const || hi.value.kind != fir.const_kind.ck_int
+                || consts.cv_is_neg(hi.value.value) || hi.value.value.mag != n->a->ty->len) {
+                return false;
+            }
+        } else {
+            if (hi.kind != fir.operand_kind.ok_copy
+                || hi.place.proj_len != value.place.proj_len + 1) {
+                return false;
+            }
+            fir.projection len = fir.place_projection(f, hi.place, hi.place.proj_len - 1);
+            fir.place mut header = hi.place;
+            header.proj_len -= 1;
+            if (len.kind != fir.proj_kind.pj_field || len.field != LEN_FIELD
+                || !range_audit_place_eq(f, header, value.place)) { return false; }
+        }
+    }
+    if (n->b != null) {
+        if (pointer) {
+            if (!conditional_operand(session, n->b, lo, at, contains_writer(n->c),
+                                        depth + 1, &low)) { return false; }
+        } else if (!conditional_bound(session, n->b, lo, n->loc, at, depth + 1, &low)) {
+            return false;
+        }
+    } else if (lo.kind != fir.operand_kind.ok_const || lo.value.kind != fir.const_kind.ck_int
+        || consts.cv_is_neg(lo.value.value) || lo.value.value.mag != 0) { return false; }
+    if (pointer) {
+        if (!conditional_operand(session, n->a, fir.operand_at(f, value.ops_first),
+                                    at, writer, depth + 1, &base)) { return false; }
+    } else if (!conditional_place(session, n->a, value.place, at, writer, depth + 1, &base)) {
+        return false;
+    }
+    if (base.emitted) { first = base.first; }
+    if (base.emitted && low.emitted && !conditional_order_before(session, base.last, low.first)) {
+        return false;
+    }
+    if (low.emitted && high.emitted && !conditional_order_before(session, low.last, high.first)) {
+        return false;
+    }
+    if (base.emitted && !low.emitted && high.emitted
+        && !conditional_order_before(session, base.last, high.first)) { return false; }
+    if (!base.emitted && low.emitted) { first = low.first; }
+    if (!base.emitted && !low.emitted && high.emitted) { first = high.first; }
+    *matched = range_material_match{.emitted = true, .first = first, .last = at};
+    return true;
+}
+
+
+fn conditional_wrapped_capture(conditional_proof_session mut* session, ast.node* n,
+                                u32 body, fir.range_capture mut* expected) bool {
+    fir.func* f = session->proof.f;
+    range_audit_operation op = session->proof.operation;
+    u32 mut found = 0;
+    u32 mut p = 0;
+    fir.place mut captured = fir.place{};
+    while (p < fir.block_statement_count(f, body)) {
+        fir.statement* s = fir.block_statement(f, body, p);
+        if (s->kind == fir.stmt_kind.st_assign && s->stmt == op.statement_index
+            && s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0
+            && fir.local_at(f, s->place.local)->sym == cast(n->sym, ast.sym*)
+            && range_audit_loc_eq(s->loc, n->b->loc)
+                && range_audit_loc_eq(s->exit_loc, op.exit_source)
+            && s->value.kind == fir.rvalue_kind.rv_use && s->value.ops_len == 1) {
+            fir.operand element = fir.operand_at(f, s->value.ops_first);
+            if (element.kind != fir.operand_kind.ok_copy || element.place.proj_len == 0
+                || fir.place_projection(f, element.place, element.place.proj_len - 1).kind
+                    != fir.proj_kind.pj_index) { return false; }
+            captured = element.place;
+            captured.proj_len -= 1;
+            found += 1;
+        }
+        p += 1;
+    }
+    if (found != 1) { return false; }
+    range_material_point read = range_material_point{.block = op.block, .position = op.position};
+    range_material_match mut matched = range_material_match{};
+    fir.range_capture mut binding = fir.range_capture{.source = n->b->loc, .captured = captured};
+    if (n->b->ty->kind == types.type_kind.k_array && fir.type_owning(n->b->ty)) {
+        if (!conditional_place(session, n->b, captured, read, true, 0, &matched)) {
+            return false;
+        }
+        binding.kind = fir.range_capture_kind.owning_fixed_array_place;
+        binding.original = captured;
+        binding.original_present = true;
+    } else {
+        binding.kind = fir.range_capture_kind.borrowed_header;
+        binding.original_present = true;
+        if (n->b->ty->kind == types.type_kind.k_array) {
+            binding.kind = fir.range_capture_kind.non_owning_array_copy;
+            binding.original_present = false;
+        }
+        if (fir.type_owning(n->b->ty) || designates(n->b)) {
+            range_material_point mut at = range_material_point{};
+            fir.statement* mut copy = null;
+            if (!conditional_definition(session, captured, read, &at, &copy)
+                || copy->value.kind != fir.rvalue_kind.rv_use || copy->value.ops_len != 1
+                || !range_audit_loc_eq(copy->loc, n->b->loc)) { return false; }
+            fir.operand source = fir.operand_at(f, copy->value.ops_first);
+            if (source.kind != fir.operand_kind.ok_copy
+                || !conditional_place(session, n->b, source.place, at, true, 0, &matched)) {
+                return false;
+            }
+            binding.original = source.place;
+        } else {
+            if (!conditional_place(session, n->b, captured, read, false, 0, &matched)) {
+                return false;
+            }
+            binding.original = captured;
+        }
+    }
+    if (!conditional_writes_proved(session)) { return false; }
+    *expected = binding;
+    return true;
+}
+
 
 fn range_audit_source_sym(ast.node* n) ast.sym* {
     if (n == null) { return null; }
@@ -2113,6 +2629,7 @@ fn range_audit_binding(fir.func* f, ast.node* n, range_audit_operation op,
     }
     ast.sym* source = range_audit_source_sym(n->b);
     if (source != null && designates(n->b) && !range_audit_has_call(n->b)
+        && !conditional_source_present(n->b)
         && !range_audit_place_root(f, binding.original, source, 0)) {
         *fault = range_audit_fault.protected_path;
         return false;
@@ -2398,7 +2915,7 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
             || !range_audit_contexts(&walk, proposed, source)) {
             return range_audit_fail(out, key, range_audit_fault.context);
         }
-        bool materialized = range_audit_has_call(n->b) || n->b->kind == ast.ast_kind.k_ternary;
+        bool materialized = range_audit_has_call(n->b) || conditional_source_present(n->b);
         conditional_proof_session mut conditional = conditional_proof_session{
             .proof = range_material_context{.f = f, .operation = op}, .key = key,
             .declaration = decl, .source = n};
@@ -2412,6 +2929,8 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
             bool mut proved = false;
             if (n->b->kind == ast.ast_kind.k_ternary) {
                 proved = conditional_capture_prove(&conditional, n, body, &derived);
+            } else if (conditional_source_present(n->b)) {
+                proved = conditional_wrapped_capture(&conditional, n, body, &derived);
             } else {
                 proved = range_material_capture(f, n, op, body, &derived);
             }
