@@ -1,0 +1,486 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| nested_sibling_views
+//| intermediate_storage
+//| cyclic_storage_relations
+//| aggregate_copy
+//| aggregate_move
+//| clear_one_nested_field
+//| ending_container
+//| global_stack_escape
+//| global_caller_source
+//| unknown_source
+//| incomplete_representation
+//| unknown_projected_contents
+//| unproved_destination_end
+//| retained_map_key
+//| copied_key_in_two_destinations
+//| owning_heap_storage_reachability
+/// Tests stored, returned, global, and transitive source requirements.
+import fir_env;
+import ownership_api;
+import ownership_borrows;
+import ownership_borrows_env;
+import ownership_local_env;
+import ownership_places;
+import ownership_regions;
+import ownership_state;
+import types;
+
+fn nested_sibling_views() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path first = ownership_borrows_env.field(2, 0, a[..]);
+    ownership_api.place_path second = ownership_borrows_env.field(2, 1, b[..]);
+    ownership_borrows_env.seed(&e, first, 100, 10);
+    ownership_borrows_env.seed(&e, second, 200, 20);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer stack = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(stack.proof));
+    ownership_borrows_env.expect(stack, false, true, false, false);
+    assert(stack.destinations.len == 1 &&
+        stack.destinations[0].relation.value_version.ordinal == 10);
+    ownership_borrows.answer caller = ownership_borrows_env.inspect(&e, &kept, 200);
+    assert(ownership_api.successful(caller.proof));
+    ownership_borrows_env.expect(caller, false, true, true, false);
+    assert(caller.destinations.len == 1 && caller.destinations[0].relation.source.ordinal == 200);
+}
+
+fn intermediate_storage() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path first = ownership_borrows_env.field(2, 0, a[..]);
+    ownership_api.place_path second = ownership_borrows_env.field(2, 1, b[..]);
+    ownership_borrows_env.seed(&e, first, 100, 10);
+    ownership_borrows_env.seed(&e, second, 200, 20);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.result);
+    assert(ownership_api.successful(ownership_local_env.address(&e.local, 2, 3, 102, true)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.storage_end, ownership_borrows_env.no_boundary(), false);
+    assert(got.proof.failed && got.intrinsic_escape && got.retained && !got.local_used);
+    assert(got.destinations.len == 2);
+    assert(got.destinations[1].root.root.ordinal == 3);
+    assert(got.destinations[1].relation.source.ordinal == 100);
+}
+
+fn cyclic_storage_relations() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.storage(&e, 4, 104, ownership_borrows.destination_kind.result);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.projection[1] mut c = {};
+    ownership_borrows_env.seed(&e, ownership_borrows_env.field(2, 0, a[..]), 103, 10);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.field(3, 0, b[..]), 102, 20);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.field(3, 1, c[..]), 100, 30);
+    assert(ownership_api.successful(ownership_local_env.address(&e.local, 2, 4, 102, true)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(got.proof) && got.retained && !got.local_used);
+    assert(got.destinations.len == 4);
+    assert(e.counts.work < 1000);
+}
+
+fn aggregate_copy() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path first = ownership_borrows_env.field(2, 0, a[..]);
+    ownership_api.place_path second = ownership_borrows_env.field(2, 1, b[..]);
+    ownership_borrows_env.seed(&e, first, 100, 10);
+    ownership_borrows_env.seed(&e, second, 200, 20);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.result);
+    ownership_borrows_env.aggregate(&e, 2);
+    ownership_borrows_env.aggregate(&e, 3);
+    ownership_api.projection[1] mut c = {};
+    ownership_api.projection[1] mut d = {};
+    ownership_borrows_env.seed_empty(&e, ownership_borrows_env.field(3, 0, c[..]));
+    ownership_borrows_env.seed_empty(&e, ownership_borrows_env.field(3, 1, d[..]));
+    types.node* ty = fir_env.ty(&e.fixture, "viewer");
+    ownership_places.request mut req = ownership_borrows_env.place_request(&e,
+        ownership_places.action.copy_value, ty, ownership_borrows_env.path(2),
+        ownership_borrows_env.path(3));
+    assert(ownership_api.successful(ownership_places.apply(&e.local.state,
+        &e.local.service, &req)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer one = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(one.proof) && one.retained && !one.local_used);
+    assert(one.destinations.len == 2);
+    ownership_borrows.answer two = ownership_borrows_env.inspect(&e, &kept, 200);
+    assert(ownership_api.successful(two.proof) && two.caller_requirement && two.retained);
+    assert(two.destinations.len == 2);
+    assert(two.destinations[two.destinations.len - 1].relation.range.extent.value == 8);
+}
+
+fn aggregate_move() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path first = ownership_borrows_env.field(2, 0, a[..]);
+    ownership_api.place_path second = ownership_borrows_env.field(2, 1, b[..]);
+    ownership_borrows_env.seed(&e, first, 100, 10);
+    ownership_borrows_env.seed(&e, second, 200, 20);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.result);
+    ownership_borrows_env.aggregate(&e, 2);
+    ownership_borrows_env.aggregate(&e, 3);
+    ownership_api.projection[1] mut c = {};
+    ownership_api.projection[1] mut d = {};
+    ownership_borrows_env.seed_empty(&e, ownership_borrows_env.field(3, 0, c[..]));
+    ownership_borrows_env.seed_empty(&e, ownership_borrows_env.field(3, 1, d[..]));
+    types.node* ty = fir_env.ty(&e.fixture, "viewer");
+    ownership_places.request mut req = ownership_borrows_env.place_request(&e,
+        ownership_places.action.move_value, ty, ownership_borrows_env.path(2),
+        ownership_borrows_env.path(3));
+    assert(ownership_api.successful(ownership_places.apply(&e.local.state,
+        &e.local.service, &req)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer one = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(one.proof) && one.retained && !one.local_used);
+    assert(one.destinations.len == 1);
+    ownership_borrows.answer two = ownership_borrows_env.inspect(&e, &kept, 200);
+    assert(ownership_api.successful(two.proof) && two.caller_requirement && two.retained);
+    assert(two.destinations.len == 1);
+    assert(two.destinations[two.destinations.len - 1].relation.range.extent.value == 8);
+}
+
+fn clear_one_nested_field() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path first = ownership_borrows_env.field(2, 0, a[..]);
+    ownership_api.place_path second = ownership_borrows_env.field(2, 1, b[..]);
+    ownership_borrows_env.seed(&e, first, 100, 10);
+    ownership_borrows_env.seed(&e, second, 200, 20);
+    ownership_borrows_env.clear(&e, first);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer cleared = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(cleared.proof) && !cleared.retained && !cleared.local_used);
+    ownership_borrows.answer sibling = ownership_borrows_env.inspect(&e, &kept, 200);
+    assert(ownership_api.successful(sibling.proof) && sibling.retained &&
+        sibling.caller_requirement);
+    assert(sibling.destinations.len == 1);
+    assert(ownership_state.same_place(sibling.destinations[0].root, second));
+}
+
+fn ending_container() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path first = ownership_borrows_env.field(2, 0, a[..]);
+    ownership_api.place_path second = ownership_borrows_env.field(2, 1, b[..]);
+    ownership_borrows_env.seed(&e, first, 100, 10);
+    ownership_borrows_env.seed(&e, second, 200, 20);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_api.place_path[1] ending = {ownership_borrows_env.path(2)};
+    ownership_borrows.answer got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.storage_end, ending[..], true);
+    assert(ownership_api.successful(got.proof));
+    ownership_borrows_env.expect(got, false, false, false, false);
+    ownership_places.request mut req = ownership_borrows_env.place_request(&e,
+        ownership_places.action.end_storage, null, ownership_borrows_env.path(2),
+        ownership_borrows_env.path(2));
+    req.storage_source = ownership_borrows_env.id(ownership_api.entity_kind.source, 102);
+    req.base.source_key = req.storage_source;
+    req.base.source_correspondence_proved = true;
+    req.liveness_proved = true;
+    req.retained_borrow = got.retained;
+    assert(ownership_api.successful(ownership_places.apply(&e.local.state,
+        &e.local.service, &req)));
+}
+
+fn global_stack_escape() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.global);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.path(2), 100, 10);
+    assert(ownership_api.successful(ownership_local_env.copy(&e.local, 2, 3, false)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.storage_end, ownership_borrows_env.no_boundary(), false);
+    assert(got.proof.failed && got.intrinsic_escape && got.retained && !got.local_used);
+    assert(got.destinations.len == 1 && got.destinations[0].kind ==
+        ownership_borrows.destination_kind.global);
+}
+
+fn global_caller_source() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.global);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.path(2), 100, 10);
+    assert(ownership_api.successful(ownership_local_env.copy(&e.local, 2, 3, false)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(got.proof));
+    ownership_borrows_env.expect(got, false, true, true, false);
+    assert(got.destinations.len == 1 && got.destinations[0].kind ==
+        ownership_borrows.destination_kind.global);
+}
+
+fn unknown_source() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.unknown_fort);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.result);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.path(2), 100, 10);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(got.proof.kind == ownership_api.proof_kind.incomplete && got.proof.failed);
+    assert(got.proof.terminal.present && got.retained && !got.local_used);
+}
+
+fn incomplete_representation() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.result);
+    ownership_api.borrow_relation[1] mut relations = {ownership_local_env.borrow(
+        ownership_borrows_env.id(ownership_api.entity_kind.source, 100), 10,
+        ownership_borrows_env.path(2))};
+    relations[0].representation_complete = false;
+    ownership_api.contents_fact mut value = ownership_local_env.reference(10,
+        relations[0].source, relations[..]);
+    value.place = ownership_borrows_env.path(2);
+    assert(ownership_state.add_contents(&e.local.state, &e.local.service, value,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(!ownership_api.successful(got.proof) && got.proof.terminal.present);
+    assert(got.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(!got.local_used);
+}
+
+fn unknown_projected_contents() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.contents_fact value = ownership_api.contents_fact{
+        .place = ownership_borrows_env.field(2, 0, a[..])};
+    assert(ownership_state.add_contents(&e.local.state, &e.local.service, value,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(got.proof.failed && got.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(got.proof.terminal.present && !got.local_used);
+}
+
+fn unproved_destination_end() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path first = ownership_borrows_env.field(2, 0, a[..]);
+    ownership_api.place_path second = ownership_borrows_env.field(2, 1, b[..]);
+    ownership_borrows_env.seed(&e, first, 100, 10);
+    ownership_borrows_env.seed(&e, second, 200, 20);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_api.place_path[1] ending = {ownership_borrows_env.path(2)};
+    ownership_borrows.answer unproved = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.storage_end, ending[..], false);
+    assert(unproved.proof.failed && unproved.retained && unproved.intrinsic_escape);
+    assert(!unproved.local_used);
+    ownership_borrows.answer proved = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.storage_end, ending[..], true);
+    assert(ownership_api.successful(proved.proof) && !proved.retained && !proved.local_used);
+}
+
+fn retained_map_key() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.caller);
+    ownership_borrows_env.storage(&e, 5, 105, ownership_borrows.destination_kind.local_value);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e.local, 5, 10, 100, 1)));
+    assert(ownership_api.successful(ownership_local_env.copy(&e.local, 5, 2, false)));
+    ownership_api.projection[1] mut a = {};
+    ownership_api.place_path key = ownership_borrows_env.element(3, 40, 0, a[..]);
+    ownership_borrows_env.seed_empty(&e, key);
+    ownership_regions.result mut update = ownership_borrows_env.region_copy(&e,
+        ownership_borrows_env.path(2), key);
+    ownership_borrows_env.take(&e, &update);
+    assert(ownership_api.successful(ownership_local_env.dead(&e.local, 2, 102, true, false)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(got.proof) && got.retained && !got.local_used);
+    assert(got.destinations.len == 1 && ownership_state.same_place(got.destinations[0].root, key));
+}
+
+fn copied_key_in_two_destinations() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.caller);
+    ownership_borrows_env.storage(&e, 4, 104, ownership_borrows.destination_kind.caller);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.path(2), 100, 10);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path one = ownership_borrows_env.element(3, 40, 0, a[..]);
+    ownership_api.place_path two = ownership_borrows_env.element(4, 41, 0, b[..]);
+    ownership_borrows_env.seed_empty(&e, one);
+    ownership_borrows_env.seed_empty(&e, two);
+    ownership_regions.result mut update = ownership_borrows_env.region_copy(&e,
+        ownership_borrows_env.path(2), one);
+    ownership_borrows_env.take(&e, &update);
+    update = ownership_borrows_env.region_copy(&e, ownership_borrows_env.path(2), two);
+    ownership_borrows_env.take(&e, &update);
+    assert(ownership_api.successful(ownership_local_env.dead(&e.local, 2, 102, true, false)));
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(got.proof) && got.caller_requirement && got.retained);
+    assert(got.destinations.len == 2 && !got.local_used);
+    ownership_borrows_env.clear(&e, one);
+    ownership_borrows.graph mut after = ownership_borrows_env.solve(&e);
+    ownership_borrows.answer remaining = ownership_borrows_env.inspect(&e, &after, 100);
+    assert(ownership_api.successful(remaining.proof) && remaining.retained);
+    assert(remaining.destinations.len == 1);
+    assert(ownership_state.same_place(remaining.destinations[0].root, two));
+    ownership_borrows.free(&after);
+}
+
+fn owning_heap_storage_reachability() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.storage(&e, 5, 105, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.result);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e.local, 5, 10, 100, 1)));
+    assert(ownership_api.successful(ownership_local_env.move_owner(&e.local, 5, 3)));
+    ownership_borrows_env.bind(&e, 4, 100, ownership_borrows.destination_kind.projected);
+    ownership_borrows_env.source(&e, 200, ownership_api.source_kind.symbolic_caller);
+    ownership_api.projection[1] mut parts = {};
+    ownership_borrows_env.seed(&e, ownership_borrows_env.field(4, 0, parts[..]), 200, 20);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer allocation = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(allocation.proof));
+    ownership_borrows_env.expect(allocation, false, false, false, false);
+    ownership_borrows.answer borrowed = ownership_borrows_env.inspect(&e, &kept, 200);
+    assert(ownership_api.successful(borrowed.proof));
+    ownership_borrows_env.expect(borrowed, false, true, true, false);
+    assert(borrowed.destinations.len == 2);
+    assert(borrowed.destinations[0].root.root.ordinal == 3);
+    assert(borrowed.destinations[0].kind == ownership_borrows.destination_kind.result);
+    assert(borrowed.destinations[0].relation.source.ordinal == 200);
+}
+
+fn main() i32 {
+    nested_sibling_views();
+    println("nested_sibling_views");
+    intermediate_storage();
+    println("intermediate_storage");
+    cyclic_storage_relations();
+    println("cyclic_storage_relations");
+    aggregate_copy();
+    println("aggregate_copy");
+    aggregate_move();
+    println("aggregate_move");
+    clear_one_nested_field();
+    println("clear_one_nested_field");
+    ending_container();
+    println("ending_container");
+    global_stack_escape();
+    println("global_stack_escape");
+    global_caller_source();
+    println("global_caller_source");
+    unknown_source();
+    println("unknown_source");
+    incomplete_representation();
+    println("incomplete_representation");
+    unknown_projected_contents();
+    println("unknown_projected_contents");
+    unproved_destination_end();
+    println("unproved_destination_end");
+    retained_map_key();
+    println("retained_map_key");
+    copied_key_in_two_destinations();
+    println("copied_key_in_two_destinations");
+    owning_heap_storage_reachability();
+    println("owning_heap_storage_reachability");
+    return 0;
+}

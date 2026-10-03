@@ -1,0 +1,70 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| successful retained-source teardown ok
+/// Measures successful graph teardown with allocator views.
+import heap;
+import ownership_api;
+import ownership_borrows;
+import ownership_borrows_env;
+
+u64 ROUNDS = 32;
+u64 CALLS = 512;
+u64 LATE_START = 16;
+
+fn result_teardown() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.allocator_setup(&e);
+    defer ownership_borrows_env.close(&e);
+    u64 mut early_system = 0;
+    u64 mut early_block = 0;
+    u64 mut system_distance = ownership_api.U64_MAX;
+    u64 mut block_distance = ownership_api.U64_MAX;
+    u64 mut round = 0;
+    while (round < ROUNDS) {
+        u64 mut index = 0;
+        while (index < CALLS) {
+            e.counts.work = 0;
+            e.counts.relations = 0;
+            ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+            assert(ownership_api.successful(kept.proof));
+            assert(kept.edges_len == 18 && kept.snapshot.contents_len == 18);
+            assert(kept.snapshot.sources_len == 16 && kept.snapshot.blocks != null);
+            ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &kept, 100);
+            assert(ownership_api.successful(got.proof) && got.retained && !got.local_used);
+            assert(got.destinations.len == 18 && got.caller_requirement);
+            ownership_borrows.free(&kept);
+            assert(kept.snapshot.blocks == null && kept.edges_len == 0);
+            assert(kept.destinations.len == 0 && kept.matches.len == 0);
+            assert(!ownership_api.successful(kept.proof));
+            ownership_borrows.free(&kept);
+            index += 1;
+        }
+        u64 system_value = heap.system_view();
+        u64 block_value = heap.block_view();
+        if (round == 4) {
+            early_system = system_value;
+            early_block = block_value;
+        }
+        if (round >= LATE_START) {
+            u64 mut distance_value = heap.distance(early_system, system_value);
+            if (distance_value < system_distance) { system_distance = distance_value; }
+            distance_value = heap.distance(early_block, block_value);
+            if (distance_value < block_distance) { block_distance = distance_value; }
+        }
+        round += 1;
+    }
+    // Each result buffer stays below the Linux mmap threshold of 131072 bytes.
+    // The repeated calls also expose loss of the smallest visited-set allocation.
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 8192 : 1024;
+    if (system_distance >= bound || (heap.ADDRESS_IS_A_VIEW && block_distance >= bound)) {
+        eprintln("allocator distances: system ", system_distance, " block ", block_distance);
+        panic("successful retained-source teardown retains allocations");
+    }
+}
+
+fn main() i32 {
+    result_teardown();
+    println("successful retained-source teardown ok");
+    return 0;
+}
