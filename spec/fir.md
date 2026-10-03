@@ -240,6 +240,7 @@ A top-level conditional-result proof derives the joined destination from its con
 It matches the checked predicate, exact true and default edges, both source arms, and their join.
 Each arm entry has only its required switch predecessor. The join has only its two required exits.
 Scalar arm stores consume their exact produced operands.
+Nested scalar results require move for an owning checked type and copy for a non-owning checked type.
 Aggregate arms write their destination directly.
 Each required arm path establishes the destination. Nested result arms repeat the same proof.
 Only direct nested aggregate result arms can share one proved destination family.

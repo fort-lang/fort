@@ -153,7 +153,8 @@ came here.
   The proof rejects missing, duplicate, overwritten, substituted, and cross-expansion links.
   A top-level conditional result proves its predicate, exact switch edges, both arms, and join.
   Aggregate arms write the joined destination directly.
-  Scalar arms copy their exact produced operands.
+  Scalar arms retain their exact produced operands.
+  Nested scalar results use move for owning checked types and copy for non-owning checked types.
   Nested result arms repeat that proof. Constant predicates still require both emitted arms.
   Direct nested aggregate result arms share only their proved parent's destination family.
   Each edge matches the exact source arm, aggregate destination, CFG interval, and nested join exit.
