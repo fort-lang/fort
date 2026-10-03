@@ -169,6 +169,9 @@ fn mapped_event(void mut* opaque, ownership_api.event_request* request)
     ownership_api.event_request mut mapped = *request;
     mapped.event.key = event_key(bridge->input, mapped.event.operation,
         mapped.event.kind, mapped.event.relation);
+    if (request->current.terminal.limit.present) {
+        mapped.event.limit = request->current.terminal.limit;
+    }
     if (mapped.event.key.kind != ownership_api.entity_kind.event) {
         ownership_api.event_result mut missing = ownership_api.event_result{};
         missing.proof = ownership_api.incomplete(
@@ -236,6 +239,7 @@ fn charged_failure(program* in, ownership_api.proof_status proof,
     event.evidence = ownership_api.evidence_kind.abstract_possibility;
     event.reason = proof.terminal.reason;
     event.relation = proof.terminal.relation;
+    event.limit = proof.terminal.limit;
     event.text = "ownership flow cannot complete the requested work";
     ownership_api.event_request request = ownership_api.event_request{event, proof};
     return ownership_api.record_event(in->services, &request).proof;
@@ -611,13 +615,30 @@ fn check_returned_borrows(program* in, analysis mut* out, path* p,
     if (in->result_slot.kind == ownership_api.entity_kind.none) { return; }
     ownership_api.source_position at = return_source(in, op.block);
     bool mut found = false;
+    bool mut reference_leaf = false;
     u64 mut c = 0;
     while (c < p->facts.contents_len) {
         ownership_api.contents_fact value = p->facts.contents[c];
         if (same_entity(value.place.root, in->result_slot)) {
             found = true;
+            if (value.kind == ownership_api.contents_kind.aggregate) {
+                c += 1;
+                continue;
+            }
+            if (value.kind == ownership_api.contents_kind.scalar &&
+                value.place.projections.len > 0) {
+                c += 1;
+                continue;
+            }
+            reference_leaf = true;
+            bool empty = (value.kind == ownership_api.contents_kind.reference ||
+                value.kind == ownership_api.contents_kind.empty_owner) &&
+                value.owner_empty && value.borrows.len == 0 &&
+                value.span_length.kind == ownership_api.fact_kind.exact &&
+                value.span_length.value == 0;
+            if (empty) { c += 1; continue; }
             if (value.place.residual || value.kind != ownership_api.contents_kind.reference ||
-                value.value_version.kind != ownership_api.entity_kind.value ||
+                value.owner_empty || value.value_version.kind != ownership_api.entity_kind.value ||
                 value.borrows.len == 0) {
                 note_failure(out, failure(in, op, at,
                     ownership_api.event_kind.incomplete_proof,
@@ -657,7 +678,7 @@ fn check_returned_borrows(program* in, analysis mut* out, path* p,
         }
         c += 1;
     }
-    if (!found) {
+    if (!found || !reference_leaf) {
         note_failure(out, failure(in, op, at,
             ownership_api.event_kind.incomplete_proof,
             ownership_api.incomplete_reason.missing_correspondence,
@@ -677,10 +698,20 @@ fn parameter_return(program* in, analysis mut* out, path mut* p, u32 block) void
             ownership_api.allocation_fact alloc = p->facts.allocations[a];
             if (same_entity(alloc.owner.place.root, param.slot) && alloc.obligation &&
                 (alloc.count.one || alloc.count.many)) {
-                note_failure(out, failure(in, op, at,
-                    ownership_api.event_kind.lost_ownership,
-                    ownership_api.incomplete_reason.none, alloc.key,
-                    "parameter storage ends with a live owner"));
+                if (alloc.count.zero ||
+                    alloc.validity != ownership_api.validity_kind.live ||
+                    alloc.owner.place.residual || alloc.owner.detached ||
+                    alloc.owner.transfer_pending) {
+                    note_failure(out, failure(in, op, at,
+                        ownership_api.event_kind.incomplete_proof,
+                        ownership_api.incomplete_reason.missing_path, alloc.key,
+                        "parameter storage has no live owner"));
+                } else {
+                    note_failure(out, failure(in, op, at,
+                        ownership_api.event_kind.lost_ownership,
+                        ownership_api.incomplete_reason.none, alloc.key,
+                        "parameter storage ends with a live owner"));
+                }
             }
             a += 1;
         }

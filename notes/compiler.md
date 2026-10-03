@@ -592,10 +592,13 @@ came here.
   A whole-body range loan starts at body entry and ends at loan exit.
   Direct and summarized writes to captured storage use one overlap test.
   At normal return, the pass checks complete returned-borrow relations after expanded effects.
+  A proved empty reference needs no borrow. Scalar result fields add no source obligation.
   It also checks parameter obligations.
   A widened owner with no known root keeps its parameter obligation.
+  A possible parameter owner gives incomplete proof unless a path witness proves the loss.
   It then ends parameter stack sources. Abort and trap paths do not require normal cleanup.
   Unknown call outcomes keep a possible return. A guarded return needs a condition proof.
+  Direct and delegated W failures store the exhaustion record used by diagnostic rendering.
   This pass does not construct source effects.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
