@@ -1107,6 +1107,536 @@ fn range_audit_call_root(ast.node* n) bool {
     return false;
 }
 
+// Operand calls require proof even when they do not supply the storage root.
+fn range_audit_has_call(ast.node* n) bool {
+    if (n == null) { return false; }
+    if (n->kind == ast.ast_kind.k_call) { return true; }
+    if (range_audit_has_call(n->a) || range_audit_has_call(n->b)
+        || range_audit_has_call(n->c) || range_audit_has_call(n->d)) { return true; }
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        if (range_audit_has_call(ast.ast_child(n, i))) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+struct range_material_point {
+    u32 block;
+    u32 position;
+}
+
+struct range_material_match {
+    bool emitted;
+    range_material_point first;
+    range_material_point last;
+}
+
+struct range_material_context {
+    fir.func* f;
+    range_audit_operation operation;
+}
+
+// A linear predecessor must have one normal edge. Conditional joins need a later proof.
+fn range_material_parent(range_material_context* proof, u32 block, u32 mut* parent) bool {
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(proof->f)) {
+        fir.terminator* term = &fir.block_at(proof->f, b)->term;
+        u32 mut i = 0;
+        u32 mut target = 0;
+        while (fir.term_targets(proof->f, term, i, &target)) {
+            if (target == block) {
+                if (term->kind != fir.term_kind.tk_goto && term->kind != fir.term_kind.tk_check) {
+                    return false;
+                }
+                if (term->stmt != proof->operation.statement_index
+                    || !range_audit_loc_eq(term->exit_loc, proof->operation.exit_source)) {
+                    return false;
+                }
+                *parent = b;
+                count += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return count == 1;
+}
+
+// The definition must precede this read on its actual linear path.
+fn range_material_before(range_material_context* proof, range_material_point before,
+                          range_material_point read) bool {
+    u32 mut steps = 0;
+    range_material_point mut current = read;
+    while (steps < fir.block_count(proof->f)) {
+        if (current.block == before.block) { return before.position < current.position; }
+        u32 mut parent = 0;
+        if (!range_material_parent(proof, current.block, &parent)) { return false; }
+        current = range_material_point{.block = parent,
+                                        .position = fir.block_statement_count(proof->f, parent)};
+        steps += 1;
+    }
+    return false;
+}
+
+// A materialized temporary has one complete write and no competing write or deletion.
+fn range_material_definition(range_material_context* proof, fir.place target,
+                              range_material_point read, range_material_point mut* at,
+                              fir.statement* mut* definition) bool {
+    fir.func* f = proof->f;
+    if (!range_audit_place_valid(f, target) || target.base != fir.base_kind.bk_local
+        || target.proj_len != 0 || fir.local_at(f, target.local)->kind != fir.local_kind.lk_temp) {
+        return false;
+    }
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, p);
+            // An address or array slice permits writes that name another local.
+            if (s->kind == fir.stmt_kind.st_assign
+                && (s->value.kind == fir.rvalue_kind.rv_addr
+                    || (s->value.kind == fir.rvalue_kind.rv_slice
+                        && fir.place_type(f, s->value.place)->kind == types.type_kind.k_array))
+                && s->value.place.base == fir.base_kind.bk_local
+                && s->value.place.local == target.local && fir.place_fixed(f, s->value.place)) {
+                return false;
+            }
+            fir.place mut written = fir.place{};
+            if (fir.stmt_writes_place(s, &written) && written.base == fir.base_kind.bk_local
+                && written.local == target.local) {
+                if (s->kind != fir.stmt_kind.st_assign || written.proj_len != 0) { return false; }
+                *at = range_material_point{.block = b, .position = p};
+                *definition = s;
+                count += 1;
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    if (count != 1 || (*definition)->stmt != proof->operation.statement_index
+        || !range_audit_loc_eq((*definition)->exit_loc, proof->operation.exit_source)) {
+        return false;
+    }
+    return range_material_before(proof, *at, read);
+}
+
+fn range_material_fixed_temp(fir.func* f, fir.place p) bool {
+    return p.base == fir.base_kind.bk_local
+        && fir.local_at(f, p.local)->kind == fir.local_kind.lk_temp && fir.place_fixed(f, p);
+}
+
+// Read literal syntax independently. Other folded constants need their value table.
+fn range_material_constant(ast.node* n, fir.constant value) bool {
+    if (n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field) {
+        return n->sym != null && n->sym->kind == ast.sym_kind.s_fn
+            && value.kind == fir.const_kind.ck_fn && value.sym == cast(n->sym, ast.sym*);
+    }
+    if (n->kind == ast.ast_kind.k_int || n->kind == ast.ast_kind.k_char) {
+        return value.kind == fir.const_kind.ck_int && !consts.cv_is_neg(value.value)
+            && value.value.mag == n->ival && types.type_equal(value.ty, n->ty);
+    }
+    if (n->kind == ast.ast_kind.k_bool) {
+        return value.kind == fir.const_kind.ck_bool && value.value.mag == n->ival;
+    }
+    if (n->kind == ast.ast_kind.k_null) {
+        return value.kind == fir.const_kind.ck_null && types.type_equal(value.ty, n->ty);
+    }
+    if (n->kind == ast.ast_kind.k_string) {
+        return value.kind == fir.const_kind.ck_string && value.text == n->name;
+    }
+    return false;
+}
+
+// Verify a held read before its later writer. A fixed temporary needs no additional copy.
+fn range_material_operand(range_material_context* proof, ast.node* n, fir.operand actual,
+                           range_material_point read, bool later, u32 depth,
+                           range_material_match mut* matched) bool {
+    if (n == null || depth >= 64 || n->kind == ast.ast_kind.k_ternary) { return false; }
+    if (actual.kind == fir.operand_kind.ok_const) {
+        return range_material_constant(n, actual.value);
+    }
+    if (!range_audit_place_valid(proof->f, actual.place)) { return false; }
+    if (later && !range_material_fixed_temp(proof->f, actual.place)) { return false; }
+    if (later && actual.place.proj_len == 0) {
+        range_material_point mut at = range_material_point{};
+        fir.statement* mut held = null;
+        if (range_material_definition(proof, actual.place, read, &at, &held)
+            && held->value.kind == fir.rvalue_kind.rv_use && held->value.ops_len == 1
+            && range_audit_loc_eq(held->loc, n->loc)) {
+            fir.operand original = fir.operand_at(proof->f, held->value.ops_first);
+            if (original.kind == fir.operand_kind.ok_const || original.kind != actual.kind
+                || range_material_fixed_temp(proof->f, original.place)) { return false; }
+            if (!range_material_operand(proof, n, original, at, false, depth + 1, matched)) {
+                return false;
+            }
+            if (!matched->emitted) { matched->first = at; }
+            matched->emitted = true;
+            matched->last = at;
+            return true;
+        }
+    }
+    bool moved = n->kind == ast.ast_kind.k_call && (n->ann & check.ANN_MOVE) != 0;
+    if (moved) {
+        return actual.kind == fir.operand_kind.ok_move
+            && range_material_place(proof, ast.ast_child(n, 0), actual.place, read, false,
+                                     depth + 1, matched);
+    }
+    bool owns_result = !designates(n) && fir.type_owning(n->ty);
+    if ((actual.kind == fir.operand_kind.ok_move) != owns_result) { return false; }
+    return range_material_place(proof, n, actual.place, read, false, depth + 1, matched);
+}
+
+// Reverse argument traversal checks the actual emitted order, not temporary numbers.
+fn range_material_call(range_material_context* proof, ast.node* n, fir.statement* s,
+                        range_material_point at, u32 depth,
+                        range_material_match mut* matched) bool {
+    if (s->value.kind != fir.rvalue_kind.rv_call || builtin_call(n)
+        || cast(s->value.ops_len, u64) != ast.ast_len(n) || !range_audit_loc_eq(s->loc, n->loc)) {
+        return false;
+    }
+    u32 mut copies = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(proof->f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(proof->f, b)) {
+            fir.statement* other = fir.block_statement(proof->f, b, p);
+            if (other->kind == fir.stmt_kind.st_assign
+                && other->value.kind == fir.rvalue_kind.rv_call
+                && other->stmt == s->stmt && range_audit_loc_eq(other->loc, n->loc)
+                && range_audit_loc_eq(other->exit_loc, s->exit_loc)) { copies += 1; }
+            p += 1;
+        }
+        b += 1;
+    }
+    if (copies != 1) { return false; }
+    range_material_point mut first = at;
+    bool mut later = false;
+    u64 mut i = ast.ast_len(n);
+    while (i > 0) {
+        i -= 1;
+        ast.node* arg = ast.ast_child(n, i);
+        fir.operand actual = fir.operand_at(proof->f, s->value.ops_first + cast(i, u32));
+        range_material_match mut child = range_material_match{};
+        if (!range_material_operand(proof, arg, actual, at, later, depth + 1, &child)) {
+            return false;
+        }
+        if (child.emitted) {
+            if (!range_material_before(proof, child.last, first)) { return false; }
+            first = child.first;
+        }
+        later = later || contains_writer(arg);
+    }
+    ast.sym* callee = n->a->sym;
+    if (callee != null && (callee->kind == ast.sym_kind.s_fn
+        || callee->kind == ast.sym_kind.s_extern_fn)) {
+        fir.callee_kind mut expected = fir.callee_kind.cl_fn;
+        if (callee->kind == ast.sym_kind.s_extern_fn) { expected = fir.callee_kind.cl_extern; }
+        if (s->value.callee != expected || s->value.callee_sym != callee) { return false; }
+    } else {
+        range_material_match mut value = range_material_match{};
+        if (s->value.callee != fir.callee_kind.cl_value
+            || !range_material_operand(proof, n->a, s->value.callee_op, at, later,
+                                       depth + 1, &value)) {
+            return false;
+        }
+        if (value.emitted) {
+            if (!range_material_before(proof, value.last, first)) { return false; }
+            first = value.first;
+        }
+    }
+    *matched = range_material_match{.emitted = true, .first = first, .last = at};
+    return true;
+}
+
+fn range_material_bound(range_material_context* proof, ast.node* n, fir.operand actual,
+                         diag.loc source, range_material_point read, u32 depth,
+                         range_material_match mut* matched) bool {
+    if (actual.kind != fir.operand_kind.ok_copy) { return false; }
+    range_material_point mut at = range_material_point{};
+    fir.statement* mut casted = null;
+    if (!range_material_definition(proof, actual.place, read, &at, &casted)
+        || casted->value.kind != fir.rvalue_kind.rv_cast || casted->value.ops_len != 1
+        || casted->value.ty->kind != types.type_kind.k_prim
+        || casted->value.ty->prim != prim.prim_kind.prim_u64
+        || !range_audit_loc_eq(casted->loc, source)) { return false; }
+    if (!range_material_operand(proof, n, fir.operand_at(proof->f, casted->value.ops_first),
+                                at, false, depth + 1, matched)) { return false; }
+    if (!matched->emitted) { matched->first = at; }
+    matched->emitted = true;
+    matched->last = at;
+    return true;
+}
+
+fn range_material_field(ast.node* n, u32 mut* field) bool {
+    types.node* mut ty = n->a->ty;
+    if (n->kind == ast.ast_kind.k_arrow) { ty = ty->elem; }
+    if (ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_string) {
+        if (n->name != "len" && n->name != "ptr") { return false; }
+        *field = PTR_FIELD;
+        if (n->name == "len") { *field = LEN_FIELD; }
+        return true;
+    }
+    u64 mut index = 0;
+    if (n->sym == null || !gen.gen_field_index(n->sym, &index) || index >= fir.U32_LIMIT) {
+        return false;
+    }
+    *field = cast(index, u32);
+    return true;
+}
+
+fn range_material_deref(range_material_context* proof, ast.node* n, fir.place p,
+                         range_material_point read, u32 depth,
+                        range_material_match mut* matched) bool {
+    if (p.proj_len == 0
+        || fir.place_projection(proof->f, p, p.proj_len - 1).kind != fir.proj_kind.pj_deref) {
+        return false;
+    }
+    fir.place mut pointer = p;
+    pointer.proj_len -= 1;
+    return range_material_operand(proof, n, fir.operand_copy(pointer), read, false,
+                                  depth + 1, matched);
+}
+
+// Read each projection from verified FIR. This walk adds no projection or temporary.
+fn range_material_place(range_material_context* proof, ast.node* n, fir.place p,
+                         range_material_point read, bool held, u32 depth,
+                         range_material_match mut* matched) bool {
+    if (n == null || depth >= 64 || !range_audit_place_valid(proof->f, p)
+        || n->kind == ast.ast_kind.k_ternary) { return false; }
+    fir.func* f = proof->f;
+    if (held && p.base == fir.base_kind.bk_local && p.proj_len == 1
+        && fir.place_projection(f, p, 0).kind == fir.proj_kind.pj_deref) {
+        range_material_point mut at = range_material_point{};
+        fir.statement* mut address = null;
+        if (range_material_definition(proof, fir.place_local(p.local), read, &at, &address)
+            && address->value.kind == fir.rvalue_kind.rv_addr
+            && range_audit_loc_eq(address->loc, n->loc)) {
+            if (!fir.place_indirect(f, address->value.place)
+                || !range_material_place(proof, n, address->value.place, at, false,
+                                          depth + 1, matched)) { return false; }
+            if (!matched->emitted) { matched->first = at; }
+            matched->emitted = true;
+            matched->last = at;
+            return true;
+        }
+    }
+    if (held && fir.place_indirect(f, p)) { return false; }
+    if ((n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field) && n->sym != null) {
+        ast.sym* source = n->sym;
+        if (source->kind == ast.sym_kind.s_global || source->kind == ast.sym_kind.s_const) {
+            return p.base == fir.base_kind.bk_global && p.global == source && p.proj_len == 0;
+        }
+        if (source->kind == ast.sym_kind.s_param || source->kind == ast.sym_kind.s_local) {
+            return p.base == fir.base_kind.bk_local && p.proj_len == 0
+                && fir.local_at(f, p.local)->sym == source;
+        }
+    }
+    if (n->kind == ast.ast_kind.k_field || n->kind == ast.ast_kind.k_arrow) {
+        u32 mut field = 0;
+        if (p.proj_len == 0 || !range_material_field(n, &field)) { return false; }
+        fir.projection actual = fir.place_projection(f, p, p.proj_len - 1);
+        if (actual.kind != fir.proj_kind.pj_field || actual.field != field) { return false; }
+        fir.place mut base = p;
+        base.proj_len -= 1;
+        if (n->kind == ast.ast_kind.k_arrow) {
+            return range_material_deref(proof, n->a, base, read, depth + 1, matched);
+        }
+        return range_material_place(proof, n->a, base, read, false, depth + 1, matched);
+    }
+    if (n->kind == ast.ast_kind.k_unary && cast(n->op, lexer.tok_kind) == lexer.tok_kind.star) {
+        return range_material_deref(proof, n->a, p, read, depth + 1, matched);
+    }
+    if (n->kind == ast.ast_kind.k_index) {
+        if (p.proj_len == 0) { return false; }
+        fir.projection index = fir.place_projection(f, p, p.proj_len - 1);
+        if (index.kind != fir.proj_kind.pj_index) { return false; }
+        range_material_match mut bound = range_material_match{};
+        if (!range_material_bound(proof, n->b, fir.operand_copy(fir.place_local(index.index)),
+                                  n->loc, read, depth + 1, &bound)) { return false; }
+        fir.place mut base = p;
+        base.proj_len -= 1;
+        range_material_match mut root = range_material_match{};
+        bool writer = contains_writer(n->b);
+        if (!range_material_place(proof, n->a, base, read, writer, depth + 1, &root)) {
+            return false;
+        }
+        if (root.emitted && !range_material_before(proof, root.last, bound.first)) { return false; }
+        *matched = bound;
+        if (root.emitted) { matched->first = root.first; }
+        return true;
+    }
+    range_material_point mut at = range_material_point{};
+    fir.statement* mut definition = null;
+    if (!range_material_definition(proof, p, read, &at, &definition)
+        || !range_audit_loc_eq(definition->loc, n->loc)
+        || !types.type_same_shape(fir.place_type(f, p), n->ty)) { return false; }
+    if (n->kind == ast.ast_kind.k_call) {
+        return range_material_call(proof, n, definition, at, depth + 1, matched);
+    }
+    fir.rvalue value = definition->value;
+    if (n->kind == ast.ast_kind.k_unary && cast(n->op, lexer.tok_kind) == lexer.tok_kind.amp) {
+        if (value.kind != fir.rvalue_kind.rv_addr || value.is_mut != n->ty->is_mut
+            || !range_material_place(proof, n->a, value.place, at, false, depth + 1, matched)) {
+            return false;
+        }
+    } else if (n->kind == ast.ast_kind.k_cast) {
+        if (value.kind != fir.rvalue_kind.rv_cast || value.ops_len != 1
+            || !types.type_equal(value.ty, n->ty)
+            || !range_material_operand(proof, n->a, fir.operand_at(f, value.ops_first),
+                                        at, false, depth + 1, matched)) { return false; }
+    } else if (n->kind == ast.ast_kind.k_span) {
+        if (!range_material_slice(proof, n, value, at, depth + 1, matched)) { return false; }
+    } else { return false; }
+    if (!matched->emitted) { matched->first = at; }
+    matched->emitted = true;
+    matched->last = at;
+    return true;
+}
+
+fn range_material_slice(range_material_context* proof, ast.node* n, fir.rvalue value,
+                         range_material_point at, u32 depth,
+                        range_material_match mut* matched) bool {
+    fir.func* f = proof->f;
+    bool pointer = n->a->ty->kind == types.type_kind.k_ptr;
+    u32 mut expected = 2;
+    if (pointer) { expected = 3; }
+    if (value.ops_len != expected
+        || (pointer && value.kind != fir.rvalue_kind.rv_slice_ptr)
+        || (!pointer && value.kind != fir.rvalue_kind.rv_slice)) { return false; }
+    range_material_match mut base = range_material_match{};
+    bool writer = contains_writer(n->b) || contains_writer(n->c);
+    if (pointer) {
+        if (!range_material_operand(proof, n->a, fir.operand_at(f, value.ops_first),
+                                    at, writer, depth + 1, &base)) { return false; }
+    } else if (!range_material_place(proof, n->a, value.place, at, writer, depth + 1, &base)) {
+        return false;
+    }
+    range_material_point mut first = at;
+    if (base.emitted) { first = base.first; }
+    range_material_match mut low = range_material_match{};
+    range_material_match mut high = range_material_match{};
+    u32 mut offset = 0;
+    if (pointer) { offset = 1; }
+    fir.operand lo = fir.operand_at(f, value.ops_first + offset);
+    fir.operand hi = fir.operand_at(f, value.ops_first + offset + 1);
+    if (n->b != null) {
+        if (pointer) {
+            if (!range_material_operand(proof, n->b, lo, at, contains_writer(n->c),
+                                        depth + 1, &low)) { return false; }
+        } else if (!range_material_bound(proof, n->b, lo, n->loc, at, depth + 1, &low)) {
+            return false;
+        }
+    } else if (lo.kind != fir.operand_kind.ok_const || lo.value.kind != fir.const_kind.ck_int
+        || consts.cv_is_neg(lo.value.value) || lo.value.value.mag != 0) { return false; }
+    if (n->c != null) {
+        if (pointer) {
+            if (!range_material_operand(proof, n->c, hi, at, false, depth + 1, &high)) {
+                return false;
+            }
+        } else if (!range_material_bound(proof, n->c, hi, n->loc, at, depth + 1, &high)) {
+            return false;
+        }
+    } else {
+        if (n->a->ty->kind == types.type_kind.k_array) {
+            if (hi.kind != fir.operand_kind.ok_const || hi.value.kind != fir.const_kind.ck_int
+                || consts.cv_is_neg(hi.value.value) || hi.value.value.mag != n->a->ty->len) {
+                return false;
+            }
+        } else {
+            if (hi.kind != fir.operand_kind.ok_copy
+                || hi.place.proj_len != value.place.proj_len + 1) {
+                return false;
+            }
+            fir.projection len = fir.place_projection(f, hi.place, hi.place.proj_len - 1);
+            fir.place mut header = hi.place;
+            header.proj_len -= 1;
+            if (len.kind != fir.proj_kind.pj_field || len.field != LEN_FIELD
+                || !range_audit_place_eq(f, header, value.place)) { return false; }
+        }
+    }
+    if (base.emitted && low.emitted && !range_material_before(proof, base.last, low.first)) {
+        return false;
+    }
+    if (low.emitted && high.emitted && !range_material_before(proof, low.last, high.first)) {
+        return false;
+    }
+    if (base.emitted && !low.emitted && high.emitted
+        && !range_material_before(proof, base.last, high.first)) { return false; }
+    if (!base.emitted && low.emitted) { first = low.first; }
+    if (!base.emitted && !low.emitted && high.emitted) { first = high.first; }
+    *matched = range_material_match{.emitted = true, .first = first, .last = at};
+    return true;
+}
+
+// The body use supplies the capture. Candidates cannot select this place or its source chain.
+fn range_material_capture(fir.func* f, ast.node* n, range_audit_operation op,
+                           u32 body, fir.range_capture mut* expected) bool {
+    u32 mut found = 0;
+    u32 mut p = 0;
+    fir.place mut captured = fir.place{};
+    while (p < fir.block_statement_count(f, body)) {
+        fir.statement* s = fir.block_statement(f, body, p);
+        if (s->kind == fir.stmt_kind.st_assign && s->stmt == op.statement_index
+            && s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0
+            && fir.local_at(f, s->place.local)->sym == cast(n->sym, ast.sym*)
+            && range_audit_loc_eq(s->loc, n->b->loc)
+                && range_audit_loc_eq(s->exit_loc, op.exit_source)
+            && s->value.kind == fir.rvalue_kind.rv_use && s->value.ops_len == 1) {
+            fir.operand element = fir.operand_at(f, s->value.ops_first);
+            if (element.kind != fir.operand_kind.ok_copy || element.place.proj_len == 0
+                || fir.place_projection(f, element.place, element.place.proj_len - 1).kind
+                    != fir.proj_kind.pj_index) { return false; }
+            captured = element.place;
+            captured.proj_len -= 1;
+            found += 1;
+        }
+        p += 1;
+    }
+    if (found != 1) { return false; }
+    range_material_context proof = range_material_context{.f = f, .operation = op};
+    range_material_point read = range_material_point{.block = op.block, .position = op.position};
+    range_material_match mut matched = range_material_match{};
+    fir.range_capture mut binding = fir.range_capture{.source = n->b->loc, .captured = captured};
+    if (n->b->ty->kind == types.type_kind.k_array && fir.type_owning(n->b->ty)) {
+        if (!range_material_place(&proof, n->b, captured, read, true, 0, &matched)) {
+            return false;
+        }
+        binding.kind = fir.range_capture_kind.owning_fixed_array_place;
+        binding.original = captured;
+        binding.original_present = true;
+    } else {
+        binding.kind = fir.range_capture_kind.borrowed_header;
+        binding.original_present = true;
+        if (n->b->ty->kind == types.type_kind.k_array) {
+            binding.kind = fir.range_capture_kind.non_owning_array_copy;
+            binding.original_present = false;
+        }
+        if (fir.type_owning(n->b->ty) || designates(n->b)) {
+            range_material_point mut at = range_material_point{};
+            fir.statement* mut copy = null;
+            if (!range_material_definition(&proof, captured, read, &at, &copy)
+                || copy->value.kind != fir.rvalue_kind.rv_use || copy->value.ops_len != 1
+                || !range_audit_loc_eq(copy->loc, n->b->loc)) { return false; }
+            fir.operand source = fir.operand_at(f, copy->value.ops_first);
+            if (source.kind != fir.operand_kind.ok_copy
+                || !range_material_place(&proof, n->b, source.place, at, true, 0, &matched)) {
+                return false;
+            }
+            binding.original = source.place;
+        } else {
+            if (!range_material_place(&proof, n->b, captured, read, false, 0, &matched)) {
+                return false;
+            }
+            binding.original = captured;
+        }
+    }
+    *expected = binding;
+    return true;
+}
+
 fn range_audit_source_sym(ast.node* n) ast.sym* {
     if (n == null) { return null; }
     if (n->kind == ast.ast_kind.k_ident) { return n->sym; }
@@ -1200,7 +1730,7 @@ fn range_audit_binding(fir.func* f, ast.node* n, range_audit_operation op,
         return false;
     }
     ast.sym* source = range_audit_source_sym(n->b);
-    if (source != null && designates(n->b)
+    if (source != null && designates(n->b) && !range_audit_has_call(n->b)
         && !range_audit_place_root(f, binding.original, source, 0)) {
         *fault = range_audit_fault.protected_path;
         return false;
@@ -1486,8 +2016,14 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
             || !range_audit_contexts(&walk, proposed, source)) {
             return range_audit_fail(out, key, range_audit_fault.context);
         }
-        if (range_audit_call_root(n->b)) {
-            return range_audit_fail(out, key, range_audit_fault.protected_path);
+        bool materialized = range_audit_has_call(n->b);
+        fir.range_capture mut derived = fir.range_capture{};
+        if (materialized) {
+            u32 mut body = 0;
+            if (!range_audit_body(f, n, op, &body)
+                || !range_material_capture(f, n, op, body, &derived)) {
+                return range_audit_fail(out, key, range_audit_fault.protected_path);
+            }
         }
         if (i >= proposed->captures.len) {
             range_audit_fault mut missing = range_audit_fault.expansion_key;
@@ -1509,6 +2045,17 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
         if (c->occurrence.context != source.context
             || c->occurrence.exit_occurrence != source.occurrence) {
             return range_audit_fail(out, key, range_audit_fault.context);
+        }
+        if (materialized) {
+            if (c->binding.kind != derived.kind
+                || !range_audit_place_eq(f, c->binding.captured, derived.captured)) {
+                return range_audit_fail(out, key, range_audit_fault.capture);
+            }
+            if (c->binding.original_present != derived.original_present
+                || (derived.original_present
+                    && !range_audit_place_eq(f, c->binding.original, derived.original))) {
+                return range_audit_fail(out, key, range_audit_fault.protected_path);
+            }
         }
         range_audit_fault mut fault = range_audit_fault.none;
         u32 mut body_block = 0;

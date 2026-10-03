@@ -220,10 +220,25 @@ A verified CFG walk derives the required body-scope dead gaps from that entry.
 The two derivations must agree. Each required gap matches exactly one cleanup triple.
 Candidate order, numbering, parent links, or selected subsets cannot establish this correspondence.
 Missing, duplicate, moved, or cross-expansion records cause keyed refusal.
-An ambiguous context or gap partition remains incomplete. Call-result paths remain incomplete until
-an independent result-materialization proof exists.
-This refusal includes either conditional result arm and nested conditionals.
-Dereference, member, span-header, and cast wrappers retain the call-result refusal.
+An ambiguous context or gap partition remains incomplete.
+For linear call-result paths, an independent proof derives the capture from actual range-body uses.
+It traces the result, address, header, and protected path through verified FIR before candidate
+checks.
+Each temporary has one complete reaching definition in the current statement and exit context.
+The proof rejects another write or deletion, including a write after the captured read.
+An address of fixed storage rooted in that temporary stays incomplete without alias proof.
+A fixed-array slice of that storage has the same limit.
+It matches the checked callee, result type, ordered arguments, exact destinations, and projections.
+Held callee, argument, and address operations precede later effects that require their capture.
+Complete operand intervals must retain checked-source evaluation order.
+Index and span-bound calls supply operand effects. They do not supply collection storage roots.
+The proof retains u64 conversions and reads a stored header after index or explicit-bound effects.
+An absent upper bound uses that later length read. Pointer slices retain their unchecked contract.
+Missing, duplicate, overwritten, substituted, or cross-expansion links cause keyed refusal.
+Conditional results, callees, arguments, indices, and bounds remain incomplete without a join proof.
+This refusal includes either result arm, nested conditionals, predicate calls, and deferred paths.
+Unknown source forms, ambiguous definitions, and unproved folded constants remain incomplete.
+Source correspondence proves no returned-storage liveness or callee ownership effect.
 The keyed failure retains checked-source defer and verified FIR exit evidence.
 The audit keeps its rows and failures outside FIR.
 It proves no deferred absence and sets no structural or selected-source completeness claim.
