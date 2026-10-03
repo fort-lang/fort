@@ -155,6 +155,10 @@ came here.
   Aggregate arms write the joined destination directly.
   Scalar arms copy their exact produced operands.
   Nested result arms repeat that proof. Constant predicates still require both emitted arms.
+  Direct nested aggregate result arms share only their proved parent's destination family.
+  Each edge matches the exact source arm, aggregate destination, CFG interval, and nested join exit.
+  Nested siblings retain that family. Independent operand regions keep separate destinations.
+  Each destination write matches exactly one arm in its proved family.
   Each arm retains its checked source, statement index, and observed FIR exit.
   Extra predecessors, extra writes, arm swaps, and substituted joins cause keyed refusal.
   Literal boolean selections of two string literals can prove folded bytes without a value table.

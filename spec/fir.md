@@ -242,6 +242,14 @@ Each arm entry has only its required switch predecessor. The join has only its t
 Scalar arm stores consume their exact produced operands.
 Aggregate arms write their destination directly.
 Each required arm path establishes the destination. Nested result arms repeat the same proof.
+Only direct nested aggregate result arms can share one proved destination family.
+Each family edge matches the exact checked parent arm, equal aggregate destination, and CFG arm
+interval. The nested join supplies that parent arm's exit.
+Nested sibling result arms can share their parent's destination through these exact edges.
+Independent callee, argument, bound, and wrapper operand regions keep distinct destinations.
+A general source descendant supplies no family edge.
+Each destination write matches exactly one arm in its proved destination family.
+Unproved or ambiguous family links cause keyed refusal.
 A constant predicate still requires both emitted arms.
 Runtime reachability supplies no omitted-arm proof.
 Distinct call nodes keep separate result identities, including equal callees, types, and arguments.

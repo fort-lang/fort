@@ -12,7 +12,7 @@
 //| selected paths 2
 //| boundary repeats 10
 //| absence remains open
-//| output compared 182
+//| output compared 206
 /// Checks selected source inventory against inactive range proposals.
 import ast;
 import check;
@@ -4746,7 +4746,447 @@ fn ambiguous_gap_partition() void {
     assert_unpublished(&f, &audit);
 }
 
+
+u32 mut repair_r1_pairs = 0;
+u32 mut repair_r1_rows = 0;
+u32 mut repair_r1_corruptions = 0;
+
+fn repair_r1_candidates(fir_lower.range_candidate_set* source,
+                         fir_lower.range_candidate_set mut* copied) void {
+    u64 mut i = 0;
+    copied->declarations.items = new(fir.range_declaration, source->declarations.len);
+    copied->declarations.len = source->declarations.len;
+    while (i < source->declarations.len) {
+        copied->declarations.items[i] = source->declarations.items[i];
+        i += 1;
+    }
+    i = 0;
+    while (i < source->captures.len) {
+        fir_lower.range_capture_candidate_add(&copied->captures, source->captures.items[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < source->boundaries.len) {
+        fir_lower.range_boundary_candidate_add(&copied->boundaries, source->boundaries.items[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < source->suppressions.len) {
+        fir_lower.range_suppression_candidate_add(&copied->suppressions,
+                                                  source->suppressions.items[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < source->deferred.len) {
+        fir_lower.range_defer_context_candidate_add(&copied->deferred, source->deferred.items[i]);
+        i += 1;
+    }
+}
+
+// Select both independent joined operands from the checked call and its exact FIR occurrence.
+fn repair_r1_corrupt(string name, lower_env.env mut* e, ast.node* decl, fir.func* f,
+                      fir_lower.range_candidate_set* proposed,
+                      fir_lower.range_source_audit* audit) void {
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    fir_lower.range_audit_selected(decl->b, &selected);
+    assert(selected.len == 1);
+    ast.node* call = gen.refs_at(&selected, 0)->b;
+    assert(call->kind == ast.ast_kind.k_call && ast.ast_len(call) >= 2);
+    assert(ast.ast_child(call, 0)->kind == ast.ast_kind.k_ternary);
+    assert(ast.ast_child(call, 1)->kind == ast.ast_kind.k_ternary);
+    u64 mut row = 0;
+    while (row < audit->rows.len) {
+        fir_lower.range_audit_key key = audit->rows.items[row].key;
+        u32 mut found = 0;
+        u32 mut call_block = 0;
+        u32 mut call_position = 0;
+        u32 mut b = 0;
+        while (b < fir.block_count(f)) {
+            u32 mut p = 0;
+            while (p < fir.block_statement_count(f, b)) {
+                fir.statement* s = fir.block_statement(f, b, p);
+                if (s->kind == fir.stmt_kind.st_assign
+                    && s->value.kind == fir.rvalue_kind.rv_call
+                    && fir_lower.range_audit_loc_eq(s->loc, call->loc)
+                    && fir_lower.range_audit_loc_eq(s->exit_loc, key.exit_source)) {
+                    call_block = b;
+                    call_position = p;
+                    found += 1;
+                }
+                p += 1;
+            }
+            b += 1;
+        }
+        assert(found == 1);
+        fir.statement actual = *fir.block_statement(f, call_block, call_position);
+        fir.operand first = fir.operand_at(f, actual.value.ops_first);
+        fir.operand second = fir.operand_at(f, actual.value.ops_first + 1);
+        assert(first.kind == fir.operand_kind.ok_copy && second.kind == first.kind);
+        assert(first.place.base == fir.base_kind.bk_local && first.place.proj_len == 0);
+        assert(second.place.base == fir.base_kind.bk_local && second.place.proj_len == 0);
+        assert(first.place.local != second.place.local);
+        assert(types.type_same_shape(fir.place_type(f, first.place),
+                                     fir.place_type(f, second.place)));
+        u32 mut direction = 0;
+        while (direction < 2) {
+            fir.func mut changed = fir.func_clone(f);
+            defer fir.func_free(&changed);
+            fir.place mut from = second.place;
+            fir.place mut to = first.place;
+            u32 mut operand = 1;
+            string mut label = "second_to_first";
+            if (direction != 0) {
+                from = first.place;
+                to = second.place;
+                operand = 0;
+                label = "first_to_second";
+            }
+            u32 mut writes = 0;
+            b = 0;
+            while (b < fir.block_count(&changed)) {
+                u32 mut p = 0;
+                while (p < fir.block_statement_count(&changed, b)) {
+                    fir.statement mut* s = &fir.block_mut(&changed, b)->statements.items[p];
+                    if (s->kind == fir.stmt_kind.st_assign
+                        && fir_lower.range_audit_place_eq(&changed, s->place, from)) {
+                        assert(s->stmt == actual.stmt);
+                        assert(fir_lower.range_audit_loc_eq(s->exit_loc, key.exit_source));
+                        s->place = to;
+                        writes += 1;
+                    }
+                    p += 1;
+                }
+                b += 1;
+            }
+            assert(writes == 2);
+            changed.ops.items[actual.value.ops_first + operand].place = to;
+            fir_verify.violation mut bad = fir_verify.violation{};
+            assert(!fir_verify.find_violation(&changed, &e->rt, &bad));
+            strbuf.str_buf mut id = strbuf.create();
+            defer strbuf.free(&id);
+            strbuf.append(&id, name);
+            strbuf.push(&id, '_');
+            strbuf.append_u64(&id, row + 1);
+            strbuf.push(&id, '_');
+            strbuf.append(&id, label);
+            eprintln(strbuf.view(&id), " verifies corrupted FIR");
+            conditional_fault(strbuf.view(&id), "cross-region joined destination reuse", e,
+                                decl, f, &changed, proposed, key, call_block, call_position);
+            fir_lower.range_candidate_set mut copied = fir_lower.range_candidate_set{};
+            defer fir_lower.range_candidate_set_free(&copied);
+            repair_r1_candidates(proposed, &copied);
+            strbuf.str_buf mut before = strbuf.create();
+            defer strbuf.free(&before);
+            strbuf.str_buf mut after = strbuf.create();
+            defer strbuf.free(&after);
+            conditional_candidate_snapshot(&changed, &copied, &before);
+            fir_lower.range_source_audit mut retained = fir_lower.range_source_audit{};
+            defer fir_lower.range_source_audit_free(&retained);
+            assert(!fir_lower.audit_produced_ranges(decl, &changed, &copied, &retained));
+            conditional_candidate_snapshot(&changed, &copied, &after);
+            assert(strbuf.view(&before) == strbuf.view(&after));
+            fir_lower.range_candidate_set_free(&copied);
+            assert_linear_key(retained.failure.key, key);
+            assert(retained.failure.reason == fir_lower.range_audit_fault.protected_path);
+            assert_unpublished(&changed, &retained);
+            conditional_receipt(strbuf.view(&id), &changed, &retained, false);
+            // Undo exactly the two stores and consumed operand. Other exits retain their bytes.
+            b = 0;
+            while (b < fir.block_count(f)) {
+                u32 mut p = 0;
+                while (p < fir.block_statement_count(f, b)) {
+                    fir.statement* original = fir.block_statement(f, b, p);
+                    if (original->kind == fir.stmt_kind.st_assign
+                        && fir_lower.range_audit_place_eq(f, original->place, from)) {
+                        fir.block_mut(&changed, b)->statements.items[p].place = from;
+                    }
+                    p += 1;
+                }
+                b += 1;
+            }
+            changed.ops.items[actual.value.ops_first + operand].place = from;
+            strbuf.clear(&before);
+            strbuf.clear(&after);
+            conditional_snapshot(f, &before);
+            conditional_snapshot(&changed, &after);
+            assert(strbuf.view(&before) == strbuf.view(&after));
+            repair_r1_corruptions += 1;
+            direction += 1;
+        }
+        row += 1;
+    }
+}
+
+// Exercise record guards without changing source syntax or executable FIR.
+fn repair_r1_family_records(ast.node* decl, fir.func* f,
+                             fir_lower.range_source_audit* audit) void {
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    fir_lower.range_audit_selected(decl->b, &selected);
+    assert(selected.len == 1);
+    ast.node* n = gen.refs_at(&selected, 0);
+    fir_lower.range_audit_operation_vec mut operations = fir_lower.range_audit_operation_vec{};
+    defer del(operations.items);
+    fir_lower.range_audit_operations(f, &selected, &operations);
+    assert(operations.len == audit->rows.len);
+    u64 mut row = 0;
+    while (row < operations.len) {
+        fir_lower.range_audit_operation operation = operations.items[row];
+        fir_lower.conditional_proof_session mut session = fir_lower.conditional_proof_session{
+            .proof = fir_lower.range_material_context{f, operation},
+            .key = audit->rows.items[row].key, .declaration = decl, .source = n};
+        defer fir_lower.conditional_proof_free(&session);
+        u32 mut body = 0;
+        assert(fir_lower.range_audit_body(f, n, operation, &body));
+        fir.range_capture mut binding = fir.range_capture{};
+        assert(fir_lower.conditional_wrapped_capture(&session, n, body, &binding));
+        assert(session.regions.len >= 3 && session.arms.len >= 3);
+        assert(fir_lower.conditional_writes_proved(&session));
+        fir_lower.conditional_region_fact root = session.regions.items[0];
+        fir_lower.conditional_region_fact child = session.regions.items[1];
+        assert(fir.type_aggregate(root.source->ty) && fir.type_aggregate(child.source->ty));
+        assert(fir_lower.range_audit_place_eq(f, root.destination, child.destination));
+        assert(cast(root.source->b, ast.node*) == child.source);
+        session.regions.items[1].proved = false;
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.regions.items[1] = child;
+        // Equal source and destination alone cannot establish a direct family edge.
+        session.regions.items[1].source = root.source;
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.regions.items[1] = child;
+        session.regions.items[1].join = root.join;
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.regions.items[1] = child;
+        session.regions.items[1].branch = root.branch;
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.regions.items[1] = child;
+        fir_lower.conditional_arm_fact arm = session.arms.items[0];
+        session.arms.items[0].region = cast(session.regions.len, u32);
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.arms.items[0] = arm;
+        session.arms.items[0].region = 0;
+        // Shared family membership cannot replace the exact arm owner.
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.arms.items[0] = arm;
+        u64 arms = session.arms.len;
+        session.arms.len = 0;
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.arms.len = arms;
+        assert(fir_lower.conditional_arm_add(&session, arm));
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.arms.len = arms;
+        u64 regions = session.regions.len;
+        u32 mut duplicate = 0;
+        assert(fir_lower.conditional_region_add(&session, root, &duplicate));
+        assert(cast(duplicate, u64) == regions);
+        assert(!fir_lower.conditional_writes_proved(&session));
+        session.regions.len = regions;
+        assert(fir_lower.conditional_writes_proved(&session));
+        fir_lower.conditional_proof_free(&session);
+        assert(session.regions.items.len == 0 && session.arms.items.len == 0);
+        assert_unpublished(f, audit);
+        row += 1;
+    }
+}
+
+fn repair_r1_pair(string name, string@ direct, bool corrupt) void {
+    u32 mut mode = 0;
+    while (mode < 2) {
+        u64 mut extra = 0;
+        if (mode != 0) { extra = 2; }
+        string mut@ own source = new(string, direct.len + extra);
+        defer del(source);
+        u64 mut i = 0;
+        u64 mut j = 0;
+        while (i < direct.len) {
+            bool collection = i + 3 == direct.len;
+            if (mode != 0 && collection) { source[j] = "    defer {"; j += 1; }
+            source[j] = direct[i];
+            j += 1;
+            if (mode != 0 && collection) { source[j] = "    }"; j += 1; }
+            i += 1;
+        }
+        assert(j == source.len);
+        strbuf.str_buf mut id = strbuf.create();
+        defer strbuf.free(&id);
+        strbuf.append(&id, "repair_r1_");
+        strbuf.append(&id, name);
+        if (mode == 0) { strbuf.append(&id, "_direct"); }
+        else { strbuf.append(&id, "_deferred"); }
+        lower_env.env mut e = lower_env.env{};
+        lower_env.open(&e);
+        defer lower_env.close(&e);
+        lower_env.check_lines(&e, source, true);
+        ast.node* decl = lower_env.decl(&e, "walk");
+        fir.func mut f = fir.func{};
+        defer fir.func_free(&f);
+        fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+        defer fir_lower.range_candidate_set_free(&proposed);
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+        fir_verify.violation mut bad = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+        fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+        defer fir_lower.range_source_audit_free(&audit);
+        assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+        u64 expected = cast(mode + 1, u64);
+        assert(audit.rows.len == expected && proposed.captures.len == expected);
+        assert(audit.matched_captures == cast(expected, u32));
+        assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+        if (mode == 0) {
+            assert(audit.rows.items[0].key.context == 0);
+            assert(audit.rows.items[0].key.exit_occurrence == 0);
+            assert(audit.rows.items[0].key.exit_source.line == 0);
+        } else {
+            assert(audit.rows.items[0].key.context != 0);
+            assert(audit.rows.items[1].key.context != 0);
+            assert(audit.rows.items[0].key.exit_occurrence
+                   != audit.rows.items[1].key.exit_occurrence);
+            assert(audit.rows.items[0].key.exit_source.line
+                   != audit.rows.items[1].key.exit_source.line);
+        }
+        assert_unpublished(&f, &audit);
+        check_output(&e, decl, &f, strbuf.view(&id), true);
+        if (name == "nested_sibling_aggregate_arms") {
+            repair_r1_family_records(decl, &f, &audit);
+        }
+        if (corrupt) { repair_r1_corrupt(strbuf.view(&id), &e, decl, &f, &proposed, &audit); }
+        fir_lower.range_candidate_set_free(&proposed);
+        conditional_receipt(strbuf.view(&id), &f, &audit, true);
+        assert(audit.rows.len == expected);
+        repair_r1_pairs += 1;
+        repair_r1_rows += cast(expected, u32);
+        mode += 1;
+    }
+}
+
+fn repair_r1_matrix() void {
+    string[5] independent_spans = {
+        "fn pick(i32@ a, i32@ b) i32@ { return a; }",
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values, i32@ backup) void {",
+        "    for (i32 x : pick(select ? values : backup, other ? backup : values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("independent_spans", independent_spans[..], true);
+    string own line_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i32* a, ",
+        "i32* b, i32@ values) void {");
+    defer del(line_1);
+    string[5] independent_pointers = {
+        "fn pick(i32* a, i32* b, i32@ values) i32@ { return values; }",
+        line_1,
+        "    for (i32 x : pick(select ? a : b, other ? b : a, values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("independent_pointers", independent_pointers[..], true);
+    string[7] independent_functions = {
+        "fn a() i32 { return 1; }",
+        "fn b() i32 { return 2; }",
+        "fn pick(fn () i32 a, fn () i32 b, i32@ values) i32@ { return values; }",
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values) void {",
+        "    for (i32 x : pick(select ? a : b, other ? b : a, values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("independent_functions", independent_functions[..], true);
+    string[4] nested_then_then = {
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values, i32@ backup) void {",
+        "    for (i32 x : select ? (other ? (third ? values : backup) : backup) : values) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_then_then", nested_then_then[..], false);
+    string[4] nested_then_else = {
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values, i32@ backup) void {",
+        "    for (i32 x : select ? (other ? values : (third ? backup : values)) : backup) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_then_else", nested_then_else[..], false);
+    string[4] nested_else_then = {
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values, i32@ backup) void {",
+        "    for (i32 x : select ? values : (other ? (third ? backup : values) : backup)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_else_then", nested_else_then[..], false);
+    string[4] nested_else_else = {
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values, i32@ backup) void {",
+        "    for (i32 x : select ? backup : (other ? values : (third ? backup : values))) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_else_else", nested_else_else[..], false);
+    string[4] nested_sibling_aggregate_arms = {
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values, i32@ backup) void {",
+        "    for (i32 x : select ? (other ? values : backup) : (third ? backup : values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_sibling_aggregate_arms", nested_sibling_aggregate_arms[..], false);
+    string own line_2 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, holder ",
+        "values, holder backup) void {");
+    defer del(line_2);
+    string own line_3 = str.concat(
+        "    for (i32 x : (select ? (other ? values : backup) : (third ? ",
+        "backup : values)).items) { }");
+    defer del(line_3);
+    string[5] nested_struct = {
+        "struct holder { i32@ items; }",
+        line_2,
+        line_3,
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_struct", nested_struct[..], false);
+    string own line_4 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i32[2] ",
+        "values, i32[2] backup) void {");
+    defer del(line_4);
+    string[4] nested_fixed_array = {
+        line_4,
+        "    for (i32 x : select ? (other ? values : backup) : (third ? backup : values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_fixed_array", nested_fixed_array[..], false);
+    string own line_5 = str.concat(
+        "    for (i32 x : pick(select ? leaf(values, backup) : backup, ",
+        "other ? backup : leaf(values, backup))) { }");
+    defer del(line_5);
+    string[6] equal_call_result_regions = {
+        "fn leaf(i32@ a, i32@ b) i32@ { return a; }",
+        "fn pick(i32@ a, i32@ b) i32@ { return a; }",
+        "fn walk(bool select, bool other, bool third, bool quit, i32@ values, i32@ backup) void {",
+        line_5,
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("equal_call_result_regions", equal_call_result_regions[..], true);
+    string own line_6 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, string ",
+        "values, string backup) void {");
+    defer del(line_6);
+    string[4] nested_string = {
+        line_6,
+        "    for (char x : select ? (other ? values : backup) : (third ? backup : values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r1_pair("nested_string", nested_string[..], false);
+    assert(repair_r1_pairs == 24 && repair_r1_rows == 36 && repair_r1_corruptions == 24);
+}
+
 fn main() i32 {
+    string mut repair = "";
+    if (sys.env("FORT_CONDITIONAL_REPAIR_R1_REGRESSION", &repair)) {
+        repair_r1_matrix();
+        return 0;
+    }
     string mut regression = "";
     if (sys.env("FORT_CONDITIONAL_OPERAND_REGRESSION", &regression)) {
         conditional_operand_matrix();
@@ -4828,7 +5268,11 @@ fn main() i32 {
              " changed expansions ", conditional_callee_changed_expansions);
     eprintln("final conditional damage ", conditional_damage_cases, " verified ",
              conditional_verified_damage, " invalid ", conditional_invalid_damage);
+    repair_r1_matrix();
+    assert(output_comparisons == 206);
+    eprintln("repair R1 pairs ", repair_r1_pairs, " rows ", repair_r1_rows,
+             " corruptions ", repair_r1_corruptions);
     export_ledger();
-    println("output compared 182");
+    println("output compared 206");
     return 0;
 }

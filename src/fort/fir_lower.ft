@@ -1928,13 +1928,73 @@ fn conditional_arm_path(conditional_proof_session* session, ast.node* n, fir.pla
         && conditional_gap_before(session, range_material_point{nested.join, 0}, end);
 }
 
-// All joined-slot writes must be proved arm stores. Scan exposure after nested recognition too.
+// Only a direct aggregate result arm can share its parent's joined destination.
+fn conditional_family_parent(conditional_proof_session* session, u32 child,
+                              u32 mut* parent, bool mut* present) bool {
+    if (cast(child, u64) >= session->regions.len) { return false; }
+    conditional_region_fact nested = session->regions.items[child];
+    if (!nested.proved) { return false; }
+    *present = false;
+    u64 mut i = 0;
+    while (i < session->regions.len) {
+        conditional_region_fact outer = session->regions.items[i];
+        if (i != cast(child, u64) && outer.proved
+            && (cast(outer.source->b, ast.node*) == nested.source
+                || cast(outer.source->c, ast.node*) == nested.source)
+            && range_audit_place_eq(session->proof.f, outer.destination, nested.destination)) {
+            if (*present || !fir.type_aggregate(nested.source->ty)
+                || !fir.type_aggregate(outer.source->ty)
+                || !types.type_same_shape(outer.source->ty, nested.source->ty)
+                || outer.source->b == outer.source->c) { return false; }
+            bool side = cast(outer.source->b, ast.node*) == nested.source;
+            u32 mut entry = outer.no;
+            u32 mut exit = outer.no_exit;
+            if (side) { entry = outer.yes; exit = outer.yes_exit; }
+            if (nested.join != exit
+                || !conditional_gap_before(session, range_material_point{entry, 0},
+                                             nested.branch)) { return false; }
+            *parent = cast(i, u32);
+            *present = true;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Bounded parent traversal also rejects a cycle or an ambiguous direct result family.
+fn conditional_family_root(conditional_proof_session* session, u32 region,
+                            u32 mut* root) bool {
+    u32 mut current = region;
+    u32 mut depth = 0;
+    while (depth < 64) {
+        u32 mut parent = 0;
+        bool mut present = false;
+        if (!conditional_family_parent(session, current, &parent, &present)) { return false; }
+        if (!present) { *root = current; return true; }
+        current = parent;
+        depth += 1;
+    }
+    return false;
+}
+
+// All joined-slot writes belong to exactly one arm in the destination's proved result family.
 fn conditional_writes_proved(conditional_proof_session* session) bool {
     fir.func* f = session->proof.f;
     u64 mut r = 0;
     while (r < session->regions.len) {
         conditional_region_fact region = session->regions.items[r];
-        if (!region.proved) { return false; }
+        u32 mut root = 0;
+        if (!conditional_family_root(session, cast(r, u32), &root)) { return false; }
+        u64 mut other = 0;
+        while (other < session->regions.len) {
+            conditional_region_fact peer = session->regions.items[other];
+            if (range_audit_place_eq(f, peer.destination, region.destination)) {
+                u32 mut peer_root = 0;
+                if (!conditional_family_root(session, cast(other, u32), &peer_root)
+                    || peer_root != root) { return false; }
+            }
+            other += 1;
+        }
         u32 mut b = 0;
         while (b < fir.block_count(f)) {
             u32 mut p = 0;
@@ -1955,7 +2015,20 @@ fn conditional_writes_proved(conditional_proof_session* session) bool {
                     while (a < session->arms.len) {
                         conditional_arm_fact arm = session->arms.items[a];
                         if (arm.write.block == b && arm.write.position == p
-                            && range_audit_place_eq(f, arm.destination, written)) { count += 1; }
+                            && range_audit_place_eq(f, arm.destination, written)) {
+                            if (cast(arm.region, u64) >= session->regions.len) { return false; }
+                            conditional_region_fact owner = session->regions.items[arm.region];
+                            ast.node* mut source = owner.source->c;
+                            if (arm.side) { source = owner.source->b; }
+                            if (arm.source != source
+                                || !range_audit_place_eq(f, arm.destination, owner.destination)) {
+                                return false;
+                            }
+                            u32 mut arm_root = 0;
+                            if (!conditional_family_root(session, arm.region, &arm_root)
+                                || arm_root != root) { return false; }
+                            count += 1;
+                        }
                         a += 1;
                     }
                     if (count != 1) { return false; }
