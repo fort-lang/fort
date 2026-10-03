@@ -13,6 +13,7 @@ import ownership_api;
 import ownership_diag;
 import ownership_events;
 import ownership_flow;
+import ownership_keys;
 import ownership_local_env;
 import ownership_limits;
 import ownership_state;
@@ -1488,7 +1489,7 @@ fn return_source_map_requires_complete_identity() void {
     ownership_flow.free(&mapped);
 }
 
-fn return_events_keep_function_identity(u32 module, u32 file) void {
+fn return_events_keep_function_identity(u32 module, u32 file, bool unnamed_second) void {
     fixture mut f = fixture{};
     init(&f);
     defer close(&f);
@@ -1507,8 +1508,8 @@ fn return_events_keep_function_identity(u32 module, u32 file) void {
         fir.term_switch(fir.operand_copy(fir.place_local(2)), first, 1, 2, where, 0));
     fir.block_set_terminator(&function, 1,
         fir.term_return(diag.loc_make("return.ft", 11, 2), 1));
-    fir.block_set_terminator(&function, 2,
-        fir.term_return(diag.loc_make("return.ft", 12, 4), 2));
+    diag.loc second = unnamed_second ? diag.loc{} : diag.loc_make("return.ft", 12, 4);
+    fir.block_set_terminator(&function, 2, fir.term_return(second, 2));
     ownership_state.state mut entry = ownership_state.empty();
     defer ownership_state.free(&entry);
     ownership_api.source_fact mut storage = ownership_api.source_fact{};
@@ -1546,38 +1547,49 @@ fn return_events_keep_function_identity(u32 module, u32 file) void {
     ownership_flow.analysis mut result = ownership_flow.solve(&input);
     assert(result.failures == 2 && result.normal_returns == 2);
     assert(events.len == 2);
-    assert(ownership_events.at(&events, 0)->operation.block == 1);
-    assert(ownership_events.at(&events, 1)->operation.block == 2);
-    assert(ownership_events.at(&events, 0)->source.line == 11);
-    assert(ownership_events.at(&events, 1)->source.line == 12);
-    assert(ownership_events.at(&events, 0)->source.col == 2 &&
-        ownership_events.at(&events, 0)->source.end_line == 11 &&
-        ownership_events.at(&events, 0)->source.end_col == 2);
-    assert(ownership_events.at(&events, 1)->source.col == 4 &&
-        ownership_events.at(&events, 1)->source.end_line == 12 &&
-        ownership_events.at(&events, 1)->source.end_col == 4);
-    assert(ownership_events.at(&events, 0)->source.module == module &&
-        ownership_events.at(&events, 0)->source.file == file);
-    assert(ownership_events.at(&events, 1)->source.module == module &&
-        ownership_events.at(&events, 1)->source.file == file);
+    ownership_api.event_descriptor* mut named = ownership_events.at(&events, 0);
+    ownership_api.event_descriptor* mut second_event = ownership_events.at(&events, 1);
+    if (named->operation.block == 2) {
+        named = ownership_events.at(&events, 1);
+        second_event = ownership_events.at(&events, 0);
+    }
+    assert(named->operation.block == 1 && second_event->operation.block == 2);
+    assert(named->source.line == 11);
+    assert(second_event->source.line == (unnamed_second ? 0 : 12));
+    assert(named->source.col == 2 && named->source.end_line == 11 &&
+        named->source.end_col == 2);
+    assert(second_event->source.col == (unnamed_second ? 0 : 4) &&
+        second_event->source.end_line ==
+        (unnamed_second ? 0 : 12) &&
+        second_event->source.end_col == (unnamed_second ? 0 : 4));
+    assert(named->source.module == module && named->source.file == file);
+    assert(second_event->source.module == module && second_event->source.file == file);
+    assert(named->source.filename_present);
+    assert(second_event->source.filename_present == !unnamed_second);
+    ownership_api.source_position mut unnamed_copy = named->source;
+    unnamed_copy.filename_present = false;
+    assert(ownership_keys.source(named->source, unnamed_copy) != 0);
     diag.sink mut diagnostics = diag.create();
     defer diag.free(&diagnostics);
     ownership_diag.renderer mut render_at = ownership_diag.renderer{};
     ownership_diag.bind(&render_at, &diagnostics, &events, cast(&input, void mut*),
         ownership_flow.source_filename, &f.services);
-    ownership_api.event_descriptor[2] items = {
-        *ownership_events.at(&events, 0), *ownership_events.at(&events, 1),
-    };
+    ownership_api.event_descriptor[2] items = {*named, *second_event};
     ownership_api.diagnostic_request request = ownership_api.diagnostic_request{
         items[..], result.first_failure};
     ownership_api.diagnostic_result rendered = ownership_api.render(&f.services, &request);
     assert(rendered.rendered && diag.count(&diagnostics) == 2);
-    assert(diag.record_at(&diagnostics, 0).loc.file == "return.ft");
-    assert(diag.record_at(&diagnostics, 1).loc.file == "return.ft");
-    assert(diag.record_at(&diagnostics, 0).loc.line == 11 &&
-        diag.record_at(&diagnostics, 0).loc.col == 2);
-    assert(diag.record_at(&diagnostics, 1).loc.line == 12 &&
-        diag.record_at(&diagnostics, 1).loc.col == 4);
+    u64 named_index = diag.record_at(&diagnostics, 0).loc.line == 11 ? 0 : 1;
+    u64 second_index = 1 - named_index;
+    assert(diag.record_at(&diagnostics, named_index).loc.file == "return.ft");
+    assert(diag.record_at(&diagnostics, second_index).loc.file ==
+        (unnamed_second ? "" : "return.ft"));
+    assert(diag.record_at(&diagnostics, named_index).loc.line == 11 &&
+        diag.record_at(&diagnostics, named_index).loc.col == 2);
+    assert(diag.record_at(&diagnostics, second_index).loc.line ==
+        (unnamed_second ? 1 : 12) &&
+        diag.record_at(&diagnostics, second_index).loc.col ==
+        (unnamed_second ? 1 : 4));
     ownership_flow.free(&result);
 }
 
@@ -2064,10 +2076,11 @@ fn main() i32 {
     widened_optional_parameter_uses_incomplete_evidence();
     widened_parameter_borrow_stays_incomplete();
     return_source_map_requires_complete_identity();
-    return_events_keep_function_identity(7, 9);
-    return_events_keep_function_identity(0, 9);
-    return_events_keep_function_identity(7, 0);
-    return_events_keep_function_identity(0, 0);
+    return_events_keep_function_identity(7, 9, false);
+    return_events_keep_function_identity(0, 9, false);
+    return_events_keep_function_identity(7, 0, false);
+    return_events_keep_function_identity(0, 0, false);
+    return_events_keep_function_identity(0, 0, true);
     delegated_events_keep_return_identity();
     flow_work_limit(0);
     flow_work_limit(1);
