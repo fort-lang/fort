@@ -1266,8 +1266,9 @@ fn live(context* ctx, ownership_api.services* svc, address value, request* req)
     if (fact.validity != ownership_api.validity_kind.live) {
         return fail(svc, req, value.source, true, "raw source is no longer live");
     }
-    bool mut inherited = value.alignment != 0 && value.alignment <= original.alignment &&
-        original.alignment % value.alignment == 0;
+    bool mut inherited = fact.kind == ownership_api.source_kind.trusted_foreign ||
+        (value.alignment != 0 && value.alignment <= original.alignment &&
+        original.alignment % value.alignment == 0);
     if (inherited && fact.kind != ownership_api.source_kind.trusted_foreign) {
         inherited = le_work(&work, original.begin, value.begin) &&
             le_work(&work, value.begin, value.end) && le_work(&work, value.end, original.end);
@@ -1529,8 +1530,10 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
             !validate_expression_work(&work, item.end) || residual_work(&work, item.place) ||
             item.place.projections.len > req->limits.d ||
             !same_key(item.allocation,
-            core->sources[source].allocation) || item.alignment == 0 ||
-            (item.alignment & (item.alignment - 1)) != 0) {
+            core->sources[source].allocation) ||
+            (item.alignment == 0 &&
+            core->sources[source].kind != ownership_api.source_kind.trusted_foreign) ||
+            (item.alignment != 0 && (item.alignment & (item.alignment - 1)) != 0)) {
             if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
             discard(&out, fail(svc, req, item.source, false,
                 "raw source correspondence is incomplete"));
@@ -1897,10 +1900,15 @@ fn access(context* ctx, ownership_api.services* svc, address@ values,
         if (!ownership_api.successful(proof)) { return proof; }
         bool trusted = foreign_work(&work, item);
         if (!ownership_api.successful(work.proof)) { return work.proof; }
+        expression end = sum_work(&work, &scratch, item.offset, literal(bytes));
+        if (!fits_work(&work, item.offset) || !fits_work(&work, end)) {
+            if (!ownership_api.successful(work.proof)) { return work.proof; }
+            return fail(svc, req, item.source, false,
+                "typed access arithmetic does not fit the address representation");
+        }
+        if (!ownership_api.successful(work.proof)) { return work.proof; }
         if (!trusted) {
-            expression end = sum_work(&work, &scratch, item.offset, literal(bytes));
-            if (!fits_work(&work, item.offset) || !fits_work(&work, end) ||
-                !le_work(&work, item.begin, item.offset) || !le_work(&work, end, item.end)) {
+            if (!le_work(&work, item.begin, item.offset) || !le_work(&work, end, item.end)) {
                 if (!ownership_api.successful(work.proof)) { return work.proof; }
                 return fail(svc, req, item.source, false,
                     "typed access exceeds its inherited window");

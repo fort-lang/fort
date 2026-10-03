@@ -1,0 +1,133 @@
+/// Supplies foreign arithmetic facts with complete operation and source keys.
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+import ownership_transfer;
+import types;
+
+struct observation {
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.entity_id event;
+    u64 events;
+    ownership_api.event_kind kind;
+    ownership_api.evidence_kind evidence;
+}
+struct env {
+    ownership_raw_env.env raw;
+    observation observed;
+    ownership_transfer.event_binding[1] binding;
+}
+fn function() ownership_api.function_id {
+    return ownership_api.function_id{ownership_api.declaration_id{31, 41}, 1};
+}
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{function(), kind, ordinal};
+}
+fn place() ownership_api.place_path {
+    ownership_api.place_path mut out = {};
+    out.root = id(ownership_api.entity_kind.slot, 9);
+    return out;
+}
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    observation mut* selected = cast(opaque, observation mut*);
+    assert(ownership_keys.operation(req->event.operation, selected->operation) == 0);
+    assert(ownership_keys.source(req->event.source, selected->source) == 0);
+    assert(ownership_keys.entity(req->event.key, selected->event) == 0);
+    selected->events += 1;
+    selected->kind = req->event.kind;
+    selected->evidence = req->event.evidence;
+    ownership_api.event_result mut out = {};
+    out.proof = req->current;
+    out.retained = true;
+    return out;
+}
+fn request(env mut* e, u32 operation, u32 line) ownership_raw.request {
+    ownership_raw.request mut out = {};
+    out.limits = ownership_limits.production();
+    out.captured_values = true;
+    out.alternatives_complete = true;
+    out.base.kind = ownership_transfer.action.use;
+    out.base.operation = ownership_api.operation_position{function(), 2, operation, false};
+    out.base.source_position = ownership_api.source_position{31, 1, line, 5, line, 17, true};
+    out.base.source = place();
+    out.base.destination = place();
+    out.base.direct_source_proved = true;
+    out.base.direct_destination_proved = true;
+    out.base.event_map_complete_proved = true;
+    e->binding[0] = ownership_transfer.event_binding{out.base.operation,
+        id(ownership_api.entity_kind.event, operation)};
+    out.base.event_bindings = e->binding[..];
+    e->observed.operation = out.base.operation;
+    e->observed.source = out.base.source_position;
+    e->observed.event = e->binding[0].key;
+    return out;
+}
+fn open(env mut* e, u32 operation, u32 line, ownership_raw.captured_bound@ bounds) void {
+    ownership_raw_env.open(&e->raw);
+    e->raw.local.service.event_context = cast(&e->observed, void mut*);
+    e->raw.local.service.event = event;
+    ownership_raw.request mut req = request(e, operation, line);
+    ownership_api.source_fact mut source = {};
+    source.key = id(ownership_api.entity_kind.source, 9);
+    source.kind = ownership_api.source_kind.trusted_foreign;
+    source.validity = ownership_api.validity_kind.live;
+    source.boundary = ownership_api.operation_position{function(), 1, 9, false};
+    assert(ownership_state.add_source(&e->raw.local.state, &e->raw.local.service, source,
+        req.base.operation, req.base.source_position).applied);
+    ownership_api.borrow_relation[1] mut borrows = {};
+    borrows[0].key = id(ownership_api.entity_kind.relation, 91);
+    borrows[0].value_version = id(ownership_api.entity_kind.value, 91);
+    borrows[0].containing = place();
+    borrows[0].source = source.key;
+    borrows[0].range.key = id(ownership_api.entity_kind.region, 91);
+    borrows[0].range.source = source.key;
+    borrows[0].range.layout = e->raw.byte;
+    borrows[0].representation_complete = true;
+    ownership_api.contents_fact mut contents = {};
+    contents.place = place();
+    contents.kind = ownership_api.contents_kind.reference;
+    contents.value_version = borrows[0].value_version;
+    contents.borrows = borrows[..];
+    assert(ownership_state.add_contents(&e->raw.local.state, &e->raw.local.service, contents,
+        req.base.operation, req.base.source_position).applied);
+    ownership_raw.origin mut input = {};
+    input.source = source.key;
+    input.place = place();
+    input.layout = e->raw.byte;
+    input.count = ownership_raw.literal(0);
+    input.begin = ownership_raw.literal(0);
+    input.end = ownership_raw.literal(0);
+    input.correspondence = true;
+    e->raw.root = ownership_raw.capture_origin(&e->raw.local.state, &e->raw.local.service,
+        &input, bounds, ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.accepts(&e->raw.root);
+}
+fn unknown_extent(env* e) void {
+    assert(e->raw.local.state.allocations_len == 0 && e->raw.local.state.sources_len == 1);
+    ownership_api.contents_fact contents = e->raw.local.state.contents[0];
+    assert(contents.borrows.len == 1 && contents.kind == ownership_api.contents_kind.reference);
+    ownership_api.region range = contents.borrows[0].range;
+    assert(range.extent.kind == ownership_api.fact_kind.unknown && range.alignment == 0);
+    assert(range.access.begin.kind == ownership_api.fact_kind.unknown &&
+        range.access.end.kind == ownership_api.fact_kind.unknown &&
+        !range.access.arithmetic_proved);
+    assert(e->raw.root.storage.origins[0].alignment == 0);
+}
+fn incomplete(env* e, ownership_api.proof_status proof, ownership_raw.request* req) void {
+    ownership_raw_env.rejected(proof);
+    assert(proof.kind == ownership_api.proof_kind.incomplete);
+    assert(ownership_keys.operation(proof.terminal.operation, req->base.operation) == 0);
+    assert(ownership_keys.source(proof.terminal.source, req->base.source_position) == 0);
+    assert(e->observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e->observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+}
+fn reset_budget(env mut* e) void {
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_limits.configure(&e->raw.budget.meter, &limits));
+    e->raw.budget.deny_at = 0;
+}
+fn close(env mut* e) void { ownership_raw_env.close(&e->raw); }

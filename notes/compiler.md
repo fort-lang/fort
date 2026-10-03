@@ -351,6 +351,8 @@ came here.
   Entry charges map validation and keeps its route in stack storage.
   Each raw consumer charges repeated source searches, comparisons, copies, and allocations.
   A metadata copy price pays no later arithmetic work. Each address alternative pays its own work.
+  Typed access proves nonnegative, representable offsets and endpoints for foreign sources too.
+  Foreign trust supplies no static extent or alignment. Endpoint proof charges and releases scratch expressions.
   Type casts pay iterative comparison work before they use the existing reference conversion matrix.
   Header reads pay for their delegated borrow and source walks before transfer inspection.
   Cleanup requires no work permission after the first terminal refusal.
