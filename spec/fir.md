@@ -224,7 +224,8 @@ An ambiguous context or gap partition remains incomplete.
 For linear call-result paths, an independent proof derives the capture from actual range-body uses.
 It traces the result, address, header, and protected path through verified FIR before candidate
 checks.
-Each temporary has one complete reaching definition in the current statement and exit context.
+Each linear temporary has one complete reaching definition.
+That definition matches the current statement and exit context.
 The proof rejects another write or deletion, including a write after the captured read.
 An address of fixed storage rooted in that temporary stays incomplete without alias proof.
 A fixed-array slice of that storage has the same limit.
@@ -235,8 +236,27 @@ Index and span-bound calls supply operand effects. They do not supply collection
 The proof retains u64 conversions and reads a stored header after index or explicit-bound effects.
 An absent upper bound uses that later length read. Pointer slices retain their unchecked contract.
 Missing, duplicate, overwritten, substituted, or cross-expansion links cause keyed refusal.
-Conditional results, callees, arguments, indices, and bounds remain incomplete without a join proof.
-This refusal includes either result arm, nested conditionals, predicate calls, and deferred paths.
+A top-level conditional-result proof derives the joined destination from its consuming read (D19.8).
+It matches the checked predicate, exact true and default edges, both source arms, and their join.
+Each arm entry has only its required switch predecessor. The join has only its two required exits.
+Scalar arm stores consume their exact produced operands.
+Aggregate arms write their destination directly.
+Each required arm path establishes the destination. Nested result arms repeat the same proof.
+A constant predicate still requires both emitted arms.
+Runtime reachability supplies no omitted-arm proof.
+Distinct call nodes keep separate result identities, including equal callees, types, and arguments.
+Missing, extra, overwritten, substituted, or cross-expansion writes cause keyed refusal.
+A literal boolean selection of two string literals can prove its folded literal bytes.
+The proof also checks the constant shape.
+Other folded expressions remain incomplete when the audit lacks their checker value table.
+Conditional callees, arguments, indices, bounds, and wrappers after a join remain incomplete.
+Calls in conditional predicates retain keyed refusal.
+Direct and deferred result proofs use separate keys.
+Proof sessions own their vectors. Stored record indices remain valid across vector growth.
+Report keys, bindings, boundaries, and faults copy before proof or candidate teardown.
+These copies retain existing source, type, symbol, literal, and FIR projection borrows.
+Checked source and types outlive the report. FIR remains alive while the caller interprets bindings.
+This internal record contract adds no source annotation, ABI field, or runtime tracking (D19.8).
 Unknown source forms, ambiguous definitions, and unproved folded constants remain incomplete.
 Source correspondence proves no returned-storage liveness or callee ownership effect.
 The keyed failure retains checked-source defer and verified FIR exit evidence.

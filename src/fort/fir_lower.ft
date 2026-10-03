@@ -1637,6 +1637,388 @@ fn range_material_capture(fir.func* f, ast.node* n, range_audit_operation op,
     return true;
 }
 
+// Facts copy source and FIR views. Only the session owns their resizable storage.
+// Stored indices remain valid across growth. No item address enters the report.
+struct conditional_region_fact {
+    ast.node* source;
+    range_material_point branch;
+    u32 yes;
+    u32 no;
+    u32 join;
+    u32 yes_exit;
+    u32 no_exit;
+    fir.place destination;
+    bool proved;
+}
+
+struct conditional_region_fact_vec {
+    conditional_region_fact mut@ own items;
+    u64 len;
+}
+
+struct conditional_arm_fact {
+    u32 region;
+    bool side;
+    ast.node* source;
+    range_material_point write;
+    fir.place destination;
+    fir.operand produced;
+}
+
+struct conditional_arm_fact_vec {
+    conditional_arm_fact mut@ own items;
+    u64 len;
+}
+
+struct conditional_proof_session {
+    range_material_context proof;
+    range_audit_key key;
+    ast.node* declaration;
+    ast.node* source;
+    conditional_region_fact_vec regions;
+    conditional_arm_fact_vec arms;
+}
+
+// The audit registers cleanup before recognition. Empty and partial sessions use this path too.
+fn conditional_proof_free(conditional_proof_session mut* session) void {
+    del(session->regions.items);
+    del(session->arms.items);
+    *session = conditional_proof_session{};
+}
+
+// The work bounds refuse normally. Checked capacity growth keeps its existing panic contract.
+fn conditional_region_add(conditional_proof_session mut* session,
+                           conditional_region_fact fact, u32 mut* index) bool {
+    conditional_region_fact_vec mut* v = &session->regions;
+    if (v->len >= 4096 || v->len >= fir.U32_LIMIT) { return false; }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "conditional region capacity overflow");
+        conditional_region_fact mut@ own bigger = new(conditional_region_fact, cap);
+        u64 mut i = 0;
+        while (i < v->len) { bigger[i] = v->items[i]; i += 1; }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    *index = cast(v->len, u32);
+    v->items[v->len] = fact;
+    v->len += 1;
+    return true;
+}
+
+fn conditional_arm_add(conditional_proof_session mut* session,
+                        conditional_arm_fact fact) bool {
+    conditional_arm_fact_vec mut* v = &session->arms;
+    if (v->len >= 8192 || v->len >= fir.U32_LIMIT) { return false; }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "conditional arm capacity overflow");
+        conditional_arm_fact mut@ own bigger = new(conditional_arm_fact, cap);
+        u64 mut i = 0;
+        while (i < v->len) { bigger[i] = v->items[i]; i += 1; }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = fact;
+    v->len += 1;
+    return true;
+}
+
+// A join denotes its entry gap. It can equal the consuming gap without inventing a statement.
+fn conditional_gap_before(conditional_proof_session* session, range_material_point before,
+                           range_material_point read) bool {
+    range_material_point mut current = read;
+    u32 mut steps = 0;
+    while (steps < fir.block_count(session->proof.f)) {
+        if (current.block == before.block) { return before.position <= current.position; }
+        u32 mut parent = 0;
+        if (!range_material_parent(&session->proof, current.block, &parent)) { return false; }
+        current = range_material_point{parent,
+                    fir.block_statement_count(session->proof.f, parent)};
+        steps += 1;
+    }
+    return false;
+}
+
+fn conditional_incoming(fir.func* f, u32 target, u32 first, u32 second, u32 expected) bool {
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        u32 mut edge = 0;
+        while (fir.term_targets(f, &fir.block_at(f, b)->term, i, &edge)) {
+            if (edge == target) {
+                if (b != first && b != second) { return false; }
+                count += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return count == expected;
+}
+
+// Recognize the exact switch and two source-located exits before checking either result arm.
+fn conditional_region_find(conditional_proof_session* session, ast.node* n, fir.place dst,
+                            conditional_region_fact mut* fact) bool {
+    fir.func* f = session->proof.f;
+    range_audit_operation op = session->proof.operation;
+    if (range_audit_has_call(n->a) || !range_material_fixed_temp(f, dst) || dst.proj_len != 0
+        || !types.type_same_shape(fir.place_type(f, dst), n->ty)) { return false; }
+    u32 mut switches = 0;
+    u32 mut exits = 0;
+    u32 mut b = 0;
+    *fact = conditional_region_fact{.source = n, .destination = dst};
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->stmt == op.statement_index && range_audit_loc_eq(t->exit_loc, op.exit_source)
+            && range_audit_loc_eq(t->loc, n->loc)) {
+            if (t->kind == fir.term_kind.tk_switch) {
+                if (t->arms_len != 1) { return false; }
+                fir.arm edge = fir.term_arm(f, t, 0);
+                if (edge.value.kind != consts.cval_kind.cv_bool || edge.value.mag != 1
+                    || edge.target == t->otherwise) { return false; }
+                fact->branch = range_material_point{b, fir.block_statement_count(f, b)};
+                fact->yes = edge.target;
+                fact->no = t->otherwise;
+                switches += 1;
+            } else if (t->kind == fir.term_kind.tk_goto) {
+                if (exits == 0) {
+                    fact->yes_exit = b;
+                    fact->join = t->target;
+                } else {
+                    if (t->target != fact->join) { return false; }
+                    fact->no_exit = b;
+                }
+                exits += 1;
+            } else { return false; }
+        }
+        b += 1;
+    }
+    if (switches != 1 || exits != 2 || fact->join == fact->yes || fact->join == fact->no
+        || !conditional_incoming(f, fact->yes, fact->branch.block, fact->branch.block, 1)
+        || !conditional_incoming(f, fact->no, fact->branch.block, fact->branch.block, 1)
+        || !conditional_incoming(f, fact->join, fact->yes_exit, fact->no_exit, 2)) {
+        return false;
+    }
+    return true;
+}
+
+// Match an arm's last store. Aggregate calls write it directly; scalar calls supply its operand.
+fn conditional_arm_prove(conditional_proof_session mut* session, u32 region, bool side,
+                          ast.node* n, u32 entry, u32 exit, u32 depth) bool {
+    fir.func* f = session->proof.f;
+    conditional_region_fact fact = session->regions.items[region];
+    range_material_point read = range_material_point{exit, fir.block_statement_count(f, exit)};
+    range_material_point start = range_material_point{entry, 0};
+    range_material_match mut matched = range_material_match{};
+    if (n->kind == ast.ast_kind.k_ternary && fir.type_aggregate(n->ty)) {
+        if (!conditional_region_prove(session, n, fact.destination, read, depth + 1, &matched)
+            || !conditional_gap_before(session, start, matched.first)) { return false; }
+        return true;
+    }
+    if (read.position == 0 || (n->kind != ast.ast_kind.k_ternary
+        && !conditional_gap_before(session, start, read))) { return false; }
+    range_material_point at = range_material_point{exit, read.position - 1};
+    fir.statement* s = fir.block_statement(f, at.block, at.position);
+    if (s->kind != fir.stmt_kind.st_assign
+        || !range_audit_place_eq(f, s->place, fact.destination)
+        || !range_audit_loc_eq(s->loc, n->loc)
+        || s->stmt != session->proof.operation.statement_index
+        || !range_audit_loc_eq(s->exit_loc, session->proof.operation.exit_source)) {
+        return false;
+    }
+    fir.operand mut produced = fir.operand{};
+    if (s->value.kind == fir.rvalue_kind.rv_use && s->value.ops_len == 1) {
+        produced = fir.operand_at(f, s->value.ops_first);
+        if (n->kind == ast.ast_kind.k_ternary) {
+            if (produced.kind != fir.operand_kind.ok_copy
+                || !conditional_region_prove(session, n, produced.place, at,
+                                              depth + 1, &matched)) { return false; }
+        } else if (!range_material_operand(&session->proof, n, produced, at, false,
+                                            depth + 1, &matched)) { return false; }
+    } else if (n->kind == ast.ast_kind.k_call) {
+        if (!range_material_call(&session->proof, n, s, at, depth + 1, &matched)) { return false; }
+    } else { return false; }
+    if (matched.emitted && !conditional_gap_before(session, start, matched.first)) { return false; }
+    return conditional_arm_add(session, conditional_arm_fact{region, side, n, at,
+                                                               fact.destination, produced});
+}
+
+fn conditional_region_prove(conditional_proof_session mut* session, ast.node* n, fir.place dst,
+                             range_material_point read, u32 depth,
+                             range_material_match mut* matched) bool {
+    if (depth >= 64 || n->kind != ast.ast_kind.k_ternary) { return false; }
+    conditional_region_fact mut fact = conditional_region_fact{};
+    if (!conditional_region_find(session, n, dst, &fact)
+        || !conditional_gap_before(session, range_material_point{fact.join, 0}, read)) {
+        return false;
+    }
+    u32 mut index = 0;
+    if (!conditional_region_add(session, fact, &index)) { return false; }
+    fir.terminator* branch = &fir.block_at(session->proof.f, fact.branch.block)->term;
+    range_material_match mut predicate = range_material_match{};
+    if (!range_material_operand(&session->proof, n->a, branch->cond, fact.branch, false,
+                                depth + 1, &predicate)) { return false; }
+    // Exit discovery is independent of arm ordering. The entry relation assigns each exit.
+    bool first_yes = conditional_arm_path(session, n->b, dst, fact.yes, fact.yes_exit);
+    if (!first_yes) {
+        u32 swap = fact.yes_exit;
+        fact.yes_exit = fact.no_exit;
+        fact.no_exit = swap;
+        session->regions.items[index] = fact;
+    }
+    if (!conditional_arm_prove(session, index, true, n->b, fact.yes, fact.yes_exit, depth + 1)
+        || !conditional_arm_prove(session, index, false, n->c, fact.no, fact.no_exit, depth + 1)) {
+        return false;
+    }
+    session->regions.items[index].proved = true;
+    range_material_point mut first = fact.branch;
+    if (predicate.emitted) { first = predicate.first; }
+    *matched = range_material_match{true, first, range_material_point{fact.join, 0}};
+    return true;
+}
+
+fn conditional_arm_path(conditional_proof_session* session, ast.node* n, fir.place dst,
+                         u32 entry, u32 exit) bool {
+    fir.func* f = session->proof.f;
+    range_material_point end = range_material_point{exit, fir.block_statement_count(f, exit)};
+    if (n->kind != ast.ast_kind.k_ternary) {
+        return conditional_gap_before(session, range_material_point{entry, 0}, end);
+    }
+    fir.place mut target = dst;
+    if (!fir.type_aggregate(n->ty)) {
+        if (end.position == 0) { return false; }
+        fir.statement* s = fir.block_statement(f, exit, end.position - 1);
+        if (s->value.kind != fir.rvalue_kind.rv_use || s->value.ops_len != 1) { return false; }
+        fir.operand value = fir.operand_at(f, s->value.ops_first);
+        if (value.kind != fir.operand_kind.ok_copy) { return false; }
+        target = value.place;
+    }
+    conditional_region_fact mut nested = conditional_region_fact{};
+    return conditional_region_find(session, n, target, &nested)
+        && conditional_gap_before(session, range_material_point{entry, 0}, nested.branch)
+        && conditional_gap_before(session, range_material_point{nested.join, 0}, end);
+}
+
+// All joined-slot writes must be proved arm stores. Scan exposure after nested recognition too.
+fn conditional_writes_proved(conditional_proof_session* session) bool {
+    fir.func* f = session->proof.f;
+    u64 mut r = 0;
+    while (r < session->regions.len) {
+        conditional_region_fact region = session->regions.items[r];
+        if (!region.proved) { return false; }
+        u32 mut b = 0;
+        while (b < fir.block_count(f)) {
+            u32 mut p = 0;
+            while (p < fir.block_statement_count(f, b)) {
+                fir.statement* s = fir.block_statement(f, b, p);
+                if (s->kind == fir.stmt_kind.st_assign
+                    && (s->value.kind == fir.rvalue_kind.rv_addr
+                        || (s->value.kind == fir.rvalue_kind.rv_slice
+                            && fir.place_type(f, s->value.place)->kind == types.type_kind.k_array))
+                    && s->value.place.base == fir.base_kind.bk_local
+                    && s->value.place.local == region.destination.local
+                    && fir.place_fixed(f, s->value.place)) { return false; }
+                fir.place mut written = fir.place{};
+                if (fir.stmt_writes_place(s, &written) && written.base == fir.base_kind.bk_local
+                    && written.local == region.destination.local) {
+                    u64 mut a = 0;
+                    u32 mut count = 0;
+                    while (a < session->arms.len) {
+                        conditional_arm_fact arm = session->arms.items[a];
+                        if (arm.write.block == b && arm.write.position == p
+                            && range_audit_place_eq(f, arm.destination, written)) { count += 1; }
+                        a += 1;
+                    }
+                    if (count != 1) { return false; }
+                }
+                p += 1;
+            }
+            b += 1;
+        }
+        r += 1;
+    }
+    return true;
+}
+
+// Only a top-level result conditional enters this proof. Operand and wrapper joins stay incomplete.
+fn conditional_capture_prove(conditional_proof_session mut* session, ast.node* n,
+                              u32 body, fir.range_capture mut* expected) bool {
+    fir.func* f = session->proof.f;
+    range_audit_operation op = session->proof.operation;
+    u32 mut found = 0;
+    fir.place mut captured = fir.place{};
+    u32 mut p = 0;
+    while (p < fir.block_statement_count(f, body)) {
+        fir.statement* s = fir.block_statement(f, body, p);
+        if (s->kind == fir.stmt_kind.st_assign && s->stmt == op.statement_index
+            && s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0
+            && fir.local_at(f, s->place.local)->sym == cast(n->sym, ast.sym*)
+            && range_audit_loc_eq(s->loc, n->b->loc)
+            && range_audit_loc_eq(s->exit_loc, op.exit_source)
+            && s->value.kind == fir.rvalue_kind.rv_use && s->value.ops_len == 1) {
+            fir.operand element = fir.operand_at(f, s->value.ops_first);
+            if (element.kind != fir.operand_kind.ok_copy || element.place.proj_len == 0
+                || fir.place_projection(f, element.place, element.place.proj_len - 1).kind
+                    != fir.proj_kind.pj_index) { return false; }
+            captured = element.place;
+            captured.proj_len -= 1;
+            found += 1;
+        }
+        p += 1;
+    }
+    if (found != 1) { return false; }
+    range_material_point mut read = range_material_point{op.block, op.position};
+    range_material_match mut matched = range_material_match{};
+    fir.place mut original = captured;
+    if (fir.type_owning(n->b->ty) && n->b->ty->kind != types.type_kind.k_array) {
+        range_material_point mut at = range_material_point{};
+        fir.statement* mut copy = null;
+        if (!range_material_definition(&session->proof, captured, read, &at, &copy)
+            || copy->value.kind != fir.rvalue_kind.rv_use || copy->value.ops_len != 1
+            || !range_audit_loc_eq(copy->loc, n->b->loc)) { return false; }
+        fir.operand value = fir.operand_at(f, copy->value.ops_first);
+        if (value.kind != fir.operand_kind.ok_copy) { return false; }
+        original = value.place;
+        read = at;
+    }
+    bool mut folded = false;
+    ast.node* expression = n->b;
+    if (expression->ty->kind == types.type_kind.k_string
+        && expression->a->kind == ast.ast_kind.k_bool
+        && expression->b->kind == ast.ast_kind.k_string
+        && expression->c->kind == ast.ast_kind.k_string) {
+        range_material_point mut at = range_material_point{};
+        fir.statement* mut constant = null;
+        if (!range_material_definition(&session->proof, original, read, &at, &constant)
+            || !range_audit_loc_eq(constant->loc, expression->loc)
+            || constant->value.kind != fir.rvalue_kind.rv_use || constant->value.ops_len != 1) {
+            return false;
+        }
+        fir.operand actual = fir.operand_at(f, constant->value.ops_first);
+        ast.node* mut selected = expression->c;
+        if (expression->a->ival != 0) { selected = expression->b; }
+        folded = actual.kind == fir.operand_kind.ok_const
+            && range_material_constant(selected, actual.value);
+        if (!folded) { return false; }
+    }
+    if (!folded && (!conditional_region_prove(session, expression, original, read, 0, &matched)
+        || !conditional_writes_proved(session))) { return false; }
+    fir.range_capture_kind mut kind = fir.range_capture_kind.borrowed_header;
+    bool mut protected = true;
+    if (n->b->ty->kind == types.type_kind.k_array) {
+        kind = fir.range_capture_kind.non_owning_array_copy;
+        protected = false;
+        if (fir.type_owning(n->b->ty)) {
+            kind = fir.range_capture_kind.owning_fixed_array_place;
+            protected = true;
+        }
+    }
+    *expected = fir.range_capture{.source = n->b->loc, .captured = captured,
+                                  .kind = kind, .original = original,
+                                  .original_present = protected};
+    return true;
+}
+
 fn range_audit_source_sym(ast.node* n) ast.sym* {
     if (n == null) { return null; }
     if (n->kind == ast.ast_kind.k_ident) { return n->sym; }
@@ -2016,12 +2398,24 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
             || !range_audit_contexts(&walk, proposed, source)) {
             return range_audit_fail(out, key, range_audit_fault.context);
         }
-        bool materialized = range_audit_has_call(n->b);
+        bool materialized = range_audit_has_call(n->b) || n->b->kind == ast.ast_kind.k_ternary;
+        conditional_proof_session mut conditional = conditional_proof_session{
+            .proof = range_material_context{.f = f, .operation = op}, .key = key,
+            .declaration = decl, .source = n};
+        defer conditional_proof_free(&conditional);
         fir.range_capture mut derived = fir.range_capture{};
         if (materialized) {
             u32 mut body = 0;
-            if (!range_audit_body(f, n, op, &body)
-                || !range_material_capture(f, n, op, body, &derived)) {
+            if (!range_audit_body(f, n, op, &body)) {
+                return range_audit_fail(out, key, range_audit_fault.protected_path);
+            }
+            bool mut proved = false;
+            if (n->b->kind == ast.ast_kind.k_ternary) {
+                proved = conditional_capture_prove(&conditional, n, body, &derived);
+            } else {
+                proved = range_material_capture(f, n, op, body, &derived);
+            }
+            if (!proved) {
                 return range_audit_fail(out, key, range_audit_fault.protected_path);
             }
         }
