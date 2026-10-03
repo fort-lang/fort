@@ -601,6 +601,7 @@ came here.
   Direct and delegated W failures store the exhaustion record used by diagnostic rendering.
   Source positions keep filename presence apart from numeric module and file IDs.
   A named zero pair can coexist with an unnamed source without a false filename.
+  The renderer does not call a filename resolver when the source has no filename.
   This pass does not construct source effects.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
