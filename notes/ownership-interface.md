@@ -128,7 +128,7 @@ A callback owns no caller request, checked symbol, checked type, or caller state
 | FIR range carriers and preservation | T-311 |
 | Capture candidates | T-312 |
 | Ordered boundary candidates | T-313 |
-| Correspondence and source activation | T-314 |
+| Inventory, correspondence, and source activation | Compiler lowering (`spec/fir.md` 5.2, 9.5, 10) |
 
 T-316 imports only this API, these keys, and existing merged modules.
 T-317 imports only this API, these keys, and existing merged modules.
@@ -280,7 +280,8 @@ correspondence flags.
 The synthetic validator requires all three flags before accepting supplied absence correspondence.
 It always leaves actual source completeness false. Producer counts alone prove no source absence.
 Verified FIR proves structural validity. It proves no source-loan production completeness.
-T-314 owns actual source activation after independent evidence validation.
+The compiler activates source coverage after independent inventory, validated absence, and
+structural verification (`spec/fir.md` 5.2, 10).
 
 The caller invokes teardown once per owned output store.
 Teardown invokes the state destructor, clears its handle, invokes the event destructor, and clears
