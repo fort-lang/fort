@@ -133,6 +133,13 @@ came here.
   A skipped defer records a suppression proposal with no capture. All proposals stay outside FIR.
   The producer frees unused proposals on each path. A caller owns returned proposals.
   Source completeness remains false until independent source correspondence validates them.
+- **The inactive range audit compares checked source with FIR operations** (`spec/fir.md` 5.2).
+  A separate selected-source walk assigns declaration IDs without reading producer records.
+  Counter-zero FIR operations identify produced expansions, including disconnected blocks.
+  The audit matches each operation to one expansion key, capture, protected path, and boundary set.
+  Its owned rows retain source exits and failure reasons after candidate teardown.
+  Structural validity, source coverage, and ownership proof remain separate false verdicts.
+  Deferred absence validation and publication follow in a later pass.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a

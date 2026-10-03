@@ -208,6 +208,19 @@ struct range_audit_boundary_vec {
     u64 len;
 }
 
+struct range_audit_operation {
+    u32 block;
+    u32 position;
+    u32 statement_index;
+    u32 declaration;
+    diag.loc exit_source;
+}
+
+struct range_audit_operation_vec {
+    range_audit_operation mut@ own items;
+    u64 len;
+}
+
 struct range_audit_failure {
     range_audit_key key;
     range_audit_fault reason;
@@ -257,6 +270,24 @@ fn range_audit_boundary_add(range_audit_boundary_vec mut* v, fir.range_boundary 
         u64 cap = fir.grown_capacity(v->items.len,
                                       "fir_lower.range_audit_boundary_add: overflow");
         fir.range_boundary mut@ own bigger = new(fir.range_boundary, cap);
+        u64 mut i = 0;
+        while (i < v->len) { bigger[i] = v->items[i]; i += 1; }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = value;
+    v->len += 1;
+}
+
+fn range_audit_operation_add(range_audit_operation_vec mut* v,
+                             range_audit_operation value) void {
+    if (v->len >= fir.U32_LIMIT) {
+        panic("fir_lower.range_audit_operation_add: too many operations");
+    }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len,
+                                      "fir_lower.range_audit_operation_add: overflow");
+        range_audit_operation mut@ own bigger = new(range_audit_operation, cap);
         u64 mut i = 0;
         while (i < v->len) { bigger[i] = v->items[i]; i += 1; }
         del(v->items);
@@ -640,6 +671,417 @@ fn audit_range_inventory(ast.node* decl, range_candidate_set* proposed,
                                               .declaration = extra->id,
                                               .source = extra->source};
         return range_audit_fail(out, key, range_audit_fault.declaration);
+    }
+    return true;
+}
+
+// The range lowering writes its fresh u64 counter at the range node.
+// This FIR operation exists even when the loop has zero runtime iterations.
+fn range_audit_counter(fir.func* f, fir.statement* s) bool {
+    if (s->kind != fir.stmt_kind.st_assign || s->place.base != fir.base_kind.bk_local
+        || s->place.proj_len != 0 || s->place.local >= fir.local_count(f)
+        || fir.local_at(f, s->place.local)->kind != fir.local_kind.lk_temp
+        || s->value.kind != fir.rvalue_kind.rv_use || s->value.ops_len != 1) {
+        return false;
+    }
+    fir.operand value = fir.operand_at(f, s->value.ops_first);
+    return value.kind == fir.operand_kind.ok_const
+        && value.value.kind == fir.const_kind.ck_int
+        && consts.cv_is_zero(value.value.value);
+}
+
+fn range_audit_operations(fir.func* f, gen.node_ref_vec* selected,
+                          range_audit_operation_vec mut* operations) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, p);
+            if (range_audit_counter(f, s)) {
+                u64 mut i = 0;
+                while (i < selected->len) {
+                    ast.node* n = gen.refs_at(selected, i);
+                    if (range_audit_loc_eq(s->loc, n->loc)) {
+                        range_audit_operation_add(operations,
+                            range_audit_operation{b, p, s->stmt, cast(i + 1, u32), s->exit_loc});
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    u64 mut i = 1;
+    while (i < operations->len) {
+        range_audit_operation item = operations->items[i];
+        u64 mut j = i;
+        while (j > 0 && operations->items[j - 1].statement_index > item.statement_index) {
+            operations->items[j] = operations->items[j - 1];
+            j -= 1;
+        }
+        operations->items[j] = item;
+        i += 1;
+    }
+}
+
+fn range_audit_place_eq(fir.func* f, fir.place a, fir.place b) bool {
+    if (a.base != b.base || a.local != b.local || a.global != b.global
+        || a.proj_len != b.proj_len) { return false; }
+    u32 mut i = 0;
+    while (i < a.proj_len) {
+        fir.projection x = fir.place_projection(f, a, i);
+        fir.projection y = fir.place_projection(f, b, i);
+        if (x.kind != y.kind || x.field != y.field || x.index != y.index) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn range_audit_place_valid(fir.func* f, fir.place p) bool {
+    if (p.base == fir.base_kind.bk_local && p.local >= fir.local_count(f)) { return false; }
+    if (p.base == fir.base_kind.bk_global && p.global == null) { return false; }
+    return cast(p.proj_first, u64) + cast(p.proj_len, u64) <= f->projs.len;
+}
+
+fn range_audit_indexed_from(fir.func* f, fir.place element, fir.place base) bool {
+    if (element.base != base.base || element.local != base.local
+        || element.global != base.global || element.proj_len != base.proj_len + 1) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < base.proj_len) {
+        fir.projection x = fir.place_projection(f, element, i);
+        fir.projection y = fir.place_projection(f, base, i);
+        if (x.kind != y.kind || x.field != y.field || x.index != y.index) { return false; }
+        i += 1;
+    }
+    return fir.place_projection(f, element, i).kind == fir.proj_kind.pj_index;
+}
+
+fn range_audit_element(fir.func* f, ast.node* n, u32 statement_index,
+                       fir.place captured, u32 mut* body_block) bool {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut p = 0;
+        while (p < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, p);
+            if (s->stmt == statement_index && s->kind == fir.stmt_kind.st_assign
+                && s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0
+                && s->place.local < fir.local_count(f)
+                && fir.local_at(f, s->place.local)->sym == cast(n->sym, ast.sym*)
+                && range_audit_loc_eq(s->loc, n->b->loc)
+                && s->value.kind == fir.rvalue_kind.rv_use && s->value.ops_len == 1) {
+                fir.operand value = fir.operand_at(f, s->value.ops_first);
+                if (value.kind == fir.operand_kind.ok_copy
+                    && range_audit_indexed_from(f, value.place, captured)) {
+                    *body_block = b;
+                    return true;
+                }
+            }
+            p += 1;
+        }
+        b += 1;
+    }
+    return false;
+}
+
+fn range_audit_contains(ast.node* root, ast.node* target) bool {
+    if (root == null) { return false; }
+    if (root == target) { return true; }
+    if (root->kind == ast.ast_kind.k_compile_if) {
+        return range_audit_contains(selected_branch(root), target);
+    }
+    if (range_audit_contains(root->a, target) || range_audit_contains(root->b, target)
+        || range_audit_contains(root->c, target) || range_audit_contains(root->d, target)) {
+        return true;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(root)) {
+        if (range_audit_contains(ast.ast_child(root, i), target)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn range_audit_context_at(range_candidate_set* proposed, u32 id)
+    range_defer_context_candidate* {
+    u64 mut i = 0;
+    while (i < proposed->deferred.len) {
+        if (proposed->deferred.items[i].id == id) { return &proposed->deferred.items[i]; }
+        i += 1;
+    }
+    return null;
+}
+
+fn range_audit_context_matches(range_candidate_set* proposed, ast.node* n,
+                               fir.range_expansion occurrence, diag.loc exit_source) bool {
+    if (!range_audit_loc_eq(occurrence.exit_source, exit_source)) { return false; }
+    if (exit_source.line == 0) {
+        return occurrence.context == 0 && occurrence.exit_occurrence == 0;
+    }
+    if (occurrence.context == 0 || occurrence.exit_occurrence == 0) { return false; }
+    range_defer_context_candidate* inner = range_audit_context_at(proposed, occurrence.context);
+    if (inner == null || inner->exit_occurrence != occurrence.exit_occurrence
+        || !range_audit_loc_eq(inner->exit_source, exit_source)) { return false; }
+    ast.node* mut child = n;
+    u32 mut context = occurrence.context;
+    u64 mut steps = 0;
+    while (context != 0 && steps < proposed->deferred.len) {
+        range_defer_context_candidate* current = range_audit_context_at(proposed, context);
+        if (current == null || current->source_node == null
+            || current->source_node->kind != ast.ast_kind.k_defer
+            || !range_audit_contains(current->source_node->a, child)) { return false; }
+        child = current->source_node;
+        context = current->parent;
+        steps += 1;
+    }
+    return context == 0;
+}
+
+fn range_audit_source_sym(ast.node* n) ast.sym* {
+    if (n == null) { return null; }
+    if (n->kind == ast.ast_kind.k_ident) { return n->sym; }
+    if (n->sym != null && (n->sym->kind == ast.sym_kind.s_global
+        || n->sym->kind == ast.sym_kind.s_const)) { return n->sym; }
+    return range_audit_source_sym(n->a);
+}
+
+// A held address names the source storage through one temporary address operation.
+fn range_audit_place_root(fir.func* f, fir.place p, ast.sym* source, u32 depth) bool {
+    if (source == null || depth >= 8) { return false; }
+    if (p.base == fir.base_kind.bk_global) { return p.global == source; }
+    if (p.local >= fir.local_count(f)) { return false; }
+    fir.local* slot = fir.local_at(f, p.local);
+    if (slot->sym == source) { return true; }
+    if (slot->kind != fir.local_kind.lk_temp || p.proj_len == 0
+        || fir.place_projection(f, p, 0).kind != fir.proj_kind.pj_deref) { return false; }
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut at = 0;
+        while (at < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, at);
+            if (s->kind == fir.stmt_kind.st_assign
+                && s->place.base == fir.base_kind.bk_local && s->place.local == p.local
+                && s->place.proj_len == 0 && s->value.kind == fir.rvalue_kind.rv_addr) {
+                return range_audit_place_root(f, s->value.place, source, depth + 1);
+            }
+            at += 1;
+        }
+        b += 1;
+    }
+    return false;
+}
+
+fn range_audit_header_copy(fir.func* f, range_audit_operation op,
+                           fir.range_capture binding) bool {
+    u32 mut p = 0;
+    while (p < op.position) {
+        fir.statement* s = fir.block_statement(f, op.block, p);
+        if (s->kind == fir.stmt_kind.st_assign
+            && range_audit_place_eq(f, s->place, binding.captured)
+            && s->value.kind == fir.rvalue_kind.rv_use && s->value.ops_len == 1) {
+            fir.operand source = fir.operand_at(f, s->value.ops_first);
+            if (source.kind == fir.operand_kind.ok_copy
+                && range_audit_place_eq(f, source.place, binding.original)) { return true; }
+        }
+        p += 1;
+    }
+    return false;
+}
+
+fn range_audit_binding(fir.func* f, ast.node* n, range_audit_operation op,
+                       range_capture_candidate* c, u32 mut* body_block,
+                       range_audit_fault mut* fault) bool {
+    fir.range_capture binding = c->binding;
+    fir.range_capture_kind mut expected = fir.range_capture_kind.borrowed_header;
+    if (n->b->ty->kind == types.type_kind.k_array) {
+        expected = fir.range_capture_kind.non_owning_array_copy;
+        if (fir.type_owning(n->b->ty)) {
+            expected = fir.range_capture_kind.owning_fixed_array_place;
+        }
+    }
+    if (binding.kind != expected || !range_audit_loc_eq(binding.source, n->b->loc)
+        || !range_audit_place_valid(f, binding.captured)
+        || !range_audit_element(f, n, op.statement_index, binding.captured, body_block)) {
+        *fault = range_audit_fault.capture;
+        return false;
+    }
+    bool protected = expected != fir.range_capture_kind.non_owning_array_copy;
+    if (binding.original_present != protected) {
+        *fault = range_audit_fault.protected_path;
+        return false;
+    }
+    if (!protected) { return true; }
+    if (!range_audit_place_valid(f, binding.original)) {
+        *fault = range_audit_fault.protected_path;
+        return false;
+    }
+    if (expected == fir.range_capture_kind.owning_fixed_array_place) {
+        if (!range_audit_place_eq(f, binding.original, binding.captured)) {
+            *fault = range_audit_fault.protected_path;
+            return false;
+        }
+    } else if (fir.type_owning(n->b->ty) || designates(n->b)) {
+        if (!range_audit_header_copy(f, op, binding)) {
+            *fault = range_audit_fault.protected_path;
+            return false;
+        }
+    } else if (!range_audit_place_eq(f, binding.original, binding.captured)) {
+        *fault = range_audit_fault.protected_path;
+        return false;
+    }
+    ast.sym* source = range_audit_source_sym(n->b);
+    if (source != null && designates(n->b)
+        && !range_audit_place_root(f, binding.original, source, 0)) {
+        *fault = range_audit_fault.protected_path;
+        return false;
+    }
+    return true;
+}
+
+// Match every boundary by its expansion, then require the capture and body-entry gaps.
+fn range_audit_boundaries(fir.func* f, ast.node* n, range_audit_operation op,
+                          range_candidate_set* proposed, u32 expansion,
+                          u32 body_block, range_source_audit mut* out,
+                          range_audit_row mut* row) bool {
+    u32 mut capture_count = 0;
+    u32 mut entry_count = 0;
+    u32 mut cleanup_count = 0;
+    u32 mut exit_count = 0;
+    u32 mut outer_count = 0;
+    u32 mut cleanup_phase = 0;
+    fir.range_boundary mut cleanup = fir.range_boundary{};
+    fir.range_boundary mut loan_exit = fir.range_boundary{};
+    row->boundaries_first = cast(out->boundaries.len, u32);
+    u64 mut i = 0;
+    while (i < proposed->boundaries.len) {
+        range_boundary_candidate* c = &proposed->boundaries.items[i];
+        if (c->expansion == expansion) {
+            fir.range_boundary bd = c->boundary;
+            if (c->declaration != op.declaration || bd.loan != expansion
+                || bd.block >= fir.block_count(f)
+                || bd.position > fir.block_statement_count(f, bd.block)) { return false; }
+            switch (bd.kind) {
+            case fir.range_boundary_kind.capture:
+                capture_count += 1;
+                if (bd.block != op.block || bd.position != op.position
+                    || !range_audit_loc_eq(bd.source, n->b->loc)) { return false; }
+            case fir.range_boundary_kind.body_entry:
+                entry_count += 1;
+                if (bd.block != body_block || !range_audit_loc_eq(bd.source, n->loc)) {
+                    return false;
+                }
+                if (bd.position >= fir.block_statement_count(f, bd.block)) { return false; }
+                fir.statement* first = fir.block_statement(f, bd.block, bd.position);
+                if (first->kind != fir.stmt_kind.st_live || first->local >= fir.local_count(f)
+                    || fir.local_at(f, first->local)->sym != cast(n->sym, ast.sym*)) {
+                    return false;
+                }
+            case fir.range_boundary_kind.body_cleanup:
+                cleanup_count += 1;
+                if (cleanup_phase != 0) { return false; }
+                cleanup = bd;
+                cleanup_phase = 1;
+            case fir.range_boundary_kind.loan_exit:
+                exit_count += 1;
+                if (cleanup_phase != 1 || bd.block != cleanup.block
+                    || bd.position < cleanup.position
+                    || !range_audit_loc_eq(bd.source, cleanup.source)) { return false; }
+                loan_exit = bd;
+                cleanup_phase = 2;
+            case fir.range_boundary_kind.outer_cleanup:
+                outer_count += 1;
+                if (cleanup_phase != 2 || bd.block != loan_exit.block
+                    || bd.position != loan_exit.position || bd.order <= loan_exit.order
+                    || !range_audit_loc_eq(bd.source, loan_exit.source)) { return false; }
+                cleanup_phase = 0;
+            }
+            range_audit_boundary_add(&out->boundaries, bd);
+            row->boundaries_len += 1;
+            out->matched_boundaries += 1;
+        }
+        i += 1;
+    }
+    return cleanup_phase == 0 && capture_count == 1 && entry_count == 1
+        && cleanup_count == exit_count
+        && exit_count == outer_count;
+}
+
+/// Audits selected declarations and produced range operations without claiming source coverage.
+/// The caller releases the report before the checked tree. The report survives candidate teardown.
+fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* proposed,
+                         range_source_audit mut* out) bool {
+    if (!audit_range_inventory(decl, proposed, out)) { return false; }
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    range_audit_selected(decl->b, &selected);
+    range_audit_operation_vec mut operations = range_audit_operation_vec{};
+    defer del(operations.items);
+    range_audit_operations(f, &selected, &operations);
+    out->produced_expansions = cast(operations.len, u32);
+    u64 mut i = 0;
+    while (i < operations.len) {
+        range_audit_operation op = operations.items[i];
+        ast.node* n = gen.refs_at(&selected, cast(op.declaration - 1, u64));
+        range_audit_key mut key = range_audit_key{.function = decl->sym,
+                                                  .declaration = op.declaration,
+                                                  .expansion = cast(i + 1, u32),
+                                                  .source = n->loc,
+                                                  .exit_source = op.exit_source};
+        if (i > 0 && operations.items[i - 1].statement_index == op.statement_index) {
+            return range_audit_fail(out, key, range_audit_fault.operation);
+        }
+        if (i >= proposed->captures.len) {
+            return range_audit_fail(out, key, range_audit_fault.expansion_key);
+        }
+        range_capture_candidate* c = &proposed->captures.items[i];
+        key.context = c->occurrence.context;
+        key.exit_occurrence = c->occurrence.exit_occurrence;
+        if (c->declaration != op.declaration || c->expansion != key.expansion
+            || c->occurrence.id != key.expansion
+            || c->occurrence.declaration != op.declaration
+            || !range_audit_loc_eq(c->occurrence.source, n->loc)
+            || c->loan.id != key.expansion || c->loan.expansion != key.expansion
+            || c->binding.loan != key.expansion) {
+            return range_audit_fail(out, key, range_audit_fault.expansion_key);
+        }
+        if (!range_audit_loc_eq(c->occurrence.exit_source, op.exit_source)) {
+            return range_audit_fail(out, key, range_audit_fault.exit_source);
+        }
+        if (!range_audit_context_matches(proposed, n, c->occurrence, op.exit_source)) {
+            return range_audit_fail(out, key, range_audit_fault.context);
+        }
+        range_audit_fault mut fault = range_audit_fault.none;
+        u32 mut body_block = 0;
+        if (!range_audit_binding(f, n, op, c, &body_block, &fault)) {
+            return range_audit_fail(out, key, fault);
+        }
+        range_audit_row mut row = range_audit_row{.key = key, .binding = c->binding};
+        if (!range_audit_boundaries(f, n, op, proposed, key.expansion, body_block,
+                                    out, &row)) {
+            return range_audit_fail(out, key, range_audit_fault.boundary);
+        }
+        range_audit_row_add(&out->rows, row);
+        out->matched_captures += 1;
+        if (c->binding.original_present) { out->protected_paths += 1; }
+        i += 1;
+    }
+    if (proposed->captures.len != operations.len) {
+        range_capture_candidate* extra = &proposed->captures.items[operations.len];
+        range_audit_key key = range_audit_key{.function = decl->sym,
+                                              .declaration = extra->declaration,
+                                              .expansion = extra->expansion,
+                                              .context = extra->occurrence.context,
+                                              .exit_occurrence = extra->occurrence.exit_occurrence,
+                                              .source = extra->occurrence.source,
+                                              .exit_source = extra->occurrence.exit_source};
+        return range_audit_fail(out, key, range_audit_fault.expansion_key);
+    }
+    if (cast(out->matched_boundaries, u64) != proposed->boundaries.len) {
+        range_audit_key key = range_audit_key{.function = decl->sym};
+        return range_audit_fail(out, key, range_audit_fault.boundary);
     }
     return true;
 }
