@@ -12,7 +12,7 @@
 //| selected paths 2
 //| boundary repeats 10
 //| absence remains open
-//| output compared 206
+//| output compared 222
 /// Checks selected source inventory against inactive range proposals.
 import ast;
 import check;
@@ -60,6 +60,7 @@ u32 mut linear_damage_cases = 0;
 u32 mut linear_verified_damage = 0;
 u32 mut linear_invalid_damage = 0;
 strbuf.str_buf mut probe_rows = strbuf.str_buf{};
+bool mut repair_r2_runtime_free = false;
 
 struct probe_emissions {
     u32 selected;
@@ -109,6 +110,9 @@ fn probe_module(lower_env.env mut* e, ast.node* decl, fir.func* audited,
         probe_declarations(g, &fp, m->ast, decl, audited, counts);
         g->module = null;
         i += 1;
+    }
+    if (repair_r2_runtime_free) {
+        strbuf.append(&g->funcs, "declare void @\"std.rt.free\"(ptr)\n");
     }
     gen_data.gen_finish(g);
     assert(!g->failed && counts->selected == 1);
@@ -5181,7 +5185,467 @@ fn repair_r1_matrix() void {
     assert(repair_r1_pairs == 24 && repair_r1_rows == 36 && repair_r1_corruptions == 24);
 }
 
+u32 mut repair_r2_pairs = 0;
+u32 mut repair_r2_rows = 0;
+u32 mut repair_r2_substitutions = 0;
+u32 mut repair_r2_invalid = 0;
+
+fn repair_r2_local(fir.func* f, string name) u32 {
+    u32 mut found = 0;
+    u32 mut count = 0;
+    u32 mut i = 0;
+    while (i < fir.local_count(f)) {
+        fir.local* item = fir.local_at(f, i);
+        if (item->kind == fir.local_kind.lk_param && fir.local_name(item) == name) {
+            found = i;
+            count += 1;
+        }
+        i += 1;
+    }
+    assert(count == 1);
+    return found;
+}
+
+// The exact checked region and side select one proved arm store.
+fn repair_r2_arm(fir_lower.conditional_proof_session* session, ast.node* source, bool side,
+                  fir_lower.conditional_region_fact mut* region) fir_lower.conditional_arm_fact {
+    u32 mut index = 0;
+    u32 mut count = 0;
+    u64 mut i = 0;
+    while (i < session->regions.len) {
+        if (session->regions.items[i].source == source) {
+            index = cast(i, u32);
+            *region = session->regions.items[i];
+            count += 1;
+        }
+        i += 1;
+    }
+    assert(count == 1 && region->proved);
+    fir_lower.conditional_arm_fact mut arm = fir_lower.conditional_arm_fact{};
+    count = 0;
+    i = 0;
+    while (i < session->arms.len) {
+        fir_lower.conditional_arm_fact current = session->arms.items[i];
+        if (current.region == index && current.side == side) { arm = current; count += 1; }
+        i += 1;
+    }
+    ast.node* mut expected = source->c;
+    if (side) { expected = source->b; }
+    assert(count == 1 && arm.source == expected);
+    return arm;
+}
+
+// Node addresses identify the actual checked nodes while their tree remains alive.
+fn repair_r2_selector(string name, ast.node* root, fir.func* f,
+                       fir_lower.conditional_region_fact region,
+                       fir_lower.conditional_arm_fact arm, fir_lower.range_audit_key key,
+                       fir.operand old, fir.operand changed, fir_verify.violation* bad,
+                       bool invalid, string before, string after) void {
+    string mut dir = "";
+    if (!sys.env("FORT_RANGE_PROBE_DIR", &dir)) { return; }
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    json.writer mut j = json.writer{};
+    json.json_init(&j, &text);
+    json.json_object_begin(&j);
+    json.json_key(&j, "source_probe"); json.json_str(&j, name);
+    json.json_key(&j, "function_symbol_id");
+    json.json_uint(&j, cast(key.function, u64));
+    json.json_key(&j, "baseline_key"); conditional_json_key(&j, key);
+    json.json_key(&j, "exit_key"); conditional_json_key(&j, key);
+    json.json_key(&j, "checked_node_ids"); json.json_array_begin(&j);
+    json.json_uint(&j, cast(root, u64));
+    json.json_uint(&j, cast(region.source, u64));
+    json.json_uint(&j, cast(arm.source, u64));
+    json.json_array_end(&j);
+    json.json_key(&j, "checked_region"); conditional_json_loc(&j, region.source->loc);
+    json.json_key(&j, "checked_arm"); conditional_json_loc(&j, arm.source->loc);
+    fir.statement* write = fir.block_statement(f, arm.write.block, arm.write.position);
+    json.json_key(&j, "block"); json.json_uint(&j, cast(arm.write.block, u64));
+    json.json_key(&j, "position"); json.json_uint(&j, cast(arm.write.position, u64));
+    json.json_key(&j, "destination_local");
+    json.json_uint(&j, cast(arm.destination.local, u64));
+    json.json_key(&j, "old_operand_local"); json.json_uint(&j, cast(old.place.local, u64));
+    json.json_key(&j, "new_operand_local"); json.json_uint(&j, cast(changed.place.local, u64));
+    json.json_key(&j, "old_operand_kind"); json.json_uint(&j, cast(old.kind, u64));
+    json.json_key(&j, "new_operand_kind"); json.json_uint(&j, cast(changed.kind, u64));
+    json.json_key(&j, "old_operand_name");
+    json.json_str(&j, fir.local_name(fir.local_at(f, old.place.local)));
+    json.json_key(&j, "new_operand_name");
+    json.json_str(&j, fir.local_name(fir.local_at(f, changed.place.local)));
+    u32 mut entry = region.no;
+    if (arm.side) { entry = region.yes; }
+    json.json_key(&j, "entry_block"); json.json_uint(&j, cast(entry, u64));
+    json.json_key(&j, "join_block"); json.json_uint(&j, cast(region.join, u64));
+    json.json_key(&j, "statement_index"); json.json_uint(&j, cast(write->stmt, u64));
+    json.json_key(&j, "statement_source"); conditional_json_loc(&j, write->loc);
+    json.json_key(&j, "statement_exit"); conditional_json_loc(&j, write->exit_loc);
+    json.json_key(&j, "one_changed_operand"); json.json_bool(&j, true);
+    json.json_key(&j, "other_exits_unchanged"); json.json_bool(&j, true);
+    json.json_key(&j, "invalid_transfer"); json.json_bool(&j, invalid);
+    json.json_key(&j, "verifier_rule"); json.json_uint(&j, cast(bad->rule, u64));
+    json.json_key(&j, "verifier_reason"); json.json_str(&j, bad->what);
+    json.json_key(&j, "audit_executed"); json.json_bool(&j, !invalid);
+    json.json_key(&j, "before"); json.json_str(&j, before);
+    json.json_key(&j, "after"); json.json_str(&j, after);
+    json.json_object_end(&j);
+    string own leaf = str.concat(name, ".selector.json");
+    defer del(leaf);
+    probe_file(dir, leaf, strbuf.view(&text));
+}
+
+fn repair_r2_change(string name, string kind, lower_env.env mut* e, ast.node* decl,
+                      ast.node* root, fir.func* f, fir_lower.range_candidate_set* proposed,
+                      fir_lower.range_audit_key key, fir_lower.conditional_region_fact region,
+                      fir_lower.conditional_arm_fact arm, fir.operand replacement,
+                      bool invalid) void {
+    fir.statement* write = fir.block_statement(f, arm.write.block, arm.write.position);
+    assert(write->kind == fir.stmt_kind.st_assign);
+    assert(write->value.kind == fir.rvalue_kind.rv_use && write->value.ops_len == 1);
+    assert(fir_lower.range_audit_loc_eq(write->loc, arm.source->loc));
+    assert(fir_lower.range_audit_loc_eq(write->exit_loc, key.exit_source));
+    u32 operand = write->value.ops_first;
+    fir.operand old = fir.operand_at(f, operand);
+    assert(old.kind == arm.produced.kind);
+    assert(fir_lower.range_audit_place_eq(f, old.place, arm.produced.place));
+    assert(old.place.base == fir.base_kind.bk_local && old.place.proj_len == 0);
+    assert(replacement.place.base == fir.base_kind.bk_local && replacement.place.proj_len == 0);
+    if (!invalid) {
+        assert(old.kind == fir.operand_kind.ok_move && replacement.kind == old.kind);
+        assert(fir.type_owning(arm.source->ty));
+        assert(old.place.local != replacement.place.local);
+        assert(types.type_same_shape(fir.operand_type(f, old),
+                                     fir.operand_type(f, replacement)));
+    }
+    u32 mut uses = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut position = 0;
+        while (position < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, position);
+            if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_use
+                && s->value.ops_first == operand) { uses += 1; }
+            position += 1;
+        }
+        b += 1;
+    }
+    assert(uses == 1);
+    fir.func mut changed = fir.func_clone(f);
+    defer fir.func_free(&changed);
+    changed.ops.items[operand] = replacement;
+    strbuf.str_buf mut before = strbuf.create();
+    defer strbuf.free(&before);
+    strbuf.str_buf mut after = strbuf.create();
+    defer strbuf.free(&after);
+    conditional_snapshot(f, &before);
+    conditional_snapshot(&changed, &after);
+    assert(strbuf.view(&before) != strbuf.view(&after));
+    fir_verify.violation mut bad = fir_verify.violation{};
+    bool refused = fir_verify.find_violation(&changed, &e->rt, &bad);
+    strbuf.str_buf mut id = strbuf.create();
+    defer strbuf.free(&id);
+    strbuf.append(&id, name);
+    strbuf.push(&id, '_');
+    strbuf.append_u64(&id, cast(key.expansion, u64));
+    strbuf.push(&id, '_');
+    strbuf.append(&id, kind);
+    if (invalid) {
+        assert(refused && (bad.rule == fir_verify.RULE_V5 || bad.rule == fir_verify.RULE_V6));
+        assert(bad.block == arm.write.block && bad.position == arm.write.position);
+        repair_r2_invalid += 1;
+    } else {
+        assert(!refused);
+        conditional_fault(strbuf.view(&id), "exact owning scalar source substitution", e,
+                            decl, f, &changed, proposed, key, arm.write.block, arm.write.position);
+        fir_lower.range_candidate_set mut copied = fir_lower.range_candidate_set{};
+        defer fir_lower.range_candidate_set_free(&copied);
+        repair_r1_candidates(proposed, &copied);
+        fir_lower.range_source_audit mut retained = fir_lower.range_source_audit{};
+        defer fir_lower.range_source_audit_free(&retained);
+        strbuf.str_buf mut candidate_before = strbuf.create();
+        defer strbuf.free(&candidate_before);
+        strbuf.str_buf mut candidate_after = strbuf.create();
+        defer strbuf.free(&candidate_after);
+        conditional_candidate_snapshot(&changed, &copied, &candidate_before);
+        assert(!fir_lower.audit_produced_ranges(decl, &changed, &copied, &retained));
+        conditional_candidate_snapshot(&changed, &copied, &candidate_after);
+        assert(strbuf.view(&candidate_before) == strbuf.view(&candidate_after));
+        fir_lower.range_candidate_set_free(&copied);
+        assert_linear_key(retained.failure.key, key);
+        assert(retained.failure.reason == fir_lower.range_audit_fault.protected_path);
+        assert_unpublished(&changed, &retained);
+        conditional_receipt(strbuf.view(&id), &changed, &retained, false);
+        repair_r2_substitutions += 1;
+    }
+    changed.ops.items[operand] = old;
+    strbuf.str_buf mut restored = strbuf.create();
+    defer strbuf.free(&restored);
+    conditional_snapshot(&changed, &restored);
+    assert(strbuf.view(&before) == strbuf.view(&restored));
+    repair_r2_selector(strbuf.view(&id), root, f, region, arm, key, old, replacement, &bad,
+                       invalid, strbuf.view(&before), strbuf.view(&after));
+}
+
+// These source paths implement the reviewed outer-arm and distinct nested-leaf selectors.
+fn repair_r2_damage(string name, string form, bool owning, lower_env.env mut* e,
+                      ast.node* decl, fir.func* f, fir_lower.range_candidate_set* proposed,
+                      fir_lower.range_source_audit* audit) void {
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    fir_lower.range_audit_selected(decl->b, &selected);
+    assert(selected.len == 1);
+    ast.node* range = gen.refs_at(&selected, 0);
+    ast.node* call = range->b;
+    assert(call->kind == ast.ast_kind.k_call && ast.ast_len(call) == 2);
+    ast.node* root = ast.ast_child(call, 0);
+    assert(root->kind == ast.ast_kind.k_ternary && root->a->name == "select");
+    bool side = form != "own_pointer_else";
+    ast.node* mut nested = root->b;
+    if (!side) { nested = root->c; }
+    assert(nested->kind == ast.ast_kind.k_ternary && nested->a->name == "other");
+    ast.node* mut leaf_region = nested;
+    if (form == "own_pointer_depth_three") { leaf_region = nested->b; }
+    fir_lower.range_audit_operation_vec mut operations = fir_lower.range_audit_operation_vec{};
+    defer del(operations.items);
+    fir_lower.range_audit_operations(f, &selected, &operations);
+    assert(operations.len == audit->rows.len);
+    u64 mut row = 0;
+    while (row < operations.len) {
+        fir_lower.range_audit_key key = audit->rows.items[row].key;
+        fir_lower.range_audit_operation op = operations.items[row];
+        assert(fir_lower.range_audit_loc_eq(op.exit_source, key.exit_source));
+        fir_lower.conditional_proof_session mut session = fir_lower.conditional_proof_session{
+            .proof = fir_lower.range_material_context{f, op}, .key = key,
+            .declaration = decl, .source = range};
+        defer fir_lower.conditional_proof_free(&session);
+        u32 mut body = 0;
+        assert(fir_lower.range_audit_body(f, range, op, &body));
+        fir.range_capture mut binding = fir.range_capture{};
+        assert(fir_lower.conditional_wrapped_capture(&session, range, body, &binding));
+        fir_lower.conditional_region_fact mut outer_region = fir_lower.conditional_region_fact{};
+        fir_lower.conditional_arm_fact outer = repair_r2_arm(&session, root, side, &outer_region);
+        fir_lower.conditional_region_fact mut inner_region = fir_lower.conditional_region_fact{};
+        fir_lower.conditional_arm_fact inner = repair_r2_arm(&session, leaf_region, true,
+                                                              &inner_region);
+        assert(outer.write.block != inner.write.block
+               || outer.write.position != inner.write.position);
+        fir.operand_kind mut expected = fir.operand_kind.ok_copy;
+        if (owning) { expected = fir.operand_kind.ok_move; }
+        assert(fir.type_owning(root->ty) == owning && outer.produced.kind == expected);
+        assert(inner.produced.kind == expected);
+        if (owning) {
+            string mut owner = "c";
+            if (!side) { owner = "a"; }
+            if (form == "own_pointer_depth_three") { owner = "d"; }
+            assert(fir.local_at(f, outer.produced.place.local)->kind == fir.local_kind.lk_temp);
+            string mut leaf = "a";
+            if (!side) { leaf = "b"; }
+            assert(fir.local_name(fir.local_at(f, inner.produced.place.local)) == leaf);
+            repair_r2_change(name, "named_owner_substitution", e, decl, root, f, proposed, key,
+                              outer_region, outer, fir.operand_move(
+                                  fir.place_local(repair_r2_local(f, owner))), false);
+            repair_r2_change(name, "nested_arm_source_substitution", e, decl, root, f,
+                              proposed, key, inner_region, inner,
+                              fir.operand_move(fir.place_local(repair_r2_local(f, "d"))), false);
+        }
+        fir.operand mut wrong = outer.produced;
+        wrong.kind = fir.operand_kind.ok_move;
+        if (owning) { wrong.kind = fir.operand_kind.ok_copy; }
+        repair_r2_change(name, "wrong_transfer", e, decl, root, f, proposed, key,
+                          outer_region, outer, wrong, true);
+        row += 1;
+    }
+}
+
+fn repair_r2_pair(string name, string@ direct, bool owning) void {
+    bool previous_runtime_free = repair_r2_runtime_free;
+    repair_r2_runtime_free = owning;
+    defer { repair_r2_runtime_free = previous_runtime_free; }
+    u32 mut mode = 0;
+    while (mode < 2) {
+        u64 mut extra = 0;
+        if (mode != 0) { extra = 2; }
+        string mut@ own source = new(string, direct.len + extra);
+        defer del(source);
+        u64 mut i = 0;
+        u64 mut j = 0;
+        while (i < direct.len) {
+            bool collection = i + 3 == direct.len;
+            if (mode != 0 && collection) { source[j] = "    defer {"; j += 1; }
+            source[j] = direct[i];
+            j += 1;
+            if (mode != 0 && collection) { source[j] = "    }"; j += 1; }
+            i += 1;
+        }
+        assert(j == source.len);
+        strbuf.str_buf mut id = strbuf.create();
+        defer strbuf.free(&id);
+        strbuf.append(&id, "repair_r2_");
+        strbuf.append(&id, name);
+        if (mode == 0) { strbuf.append(&id, "_direct"); }
+        else { strbuf.append(&id, "_deferred"); }
+        lower_env.env mut e = lower_env.env{};
+        lower_env.open(&e);
+        defer lower_env.close(&e);
+        lower_env.check_lines(&e, source, true);
+        ast.node* decl = lower_env.decl(&e, "walk");
+        fir.func mut f = fir.func{};
+        defer fir.func_free(&f);
+        fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+        defer fir_lower.range_candidate_set_free(&proposed);
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+        fir_verify.violation mut bad = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+        eprintln(strbuf.view(&id), " verifies fixture FIR");
+        fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+        defer fir_lower.range_source_audit_free(&audit);
+        bool matched = fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit);
+        if (!matched) { eprintln(strbuf.view(&id), " refuses a proved owning scalar"); }
+        assert(matched);
+        u64 expected = cast(mode + 1, u64);
+        assert(audit.rows.len == expected && proposed.captures.len == expected);
+        assert(audit.matched_captures == cast(expected, u32));
+        assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+        if (mode == 0) {
+            assert(audit.rows.items[0].key.context == 0);
+            assert(audit.rows.items[0].key.exit_occurrence == 0);
+            assert(audit.rows.items[0].key.exit_source.line == 0);
+        } else {
+            assert(audit.rows.items[0].key.context != 0);
+            assert(audit.rows.items[1].key.context != 0);
+            assert(audit.rows.items[0].key.exit_occurrence
+                   != audit.rows.items[1].key.exit_occurrence);
+            assert(audit.rows.items[0].key.exit_source.line
+                   != audit.rows.items[1].key.exit_source.line);
+        }
+        assert_unpublished(&f, &audit);
+        check_output(&e, decl, &f, strbuf.view(&id), true);
+        repair_r2_damage(strbuf.view(&id), name, owning, &e, decl, &f, &proposed, &audit);
+        fir_lower.range_candidate_set_free(&proposed);
+        conditional_receipt(strbuf.view(&id), &f, &audit, true);
+        assert(audit.rows.len == expected);
+        repair_r2_pairs += 1;
+        repair_r2_rows += cast(expected, u32);
+        mode += 1;
+    }
+}
+
+fn repair_r2_matrix() void {
+    string own line_0_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i32* own mut ",
+        "a, i32* own mut b, i32* own mut c, i32* own mut d, i32@ values) void {");
+    defer del(line_0_1);
+    string[5] own_pointer_then = {
+        "fn pick(i32* own mut p, i32@ values) i32@ { del(p); return values; }",
+        line_0_1,
+        "    for (i32 x : pick(select ? (other ? move(a) : move(b)) : move(c), values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("own_pointer_then", own_pointer_then[..], true);
+    string own line_1_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i32* own mut ",
+        "a, i32* own mut b, i32* own mut c, i32* own mut d, i32@ values) void {");
+    defer del(line_1_1);
+    string[5] own_pointer_else = {
+        "fn pick(i32* own mut p, i32@ values) i32@ { del(p); return values; }",
+        line_1_1,
+        "    for (i32 x : pick(select ? move(a) : (other ? move(b) : move(c)), values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("own_pointer_else", own_pointer_else[..], true);
+    string own line_2_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i32* own mut ",
+        "a, i32* own mut b, i32* own mut c, i32* own mut d, i32@ values) void {");
+    defer del(line_2_1);
+    string own line_2_2 = str.concat(
+        "    for (i32 x : pick(select ? (other ? move(a) : move(b)) : (third ? ",
+        "move(c) : move(d)), values)) { }");
+    defer del(line_2_2);
+    string[5] own_pointer_both = {
+        "fn pick(i32* own mut p, i32@ values) i32@ { del(p); return values; }",
+        line_2_1,
+        line_2_2,
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("own_pointer_both", own_pointer_both[..], true);
+    string own line_3_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i32* own mut ",
+        "a, i32* own mut b, i32* own mut c, i32* own mut d, i32@ values) void {");
+    defer del(line_3_1);
+    string own line_3_2 = str.concat(
+        "    for (i32 x : pick(select ? (other ? (third ? move(a) : move(b)) : ",
+        "move(c)) : move(d), values)) { }");
+    defer del(line_3_2);
+    string[5] own_pointer_depth_three = {
+        "fn pick(i32* own mut p, i32@ values) i32@ { del(p); return values; }",
+        line_3_1,
+        line_3_2,
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("own_pointer_depth_three", own_pointer_depth_three[..], true);
+    string own line_4_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, void mut* own mut a, ",
+        "void mut* own mut b, void mut* own mut c, void mut* own mut d, i32@ values) void {");
+    defer del(line_4_1);
+    string[5] own_void_pointer = {
+        "fn pick(void mut* own mut p, i32@ values) i32@ { del(p); return values; }",
+        line_4_1,
+        "    for (i32 x : pick(select ? (other ? move(a) : move(b)) : move(c), values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("own_void_pointer", own_void_pointer[..], true);
+    string own line_5_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i32* a, i32* ",
+        "b, i32* c, i32* d, i32@ values) void {");
+    defer del(line_5_1);
+    string[5] borrowed_pointer_control = {
+        "fn pick(i32* p, i32@ values) i32@ { return values; }",
+        line_5_1,
+        "    for (i32 x : pick(select ? (other ? a : b) : c, values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("borrowed_pointer_control", borrowed_pointer_control[..], false);
+    string own line_6_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, i64 a, i64 b, ",
+        "i64 c, i64 d, i32@ values) void {");
+    defer del(line_6_1);
+    string[5] integer_control = {
+        "fn pick(i64 p, i32@ values) i32@ { return values; }",
+        line_6_1,
+        "    for (i32 x : pick(select ? (other ? a : b) : c, values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("integer_control", integer_control[..], false);
+    string own line_7_1 = str.concat(
+        "fn walk(bool select, bool other, bool third, bool quit, fn () i32 a, ",
+        "fn () i32 b, fn () i32 c, fn () i32 d, i32@ values) void {");
+    defer del(line_7_1);
+    string[5] function_control = {
+        "fn pick(fn () i32 p, i32@ values) i32@ { return values; }",
+        line_7_1,
+        "    for (i32 x : pick(select ? (other ? a : b) : c, values)) { }",
+        "    if (quit) { return; }",
+        "}",
+    };
+    repair_r2_pair("function_control", function_control[..], false);
+    assert(repair_r2_pairs == 16 && repair_r2_rows == 24);
+    assert(repair_r2_substitutions == 30 && repair_r2_invalid == 24);
+}
+
 fn main() i32 {
+    string mut owner_repair = "";
+    if (sys.env("FORT_CONDITIONAL_REPAIR_R2_REGRESSION", &owner_repair)) {
+        repair_r2_matrix();
+        return 0;
+    }
     string mut repair = "";
     if (sys.env("FORT_CONDITIONAL_REPAIR_R1_REGRESSION", &repair)) {
         repair_r1_matrix();
@@ -5272,7 +5736,11 @@ fn main() i32 {
     assert(output_comparisons == 206);
     eprintln("repair R1 pairs ", repair_r1_pairs, " rows ", repair_r1_rows,
              " corruptions ", repair_r1_corruptions);
+    repair_r2_matrix();
+    assert(output_comparisons == 222);
+    eprintln("repair R2 pairs ", repair_r2_pairs, " rows ", repair_r2_rows,
+             " substitutions ", repair_r2_substitutions, " invalid ", repair_r2_invalid);
     export_ledger();
-    println("output compared 206");
+    println("output compared 222");
     return 0;
 }
