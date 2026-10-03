@@ -31,6 +31,37 @@
 //| array projection copy work exhaustion
 //| field projection copy work exhaustion
 //| checked array sizing preserves overflow refusal
+//| unit-a accept range_validation_slice
+//| unit-a accept range_validation_derive
+//| unit-a reject range_validation_slice
+//| unit-a reject range_validation_derive
+//| unit-a accept address_validation_start
+//| unit-a accept address_validation_access
+//| unit-a reject address_validation_start
+//| unit-a reject address_validation_access
+//| unit-a accept origin_metadata
+//| unit-a reject origin_metadata
+//| unit-a accept leaf_metadata
+//| unit-a reject leaf_metadata
+//| unit-a accept term_block_metadata
+//| unit-a reject term_block_metadata
+//| unit-a accept relation_metadata
+//| unit-a reject relation_metadata
+//| unit-a accept query_bound_lookup
+//| unit-a reject query_bound_lookup
+//| unit-a accept query_relation_terms
+//| unit-a reject query_relation_terms
+//| unit-a accept event_map_work
+//| unit-a reject event_map_work
+//| unit-a accept event_map_recovery
+//| unit-a reject event_map_recovery
+//| unit-a accept cast_type_work
+//| unit-a reject cast_type_work
+//| unit-a accept cast_type_depth
+//| unit-a reject cast_type_depth_d
+//| unit-a reject cast_type_depth_w
+//| unit-a accept alignment_coefficient_work
+//| unit-a reject alignment_coefficient_work
 //| successful result allocator teardown
 //| early failure allocator teardown
 //| late failure allocator teardown
@@ -304,9 +335,13 @@ fn denied_charge_preserves_input() void {
     defer ownership_raw.free(&raw_before);
     ownership_raw.origin mut input = e.root.storage.origins[0];
     ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_env.accepted(ownership_raw.begin_work(&e.local.state, &e.local.service,
+        &req, &cursor));
     e.budget.deny_at = e.budget.calls + 8;
     ownership_raw.result mut value = ownership_raw.capture_origin(&e.local.state,
-        &e.local.service, &input, e.root.storage.bounds[..], ownership_raw_env.NO_RELATIONS, &req);
+        &e.local.service, &input, e.root.storage.bounds[..], ownership_raw_env.NO_RELATIONS,
+        &cursor.selected);
     ownership_raw_env.rejected(value.proof);
     assert(value.proof.terminal.limit.present && value.proof.terminal.limit.used == 7 &&
         value.proof.terminal.limit.bound == 7 && value.proof.terminal.limit.attempted > 0);
@@ -562,10 +597,13 @@ fn array_projection_work() void {
     ownership_api.place_path mut path = ownership_local_env.place(1);
     path.projections = parts[..];
     ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_env.accepted(ownership_raw.begin_work(&e.local.state, &e.local.service,
+        &req, &cursor));
     ownership_raw_env.remaining_work(&e, 5);
     types.node* selected = types.type_array(&e.table, e.byte, 1);
-    ownership_api.proof_status refused = ownership_raw.layout(&output, &e.local.service, &req,
-        selected, path, 0, 0);
+    ownership_api.proof_status refused = ownership_raw.layout(&output, &e.local.service,
+        &cursor.selected, selected, path, 0, 0);
     ownership_raw_env.work_failure(&e, refused, &req);
     assert(output.leaves_len == 0 && output.paths.blocks == null && output.leaves.ptr == null);
     assert(parts[0].index.value == 0 && e.root.storage.leaves_len == 1);
@@ -587,9 +625,12 @@ fn field_projection_work() void {
     ownership_api.place_path mut path = ownership_local_env.place(1);
     path.projections = parts[..];
     ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_env.accepted(ownership_raw.begin_work(&e.local.state, &e.local.service,
+        &req, &cursor));
     ownership_raw_env.remaining_work(&e, 6);
-    ownership_api.proof_status refused = ownership_raw.layout(&output, &e.local.service, &req,
-        selected, path, 0, 0);
+    ownership_api.proof_status refused = ownership_raw.layout(&output, &e.local.service,
+        &cursor.selected, selected, path, 0, 0);
     ownership_raw_env.work_failure(&e, refused, &req);
     assert(output.leaves_len == 0 && output.paths.blocks == null && output.leaves.ptr == null);
     assert(parts[0].index.value == 0 && e.root.storage.leaves_len == 1);
@@ -655,6 +696,285 @@ $if ($cfg(target_os) == "linux") {
     fn live_bytes() u64 { return heap.system_view(); }
 }
 struct allocation_sample { u64[9] addresses; }
+fn range_validation_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.zero_bound_heap(&e);
+    ownership_raw.term[128] mut terms = {};
+    ownership_raw.expression lower = ownership_raw_env.zero_terms(terms[..]);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    e.budget.meter.bounds.w = 300000;
+    req.limits.w = e.budget.meter.bounds.w;
+    ownership_raw.result mut value = ownership_raw.slice_ptr(&e.root.storage, &e.local.service,
+        e.root.addresses[..], lower, lower, e.byte, &req);
+    ownership_raw_env.accepts(&value);
+    ownership_raw.free_result(&value);
+    println("unit-a accept range_validation_slice");
+    value = ownership_raw.derive_address(&e.root.storage, &e.local.service,
+        e.root.addresses[..], lower, lower, e.byte, &req);
+    ownership_raw_env.accepts(&value);
+    ownership_raw.free_result(&value);
+    println("unit-a accept range_validation_derive");
+    terms[127].coefficient.valid = false;
+    ownership_raw_env.remaining_work(&e, 25);
+    value = ownership_raw.slice_ptr(&e.root.storage, &e.local.service,
+        e.root.addresses[..], lower, lower, e.byte, &req);
+    ownership_raw_env.work_failure(&e, value.proof, &req);
+    ownership_raw_env.rejects(&value);
+    println("unit-a reject range_validation_slice");
+    ownership_raw_env.remaining_work(&e, 25);
+    value = ownership_raw.derive_address(&e.root.storage, &e.local.service,
+        e.root.addresses[..], lower, lower, e.byte, &req);
+    ownership_raw_env.work_failure(&e, value.proof, &req);
+    ownership_raw_env.rejects(&value);
+    assert(!terms[127].coefficient.valid && e.root.addresses.len == 1);
+    println("unit-a reject range_validation_derive");
+}
+fn address_validation_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.zero_bound_heap(&e);
+    ownership_raw.term[128] mut terms = {};
+    ownership_raw.address[1] mut values = {e.root.addresses[0]};
+    values[0].offset = ownership_raw_env.zero_terms(terms[..]);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    e.budget.meter.bounds.w = 300000;
+    req.limits.w = e.budget.meter.bounds.w;
+    ownership_raw.result mut value = ownership_raw.start(&e.root.storage, &e.local.service,
+        values[..], &req, 0);
+    ownership_raw_env.accepts(&value);
+    ownership_raw.free_result(&value);
+    println("unit-a accept address_validation_start");
+    ownership_raw_env.accepted(ownership_raw.access(&e.root.storage, &e.local.service,
+        values[..], e.byte, &req));
+    println("unit-a accept address_validation_access");
+    terms[127].coefficient.valid = false;
+    ownership_raw_env.remaining_work(&e, 25);
+    value = ownership_raw.start(&e.root.storage, &e.local.service, values[..], &req, 0);
+    ownership_raw_env.work_failure(&e, value.proof, &req);
+    ownership_raw_env.rejects(&value);
+    println("unit-a reject address_validation_start");
+    ownership_raw_env.remaining_work(&e, 25);
+    ownership_raw_env.work_failure(&e, ownership_raw.access(&e.root.storage, &e.local.service,
+        values[..], e.byte, &req), &req);
+    assert(e.root.addresses[0].offset.terms.len == 0 && !terms[127].coefficient.valid);
+    println("unit-a reject address_validation_access");
+}
+fn metadata_work(u32 mode) void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.symbolic_heap(&e, 1, 0, 8);
+    ownership_api.projection[8] mut parts = {};
+    ownership_raw_env.projections(parts[..]);
+    if (mode == 0) { e.root.storage.origins[0].place.projections = parts[..]; }
+    if (mode == 1) { e.root.storage.leaves[0].place.projections = parts[..]; }
+    if (mode == 3) {
+        del(e.root.storage.relations);
+        e.root.storage.relations = new(ownership_raw.relation, 1);
+        ownership_raw.term[128] mut terms = {};
+        ownership_raw.expression item = ownership_raw_env.zero_terms(terms[..]);
+        e.root.storage.relations[0].left = ownership_raw.copy_expression(&e.root.storage, item);
+        e.root.storage.relations[0].right = ownership_raw.copy_expression(&e.root.storage, item);
+    }
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw.calculation mut work = ownership_raw_env.calculation(&e, &req, &cursor);
+    u64 mut price = 999;
+    assert(ownership_raw.measure_context_work(&work, e.root.addresses[..], 0, &price));
+    ownership_raw_env.accepted(work.proof);
+    assert(price != 999);
+    string name = mode == 0 ? "origin_metadata" : mode == 1 ? "leaf_metadata" :
+        mode == 2 ? "term_block_metadata" : "relation_metadata";
+    println("unit-a accept ", name);
+    ownership_raw_env.remaining_work(&e, 1);
+    work.proof = ownership_raw.complete();
+    price = 999;
+    assert(!ownership_raw.measure_context_work(&work, e.root.addresses[..], 0, &price));
+    ownership_raw_env.work_failure(&e, work.proof, &req);
+    assert(price == 999 && e.root.storage.origins.len == 1);
+    println("unit-a reject ", name);
+}
+fn query_bound_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    del(e.root.storage.bounds);
+    e.root.storage.bounds = new(ownership_raw.captured_bound, 127);
+    u64 mut i = 0;
+    while (i < e.root.storage.bounds.len) {
+        e.root.storage.bounds[i] = ownership_raw.captured_bound{
+            ownership_local_env.id(ownership_api.entity_kind.value, cast(i, u32) + 20),
+            ownership_raw.natural(1), ownership_raw.natural(1)};
+        i += 1;
+    }
+    e.root.storage.bounds[126].version = ownership_local_env.id(
+        ownership_api.entity_kind.value, 10);
+    ownership_raw.term[1] mut terms = {};
+    ownership_raw.expression left = ownership_raw_env.symbol(10, terms[..], 1);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw_env.accepted(ownership_raw.compare_expressions(&e.root.storage,
+        &e.local.service, left, ownership_raw.literal(2), &req));
+    println("unit-a accept query_bound_lookup");
+    ownership_raw_env.remaining_work(&e, 25);
+    ownership_raw_env.work_failure(&e, ownership_raw.compare_expressions(&e.root.storage,
+        &e.local.service, left, ownership_raw.literal(2), &req), &req);
+    assert(e.root.storage.bounds[126].version.ordinal == 10 && terms[0].coefficient.magnitude == 1);
+    println("unit-a reject query_bound_lookup");
+}
+fn query_relation_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.term[128] mut left_terms = {};
+    ownership_raw.term[128] mut right_terms = {};
+    ownership_raw.expression mut left = ownership_raw_env.zero_terms(left_terms[..]);
+    ownership_raw.expression mut right = ownership_raw_env.zero_terms(right_terms[..]);
+    u64 mut i = 0;
+    while (i < right_terms.len) { right_terms[i].version.ordinal = 11; i += 1; }
+    del(e.root.storage.relations);
+    e.root.storage.relations = new(ownership_raw.relation, 1);
+    e.root.storage.relations[0].left = ownership_raw.copy_expression(&e.root.storage, left);
+    e.root.storage.relations[0].right = ownership_raw.copy_expression(&e.root.storage, right);
+    ownership_raw.term[1] mut query_left = {};
+    ownership_raw.term[1] mut query_right = {};
+    left = ownership_raw_env.symbol(10, query_left[..], 128);
+    right = ownership_raw_env.symbol(11, query_right[..], 128);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    u64 before = e.budget.meter.used.w;
+    ownership_raw_env.accepted(ownership_raw.compare_expressions(&e.root.storage,
+        &e.local.service, left, right, &req));
+    assert(e.budget.meter.used.w - before > 32000);
+    println("unit-a accept query_relation_terms");
+    ownership_raw_env.remaining_work(&e, 100);
+    ownership_raw_env.work_failure(&e, ownership_raw.compare_expressions(&e.root.storage,
+        &e.local.service, left, right, &req), &req);
+    assert(e.root.storage.relations[0].left.terms.len == 128 &&
+        query_right[0].version.ordinal == 11);
+    println("unit-a reject query_relation_terms");
+}
+fn event_map_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    u64 mut i = 0;
+    while (i < 6) { req = ownership_raw_env.request(&e); i += 1; }
+    ownership_raw.work_cursor mut cursor = {};
+    u64 before = e.budget.meter.used.w;
+    ownership_raw_env.accepted(ownership_raw.begin_work(&e.local.state, &e.local.service,
+        &req, &cursor));
+    u64 count = req.base.event_bindings.len;
+    assert(e.budget.meter.used.w - before == count * count &&
+        cursor.selected.base.event_bindings.len == 1);
+    println("unit-a accept event_map_work");
+    ownership_raw_env.remaining_work(&e, count * count - 1);
+    u64 events = e.local.counts.events;
+    ownership_raw_env.unmapped_work_failure(&e, ownership_raw.begin_work(&e.local.state,
+        &e.local.service, &req, &cursor), &req, events);
+    assert(cursor.selected.base.event_bindings.len == req.base.event_bindings.len);
+    println("unit-a reject event_map_work");
+}
+fn event_route_recovery_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_env.accepted(ownership_raw.begin_work(&e.local.state, &e.local.service,
+        &req, &cursor));
+    ownership_raw_env.remaining_work(&e, 0);
+    ownership_raw_env.work_failure(&e, ownership_raw.charge(&e.local.service, &cursor.selected,
+        ownership_api.limit_category.w, 1), &req);
+    println("unit-a accept event_map_recovery");
+    ownership_api.services mut refused_service = e.local.service;
+    refused_service.event = ownership_raw_env.refuse_mapped_event;
+    ownership_api.proof_status refused = ownership_raw.charge(&refused_service, &cursor.selected,
+        ownership_api.limit_category.w, 1);
+    ownership_raw_env.rejected(refused);
+    assert(refused.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    u64 events = e.local.counts.events;
+    ownership_raw_env.unmapped_work_failure(&e, ownership_raw.begin_work(&e.local.state,
+        &e.local.service, &req, &cursor), &req, events);
+    assert(cursor.selected.base.event_bindings.len == req.base.event_bindings.len);
+    println("unit-a reject event_map_recovery");
+}
+fn cast_type_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    types.node*[8] mut params = {};
+    u64 mut i = 0;
+    while (i < params.len) { params[i] = e.byte; i += 1; }
+    types.node* function = types.type_fn(&e.table, e.byte, params[..], false);
+    types.node* from = types.type_ptr(&e.table, function, false, false);
+    types.node* to = types.type_span(&e.table, function, false, false);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw.calculation mut work = ownership_raw_env.calculation(&e, &req, &cursor);
+    u64 mut price = 999;
+    assert(ownership_raw.type_work(&work, from, to, &price) && price == 184);
+    ownership_raw_env.accepted(work.proof);
+    println("unit-a accept cast_type_work");
+    ownership_raw_env.remaining_work(&e, 4);
+    work.proof = ownership_raw.complete();
+    price = 999;
+    assert(!ownership_raw.type_work(&work, from, to, &price));
+    ownership_raw_env.work_failure(&e, work.proof, &req);
+    assert(price == 999 && function->params.len == 8);
+    println("unit-a reject cast_type_work");
+}
+fn cast_type_depth_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    types.node* mut from = e.byte;
+    u64 mut i = 1;
+    while (i < req.limits.d) { from = types.type_ptr(&e.table, from, false, false); i += 1; }
+    types.node* too_deep = types.type_ptr(&e.table, from, false, false);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw.calculation mut work = ownership_raw_env.calculation(&e, &req, &cursor);
+    u64 mut price = 999;
+    assert(ownership_raw.type_work(&work, from, e.byte, &price));
+    ownership_raw_env.accepted(work.proof);
+    println("unit-a accept cast_type_depth");
+    work.proof = ownership_raw.complete();
+    price = 999;
+    assert(!ownership_raw.type_work(&work, too_deep, e.byte, &price));
+    ownership_raw_env.rejected(work.proof);
+    assert(work.proof.terminal.reason != ownership_api.incomplete_reason.work_limit &&
+        price == 999);
+    println("unit-a reject cast_type_depth_d");
+    ownership_raw_env.remaining_work(&e, 3);
+    work.proof = ownership_raw.complete();
+    assert(!ownership_raw.type_work(&work, from, e.byte, &price));
+    ownership_raw_env.work_failure(&e, work.proof, &req);
+    assert(price == 999);
+    println("unit-a reject cast_type_depth_w");
+}
+fn alignment_coefficient_work() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.zero_bound_heap(&e);
+    ownership_raw.term[128] mut terms = {};
+    ownership_raw.expression offset = ownership_raw_env.zero_terms(terms[..]);
+    terms[127].coefficient = ownership_raw.natural(0);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw.calculation mut work = ownership_raw_env.calculation(&e, &req, &cursor);
+    u64 before = e.budget.meter.used.w;
+    assert(ownership_raw.aligned_work(&work, offset, 8));
+    ownership_raw_env.accepted(work.proof);
+    assert(e.budget.meter.used.w - before > 49000);
+    println("unit-a accept alignment_coefficient_work");
+    ownership_raw_env.remaining_work(&e, 200);
+    work.proof = ownership_raw.complete();
+    assert(!ownership_raw.aligned_work(&work, offset, 8));
+    ownership_raw_env.work_failure(&e, work.proof, &req);
+    assert(terms[0].coefficient.magnitude == 1 && e.root.storage.bounds.len == 1);
+    println("unit-a reject alignment_coefficient_work");
+}
+
 fn cleanup_round(u32 mode, types.node* record_type) allocation_sample {
     ownership_raw_env.env mut e = {};
     ownership_raw_env.open(&e);
@@ -673,9 +993,11 @@ fn cleanup_round(u32 mode, types.node* record_type) allocation_sample {
             ownership_raw.natural(32)}};
     ownership_raw.relation[1] relations = {ownership_raw.relation{left, right}};
     ownership_raw.request mut req = ownership_raw_env.request(&e);
+    u64 capture_start = e.budget.calls;
     e.root = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
         bounds[..], relations[..], &req);
     ownership_raw_env.accepts(&e.root);
+    u64 capture_cost = e.budget.calls - capture_start;
     allocation_sample mut sample = {};
     sample.addresses[0] = cast(e.root.storage.origins.ptr, u64);
     sample.addresses[1] = cast(e.root.storage.leaves.ptr, u64);
@@ -699,9 +1021,12 @@ fn cleanup_round(u32 mode, types.node* record_type) allocation_sample {
         ownership_raw.free_result(&next);
     } else {
         req = ownership_raw_env.request(&e);
-        e.budget.deny_at = e.budget.calls + (mode == 1 ? 1 : 12);
+        ownership_raw.work_cursor mut cursor = {};
+        ownership_raw_env.accepted(ownership_raw.begin_work(&e.local.state, &e.local.service,
+            &req, &cursor));
+        e.budget.deny_at = e.budget.calls + (mode == 1 ? 1 : capture_cost);
         next = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
-            bounds[..], relations[..], &req);
+            bounds[..], relations[..], &cursor.selected);
         ownership_raw_env.rejects(&next);
     }
     ownership_raw_env.close(&e);
@@ -780,6 +1105,19 @@ fn main() i32 {
     array_projection_work();
     field_projection_work();
     sizing_array_overflow();
+    range_validation_work();
+    address_validation_work();
+    metadata_work(0);
+    metadata_work(1);
+    metadata_work(2);
+    metadata_work(3);
+    query_bound_work();
+    query_relation_work();
+    event_map_work();
+    event_route_recovery_work();
+    cast_type_work();
+    cast_type_depth_work();
+    alignment_coefficient_work();
     successful_allocator_teardown();
     early_allocator_teardown();
     late_allocator_teardown();

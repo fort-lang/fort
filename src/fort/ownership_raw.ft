@@ -128,29 +128,158 @@ fn complete() ownership_api.proof_status {
     proof.kind = ownership_api.proof_kind.complete;
     return proof;
 }
+// The stack cursor keeps one route after complete map validation.
+struct work_cursor {
+    request selected;
+    ownership_transfer.event_binding[1] binding;
+    ownership_api.proof_status proof;
+}
+struct raw_event_route { request* selected; ownership_api.services original; }
+struct calculation {
+    context* storage;
+    ownership_api.services* service;
+    request* selected;
+    ownership_api.proof_status proof;
+}
+fn cached_key(request* req) ownership_api.entity_id {
+    if (req->base.event_map_complete_proved && req->base.event_bindings.len == 1 &&
+        ownership_keys.operation(req->base.event_bindings[0].operation,
+        req->base.operation) == 0) { return req->base.event_bindings[0].key; }
+    return ownership_api.entity_id{};
+}
 fn fail(ownership_api.services* svc, request* req, ownership_api.entity_id key,
     bool invalid, string text) ownership_api.proof_status {
-    return ownership_transfer.failed(svc, &req->base,
-        invalid ? ownership_api.event_kind.invalid_use : ownership_api.event_kind.incomplete_proof,
-        invalid ? ownership_api.incomplete_reason.none :
-            ownership_api.incomplete_reason.unknown_effect,
-        key, text);
-}
-fn entry(ownership_state.state* core, ownership_api.services* svc, request* req)
-    ownership_api.proof_status {
-    if (!ownership_api.successful(core->proof)) { return core->proof; }
-    if (!ownership_transfer.valid_event_map(&req->base)) {
+    ownership_api.entity_id route = cached_key(req);
+    if (route.kind != ownership_api.entity_kind.event) {
         return ownership_api.incomplete(ownership_api.incomplete_reason.missing_events,
             req->base.operation, req->base.source_position);
     }
+    ownership_api.proof_status mut proof = complete();
+    proof.failed = true;
+    if (!invalid) {
+        proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            req->base.operation, req->base.source_position);
+        proof.terminal.relation = key;
+    }
+    ownership_api.event_descriptor mut event = ownership_api.event_descriptor{};
+    event.key = route;
+    event.operation = req->base.operation;
+    event.source = req->base.source_position;
+    event.kind = invalid ? ownership_api.event_kind.invalid_use :
+        ownership_api.event_kind.incomplete_proof;
+    event.evidence = invalid ? ownership_api.evidence_kind.unconditional :
+        ownership_api.evidence_kind.abstract_possibility;
+    event.reason = invalid ? ownership_api.incomplete_reason.none :
+        ownership_api.incomplete_reason.unknown_effect;
+    event.relation = key;
+    event.source_path = req->base.source;
+    event.owner_path = req->base.destination;
+    event.text = text;
+    ownership_api.witness_link[1] mut witness = {};
+    witness[0].key = route;
+    witness[0].key.kind = ownership_api.entity_kind.witness;
+    witness[0].condition = key;
+    witness[0].validated = invalid;
+    event.witnesses = witness[..];
+    ownership_api.event_request report = ownership_api.event_request{event, proof};
+    return ownership_api.record_event(svc, &report).proof;
+}
+fn before_route(ownership_api.services* svc, request* req) ownership_api.proof_status {
+    ownership_api.charge_item[1] items = {ownership_api.charge_item{
+        ownership_api.limit_category.w, ownership_api.limit_scope.computation, 1}};
+    ownership_api.charge_request change = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, req->base.operation, req->base.source_position,
+        items[..]};
+    ownership_api.charge_result charged = ownership_api.charge(svc, &change);
+    return charged.allowed ? complete() : charged.proof;
+}
+fn begin_work(ownership_state.state* core, ownership_api.services* svc, request* req,
+    work_cursor mut* cursor) ownership_api.proof_status {
+    *cursor = work_cursor{};
+    cursor->selected = *req;
+    cursor->proof = core->proof;
+    if (!ownership_api.successful(cursor->proof)) { return cursor->proof; }
+    if (!req->base.event_map_complete_proved || req->base.event_bindings.len == 0) {
+        cursor->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_events,
+            req->base.operation, req->base.source_position);
+        return cursor->proof;
+    }
+    ownership_api.entity_id mut key = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < req->base.event_bindings.len) {
+        cursor->proof = before_route(svc, req);
+        if (!ownership_api.successful(cursor->proof)) { return cursor->proof; }
+        ownership_transfer.event_binding left = req->base.event_bindings[i];
+        if (left.key.kind != ownership_api.entity_kind.event ||
+            ownership_keys.function(left.key.function, left.operation.function) != 0) {
+            cursor->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_events,
+                req->base.operation, req->base.source_position);
+            return cursor->proof;
+        }
+        if (ownership_keys.operation(left.operation, req->base.operation) == 0) { key = left.key; }
+        u64 mut j = 0;
+        while (j < i) {
+            cursor->proof = before_route(svc, req);
+            if (!ownership_api.successful(cursor->proof)) { return cursor->proof; }
+            if (ownership_keys.operation(left.operation,
+                req->base.event_bindings[j].operation) == 0) {
+                key = ownership_api.entity_id{};
+                break;
+            }
+            cursor->proof = before_route(svc, req);
+            if (!ownership_api.successful(cursor->proof)) { return cursor->proof; }
+            if (same_key(left.key, req->base.event_bindings[j].key)) {
+                key = ownership_api.entity_id{};
+                break;
+            }
+            j += 1;
+        }
+        if (j < i) { break; }
+        i += 1;
+    }
+    if (i != req->base.event_bindings.len || key.kind != ownership_api.entity_kind.event) {
+        cursor->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_events,
+            req->base.operation, req->base.source_position);
+        return cursor->proof;
+    }
+    cursor->binding[0] = ownership_transfer.event_binding{req->base.operation, key};
+    cursor->selected.base.event_bindings = cursor->binding[..];
     if (!req->alternatives_complete || !req->captured_values) {
-        return fail(svc, req, ownership_api.entity_id{}, false,
+        cursor->proof = fail(svc, &cursor->selected, ownership_api.entity_id{}, false,
             "raw proof needs exhaustive captured input correspondence");
+    } else if (!ownership_api.valid_limits(&req->limits)) {
+        cursor->proof = fail(svc, &cursor->selected, ownership_api.entity_id{}, false,
+            "raw proof needs valid limits");
+    } else { cursor->proof = complete(); }
+    return cursor->proof;
+}
+fn entry(ownership_state.state* core, ownership_api.services* svc, request* req)
+    ownership_api.proof_status {
+    work_cursor mut cursor = {};
+    return begin_work(core, svc, req, &cursor);
+}
+fn cached_event(void mut* opaque, ownership_api.event_request* report)
+    ownership_api.event_result {
+    raw_event_route* route = cast(opaque, raw_event_route*);
+    ownership_api.exhaustion limit = report->current.terminal.limit;
+    ownership_api.entity_id key = cached_key(route->selected);
+    if (key.kind != ownership_api.entity_kind.event ||
+        ownership_keys.operation(report->event.operation, route->selected->base.operation) != 0 ||
+        (report->event.kind == ownership_api.event_kind.work_failure &&
+        (report->event.reason != ownership_api.incomplete_reason.work_limit ||
+        report->current.terminal.reason != ownership_api.incomplete_reason.work_limit ||
+        !limit.present || ownership_keys.operation(limit.operation, report->event.operation) != 0 ||
+        ownership_keys.source(limit.source, report->event.source) != 0))) {
+        ownership_api.event_result mut refused = ownership_api.event_result{};
+        refused.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            report->event.operation, report->event.source);
+        refused.retained = true;
+        return refused;
     }
-    if (!ownership_api.valid_limits(&req->limits)) {
-        return fail(svc, req, ownership_api.entity_id{}, false, "raw proof needs valid limits");
-    }
-    return complete();
+    ownership_api.event_request mut mapped = *report;
+    mapped.event.key = key;
+    if (mapped.event.kind == ownership_api.event_kind.work_failure) { mapped.event.limit = limit; }
+    return route->original.event(route->original.event_context, &mapped);
 }
 fn charge(ownership_api.services* svc, request* req, ownership_api.limit_category category,
     u64 amount) ownership_api.proof_status {
@@ -173,13 +302,15 @@ fn charge(ownership_api.services* svc, request* req, ownership_api.limit_categor
             items[..len]};
         ownership_api.charge_result charged = ownership_api.charge(svc, &change);
         if (!charged.allowed) {
-            if (svc->event == null) { return charged.proof; }
-            ownership_transfer.event_route mut route = ownership_transfer.event_route{};
+            if (svc->event == null || cached_key(req).kind != ownership_api.entity_kind.event) {
+                return charged.proof;
+            }
+            raw_event_route mut route = {};
             route.original = *svc;
-            route.request = &req->base;
+            route.selected = req;
             ownership_api.services mut mapped = *svc;
             mapped.event_context = cast(&route, void mut*);
-            mapped.event = ownership_transfer.mapped_event;
+            mapped.event = cached_event;
             return ownership_state.report_failure(&mapped, charged.proof,
                 req->base.operation, req->base.source_position);
         }
@@ -343,22 +474,208 @@ fn le(context* ctx, expression a, expression b) bool {
 fn fits(context* ctx, expression value) bool {
     return le(ctx, literal(0), value) && le(ctx, value, literal(U64_MAX));
 }
+fn spend(calculation mut* work, u64 amount) bool {
+    if (!ownership_api.successful(work->proof)) { return false; }
+    work->proof = charge(work->service, work->selected, ownership_api.limit_category.w, amount);
+    return ownership_api.successful(work->proof);
+}
+fn validate_expression_work(calculation mut* work, expression input) bool {
+    if (!spend(work, 1)) { return false; }
+    if (!input.complete || !input.constant.valid ||
+        input.terms.len > types.TYPE_MAX_SIZE / sizeof(term)) { return false; }
+    u64 mut i = 0;
+    while (i < input.terms.len) {
+        if (!spend(work, 1)) { return false; }
+        if (!value_key(input.terms[i].version) || !input.terms[i].coefficient.valid) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn validate_addresses_work(calculation mut* work, address@ values) bool {
+    u64 mut i = 0;
+    while (i < values.len) {
+        if (!spend(work, 1)) { return false; }
+        address item = values[i];
+        if (item.offset.terms.len > work->selected->limits.p ||
+            item.begin.terms.len > work->selected->limits.p ||
+            item.end.terms.len > work->selected->limits.p ||
+            !validate_expression_work(work, item.offset) ||
+            !validate_expression_work(work, item.begin) ||
+            !validate_expression_work(work, item.end)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn coefficient_work(calculation mut* work, expression input, ownership_api.entity_id key) number {
+    number mut out = natural(0);
+    u64 mut i = 0;
+    while (i < input.terms.len) {
+        if (!spend(work, 1)) { return number{}; }
+        if (same_key(input.terms[i].version, key)) { out = plus(out, input.terms[i].coefficient); }
+        i += 1;
+    }
+    return out;
+}
+fn first_work(calculation mut* work, expression input, u64 index) bool {
+    u64 mut i = 0;
+    while (i < index) {
+        if (!spend(work, 1)) { return false; }
+        if (same_key(input.terms[i].version, input.terms[index].version)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn bound_work(calculation mut* work, ownership_api.entity_id key) interval {
+    u64 mut i = 0;
+    while (i < work->storage->bounds.len) {
+        if (!spend(work, 1)) { return interval{}; }
+        captured_bound item = work->storage->bounds[i];
+        if (same_key(item.version, key)) { return interval{item.lower, item.upper, true}; }
+        i += 1;
+    }
+    return interval{};
+}
+fn same_expression_work(calculation mut* work, expression a, expression b) bool {
+    if (!validate_expression_work(work, a) || !validate_expression_work(work, b) ||
+        !same_number(a.constant, b.constant)) { return false; }
+    u64 mut i = 0;
+    while (i < a.terms.len) {
+        if (!spend(work, 1)) { return false; }
+        ownership_api.entity_id key = a.terms[i].version;
+        number left = coefficient_work(work, a, key);
+        number right = coefficient_work(work, b, key);
+        if (!ownership_api.successful(work->proof) || !same_number(left, right)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < b.terms.len) {
+        if (!spend(work, 1)) { return false; }
+        ownership_api.entity_id key = b.terms[i].version;
+        number left = coefficient_work(work, a, key);
+        number right = coefficient_work(work, b, key);
+        if (!ownership_api.successful(work->proof) || !same_number(left, right)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn difference_work(calculation mut* work, expression a, expression b) interval {
+    if (!validate_expression_work(work, a) || !validate_expression_work(work, b)) {
+        return interval{};
+    }
+    number value = plus(a.constant, negate(b.constant));
+    interval mut out = interval{value, value, value.valid};
+    u64 mut i = 0;
+    while (i < a.terms.len) {
+        if (!spend(work, 1)) { return interval{}; }
+        if (first_work(work, a, i)) {
+            ownership_api.entity_id key = a.terms[i].version;
+            number left = coefficient_work(work, a, key);
+            number right = coefficient_work(work, b, key);
+            interval captured = bound_work(work, key);
+            out = extend(out, plus(left, negate(right)), captured);
+        }
+        if (!ownership_api.successful(work->proof)) { return interval{}; }
+        i += 1;
+    }
+    i = 0;
+    while (i < b.terms.len) {
+        if (!spend(work, 1)) { return interval{}; }
+        ownership_api.entity_id key = b.terms[i].version;
+        bool leading = first_work(work, b, i);
+        if (!ownership_api.successful(work->proof)) { return interval{}; }
+        if (leading) {
+            number factor = coefficient_work(work, a, key);
+            if (!ownership_api.successful(work->proof)) { return interval{}; }
+            if (factor.magnitude == 0) {
+                bool mut present = false;
+                u64 mut j = 0;
+                while (j < a.terms.len) {
+                    if (!spend(work, 1)) { return interval{}; }
+                    if (same_key(a.terms[j].version, key)) { present = true; }
+                    j += 1;
+                }
+                if (!present) {
+                    number coefficient = coefficient_work(work, b, key);
+                    interval captured = bound_work(work, key);
+                    out = extend(out, negate(coefficient), captured);
+                }
+            }
+        }
+        if (!ownership_api.successful(work->proof)) { return interval{}; }
+        i += 1;
+    }
+    return out;
+}
+fn le_work(calculation mut* work, expression a, expression b) bool {
+    interval delta = difference_work(work, a, b);
+    if (!ownership_api.successful(work->proof)) { return false; }
+    if (delta.proved && less_equal(delta.upper, natural(0))) { return true; }
+    interval left = difference_work(work, a, literal(0));
+    interval right = difference_work(work, b, literal(0));
+    if (!ownership_api.successful(work->proof)) { return false; }
+    if (left.proved && right.proved && less_equal(left.upper, right.lower)) { return true; }
+    u64 mut i = 0;
+    while (i < work->storage->relations.len) {
+        if (!spend(work, 1)) { return false; }
+        relation stored = work->storage->relations[i];
+        if (same_expression_work(work, a, stored.left) &&
+            same_expression_work(work, b, stored.right)) { return true; }
+        if (!ownership_api.successful(work->proof)) { return false; }
+        i += 1;
+    }
+    return false;
+}
+fn fits_work(calculation mut* work, expression value) bool {
+    return le_work(work, literal(0), value) && le_work(work, value, literal(U64_MAX));
+}
+fn aligned_work(calculation mut* work, expression offset, u64 alignment) bool {
+    if (!validate_expression_work(work, offset) || alignment == 0 || offset.constant.negative ||
+        offset.constant.magnitude % alignment != 0) { return false; }
+    u64 mut i = 0;
+    while (i < offset.terms.len) {
+        if (!spend(work, 1)) { return false; }
+        term item = offset.terms[i];
+        number mut factor = coefficient_work(work, offset, item.version);
+        if (!ownership_api.successful(work->proof)) { return false; }
+        if (factor.magnitude % alignment != 0) {
+            interval exact = bound_work(work, item.version);
+            if (!ownership_api.successful(work->proof) || !exact.proved ||
+                !same_number(exact.lower, exact.upper)) { return false; }
+            factor = coefficient_work(work, offset, item.version);
+            if (!ownership_api.successful(work->proof) ||
+                !multiply(factor, exact.lower).valid) { return false; }
+            factor = coefficient_work(work, offset, item.version);
+            if (!ownership_api.successful(work->proof) ||
+                multiply(factor, exact.lower).magnitude % alignment != 0) { return false; }
+        }
+        i += 1;
+    }
+    return true;
+}
 fn compare_expressions(context* ctx, ownership_api.services* svc, expression left,
-    expression right, request* req) ownership_api.proof_status {
-    ownership_api.proof_status mut proof = entry(ctx->core, svc, req);
+    expression right, request* supplied) ownership_api.proof_status {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
+    ownership_api.proof_status mut proof = prepared;
     if (!ownership_api.successful(proof)) { return proof; }
-    if (!bounded_expression(left, req) || !bounded_expression(right, req)) {
+    calculation mut work = calculation{ctx, svc, req, complete()};
+    if (left.terms.len > req->limits.p || right.terms.len > req->limits.p ||
+        !validate_expression_work(&work, left) || !validate_expression_work(&work, right)) {
+        if (!ownership_api.successful(work.proof)) { return work.proof; }
         return fail(svc, req, ownership_api.entity_id{}, false, "raw expressions are incomplete");
     }
-    proof = charge(svc, req, ownership_api.limit_category.w, square_work(
-        add_work(add_work(1, left.terms.len), add_work(right.terms.len, ctx->relations.len))));
-    if (!ownership_api.successful(proof)) { return proof; }
-    if (!le(ctx, left, right)) {
+    bool proved = le_work(&work, left, right);
+    if (!ownership_api.successful(work.proof)) { return work.proof; }
+    if (!proved) {
         return fail(svc, req, ownership_api.entity_id{}, false,
             "raw bound relation remains unproved");
     }
     return complete();
 }
+
 fn scale(context mut* ctx, expression input, u64 stride) expression {
     expression mut out = copy_expression(ctx, input);
     out.constant = multiply(input.constant, natural(stride));
@@ -637,33 +954,89 @@ fn foreign(context* ctx, address value) bool {
     return source != U64_MAX &&
         ctx->core->sources[source].kind == ownership_api.source_kind.trusted_foreign;
 }
-fn work_size(context* ctx, address@ values, u64 operands) u64 {
+fn measure_context_work(calculation mut* work, address@ values, u64 operands,
+    u64 mut* price) bool {
+    if (!spend(work, 1)) { return false; }
+    context* ctx = work->storage;
     u64 mut total = add_work(add_work(1, ctx->origins.len), ctx->leaves_len);
     total = add_work(total, add_work(ctx->bounds.len, ctx->relations.len));
     term_block* mut block = ctx->terms;
     while (block != null) {
+        if (!spend(work, 1)) { return false; }
         total = add_work(total, block->items.len);
         block = block->next;
     }
     u64 mut i = 0;
     while (i < ctx->origins.len) {
-        total = add_work(total, ctx->origins[i].place.projections.len);
+        if (!spend(work, 1)) { return false; }
+        origin item = ctx->origins[i];
+        total = add_work(total, item.place.projections.len);
+        total = add_work(total, add_work(item.count.terms.len,
+            add_work(item.begin.terms.len, item.end.terms.len)));
         i += 1;
     }
     i = 0;
     while (i < ctx->leaves_len) {
+        if (!spend(work, 1)) { return false; }
         total = add_work(total, ctx->leaves[i].place.projections.len);
         i += 1;
     }
     i = 0;
+    while (i < ctx->relations.len) {
+        if (!spend(work, 1)) { return false; }
+        relation item = ctx->relations[i];
+        total = add_work(total, add_work(item.left.terms.len, item.right.terms.len));
+        i += 1;
+    }
+    i = 0;
     while (i < values.len) {
-        u64 mut count = add_work(values[i].offset.terms.len, values[i].begin.terms.len);
-        count = add_work(count, values[i].end.terms.len);
+        if (!spend(work, 1)) { return false; }
+        address item = values[i];
+        u64 mut count = add_work(item.offset.terms.len, item.begin.terms.len);
+        count = add_work(count, item.end.terms.len);
         total = add_work(total, add_work(add_work(count, 1), operands));
         i += 1;
     }
-    // This bound includes nested coefficient comparisons and copied records.
-    return square_work(total);
+    // Metadata charges do not pay for nested comparisons.
+    *price = square_work(total);
+    return true;
+}
+fn type_nodes_work(calculation mut* work, types.node* ty, u64 depth, u64 mut* nodes) bool {
+    if (depth >= work->selected->limits.d) {
+        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
+            "raw type comparison exceeds its depth limit");
+        return false;
+    }
+    if (!spend(work, 1)) { return false; }
+    if (ty == null) {
+        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
+            "raw type comparison needs checked metadata");
+        return false;
+    }
+    *nodes = add_work(*nodes, 1);
+    if (ty->kind == types.type_kind.k_ptr || ty->kind == types.type_kind.k_voidptr ||
+        ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_array ||
+        ty->kind == types.type_kind.k_fn) {
+        if (!type_nodes_work(work, ty->elem, depth + 1, nodes)) { return false; }
+    }
+    if (ty->kind == types.type_kind.k_fn) {
+        u64 mut i = 0;
+        while (i < ty->params.len) {
+            if (!spend(work, 1)) { return false; }
+            if (!type_nodes_work(work, ty->params[i], depth + 1, nodes)) { return false; }
+            i += 1;
+        }
+    }
+    return true;
+}
+fn type_work(calculation mut* work, types.node* from, types.node* to, u64 mut* price) bool {
+    u64 mut nodes = 0;
+    if (!type_nodes_work(work, from, 0, &nodes) ||
+        !type_nodes_work(work, to, 0, &nodes)) { return false; }
+    // Eight full node passes cover equality, conversion, marks, shape, and orphan tests.
+    u64 count = add_work(nodes, 1);
+    *price = count > U64_MAX / 8 ? U64_MAX : count * 8;
+    return true;
 }
 fn bounded_addresses(address@ values, request* req) bool {
     u64 mut i = 0;
@@ -675,18 +1048,28 @@ fn bounded_addresses(address@ values, request* req) bool {
     }
     return true;
 }
-fn start(context* ctx, ownership_api.services* svc, address@ values, request* req,
+fn start(context* ctx, ownership_api.services* svc, address@ values, request* supplied,
     u64 operands) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
     result mut out = result{};
-    out.proof = entry(ctx->core, svc, req);
+    out.proof = prepared;
     if (!ownership_api.successful(out.proof)) { return out; }
+    calculation mut work = calculation{ctx, svc, req, complete()};
     if (!ownership_api.successful(ctx->proof) || values.len == 0 || values.len > req->limits.g ||
-        !bounded_addresses(values, req)) {
+        !validate_addresses_work(&work, values)) {
+        if (!ownership_api.successful(work.proof)) { out.proof = work.proof; return out; }
         out.proof = fail(svc, req, ownership_api.entity_id{}, false,
             "raw alternatives need complete exhaustive correspondence");
         return out;
     }
-    out.proof = charge(svc, req, ownership_api.limit_category.w, work_size(ctx, values, operands));
+    u64 mut price = 0;
+    if (!measure_context_work(&work, values, operands, &price)) {
+        out.proof = work.proof;
+        return out;
+    }
+    out.proof = charge(svc, req, ownership_api.limit_category.w, price);
     if (!ownership_api.successful(out.proof)) { return out; }
     out.storage = clone(ctx, ctx->core);
     out.addresses = new(address, values.len);
@@ -695,11 +1078,17 @@ fn start(context* ctx, ownership_api.services* svc, address@ values, request* re
     return out;
 }
 fn start_range(context* ctx, ownership_api.services* svc, address@ values,
-    expression lower, expression upper, request* req) result {
+    expression lower, expression upper, request* supplied) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
     result mut out = result{};
-    out.proof = entry(ctx->core, svc, req);
+    out.proof = prepared;
     if (!ownership_api.successful(out.proof)) { return out; }
-    if (!bounded_expression(lower, req) || !bounded_expression(upper, req)) {
+    calculation mut work = calculation{ctx, svc, req, complete()};
+    if (lower.terms.len > req->limits.p || upper.terms.len > req->limits.p ||
+        !validate_expression_work(&work, lower) || !validate_expression_work(&work, upper)) {
+        if (!ownership_api.successful(work.proof)) { out.proof = work.proof; return out; }
         out.proof = fail(svc, req, ownership_api.entity_id{}, false,
             "raw selected bounds are incomplete");
         return out;
@@ -712,9 +1101,12 @@ fn discard(result mut* out, ownership_api.proof_status proof) void {
     out->proof = proof;
 }
 fn capture_origins(ownership_state.state* core, ownership_api.services* svc, origin@ inputs,
-    captured_bound@ bounds, relation@ relations, request* req) result {
+    captured_bound@ bounds, relation@ relations, request* supplied) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
     result mut out = result{};
-    out.proof = entry(core, svc, req);
+    out.proof = prepared;
     if (!ownership_api.successful(out.proof)) { return out; }
     if (inputs.len == 0 || inputs.len > req->limits.g || bounds.len > req->limits.p ||
         relations.len > req->limits.p || inputs.len > types.TYPE_MAX_SIZE / sizeof(origin) ||
@@ -866,7 +1258,15 @@ fn capture_origin(ownership_state.state* core, ownership_api.services* svc, orig
 
 // The producer supplies a checked subobject or a successful ordinary-bounds window.
 fn derive_address(context* ctx, ownership_api.services* svc, address@ values,
-    expression lower, expression upper, types.node* selected, request* req) result {
+    expression lower, expression upper, types.node* selected, request* supplied) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
+    if (!ownership_api.successful(prepared)) {
+        result mut failed = {};
+        failed.proof = prepared;
+        return failed;
+    }
     result mut out = start_range(ctx, svc, values, lower, upper, req);
     if (!ownership_api.successful(out.proof)) { return out; }
     u64 mut i = 0;
@@ -890,7 +1290,15 @@ fn derive_address(context* ctx, ownership_api.services* svc, address@ values,
     return out;
 }
 fn cast_reference(context* ctx, ownership_api.services* svc, address@ values,
-    types.node* from, types.node* to, request* req) result {
+    types.node* from, types.node* to, request* supplied) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
+    if (!ownership_api.successful(prepared)) {
+        result mut failed = {};
+        failed.proof = prepared;
+        return failed;
+    }
     result mut out = start(ctx, svc, values, req, 0);
     if (!ownership_api.successful(out.proof)) { return out; }
     if (from == null || to == null || !types.type_cast_allowed(to, from) ||
@@ -903,10 +1311,13 @@ fn cast_reference(context* ctx, ownership_api.services* svc, address@ values,
     while (i < out.addresses.len) { out.addresses[i].ty = to; i += 1; }
     return out;
 }
-fn reconstruct_integer(ownership_state.state* core, ownership_api.services* svc, request* req)
+fn reconstruct_integer(ownership_state.state* core, ownership_api.services* svc, request* supplied)
     result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
     result mut out = result{};
-    out.proof = entry(core, svc, req);
+    out.proof = prepared;
     if (!ownership_api.successful(out.proof)) { return out; }
     out.proof = charge(svc, req, ownership_api.limit_category.w, 1);
     if (!ownership_api.successful(out.proof)) { return out; }
@@ -932,7 +1343,15 @@ fn scalar_expression(context mut* ctx, ownership_api.scalar_fact fact) expressio
 }
 // Header correspondence is separate from the header slot's own storage source.
 fn extract_pointer(context* ctx, ownership_api.services* svc, address@ backing,
-    ownership_api.contents_fact* header, request* req) result {
+    ownership_api.contents_fact* header, request* supplied) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
+    if (!ownership_api.successful(prepared)) {
+        result mut failed = {};
+        failed.proof = prepared;
+        return failed;
+    }
     result mut out = start(ctx, svc, backing, req, 0);
     if (!ownership_api.successful(out.proof)) { return out; }
     if (header->kind != ownership_api.contents_kind.reference || header->borrows.len != backing.len)
@@ -961,7 +1380,15 @@ fn extract_pointer(context* ctx, ownership_api.services* svc, address@ backing,
     return out;
 }
 fn slice_ptr(context* ctx, ownership_api.services* svc, address@ values,
-    expression lower, expression upper, types.node* element, request* req) result {
+    expression lower, expression upper, types.node* element, request* supplied) result {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
+    if (!ownership_api.successful(prepared)) {
+        result mut failed = {};
+        failed.proof = prepared;
+        return failed;
+    }
     result mut out = start_range(ctx, svc, values, lower, upper, req);
     if (!ownership_api.successful(out.proof)) { return out; }
     u64 mut stride = 0;
@@ -1013,14 +1440,21 @@ fn aligned(context* ctx, expression offset, u64 alignment) bool {
     return true;
 }
 fn access(context* ctx, ownership_api.services* svc, address@ values,
-    types.node* accessed, request* req) ownership_api.proof_status {
-    ownership_api.proof_status mut proof = entry(ctx->core, svc, req);
+    types.node* accessed, request* supplied) ownership_api.proof_status {
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(ctx->core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
+    ownership_api.proof_status mut proof = prepared;
     if (!ownership_api.successful(proof)) { return proof; }
+    calculation mut work = calculation{ctx, svc, req, complete()};
     if (!ownership_api.successful(ctx->proof) || values.len == 0 || values.len > req->limits.g ||
-        !bounded_addresses(values, req)) {
+        !validate_addresses_work(&work, values)) {
+        if (!ownership_api.successful(work.proof)) { return work.proof; }
         return fail(svc, req, ownership_api.entity_id{}, false, "raw alternatives are incomplete");
     }
-    proof = charge(svc, req, ownership_api.limit_category.w, work_size(ctx, values, 0));
+    u64 mut price = 0;
+    if (!measure_context_work(&work, values, 0, &price)) { return work.proof; }
+    proof = charge(svc, req, ownership_api.limit_category.w, price);
     if (!ownership_api.successful(proof)) { return proof; }
     u64 mut bytes = 0;
     proof = size(accessed, svc, req, 0, &bytes);
@@ -1051,9 +1485,12 @@ fn access(context* ctx, ownership_api.services* svc, address@ values,
     return complete();
 }
 fn inspect_empty_header(ownership_state.state* core, ownership_api.services* svc,
-    ownership_api.contents_fact* header, bool canonical_null, request* req)
+    ownership_api.contents_fact* header, bool canonical_null, request* supplied)
     ownership_api.proof_status {
-    ownership_api.proof_status mut proof = entry(core, svc, req);
+    work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = begin_work(core, svc, supplied, &cursor);
+    request* req = &cursor.selected;
+    ownership_api.proof_status mut proof = prepared;
     if (!ownership_api.successful(proof)) { return proof; }
     proof = charge(svc, req, ownership_api.limit_category.w, 1);
     if (!ownership_api.successful(proof)) { return proof; }
