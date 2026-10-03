@@ -12,7 +12,7 @@
 //| selected paths 2
 //| boundary repeats 10
 //| absence remains open
-//| output compared 27
+//| output compared 118
 /// Checks selected source inventory against inactive range proposals.
 import ast;
 import diag;
@@ -23,12 +23,150 @@ import fir_print;
 import fir_verify;
 import gen;
 import gen_env;
+import gen_fir;
+import gen_data;
+import json;
+import modules;
 import lower_env;
 import std.strbuf;
+import std.io;
+import std.sys;
 
 u32 mut output_comparisons = 0;
+u32 mut original_comparisons = 0;
+u32 mut exported_comparisons = 0;
+strbuf.str_buf mut probe_rows = strbuf.str_buf{};
 
-fn check_output(lower_env.env mut* e, ast.node* decl, fir.func* f) void {
+struct probe_emissions {
+    u32 selected;
+    u32 substitutions;
+}
+
+fn probe_declarations(gen.emitter mut* g, gen_fir.fir_path mut* fp, ast.node* list,
+                      ast.node* selected, fir.func* audited, probe_emissions mut* counts) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* d = ast.ast_child(list, i);
+        if (d->kind == ast.ast_kind.k_compile_if) {
+            probe_declarations(g, fp, fir_lower.selected_branch(d), selected, audited, counts);
+        } else if (d->kind == ast.ast_kind.k_fn_decl && d->b != null) {
+            if (d == selected) {
+                counts->selected += 1;
+                if (audited != null) {
+                    fir.func replacement = fir.func_clone(audited);
+                    gen_fir.emit_fir(g, fp, move(replacement));
+                    counts->substitutions += 1;
+                } else {
+                    gen_fir.emit_function(g, fp, d);
+                }
+            } else {
+                gen_fir.emit_function(g, fp, d);
+            }
+        }
+        i += 1;
+    }
+}
+
+fn probe_module(lower_env.env mut* e, ast.node* decl, fir.func* audited,
+                 gen.emitter mut* g, probe_emissions mut* counts) void {
+    gen.gen_init(g, &e->c.m.s, gen.gen_options{});
+    g->ck = &e->c.ck;
+    gen_fir.fir_path mut fp = gen_fir.fir_path{.ck = &e->c.ck, .rt = e->rt};
+    strbuf.append(&g->named, gen.SPAN_TYPE);
+    strbuf.append(&g->named, " = type { ptr, i64 }\n");
+    strbuf.append(&g->named, gen.ENUM_MEMBER_TYPE);
+    strbuf.append(&g->named, " = type { i32, ptr }\n");
+    u64 mut i = 0;
+    while (i < modules.count(&e->c.m.set)) {
+        modules.module* m = modules.at(&e->c.m.set, i);
+        g->module = m;
+        gen_fir.gen_declarations(g, &fp, m->ast, 1);
+        gen_fir.gen_declarations(g, &fp, m->ast, 2);
+        probe_declarations(g, &fp, m->ast, decl, audited, counts);
+        g->module = null;
+        i += 1;
+    }
+    gen_data.gen_finish(g);
+    assert(!g->failed && counts->selected == 1);
+    if (audited != null) { assert(counts->substitutions == 1); }
+    else { assert(counts->substitutions == 0); }
+}
+
+fn probe_file(string dir, string leaf, string text) void {
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    strbuf.append(&path, dir);
+    strbuf.push(&path, '/');
+    strbuf.append(&path, leaf);
+    assert(io.write_file(strbuf.view(&path), cast(text, u8@)));
+}
+
+fn probe_name(strbuf.str_buf mut* out, u32 index, string suffix) void {
+    strbuf.append(out, "probe-");
+    strbuf.append_u64(out, cast(index, u64));
+    strbuf.append(out, suffix);
+}
+
+fn export_probe(string name, bool added, ast.node* decl,
+                 gen.emitter mut* ordinary, gen.emitter* audited) void {
+    string mut dir = "";
+    if (!sys.env("FORT_RANGE_PROBE_DIR", &dir)) { return; }
+    strbuf.str_buf mut ordinary_name = strbuf.create();
+    defer strbuf.free(&ordinary_name);
+    probe_name(&ordinary_name, output_comparisons, ".ordinary.ll");
+    strbuf.str_buf mut audited_name = strbuf.create();
+    defer strbuf.free(&audited_name);
+    probe_name(&audited_name, output_comparisons, ".audited.ll");
+    probe_file(dir, strbuf.view(&ordinary_name), strbuf.view(&ordinary->out));
+    probe_file(dir, strbuf.view(&audited_name), strbuf.view(&audited->out));
+    if (exported_comparisons != 0) { strbuf.append(&probe_rows, ",\n"); }
+    json.writer mut j = json.writer{};
+    json.json_init(&j, &probe_rows);
+    json.json_object_begin(&j);
+    json.json_key(&j, "index");
+    json.json_uint(&j, cast(output_comparisons, u64));
+    json.json_key(&j, "source_probe");
+    json.json_str(&j, name);
+    json.json_key(&j, "origin");
+    string mut origin = "original";
+    if (added) { origin = "added"; }
+    json.json_str(&j, origin);
+    json.json_key(&j, "selected_function_key");
+    json.json_str(&j, gen.gen_symbol(ordinary, decl->sym));
+    json.json_key(&j, "selected_ir_symbol");
+    json.json_str(&j, gen.gen_symbol_ref(ordinary, decl->sym));
+    json.json_key(&j, "ordinary_selected_emissions");
+    json.json_uint(&j, 1);
+    json.json_key(&j, "audited_selected_emissions");
+    json.json_uint(&j, 1);
+    json.json_key(&j, "audited_substitutions");
+    json.json_uint(&j, 1);
+    json.json_key(&j, "ordinary");
+    json.json_str(&j, strbuf.view(&ordinary_name));
+    json.json_key(&j, "audited");
+    json.json_str(&j, strbuf.view(&audited_name));
+    json.json_object_end(&j);
+    exported_comparisons += 1;
+}
+
+fn export_ledger() void {
+    string mut dir = "";
+    if (!sys.env("FORT_RANGE_PROBE_DIR", &dir)) { return; }
+    assert(exported_comparisons == output_comparisons && original_comparisons == 27);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "{\"comparisons\":");
+    strbuf.append_u64(&text, cast(output_comparisons, u64));
+    strbuf.append(&text, ",\"original_comparisons\":27,\"added_comparisons\":");
+    strbuf.append_u64(&text, cast(output_comparisons - original_comparisons, u64));
+    strbuf.append(&text, ",\"excluded_invalid_fir\":[],\"probes\":[\n");
+    strbuf.append(&text, strbuf.view(&probe_rows));
+    strbuf.append(&text, "\n]}\n");
+    probe_file(dir, "probes.json", strbuf.view(&text));
+}
+
+fn check_output(lower_env.env mut* e, ast.node* decl, fir.func* f,
+                 string name, bool added) void {
     fir_verify.violation mut bad = fir_verify.violation{};
     assert(!fir_verify.find_violation(f, &e->rt, &bad));
     fir.func mut ordinary = fir.func{};
@@ -44,19 +182,21 @@ fn check_output(lower_env.env mut* e, ast.node* decl, fir.func* f) void {
     fir_print.print_function(&ordinary, &ordinary_text);
     assert(strbuf.view(&audited_text) == strbuf.view(&ordinary_text));
     gen.emitter mut audited_ir = gen.emitter{};
-    gen.gen_init(&audited_ir, &e->c.m.s, gen.gen_options{});
     defer gen.gen_free(&audited_ir);
     gen.emitter mut ordinary_ir = gen.emitter{};
-    gen.gen_init(&ordinary_ir, &e->c.m.s, gen.gen_options{});
     defer gen.gen_free(&ordinary_ir);
-    fir_llvm.translate_function(&audited_ir, f);
-    fir_llvm.translate_function(&ordinary_ir, &ordinary);
-    assert(strbuf.view(&audited_ir.funcs) == strbuf.view(&ordinary_ir.funcs));
+    probe_emissions mut audited_counts = probe_emissions{};
+    probe_emissions mut ordinary_counts = probe_emissions{};
+    probe_module(e, decl, f, &audited_ir, &audited_counts);
+    probe_module(e, decl, null, &ordinary_ir, &ordinary_counts);
+    assert(strbuf.view(&audited_ir.out) == strbuf.view(&ordinary_ir.out));
     strbuf.str_buf mut report = strbuf.create();
     defer strbuf.free(&report);
     assert(gen_env.block_report(&report, strbuf.view(&audited_ir.funcs))
            == gen_env.BLOCKS_OK);
     output_comparisons += 1;
+    if (!added) { original_comparisons += 1; }
+    export_probe(name, added, decl, &ordinary_ir, &audited_ir);
 }
 
 fn selected_inventory() void {
@@ -86,7 +226,7 @@ fn selected_inventory() void {
     assert(audit.produced_expansions == 1 && audit.matched_captures == 1);
     assert(audit.rows.len == 1 && audit.rows.items[0].key.expansion == 1);
     assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, "selected_inventory", false);
     fir_lower.range_source_audit_free(&audit);
     proposed.captures.len = 0;
     assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
@@ -131,16 +271,18 @@ fn repeated_expansion() void {
                                                            &proposed, &why));
     fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
     defer fir_lower.range_source_audit_free(&audit);
-    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
     assert(audit.selected_declarations == 2 && audit.produced_expansions == 3);
-    assert(audit.matched_captures == 1 && audit.rows.len == 1);
+    assert(audit.matched_captures == 3 && audit.rows.len == 3);
     assert(audit.rows.items[0].key.declaration == 1);
-    assert(audit.failure.reason == fir_lower.range_audit_fault.context);
-    assert(audit.failure.key.declaration == 2 && audit.failure.key.expansion == 2);
-    assert(audit.failure.key.context_source.line == 4);
-    assert(audit.failure.key.exit_source.line == 7);
+    assert(audit.rows.items[1].key.declaration == 2);
+    assert(audit.rows.items[2].key.declaration == 2);
+    assert(audit.rows.items[1].key.context_source.line == 4);
+    assert(audit.rows.items[1].key.exit_source.line == 7);
+    assert(audit.rows.items[1].key.exit_occurrence == 2);
+    assert(audit.rows.items[2].key.exit_occurrence == 5);
     assert(!audit.source_complete && !f.range_source_complete);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, "repeated_expansion", false);
     fir_lower.range_candidate_set_free(&proposed);
     assert(audit.rows.items[0].boundaries_len > 0);
 }
@@ -200,8 +342,11 @@ fn deferred_context_damage() void {
                                                            &proposed, &why));
     assert(proposed.captures.len == 1 && proposed.deferred.len == 2);
     diag.loc exit_source = produced_exit(&f, 3);
-    expect_context_refusal(decl, &f, &proposed, exit_source);
-    check_output(&e, decl, &f);
+    fir_lower.range_source_audit mut valid = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&valid);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &valid));
+    assert(valid.rows.len == 1 && valid.rows.items[0].key.context == 2);
+    check_output(&e, decl, &f, "deferred_context_damage", false);
     u64 captures = proposed.captures.len;
     proposed.captures.len = 0;
     expect_context_refusal(decl, &f, &proposed, exit_source);
@@ -246,7 +391,7 @@ fn damaged_keys() void {
     defer fir_lower.range_source_audit_free(&audit);
     assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
     assert(audit.protected_paths == 1 && audit.rows.items[0].boundaries_len == 5);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, "damaged_keys", false);
     fir_lower.range_source_audit_free(&audit);
     proposed.captures.items[0].expansion = 9;
     assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
@@ -288,7 +433,7 @@ fn cleanup_damage() void {
     fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
     defer fir_lower.range_source_audit_free(&audit);
     assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, "cleanup_damage", false);
     fir_lower.range_source_audit_free(&audit);
     proposed.boundaries.len = 2;
     assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
@@ -349,7 +494,7 @@ fn multi_exit_cleanup_damage() void {
     defer fir_lower.range_source_audit_free(&audit);
     assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
     assert(proposed.boundaries.len == 8);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, "multi_exit_cleanup_damage", false);
     fir_lower.range_source_audit_free(&audit);
     u64 mut source_body = proposed.boundaries.len;
     u64 mut source_exit = proposed.boundaries.len;
@@ -450,10 +595,10 @@ fn call_result_incomplete() void {
     assert(audit.failure.reason == fir_lower.range_audit_fault.protected_path);
     assert(audit.failure.key.source.line == 4 && audit.rows.len == 0);
     assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, "call_result_incomplete", false);
 }
 
-fn capture_case(string@ source, fir.range_capture_kind kind, u32 protected) void {
+fn capture_case(string name, string@ source, fir.range_capture_kind kind, u32 protected) void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
@@ -472,7 +617,7 @@ fn capture_case(string@ source, fir.range_capture_kind kind, u32 protected) void
     assert(audit.selected_declarations == 1 && audit.produced_expansions == 1);
     assert(audit.rows.items[0].binding.kind == kind && audit.protected_paths == protected);
     assert(!audit.source_complete && !f.range_source_complete);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, name, false);
 }
 
 fn capture_kinds() void {
@@ -481,7 +626,7 @@ fn capture_kinds() void {
         "    for (u8 mut* item : items) { }",
         "}",
     };
-    capture_case(owning[..], fir.range_capture_kind.owning_fixed_array_place, 1);
+    capture_case("capture_owning", owning[..], fir.range_capture_kind.owning_fixed_array_place, 1);
     string[5] copied = {
         "fn walk(i32[2] mut values) void {",
         "    for (i32 x : values) {",
@@ -489,7 +634,7 @@ fn capture_kinds() void {
         "    }",
         "}",
     };
-    capture_case(copied[..], fir.range_capture_kind.non_owning_array_copy, 0);
+    capture_case("capture_copied", copied[..], fir.range_capture_kind.non_owning_array_copy, 0);
     string[5] indirect = {
         "struct holder { u8 mut@ own items; }",
         "fn walk(holder mut* mut h, holder mut* next) void {",
@@ -497,7 +642,7 @@ fn capture_kinds() void {
         "    h = next;",
         "}",
     };
-    capture_case(indirect[..], fir.range_capture_kind.borrowed_header, 1);
+    capture_case("capture_indirect", indirect[..], fir.range_capture_kind.borrowed_header, 1);
     string[10] projected = {
         "fn select(i32 mut* count) i32 {",
         "    *count += 1;",
@@ -510,25 +655,28 @@ fn capture_kinds() void {
         "    return count;",
         "}",
     };
-    capture_case(projected[..], fir.range_capture_kind.borrowed_header, 1);
+    capture_case("capture_projected", projected[..], fir.range_capture_kind.borrowed_header, 1);
     string[3] owning_span = {
         "fn walk(u8 mut@ own bytes) void {",
         "    for (u8 x : bytes) { }",
         "}",
     };
-    capture_case(owning_span[..], fir.range_capture_kind.borrowed_header, 1);
+    capture_case("capture_owning_span", owning_span[..], fir.range_capture_kind.borrowed_header, 1);
     string[3] owning_string = {
         "fn walk(string own text) void {",
         "    for (char x : text) { }",
         "}",
     };
-    capture_case(owning_string[..], fir.range_capture_kind.borrowed_header, 1);
+    capture_case("capture_owning_string", owning_string[..], fir.range_capture_kind.borrowed_header,
+                 1);
     string[3] borrowed_string = {
         "fn walk(string text) void {",
         "    for (char x : text) { }",
         "}",
     };
-    capture_case(borrowed_string[..], fir.range_capture_kind.borrowed_header, 1);
+    capture_case("capture_borrowed_string", borrowed_string[..],
+                 fir.range_capture_kind.borrowed_header,
+                 1);
 }
 
 fn selected_paths() void {
@@ -541,17 +689,19 @@ fn selected_paths() void {
         "    }",
         "}",
     };
-    capture_case(branch[..], fir.range_capture_kind.non_owning_array_copy, 0);
+    capture_case("capture_branch", branch[..], fir.range_capture_kind.non_owning_array_copy, 0);
     string[4] disconnected = {
         "fn walk(i32[2] values) void {",
         "    return;",
         "    for (i32 x : values) { }",
         "}",
     };
-    capture_case(disconnected[..], fir.range_capture_kind.non_owning_array_copy, 0);
+    capture_case("capture_disconnected", disconnected[..],
+                 fir.range_capture_kind.non_owning_array_copy,
+                 0);
 }
 
-fn boundary_case(string@ source, u32 declarations, u32 expansions,
+fn boundary_case(string name, string@ source, u32 declarations, u32 expansions,
                  bool deferred) void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -568,19 +718,18 @@ fn boundary_case(string@ source, u32 declarations, u32 expansions,
     fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
     defer fir_lower.range_source_audit_free(&audit);
     bool matched = fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit);
-    assert(matched != deferred);
+    assert(matched);
     assert(audit.selected_declarations == declarations);
     assert(audit.produced_expansions == expansions);
     if (deferred) {
-        assert(audit.failure.reason == fir_lower.range_audit_fault.context);
-        assert(audit.failure.key.context_source.line == 2);
-        assert(audit.failure.key.exit_source.line != 0);
+        assert(audit.rows.items[1].key.context_source.line == 2);
+        assert(audit.rows.items[1].key.exit_source.line != 0);
     } else {
         assert(audit.matched_captures == expansions);
         assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
     }
     assert(!audit.source_complete && !f.range_source_complete);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, name, false);
     if (declarations == 2 && !deferred) {
         fir_lower.range_source_audit_free(&audit);
         u64 mut first = proposed.boundaries.len;
@@ -618,7 +767,7 @@ fn boundary_repeats() void {
         "    return sum;",
         "}",
     };
-    boundary_case(nested[..], 2, 2, false);
+    boundary_case("boundary_nested", nested[..], 2, 2, false);
     string[9] tail = {
         "fn walk(i32[2] values, bool stop) i32 {",
         "    i32 mut sum = 0;",
@@ -630,7 +779,7 @@ fn boundary_repeats() void {
         "    return sum;",
         "}",
     };
-    boundary_case(tail[..], 1, 1, false);
+    boundary_case("boundary_tail", tail[..], 1, 1, false);
     string[12] continued = {
         "fn walk(i32[2] values, bool skip) i32 {",
         "    i32 mut count = 0;",
@@ -645,7 +794,7 @@ fn boundary_repeats() void {
         "    return count;",
         "}",
     };
-    boundary_case(continued[..], 1, 1, false);
+    boundary_case("boundary_continued", continued[..], 1, 1, false);
     string[16] switched = {
         "fn walk(i32[2] values, i32 mode, bool stop) i32 {",
         "    i32 mut count = 0;",
@@ -664,7 +813,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(switched[..], 1, 1, false);
+    boundary_case("boundary_switched", switched[..], 1, 1, false);
     string[10] broken = {
         "fn walk(i32[2] values, bool stop) i32 {",
         "    i32 mut count = 0;",
@@ -677,7 +826,7 @@ fn boundary_repeats() void {
         "    return count;",
         "}",
     };
-    boundary_case(broken[..], 1, 1, false);
+    boundary_case("boundary_broken", broken[..], 1, 1, false);
     string[9] returned = {
         "fn walk(i32[2] values, i32 mut base) i32 {",
         "    defer base +%= 10;",
@@ -689,7 +838,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(returned[..], 1, 1, false);
+    boundary_case("boundary_returned", returned[..], 1, 1, false);
     string[7] function_defer = {
         "fn walk(i32[2] values) void {",
         "    defer { for (i32 y : values) { } }",
@@ -699,7 +848,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(function_defer[..], 2, 3, true);
+    boundary_case("boundary_function_defer", function_defer[..], 2, 3, true);
     string[7] aborted = {
         "fn walk(i32[2] values) noreturn {",
         "    for (i32 x : values) {",
@@ -709,7 +858,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(aborted[..], 1, 1, false);
+    boundary_case("boundary_aborted", aborted[..], 1, 1, false);
     string[6] zero = {
         "fn walk(i32[1] values) i32 {",
         "    i32 mut count = 0;",
@@ -718,7 +867,7 @@ fn boundary_repeats() void {
         "}",
         "",
     };
-    boundary_case(zero[..], 1, 1, false);
+    boundary_case("boundary_zero", zero[..], 1, 1, false);
     string[8] body_locals = {
         "fn walk(i32[2] values) i32 {",
         "    i32 mut total = 0;",
@@ -729,7 +878,7 @@ fn boundary_repeats() void {
         "    return total;",
         "}",
     };
-    boundary_case(body_locals[..], 1, 1, false);
+    boundary_case("boundary_body_locals", body_locals[..], 1, 1, false);
 }
 
 fn absence_stays_open() void {
@@ -762,10 +911,1198 @@ fn absence_stays_open() void {
     assert(audit.rows.len == 0 && proposed.suppressions.len == 1);
     assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
     assert(!f.range_supplied_complete && !f.range_source_complete);
-    check_output(&e, decl, &f);
+    check_output(&e, decl, &f, "absence_stays_open", false);
+}
+
+// Each refusal keeps the independently derived source and FIR exit key.
+fn assert_unpublished(fir.func* f, fir_lower.range_source_audit* audit) void {
+    assert(!audit->structural_valid);
+    assert(!audit->source_complete);
+    assert(!audit->ownership_proved);
+    assert(!f->range_supplied_complete);
+    assert(!f->range_source_complete);
+    assert(f->range_declarations.len == 0);
+    assert(f->range_expansions.len == 0);
+    assert(f->range_loans.len == 0);
+    assert(f->range_captures.len == 0);
+    assert(f->range_boundaries.len == 0);
+    assert(f->range_absences.len == 0);
+}
+
+fn assert_context_key(fir_lower.range_source_audit* audit,
+                      fir_lower.range_audit_key expected) void {
+    assert(audit->failure.reason == fir_lower.range_audit_fault.context);
+    assert(audit->failure.key.function == expected.function);
+    assert(audit->failure.key.declaration == expected.declaration);
+    assert(audit->failure.key.expansion == expected.expansion);
+    assert(audit->failure.key.context == expected.context);
+    assert(audit->failure.key.exit_occurrence == expected.exit_occurrence);
+    assert(fir_lower.range_audit_loc_eq(audit->failure.key.source, expected.source));
+    assert(fir_lower.range_audit_loc_eq(audit->failure.key.context_source,
+                                       expected.context_source));
+    assert(fir_lower.range_audit_loc_eq(audit->failure.key.exit_source,
+                                       expected.exit_source));
+}
+
+fn context_identity_damage() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn walk(i32@ values, bool stop) void {",
+        "    defer {",
+        "        defer {",
+        "            for (i32 x : values) { }",
+        "        }",
+        "    }",
+        "    if (stop) { return; }",
+        "}",
+        "",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.rows.len == 2 && proposed.deferred.len == 4);
+    assert(audit.rows.items[0].key.context == 2);
+    assert(audit.rows.items[1].key.context == 4);
+    fir_lower.range_audit_key expected = audit.rows.items[0].key;
+    assert(expected.source.line == 4 && expected.context_source.line == 3);
+    assert_context_key_shape(expected, 6, 3);
+    assert_unpublished(&f, &audit);
+    check_output(&e, decl, &f, "context_identity_damage", true);
+    fir_lower.range_source_audit_free(&audit);
+    fir_lower.range_defer_context_candidate[4] mut saved = {};
+    u64 mut i = 0;
+    while (i < 4) { saved[i] = proposed.deferred.items[i]; i += 1; }
+    fir_lower.range_capture_candidate first = proposed.captures.items[0];
+    fir_lower.range_capture_candidate second = proposed.captures.items[1];
+    u64 original_len = proposed.deferred.len;
+    // Removing the entire context vector cannot erase checked-source defers.
+    proposed.deferred.len = 0;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    assert_unpublished(&f, &audit);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.len = original_len;
+    // A missing inner context cannot use the outer context as a replacement.
+    proposed.deferred.len = 1;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    assert_unpublished(&f, &audit);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.len = original_len;
+    // Delete the first context while keeping the three other records.
+    i = 0;
+    while (i < 3) { proposed.deferred.items[i] = saved[i + 1]; i += 1; }
+    proposed.deferred.len = 3;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.len = original_len;
+    i = 0;
+    while (i < 4) { proposed.deferred.items[i] = saved[i]; i += 1; }
+    // Check each field separately. Each mutation restores its original value.
+    proposed.deferred.items[1].parent = 0;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.items[1] = saved[1];
+    proposed.deferred.items[1].parent = proposed.deferred.items[1].id;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.items[1] = saved[1];
+    proposed.deferred.items[1].source_node = saved[0].source_node;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.items[1] = saved[1];
+    proposed.deferred.items[1].exit_source = saved[0].exit_source;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.items[1] = saved[1];
+    proposed.deferred.items[0] = saved[2];
+    proposed.deferred.items[2] = saved[0];
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.items[0] = saved[0];
+    proposed.deferred.items[2] = saved[2];
+    proposed.deferred.items[0].exit_source = saved[2].exit_source;
+    proposed.deferred.items[1].exit_source = saved[3].exit_source;
+    proposed.captures.items[0].occurrence.exit_source = second.occurrence.exit_source;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.items[0] = saved[0];
+    proposed.deferred.items[1] = saved[1];
+    proposed.captures.items[0] = first;
+    // Coordinated renumbering cannot replace the independent event count.
+    i = 0;
+    while (i < 4) {
+        proposed.deferred.items[i].exit_occurrence += 20;
+        i += 1;
+    }
+    proposed.captures.items[0].occurrence.exit_occurrence += 20;
+    proposed.captures.items[1].occurrence.exit_occurrence += 20;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    i = 0;
+    while (i < 4) {
+        proposed.deferred.items[i] = saved[i];
+        proposed.deferred.items[i].id += 20;
+        if (proposed.deferred.items[i].parent != 0) { proposed.deferred.items[i].parent += 20; }
+        i += 1;
+    }
+    proposed.captures.items[0] = first;
+    proposed.captures.items[1] = second;
+    proposed.captures.items[0].occurrence.context += 20;
+    proposed.captures.items[1].occurrence.context += 20;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    i = 0;
+    while (i < 4) { proposed.deferred.items[i] = saved[i]; i += 1; }
+    proposed.captures.items[0] = first;
+    proposed.captures.items[1] = second;
+    fir_lower.range_defer_context_candidate_add(&proposed.deferred, saved[1]);
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    assert_unpublished(&f, &audit);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.len = original_len;
+    proposed.captures.len = 0;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    assert_unpublished(&f, &audit);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.captures.len = 2;
+    proposed.captures.items[0].occurrence.context = 0;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.captures.items[0] = first;
+    proposed.captures.items[0].occurrence.exit_occurrence = 0;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.captures.items[0] = first;
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.rows.len == 2);
+    assert_unpublished(&f, &audit);
+    fir_lower.range_candidate_set_free(&proposed);
+    assert(audit.rows.items[0].key.context == expected.context);
+    assert(audit.rows.items[0].boundaries_len == 5);
+    assert(audit.rows.items[1].boundaries_len == 5);
+}
+
+fn assert_context_key_shape(fir_lower.range_audit_key key, u32 exit_line,
+                            u32 context_line) void {
+    assert(key.function != null && key.context != 0);
+    assert(key.exit_occurrence != 0);
+    assert(key.exit_source.line == exit_line);
+    assert(key.context_source.line == context_line);
+    assert(key.source.file == key.exit_source.file);
+}
+
+fn deferred_scope_case(string name, string@ source, u32 declarations,
+                        u32 expansions, u32 contexts) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source, true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.selected_declarations == declarations);
+    if (audit.produced_expansions != expansions || proposed.deferred.len != cast(contexts, u64)) {
+        eprintln(name, " expansions ", audit.produced_expansions,
+                 " contexts ", proposed.deferred.len);
+    }
+    assert(audit.produced_expansions == expansions);
+    assert(audit.matched_captures == expansions);
+    assert(audit.rows.len == cast(expansions, u64));
+    assert(proposed.deferred.len == cast(contexts, u64));
+    assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+    assert_unpublished(&f, &audit);
+    u64 mut i = 0;
+    while (i < audit.rows.len) {
+        fir_lower.range_audit_row row = audit.rows.items[i];
+        assert(row.key.function == cast(decl->sym, ast.sym*));
+        assert(row.key.expansion == cast(i + 1, u32));
+        assert(row.key.declaration != 0 && row.key.declaration <= declarations);
+        assert(row.key.source.file == decl->loc.file);
+        assert(row.boundaries_len >= 2);
+        if (row.key.context != 0) {
+            assert(row.key.context_source.line != 0);
+            assert(row.key.exit_occurrence != 0);
+            assert(row.key.exit_source.line != 0);
+        } else {
+            assert(row.key.context_source.line == 0);
+            assert(row.key.exit_occurrence == 0);
+            assert(row.key.exit_source.line == 0);
+        }
+        i += 1;
+    }
+    check_output(&e, decl, &f, name, true);
+    fir_lower.range_candidate_set_free(&proposed);
+    assert(audit.rows.len == cast(expansions, u64));
+    assert_unpublished(&f, &audit);
+}
+
+fn deferred_scope_matrix() void {
+    string[3] single_defer = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "}",
+    };
+    deferred_scope_case("single_defer", single_defer[..], 1, 1, 1);
+    string[5] bare_scope_defer = {
+        "fn walk(i32[2] values) void {",
+        "    {",
+        "        defer { for (i32 x : values) { } }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("bare_scope_defer", bare_scope_defer[..], 1, 1, 1);
+    string[7] selected_defer = {
+        "fn walk(i32[2] values) void {",
+        "    $if (true) {",
+        "        defer { for (i32 x : values) { } }",
+        "    } else {",
+        "        defer { for (i32 y : values) { } }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("selected_defer", selected_defer[..], 1, 1, 1);
+    string[6] unselected_defer = {
+        "fn walk(i32[2] values) void {",
+        "    $if (false) {",
+        "        defer { for (i32 x : values) { } }",
+        "    }",
+        "    defer { for (i32 y : values) { } }",
+        "}",
+    };
+    deferred_scope_case("unselected_defer", unselected_defer[..], 1, 1, 1);
+    string[9] three_contexts = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        defer {",
+        "            defer {",
+        "                for (i32 x : values) { }",
+        "            }",
+        "        }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("three_contexts", three_contexts[..], 1, 1, 3);
+    string[4] sibling_contexts = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    defer { for (i32 y : values) { } }",
+        "}",
+    };
+    deferred_scope_case("sibling_contexts", sibling_contexts[..], 2, 2, 2);
+    string[6] shared_context = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        for (i32 x : values) { }",
+        "        for (i32 y : values) { }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("shared_context", shared_context[..], 2, 2, 1);
+    string[5] deferred_owning_span = {
+        "fn walk(u8 mut@ own values) void {",
+        "    defer {",
+        "        for (u8 x : values) { }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("deferred_owning_span", deferred_owning_span[..], 1, 1, 1);
+    string[5] deferred_owning_string = {
+        "fn walk(string own text) void {",
+        "    defer {",
+        "        for (char x : text) { }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("deferred_owning_string", deferred_owning_string[..], 1, 1, 1);
+    string[5] deferred_borrowed_string = {
+        "fn walk(string text) void {",
+        "    defer {",
+        "        for (char x : text) { }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("deferred_borrowed_string", deferred_borrowed_string[..], 1, 1, 1);
+    string[6] deferred_projection = {
+        "struct holder { u8 mut@ own items; }",
+        "fn walk(holder* h) void {",
+        "    defer {",
+        "        for (u8 x : h->items) { }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("deferred_projection", deferred_projection[..], 1, 1, 1);
+    string[6] while_before_exit = {
+        "fn walk(i32[2] values, bool repeat) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    while (repeat) {",
+        "        i32 saved = 0;",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("while_before_exit", while_before_exit[..], 1, 1, 1);
+    string[6] do_before_exit = {
+        "fn walk(i32[2] values, bool repeat) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    do {",
+        "        i32 saved = 0;",
+        "    } while (repeat);",
+        "}",
+    };
+    deferred_scope_case("do_before_exit", do_before_exit[..], 1, 1, 1);
+    string[6] for_before_exit = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    for (i32 mut i = 0; i < 2; i++) {",
+        "        i32 saved = i;",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("for_before_exit", for_before_exit[..], 1, 1, 1);
+    string[6] while_continue_expansions = {
+        "fn walk(i32[2] values, bool repeat, bool skip) void {",
+        "    while (repeat) {",
+        "        defer { for (i32 x : values) { } }",
+        "        if (skip) { continue; }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("while_continue_expansions", while_continue_expansions[..], 1, 2, 2);
+    string[6] while_break_expansions = {
+        "fn walk(i32[2] values, bool repeat, bool stop) void {",
+        "    while (repeat) {",
+        "        defer { for (i32 x : values) { } }",
+        "        if (stop) { break; }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("while_break_expansions", while_break_expansions[..], 1, 2, 2);
+    string[6] do_break_expansions = {
+        "fn walk(i32[2] values, bool repeat, bool stop) void {",
+        "    do {",
+        "        defer { for (i32 x : values) { } }",
+        "        if (stop) { break; }",
+        "    } while (repeat);",
+        "}",
+    };
+    deferred_scope_case("do_break_expansions", do_break_expansions[..], 1, 2, 2);
+    string[6] for_continue_expansions = {
+        "fn walk(i32[2] values, bool skip) void {",
+        "    for (i32 mut i = 0; i < 2; i++) {",
+        "        defer { for (i32 x : values) { } }",
+        "        if (skip) { continue; }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("for_continue_expansions", for_continue_expansions[..], 1, 2, 2);
+    string[9] switch_break_expansions = {
+        "fn walk(i32[2] values, i32 tag, bool stop) void {",
+        "    switch (tag) {",
+        "    case 0:",
+        "        defer { for (i32 x : values) { } }",
+        "        if (stop) { break; }",
+        "    default:",
+        "        break;",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("switch_break_expansions", switch_break_expansions[..], 1, 2, 2);
+    string[12] continue_crosses_switch = {
+        "fn walk(i32[2] values, bool repeat, i32 tag) void {",
+        "    while (repeat) {",
+        "        defer { for (i32 x : values) { } }",
+        "        switch (tag) {",
+        "        case 0:",
+        "            continue;",
+        "        default:",
+        "            break;",
+        "        }",
+        "        break;",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("continue_crosses_switch", continue_crosses_switch[..], 1, 2, 2);
+    string[4] return_and_falloff = {
+        "fn walk(i32[2] values, bool stop) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    if (stop) { return; }",
+        "}",
+    };
+    deferred_scope_case("return_and_falloff", return_and_falloff[..], 1, 2, 2);
+    string[8] both_return_arms = {
+        "fn walk(i32[2] values, bool stop) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    if (stop) {",
+        "        return;",
+        "    } else {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("both_return_arms", both_return_arms[..], 1, 3, 3);
+    string[4] disconnected_defer = {
+        "fn walk(i32[2] values) void {",
+        "    return;",
+        "    defer { for (i32 x : values) { } }",
+        "}",
+    };
+    deferred_scope_case("disconnected_defer", disconnected_defer[..], 1, 1, 1);
+    string[7] suppressed_before_produced = {
+        "fn walk(i32[2] values) void {",
+        "    {",
+        "        defer { for (i32 x : values) { } }",
+        "        defer panic(\"stop\");",
+        "    }",
+        "    defer { for (i32 y : values) { } }",
+        "}",
+    };
+    deferred_scope_case("suppressed_before_produced", suppressed_before_produced[..], 2, 1, 3);
+    string[7] nested_empty_scopes = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    {",
+        "        { }",
+        "        { i32 value = 0; }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("nested_empty_scopes", nested_empty_scopes[..], 1, 1, 1);
+    string[7] nested_range_body_defers = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        for (i32 x : values) {",
+        "            defer { for (i32 y : values) { } }",
+        "        }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("nested_range_body_defers", nested_range_body_defers[..], 2, 2, 2);
+}
+
+fn assert_boundary_refusal(ast.node* decl, fir.func* f,
+                           fir_lower.range_candidate_set* proposed,
+                           fir_lower.range_audit_key expected) void {
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(f, null, &bad));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(!fir_lower.audit_produced_ranges(decl, f, proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    assert(audit.failure.key.declaration == expected.declaration);
+    assert(audit.failure.key.expansion == expected.expansion);
+    assert(audit.failure.key.context == expected.context);
+    assert(audit.failure.key.exit_occurrence == expected.exit_occurrence);
+    assert(fir_lower.range_audit_loc_eq(audit.failure.key.source, expected.source));
+    assert(fir_lower.range_audit_loc_eq(audit.failure.key.context_source,
+                                       expected.context_source));
+    assert(fir_lower.range_audit_loc_eq(audit.failure.key.exit_source, expected.exit_source));
+    assert_unpublished(f, &audit);
+}
+
+fn expansion_gap_damage() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] values, bool skip, bool stop) void {",
+        "    for (i32 x : values) {",
+        "        defer {",
+        "            for (i32 y : values) {",
+        "                if (stop) { break; }",
+        "            }",
+        "        }",
+        "        if (skip) { continue; }",
+        "    }",
+        "}",
+        "",
+        "",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.rows.len == 3 && audit.matched_captures == 3);
+    assert(audit.rows.items[1].boundaries_len == 8);
+    assert(audit.rows.items[2].boundaries_len == 8);
+    fir_lower.range_audit_key expected = audit.rows.items[1].key;
+    assert(expected.exit_occurrence == 2);
+    assert(audit.rows.items[2].key.exit_occurrence == 7);
+    assert(expected.context_source.line == 3 && expected.exit_source.line == 8);
+    assert_unpublished(&f, &audit);
+    check_output(&e, decl, &f, "expansion_gap_damage", true);
+    fir_lower.range_source_audit_free(&audit);
+    u64 length = proposed.boundaries.len;
+    fir_lower.range_boundary_candidate mut@ own saved =
+        new(fir_lower.range_boundary_candidate, length);
+    defer del(saved);
+    u64 mut i = 0;
+    while (i < length) { saved[i] = proposed.boundaries.items[i]; i += 1; }
+    u64[3] mut target = {length, length, length};
+    u64[3] mut other = {length, length, length};
+    u64 mut entry = length;
+    u64 mut other_entry = length;
+    u64 mut second_gap = length;
+    i = 0;
+    while (i < length) {
+        fir_lower.range_boundary_candidate c = saved[i];
+        if (c.boundary.kind == fir.range_boundary_kind.body_entry) {
+            if (c.expansion == 2) { entry = i; }
+            if (c.expansion == 3) { other_entry = i; }
+        }
+        if (c.boundary.source.line == 5) {
+            if (c.boundary.kind == fir.range_boundary_kind.body_cleanup) {
+                if (c.expansion == 2) { target[0] = i; }
+                if (c.expansion == 3) { other[0] = i; }
+            }
+            if (c.boundary.kind == fir.range_boundary_kind.loan_exit) {
+                if (c.expansion == 2) { target[1] = i; }
+                if (c.expansion == 3) { other[1] = i; }
+            }
+            if (c.boundary.kind == fir.range_boundary_kind.outer_cleanup) {
+                if (c.expansion == 2) { target[2] = i; }
+                if (c.expansion == 3) { other[2] = i; }
+            }
+        } else if (c.expansion == 2
+                   && c.boundary.kind == fir.range_boundary_kind.body_cleanup) {
+            second_gap = i;
+        }
+        i += 1;
+    }
+    assert(entry < length && other_entry < length && second_gap < length);
+    i = 0;
+    while (i < 3) { assert(target[i] < length && other[i] < length); i += 1; }
+    // A candidate body entry cannot select the other expansion's CFG.
+    proposed.boundaries.items[entry].boundary = saved[other_entry].boundary;
+    proposed.boundaries.items[entry].boundary.loan = 2;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    proposed.boundaries.items[entry] = saved[entry];
+    // Copy all three gaps while preserving the target expansion and loan IDs.
+    i = 0;
+    while (i < 3) {
+        proposed.boundaries.items[target[i]].boundary = saved[other[i]].boundary;
+        proposed.boundaries.items[target[i]].boundary.loan = 2;
+        i += 1;
+    }
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    i = 0;
+    while (i < length) { proposed.boundaries.items[i] = saved[i]; i += 1; }
+    // Moving a complete triple by one operation gap still refuses.
+    i = 0;
+    while (i < 3) { proposed.boundaries.items[target[i]].boundary.position += 1; i += 1; }
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    i = 0;
+    while (i < length) { proposed.boundaries.items[i] = saved[i]; i += 1; }
+    // Reassigning complete triples to the other expansion leaves a required gap.
+    i = 0;
+    while (i < 3) {
+        proposed.boundaries.items[target[i]].expansion = 3;
+        proposed.boundaries.items[target[i]].boundary.loan = 3;
+        i += 1;
+    }
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    i = 0;
+    while (i < length) { proposed.boundaries.items[i] = saved[i]; i += 1; }
+    // Duplicating a complete triple cannot cover a second required gap.
+    i = 0;
+    while (i < 3) {
+        fir_lower.range_boundary_candidate mut duplicate = saved[target[i]];
+        duplicate.boundary.order += 30;
+        fir_lower.range_boundary_candidate_add(&proposed.boundaries, duplicate);
+        i += 1;
+    }
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    proposed.boundaries.len = length;
+    // Remove one complete triple. The remaining candidate subset stays ordered.
+    u64 mut written = 0;
+    i = 0;
+    while (i < length) {
+        if (i != target[0] && i != target[1] && i != target[2]) {
+            proposed.boundaries.items[written] = saved[i];
+            written += 1;
+        }
+        i += 1;
+    }
+    assert(written == length - 3);
+    proposed.boundaries.len = written;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    proposed.boundaries.len = length;
+    i = 0;
+    while (i < length) { proposed.boundaries.items[i] = saved[i]; i += 1; }
+    // Verified FIR statement tags cannot replace the source exit and CFG proof.
+    fir.range_boundary start = saved[target[0]].boundary;
+    fir.statement mut* dead = &fir.block_mut(&f, start.block)->statements.items[start.position];
+    fir.statement original = *dead;
+    dead->stmt += 1;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *dead = original;
+    dead->exit_loc = proposed.captures.items[2].occurrence.exit_source;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *dead = original;
+    fir.range_boundary second = saved[second_gap].boundary;
+    fir.statement* other_dead = fir.block_statement(&f, second.block, second.position);
+    dead->loc = other_dead->loc;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *dead = original;
+    dead->stmt = other_dead->stmt;
+    dead->loc = other_dead->loc;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *dead = original;
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.rows.len == 3 && audit.matched_boundaries == cast(length, u32));
+    assert_unpublished(&f, &audit);
+}
+
+fn assert_call_incomplete(ast.node* decl, fir.func* f,
+                          fir_lower.range_candidate_set* proposed,
+                          fir_lower.range_audit_key expected) void {
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(!fir_lower.audit_produced_ranges(decl, f, proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.protected_path);
+    assert(audit.rows.len == 0 && audit.matched_captures == 0);
+    assert(audit.failure.key.function == expected.function);
+    assert(audit.failure.key.declaration == expected.declaration);
+    assert(audit.failure.key.expansion == expected.expansion);
+    assert(audit.failure.key.context == expected.context);
+    assert(audit.failure.key.exit_occurrence == expected.exit_occurrence);
+    assert(fir_lower.range_audit_loc_eq(audit.failure.key.source, expected.source));
+    assert(fir_lower.range_audit_loc_eq(audit.failure.key.context_source,
+                                       expected.context_source));
+    assert(fir_lower.range_audit_loc_eq(audit.failure.key.exit_source, expected.exit_source));
+    assert_unpublished(f, &audit);
+}
+
+fn call_materialization_case(string name, string@ source, u32 source_line,
+                              u32 context_line) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source, true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    bool incomplete = !fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit);
+    if (!incomplete) { eprintln(name, " accepts an unproved protected path"); }
+    assert(incomplete);
+    assert(audit.failure.reason == fir_lower.range_audit_fault.protected_path);
+    assert(audit.selected_declarations == 1 && audit.produced_expansions == 1);
+    assert(audit.rows.len == 0 && audit.matched_captures == 0);
+    fir_lower.range_audit_key expected = audit.failure.key;
+    assert(expected.source.line == source_line);
+    assert(expected.context_source.line == context_line);
+    if (context_line == 0) {
+        assert(expected.context == 0 && expected.exit_occurrence == 0);
+        assert(expected.exit_source.line == 0);
+    } else {
+        assert(expected.context != 0 && expected.exit_occurrence != 0);
+        assert(expected.exit_source.line != 0);
+    }
+    assert_unpublished(&f, &audit);
+    check_output(&e, decl, &f, name, true);
+    fir_lower.range_source_audit_free(&audit);
+    assert(proposed.captures.len == 1);
+    fir_lower.range_capture_candidate saved = proposed.captures.items[0];
+    // A substituted protected root remains incomplete before binding acceptance.
+    proposed.captures.items[0].binding.original = saved.binding.captured;
+    assert_call_incomplete(decl, &f, &proposed, expected);
+    proposed.captures.items[0] = saved;
+    proposed.captures.items[0].binding.original = fir.place_local(1);
+    assert_call_incomplete(decl, &f, &proposed, expected);
+    proposed.captures.items[0] = saved;
+    proposed.captures.items[0].binding.captured = saved.binding.original;
+    assert_call_incomplete(decl, &f, &proposed, expected);
+    proposed.captures.items[0] = saved;
+    proposed.captures.items[0].binding.original_present = false;
+    assert_call_incomplete(decl, &f, &proposed, expected);
+    proposed.captures.items[0] = saved;
+    // Deleting a candidate cannot promote a call-result path to source acceptance.
+    proposed.captures.len = 0;
+    assert_call_incomplete(decl, &f, &proposed, expected);
+    proposed.captures.len = 1;
+    // Delete each boundary set while preserving the valid executable function.
+    u64 boundaries = proposed.boundaries.len;
+    proposed.boundaries.len = 0;
+    assert_call_incomplete(decl, &f, &proposed, expected);
+    proposed.boundaries.len = boundaries;
+    assert_call_incomplete(decl, &f, &proposed, expected);
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+}
+
+fn call_materialization_matrix() void {
+    string[5] returned_span = {
+        "fn pick(i32@ values) i32@ { return values; }",
+        "fn walk(i32@ values) void {",
+        "    for (i32 x : pick(values)) { }",
+        "}",
+        "",
+    };
+    call_materialization_case("call_returned_span", returned_span[..], 3, 0);
+    string[5] returned_string = {
+        "fn pick(string text) string { return text; }",
+        "fn walk(string text) void {",
+        "    for (char x : pick(text)) { }",
+        "}",
+        "",
+    };
+    call_materialization_case("call_returned_string", returned_string[..], 3, 0);
+    string[6] pointer_result = {
+        "struct holder { i32@ items; i32@ other; }",
+        "fn pick(holder* h) holder* { return h; }",
+        "fn walk(holder* h) void {",
+        "    for (i32 x : pick(h)->items) { }",
+        "}",
+        "",
+    };
+    call_materialization_case("call_pointer_result", pointer_result[..], 4, 0);
+    string[7] projected_result = {
+        "struct inner { i32@ items; }",
+        "struct holder { inner data; }",
+        "fn pick(holder* h) holder* { return h; }",
+        "fn walk(holder* h) void {",
+        "    for (i32 x : pick(h)->data.items) { }",
+        "}",
+        "",
+    };
+    call_materialization_case("call_projected_result", projected_result[..], 5, 0);
+    string[8] deferred_result = {
+        "struct holder { i32@ items; }",
+        "fn pick(holder* h) holder* { return h; }",
+        "fn walk(holder* h) void {",
+        "    defer {",
+        "        for (i32 x : pick(h)->items) { }",
+        "    }",
+        "}",
+        "",
+    };
+    call_materialization_case("call_deferred_result", deferred_result[..], 5, 4);
+}
+
+fn conditional_control_case(string name, string@ source, bool accepted) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source, true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    bool matched = fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit);
+    if (matched != accepted) { eprintln(name, " changes its protected-place verdict"); }
+    assert(matched == accepted);
+    assert(audit.selected_declarations == 1 && audit.produced_expansions == 1);
+    if (accepted) {
+        assert(audit.rows.len == 1 && audit.matched_captures == 1);
+        assert(audit.matched_boundaries == cast(proposed.boundaries.len, u32));
+    } else {
+        assert(audit.failure.reason == fir_lower.range_audit_fault.protected_path);
+        assert(audit.failure.key.source.line == 5);
+        assert(audit.rows.len == 0 && audit.matched_captures == 0);
+    }
+    check_output(&e, decl, &f, name, true);
+    fir_lower.range_candidate_set_free(&proposed);
+    assert_unpublished(&f, &audit);
+    if (accepted) { assert(audit.rows.len == 1); }
+    else { assert(audit.failure.reason == fir_lower.range_audit_fault.protected_path); }
+}
+
+fn conditional_materialization_pair(string name, string first, string second,
+                                      string parameters, string element, string expression,
+                                      bool accepted, bool control) void {
+    strbuf.str_buf mut header = strbuf.create();
+    defer strbuf.free(&header);
+    strbuf.append(&header, "fn walk(");
+    strbuf.append(&header, parameters);
+    strbuf.append(&header, ") void {");
+    strbuf.str_buf mut loop = strbuf.create();
+    defer strbuf.free(&loop);
+    strbuf.append(&loop, "        for (");
+    strbuf.append(&loop, element);
+    strbuf.append(&loop, " x : ");
+    strbuf.append(&loop, expression);
+    strbuf.append(&loop, ") { }");
+    u32 mut mode = 0;
+    while (mode < 2) {
+        string[8] mut source = {
+            first, second, strbuf.view(&header), "", strbuf.view(&loop), "", "}", "",
+        };
+        strbuf.str_buf mut key = strbuf.create();
+        strbuf.append(&key, name);
+        u32 mut context = 0;
+        if (mode == 0) {
+            strbuf.append(&key, "_direct");
+        } else {
+            source[3] = "    defer {";
+            source[5] = "    }";
+            context = 4;
+            strbuf.append(&key, "_deferred");
+        }
+        if (control) {
+            conditional_control_case(strbuf.view(&key), source[..], accepted);
+        } else {
+            call_materialization_case(strbuf.view(&key), source[..], 5, context);
+        }
+        strbuf.free(&key);
+        mode += 1;
+    }
+}
+
+fn conditional_materialization_matrix() void {
+    string span_call = "fn pick(i32@ values) i32@ { return values; }";
+    string span_parameters = "bool select, bool other, i32@ values, i32@ backup";
+    conditional_materialization_pair("conditional_span_then", span_call, "",
+        span_parameters, "i32", "select ? pick(values) : backup", false, false);
+    conditional_materialization_pair("conditional_span_else", span_call, "",
+        span_parameters, "i32", "select ? values : pick(backup)", false, false);
+    string string_call = "fn pick(string values) string { return values; }";
+    string string_parameters = "bool select, string values, string backup";
+    conditional_materialization_pair("conditional_string_then", string_call, "",
+        string_parameters, "char", "select ? pick(values) : backup", false, false);
+    conditional_materialization_pair("conditional_string_else", string_call, "",
+        string_parameters, "char", "select ? values : pick(backup)", false, false);
+    conditional_materialization_pair("conditional_nested_then_then", span_call, "",
+        span_parameters, "i32", "select ? (other ? pick(values) : backup) : values", false, false);
+    conditional_materialization_pair("conditional_nested_then_else", span_call, "",
+        span_parameters, "i32", "select ? (other ? values : pick(backup)) : values", false, false);
+    conditional_materialization_pair("conditional_nested_else_then", span_call, "",
+        span_parameters, "i32", "select ? values : (other ? pick(values) : backup)", false, false);
+    conditional_materialization_pair("conditional_nested_else_else", span_call, "",
+        span_parameters, "i32", "select ? values : (other ? values : pick(backup))", false, false);
+    string address_call = "fn pick(i32@* values) i32@* { return values; }";
+    string address_parameters = "bool select, i32@* values, i32@* backup";
+    conditional_materialization_pair("conditional_address_then", address_call, "",
+        address_parameters, "i32", "*(select ? pick(values) : backup)", false, false);
+    conditional_materialization_pair("conditional_address_else", address_call, "",
+        address_parameters, "i32", "*(select ? values : pick(backup))", false, false);
+    string holder = "struct holder { i32@ items; }";
+    string member_call = "fn pick(holder* values) holder* { return values; }";
+    string member_parameters = "bool select, holder* values, holder* backup";
+    conditional_materialization_pair("conditional_member_then", holder, member_call,
+        member_parameters, "i32", "(select ? pick(values) : backup)->items", false, false);
+    conditional_materialization_pair("conditional_member_else", holder, member_call,
+        member_parameters, "i32", "(select ? values : pick(backup))->items", false, false);
+    conditional_materialization_pair("conditional_header_then", span_call, "",
+        span_parameters, "i32", "(select ? pick(values) : backup)[..]", false, false);
+    conditional_materialization_pair("conditional_header_else", span_call, "",
+        span_parameters, "i32", "(select ? values : pick(backup))[..]", false, false);
+    conditional_materialization_pair("conditional_cast_then", span_call, "",
+        span_parameters, "i32", "cast(select ? pick(values) : backup, i32@)", false, false);
+    conditional_materialization_pair("conditional_cast_else", span_call, "",
+        span_parameters, "i32", "cast(select ? values : pick(backup), i32@)", false, false);
+    string condition_call = "fn choose(bool selected) bool { return selected; }";
+    conditional_materialization_pair("conditional_condition_call", condition_call, "",
+        span_parameters, "i32", "choose(select) ? values : backup", false, false);
+    // No-call controls preserve the existing accepted and incomplete source matches.
+    conditional_materialization_pair("conditional_span_control", "", "",
+        span_parameters, "i32", "select ? values : backup", true, true);
+    conditional_materialization_pair("conditional_string_control", "", "",
+        string_parameters, "char", "select ? values : backup", true, true);
+    conditional_materialization_pair("conditional_nested_control", "", "",
+        span_parameters, "i32", "select ? (other ? values : backup) : values", true, true);
+    conditional_materialization_pair("conditional_address_control", "", "",
+        address_parameters, "i32", "*(select ? values : backup)", false, true);
+    conditional_materialization_pair("conditional_member_control", holder, "",
+        member_parameters, "i32", "(select ? values : backup)->items", false, true);
+    conditional_materialization_pair("conditional_header_control", "", "",
+        span_parameters, "i32", "(select ? values : backup)[..]", true, true);
+    conditional_materialization_pair("conditional_cast_control", "", "",
+        span_parameters, "i32", "cast(select ? values : backup, i32@)", true, true);
+}
+fn additional_scope_matrix() void {
+    string[8] scalar_defer_order = {
+        "fn walk(i32[2] values) void {",
+        "    i32 mut count = 0;",
+        "    defer count +%= 1;",
+        "    defer { for (i32 x : values) { } }",
+        "    defer count +%= 2;",
+        "}",
+        "",
+        "",
+    };
+    deferred_scope_case("scalar_defer_order", scalar_defer_order[..], 1, 1, 3);
+    string[8] selected_inside_defer = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        $if (true) {",
+        "            for (i32 x : values) { }",
+        "        }",
+        "    }",
+        "}",
+        "",
+    };
+    deferred_scope_case("selected_inside_defer", selected_inside_defer[..], 1, 1, 1);
+    string[10] empty_selection_inside_defer = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        $if (false) {",
+        "            for (i32 x : values) { }",
+        "        } else {",
+        "            for (i32 y : values) { }",
+        "        }",
+        "    }",
+        "}",
+        "",
+    };
+    deferred_scope_case("else_inside_defer", empty_selection_inside_defer[..], 1, 1, 1);
+    string[9] abort_suppression = {
+        "fn stop() noreturn { while (true) { } }",
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        for (i32 x : values) { }",
+        "    }",
+        "    defer stop();",
+        "    return;",
+        "}",
+        "",
+    };
+    deferred_scope_case("abort_suppression", abort_suppression[..], 1, 0, 2);
+    string[9] range_then_abort = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        for (i32 x : values) { }",
+        "        panic(\"stop\");",
+        "    }",
+        "    defer { i32 value = 0; }",
+        "}",
+        "",
+        "",
+    };
+    deferred_scope_case("range_then_abort", range_then_abort[..], 1, 1, 2);
+    string[10] deferred_switch = {
+        "fn walk(i32[2] values, i32 tag) void {",
+        "    defer {",
+        "        switch (tag) {",
+        "        case 0:",
+        "            for (i32 x : values) { }",
+        "        default:",
+        "            for (i32 y : values) { }",
+        "        }",
+        "    }",
+        "}",
+    };
+    deferred_scope_case("deferred_switch", deferred_switch[..], 2, 2, 1);
+    string[10] deferred_if = {
+        "fn walk(i32[2] values, bool select) void {",
+        "    defer {",
+        "        if (select) {",
+        "            for (i32 x : values) { }",
+        "        } else {",
+        "            for (i32 y : values) { }",
+        "        }",
+        "    }",
+        "}",
+        "",
+    };
+    deferred_scope_case("deferred_if", deferred_if[..], 2, 2, 1);
+    string[9] deferred_body_local = {
+        "fn walk(i32[2] values) void {",
+        "    defer {",
+        "        for (i32 x : values) {",
+        "            i32 saved = x;",
+        "            { i32 other = saved; }",
+        "        }",
+        "    }",
+        "}",
+        "",
+    };
+    deferred_scope_case("deferred_body_local", deferred_body_local[..], 1, 1, 1);
+}
+
+fn source_body_identity_damage() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[11] source = {
+        "fn walk(i32[2] values, bool skip) void {",
+        "    for (i32 x : values) {",
+        "        defer {",
+        "            for (i32 y : values) { }",
+        "        }",
+        "        if (skip) { continue; }",
+        "    }",
+        "}",
+        "",
+        "",
+        "",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.rows.len == 3);
+    fir_lower.range_audit_key expected = audit.rows.items[1].key;
+    assert(expected.declaration == 2 && expected.expansion == 2);
+    assert(expected.exit_occurrence == 2);
+    assert(audit.rows.items[2].key.exit_occurrence == 5);
+    check_output(&e, decl, &f, "source_body_identity_damage", true);
+    fir_lower.range_source_audit_free(&audit);
+    u32 mut body = fir.block_count(&f);
+    u64 mut i = 0;
+    while (i < proposed.boundaries.len) {
+        fir_lower.range_boundary_candidate c = proposed.boundaries.items[i];
+        if (c.expansion == 2 && c.boundary.kind == fir.range_boundary_kind.body_entry) {
+            body = c.boundary.block;
+        }
+        i += 1;
+    }
+    assert(body < fir.block_count(&f));
+    fir.statement mut* live = &fir.block_mut(&f, body)->statements.items[0];
+    fir.statement original = *live;
+    assert(original.kind == fir.stmt_kind.st_live);
+    live->stmt += 1;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *live = original;
+    live->loc = expected.source;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *live = original;
+    live->exit_loc = proposed.captures.items[2].occurrence.exit_source;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *live = original;
+    u32 mut head = fir.block_count(&f);
+    u32 mut b = 0;
+    while (b < fir.block_count(&f)) {
+        fir.terminator* term = &fir.block_at(&f, b)->term;
+        if (term->kind == fir.term_kind.tk_switch && term->arms_len == 1
+            && fir.term_arm(&f, term, 0).target == body) {
+            head = b;
+        }
+        b += 1;
+    }
+    assert(head < fir.block_count(&f));
+    fir.terminator mut* term = &fir.block_mut(&f, head)->term;
+    fir.terminator saved_term = *term;
+    term->stmt += 1;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *term = saved_term;
+    term->loc = expected.context_source;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *term = saved_term;
+    term->exit_loc = proposed.captures.items[2].occurrence.exit_source;
+    assert_boundary_refusal(decl, &f, &proposed, expected);
+    *term = saved_term;
+    assert(fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_unpublished(&f, &audit);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.deferred.items[0].parent = 99;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert_context_key(&audit, expected);
+    assert(audit.rows.len == 1);
+    fir_lower.range_candidate_set_free(&proposed);
+    assert_context_key(&audit, expected);
+    assert_unpublished(&f, &audit);
+}
+
+fn ambiguous_gap_partition() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn walk(i32[2] values) void {",
+        "    for (i32 x : values) {",
+        "        return;",
+        "        i32 saved = x;",
+        "    }",
+        "}",
+        "",
+        "",
+        "",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    assert(audit.failure.key.source.line == 2);
+    assert(audit.failure.key.declaration == 1 && audit.failure.key.expansion == 1);
+    assert(audit.failure.key.context == 0 && audit.failure.key.exit_occurrence == 0);
+    assert(audit.failure.key.exit_source.line == 0);
+    assert(audit.rows.len == 0 && audit.matched_captures == 0);
+    assert_unpublished(&f, &audit);
+    check_output(&e, decl, &f, "ambiguous_gap_partition", true);
+    fir_lower.range_source_audit_free(&audit);
+    u64 count = proposed.boundaries.len;
+    assert(count == 8);
+    // A selected candidate subset cannot turn the ambiguous partition into proof.
+    proposed.boundaries.len = 5;
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.boundary);
+    assert(audit.failure.key.source.line == 2 && audit.rows.len == 0);
+    assert_unpublished(&f, &audit);
+    fir_lower.range_source_audit_free(&audit);
+    proposed.boundaries.len = count;
+    fir_lower.range_candidate_set_free(&proposed);
+    assert(!fir_lower.audit_produced_ranges(decl, &f, &proposed, &audit));
+    assert(audit.failure.reason == fir_lower.range_audit_fault.declaration);
+    assert(audit.selected_declarations == 1);
+    assert_unpublished(&f, &audit);
 }
 
 fn main() i32 {
+    defer strbuf.free(&probe_rows);
     selected_inventory();
     println("selected inventory 1");
     println("produced expansion 1");
@@ -788,7 +2125,17 @@ fn main() i32 {
     println("boundary repeats 10");
     absence_stays_open();
     println("absence remains open");
-    assert(output_comparisons == 27);
-    println("output compared 27");
+    context_identity_damage();
+    deferred_scope_matrix();
+    expansion_gap_damage();
+    call_materialization_matrix();
+    additional_scope_matrix();
+    source_body_identity_damage();
+    ambiguous_gap_partition();
+    assert(output_comparisons == 70);
+    conditional_materialization_matrix();
+    assert(output_comparisons == 118);
+    export_ledger();
+    println("output compared 118");
     return 0;
 }

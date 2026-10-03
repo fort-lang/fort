@@ -136,10 +136,16 @@ came here.
 - **The inactive range audit compares checked source with FIR operations** (`spec/fir.md` 5.2).
   A separate selected-source walk assigns declaration IDs without reading producer records.
   Counter-zero FIR operations identify produced expansions, including disconnected blocks.
-  A direct match requires its expansion key, capture, protected path, and FIR-supported boundaries.
-  Normal cleanup triples match body-scope `dead` gaps. Missing or moved triples cause refusal.
-  A deferred range or call-result path stays incomplete until independent proof exists.
-  Its owned rows and failures retain source and exit evidence after candidate teardown.
+  A source-only scope replay derives defer chains, exit occurrences, and cleanup events.
+  Empty scope expansions consume occurrence numbers. Repeated defers can use numbers 2 and 5.
+  Source exits and verified FIR operations constrain each produced context match.
+  The FIR loop edge and live marker identify body entry before candidate binding checks.
+  Source intervals and a CFG walk must agree on each expansion's required dead gaps.
+  Each required gap matches exactly one cleanup triple. Candidate subsets supply no gap proof.
+  Ambiguous partitions and call-result paths stay keyed incomplete.
+  The call-root guard follows both conditional result arms, including nested conditionals.
+  Dereference, member, sliced-header, and cast wrappers retain that refusal.
+  The report retains source and exit evidence after candidate teardown.
   Structural validity, source coverage, and ownership proof remain separate false verdicts.
   Deferred absence validation and publication follow in a later pass.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
