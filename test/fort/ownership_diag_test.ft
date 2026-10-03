@@ -1,7 +1,7 @@
 //! run
 //! flags: -I ../../src/fort -I support
 //! stdout:
-//| 18 ownership diagnostic groups ok
+//| 19 ownership diagnostic groups ok
 /// Checks text and JSON diagnostics from supplied ownership events.
 import capture;
 import diag;
@@ -596,17 +596,128 @@ fn callback_boundary() void {
     ownership_api.event_descriptor mut item = event(ownership_api.event_kind.incomplete_proof,
         ownership_api.evidence_kind.abstract_possibility, 31, "that storage is live");
     item.source = ownership_api.source_position{};
-    ownership_api.event_descriptor[1] items = {item};
-    ownership_api.diagnostic_request req = ownership_api.diagnostic_request{items[..],
+    ownership_api.event_descriptor[1] mut items = {item};
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{items[..],
         ownership_api.proof_status{}};
     ownership_api.diagnostic_result missing = ownership_diag.callback(null, &req);
     assert(!missing.rendered && missing.proof.failed && diag.count(&s) == 0);
     ownership_diag.callback(cast(&rend, void mut*), &req);
-    assert(calls == 1 && diag.count(&s) == 1);
-    assert(diag.record_at(&s, 0).loc.file == "origin.ft");
+    assert(calls == 0 && diag.count(&s) == 1);
+    assert(diag.record_at(&s, 0).loc.file == "");
     assert(diag.record_at(&s, 0).loc.line == 1 && diag.record_at(&s, 0).loc.col == 1);
     assert(diag.record_at(&s, 0).loc.end_line == 1 &&
         diag.record_at(&s, 0).loc.end_col == 1);
+    diag.reset(&s);
+    item.source.filename_present = true;
+    items[0] = item;
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    assert(calls == 1 && diag.count(&s) == 1);
+    assert(diag.record_at(&s, 0).loc.file == "origin.ft");
+    diag.reset(&s);
+    req.events = items[0..0];
+    req.verdict = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        item.operation, ownership_api.source_position{});
+    ownership_diag.callback(cast(&rend, void mut*), &req);
+    assert(calls == 1 && diag.count(&s) == 1);
+    assert(diag.record_at(&s, 0).loc.file == "");
+}
+
+fn unnamed_work_source_keeps_its_name_absent() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 16);
+    u64 mut calls = 0;
+    ownership_diag.bind(&rend, &s, &evs, cast(&calls, void mut*),
+        file_with_context, &svc);
+    ownership_api.event_descriptor mut work = event(ownership_api.event_kind.work_failure,
+        ownership_api.evidence_kind.abstract_possibility, 41, "");
+    work.source = ownership_api.source_position{0, 0, 0, 0, 0, 0, false};
+    work.reason = ownership_api.incomplete_reason.work_limit;
+    work.limit.present = true;
+    work.limit.category = ownership_api.limit_category.w;
+    work.limit.work = ownership_api.work_kind.transfer;
+    work.limit.used = 2;
+    work.limit.bound = 2;
+    work.limit.operation = work.operation;
+    work.limit.source = work.source;
+    ownership_api.event_note[1] notes = {ownership_api.event_note{
+        ownership_api.note_role.callee,
+        ownership_api.source_position{0, 0, 5, 6, 5, 8, true},
+        ownership_api.entity_id{}, "callee needs one more transfer"}};
+    work.notes = notes[..];
+    ownership_api.event_descriptor[1] items = {work};
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{items[..],
+        ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+            work.operation, work.source)};
+    req.verdict.terminal.relation = work.relation;
+    req.verdict.terminal.limit = work.limit;
+    ownership_api.diagnostic_result result = ownership_api.render(&svc, &req);
+    assert(result.rendered && result.proof.failed);
+    assert(calls == 1 && diag.count(&s) == 1 && diag.record_count(&s) == 3);
+    assert(diag.record_at(&s, 0).loc.file == "");
+    assert(diag.record_at(&s, 1).loc.file == "origin.ft");
+    assert(diag.record_at(&s, 2).loc.file == "");
+    assert(diag.record_at(&s, 0).msg ==
+        "ownership analysis exceeds the transfer-work bound 2");
+}
+
+fn unnamed_notes_and_terminal_keep_names_absent() void {
+    diag.sink mut s = diag.create();
+    defer diag.free(&s);
+    ownership_diag.renderer mut rend = ownership_diag.renderer{};
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_events.store mut evs = ownership_events.store{};
+    defer ownership_events.free(&evs);
+    setup(&rend, &s, &evs, &svc, 16);
+    u64 mut calls = 0;
+    ownership_diag.bind(&rend, &s, &evs, cast(&calls, void mut*),
+        file_with_context, &svc);
+    ownership_api.event_descriptor mut item = event(
+        ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility, 42, "source is live");
+    item.source = ownership_api.source_position{0, 0, 0, 0, 0, 0, false};
+    item.reason = ownership_api.incomplete_reason.unknown_effect;
+    ownership_api.event_note[1] notes = {ownership_api.event_note{
+        ownership_api.note_role.release, item.source,
+        ownership_api.entity_id{}, "source ended here"}};
+    item.notes = notes[..];
+    item.precision.category = ownership_api.limit_category.p;
+    item.precision.bound = 1;
+    item.precision.reason = ownership_api.incomplete_reason.missing_path;
+    item.precision.first_source = item.source;
+    ownership_api.event_descriptor[1] items = {item};
+    ownership_api.diagnostic_request mut req = ownership_api.diagnostic_request{
+        items[..], ownership_api.proof_status{}};
+    ownership_api.diagnostic_result mut result = ownership_api.render(&svc, &req);
+    assert(result.rendered && calls == 0);
+    assert(diag.count(&s) == 1 && diag.record_count(&s) == 3);
+    u64 mut i = 0;
+    while (i < diag.record_count(&s)) {
+        assert(diag.record_at(&s, i).loc.file == "");
+        i += 1;
+    }
+    diag.reset(&s);
+    req.events = items[0..0];
+    req.verdict = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+        item.operation, item.source);
+    req.verdict.terminal.limit.present = true;
+    req.verdict.terminal.limit.category = ownership_api.limit_category.w;
+    req.verdict.terminal.limit.work = ownership_api.work_kind.transfer;
+    req.verdict.terminal.limit.used = 2;
+    req.verdict.terminal.limit.bound = 2;
+    req.verdict.terminal.limit.operation = item.operation;
+    req.verdict.terminal.limit.source = item.source;
+    result = ownership_api.render(&svc, &req);
+    assert(result.rendered && calls == 0);
+    assert(diag.count(&s) == 1 && diag.record_count(&s) == 2);
+    assert(diag.record_at(&s, 0).loc.file == "");
+    assert(diag.record_at(&s, 1).loc.file == "");
+    assert(diag.record_at(&s, 0).msg ==
+        "ownership analysis exceeds the transfer-work bound 2");
 }
 
 fn canonical_order_ties() void {
@@ -718,8 +829,10 @@ fn main() i32 {
     rendered_v_refusal();
     retained_budget_and_fallback();
     callback_boundary();
+    unnamed_work_source_keeps_its_name_absent();
+    unnamed_notes_and_terminal_keep_names_absent();
     canonical_order_ties();
     all_note_roles();
-    println("18 ownership diagnostic groups ok");
+    println("19 ownership diagnostic groups ok");
     return 0;
 }
