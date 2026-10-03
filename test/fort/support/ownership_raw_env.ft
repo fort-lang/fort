@@ -247,3 +247,30 @@ fn projections(ownership_api.projection mut@ parts) void {
         i += 1;
     }
 }
+fn calculation(env mut* e, ownership_raw.request* req, ownership_raw.work_cursor mut* cursor)
+    ownership_raw.calculation {
+    accepted(ownership_raw.begin_work(&e->local.state, &e->local.service, req, cursor));
+    return ownership_raw.calculation{&e->root.storage, &e->local.service, &cursor->selected,
+        ownership_raw.complete()};
+}
+fn unmapped_work_failure(env* e, ownership_api.proof_status proof,
+    ownership_raw.request* req, u64 events) void {
+    rejected(proof);
+    ownership_api.exhaustion limit = proof.terminal.limit;
+    assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit && limit.present);
+    assert(limit.category == ownership_api.limit_category.w && limit.attempted == 1 &&
+        limit.used == e->budget.meter.bounds.w && limit.bound == limit.used);
+    assert(ownership_keys.operation(limit.operation, req->base.operation) == 0);
+    assert(e->local.counts.events == events);
+}
+fn refuse_mapped_event(void mut* opaque, ownership_api.event_request* report)
+    ownership_api.event_result {
+    assert(report->event.key.kind == ownership_api.entity_kind.event &&
+        report->event.kind == ownership_api.event_kind.work_failure &&
+        report->event.limit.present && report->event.limit.attempted == 1);
+    ownership_api.event_result mut out = {};
+    out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.report_limit,
+        report->event.operation, report->event.source);
+    out.retained = true;
+    return out;
+}
