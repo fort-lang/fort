@@ -1,0 +1,662 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept live_heap_range
+//| accept live_object_access
+//| reject range_exceeds_window
+//| reject typed_access_exceeds_window
+//| reject unproved_source
+//| reject negative_bound
+//| reject reversed_bounds
+//| reject unproved_bound
+//| accept canonical_empty_inspection
+//| reject canonical_empty_element
+//| reject raw_zero_range_without_source
+//| accept live_boundary_zero_range
+//| reject end_pointer_read
+//| reject end_pointer_positive_range
+//| accept aligned_same_size_reinterpretation
+//| accept misaligned_pointer_cast_alone
+//| reject misaligned_access
+//| accept exact_integer_cast_alone
+//| reject exact_integer_access
+//| reject identity_integer_copy_access
+//| reject changed_address_bits
+//| reject bitwise_address_bits
+//| reject narrowed_widened_bits
+//| reject restored_equal_bits
+//| reject arbitrary_integer_access
+//| reject foreign_integer_access
+//| accept void_round_trip
+//| accept cast_preserves_original_obligation
+//| accept field_window_access
+//| accept element_window_access
+//| accept span_backing_pointer
+//| reject header_is_not_backing
+//| reject cast_cannot_widen_subobject
+//| accept captured_symbolic_byte_count
+//| accept captured_symbolic_nonbyte_stride
+//| accept proved_symbolic_subrange
+//| accept reassigned_count_preserves_old_extent
+//| accept ordinary_bounds_success_narrows_view
+/// Tests required raw-range verdicts from captured compiler facts.
+import check_env;
+import ownership_api;
+import ownership_keys;
+import ownership_local_env;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import types;
+
+fn live_heap_range() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 16);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(0), ownership_raw.literal(16), e.byte);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    ownership_raw_env.source(&value, 1, 0, 16);
+    assert(e.local.state.allocations[0].obligation);
+    println("accept live_heap_range");
+}
+
+fn live_object_access() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.object(&e, 8);
+    ownership_raw_env.accepted(ownership_raw_env.access(&e, &e.root, e.byte));
+    assert(e.root.storage.leaves_len == 8);
+    assert(e.local.state.sources[0].kind == ownership_api.source_kind.stack);
+    println("accept live_object_access");
+}
+
+fn range_exceeds_window() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 16);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(0), ownership_raw.literal(17), e.byte);
+    ownership_raw_env.rejects(&value);
+    println("reject range_exceeds_window");
+}
+
+fn typed_access_exceeds_window() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 1);
+    types.node* wider = types.type_prim(&e.table, prim.prim_kind.prim_i32);
+    ownership_raw_env.rejected(ownership_raw_env.access(&e, &e.root, wider));
+    println("reject typed_access_exceeds_window");
+}
+
+fn unproved_source() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    e.local.state.sources[0].kind = ownership_api.source_kind.unknown_fort;
+    ownership_raw_env.rejected(ownership_raw_env.access(&e, &e.root, e.byte));
+    println("reject unproved_source");
+}
+
+fn negative_bound() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.expression mut lo = ownership_raw.literal(0);
+    lo.constant = ownership_raw.signed(-1);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root, lo,
+        ownership_raw.literal(1), e.byte);
+    ownership_raw_env.rejects(&value);
+    println("reject negative_bound");
+}
+
+fn reversed_bounds() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(4), ownership_raw.literal(3), e.byte);
+    ownership_raw_env.rejects(&value);
+    println("reject reversed_bounds");
+}
+
+fn unproved_bound() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.expression hi = ownership_raw.expression{};
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(0), hi, e.byte);
+    ownership_raw_env.rejects(&value);
+    println("reject unproved_bound");
+}
+
+fn canonical_empty_inspection() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    ownership_api.contents_fact header = ownership_local_env.empty_value();
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw_env.accepted(ownership_raw.inspect_empty_header(&e.local.state,
+        &e.local.service, &header, true, &req));
+    assert(e.local.state.sources_len == 0 && e.local.state.allocations_len == 0);
+    println("accept canonical_empty_inspection");
+}
+
+fn canonical_empty_element() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    ownership_api.contents_fact header = ownership_local_env.empty_value();
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw_env.rejected(ownership_transfer.check_read(&e.local.state,
+        &e.local.service, &req.base, header, true));
+    println("reject canonical_empty_element");
+}
+
+fn raw_zero_range_without_source() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+    defer ownership_raw.free_result(&bits);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &bits,
+        ownership_raw.literal(0), ownership_raw.literal(0), e.byte);
+    ownership_raw_env.rejects(&value);
+    println("reject raw_zero_range_without_source");
+}
+
+fn live_boundary_zero_range() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(8), ownership_raw.literal(8), e.byte);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    ownership_raw_env.source(&value, 1, 8, 8);
+    println("accept live_boundary_zero_range");
+}
+
+fn end_pointer_read() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.result mut value = ownership_raw_env.window(&e, &e.root, 8, 8);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    ownership_raw_env.rejected(ownership_raw_env.access(&e, &value, e.byte));
+    println("reject end_pointer_read");
+}
+
+fn end_pointer_positive_range() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.result mut value = ownership_raw_env.window(&e, &e.root, 8, 8);
+    defer ownership_raw.free_result(&value);
+    ownership_raw.result mut bad = ownership_raw_env.slice(&e, &value,
+        ownership_raw.literal(0), ownership_raw.literal(1), e.byte);
+    ownership_raw_env.rejects(&bad);
+    println("reject end_pointer_positive_range");
+}
+
+fn aligned_same_size_reinterpretation() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.typed_heap(&e, prim.prim_kind.prim_i32, 1);
+    types.node* left = types.type_ptr(&e.table, e.root.storage.origins[0].layout, false, false);
+    types.node* floating = types.type_prim(&e.table, prim.prim_kind.prim_f32);
+    types.node* right = types.type_ptr(&e.table, floating, false, false);
+    ownership_raw.result mut value = ownership_raw_env.cast_value(&e, &e.root, left, right);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    ownership_raw_env.accepted(ownership_raw_env.access(&e, &value, floating));
+    ownership_raw_env.source(&value, 1, 0, 4);
+    println("accept aligned_same_size_reinterpretation");
+}
+
+fn misaligned_pointer_cast_alone() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 16);
+       ownership_raw.result mut selected = ownership_raw_env.window(&e, &e.root, 1, 9);
+       defer ownership_raw.free_result(&selected);
+       types.node* wider = types.type_prim(&e.table, prim.prim_kind.prim_i32);
+       types.node* left = types.type_ptr(&e.table, e.byte, false, false);
+       types.node* right = types.type_ptr(&e.table, wider, false, false);
+       ownership_raw.result mut value = ownership_raw_env.cast_value(&e, &selected, left, right);
+       defer ownership_raw.free_result(&value);
+       ownership_raw_env.accepts(&value);
+       ownership_raw_env.source(&value, 1, 1, 9);
+    assert(value.addresses[0].alignment == 8);
+    println("accept misaligned_pointer_cast_alone");
+}
+
+fn misaligned_access() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 16);
+       ownership_raw.result mut selected = ownership_raw_env.window(&e, &e.root, 1, 9);
+       defer ownership_raw.free_result(&selected);
+       types.node* wider = types.type_prim(&e.table, prim.prim_kind.prim_i32);
+       types.node* left = types.type_ptr(&e.table, e.byte, false, false);
+       types.node* right = types.type_ptr(&e.table, wider, false, false);
+       ownership_raw.result mut value = ownership_raw_env.cast_value(&e, &selected, left, right);
+       defer ownership_raw.free_result(&value);
+       ownership_raw_env.accepts(&value);
+       ownership_raw_env.source(&value, 1, 1, 9);
+    ownership_raw_env.rejected(ownership_raw_env.access(&e, &value, wider));
+    println("reject misaligned_access");
+}
+
+fn exact_integer_cast_alone() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+    defer ownership_raw.free_result(&bits);
+    ownership_raw_env.accepts(&bits);
+    assert(!bits.addresses[0].complete && bits.addresses[0].source.kind ==
+        ownership_api.entity_kind.none && bits.storage.origins.len == 0);
+    println("accept exact_integer_cast_alone");
+}
+
+fn exact_integer_access() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    u64 original = 4096;
+    u64 reconstructed = original;
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject exact_integer_access");
+}
+
+fn identity_integer_copy_access() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    u64 original = 4096;
+    u64 identity = original;
+    u64 reconstructed = identity;
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject identity_integer_copy_access");
+}
+
+fn changed_address_bits() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    u64 original = 4096;
+    u64 reconstructed = original + 1;
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject changed_address_bits");
+}
+
+fn bitwise_address_bits() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    u64 original = 4096;
+    u64 reconstructed = original ^ 8;
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject bitwise_address_bits");
+}
+
+fn narrowed_widened_bits() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    u64 original = 4096;
+    u32 narrow = cast(original, u32);
+    u64 reconstructed = cast(narrow, u64);
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject narrowed_widened_bits");
+}
+
+fn restored_equal_bits() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    u64 original = 4096;
+    u64 changed = original + 1;
+    u64 reconstructed = changed - 1;
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject restored_equal_bits");
+}
+
+fn arbitrary_integer_access() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.open(&e);
+    u64 reconstructed = 12345;
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject arbitrary_integer_access");
+}
+
+fn foreign_integer_access() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.trusted(&e);
+    u64 reconstructed = 16384;
+        assert(reconstructed > 0);
+        ownership_raw.result mut bits = ownership_raw_env.integer(&e);
+        defer ownership_raw.free_result(&bits);
+        ownership_raw_env.rejected(ownership_raw_env.access(&e, &bits, e.byte));
+    println("reject foreign_integer_access");
+}
+
+fn void_round_trip() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    types.node* pointer = types.type_ptr(&e.table, e.byte, false, false);
+    types.node* erased = types.type_voidptr(&e.table, false, false);
+    ownership_raw.result mut intermediate = ownership_raw_env.cast_value(&e, &e.root,
+        pointer, erased);
+    defer ownership_raw.free_result(&intermediate);
+    ownership_raw.result mut value = ownership_raw_env.cast_value(&e, &intermediate,
+        erased, pointer);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepted(ownership_raw_env.access(&e, &value, e.byte));
+    ownership_raw_env.source(&value, 1, 0, 8);
+    assert(ownership_state.equal(&before, &e.local.state));
+    assert(e.local.state.allocations[0].obligation && e.local.state.allocations_len == 1);
+    println("accept void_round_trip");
+}
+
+fn cast_preserves_original_obligation() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 8);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    types.node* pointer = types.type_ptr(&e.table, e.byte, false, false);
+    types.node* erased = types.type_voidptr(&e.table, false, false);
+    ownership_raw.result mut intermediate = ownership_raw_env.cast_value(&e, &e.root,
+        pointer, erased);
+    defer ownership_raw.free_result(&intermediate);
+    ownership_raw.result mut value = ownership_raw_env.cast_value(&e, &intermediate,
+        erased, pointer);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepted(ownership_raw_env.access(&e, &value, e.byte));
+    ownership_raw_env.source(&value, 1, 0, 8);
+    assert(ownership_state.equal(&before, &e.local.state));
+    assert(e.local.state.allocations[0].obligation && e.local.state.allocations_len == 1);
+    println("accept cast_preserves_original_obligation");
+}
+
+fn field_window_access() void {
+    check_env.env mut checked = {};
+    check_env.open(&checked);
+    defer check_env.close(&checked);
+    assert(check_env.check_src(&checked,
+        "struct record { u8 pad; i32 field; u8* own owner; } fn main() i32 { return 0; }"));
+    types.node* record_type = check_env.sym_main(&checked, "record")->ty;
+    ownership_raw_env.env mut e = {};
+    ownership_raw_env.open(&e);
+    defer ownership_raw_env.close(&e);
+    ownership_local_env.add_stack(&e.local, 1);
+    ownership_raw.origin input = ownership_raw_env.origin(&e, 1, record_type,
+        ownership_raw.literal(1), ownership_raw.literal(16), false);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    e.root = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.accepts(&e.root);
+    assert(e.root.storage.leaves_len == 4 && e.root.storage.leaves[1].padding &&
+        e.root.storage.leaves[3].owning);
+    ownership_raw.result mut selected = ownership_raw_env.window(&e, &e.root, 4, 8);
+    defer ownership_raw.free_result(&selected);
+    types.node* word = types.type_prim(&e.table, prim.prim_kind.prim_i32);
+    ownership_raw_env.accepted(ownership_raw_env.access(&e, &selected, word));
+    ownership_raw_env.source(&selected, 1, 4, 8);
+    assert(e.root.storage.leaves[2].place.projections[0].kind ==
+        ownership_api.projection_kind.field &&
+        e.root.storage.leaves[2].place.projections[0].field == 1);
+    println("accept field_window_access");
+}
+
+fn element_window_access() void {
+    ownership_raw_env.env mut e = {};
+    ownership_raw_env.open(&e);
+    defer ownership_raw_env.close(&e);
+    ownership_local_env.add_stack(&e.local, 1);
+    types.node* word = types.type_prim(&e.table, prim.prim_kind.prim_i32);
+    types.node* array_type = types.type_array(&e.table, word, 4);
+    ownership_raw.origin input = ownership_raw_env.origin(&e, 1, array_type,
+        ownership_raw.literal(1), ownership_raw.literal(16), false);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    e.root = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.accepts(&e.root);
+    ownership_raw.result mut selected = ownership_raw_env.window(&e, &e.root, 8, 12);
+    defer ownership_raw.free_result(&selected);
+    ownership_raw_env.accepted(ownership_raw_env.access(&e, &selected, word));
+    ownership_raw_env.source(&selected, 1, 8, 12);
+    assert(e.root.storage.leaves_len == 4 && e.root.storage.leaves[2].begin == 8 &&
+        e.root.storage.leaves[2].place.projections[0].index.value == 2);
+    println("accept element_window_access");
+}
+
+fn span_backing_pointer() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 16);
+    ownership_raw.result mut selected = ownership_raw_env.window(&e, &e.root, 4, 8);
+    defer ownership_raw.free_result(&selected);
+    ownership_api.borrow_relation[1] mut borrows = {ownership_local_env.borrow(
+        ownership_local_env.id(ownership_api.entity_kind.source, 1), 11,
+        ownership_local_env.place(2))};
+    borrows[0].range.offset.kind = ownership_api.fact_kind.exact;
+    borrows[0].range.offset.value = 4;
+    borrows[0].range.access.begin.kind = ownership_api.fact_kind.exact;
+    borrows[0].range.access.begin.value = 4;
+    borrows[0].range.access.end.kind = ownership_api.fact_kind.exact;
+    borrows[0].range.access.end.value = 8;
+    borrows[0].range.access.arithmetic_proved = true;
+    ownership_api.contents_fact header = ownership_local_env.reference(11,
+        borrows[0].source, borrows[..]);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.result mut value = ownership_raw.extract_pointer(&selected.storage,
+        &e.local.service, selected.addresses[..], &header, &req);
+
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepted(ownership_raw_env.access(&e, &value, e.byte));
+    ownership_raw_env.source(&value, 1, 4, 8);
+    assert(header.place.root.ordinal != value.addresses[0].source.ordinal ||
+        header.place.root.kind != value.addresses[0].source.kind);
+    println("accept span_backing_pointer");
+}
+
+fn header_is_not_backing() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 16);
+       ownership_raw.result mut selected = ownership_raw_env.window(&e, &e.root, 4, 8);
+       defer ownership_raw.free_result(&selected);
+       ownership_api.borrow_relation[1] mut borrows = {ownership_local_env.borrow(
+           ownership_local_env.id(ownership_api.entity_kind.source, 2), 11,
+           ownership_local_env.place(2))};
+       borrows[0].range.offset.kind = ownership_api.fact_kind.exact;
+       borrows[0].range.offset.value = 4;
+       borrows[0].range.access.begin.kind = ownership_api.fact_kind.exact;
+       borrows[0].range.access.begin.value = 4;
+       borrows[0].range.access.end.kind = ownership_api.fact_kind.exact;
+       borrows[0].range.access.end.value = 8;
+       borrows[0].range.access.arithmetic_proved = true;
+       ownership_api.contents_fact header = ownership_local_env.reference(11,
+           borrows[0].source, borrows[..]);
+       ownership_raw.request mut req = ownership_raw_env.request(&e);
+       ownership_raw.result mut value = ownership_raw.extract_pointer(&selected.storage,
+           &e.local.service, selected.addresses[..], &header, &req);
+    ownership_raw_env.rejects(&value);
+    println("reject header_is_not_backing");
+}
+
+fn cast_cannot_widen_subobject() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.object(&e, 16);
+    ownership_raw.result mut field = ownership_raw_env.window(&e, &e.root, 4, 8);
+    defer ownership_raw.free_result(&field);
+    types.node* pointer = types.type_ptr(&e.table, e.byte, false, false);
+    types.node* erased = types.type_voidptr(&e.table, false, false);
+    ownership_raw.result mut value = ownership_raw_env.cast_value(&e, &field, pointer, erased);
+    defer ownership_raw.free_result(&value);
+    types.node* two_words = types.type_array(&e.table, e.byte, 8);
+    ownership_raw_env.rejected(ownership_raw_env.access(&e, &value, two_words));
+    ownership_raw_env.source(&value, 1, 4, 8);
+    println("reject cast_cannot_widen_subobject");
+}
+
+fn captured_symbolic_byte_count() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.symbolic_heap(&e, 1, 0, 64);
+    ownership_raw.term[1] mut terms = {};
+    ownership_raw.expression n = ownership_raw_env.symbol(10, terms[..], 1);
+    types.node* element = e.root.storage.origins[0].layout;
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(0), n, element);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    assert(ownership_raw.same_expression(value.addresses[0].end,
+        e.root.storage.origins[0].end));
+    assert(value.addresses[0].source.ordinal == 1);
+    println("accept captured_symbolic_byte_count");
+}
+
+fn captured_symbolic_nonbyte_stride() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.symbolic_heap(&e, 4, 0, 64);
+    ownership_raw.term[1] mut terms = {};
+    ownership_raw.expression n = ownership_raw_env.symbol(10, terms[..], 1);
+    types.node* element = e.root.storage.origins[0].layout;
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(0), n, element);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    assert(ownership_raw.same_expression(value.addresses[0].end,
+        e.root.storage.origins[0].end));
+    assert(value.addresses[0].source.ordinal == 1);
+    println("accept captured_symbolic_nonbyte_stride");
+}
+
+fn proved_symbolic_subrange() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.symbolic_heap(&e, 4, 8, 64);
+    ownership_raw.term[1] mut terms = {};
+    ownership_raw.expression mut upper = ownership_raw_env.symbol(10, terms[..], 1);
+    upper.constant = ownership_raw.signed(-1);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(1), upper, e.root.storage.origins[0].layout);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    assert(ownership_raw.same_expression(value.addresses[0].begin, ownership_raw.literal(4)));
+    assert(value.addresses[0].end.constant.negative &&
+        value.addresses[0].end.constant.magnitude == 4);
+    println("accept proved_symbolic_subrange");
+}
+
+fn reassigned_count_preserves_old_extent() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.symbolic_heap(&e, 1, 16, 16);
+    u64 mut current_count = 16;
+    current_count = 128;
+    ownership_raw.term[1] mut terms = {};
+    ownership_raw.expression captured = ownership_raw_env.symbol(10, terms[..], 1);
+    ownership_raw.result mut value = ownership_raw_env.slice(&e, &e.root,
+        ownership_raw.literal(0), captured, e.byte);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    assert(current_count == 128 && value.storage.bounds[0].upper.magnitude == 16);
+    assert(ownership_raw.same_expression(value.addresses[0].end, captured));
+    println("accept reassigned_count_preserves_old_extent");
+}
+
+fn ordinary_bounds_success_narrows_view() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.symbolic_heap(&e, 1, 16, 16);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.result mut value = ownership_raw.derive_address(&e.root.storage,
+        &e.local.service, e.root.addresses[..], ownership_raw.literal(3),
+        ownership_raw.literal(7), e.byte, &req);
+    defer ownership_raw.free_result(&value);
+    ownership_raw_env.accepts(&value);
+    ownership_raw_env.source(&value, 1, 3, 7);
+    assert(e.local.state.allocations[0].logical_length.symbol.ordinal == 10);
+    println("accept ordinary_bounds_success_narrows_view");
+}
+
+fn main() i32 {
+    live_heap_range();
+    live_object_access();
+    range_exceeds_window();
+    typed_access_exceeds_window();
+    unproved_source();
+    negative_bound();
+    reversed_bounds();
+    unproved_bound();
+    canonical_empty_inspection();
+    canonical_empty_element();
+    raw_zero_range_without_source();
+    live_boundary_zero_range();
+    end_pointer_read();
+    end_pointer_positive_range();
+    aligned_same_size_reinterpretation();
+    misaligned_pointer_cast_alone();
+    misaligned_access();
+    exact_integer_cast_alone();
+    exact_integer_access();
+    identity_integer_copy_access();
+    changed_address_bits();
+    bitwise_address_bits();
+    narrowed_widened_bits();
+    restored_equal_bits();
+    arbitrary_integer_access();
+    foreign_integer_access();
+    void_round_trip();
+    cast_preserves_original_obligation();
+    field_window_access();
+    element_window_access();
+    span_backing_pointer();
+    header_is_not_backing();
+    cast_cannot_widen_subobject();
+    captured_symbolic_byte_count();
+    captured_symbolic_nonbyte_stride();
+    proved_symbolic_subrange();
+    reassigned_count_preserves_old_extent();
+    ordinary_bounds_success_narrows_view();
+    return 0;
+}

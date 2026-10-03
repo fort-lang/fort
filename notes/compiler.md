@@ -355,6 +355,18 @@ came here.
 - **Raw storage retains its typed source facts** (T-275, D17.17).
   `spec/memory-model.md` 2.8 defines source objects, byte offsets, access windows, alignment, and
   reference representation effects. Pointer casts preserve those facts through void pointers.
+  `src/fort/ownership_raw.ft` evaluates supplied checked facts.
+  Its producer supplies exhaustive sources, captured value versions, complete headers, and resolved
+  layouts. Its context borrows its paired core state and type table.
+  The caller keeps both alive until it destroys the raw result.
+  Raw results own copied expressions, place paths, origins, and addresses.
+  A failure releases those copies and retains the input core state.
+  The kernel checks maximum projection depth separately from cumulative work.
+  It charges each preliminary type-size descent before it reads the next type node.
+  Array sizing uses checked multiplication and never calls recursive size_checked on an array.
+  Range copies charge lower and upper operands before output allocation.
+  Projection copies charge each retained path element before allocation or copying.
+  Its producer validates actual source correspondence before driver integration.
   Typed subobject windows do not grow when a cast erases the pointee type.
   Raw ranges require proved bounds and sufficient extent. Extents can remain symbolic.
   Integer reconstruction supplies no source proof, including an exact unmodified u64 round trip.
@@ -367,7 +379,8 @@ came here.
   Zero-element allocations retain ownership with zero logical access extent.
   Foreign byte effects remain outside proof under D17.13. Known allocation release still invalidates
   related borrows, even when foreign extent trust remains available.
-  The 12 normative traces are design evidence. They do not establish compiler implementation.
+  The 12 normative traces are design evidence. The two raw suites probe supplied facts.
+  These probes do not establish producer integration or ordered representation writes.
   These rules change no layout, ABI, emitted instruction, arithmetic operator, or runtime check.
 - **An emitter that copies a value and then clears its source needs an intermediate.** `move(lv)`
   writes into a destination the emitter cannot prove distinct from the operand (`s = move(s)`,
