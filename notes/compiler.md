@@ -661,15 +661,32 @@ came here.
   A move reads its value before emptiness. A whole proved replacement kills only its prior value.
   Projected and unproved writes preserve possible use of the containing prior value.
   Complete supplied correspondence maps indirect reads and ordered substituted call effects.
-  Missing correspondence prevents a successful query. A supplied success establishes no source coverage.
-  The backward solver unions reachable successor uses and preserves loop back edges and zero iterations.
-  Live and dead delimit local instances. Neither marker supplies a semantic read or replacement write.
+  Missing correspondence prevents a successful query.
+  A supplied success establishes no source coverage.
+  The backward solver unions reachable successor uses and preserves loop back edges and zero
+  iterations.
+  Live and dead delimit local instances. Neither marker supplies a semantic read or replacement
+  write.
   Deferred reads remain before dead markers. Ending an inner instance preserves outer local uses.
   Instance boundaries remove no retained relation, referenced source obligation, or range loan.
-  Validation, alias resolution, buffer growth, bit-set work, transfers, and joins charge W before changes.
+  Validation, alias resolution, buffer growth, bit-set work, transfers, and joins charge W before
+  changes.
   Array initialization, FIR read walks, and unreachable-block scans also charge their work.
   Failed results stay safe to free. Partial results provide no successful absence query.
-  The module adds no driver selection, lifetime syntax, LLVM instruction, ABI field, or runtime field.
+- **Retained sources remain separate from local last use** (D17.14, D17.15).
+  `ownership_borrows.solve` copies current contents, source facts, and complete supplied bindings.
+  A binding separates current destination storage from original relation evidence.
+  Local liveness removes no field, element, result, global, caller relation, or range loan.
+  The graph follows retained storage through intermediate references with a finite visited set.
+  Owning references supply storage reachability without becoming borrowed local-use roots.
+  Exact updates and proved destination ends remove only their selected relations.
+  Weak updates, residual partitions, and unknown retained contents cannot prove absent retention.
+  Symbolic caller sources remain caller requirements. Ending retained local storage gives escape.
+  W and E charges precede copies and traversal. Failed results provide no successful absence query.
+  Separate allocator probes measure successful and failed result teardown.
+  The producer still proves storage, reference-leaf, and source-closure correspondence.
+  The module adds no driver selection, lifetime syntax, LLVM instruction, ABI field, or runtime
+  field.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by

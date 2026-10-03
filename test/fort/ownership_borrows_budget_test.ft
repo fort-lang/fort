@@ -1,0 +1,660 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| graph_work_exhaustion
+//| graph_teardown
+//| nested_metadata_snapshot
+//| incomplete_inputs
+//| event_storage_failure
+//| residual_metadata
+//| finite_storage_depth
+//| canonical_destinations
+//| duplicate_binding_work_exhaustion
+//| boundary_destination_work_exhaustion
+/// Tests exact budget boundaries, snapshots, and conservative incomplete results.
+import ownership_api;
+import ownership_borrows;
+import ownership_borrows_env;
+import ownership_keys;
+import ownership_limits;
+import ownership_local_env;
+import ownership_liveness;
+import ownership_state;
+
+struct charges { u64 build; u64 query; u64 relations; }
+struct binding_charges { u64 validation; u64 duplicate; u64 build; }
+struct boundary_charges { u64 negative; u64 positive; u64 query; u64 nested; u64 reaches; }
+
+fn setup(ownership_borrows_env.env mut* e) void {
+    ownership_borrows_env.open(e);
+    ownership_borrows_env.local_use(e, 2, false);
+    ownership_borrows_env.source(e, 100, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.seed_metadata(e, 2, 10);
+    ownership_borrows_env.seed_metadata(e, 2, 11);
+}
+
+fn incomplete(ownership_api.proof_status proof, ownership_api.incomplete_reason reason) void {
+    assert(!ownership_api.successful(proof));
+    assert(proof.kind == ownership_api.proof_kind.incomplete && proof.failed);
+    assert(proof.terminal.present && proof.terminal.reason == reason);
+}
+
+fn limit(ownership_api.proof_status proof, ownership_api.limit_category category, u64 bound)
+    void {
+    incomplete(proof, ownership_api.incomplete_reason.work_limit);
+    assert(proof.terminal.limit.present && proof.terminal.limit.category == category);
+    assert(proof.terminal.limit.bound == bound && proof.terminal.limit.used == bound);
+    assert(proof.terminal.limit.attempted == 1);
+}
+
+fn empty_output(ownership_borrows.graph* kept) void {
+    assert(kept->destinations.len == 0 && kept->edges.len == 0 && kept->edges_len == 0);
+    assert(kept->visited.len == 0 && kept->queue.len == 0 && kept->matches.len == 0);
+    assert(kept->snapshot.contents.len == 0 && kept->snapshot.sources.len == 0);
+    assert(kept->snapshot.blocks == null && !ownership_api.successful(kept->proof));
+}
+
+fn graph_work_exhaustion() charges {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W,
+        ownership_limits.PRODUCTION_E);
+    ownership_borrows.graph mut full = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&full);
+    assert(ownership_api.successful(full.proof));
+    charges mut measured = charges{.build = e.counts.meter.used.w,
+        .relations = e.counts.meter.used.e};
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W,
+        ownership_limits.PRODUCTION_E);
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(&e, &full, 100);
+    assert(ownership_api.successful(got.proof) && !got.local_used && got.retained);
+    measured.query = e.counts.meter.used.w;
+    assert(measured.build > 100 && measured.query > 1 && measured.relations == 2);
+    u64 mut bound = 1;
+    while (bound < measured.build) {
+        ownership_borrows_env.production(&e, bound, measured.relations);
+        ownership_borrows.graph mut denied = ownership_borrows_env.solve(&e);
+        limit(denied.proof, ownership_api.limit_category.w, bound);
+        ownership_borrows.answer failed = ownership_borrows_env.inspect(&e, &denied, 100);
+        limit(failed.proof, ownership_api.limit_category.w, bound);
+        assert(ownership_state.equal(&e.local.state, &before));
+        ownership_borrows.free(&denied);
+        empty_output(&denied);
+        ownership_borrows.free(&denied);
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.build, measured.relations);
+    ownership_borrows.graph mut exact = ownership_borrows_env.solve(&e);
+    assert(ownership_api.successful(exact.proof));
+    assert(e.counts.meter.used.w == measured.build && e.counts.meter.used.e == measured.relations);
+    ownership_borrows.free(&exact);
+    bound = 1;
+    while (bound < measured.query) {
+        ownership_borrows_env.production(&e, bound, measured.relations);
+        ownership_borrows.answer denied = ownership_borrows_env.inspect(&e, &full, 100);
+        limit(denied.proof, ownership_api.limit_category.w, bound);
+        assert(ownership_api.successful(full.proof));
+        assert(ownership_state.equal(&e.local.state, &before));
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.query, measured.relations);
+    got = ownership_borrows_env.inspect(&e, &full, 100);
+    assert(ownership_api.successful(got.proof) && got.retained && !got.local_used);
+    assert(e.counts.meter.used.w == measured.query);
+    bound = 1;
+    while (bound < measured.relations) {
+        ownership_borrows_env.production(&e, measured.build, bound);
+        ownership_borrows.graph mut denied = ownership_borrows_env.solve(&e);
+        limit(denied.proof, ownership_api.limit_category.e, bound);
+        // Denial precedes relation snapshots and their edge buffer.
+        assert(denied.snapshot.contents.len == 0 && denied.edges.len == 0);
+        assert(ownership_state.equal(&e.local.state, &before));
+        ownership_borrows.free(&denied);
+        empty_output(&denied);
+        bound += 1;
+    }
+    return measured;
+}
+
+fn graph_teardown() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    assert(ownership_api.successful(kept.proof));
+    assert(kept.snapshot.blocks != null && kept.destinations.len == 1);
+    assert(kept.edges_len == 2 && kept.visited.len == 2 && kept.matches.len == 2);
+    ownership_borrows.free(&kept);
+    empty_output(&kept);
+    ownership_borrows.free(&kept);
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(!ownership_api.successful(got.proof));
+    ownership_borrows_env.production(&e, 1, 2);
+    kept = ownership_borrows_env.solve(&e);
+    incomplete(kept.proof, ownership_api.incomplete_reason.work_limit);
+    ownership_borrows.free(&kept);
+    empty_output(&kept);
+}
+
+fn nested_metadata_snapshot() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    assert(ownership_api.successful(kept.proof));
+    ownership_api.contents_fact original = e.local.state.contents[0];
+    ownership_api.contents_fact copied = kept.snapshot.contents[0];
+    assert(ownership_state.same_contents(original, copied));
+    assert(original.place.projections.ptr != copied.place.projections.ptr);
+    assert(original.borrows.ptr != copied.borrows.ptr);
+    assert(original.borrows[0].range.leaves.ptr != copied.borrows[0].range.leaves.ptr);
+    assert(original.borrows[0].range.partitions.ptr != copied.borrows[0].range.partitions.ptr);
+    ownership_state.free(&e.local.state);
+    ownership_liveness.free(&e.live);
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(got.proof) && got.retained && got.caller_requirement);
+    assert(!got.local_used && got.destinations.len == 2);
+    ownership_api.borrow_relation relation = got.destinations[0].relation;
+    assert(relation.containing.projections.len == 16 && relation.range.leaves.len == 16);
+    assert(relation.range.partitions.len == 16 && relation.range.extent.value == 128);
+    assert(relation.range.leaves[15].bytes.end.value == 128);
+    assert(relation.value_version.ordinal == 10 && relation.source.ordinal == 100);
+}
+
+fn failed_build(ownership_borrows_env.env mut* e, ownership_borrows.request* req,
+    ownership_api.incomplete_reason reason) void {
+    ownership_borrows.graph mut kept = ownership_borrows.solve(req);
+    defer ownership_borrows.free(&kept);
+    incomplete(kept.proof, reason);
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(e, &kept, 100);
+    assert(!ownership_api.successful(got.proof));
+}
+
+fn incomplete_inputs() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows.request mut req = ownership_borrows_env.input(&e);
+    req.contents_complete = false;
+    failed_build(&e, &req, ownership_api.incomplete_reason.missing_correspondence);
+    req = ownership_borrows_env.input(&e);
+    req.bindings_complete = false;
+    failed_build(&e, &req, ownership_api.incomplete_reason.missing_correspondence);
+    req = ownership_borrows_env.input(&e);
+    req.current = null;
+    failed_build(&e, &req, ownership_api.incomplete_reason.invalid_input);
+    req = ownership_borrows_env.input(&e);
+    req.local_uses = null;
+    failed_build(&e, &req, ownership_api.incomplete_reason.missing_correspondence);
+    req = ownership_borrows_env.input(&e);
+    req.point.block = 99;
+    failed_build(&e, &req, ownership_api.incomplete_reason.invalid_input);
+    req = ownership_borrows_env.input(&e);
+    req.bindings = req.bindings[0..0];
+    failed_build(&e, &req, ownership_api.incomplete_reason.missing_correspondence);
+    req = ownership_borrows_env.input(&e);
+    ownership_borrows.binding[2] duplicate = {e.bindings[0], e.bindings[0]};
+    req.bindings = duplicate[..];
+    failed_build(&e, &req, ownership_api.incomplete_reason.invalid_input);
+    req = ownership_borrows_env.input(&e);
+    ownership_api.entity_id original_storage = e.bindings[0].storage;
+    e.bindings[0].storage = ownership_borrows_env.id(ownership_api.entity_kind.source, 999);
+    failed_build(&e, &req, ownership_api.incomplete_reason.missing_correspondence);
+    e.bindings[0].storage = original_storage;
+    req = ownership_borrows_env.input(&e);
+    req.reporting.event.kind = ownership_api.entity_kind.none;
+    failed_build(&e, &req, ownership_api.incomplete_reason.invalid_input);
+    req = ownership_borrows_env.input(&e);
+    e.services.budget = null;
+    failed_build(&e, &req, ownership_api.incomplete_reason.missing_budget);
+    e.services.budget = ownership_borrows_env.budget;
+    e.services.event = null;
+    failed_build(&e, &req, ownership_api.incomplete_reason.missing_events);
+    e.services.event = ownership_borrows_env.event;
+    ownership_state.append_sources(&e.local.state, e.local.state.sources[0]);
+    failed_build(&e, &req, ownership_api.incomplete_reason.invalid_input);
+}
+
+fn event_storage_failure() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    assert(ownership_state.end_source(&e.local.state, &e.local.service,
+        ownership_borrows_env.id(ownership_api.entity_kind.source, 100),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    e.counts.refuse_events = true;
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(&e, &kept, 100);
+    incomplete(got.proof, ownership_api.incomplete_reason.report_limit);
+    assert(got.retained && !got.local_used && e.counts.events == 1);
+    e.counts.refuse_events = false;
+    e.services.event = null;
+    got = ownership_borrows_env.inspect(&e, &kept, 100);
+    incomplete(got.proof, ownership_api.incomplete_reason.missing_events);
+    e.services.event = ownership_borrows_env.event;
+    ownership_borrows.context reporting = ownership_borrows_env.ctx(&e);
+    ownership_borrows.boundary end = ownership_borrows.boundary{
+        .kind = ownership_borrows.boundary_kind.storage_end,
+        .source = ownership_borrows_env.id(ownership_api.entity_kind.source, 200)};
+    got = ownership_borrows.query(&kept, &reporting,
+        ownership_borrows_env.id(ownership_api.entity_kind.source, 100), &end);
+    incomplete(got.proof, ownership_api.incomplete_reason.invalid_input);
+}
+
+fn residual_metadata() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_api.contents_fact mut residual = e.local.state.contents[0];
+    residual.place.residual = true;
+    ownership_state.append_contents(&e.local.state, residual);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    assert(ownership_api.successful(kept.proof));
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(&e, &kept, 100);
+    incomplete(got.proof, ownership_api.incomplete_reason.unknown_effect);
+    ownership_borrows.free(&kept);
+    ownership_state.free(&e.local.state);
+    e.local.state = ownership_state.clone(&before);
+    ownership_api.region_partition[1] partitions = {ownership_api.region_partition{
+        .key = ownership_borrows_env.id(ownership_api.entity_kind.region, 77), .residual = true}};
+    ownership_api.borrow_relation[1] mut relations = {e.local.state.contents[0].borrows[0]};
+    relations[0].range.partitions = partitions[..];
+    residual = e.local.state.contents[0];
+    residual.borrows = relations[..];
+    ownership_state.append_contents(&e.local.state, residual);
+    kept = ownership_borrows_env.solve(&e);
+    assert(ownership_api.successful(kept.proof));
+    got = ownership_borrows_env.inspect(&e, &kept, 100);
+    incomplete(got.proof, ownership_api.incomplete_reason.unknown_effect);
+    ownership_borrows.free(&kept);
+    ownership_state.free(&e.local.state);
+    e.local.state = ownership_state.clone(&before);
+    ownership_api.projection[1] parts = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.residual}};
+    residual = e.local.state.contents[0];
+    residual.place.projections = parts[..];
+    ownership_state.append_contents(&e.local.state, residual);
+    kept = ownership_borrows_env.solve(&e);
+    assert(ownership_api.successful(kept.proof));
+    got = ownership_borrows_env.inspect(&e, &kept, 100);
+    incomplete(got.proof, ownership_api.incomplete_reason.unknown_effect);
+    ownership_borrows.free(&kept);
+}
+
+fn finite_storage_depth() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.stack);
+    ownership_api.projection[16] mut parts = {};
+    u32 mut i = 0;
+    while (i < 16) {
+        ownership_borrows_env.source(&e, 101 + i, ownership_api.source_kind.stack);
+        parts[cast(i, u64)] = ownership_api.projection{
+            .kind = ownership_api.projection_kind.field, .field = i};
+        ownership_api.place_path mut destination = ownership_borrows_env.path(2);
+        destination.projections = parts[cast(i, u64)..cast(i + 1, u64)];
+        e.bindings[e.bindings_len] = ownership_borrows.binding{destination,
+            ownership_borrows_env.id(ownership_api.entity_kind.source, 101 + i),
+            ownership_borrows.destination_kind.projected,
+            ownership_borrows_env.id(ownership_api.entity_kind.slot, 2)};
+        e.bindings_len += 1;
+        ownership_borrows_env.seed(&e, destination, 100 + i, 10 + i);
+        i += 1;
+    }
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W,
+        ownership_limits.PRODUCTION_E);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(&e, &kept, 100);
+    assert(ownership_api.successful(got.proof) && got.retained && !got.local_used);
+    assert(got.destinations.len == 16 && e.counts.meter.used.w < ownership_limits.PRODUCTION_W);
+    assert(got.destinations[15].relation.source.ordinal == 100);
+    assert(got.destinations[15].relation.value_version.ordinal == 10);
+}
+
+fn canonical_destinations() void {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows.graph mut first = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&first);
+    ownership_api.contents_fact swap = e.local.state.contents[0];
+    e.local.state.contents[0] = e.local.state.contents[1];
+    e.local.state.contents[1] = swap;
+    ownership_borrows.graph mut second = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&second);
+    ownership_borrows.answer left = ownership_borrows_env.inspect(&e, &first, 100);
+    ownership_borrows.answer right = ownership_borrows_env.inspect(&e, &second, 100);
+    assert(ownership_api.successful(left.proof) && ownership_api.successful(right.proof));
+    assert(left.retained && right.retained && !left.local_used && !right.local_used);
+    assert(left.destinations.len == 2 && right.destinations.len == 2);
+    u64 mut i = 0;
+    while (i < left.destinations.len) {
+        assert(ownership_state.same_place(left.destinations[i].root, right.destinations[i].root));
+        assert(ownership_keys.entity(left.destinations[i].relation.key,
+            right.destinations[i].relation.key) == 0);
+        i += 1;
+    }
+}
+
+fn validation_graph() ownership_borrows.graph {
+    return ownership_borrows.graph{.snapshot = ownership_state.empty(),
+        .proof = ownership_borrows.complete()};
+}
+
+fn duplicate_binding_work_exhaustion() binding_charges {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_borrows.request mut req = ownership_borrows_env.input(&e);
+    ownership_borrows.binding[5] mut rows = {};
+    ownership_api.place_path original = e.local.state.contents[0].place;
+    u64 mut i = 0;
+    while (i < 4) {
+        rows[i] = e.bindings[0];
+        rows[i].kind = ownership_borrows.destination_kind.result;
+        rows[i].place.projections = original.projections[0..i];
+        i += 1;
+    }
+    rows[4] = rows[2];
+    req.bindings = rows[0..4];
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    ownership_borrows.graph mut validated = validation_graph();
+    assert(ownership_borrows.valid_bindings(&req, &validated));
+    binding_charges mut measured = binding_charges{.validation = e.counts.meter.used.w};
+    assert(measured.validation == 41 && ownership_api.successful(validated.proof));
+    ownership_borrows.free(&validated);
+    u64 mut bound = 1;
+    while (bound < measured.validation) {
+        ownership_borrows_env.production(&e, bound, 2);
+        ownership_borrows.graph mut denied = validation_graph();
+        assert(!ownership_borrows.valid_bindings(&req, &denied));
+        limit(denied.proof, ownership_api.limit_category.w, bound);
+        if (bound == 10) {
+            assert(denied.destinations[0].storage.place.root.kind ==
+                ownership_api.entity_kind.slot);
+            assert(denied.destinations[1].storage.place.root.kind ==
+                ownership_api.entity_kind.none);
+        }
+        ownership_borrows.answer got = ownership_borrows_env.inspect(&e, &denied, 100);
+        limit(got.proof, ownership_api.limit_category.w, bound);
+        assert(ownership_state.equal(&e.local.state, &before));
+        ownership_borrows.free(&denied);
+        empty_output(&denied);
+        ownership_borrows.free(&denied);
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.validation, 2);
+    validated = validation_graph();
+    assert(ownership_borrows.valid_bindings(&req, &validated));
+    assert(e.counts.meter.used.w == measured.validation);
+    ownership_borrows.free(&validated);
+    ownership_borrows_env.production(&e, 1, 2);
+    ownership_api.proof_status mut proof = ownership_borrows.complete();
+    assert(!ownership_borrows.same_path(&req.reporting, &proof, rows[0].place, rows[1].place));
+    assert(ownership_api.successful(proof) && e.counts.meter.used.w == 0);
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    ownership_borrows.graph mut complete = ownership_borrows.solve(&req);
+    assert(ownership_api.successful(complete.proof));
+    measured.build = e.counts.meter.used.w;
+    ownership_borrows.answer mut got = ownership_borrows_env.inspect(&e, &complete, 100);
+    assert(ownership_api.successful(got.proof) && got.retained && !got.local_used);
+    ownership_borrows.free(&complete);
+    bound = 1;
+    while (bound < measured.build) {
+        ownership_borrows_env.production(&e, bound, 2);
+        ownership_borrows.graph mut denied = ownership_borrows.solve(&req);
+        limit(denied.proof, ownership_api.limit_category.w, bound);
+        got = ownership_borrows_env.inspect(&e, &denied, 100);
+        limit(got.proof, ownership_api.limit_category.w, bound);
+        assert(ownership_state.equal(&e.local.state, &before));
+        ownership_borrows.free(&denied);
+        empty_output(&denied);
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.build, 2);
+    complete = ownership_borrows.solve(&req);
+    assert(ownership_api.successful(complete.proof) && e.counts.meter.used.w == measured.build);
+    ownership_borrows.free(&complete);
+    req.bindings = rows[..];
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    validated = validation_graph();
+    assert(!ownership_borrows.valid_bindings(&req, &validated));
+    incomplete(validated.proof, ownership_api.incomplete_reason.invalid_input);
+    measured.duplicate = e.counts.meter.used.w;
+    assert(measured.duplicate == 55);
+    ownership_borrows.free(&validated);
+    bound = 1;
+    while (bound < measured.duplicate) {
+        ownership_borrows_env.production(&e, bound, 2);
+        validated = validation_graph();
+        assert(!ownership_borrows.valid_bindings(&req, &validated));
+        limit(validated.proof, ownership_api.limit_category.w, bound);
+        if (bound == 11) {
+            assert(validated.destinations[1].storage.place.root.kind ==
+                ownership_api.entity_kind.none);
+        }
+        assert(ownership_state.equal(&e.local.state, &before));
+        ownership_borrows.free(&validated);
+        empty_output(&validated);
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.duplicate, 2);
+    complete = ownership_borrows.solve(&req);
+    incomplete(complete.proof, ownership_api.incomplete_reason.invalid_input);
+    assert(e.counts.meter.used.w == measured.duplicate);
+    got = ownership_borrows_env.inspect(&e, &complete, 100);
+    incomplete(got.proof, ownership_api.incomplete_reason.invalid_input);
+    ownership_borrows.free(&complete);
+    assert(ownership_state.equal(&e.local.state, &before));
+    return measured;
+}
+
+fn nested_boundary_work() boundary_charges {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    ownership_borrows_env.open(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_borrows_env.local_use(&e, 2, false);
+    ownership_borrows_env.source(&e, 100, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(&e, 2, 102, ownership_borrows.destination_kind.result);
+    ownership_borrows_env.storage(&e, 3, 200, ownership_borrows.destination_kind.local_value);
+    ownership_api.projection[1] mut parts = {};
+    ownership_borrows_env.seed(&e, ownership_borrows_env.path(2), 200, 10);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.field(3, 0, parts[..]), 100, 20);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    assert(ownership_api.successful(kept.proof) && kept.snapshot.sources_len == 3);
+    assert(kept.edges[0].relation.source.ordinal == 200 && kept.edges_len == 2);
+    ownership_api.place_path[2] ending = {ownership_borrows_env.path(99),
+        ownership_borrows_env.path(3)};
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    ownership_borrows.answer mut got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.none, ending[..], true);
+    assert(ownership_api.successful(got.proof) && !got.retained && !got.local_used);
+    boundary_charges mut measured = boundary_charges{.nested = e.counts.meter.used.w};
+    u64 mut bound = 1;
+    while (bound < measured.nested) {
+        ownership_borrows_env.production(&e, bound, 2);
+        got = ownership_borrows_env.query(&e, &kept, 100,
+            ownership_borrows.boundary_kind.none, ending[..], true);
+        limit(got.proof, ownership_api.limit_category.w, bound);
+        assert(ownership_api.successful(kept.proof));
+        assert(ownership_state.equal(&e.local.state, &before));
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.nested, 2);
+    got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.none, ending[..], true);
+    assert(ownership_api.successful(got.proof) && !got.retained && !got.local_used);
+    ownership_borrows.context reporting = ownership_borrows_env.ctx(&e);
+    ownership_borrows.boundary limit_value = ownership_borrows.boundary{
+        .destinations = ending[..], .destinations_proved = true};
+    ownership_api.borrow_relation mut evidence = ownership_api.borrow_relation{};
+    ownership_api.proof_status mut proof = ownership_borrows.complete();
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    assert(!ownership_borrows.reaches(&reporting, &proof, &kept, kept.edges[0],
+        ownership_borrows_env.id(ownership_api.entity_kind.source, 100), &limit_value, &evidence));
+    assert(ownership_api.successful(proof));
+    measured.reaches = e.counts.meter.used.w;
+    bound = 1;
+    while (bound < measured.reaches) {
+        ownership_borrows_env.production(&e, bound, 2);
+        proof = ownership_borrows.complete();
+        assert(!ownership_borrows.reaches(&reporting, &proof, &kept, kept.edges[0],
+            ownership_borrows_env.id(ownership_api.entity_kind.source, 100), &limit_value,
+            &evidence));
+        limit(proof, ownership_api.limit_category.w, bound);
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.reaches, 2);
+    proof = ownership_borrows.complete();
+    assert(!ownership_borrows.reaches(&reporting, &proof, &kept, kept.edges[0],
+        ownership_borrows_env.id(ownership_api.entity_kind.source, 100), &limit_value, &evidence));
+    assert(ownership_api.successful(proof) && e.counts.meter.used.w == measured.reaches);
+    ownership_borrows_env.production(&e, 12, 2);
+    proof = ownership_borrows.complete();
+    assert(!ownership_borrows.reaches(&reporting, &proof, &kept, kept.edges[0],
+        ownership_borrows_env.id(ownership_api.entity_kind.source, 100), &limit_value, &evidence));
+    limit(proof, ownership_api.limit_category.w, 12);
+    assert(ownership_api.successful(kept.proof));
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.none, ending[..], false);
+    assert(ownership_api.successful(got.proof) && got.retained && got.caller_requirement);
+    got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.none, ending[0..1], true);
+    assert(ownership_api.successful(got.proof) && got.retained && got.caller_requirement);
+    assert(ownership_state.equal(&e.local.state, &before));
+    return measured;
+}
+
+fn boundary_destination_work_exhaustion() boundary_charges {
+    ownership_borrows_env.env mut e = ownership_borrows_env.env{};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_borrows.graph mut kept = ownership_borrows_env.solve(&e);
+    defer ownership_borrows.free(&kept);
+    assert(ownership_api.successful(kept.proof));
+    ownership_api.place_path place = kept.snapshot.contents[0].place;
+    ownership_api.place_path[4] mut ending = {};
+    u64 mut i = 0;
+    while (i < 3) {
+        ending[i] = ownership_borrows_env.path(cast(99 - i, u32));
+        ending[i].projections = place.projections[0..i];
+        i += 1;
+    }
+    ending[3] = ownership_borrows_env.path(2);
+    ownership_borrows.context reporting = ownership_borrows_env.ctx(&e);
+    ownership_borrows.boundary mut limit_value = ownership_borrows.boundary{
+        .destinations = ending[0..3], .destinations_proved = true};
+    ownership_api.proof_status mut proof = ownership_borrows.complete();
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    assert(!ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+    assert(ownership_api.successful(proof));
+    boundary_charges mut measured = boundary_charges{.negative = e.counts.meter.used.w};
+    assert(measured.negative == 57);
+    u64 mut bound = 1;
+    while (bound < measured.negative) {
+        ownership_borrows_env.production(&e, bound, 2);
+        proof = ownership_borrows.complete();
+        assert(!ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+        limit(proof, ownership_api.limit_category.w, bound);
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.negative, 2);
+    proof = ownership_borrows.complete();
+    assert(!ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+    assert(ownership_api.successful(proof) && e.counts.meter.used.w == measured.negative);
+    limit_value.destinations = ending[..];
+    proof = ownership_borrows.complete();
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    assert(ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+    assert(ownership_api.successful(proof));
+    measured.positive = e.counts.meter.used.w;
+    assert(measured.positive == 75);
+    bound = 1;
+    while (bound < measured.positive) {
+        ownership_borrows_env.production(&e, bound, 2);
+        proof = ownership_borrows.complete();
+        assert(!ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+        limit(proof, ownership_api.limit_category.w, bound);
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.positive, 2);
+    proof = ownership_borrows.complete();
+    assert(ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+    assert(ownership_api.successful(proof) && e.counts.meter.used.w == measured.positive);
+    ownership_borrows_env.production(&e, 1, 2);
+    ownership_api.charge_result charged = ownership_api.charge_work(&e.services,
+        ownership_api.work_kind.summary_solver, reporting.operation, reporting.source);
+    assert(charged.allowed);
+    proof = ownership_borrows.complete();
+    assert(!ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+    limit(proof, ownership_api.limit_category.w, 1);
+    limit_value.destinations_proved = false;
+    proof = ownership_borrows.complete();
+    ownership_borrows_env.production(&e, 1, 2);
+    assert(!ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+    assert(ownership_api.successful(proof) && e.counts.meter.used.w == 0);
+    limit_value.destinations_proved = true;
+    limit_value.destinations = ending[0..0];
+    assert(!ownership_borrows.ended(&reporting, &proof, &limit_value, place));
+    assert(ownership_api.successful(proof) && e.counts.meter.used.w == 0);
+    ownership_borrows_env.production(&e, ownership_limits.PRODUCTION_W, 2);
+    ownership_borrows.answer mut got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.none, ending[..], true);
+    assert(ownership_api.successful(got.proof) && !got.retained && !got.local_used);
+    measured.query = e.counts.meter.used.w;
+    assert(measured.query == 153);
+    bound = 1;
+    while (bound < measured.query) {
+        ownership_borrows_env.production(&e, bound, 2);
+        got = ownership_borrows_env.query(&e, &kept, 100,
+            ownership_borrows.boundary_kind.none, ending[..], true);
+        limit(got.proof, ownership_api.limit_category.w, bound);
+        assert(ownership_api.successful(kept.proof));
+        assert(ownership_state.equal(&e.local.state, &before));
+        bound += 1;
+    }
+    ownership_borrows_env.production(&e, measured.query, 2);
+    got = ownership_borrows_env.query(&e, &kept, 100,
+        ownership_borrows.boundary_kind.none, ending[..], true);
+    assert(ownership_api.successful(got.proof) && !got.retained && !got.local_used);
+    boundary_charges nested = nested_boundary_work();
+    measured.nested = nested.nested;
+    measured.reaches = nested.reaches;
+    assert(ownership_state.equal(&e.local.state, &before));
+    return measured;
+}
+
+fn main() i32 {
+    charges measured = graph_work_exhaustion();
+    assert(measured.build == 440 && measured.query == 88 && measured.relations == 2);
+    println("graph_work_exhaustion");
+    graph_teardown(); println("graph_teardown");
+    nested_metadata_snapshot(); println("nested_metadata_snapshot");
+    incomplete_inputs(); println("incomplete_inputs");
+    event_storage_failure(); println("event_storage_failure");
+    residual_metadata(); println("residual_metadata");
+    finite_storage_depth(); println("finite_storage_depth");
+    canonical_destinations(); println("canonical_destinations");
+    duplicate_binding_work_exhaustion(); println("duplicate_binding_work_exhaustion");
+    boundary_destination_work_exhaustion(); println("boundary_destination_work_exhaustion");
+    return 0;
+}
