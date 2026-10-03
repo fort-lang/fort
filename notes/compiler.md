@@ -142,9 +142,18 @@ came here.
   The FIR loop edge and live marker identify body entry before candidate binding checks.
   Source intervals and a CFG walk must agree on each expansion's required dead gaps.
   Each required gap matches exactly one cleanup triple. Candidate subsets supply no gap proof.
-  Ambiguous partitions and call-result paths stay keyed incomplete.
-  The call-root guard follows both conditional result arms, including nested conditionals.
-  Dereference, member, sliced-header, and cast wrappers retain that refusal.
+  A separate proof derives linear call-result capture and protected paths from actual body uses.
+  It traces unique temporary definitions, checked callees, ordered operands, and exact projections.
+  An address or array slice of a temporary's fixed storage stays incomplete without alias proof.
+  An address or slice of backing storage does not expose that temporary's slot.
+  Held callee, argument, and address operations precede the effects that require them.
+  Index and bound calls supply operand effects. They do not supply collection storage roots.
+  Stored header reads follow index and explicit-bound effects.
+  An absent upper bound reads length then.
+  The proof rejects missing, duplicate, overwritten, substituted, and cross-expansion links.
+  Conditional calls and ambiguous partitions stay keyed incomplete, including deferred expansions.
+  Unknown forms, joins, and folded constants without their value table also stay incomplete.
+  This correspondence proves no returned-storage liveness or callee ownership effect.
   The report retains source and exit evidence after candidate teardown.
   Structural validity, source coverage, and ownership proof remain separate false verdicts.
   Deferred absence validation and publication follow in a later pass.
