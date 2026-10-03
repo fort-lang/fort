@@ -118,6 +118,20 @@ fn defer_context(fir_lower.range_candidate_set* proposed,
     panic("range boundary test: missing deferred context");
 }
 
+fn defer_context_count(fir_lower.range_candidate_set* proposed, u32 source_line,
+                       u32 exit_line) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < proposed->deferred.len) {
+        fir_lower.range_defer_context_candidate* c = &proposed->deferred.items[i];
+        if (c->source_node->loc.line == source_line && c->exit_source.line == exit_line) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
 fn capture_at(fir_lower.range_candidate_set* proposed, u32 source_line,
               u32 exit_line) fir_lower.range_capture_candidate* {
     u64 mut i = 0;
@@ -662,6 +676,90 @@ fn suppressed_outer_defer() void {
     assert(cs.boundaries.len == 0 && !f.range_source_complete);
 }
 
+// A continued loop body does not cross a function-scope defer.
+fn aborting_continue_target() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 y : values) { } }",
+        "    for (i32 x : values) {",
+        "        defer panic(\"stop\");",
+        "        continue;",
+        "    }",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.declarations.len == 2 && cs.captures.len == 2);
+    assert(cs.suppressions.len == 0 && !f.range_source_complete);
+    assert(defer_context_count(&cs, 2, 5) == 0);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 0);
+}
+
+// A loop break does not cross a function-scope defer.
+fn aborting_loop_break_target() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] source = {
+        "fn walk(i32[2] values) void {",
+        "    defer { for (i32 y : values) { } }",
+        "    for (i32 x : values) {",
+        "        defer panic(\"stop\");",
+        "        break;",
+        "    }",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.declarations.len == 2 && cs.captures.len == 2);
+    assert(cs.suppressions.len == 0 && !f.range_source_complete);
+    assert(defer_context_count(&cs, 2, 5) == 0);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 0);
+}
+
+// A switch break does not cross its enclosing loop-body defer.
+fn aborting_switch_break_target() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[14] source = {
+        "fn walk(i32[2] values) void {",
+        "    for (i32 x : values) {",
+        "        defer { for (i32 y : values) { } }",
+        "        switch (x) {",
+        "        case 0:",
+        "            defer panic(\"stop\");",
+        "            break;",
+        "        default:",
+        "            break;",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    lower_case(&e, source[..], "walk", &f, &cs);
+    assert(cs.declarations.len == 2 && cs.captures.len > 1);
+    assert(cs.suppressions.len == 0 && !f.range_source_complete);
+    assert(defer_context_count(&cs, 3, 7) == 0);
+    assert(boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 1);
+}
+
 // A nested deferred range names the inner context and its outer context.
 fn nested_deferred_context() void {
     lower_env.env mut e = lower_env.env{};
@@ -746,6 +844,9 @@ fn main() i32 {
     println("capture repeats 8");
     suppressed_defer();
     suppressed_outer_defer();
+    aborting_continue_target();
+    aborting_loop_break_target();
+    aborting_switch_break_target();
     println("suppressed defer proposal");
     nested_deferred_context();
     println("nested deferred context");
