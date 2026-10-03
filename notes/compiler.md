@@ -129,6 +129,7 @@ came here.
   Return unwind hides ended inner loans before it lowers enclosing defers. A range in an outer
   body defer sees the active outer loan. A range in a function defer sees no ended loan.
   A terminating inner defer records suppression for skipped defers in crossed outer scopes.
+  The walk stops at the exit target. A continue or break does not suppress defers beyond it.
   A skipped defer records a suppression proposal with no capture. All proposals stay outside FIR.
   The producer frees unused proposals on each path. A caller owns returned proposals.
   Source completeness remains false until independent source correspondence validates them.
