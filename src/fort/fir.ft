@@ -1345,10 +1345,14 @@ enum stmt_kind {
     st_del,
     st_live,
     st_dead,
+    st_loan_begin,
+    st_loan_end,
 }
 
 /// One statement. `place` and `value` serve `st_assign`. `place` serves `st_del`, whose operand is
-/// always `move place`. `local` serves `st_live` and `st_dead`. `loc` is the location of the source
+/// always `move place`. `local` serves the scope markers and the optional loan header.
+/// `loan` identifies a loan. Its begin uses `place` for the source collection.
+/// `loc` is the location of the source
 /// construct and `stmt` the index of the source statement whose lowering produced it. `exit_loc`
 /// is the location of the exit that expanded a deferred statement, and the empty range for every
 /// other statement.
@@ -1357,6 +1361,7 @@ struct statement {
     place place;
     rvalue value;
     u32 local;
+    u32 loan;
     diag.loc loc;
     diag.loc exit_loc;
     u32 stmt;
@@ -1408,6 +1413,53 @@ fn stmt_live(u32 n, diag.loc at, u32 index) statement {
 /// `dead(_n)`.
 fn stmt_dead(u32 n, diag.loc at, u32 index) statement {
     return statement{.kind = stmt_kind.st_dead, .local = n, .loc = at, .stmt = index};
+}
+
+/// Opens a collection loan. A zero header means that the collection needs no held header.
+fn stmt_loan_begin(u32 loan, place collection, u32 header, diag.loc at, u32 index) statement {
+    return statement{.kind = stmt_kind.st_loan_begin, .place = collection, .local = header,
+        .loan = loan, .loc = at, .stmt = index};
+}
+
+fn stmt_loan_end(u32 loan, diag.loc at, u32 index) statement {
+    return statement{.kind = stmt_kind.st_loan_end, .loan = loan, .loc = at, .stmt = index};
+}
+
+/// Counts loan begin statements in block order.
+fn loan_count(func* f) u32 {
+    u64 mut count = 0;
+    u32 mut b = 0;
+    while (b < block_count(f)) {
+        u32 mut i = 0;
+        while (i < block_statement_count(f, b)) {
+            if (block_statement(f, b, i)->kind == stmt_kind.st_loan_begin) {
+                if (count >= U32_LIMIT) { panic("fir.loan_count: too many loans"); }
+                count += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return cast(count, u32);
+}
+
+/// Finds begin statement `index` in block order. The function panics when the index is absent.
+fn loan_begin_at(func* f, u32 index) statement* {
+    u32 mut count = 0;
+    u32 mut b = 0;
+    while (b < block_count(f)) {
+        u32 mut i = 0;
+        while (i < block_statement_count(f, b)) {
+            statement* s = block_statement(f, b, i);
+            if (s->kind == stmt_kind.st_loan_begin) {
+                if (count == index) { return s; }
+                count += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    panic("fir.loan_begin_at: no begin statement");
 }
 
 /// Whether `s` writes a place, and which one in `out`. An assignment writes its place. A `del`
@@ -1590,7 +1642,7 @@ fn stmt_read(func* f, statement* s, u32 i, read mut* out) bool {
     case stmt_kind.st_del:
         read_index_locals(f, &c, s->place);
         read_mark(&c, s->place, true, true);
-    case stmt_kind.st_live, stmt_kind.st_dead:
+    case stmt_kind.st_live, stmt_kind.st_dead, stmt_kind.st_loan_begin, stmt_kind.st_loan_end:
         return false;
     }
     if (c.done) {
