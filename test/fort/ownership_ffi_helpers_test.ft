@@ -1,0 +1,870 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept F02-A
+//| reject F02-C
+//| reject F02-E
+//| accept F05-B
+//| accept F05-C
+//| reject F05-D
+//| reject F05-F
+//| accept F05-H
+//| reject F05-K
+//| reject F10-C
+//| accept H01
+//| accept H02
+//| accept H03
+//| reject H09
+//| reject H10
+//| reject H11
+//| reject H12
+//| reject H13
+//| reject H16
+//| reject H17
+//| accept F04-B
+//| accept F04-C
+//| accept F04-D
+//| reject F04-E
+//| accept H04
+//| accept H05
+//| reject F02-D
+//| reject F05-G
+//| reject F09-C
+//| accept H06
+//| accept H07
+//| reject H08
+//| accept H14
+//| reject H15
+//| reject P19
+//| reject P20
+//| accept supplied_snapshot_refusal_sweep
+//| accept retained_cleanup_normal
+//| accept retained_cleanup_refusal
+/// Tests supplied foreign helper boundaries and failed-input preservation.
+import ownership_api;
+import ownership_ffi_arithmetic_env;
+import ownership_ffi_helpers_env;
+import ownership_state;
+import heap;
+import std.str;
+import std.libc;
+import ownership_keys;
+import ownership_borrows;
+import ownership_borrows_env;
+import ownership_liveness;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_regions;
+import ownership_places;
+import ownership_transfer;
+
+fn changed_relation(ownership_ffi_arithmetic_env.env mut* e, bool complete, u32 version) void {
+    ownership_api.contents_fact mut value = ownership_ffi_helpers_env.value(e, 9);
+    ownership_api.borrow_relation[1] mut relation = {value.borrows[0]};
+    relation[0].representation_complete = complete;
+    relation[0].value_version =
+        ownership_ffi_helpers_env.id(ownership_api.entity_kind.value, version);
+    value.borrows = relation[..];
+    ownership_ffi_helpers_env.replace(e, value);
+}
+
+fn f02_a() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 96, 118, 9, 9);
+
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+}
+
+fn f02_c() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 128, 124, 8, 8);
+    release_at(&e, 128, 124);
+    req = ownership_ffi_helpers_env.request(&e, ownership_transfer.action.use, 129, 124, 8, 8);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.invalid_use);
+}
+
+fn f02_e() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 160, 130, 9, 9);
+    ownership_api.contents_fact empty =
+        ownership_transfer.empty_value(ownership_ffi_helpers_env.place(9));
+    ownership_ffi_helpers_env.replace(&e, empty);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.invalid_use);
+}
+
+fn f05_b() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.move_owner, 384, 172, 9, 2);
+
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+    assert(ownership_ffi_helpers_env.value(&e, 9).owner_empty);
+    assert(e.raw.local.state.allocations[0].owner.place.root.ordinal == 2);
+    assert(e.raw.local.state.sources[0].kind == ownership_api.source_kind.trusted_foreign);
+    assert(e.raw.local.state.allocations[0].logical_length.kind == ownership_api.fact_kind.unknown);
+}
+
+fn f05_c() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.release, 400, 175, 9, 9);
+
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+    assert(!e.raw.local.state.allocations[0].obligation);
+    assert(e.raw.local.state.sources[0].validity == ownership_api.validity_kind.released);
+}
+
+fn f05_d() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.assignment, 416, 178, 9, 2);
+    req.destination_owns = true;
+    req.value = ownership_ffi_helpers_env.value(&e, 9);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.lost_ownership);
+}
+
+fn f05_f() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 448, 184, 9, 9);
+    transfer_at(&e, 448, 184);
+    req = ownership_ffi_helpers_env.request(&e, ownership_transfer.action.use, 449, 184, 9, 9);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.invalid_use);
+}
+
+fn f05_h() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 480, 190, 1, 1);
+    ownership_api.source_fact mut unrelated = e.raw.local.state.sources[0];
+    unrelated.kind = ownership_api.source_kind.static_storage;
+    unrelated.boundary.operation = 1;
+    unrelated.key = ownership_ffi_helpers_env.id(ownership_api.entity_kind.source, 1);
+    unrelated.allocation = ownership_api.entity_id{};
+    assert(ownership_state.add_source(&e.raw.local.state, &e.raw.local.service, unrelated,
+        req.operation, req.source_position).applied);
+    ownership_ffi_helpers_env.seed_reference(&e, 1, 1, 11);
+    ownership_api.contents_fact mut independent = ownership_ffi_helpers_env.value(&e, 1);
+    independent.span_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 1};
+    ownership_ffi_helpers_env.replace(&e, independent);
+    release_at(&e, 480, 190);
+    req = ownership_ffi_helpers_env.request(&e, ownership_transfer.action.use, 481, 190, 1, 1);
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+}
+
+fn f05_k() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.release, 528, 199, 9, 9);
+    ownership_ffi_helpers_env.add_owner(&e, 7, 1, true);
+    req.leaves_empty_proved = false;
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn f10_c() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 960, 280, 8, 8);
+    release_at(&e, 960, 280);
+    req = ownership_ffi_helpers_env.request(&e, ownership_transfer.action.use, 961, 280, 8, 8);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.invalid_use);
+}
+
+fn h01() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.inspect, 1120, 310, 9, 9);
+
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+}
+
+fn h02() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.copy, 1136, 313, 9, 2);
+
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+}
+
+fn h03() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.assignment, 1152, 316, 9, 2);
+    req.value = ownership_ffi_helpers_env.value(&e, 9);
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+}
+
+fn h09() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 1248, 334, 8, 8);
+    e.raw.local.state.sources[0].kind = ownership_api.source_kind.heap;
+    e.raw.local.state.allocations[0].logical_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 4};
+    ownership_api.contents_fact mut header = ownership_ffi_helpers_env.value(&e, 9);
+    header.span_length = e.raw.local.state.allocations[0].logical_length;
+    ownership_ffi_helpers_env.replace(&e, header);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn h10() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 1264, 337, 8, 8);
+    e.raw.local.state.allocations[0].validity = ownership_api.validity_kind.released;
+    e.raw.local.state.allocations[0].obligation = false;
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.invalid_use);
+}
+
+fn h11() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.move_owner, 1280, 340, 9, 2);
+    changed_relation(&e, false, 91);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn h12() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.move_owner, 1296, 343, 9, 2);
+    changed_relation(&e, true, 92);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn h13() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.move_owner, 1312, 346, 9, 2);
+    e.raw.local.state.sources[0].kind = ownership_api.source_kind.heap;
+    e.raw.local.state.allocations[0].logical_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 4};
+    ownership_api.contents_fact mut borrowed = ownership_ffi_helpers_env.value(&e, 8);
+    borrowed.span_length = e.raw.local.state.allocations[0].logical_length;
+    ownership_ffi_helpers_env.replace(&e, borrowed);
+    ownership_api.contents_fact mut unequal = ownership_ffi_helpers_env.value(&e, 9);
+    unequal.span_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 3};
+    ownership_ffi_helpers_env.replace(&e, unequal);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn h16() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 1360, 355, 9, 9);
+    ownership_api.contents_fact mut unknown = ownership_ffi_helpers_env.value(&e, 9);
+    unknown.kind = ownership_api.contents_kind.unknown;
+    ownership_ffi_helpers_env.replace(&e, unknown);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn h17() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 1376, 358, 8, 8);
+    e.raw.local.state.allocations_len = 0;
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn release_at(ownership_ffi_arithmetic_env.env mut* e, u32 operation, u32 line) void {
+    ownership_transfer.request req = ownership_ffi_helpers_env.request(e,
+        ownership_transfer.action.release, operation, line, 9, 9);
+    ownership_ffi_helpers_env.apply(e, &req, true, ownership_api.event_kind.invalid_use);
+}
+fn transfer_at(ownership_ffi_arithmetic_env.env mut* e, u32 operation, u32 line) void {
+    ownership_transfer.request req = ownership_ffi_helpers_env.request(e,
+        ownership_transfer.action.move_owner, operation, line, 9, 2);
+    ownership_ffi_helpers_env.apply(e, &req, true, ownership_api.event_kind.invalid_use);
+}
+fn field_path(u32 slot, ownership_api.projection mut@ parts) ownership_api.place_path {
+    parts[0].kind = ownership_api.projection_kind.field;
+    parts[0].field = 0;
+    ownership_api.place_path mut out = ownership_ffi_helpers_env.place(slot);
+    out.projections = parts[..];
+    return out;
+}
+fn element_path(ownership_api.projection mut@ parts) ownership_api.place_path {
+    parts[0].kind = ownership_api.projection_kind.fixed_index;
+    parts[0].index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 2};
+    ownership_api.place_path mut out = ownership_ffi_helpers_env.place(4);
+    out.projections = parts[..];
+    return out;
+}
+fn f04_b() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.inspect, 304, 157, 9, 9);
+    ownership_api.projection[1] mut parts = {};
+    base.destination = field_path(3, parts[..]);
+    base.destination_owns = true;
+    ownership_ffi_helpers_env.projected_apply(&e, &base,
+        ownership_places.action.move_value, true, ownership_api.event_kind.invalid_use);
+    assert(ownership_ffi_helpers_env.value(&e, 9).owner_empty);
+    assert(ownership_state.same_place(e.raw.local.state.allocations[0].owner.place,
+        base.destination));
+}
+
+fn f04_c() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.inspect, 320, 160, 9, 9);
+    ownership_api.projection[1] mut parts = {};
+    base.source = field_path(3, parts[..]);
+    ownership_ffi_helpers_env.project(&e, base.source, true);
+    base.destination = base.source;
+    ownership_ffi_helpers_env.projected_apply(&e, &base,
+        ownership_places.action.release_value, true, ownership_api.event_kind.invalid_use);
+    assert(!e.raw.local.state.allocations[0].obligation);
+    assert(e.raw.local.state.sources[0].validity == ownership_api.validity_kind.released);
+}
+
+fn f04_d() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.inspect, 336, 163, 9, 9);
+    ownership_api.projection[1] mut parts = {};
+    base.source = element_path(parts[..]);
+    ownership_ffi_helpers_env.project(&e, base.source, true);
+    base.destination = ownership_ffi_helpers_env.place(9);
+    base.destination_owns = true;
+    ownership_regions.result mut out = ownership_ffi_helpers_env.region_apply(&e, &base,
+        ownership_regions.action.move_value, true);
+    defer ownership_regions.free(&out);
+    assert(ownership_api.successful(out.proof) && out.len == 1);
+    assert(out.states[0].allocations[0].owner.place.root.ordinal == 9);
+    assert(out.states[0].sources[0].kind == ownership_api.source_kind.trusted_foreign);
+}
+
+fn f04_e() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.inspect, 352, 166, 9, 9);
+    ownership_api.projection[1] mut parts = {};
+    base.source = field_path(3, parts[..]);
+    ownership_ffi_helpers_env.project(&e, base.source, true);
+    ownership_api.projection[1] mut destination = {};
+    base.destination = field_path(4, destination[..]);
+    base.destination_owns = true;
+    ownership_ffi_helpers_env.projected_apply(&e, &base,
+        ownership_places.action.copy_value, false, ownership_api.event_kind.lost_ownership);
+}
+
+fn h04() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.inspect, 1168, 319, 9, 9);
+    ownership_api.projection[1] mut parts = {};
+    base.source = element_path(parts[..]);
+    ownership_ffi_helpers_env.project(&e, base.source, false);
+    base.destination = ownership_ffi_helpers_env.place(9);
+    base.destination_owns = false;
+    ownership_regions.result mut out = ownership_ffi_helpers_env.region_apply(&e, &base,
+        ownership_regions.action.read_value, false);
+    defer ownership_regions.free(&out);
+    assert(ownership_api.successful(out.proof) && out.len == 1);
+}
+
+fn h05() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.inspect, 1184, 322, 9, 9);
+    ownership_api.contents_fact mut header = ownership_ffi_helpers_env.value(&e, 9);
+    header.span_length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact};
+    ownership_raw.request mut req = ownership_ffi_arithmetic_env.request(&e,
+        base.operation.operation, base.source_position.line);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_env.accepted(ownership_raw.begin_work(&e.raw.local.state,
+        &e.raw.local.service, &req, &cursor));
+    ownership_raw_env.accepted(ownership_raw.inspect_empty_header(&e.raw.local.state,
+        &e.raw.local.service, &header, false, &cursor.selected));
+    assert(header.borrows.len == 1 && header.span_length.value == 0);
+}
+
+fn f02_d() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 144, 127, 9, 9);
+    ownership_ffi_helpers_env.add_owner(&e, 1, 0, false);
+    ownership_api.contents_fact mut value = ownership_ffi_helpers_env.value(&e, 9);
+    ownership_api.borrow_relation[2] mut alternatives = {value.borrows[0], value.borrows[0]};
+    alternatives[1].source = ownership_ffi_helpers_env.id(ownership_api.entity_kind.source, 1);
+    alternatives[1].range.source = alternatives[1].source;
+    value.borrows = alternatives[..];
+    ownership_ffi_helpers_env.replace(&e, value);
+    ownership_ffi_helpers_env.apply(&e, &req, false, ownership_api.event_kind.incomplete_proof);
+}
+
+fn f05_g() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_raw.request mut req = ownership_ffi_arithmetic_env.request(&e, 464, 187);
+    req.base.source = ownership_ffi_helpers_env.place(8);
+    ownership_raw.origin mut input_shape = {};
+    input_shape.source = ownership_ffi_helpers_env.id(ownership_api.entity_kind.source, 9);
+    input_shape.allocation = ownership_ffi_helpers_env.id(ownership_api.entity_kind.allocation, 9);
+    input_shape.place = req.base.source;
+    input_shape.layout = e.raw.byte;
+    input_shape.count = ownership_raw.literal(0);
+    input_shape.begin = ownership_raw.literal(0);
+    input_shape.end = ownership_raw.literal(0);
+    input_shape.correspondence = true;
+    e.raw.root = ownership_raw.capture_origin(&e.raw.local.state, &e.raw.local.service,
+        &input_shape, ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.accepts(&e.raw.root);
+    release_at(&e, 464, 187);
+    req = ownership_ffi_arithmetic_env.request(&e, 465, 187);
+    req.base.source = ownership_ffi_helpers_env.place(8);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw_env.rejected(ownership_raw.access(&e.raw.root.storage,
+        &e.raw.local.service, e.raw.root.addresses[..], e.raw.byte, &req));
+    assert(e.observed.kind == ownership_api.event_kind.invalid_use);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+}
+
+fn h06() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.release, 1200, 325, 9, 9);
+    ownership_api.projection[1] mut parts = {};
+    base.source = element_path(parts[..]);
+    ownership_ffi_helpers_env.project(&e, base.source, true);
+    ownership_api.place_path selected_element = base.source;
+    base.source = ownership_ffi_helpers_env.place(4);
+    base.destination = base.source;
+    base.destination_owns = true;
+    ownership_regions.result mut out = ownership_ffi_helpers_env.region_apply(&e, &base,
+        ownership_regions.action.cleanup_range, true);
+    defer ownership_regions.free(&out);
+    assert(ownership_api.successful(out.proof) && out.len == 1);
+    assert(!out.states[0].allocations[0].obligation);
+    assert(out.states[0].sources[0].validity == ownership_api.validity_kind.released);
+    assert(ownership_regions.content(&out.states[0], selected_element) !=
+        ownership_regions.U64_MAX);
+}
+
+fn backing(bool foreign) void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.assignment, foreign ? 1232 : 1216,
+        foreign ? 331 : 328, 9, 9);
+    ownership_api.contents_fact mut header = ownership_ffi_helpers_env.value(&e, 9);
+    header.span_length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
+        .symbol = ownership_ffi_helpers_env.id(ownership_api.entity_kind.value, 61)};
+    ownership_ffi_helpers_env.replace(&e, header);
+    ownership_api.predicate_atom mut bound = {};
+    bound.kind = ownership_api.predicate_kind.membership;
+    bound.left = header.span_length.symbol;
+    bound.lower = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 4};
+    bound.key = ownership_ffi_helpers_env.id(ownership_api.entity_kind.predicate, 61);
+    bound.upper = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 5};
+    ownership_state.append_predicates(&e.raw.local.state, bound);
+    ownership_api.projection[1] mut element = {};
+    u64 mut i = 0;
+    while (i < 4) {
+        element[0].kind = ownership_api.projection_kind.fixed_index;
+        element[0].index = ownership_api.scalar_fact{
+            .kind = ownership_api.fact_kind.exact, .value = cast(i, i64)};
+        ownership_api.contents_fact mut scalar = {};
+        scalar.place = ownership_ffi_helpers_env.place(4);
+        scalar.place.projections = element[..];
+        scalar.kind = ownership_api.contents_kind.scalar;
+        ownership_ffi_helpers_env.replace(&e, scalar);
+        i += 1;
+    }
+    base.allocation = e.raw.local.state.allocations[0];
+    base.allocation.key = ownership_ffi_helpers_env.id(ownership_api.entity_kind.allocation, 2);
+    base.allocation.site = base.allocation.key;
+    base.allocation.logical_length = bound.lower;
+    base.fresh_source = e.raw.local.state.sources[0];
+    base.fresh_source.key = ownership_ffi_helpers_env.id(ownership_api.entity_kind.source, 2);
+    base.fresh_source.kind = foreign ? ownership_api.source_kind.trusted_foreign :
+        ownership_api.source_kind.heap;
+    base.fresh_source.allocation = base.allocation.key;
+    ownership_api.borrow_relation[1] mut new_borrow = {header.borrows[0]};
+    new_borrow[0].source = base.fresh_source.key;
+    new_borrow[0].range.source = base.fresh_source.key;
+    new_borrow[0].value_version = ownership_ffi_helpers_env.id(ownership_api.entity_kind.value, 21);
+    base.value = header;
+    base.value.value_version = new_borrow[0].value_version;
+    base.value.borrows = new_borrow[..];
+    base.value.span_length = bound.lower;
+    ownership_api.place_path[1] aliases = {base.source};
+    ownership_regions.backing_request mut req = {};
+    req.base = base;
+    req.header = ownership_regions.selection{base.source, aliases[..], true, true, true};
+    req.old_elements = ownership_ffi_helpers_env.place(4);
+    req.new_elements = ownership_ffi_helpers_env.place(6);
+    req.old_source = ownership_ffi_helpers_env.id(ownership_api.entity_kind.source, 9);
+    req.correspondence_proved = true;
+    req.complete_elements_proved = true;
+    ownership_ffi_helpers_env.prepare(&e, &base);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_regions.result mut out = ownership_regions.replace_backing(&e.raw.local.state,
+        &e.raw.local.service, &req);
+    defer ownership_regions.free(&out);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    if (foreign) {
+        assert(!ownership_api.successful(out.proof) && out.proof.failed && out.len == 0);
+        assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    } else {
+        assert(ownership_api.successful(out.proof) && out.len == 1);
+        u64 old = ownership_state.allocation_index(&out.states[0],
+            ownership_ffi_helpers_env.id(ownership_api.entity_kind.allocation, 9));
+        u64 fresh = ownership_state.allocation_index(&out.states[0], base.allocation.key);
+        assert(!out.states[0].allocations[old].obligation);
+        assert(out.states[0].allocations[fresh].obligation);
+        assert(out.states[0].allocations[fresh].logical_length.value == 4);
+        i = 0;
+        while (i < 4) {
+            element[0].index.value = cast(i, i64);
+            ownership_api.place_path mut old_element = ownership_ffi_helpers_env.place(4);
+            old_element.projections = element[..];
+            ownership_api.place_path mut new_element = ownership_ffi_helpers_env.place(6);
+            new_element.projections = element[..];
+            assert(ownership_regions.content(&out.states[0], old_element) ==
+                ownership_regions.U64_MAX);
+            u64 found = ownership_regions.content(&out.states[0], new_element);
+            assert(found != ownership_regions.U64_MAX);
+            assert(out.states[0].contents[found].kind == ownership_api.contents_kind.scalar);
+            i += 1;
+        }
+        assert(out.states[0].contents[ownership_regions.content(&out.states[0],
+            base.source)].borrows[0].source.ordinal == 2);
+    }
+}
+fn h07() void { backing(false); }
+fn h08() void { backing(true); }
+
+fn retained(bool global, bool later, u32 probe, u32 operation, u32 line) void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request base = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.release, operation, line, 9, 9);
+    ownership_borrows_env.env mut live = {};
+    ownership_borrows_env.open(&live);
+    defer ownership_borrows_env.close(&live);
+    ownership_borrows_env.local_use(&live, 8, later);
+    ownership_liveness.free(&live.live);
+    u64 mut i = 0;
+    while (i < live.live_bindings.len) {
+        live.live_bindings[i].slot = ownership_ffi_helpers_env.id(ownership_api.entity_kind.slot,
+            cast(i, u32));
+        i += 1;
+    }
+    ownership_liveness.program local_program = {.function = &live.function,
+        .identity = ownership_ffi_arithmetic_env.function(), .verified_fir = true,
+        .services = &live.services, .bindings = live.live_bindings[..]};
+    live.live = ownership_liveness.solve(&local_program);
+    assert(ownership_api.successful(live.live.proof));
+    ownership_liveness.answer used = ownership_liveness.query(&live.live, live.point,
+        ownership_ffi_helpers_env.id(ownership_api.entity_kind.slot, 8));
+    assert(ownership_api.successful(used.proof) && used.used == later);
+    bool refusal = probe != 0;
+    if (refusal) { ownership_ffi_helpers_env.add_owner(&e, 2, 4, true); }
+    if (global) {
+        ownership_transfer.request copy = ownership_ffi_helpers_env.request(&e,
+            ownership_transfer.action.copy, operation - 1, line, 8, 1);
+        ownership_ffi_helpers_env.apply(&e, &copy, true, ownership_api.event_kind.invalid_use);
+    }
+    ownership_borrows.binding[4] mut bindings = {};
+    u32[4] slots = {9, 8, 2, 1};
+    u64 slot_count = global ? 4 : 3;
+    i = 0;
+    while (i < slot_count) {
+        ownership_api.source_fact mut storage = {};
+        storage.key = ownership_ffi_helpers_env.id(ownership_api.entity_kind.source,
+            slots[i] + 100);
+        storage.kind = global && slots[i] == 1 ? ownership_api.source_kind.static_storage :
+            ownership_api.source_kind.stack;
+        storage.validity = ownership_api.validity_kind.live;
+        assert(ownership_state.add_source(&e.raw.local.state, &e.raw.local.service, storage,
+            base.operation, base.source_position).applied);
+        bindings[i] = ownership_borrows.binding{ownership_ffi_helpers_env.place(slots[i]),
+            storage.key, global && slots[i] == 1 ? ownership_borrows.destination_kind.global :
+                ownership_borrows.destination_kind.local_value,
+            ownership_ffi_helpers_env.id(ownership_api.entity_kind.slot, slots[i])};
+        i += 1;
+    }
+    ownership_ffi_helpers_env.prepare(&e, &base);
+    ownership_borrows.context ctx = {.services = &e.raw.local.service,
+        .operation = base.operation, .source = base.source_position, .event = e.binding[0].key};
+    ownership_borrows.request req = {.current = &e.raw.local.state, .local_uses = &live.live,
+        .point = live.point, .bindings = bindings[0..slot_count], .contents_complete = true,
+        .bindings_complete = true, .reporting = ctx};
+    e.raw.budget.calls = 0;
+    ownership_borrows.graph mut kept = ownership_borrows.solve(&req);
+    u64 build_cost = e.raw.budget.calls;
+    defer ownership_borrows.free(&kept);
+    assert(ownership_api.successful(kept.proof));
+    ownership_borrows.boundary end = {.kind = ownership_borrows.boundary_kind.heap_release,
+        .source = ownership_ffi_helpers_env.id(ownership_api.entity_kind.source, 9)};
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    u64 events = e.observed.events;
+    ownership_borrows.answer mut got = ownership_borrows.query(&kept, &ctx, end.source, &end);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    assert(got.local_used == (!global && later) && got.retained == global);
+    if (!global && !later) {
+        assert(ownership_api.successful(got.proof) && e.observed.events == 0);
+    } else {
+        assert(got.proof.kind == ownership_api.proof_kind.complete && got.proof.failed);
+        assert(e.observed.events == events + 1);
+        assert(e.observed.kind == ownership_api.event_kind.invalid_use);
+        assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    }
+    if (probe == 2) {
+        assert(build_cost > 0 && build_cost < 4096);
+        u64 mut denied = 1;
+        while (denied <= build_cost) {
+            ownership_ffi_arithmetic_env.reset_budget(&e);
+            e.raw.budget.calls = 0;
+            e.raw.budget.deny_at = denied;
+            ownership_borrows.graph mut partial = ownership_borrows.solve(&req);
+            assert(partial.proof.kind == ownership_api.proof_kind.incomplete);
+            assert(partial.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(ownership_keys.operation(partial.proof.terminal.operation, base.operation) == 0);
+            assert(ownership_keys.source(partial.proof.terminal.source, base.source_position) == 0);
+            assert(ownership_state.equal(&before, &e.raw.local.state));
+            ownership_borrows.free(&partial);
+            assert(ownership_api.successful(kept.proof));
+            denied += 1;
+        }
+        ownership_ffi_arithmetic_env.reset_budget(&e);
+    }
+    if (probe == 1) {
+        u64 foreign = ownership_transfer.source_index(&kept.snapshot, end.source);
+        kept.snapshot.sources[foreign].kind = ownership_api.source_kind.heap;
+        e.raw.budget.calls = 0;
+        got = ownership_borrows.query(&kept, &ctx, end.source, &end);
+        u64 heap_cost = e.raw.budget.calls;
+        kept.snapshot.sources[foreign].kind = ownership_api.source_kind.trusted_foreign;
+        e.raw.budget.calls = 0;
+        got = ownership_borrows.query(&kept, &ctx, end.source, &end);
+        assert(e.raw.budget.calls == heap_cost + 2);
+        assert(got.destinations.len == 1 && ownership_api.successful(kept.proof));
+        ownership_api.entity_id prior_source = got.destinations[0].relation.source;
+        u64 prior_destinations = got.destinations.len;
+        ownership_state.state mut prior_snapshot = ownership_state.clone(&kept.snapshot);
+        defer ownership_state.free(&prior_snapshot);
+        e.raw.budget.calls = 0;
+        e.raw.budget.deny_at = heap_cost + 2;
+        u64 prior_events = e.observed.events;
+        got = ownership_borrows.query(&kept, &ctx, end.source, &end);
+        assert(got.proof.kind == ownership_api.proof_kind.incomplete);
+        assert(got.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(got.proof.terminal.limit.present);
+        assert(e.observed.events == prior_events + 1);
+        assert(e.observed.kind == ownership_api.event_kind.work_failure);
+        assert(ownership_keys.operation(got.proof.terminal.operation, base.operation) == 0);
+        assert(ownership_keys.source(got.proof.terminal.source, base.source_position) == 0);
+        assert(ownership_api.successful(kept.proof) && prior_destinations == 1);
+        assert(prior_source.ordinal == 9);
+        assert(ownership_state.equal(&prior_snapshot, &kept.snapshot));
+        assert(ownership_state.equal(&before, &e.raw.local.state));
+        e.raw.budget.deny_at = 0;
+    }
+}
+fn f09_c() void { retained(true, false, 0, 913, 271); }
+fn h14() void { retained(false, false, 0, 1328, 349); }
+fn h15() void { retained(false, true, 0, 1344, 352); }
+fn snapshot_refusal_sweep() void { retained(true, false, 2, 2002, 1401); }
+fn p20() void { retained(true, false, 1, 1696, 418); }
+
+fn p19() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_ffi_helpers_env.add_owner(&e, 2, 4, true);
+    ownership_transfer.request req = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.use, 1680, 415, 9, 9);
+    assert(e.raw.local.state.allocations[0].key.ordinal == 2);
+    assert(e.raw.local.state.allocations[1].key.ordinal == 9);
+    e.raw.budget.calls = 0;
+    ownership_ffi_helpers_env.apply(&e, &req, true, ownership_api.event_kind.invalid_use);
+    assert(e.raw.budget.calls == 6);
+    e.raw.budget.calls = 0;
+    e.raw.budget.deny_at = 6;
+    ownership_api.proof_status proof = ownership_ffi_helpers_env.apply(&e, &req, false,
+        ownership_api.event_kind.work_failure);
+    assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(proof.terminal.limit.present &&
+        proof.terminal.limit.work == ownership_api.work_kind.transfer);
+    assert(ownership_keys.operation(proof.terminal.operation, req.operation) == 0);
+    assert(ownership_keys.source(proof.terminal.source, req.source_position) == 0);
+    e.raw.budget.deny_at = 0;
+}
+// Linux allocator metadata excludes free bins from the live-byte measurement.
+$if ($cfg(target_os) == "linux") {
+    extern fn open_memstream(char mut* own mut* buffer, u64 mut* length) void mut*;
+    extern fn malloc_info(i32 options, void mut* stream) i32;
+    extern fn fclose(void mut* stream) i32;
+    fn metric(string data, string prefix) u64 {
+        i64 mut found = str.find(data, prefix);
+        assert(found >= 0);
+        string mut tail = data[cast(found, u64)..];
+        while (true) {
+            found = str.find(tail[prefix.len..], prefix);
+            if (found < 0) { break; }
+            tail = tail[prefix.len + cast(found, u64)..];
+        }
+        found = str.find(tail, "size=\"");
+        assert(found >= 0);
+        tail = tail[cast(found, u64) + 6..];
+        found = str.index_of(tail, '\"');
+        assert(found >= 0);
+        u64 mut value = 0;
+        assert(str.parse_u64(tail[..cast(found, u64)], 10, &value));
+        return value;
+    }
+    fn live_bytes() u64 {
+        char mut* own mut buffer = null;
+        u64 mut length = 0;
+        void mut* stream = open_memstream(&buffer, &length);
+        assert(stream != null && malloc_info(0, stream) == 0 && fclose(stream) == 0);
+        string data = cast(buffer[0..length], string);
+        u64 arena = metric(data, "<system type=\"current\"");
+        u64 fast = metric(data, "<total type=\"fast\"");
+        u64 rest = metric(data, "<total type=\"rest\"");
+        u64 mapped = metric(data, "<total type=\"mmap\"");
+        libc.free(cast(move(buffer), void* own));
+        assert(arena >= fast && arena - fast >= rest);
+        return arena - fast - rest + mapped;
+    }
+} else {
+    fn live_bytes() u64 { return heap.system_view(); }
+}
+fn helper_cleanup(u32 mode) void {
+    u64 mut warm = 0;
+    while (warm < 32) {
+        retained(true, false, mode, 2001, 1400);
+        live_bytes();
+        heap.system_view();
+        warm += 1;
+    }
+    u64 before_live = live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_raw.U64_MAX;
+    u64 mut best_system = ownership_raw.U64_MAX;
+    u64 mut round = 0;
+    while (round < 128) {
+        retained(true, false, mode, 2001, 1400);
+        u64 live = heap.distance(before_live, live_bytes());
+        u64 system = heap.distance(before_system, heap.system_view());
+        if (round >= 112 && live < best_live) { best_live = live; }
+        if (round >= 112 && system < best_system) { best_system = system; }
+        round += 1;
+    }
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 2048 : 256;
+    if (best_live >= bound) { println("allocator live bytes ", mode, " ", best_live); }
+    assert(best_live < bound);
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+}
+fn main() i32 {
+    f02_a(); println("accept F02-A");
+    f02_c(); println("reject F02-C");
+    f02_e(); println("reject F02-E");
+    f05_b(); println("accept F05-B");
+    f05_c(); println("accept F05-C");
+    f05_d(); println("reject F05-D");
+    f05_f(); println("reject F05-F");
+    f05_h(); println("accept F05-H");
+    f05_k(); println("reject F05-K");
+    f10_c(); println("reject F10-C");
+    h01(); println("accept H01");
+    h02(); println("accept H02");
+    h03(); println("accept H03");
+    h09(); println("reject H09");
+    h10(); println("reject H10");
+    h11(); println("reject H11");
+    h12(); println("reject H12");
+    h13(); println("reject H13");
+    h16(); println("reject H16");
+    h17(); println("reject H17");
+    f04_b(); println("accept F04-B");
+    f04_c(); println("accept F04-C");
+    f04_d(); println("accept F04-D");
+    f04_e(); println("reject F04-E");
+    h04(); println("accept H04");
+    h05(); println("accept H05");
+    f02_d(); println("reject F02-D");
+    f05_g(); println("reject F05-G");
+    f09_c(); println("reject F09-C");
+    h06(); println("accept H06");
+    h07(); println("accept H07");
+    h08(); println("reject H08");
+    h14(); println("accept H14");
+    h15(); println("reject H15");
+    p19(); println("reject P19");
+    p20(); println("reject P20");
+    snapshot_refusal_sweep(); println("accept supplied_snapshot_refusal_sweep");
+    helper_cleanup(0); println("accept retained_cleanup_normal");
+    helper_cleanup(1); println("accept retained_cleanup_refusal");
+    return 0;
+}

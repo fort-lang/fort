@@ -250,6 +250,7 @@ fn copy_sources(request* req, graph mut* out) bool {
     if (!charge(ctx, &out->proof, 1) ||
         !charge(ctx, &out->proof, req->current->sources_len)) { return false; }
     out->snapshot.sources = new(ownership_api.source_fact, req->current->sources_len);
+    bool mut foreign_allocations = false;
     u64 mut i = 0;
     while (i < req->current->sources_len) {
         if (!charge(ctx, &out->proof, 1)) { return false; }
@@ -267,8 +268,45 @@ fn copy_sources(request* req, graph mut* out) bool {
             }
             j += 1;
         }
+        if (fact.kind == ownership_api.source_kind.trusted_foreign &&
+            fact.allocation.kind == ownership_api.entity_kind.allocation) {
+            foreign_allocations = true;
+        }
         out->snapshot.sources[i] = fact;
         out->snapshot.sources_len += 1;
+        i += 1;
+    }
+    return !foreign_allocations || copy_foreign_allocations(req, out);
+}
+
+// The graph needs allocation identity and validity only for explicit foreign release.
+// Owner reachability uses the original state. These rows borrow no nested storage.
+fn copy_foreign_allocations(request* req, graph mut* out) bool {
+    context* ctx = &req->reporting;
+    if (!charge(ctx, &out->proof, 1) ||
+        !charge(ctx, &out->proof, req->current->allocations_len)) { return false; }
+    out->snapshot.allocations = new(ownership_api.allocation_fact,
+        req->current->allocations_len);
+    u64 mut i = 0;
+    while (i < req->current->allocations_len) {
+        if (!charge(ctx, &out->proof, 1)) { return false; }
+        ownership_api.allocation_fact prior = req->current->allocations[i];
+        if (prior.key.kind != ownership_api.entity_kind.allocation) {
+            out->proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, prior.key);
+            return false;
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!charge(ctx, &out->proof, 1)) { return false; }
+            if (same(prior.key, out->snapshot.allocations[j].key)) {
+                out->proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, prior.key);
+                return false;
+            }
+            j += 1;
+        }
+        out->snapshot.allocations[i].key = prior.key;
+        out->snapshot.allocations[i].validity = prior.validity;
+        out->snapshot.allocations_len += 1;
         i += 1;
     }
     return true;
@@ -606,6 +644,20 @@ fn report(context* ctx, answer* result, ownership_api.entity_id source)
     return proof;
 }
 
+fn report_refusal(context* ctx, ownership_api.proof_status proof)
+    ownership_api.proof_status {
+    ownership_api.event_descriptor mut event = {};
+    event.key = ctx->event;
+    event.operation = ctx->operation;
+    event.source = ctx->source;
+    event.kind = ownership_api.event_kind.work_failure;
+    event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    event.reason = proof.terminal.reason;
+    event.limit = proof.terminal.limit;
+    ownership_api.event_request req = {event, proof};
+    return ownership_api.record_event(ctx->services, &req).proof;
+}
+
 // Returned destination views remain valid until the next query or graph teardown.
 fn query(graph mut* out, context* ctx, ownership_api.entity_id source,
     boundary* limit) answer {
@@ -660,7 +712,29 @@ fn query(graph mut* out, context* ctx, ownership_api.entity_id source,
     result.caller_requirement = original.kind == ownership_api.source_kind.symbolic_caller;
     result.intrinsic_escape = original.kind == ownership_api.source_kind.stack && result.retained &&
         (storage_end || original.validity == ownership_api.validity_kind.ended);
-    bool invalid = original.validity == ownership_api.validity_kind.ended ||
+    bool mut foreign_release = false;
+    if (release && original.kind == ownership_api.source_kind.trusted_foreign) {
+        if (original.allocation.kind != ownership_api.entity_kind.allocation) {
+            result.proof = fail(ctx, ownership_api.incomplete_reason.unknown_effect, source);
+            return result;
+        }
+        u64 mut allocation = 0;
+        while (allocation < out->snapshot.allocations_len) {
+            if (!charge(ctx, &result.proof, 1)) {
+                result.proof = report_refusal(ctx, result.proof);
+                return result;
+            }
+            if (same(out->snapshot.allocations[allocation].key, original.allocation)) { break; }
+            allocation += 1;
+        }
+        if (allocation == out->snapshot.allocations_len ||
+            out->snapshot.allocations[allocation].validity == ownership_api.validity_kind.unknown) {
+            result.proof = fail(ctx, ownership_api.incomplete_reason.unknown_effect, source);
+            return result;
+        }
+        foreign_release = true;
+    }
+    bool invalid = foreign_release || original.validity == ownership_api.validity_kind.ended ||
         original.validity == ownership_api.validity_kind.released || result.intrinsic_escape ||
         (release && original.kind == ownership_api.source_kind.heap);
     if (invalid) {
