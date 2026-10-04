@@ -69,8 +69,8 @@ fn used(ownership_api.used_counts* t, ownership_api.limit_category c) u64 {
 fn add(ownership_api.used_counts mut* t, ownership_api.limit_category c, u64 n) void {
     switch (c) {
     case ownership_api.limit_category.d: if (n > t->d) { t->d = n; }
-    case ownership_api.limit_category.r: t->r += n;
-    case ownership_api.limit_category.p: t->p += n;
+    case ownership_api.limit_category.r: if (n > t->r) { t->r = n; }
+    case ownership_api.limit_category.p: if (n > t->p) { t->p = n; }
     case ownership_api.limit_category.g: t->g += n;
     case ownership_api.limit_category.h: t->h += n;
     case ownership_api.limit_category.t: t->t += n;
@@ -103,7 +103,7 @@ fn valid_request(ownership_api.charge_request* req) bool {
 }
 
 /// Checks each item before it changes a counter. A precision refusal is not a verdict.
-/// D records the greatest permitted path depth. Other counters accumulate their work or facts.
+/// D, R, and P store their greatest permitted absolute amounts. Other counters accumulate.
 fn try_charge(meter mut* m, ownership_api.charge_request* req) ownership_api.charge_result {
     if (!m->configured || !ownership_api.valid_limits(&m->bounds) ||
         !valid_request(req)) { return invalid(req); }
@@ -112,9 +112,13 @@ fn try_charge(meter mut* m, ownership_api.charge_request* req) ownership_api.cha
         ownership_api.charge_item item = req->items[i];
         u64 count = used(&m->used, item.category);
         u64 max = bound(&m->bounds, item.category);
-        bool absolute = item.category == ownership_api.limit_category.d;
-        bool saturated = !absolute && item.amount > ownership_api.U64_MAX - count;
-        bool exceeds = absolute ? item.amount > max || item.amount == ownership_api.U64_MAX :
+        bool state_amount = item.category == ownership_api.limit_category.r ||
+            item.category == ownership_api.limit_category.p;
+        bool absolute = item.category == ownership_api.limit_category.d || state_amount;
+        bool saturated = state_amount ? count == ownership_api.U64_MAX :
+            !absolute && item.amount > ownership_api.U64_MAX - count;
+        bool exceeds = absolute ? saturated || item.amount > max ||
+            item.amount == ownership_api.U64_MAX :
             saturated || count > max || item.amount > max - count;
         if (count > max || exceeds) {
             ownership_api.charge_result mut out = ownership_api.charge_result{};

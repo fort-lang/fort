@@ -1,0 +1,120 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| state counting cleanup ok
+/// Measures temporary identity storage at each counted-work refusal.
+import ownership_api;
+import ownership_depth_env;
+import ownership_join;
+import ownership_limits;
+import ownership_state;
+
+fn key(u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{.kind = ownership_api.entity_kind.region, .ordinal = ordinal};
+}
+fn candidate(ownership_api.region@ regions) ownership_state.region_candidate {
+    return ownership_state.region_candidate{.regions = regions};
+}
+fn query(ownership_state.state* s, ownership_depth_env.fixture mut* f,
+    ownership_state.region_candidate added) ownership_state.region_measurement {
+    return ownership_state.measure_regions(s, &f->service, added, ownership_api.work_kind.transfer,
+        ownership_api.operation_position{.operation = 7},
+        ownership_api.source_position{.line = 23, .col = 4});
+}
+fn count_refusals() void {
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.region[24] mut regions = {};
+    u64 mut i = 0;
+    while (i < regions.len) {
+        // Descending keys require sorted insertion shifts and two growth copies.
+        regions[i].key = key(cast(regions.len - i, u32));
+        i += 1;
+    }
+    ownership_state.region_candidate added = candidate(regions[..]);
+    ownership_depth_env.fixture mut f = {};
+    ownership_depth_env.configure(&f, ownership_limits.production().w);
+    ownership_depth_env.begin();
+    ownership_state.region_measurement mut measured = query(&s, &f, added);
+    u64 created = ownership_depth_env.finish();
+    assert(ownership_api.successful(measured.proof) && measured.amount == regions.len);
+    assert(created == 2);
+    u64 cost = f.meter.used.w;
+    assert(cost == 421);
+    u64 mut bound = 0;
+    u64 mut populated = 0;
+    while (bound < cost) {
+        ownership_depth_env.configure(&f, bound);
+        ownership_depth_env.begin();
+        measured = query(&s, &f, added);
+        u64 allocated = ownership_depth_env.finish();
+        assert(!ownership_api.successful(measured.proof) && measured.amount == 0);
+        assert(measured.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(measured.proof.terminal.operation.operation == 7);
+        assert(measured.proof.terminal.source.line == 23);
+        assert(f.meter.used.w == (bound == 0 ? 1 : bound));
+        assert(f.meter.used.r == 0 && s.regions_len == 0);
+        if (allocated > 0) { populated += 1; }
+        bound += 1;
+    }
+    assert(populated > 0);
+    ownership_depth_env.configure(&f, cost);
+    ownership_depth_env.begin();
+    measured = query(&s, &f, added);
+    assert(ownership_depth_env.finish() == 2);
+    assert(ownership_api.successful(measured.proof) && measured.amount == regions.len);
+    assert(f.meter.used.w == cost);
+    eprintln("region count cost ", cost, " populated refusals ", populated);
+}
+fn mutation_refusals() void {
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    u64 mut i = 0;
+    while (i < 12) {
+        ownership_state.append_regions(&s, ownership_api.region{.key = key(cast(i + 1, u32))});
+        i += 1;
+    }
+    ownership_api.allocation_fact allocation = ownership_api.allocation_fact{
+        .key = ownership_api.entity_id{.kind = ownership_api.entity_kind.allocation, .ordinal = 1},
+        .count = ownership_api.multiplicity{true, true, true}, .obligation = true};
+    ownership_state.append_allocations(&s, allocation);
+    ownership_state.state mut before = ownership_state.clone(&s);
+    defer ownership_state.free(&before);
+    ownership_api.region fresh = ownership_api.region{.key = key(20)};
+    ownership_api.region[1] input = {fresh};
+    ownership_depth_env.fixture mut f = {};
+    ownership_depth_env.configure(&f, ownership_limits.production().w);
+    ownership_state.region_measurement baseline = query(&s, &f, candidate(input[..]));
+    assert(ownership_api.successful(baseline.proof));
+    u64 cost = f.meter.used.w;
+    u64 mut bound = 0;
+    while (bound < cost) {
+        ownership_depth_env.configure(&f, bound);
+        ownership_depth_env.begin();
+        ownership_api.mutation_result denied = ownership_state.add_region(&s, &f.service, fresh,
+            ownership_api.operation_position{.operation = 7},
+            ownership_api.source_position{.line = 23, .col = 4});
+        ownership_depth_env.finish();
+        assert(!denied.applied && !denied.precision_lost);
+        assert(denied.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(ownership_state.equal(&s, &before));
+        assert(s.allocations[0].obligation && s.allocations[0].count.many);
+        bound += 1;
+    }
+    ownership_depth_env.configure(&f, 1);
+    ownership_depth_env.begin();
+    ownership_state.state mut joined = ownership_join.join(&s, &before, &f.service,
+        &f.meter.bounds, ownership_api.operation_position{.operation = 7},
+        ownership_api.source_position{.line = 23});
+    assert(!ownership_api.successful(joined.proof) && joined.allocations[0].obligation);
+    ownership_state.free(&joined);
+    ownership_depth_env.finish();
+    assert(ownership_state.equal(&s, &before));
+}
+fn main() i32 {
+    count_refusals();
+    mutation_refusals();
+    println("state counting cleanup ok");
+    return 0;
+}

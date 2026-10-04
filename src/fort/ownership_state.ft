@@ -466,10 +466,256 @@ fn region_count(ownership_api.region range) u64 {
     return plus_count(1, range.partitions.len);
 }
 
+// A candidate describes additions and removals without copying the represented state.
+struct region_candidate {
+    ownership_api.contents_fact@ contents;
+    u64 copies;
+    ownership_api.allocation_fact@ allocations;
+    ownership_api.region@ regions;
+    ownership_api.graph_node@ nodes;
+    ownership_api.graph_edge@ edges;
+    ownership_api.place_path@ removed;
+}
+struct region_measurement { ownership_api.proof_status proof; u64 amount; }
+struct region_identity {
+    ownership_api.entity_id region;
+    ownership_api.entity_id partition;
+    bool partitioned;
+}
+struct region_counter {
+    ownership_api.services* service;
+    ownership_api.work_kind kind;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.proof_status proof;
+    region_identity[8] local;
+    region_identity mut@ own identities;
+    u64 len;
+    u64 unknown;
+}
+
+fn region_spend(region_counter mut* paid) bool {
+    if (!ownership_api.successful(paid->proof)) { return false; }
+    ownership_api.charge_result charged = ownership_api.charge_work(paid->service,
+        paid->kind, paid->operation, paid->source);
+    if (!charged.allowed) { paid->proof = charged.proof; }
+    return charged.allowed;
+}
+
+fn region_refuse(region_counter mut* paid) bool {
+    paid->proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        paid->operation, paid->source);
+    return false;
+}
+
+fn region_entries(region_counter mut* paid) region_identity mut@ {
+    return paid->identities.len == 0 ? paid->local[..] : paid->identities[..];
+}
+
+fn region_order(region_identity a, region_identity b) i32 {
+    i32 result = ownership_keys.entity(a.region, b.region);
+    if (result != 0) { return result; }
+    if (a.partitioned != b.partitioned) { return a.partitioned ? 1 : -1; }
+    return ownership_keys.entity(a.partition, b.partition);
+}
+
+// Missing keys prove no equality. Keyed entries use canonical order, never addresses.
+fn region_insert(region_counter mut* paid, region_identity item) bool {
+    if (!region_spend(paid)) { return false; }
+    if (item.region.kind == ownership_api.entity_kind.none ||
+        (item.partitioned && item.partition.kind == ownership_api.entity_kind.none)) {
+        if (paid->unknown == U64_MAX) { return region_refuse(paid); }
+        paid->unknown += 1;
+        return true;
+    }
+    u64 mut index = 0;
+    while (index < paid->len) {
+        if (!region_spend(paid)) { return false; }
+        i32 order = region_order(item, region_entries(paid)[index]);
+        if (order == 0) { return true; }
+        if (order < 0) { break; }
+        index += 1;
+    }
+    u64 ceiling = (U64_MAX / 2) / sizeof(region_identity);
+    if (paid->len >= ceiling) { return region_refuse(paid); }
+    u64 current = paid->identities.len == 0 ? paid->local.len : paid->identities.len;
+    if (paid->len == current) {
+        if (!region_spend(paid)) { return false; }
+        u64 capacity = current <= ceiling / 2 ? current * 2 : ceiling;
+        if (capacity <= paid->len || capacity > ceiling) { return region_refuse(paid); }
+        region_identity mut@ own bigger = new(region_identity, capacity);
+        u64 mut i = 0;
+        while (i < paid->len) {
+            if (!region_spend(paid)) { del(bigger); return false; }
+            bigger[i] = region_entries(paid)[i];
+            i += 1;
+        }
+        del(paid->identities);
+        paid->identities = move(bigger);
+    }
+    u64 mut i = paid->len;
+    while (i > index) {
+        if (!region_spend(paid)) { return false; }
+        region_entries(paid)[i] = region_entries(paid)[i - 1];
+        i -= 1;
+    }
+    if (!region_spend(paid)) { return false; }
+    region_entries(paid)[index] = item;
+    paid->len += 1;
+    return true;
+}
+
+fn region_range(region_counter mut* paid, ownership_api.region range, bool represented) bool {
+    if (!region_spend(paid)) { return false; }
+    if (!represented && range.key.kind == ownership_api.entity_kind.none &&
+        range.source.kind == ownership_api.entity_kind.none && range.layout == null &&
+        range.partitions.len == 0) {
+        return true;
+    }
+    if (!region_insert(paid, region_identity{.region = range.key})) { return false; }
+    u64 mut i = 0;
+    while (i < range.partitions.len) {
+        if (!region_spend(paid)) { return false; }
+        if (!region_insert(paid, region_identity{range.key, range.partitions[i].key, true})) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn region_removed(region_counter mut* paid, ownership_api.place_path place,
+    ownership_api.place_path@ removed, bool mut* found) bool {
+    *found = false;
+    u64 mut i = 0;
+    while (i < removed.len) {
+        if (!region_spend(paid)) { return false; }
+        ownership_api.place_path other = removed[i];
+        if (same_entity(place.root, other.root) && place.residual == other.residual &&
+            place.projections.len == other.projections.len) {
+            u64 mut j = 0;
+            while (j < place.projections.len) {
+                if (!region_spend(paid)) { return false; }
+                if (!same_projection(place.projections[j], other.projections[j])) { break; }
+                j += 1;
+            }
+            if (j == place.projections.len) { *found = true; return true; }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn region_contents(region_counter mut* paid, ownership_api.contents_fact fact) bool {
+    u64 mut i = 0;
+    while (i < fact.borrows.len) {
+        if (!region_spend(paid)) { return false; }
+        if (!region_range(paid, fact.borrows[i].range, true)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Insertion and join covering share this retained-cardinality mapping.
+fn measure_regions(state* s, ownership_api.services* svc, region_candidate candidate,
+    ownership_api.work_kind kind, ownership_api.operation_position op,
+    ownership_api.source_position at)
+    region_measurement {
+    region_counter mut paid = region_counter{.service = svc, .kind = kind, .operation = op,
+        .source = at, .proof = s->proof};
+    defer del(paid.identities);
+    if (!ownership_api.successful(paid.proof)) { return region_measurement{paid.proof, 0}; }
+    u64 mut i = 0;
+    bool mut ok = true;
+    while (ok && i < s->contents_len) {
+        bool mut removed = false;
+        ok = region_spend(&paid) &&
+            region_removed(&paid, s->contents[i].place, candidate.removed, &removed);
+        if (ok && !removed) { ok = region_contents(&paid, s->contents[i]); }
+        i += 1;
+    }
+    u64 mut copy = 0;
+    while (ok && copy < candidate.copies) {
+        if (!region_spend(&paid)) { ok = false; break; }
+        i = 0;
+        while (ok && i < candidate.contents.len) {
+            ok = region_spend(&paid) && region_contents(&paid, candidate.contents[i]);
+            i += 1;
+        }
+        copy += 1;
+    }
+    i = 0;
+    while (ok && i < s->allocations_len) {
+        ok = region_spend(&paid) && region_insert(&paid,
+            region_identity{.region = s->allocations[i].key});
+        i += 1;
+    }
+    i = 0;
+    while (ok && i < candidate.allocations.len) {
+        ok = region_spend(&paid) && region_insert(&paid,
+            region_identity{.region = candidate.allocations[i].key});
+        i += 1;
+    }
+    i = 0;
+    while (ok && i < s->regions_len) {
+        ok = region_spend(&paid) && region_range(&paid, s->regions[i], true);
+        i += 1;
+    }
+    i = 0;
+    while (ok && i < candidate.regions.len) {
+        ok = region_spend(&paid) && region_range(&paid, candidate.regions[i], true);
+        i += 1;
+    }
+    i = 0;
+    while (ok && i < s->nodes_len) {
+        if (!region_spend(&paid)) { ok = false; break; }
+        ownership_api.graph_node node = s->nodes[i];
+        ownership_api.entity_id key = node.allocation.kind != ownership_api.entity_kind.none ?
+            node.allocation : node.key;
+        ok = region_insert(&paid, region_identity{.region = key});
+        i += 1;
+    }
+    i = 0;
+    while (ok && i < candidate.nodes.len) {
+        if (!region_spend(&paid)) { ok = false; break; }
+        ownership_api.graph_node node = candidate.nodes[i];
+        ownership_api.entity_id key = node.allocation.kind != ownership_api.entity_kind.none ?
+            node.allocation : node.key;
+        ok = region_insert(&paid, region_identity{.region = key});
+        i += 1;
+    }
+    i = 0;
+    while (ok && i < s->edges_len) {
+        ok = region_spend(&paid) && region_range(&paid, s->edges[i].range, false);
+        i += 1;
+    }
+    i = 0;
+    while (ok && i < candidate.edges.len) {
+        ok = region_spend(&paid) && region_range(&paid, candidate.edges[i].range, false);
+        i += 1;
+    }
+    return region_measurement{paid.proof, ok ? plus_count(paid.len, paid.unknown) : 0};
+}
+
+fn require_regions(state mut* s, ownership_api.services* svc, region_candidate candidate,
+    charge_counts mut counts, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
+    region_measurement measured = measure_regions(s, svc, candidate,
+        ownership_api.work_kind.transfer, op, at);
+    if (!ownership_api.successful(measured.proof)) {
+        ownership_api.mutation_result mut out = {};
+        out.proof = ownership_api.successful(s->proof) ?
+            report_failure(svc, measured.proof, op, at) : s->proof;
+        return out;
+    }
+    counts.r = measured.amount;
+    return require_counts(s, svc, counts, op, at);
+}
+
 fn contents_counts(ownership_api.contents_fact fact) charge_counts {
     charge_counts mut c = charge_counts{};
     c.d = place_depth(fact.place);
-    c.g = 1;
+    c.g = fact.kind == ownership_api.contents_kind.scalar ? 0 : 1;
     c.w = 1;
     u64 mut i = 0;
     while (i < fact.borrows.len) {
@@ -635,7 +881,10 @@ fn bad_selection(state mut* s, ownership_api.services* svc,
 fn add_contents(state mut* s, ownership_api.services* svc,
     ownership_api.contents_fact fact, ownership_api.operation_position op,
     ownership_api.source_position at) ownership_api.mutation_result {
-    ownership_api.mutation_result result = require_counts(s, svc, contents_counts(fact), op, at);
+    ownership_api.contents_fact[1] added = {fact};
+    region_candidate candidate = region_candidate{.contents = added[..], .copies = 1};
+    ownership_api.mutation_result result = require_regions(s, svc, candidate,
+        contents_counts(fact), op, at);
     if (!result.applied) { return result; }
     append_contents(s, fact);
     return result;
@@ -646,7 +895,7 @@ fn add_source(state mut* s, ownership_api.services* svc,
     ownership_api.source_position at) ownership_api.mutation_result {
     if (source_index(s, fact.key) != U64_MAX) { return bad_selection(s, svc, op, at); }
     ownership_api.mutation_result result = require_charge(
-        s, svc, ownership_api.limit_category.r, 1, op, at);
+        s, svc, ownership_api.limit_category.w, 1, op, at);
     if (!result.applied) { return result; }
     append_sources(s, fact);
     return result;
@@ -656,7 +905,10 @@ fn add_allocation(state mut* s, ownership_api.services* svc,
     ownership_api.allocation_fact fact, ownership_api.operation_position op,
     ownership_api.source_position at) ownership_api.mutation_result {
     if (allocation_index(s, fact.key) != U64_MAX) { return bad_selection(s, svc, op, at); }
-    ownership_api.mutation_result result = require_counts(s, svc, allocation_counts(fact), op, at);
+    ownership_api.allocation_fact[1] added = {fact};
+    region_candidate candidate = region_candidate{.allocations = added[..]};
+    ownership_api.mutation_result result = require_regions(s, svc, candidate,
+        allocation_counts(fact), op, at);
     if (!result.applied) { return result; }
     append_allocations(s, fact);
     return result;
@@ -673,7 +925,9 @@ fn add_region(state mut* s, ownership_api.services* svc,
     charge_counts mut counts = charge_counts{};
     counts.r = region_count(fact);
     counts.w = 1;
-    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    ownership_api.region[1] added = {fact};
+    region_candidate candidate = region_candidate{.regions = added[..]};
+    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
     if (!result.applied) { return result; }
     append_regions(s, fact);
     return result;
@@ -687,8 +941,10 @@ fn add_node(state mut* s, ownership_api.services* svc,
         if (same_entity(s->nodes[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
         i += 1;
     }
-    ownership_api.mutation_result result = require_charge(
-        s, svc, ownership_api.limit_category.r, 1, op, at);
+    ownership_api.graph_node[1] added = {fact};
+    region_candidate candidate = region_candidate{.nodes = added[..]};
+    charge_counts counts = charge_counts{.w = 1};
+    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
     if (!result.applied) { return result; }
     append_nodes(s, fact);
     return result;
@@ -707,7 +963,9 @@ fn add_edge(state mut* s, ownership_api.services* svc,
     counts.r = region_count(fact.range);
     counts.h = 1;
     counts.w = 1;
-    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    ownership_api.graph_edge[1] added = {fact};
+    region_candidate candidate = region_candidate{.edges = added[..]};
+    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
     if (!result.applied) { return result; }
     append_edges(s, fact);
     return result;
@@ -740,7 +998,7 @@ fn add_predicate(state mut* s, ownership_api.services* svc,
         i += 1;
     }
     ownership_api.mutation_result result = require_charge(
-        s, svc, ownership_api.limit_category.p, 1, op, at);
+        s, svc, ownership_api.limit_category.p, plus_count(s->predicates_len, 1), op, at);
     if (!result.applied) { return result; }
     append_predicates(s, fact);
     return result;
@@ -1234,7 +1492,10 @@ fn strong_contents(state mut* s, ownership_api.services* svc,
         counts.r = plus_count(counts.r, part.r);
         i += 1;
     }
-    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    ownership_api.contents_fact[1] added = {fact};
+    region_candidate candidate = region_candidate{.contents = added[..],
+        .copies = aliases.len, .removed = aliases};
+    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
     if (!result.applied) { return result; }
     i = 0;
     while (i < s->contents_len) {
@@ -1274,7 +1535,9 @@ fn weak_contents(state mut* s, ownership_api.services* svc,
         counts.r = plus_count(counts.r, part.r);
         j += 1;
     }
-    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    ownership_api.contents_fact[1] added = {fact};
+    region_candidate candidate = region_candidate{.contents = added[..], .copies = selections.len};
+    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
     if (!result.applied) { return result; }
     u64 mut i = 0;
     while (i < selections.len) {

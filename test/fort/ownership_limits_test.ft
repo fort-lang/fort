@@ -23,6 +23,11 @@ fn small(u64 n) ownership_api.limit_table {
     return ownership_api.limit_table{ownership_api.LIMIT_VERSION, n, n, n, n, n, n, n, n, n};
 }
 
+fn absolute(ownership_api.limit_category category) bool {
+    return category == ownership_api.limit_category.d ||
+        category == ownership_api.limit_category.r || category == ownership_api.limit_category.p;
+}
+
 fn amount(ownership_api.used_counts* used, ownership_api.limit_category category) u64 {
     switch (category) {
     case ownership_api.limit_category.d: return used->d;
@@ -78,17 +83,17 @@ fn bounds() void {
         ownership_api.charge_request req = ownership_api.charge_request{
             ownership_api.work_kind.transfer, op, source, item[..]};
         ownership_api.charge_result first = ownership_limits.try_charge(&budget, &req);
-        if (cases[i].category == ownership_api.limit_category.d) { item[0].amount = 2; }
+        if (absolute(cases[i].category)) { item[0].amount = 2; }
         ownership_api.charge_result second = ownership_limits.try_charge(&budget, &req);
         assert(first.allowed && second.allowed && amount(&budget.used, cases[i].category) == 2);
         assert(cases[i].below.len == 6);
         scenarios += 1;
-        if (cases[i].category == ownership_api.limit_category.d) { item[0].amount = 3; }
+        if (absolute(cases[i].category)) { item[0].amount = 3; }
         ownership_api.charge_result third = ownership_limits.try_charge(&budget, &req);
         assert(third.allowed && amount(&budget.used, cases[i].category) == 3);
         assert(cases[i].at.len == 6);
         scenarios += 1;
-        if (cases[i].category == ownership_api.limit_category.d) { item[0].amount = 4; }
+        if (absolute(cases[i].category)) { item[0].amount = 4; }
         ownership_api.charge_result fourth = ownership_limits.try_charge(&budget, &req);
         assert(!fourth.allowed && fourth.limit.present && !fourth.limit.saturated);
         assert(fourth.limit.category == cases[i].category && fourth.limit.used == 3);
@@ -402,7 +407,7 @@ fn production_stress() void {
                 n += 1;
             }
         } else {
-            item[0].amount = categories[i] == ownership_api.limit_category.d ? branching[i] :
+            item[0].amount = absolute(categories[i]) ? branching[i] :
                 branching[i] - baseline[i];
             assert(ownership_limits.try_charge(&budget, &req).allowed);
         }
@@ -414,12 +419,12 @@ fn production_stress() void {
                 n += 1;
             }
         } else {
-            item[0].amount = categories[i] == ownership_api.limit_category.d ? selected[i] :
+            item[0].amount = absolute(categories[i]) ? selected[i] :
                 selected[i] - branching[i];
             assert(ownership_limits.try_charge(&budget, &req).allowed);
         }
         assert(amount(&budget.used, categories[i]) == selected[i]);
-        item[0].amount = categories[i] == ownership_api.limit_category.d ? selected[i] + 1 : 1;
+        item[0].amount = absolute(categories[i]) ? selected[i] + 1 : 1;
         ownership_api.charge_result over = ownership_limits.try_charge(&budget, &req);
         assert(!over.allowed && over.limit.present && over.limit.used == selected[i]);
         assert(over.limit.bound == selected[i] && over.limit.attempted == item[0].amount);

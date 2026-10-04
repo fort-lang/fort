@@ -842,7 +842,17 @@ fn append_leaf(context mut* ctx, ownership_api.services* svc, request* req,
         return fail(svc, req, item.place.root, false,
             "raw layout exceeds retained region precision");
     }
-    ownership_api.proof_status mut proof = charge(svc, req, ownership_api.limit_category.r, 1);
+    u64 mut core_regions = 0;
+    if (ctx->core != null) {
+        ownership_state.region_measurement core = ownership_state.measure_regions(ctx->core, svc,
+            ownership_state.region_candidate{}, ownership_api.work_kind.transfer,
+            req->base.operation, req->base.source_position);
+        if (!ownership_api.successful(core.proof)) { return type_failure(svc, req, core.proof); }
+        core_regions = core.amount;
+    }
+    u64 retained = add_work(core_regions, add_work(ctx->leaves_len, 1));
+    ownership_api.proof_status mut proof = charge(svc, req,
+        ownership_api.limit_category.r, retained);
     if (!ownership_api.successful(proof)) { return proof; }
     u64 len = ctx->leaves_len;
     proof = charge(svc, req, ownership_api.limit_category.w,
@@ -1290,7 +1300,9 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
             "raw capture exceeds its limits");
         return out;
     }
-    out.proof = charge(svc, req, ownership_api.limit_category.p, 1 + bounds.len + relations.len);
+    u64 predicates = add_work(core->predicates_len,
+        add_work(1, add_work(bounds.len, relations.len)));
+    out.proof = charge(svc, req, ownership_api.limit_category.p, predicates);
     if (!ownership_api.successful(out.proof)) { return out; }
     calculation mut work = calculation{&out.storage, svc, req, complete()};
     if (!spend(&work, 4)) { out.proof = work.proof; return out; }
