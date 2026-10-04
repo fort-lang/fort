@@ -1,0 +1,832 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept A01
+//| accept A02
+//| accept A03
+//| reject A04
+//| reject A05
+//| reject A06
+//| reject A07
+//| reject A08
+//| reject A09
+//| reject A10
+//| reject A11
+//| reject A12
+//| reject A13
+//| reject A14
+//| accept A15
+//| accept A16
+//| reject A17
+//| reject A18
+//| reject A19
+//| reject A20
+//| reject A21
+//| reject A22
+//| reject A23
+//| accept A24
+//| reject A25
+//| reject A26
+//| reject A27
+//| accept A28
+//| accept A29
+//| reject A30
+//| reject A31
+//| reject A32
+//| reject missing caller state
+//| reject incomplete caller state
+//| reject released argument allocation
+//| reject unknown argument allocation
+/// Tests checked private preparation without a foreign hook or public publication.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_boundary_env as env;
+import ownership_keys;
+import ownership_state;
+import check_env;
+import ast;
+import types;
+import std.str;
+
+ownership_api.projection@ NO_PROJECTIONS = {};
+
+fn scalar(env.env mut* e, u64 at) void {
+    ownership_api.contents_fact mut value = {};
+    value.place = env.slot(10);
+    value.value_version = env.id(ownership_api.entity_kind.value, 111);
+    value.kind = ownership_api.contents_kind.scalar;
+    e->raw.local.state.contents[0] = value;
+    e->raw.local.state.contents_len = 1;
+    env.operand(e, at, 0, e->request.call.declaration.ty->params[0]);
+}
+fn tail(env.env mut* e, bool span) void {
+    types.node* pointer = check_env.sym_main(&e->checked, "borrow")->ty->params[0];
+    env.binding(e, env.slot(1).root, pointer);
+    env.allocation(e, env.slot(1), pointer->elem, 1);
+    types.node* mut ty = pointer;
+    if (span) { ty = types.type_span(&e->raw.table, pointer->elem, false, false); }
+    env.operand(e, 1, 1, ty);
+}
+fn empty_owner(env.env mut* e) void {
+    types.node* parameter = e->request.call.declaration.ty->params[0];
+    env.binding(e, env.slot(1).root, parameter);
+    ownership_api.contents_fact mut value = {};
+    value.place = env.slot(1);
+    value.value_version = env.id(ownership_api.entity_kind.value, 11);
+    value.kind = ownership_api.contents_kind.empty_owner;
+    value.owner_empty = true;
+    value.span_length = env.exact(0);
+    e->raw.local.state.contents[0] = value;
+    e->raw.local.state.contents_len = 1;
+    env.operand(e, 0, 0, parameter);
+}
+fn orphan(env.env mut* e) void {
+    ownership_state.state mut* s = &e->raw.local.state;
+    ownership_api.place_path actual = env.field(e, s->allocations[1].key, 0);
+    s->allocations[0].owner.place = actual;
+    s->contents[0] = env.reference(e, actual, 1, 11);
+    env.operand(e, 0, 0, e->request.call.declaration.ty->params[0]);
+    // Both allocations retain obligations. No caller slot owns the cycle.
+    s->edges[1] = s->edges[0];
+    s->edges[1].key.ordinal += 1;
+    s->edges[1].from = s->nodes[1].key;
+    s->edges[1].to = s->nodes[0].key;
+    s->edges[1].place = actual;
+    s->edges_len = 2;
+}
+fn borrowed_cycle(env.env mut* e) void {
+    types.node* parameter = e->request.call.declaration.ty->params[0];
+    types.node* payload = parameter->elem;
+    ast.sym* record = cast(payload->decl, ast.sym*);
+    types.node* leaf = ast.ast_child(record->node, 0)->ty;
+    env.binding(e, env.slot(1).root, parameter);
+    env.binding(e, env.slot(2).root, parameter);
+    env.allocation(e, env.slot(1), payload, 1);
+    env.allocation(e, env.slot(2), payload, 2);
+    env.node(e, 0, 301); env.node(e, 1, 302);
+    ownership_api.place_path p = env.field(e, e->raw.local.state.allocations[0].key, 0);
+    ownership_api.place_path q = env.field(e, e->raw.local.state.allocations[1].key, 0);
+    e->raw.local.state.contents[2] = env.reference(e, p, 2, 31);
+    e->raw.local.state.contents[3] = env.reference(e, q, 1, 41);
+    e->raw.local.state.contents_len = 4;
+    env.edge(e, 0, 1, p, payload, leaf, 0, false);
+    env.edge(e, 1, 0, q, payload, leaf, 0, false);
+    env.operand(e, 0, 0, parameter);
+}
+
+fn a01() void {
+    env.env mut e = {};
+    env.open(&e, 1, "empty");
+    defer env.close(&e);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 0);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a02() void {
+    env.env mut e = {};
+    env.open(&e, 2, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 0);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a03() void {
+    env.env mut e = {};
+    env.open(&e, 3, "scalar");
+    defer env.close(&e);
+    scalar(&e, 0);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 0);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a04() void {
+    env.env mut e = {};
+    env.open(&e, 4, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.request.event_map_complete = false;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The event map is missing."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a05() void {
+    env.env mut e = {};
+    env.open(&e, 5, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.events[0].key.function.instance += 1;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The event function does not match the operation."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a06() void {
+    env.env mut e = {};
+    env.open(&e, 6, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.events[1] = e.events[0];
+    e.request.events = e.events[..];
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The event map has duplicate keys."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a07() void {
+    env.env mut e = {};
+    env.open(&e, 7, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.request.source_map_complete = false;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The supplied source correspondence is missing."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a08() void {
+    env.env mut e = {};
+    env.open(&e, 8, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.request.call.declaration.symbol = check_env.sym_main(&e.checked, "main");
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The declaration is not an extern function."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a09() void {
+    env.env mut e = {};
+    env.open(&e, 9, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.request.call.declaration.ty = null;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The binding has no checked function type."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a10() void {
+    env.env mut e = {};
+    env.open(&e, 10, "borrow");
+    defer env.close(&e);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The fixed signature argument count does not match."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a11() void {
+    env.env mut e = {};
+    env.open(&e, 11, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.operands[0].version.ordinal += 1;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The captured argument version does not match."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a12() void {
+    env.env mut e = {};
+    env.open(&e, 12, "take");
+    defer env.close(&e);
+    env.basic(&e, true);
+    e.bindings[0].ty =
+        check_env.sym_main(&e.checked, "borrow")->ty->params[0];
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.complete);
+    assert(e.observed.kind == ownership_api.event_kind.caller_requirement);
+    assert(e.observed.evidence == ownership_api.evidence_kind.unconditional);
+    assert(str.equal(e.observed.text, "The own argument has no unique owning operand."));
+    assert(e.validated == true);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a13() void {
+    env.env mut e = {};
+    env.open(&e, 13, "take");
+    defer env.close(&e);
+    env.basic(&e, true);
+    e.raw.local.state.allocations[0].count.many = true;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The owning operand remains ambiguous."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a14() void {
+    env.env mut e = {};
+    env.open(&e, 14, "pair");
+    defer env.close(&e);
+    env.basic(&e, true);
+    env.operand(&e, 1, 0,
+        e.request.call.declaration.ty->params[1]);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.complete);
+    assert(e.observed.kind == ownership_api.event_kind.caller_requirement);
+    assert(e.observed.evidence == ownership_api.evidence_kind.unconditional);
+    assert(str.equal(e.observed.text, "Two own operands select the same allocation."));
+    assert(e.validated == true);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a15() void {
+    env.env mut e = {};
+    env.open(&e, 15, "take_node");
+    defer env.close(&e);
+    env.graph(&e, false);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 2);
+    assert(out.selected->selected[1].allocation.ordinal == 2);
+    assert(&out.selected->selected[1].owner.projections[0] !=
+        &e.raw.local.state.allocations[1].owner.place.projections[0]);
+    assert(&out.selected->selected[1].incoming.range.leaves[0] !=
+        &e.raw.local.state.edges[0].range.leaves[0]);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a16() void {
+    env.env mut e = {};
+    env.open(&e, 16, "take_node");
+    defer env.close(&e);
+    env.graph(&e, true);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 2);
+    assert(out.selected->selected[1].allocation.ordinal == 2);
+    assert(&out.selected->selected[1].owner.projections[0] !=
+        &e.raw.local.state.allocations[1].owner.place.projections[0]);
+    assert(&out.selected->selected[1].incoming.range.leaves[0] !=
+        &e.raw.local.state.edges[0].range.leaves[0]);
+    assert(e.raw.local.state.allocations[2].obligation);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a17() void {
+    env.env mut e = {};
+    env.open(&e, 17, "take_node");
+    defer env.close(&e);
+    env.graph(&e, false);
+    e.raw.local.state.nodes[1].residual = true;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "Canonical owned descendant coverage is incomplete."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a18() void {
+    env.env mut e = {};
+    env.open(&e, 18, "take_node");
+    defer env.close(&e);
+    env.graph(&e, false);
+    e.raw.local.state.nodes_len = 1;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "Canonical owned descendant coverage is incomplete."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a19() void {
+    env.env mut e = {};
+    env.open(&e, 19, "take_node");
+    defer env.close(&e);
+    env.graph(&e, false);
+    orphan(&e);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.complete);
+    assert(e.observed.kind == ownership_api.event_kind.caller_requirement);
+    assert(e.observed.evidence == ownership_api.evidence_kind.unconditional);
+    assert(str.equal(e.observed.text,
+        "The own argument has no actual external owning holding operand."));
+    assert(e.validated == true);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a20() void {
+    env.env mut e = {};
+    env.open(&e, 20, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.raw.local.state.sources[0].validity = ownership_api.validity_kind.released;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.complete);
+    assert(e.observed.kind == ownership_api.event_kind.invalid_use);
+    assert(e.observed.evidence == ownership_api.evidence_kind.unconditional);
+    assert(str.equal(e.observed.text, "The argument source is released."));
+    assert(e.validated == true);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a21() void {
+    env.env mut e = {};
+    env.open(&e, 21, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.raw.local.state.sources[0].kind = ownership_api.source_kind.stack;
+    e.raw.local.state.sources[0].allocation = ownership_api.entity_id{};
+    e.raw.local.state.sources[0].validity = ownership_api.validity_kind.ended;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.complete);
+    assert(e.observed.kind == ownership_api.event_kind.invalid_use);
+    assert(e.observed.evidence == ownership_api.evidence_kind.unconditional);
+    assert(str.equal(e.observed.text, "The argument source has ended."));
+    assert(e.validated == true);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a22() void {
+    env.env mut e = {};
+    env.open(&e, 22, "tail");
+    defer env.close(&e);
+    scalar(&e, 0);
+    tail(&e, false);
+    e.raw.local.state.sources[0].validity = ownership_api.validity_kind.released;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.complete);
+    assert(e.observed.kind == ownership_api.event_kind.invalid_use);
+    assert(e.observed.evidence == ownership_api.evidence_kind.unconditional);
+    assert(str.equal(e.observed.text, "The variadic pointer source is released."));
+    assert(e.validated == true);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a23() void {
+    env.env mut e = {};
+    env.open(&e, 23, "tail");
+    defer env.close(&e);
+    scalar(&e, 0);
+    tail(&e, true);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text,
+        "The supplied tail type violates the checked extern ABI precondition."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a24() void {
+    env.env mut e = {};
+    env.open(&e, 24, "take_read");
+    defer env.close(&e);
+    env.basic(&e, true);
+    env.operand(&e, 1, 0,
+        e.request.call.declaration.ty->params[1]);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 1);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a25() void {
+    env.env mut e = {};
+    env.open(&e, 25, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.operands[0].version.function.instance += 1;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The captured argument function key does not match."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a26() void {
+    env.env mut e = {};
+    env.open(&e, 26, "take_node");
+    defer env.close(&e);
+    env.graph(&e, false);
+    e.raw.local.state.allocations[1].owner.place.projections = NO_PROJECTIONS;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "Canonical owned descendant coverage is incomplete."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a27() void {
+    env.env mut e = {};
+    env.open(&e, 27, "take_node");
+    defer env.close(&e);
+    env.graph(&e, false);
+    e.raw.local.state.contents_len = 1;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "Canonical owned descendant coverage is incomplete."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a28() void {
+    env.env mut e = {};
+    env.open(&e, 28, "take_links");
+    defer env.close(&e);
+    borrowed_cycle(&e);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 1);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a29() void {
+    env.env mut e = {};
+    env.open(&e, 29, "take");
+    defer env.close(&e);
+    empty_owner(&e);
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(ownership_api.successful(out.proof) && out.selected != null);
+    assert(e.events_seen == 0 && out.selected->selected_len == 0);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a30() void {
+    env.env mut e = {};
+    env.open(&e, 30, "take_node");
+    defer env.close(&e);
+    env.graph(&e, false);
+    e.raw.local.state.nodes[2] =
+        e.raw.local.state.nodes[0];
+    e.raw.local.state.nodes[2].key.ordinal += 1;
+    e.raw.local.state.nodes_len = 3;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text,
+        "Canonical node and allocation correspondence is ambiguous."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a31() void {
+    env.env mut e = {};
+    env.open(&e, 31, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    env.finish(&e);
+    ownership_ffi.preparation_context mut c = {};
+    c.copy.services = &e.raw.local.service;
+    c.copy.proof.kind = ownership_api.proof_kind.complete;
+    c.request = &e.request;
+    c.metadata.operation = e.request.call.operation;
+    c.metadata.source = e.request.call.source;
+    c.metadata.event = e.events[0].key;
+    c.copy.request = &c.metadata;
+    assert(!ownership_ffi.preparation_price(&c, ownership_api.U64_MAX, 2));
+    assert(e.raw.budget.calls == 0);
+    ownership_ffi.preparation_report(&c);
+    ownership_ffi.preparation mut out = {.proof = c.copy.proof};
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.work_failure);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The work price is not representable."));
+    assert(e.validated == false);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+fn a32() void {
+    env.env mut e = {};
+    env.open(&e, 32, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    env.finish(&e);
+    env.reset(&e, 1);
+    e.refuse_event = true;
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.work_failure);
+    assert(e.observed.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(str.equal(e.observed.text, "The work or representation budget refuses the operation."));
+    assert(e.validated == false);
+    assert(out.proof.terminal.present && out.proof.terminal.limit.present);
+    assert(out.proof.terminal.limit.used == 7 && out.proof.terminal.limit.bound == 7);
+    assert(out.proof.terminal.limit.attempted == 1);
+    assert(ownership_keys.operation(out.proof.terminal.operation,
+        e.request.call.operation) == 0);
+    assert(ownership_keys.source(out.proof.terminal.source, e.request.call.source) == 0);
+    assert(ownership_keys.entity(e.observed.key, e.events[0].key) == 0);
+    ownership_ffi.drop_boundary_plan(move(out.selected));
+}
+
+// The refusal names the missing caller state, not the declaration.
+fn caller_state(u32 number, bool missing) void {
+    env.env mut e = {};
+    env.open(&e, number, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    env.finish(&e);
+    if (missing) { e.request.before = null; }
+    else { e.raw.local.state.proof.kind = ownership_api.proof_kind.incomplete; }
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(e.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(str.equal(e.observed.text, "The caller state is missing or incomplete."));
+    e.raw.local.state.proof.kind = ownership_api.proof_kind.complete;
+    e.request.before = &e.raw.local.state;
+    env.unchanged(&e);
+}
+// A live source does not hide a released or unknown known allocation.
+fn argument_allocation(u32 number, ownership_api.validity_kind validity) void {
+    env.env mut e = {};
+    env.open(&e, number, "borrow");
+    defer env.close(&e);
+    env.basic(&e, false);
+    e.raw.local.state.allocations[0].validity = validity;
+    env.finish(&e);
+    ownership_ffi.preparation mut out = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    env.unchanged(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.selected == null && e.events_seen == 1);
+    assert(e.raw.local.state.sources[0].validity == ownership_api.validity_kind.live);
+    if (validity == ownership_api.validity_kind.released) {
+        assert(out.proof.kind == ownership_api.proof_kind.complete);
+        assert(e.observed.kind == ownership_api.event_kind.invalid_use && e.validated);
+        assert(str.equal(e.observed.text, "The argument source is released."));
+    } else {
+        assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+        assert(e.observed.kind == ownership_api.event_kind.incomplete_proof && !e.validated);
+        assert(str.equal(e.observed.text, "The captured argument version does not match."));
+    }
+}
+fn main() i32 {
+    a01(); println("accept A01");
+    a02(); println("accept A02");
+    a03(); println("accept A03");
+    a04(); println("reject A04");
+    a05(); println("reject A05");
+    a06(); println("reject A06");
+    a07(); println("reject A07");
+    a08(); println("reject A08");
+    a09(); println("reject A09");
+    a10(); println("reject A10");
+    a11(); println("reject A11");
+    a12(); println("reject A12");
+    a13(); println("reject A13");
+    a14(); println("reject A14");
+    a15(); println("accept A15");
+    a16(); println("accept A16");
+    a17(); println("reject A17");
+    a18(); println("reject A18");
+    a19(); println("reject A19");
+    a20(); println("reject A20");
+    a21(); println("reject A21");
+    a22(); println("reject A22");
+    a23(); println("reject A23");
+    a24(); println("accept A24");
+    a25(); println("reject A25");
+    a26(); println("reject A26");
+    a27(); println("reject A27");
+    a28(); println("accept A28");
+    a29(); println("accept A29");
+    a30(); println("reject A30");
+    a31(); println("reject A31");
+    a32(); println("reject A32");
+    caller_state(40, true); println("reject missing caller state");
+    caller_state(41, false); println("reject incomplete caller state");
+    argument_allocation(42, ownership_api.validity_kind.released);
+    println("reject released argument allocation");
+    argument_allocation(43, ownership_api.validity_kind.unknown);
+    println("reject unknown argument allocation");
+    return 0;
+}
