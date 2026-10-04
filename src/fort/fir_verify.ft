@@ -1771,6 +1771,201 @@ fn v14_flow(walk mut* w) bool {
     return true;
 }
 
+struct loan_entry {
+    u32 id;
+    u32 header;
+}
+
+fn loan_entry_index(loan_entry@ loans, u32 id) u32 {
+    u64 mut i = 0;
+    while (i < loans.len) {
+        if (loans[i].id == id) { return cast(i, u32); }
+        i += 1;
+    }
+    return 4294967295;
+}
+
+fn loan_place_valid(fir.func* f, fir.place p) bool {
+    if (p.base == fir.base_kind.bk_global && p.global == null) { return false; }
+    if (cast(p.proj_first, u64) > f->projs.len ||
+        cast(p.proj_len, u64) > f->projs.len - cast(p.proj_first, u64)) { return false; }
+    if (place_fault(f, p).len > 0) { return false; }
+    types.node* t = fir.place_type(f, p);
+    return t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string ||
+        (t->kind == types.type_kind.k_array && fir.type_owning(t));
+}
+
+fn loan_header_valid(fir.func* f, u32 header) bool {
+    if (header == 0) { return true; }
+    if (header >= fir.local_count(f)) { return false; }
+    fir.local* local_value = fir.local_at(f, header);
+    types.node* t = local_value->ty;
+    return local_value->kind == fir.local_kind.lk_temp && !t->is_own &&
+        (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string ||
+        t->kind == types.type_kind.k_ptr);
+}
+
+fn loan_header_open(loan_entry@ loans, fir_flow.bits* state, fir.place p) bool {
+    if (p.base != fir.base_kind.bk_local) { return true; }
+    u32 mut i = 0;
+    while (cast(i, u64) < loans.len) {
+        if (loans[cast(i, u64)].header != 0 &&
+            loans[cast(i, u64)].header == p.local && !fir_flow.bits_get(state, i)) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn loan_top(loan_entry@ loans, fir_flow.bits* state) u32 {
+    u32 mut top = 0;
+    u32 mut i = 0;
+    while (cast(i, u64) < loans.len) {
+        if (fir_flow.bits_get(state, i) && loans[cast(i, u64)].id > top) {
+            top = loans[cast(i, u64)].id;
+        }
+        i += 1;
+    }
+    return top;
+}
+
+// V14 follows selected FIR edges and propagates exact open-loan sets.
+fn v14_statements(walk mut* w) bool {
+    fir.func* f = w->f;
+    u32 blocks = fir.block_count(f);
+    fir_flow.bits mut reachable = fir_flow.bits_new(blocks);
+    defer fir_flow.bits_free(&reachable);
+    u32 mut@ own stack = new(u32, cast(blocks, u64));
+    defer del(stack);
+    u64 mut top = 0;
+    reach(&reachable, stack, &top, 0);
+    while (top > 0) {
+        top -= 1;
+        fir.terminator* t = &fir.block_at(f, stack[top])->term;
+        if (t->kind == fir.term_kind.tk_switch && t->cond.kind == fir.operand_kind.ok_const) {
+            reach(&reachable, stack, &top, selected_target(f, t));
+        } else {
+            u32 mut edge = 0;
+            u32 mut target = 0;
+            while (fir.term_targets(f, t, edge, &target)) {
+                reach(&reachable, stack, &top, target);
+                edge += 1;
+            }
+        }
+    }
+    loan_entry mut@ own entries = new(loan_entry, cast(fir.loan_count(f), u64));
+    defer del(entries);
+    u64 mut count = 0;
+    u32 mut b = 0;
+    while (b < blocks) {
+        if (fir_flow.bits_get(&reachable, b)) {
+            u32 mut i = 0;
+            while (i < fir.block_statement_count(f, b)) {
+                fir.statement* s = fir.block_statement(f, b, i);
+                if (s->kind == fir.stmt_kind.st_loan_begin) {
+                    if (s->loan == 0) {
+                        return fail(w, RULE_V14, "a loan statement out of order", b, i);
+                    }
+                    if (loan_entry_index(entries[0..count], s->loan) != 4294967295) {
+                        return fail(w, RULE_V14, "a loan has two begin statements", b, i);
+                    }
+                    if (!loan_place_valid(f, s->place) || !loan_header_valid(f, s->local)) {
+                        return fail(w, RULE_V14,
+                            "a loan of a place that is not a collection", b, i);
+                    }
+                    entries[count] = loan_entry{s->loan, s->local};
+                    count += 1;
+                }
+                i += 1;
+            }
+        }
+        b += 1;
+    }
+    loan_entry@ loans = entries[0..count];
+    fir_flow.bits mut@ own incoming = new(fir_flow.bits, cast(blocks, u64));
+    defer {
+        u64 mut i = 0;
+        while (i < incoming.len) { fir_flow.bits_free(&incoming[i]); i += 1; }
+        del(incoming);
+    }
+    b = 0;
+    while (b < blocks) {
+        incoming[cast(b, u64)] = fir_flow.bits_new(cast(count, u32));
+        b += 1;
+    }
+    fir_flow.bits mut seen = fir_flow.bits_new(blocks);
+    defer fir_flow.bits_free(&seen);
+    fir_flow.bits mut state = fir_flow.bits_new(cast(count, u32));
+    defer fir_flow.bits_free(&state);
+    top = 0;
+    reach(&seen, stack, &top, 0);
+    while (top > 0) {
+        top -= 1;
+        b = stack[top];
+        fir_flow.bits_copy(&state, &incoming[cast(b, u64)]);
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_loan_begin || s->kind == fir.stmt_kind.st_loan_end) {
+                u32 index = loan_entry_index(loans, s->loan);
+                if (index == 4294967295 ||
+                    (s->kind == fir.stmt_kind.st_loan_begin && fir_flow.bits_get(&state, index)) ||
+                    (s->kind == fir.stmt_kind.st_loan_end &&
+                    (loan_top(loans, &state) != s->loan ||
+                    !fir_flow.bits_get(&state, index)))) {
+                    return fail(w, RULE_V14, "a loan statement out of order", b, i);
+                }
+                if (s->kind == fir.stmt_kind.st_loan_begin) {
+                    fir_flow.bits_set(&state, index);
+                } else { fir_flow.bits_clear(&state, index); }
+            } else {
+                u32 mut r = 0;
+                fir.read mut read_value = fir.read{};
+                while (fir.stmt_read(f, s, r, &read_value)) {
+                    if (!loan_header_open(loans, &state, read_value.place)) {
+                        return fail(w, RULE_V14,
+                            "a read of a loan header while the loan is closed", b, i);
+                    }
+                    r += 1;
+                }
+            }
+            i += 1;
+        }
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        u32 mut r = 0;
+        fir.read mut read_value = fir.read{};
+        while (fir.term_read(f, t, r, &read_value)) {
+            if (!loan_header_open(loans, &state, read_value.place)) {
+                return fail(w, RULE_V14,
+                    "a read of a loan header while the loan is closed", b, i);
+            }
+            r += 1;
+        }
+        if (t->kind == fir.term_kind.tk_return && loan_top(loans, &state) != 0) {
+            return fail(w, RULE_V14, "a return with an open loan", b, i);
+        }
+        u32 mut edge = 0;
+        u32 mut target = 0;
+        bool selected = t->kind == fir.term_kind.tk_switch &&
+            t->cond.kind == fir.operand_kind.ok_const;
+        while (true) {
+            if (selected) {
+                if (edge > 0) { break; }
+                target = selected_target(f, t);
+            } else if (!fir.term_targets(f, t, edge, &target)) { break; }
+            if (!fir_flow.bits_get(&seen, target)) {
+                fir_flow.bits_copy(&incoming[cast(target, u64)], &state);
+                reach(&seen, stack, &top, target);
+            } else if (!fir_flow.bits_equal(&incoming[cast(target, u64)], &state)) {
+                return fail(w, RULE_V14, "incoming loan states conflict", target, 0);
+            }
+            edge += 1;
+        }
+    }
+    return true;
+}
+
 /// Tests the rules V1 to V14 on `f` and returns true with the first violation in *out when `f`
 /// breaks one. `rt` gives the runtime entries that V7 reads.
 // The local rules run first, then the flow rules V9, V11, V12 and V13, each group in number
@@ -1793,6 +1988,7 @@ fn find_violation(fir.func* f, runtime* rt, violation mut* out) bool {
     if (ok && f->range_supplied_complete) {
         ok = v14_flow(&w);
     }
+    if (ok) { ok = v14_statements(&w); }
     if (!ok) {
         *out = w.v;
     }

@@ -1,0 +1,93 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| loan llvm equal 4
+/// Checks that loan statements keep the executable LLVM text unchanged.
+import fir;
+import gen_data;
+import llvm_env;
+import pass_env;
+import std.io;
+import std.strbuf;
+import std.sys;
+
+fn loan_statements_emit_no_llvm() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[1] prelude = {"fn f(i32@ a) void {}"};
+    string[11] input = {
+        "fn main.f(_1 (a): i32@) -> void {",
+        "let _2: i32@; let _3: u64; let _4: bool; let _5: i32;",
+        "bb0: { _2 = copy _1; loan_begin 1 _1 _2; _3 = const u64 0; goto bb1; }",
+        "bb1: { _4 = lt(copy _3, copy _2.1);",
+        "switch(copy _4) -> [true: bb2, otherwise: bb4]; }",
+        "bb2: { _5 = copy _2[_3]; goto bb3; }",
+        "bb3: { _3 = add(copy _3, const u64 1); goto bb1; }",
+        "bb4: { loan_end 1; return; }",
+        "}",
+        "",
+        "",
+    };
+    fir.module mut fm = llvm_env.parse(&e, prelude[..], input[..]);
+    defer fir.module_free(&fm);
+    fir.func* original = fir.module_function_at(&fm, 0);
+    u64 mut mode = 0;
+    strbuf.str_buf mut first = strbuf.create();
+    defer strbuf.free(&first);
+    strbuf.str_buf mut filename = strbuf.create();
+    defer strbuf.free(&filename);
+    string mut output = "";
+    bool export_ir = sys.env("FORT_LOAN_IR_DIR", &output);
+    while (mode < pass_env.MODE_COUNT) {
+        fir.func mut full = fir.func_clone(original);
+        defer fir.func_free(&full);
+        fir.func mut bare = fir.func_clone(original);
+        defer fir.func_free(&bare);
+        u32 mut b = 0;
+        while (b < fir.block_count(&bare)) {
+            fir.block mut* block_value = fir.block_mut(&bare, b);
+            u64 mut i = 0;
+            u64 mut kept = 0;
+            while (i < block_value->statements.len) {
+                fir.statement s = block_value->statements.items[i];
+                if (s.kind != fir.stmt_kind.st_loan_begin && s.kind != fir.stmt_kind.st_loan_end) {
+                    block_value->statements.items[kept] = s;
+                    kept += 1;
+                }
+                i += 1;
+            }
+            block_value->statements.len = kept;
+            b += 1;
+        }
+        pass_env.build(&e.low, &full, pass_env.MODES[mode]);
+        pass_env.build(&e.low, &bare, pass_env.MODES[mode]);
+        pass_env.verified(&e.low, &full, "loan pass result");
+        pass_env.verified(&e.low, &bare, "bare pass result");
+        strbuf.clear(&first);
+        llvm_env.reset(&e, pass_env.MODES[mode]);
+        strbuf.append(&first, llvm_env.whole(&e, &full));
+        llvm_env.reset(&e, pass_env.MODES[mode]);
+        string text = llvm_env.whole(&e, &bare);
+        assert(strbuf.view(&first) == text);
+        llvm_env.verified(&e, text);
+        if (export_ir) {
+            strbuf.append(&e.g.named, "%fort.span = type { ptr, i64 }\n");
+            strbuf.append(&e.g.named, "%fort.enum_member = type { i32, ptr }\n");
+            gen_data.gen_finish(&e.g);
+            strbuf.clear(&filename);
+            strbuf.append(&filename, output);
+            strbuf.append(&filename, "/loan-mode-");
+            strbuf.append_u64(&filename, mode);
+            strbuf.append(&filename, ".ll");
+            assert(io.write_file(strbuf.view(&filename), cast(strbuf.view(&e.g.out), u8@)));
+        }
+        mode += 1;
+    }
+    println("loan llvm equal ", mode);
+}
+
+fn main() i32 {
+    loan_statements_emit_no_llvm();
+    return 0;
+}
