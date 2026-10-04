@@ -8,13 +8,13 @@ FIR imports neither module. T-291 owns the production adapter and registration.
 
 ## Concrete definition and storage owners
 
-The API defines 74 concrete records in 19 families. It also defines 24 enum types.
+The API defines 64 concrete records in 18 families. It also defines 21 enum types.
 A family is a planning group. It is not a struct count.
 T-315 owns each record definition below. The storage column names the production storage owner.
 The caller owns request records, result records, and borrowed descriptor headers.
 A descriptor never transfers the storage that its slices designate.
 The storage owner copies nested slices when it retains a descriptor beyond its input lifetime.
-Test `ownership_env` owns its synthetic input copies instead of T-291.
+Test `ownership_env` owns verified FIR before any build-mode pass.
 
 | Family | Records | Count | Storage owner |
 |---|---|---:|---|
@@ -66,16 +66,6 @@ Test `ownership_env` owns its synthetic input copies instead of T-291.
 |  | `charge_item` | 1 | T-317 |
 |  | `charge_request` | 1 | T-317 |
 |  | `charge_result` | 1 | T-317 |
-| Ranges | `range_declaration` | 1 | T-291 |
-|  | `expansion_id` | 1 | T-291 |
-|  | `range_expansion` | 1 | T-291 |
-|  | `loan_id` | 1 | T-291 |
-|  | `range_capture` | 1 | T-291 |
-|  | `range_loan` | 1 | T-291 |
-|  | `range_boundary` | 1 | T-291 |
-|  | `absence_evidence` | 1 | T-291 |
-|  | `coverage_status` | 1 | T-291 |
-|  | `range_input` | 1 | T-291 |
 | Services | `state_view` | 1 | caller |
 |  | `state_handle` | 1 | caller |
 |  | `event_handle` | 1 | caller |
@@ -125,10 +115,8 @@ A callback owns no caller request, checked symbol, checked type, or caller state
 | ownership_diag | T-290 |
 | ownership_fir_adapter and production registration | T-291 |
 | ownership_graph | T-307 |
-| FIR range carriers and preservation | T-311 |
-| Capture candidates | T-312 |
-| Ordered boundary candidates | T-313 |
-| Inventory, correspondence, and source activation | Compiler lowering (`spec/fir.md` 5.2, 9.5, 10) |
+| FIR loan statements and preservation | `ownership_flow` |
+| Loan statement placement | Compiler lowering (`spec/fir.md` 5.2, 9.5, 10) |
 
 T-316 imports only this API, these keys, and existing merged modules.
 T-317 imports only this API, these keys, and existing merged modules.
@@ -145,9 +133,9 @@ Zero numeric coordinates remain valid. `entity_kind.none` supplies an explicit a
 The closure builder bounds structural instances. It creates no key per runtime iteration or call
 depth.
 Keys contain no address. Comparisons use unsigned coordinates without subtraction.
-Declaration, function, expansion, loan, and deferred occurrence identities remain separate.
-One selected declaration can have zero, one, or several lowering expansions.
-Source positions do not identify expansions. Runtime iterations do not create expansion IDs.
+Declaration, function, entity, and deferred occurrence identities remain separate.
+Each deferred range expansion takes a distinct function-local FIR loan ID.
+Source positions do not identify loans. Runtime iterations create no loan ID.
 
 Contents, source validity, allocation validity, and obligation location remain separate records.
 Span length, owner emptiness, and allocation identity remain separate facts.
@@ -255,39 +243,35 @@ Notes use causal role, source range, and relation ID.
 
 `ownership_env` lowers checked source and runs the existing FIR verifier before accepting a body.
 It runs no build-mode transformation. It requires no driver option or analyzer registration.
-The environment copies supplied declaration, expansion, loan, capture, boundary, and absence arrays.
-It also copies nested capture-source and path-projection slices.
-Input supplied to `supply` must not alias that environment's current input store.
 The environment keeps borrowed symbols and types within the checked environment's lifetime.
 `accept` requires a function type and the same checked type table.
-It verifies caller-owned FIR before adopting it. A refused input remains with its caller.
-`accept` also verifies the existing owned body on each call.
-A successful acceptance keeps that body's storage, metadata, and callback handles.
-A refused owned body remains in the environment and clears its structural-validity flag.
+It verifies caller-owned FIR before adoption. A refused input remains with its caller.
+It also verifies its current owned body on each call.
+A successful acceptance keeps that body's storage and callback handles.
+A refused owned body stays in the environment and clears its verified flag.
 Verification releases no checked symbol or type.
 
-The synthetic validator accepts one supplied operation interval per loan.
-It requires capture, body entry, applicable body cleanup, and loan exit in supplied order.
-Outer cleanup is optional and follows loan exit. A loan protects the complete body through cleanup.
-The last element use does not end that protection.
-A nested loan retains a distinct parent ID. A supplied capture retains its original protected path.
-Capture kinds distinguish borrowed headers, owning fixed-array places, and non-owning array copies.
-Captured type, value version, sources, and original storage remain separate.
-These descriptors select no new header/index evaluation order. The T-262 ruling remains pending.
+`loan_begin L p [h]` and `loan_end L` supply collection loans through actual FIR statements.
+The flow solver captures header and containing allocation sources at begin.
+A clone retains those captured facts until end. Local last use does not shorten the loan.
+The solver reads direct effects from FIR and call effects from instantiated ordered outcomes.
+A missing producer step cannot hide an assignment, move operand, release, or call.
+An unknown call in an open loan yields incomplete proof.
 
-No-expansion candidates retain proposed reasons and independent checked-source, FIR, and
-correspondence flags.
-The synthetic validator requires all three flags before accepting supplied absence correspondence.
-It always leaves actual source completeness false. Producer counts alone prove no source absence.
-Verified FIR proves structural validity. It proves no source-loan production completeness.
-The compiler activates source coverage after independent inventory, validated absence, and
-structural verification (`spec/fir.md` 5.2, 10).
+`ownership_flow.place_binding` maps an actual FIR place to an ownership storage path.
+The solver checks the current function identity, FIR base, and projection sequence.
+Local roots name the same slot. Global roots name the same checked symbol.
+All bindings for one global base use the same ownership root.
+A projected global binding requires a complete root binding and matching projections.
+A missing, mismatched, residual, or unresolved binding gives incomplete proof when needed.
+It cannot establish preservation. A direct local place needs no separate binding.
+These flow records change no frozen `ownership_api` record layout.
 
 The caller invokes teardown once per owned output store.
 Teardown invokes the state destructor, clears its handle, invokes the event destructor, and clears
 its handle.
 An empty handle requires no destructor. A nonempty handle requires its designated destructor.
-Replacing supplied metadata first releases state and events that can borrow that metadata.
-The environment then releases FIR and input storage before releasing checked source storage.
+Replacing FIR first releases state and events that can borrow it.
+The environment then releases FIR before releasing checked source storage.
 It frees no borrowed checked symbol or type. Repeated empty teardown does nothing.
 The caller releases other callback output stores before releasing their borrowed input environment.

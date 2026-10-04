@@ -2207,6 +2207,8 @@ says ownership is "by convention", this section supersedes it.
   The checker refuses operations that invalidate the collection storage inside the body.
   The previous rule lent an owning collection in its original place without this refusal.
   Amended 2026-10-01 (T-272): The ownership proof preserves the whole-body storage loan from T-263.
+  Amended 2026-10-04: The proof enforces the loan from FIR loan statements.
+  The lowering assigns the duration once. The language rule remains unchanged.
 
 ### D17.11 The overwrite check
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2870,6 +2872,9 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   until then the direct path wrote such a function and called the missing entry.
   Amended 2026-10-01 (T-272): Ownership analysis replaces permanent escape-based loss of checking
   and gains staged selection.
+
+  Amended 2026-10-04: Collection loans use non-emitting loan_begin and loan_end statements.
+  FIR is the program. One lowering replaces separate source correspondence and side records.
 
 ## D20 Editor support
 
