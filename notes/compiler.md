@@ -122,6 +122,8 @@ came here.
   Either an outcome guard or an effect guard requires a condition witness for definite invalidity.
   A guarded overlapping effect gives incomplete proof without a condition witness.
   Aggregate result storage belongs to the caller. It is not private local storage.
+  The FIR aggregate classification includes span and string results.
+  Widen only open loan captures. A captured-fact work failure stops its path before block effects.
   A proved empty unrelated owner permits deletion only when no owner can overlap it.
   The ordinary source guard remains until the driver selects the ownership proof.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
