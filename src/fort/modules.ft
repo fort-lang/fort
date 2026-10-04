@@ -283,12 +283,12 @@ fn is_std_path(ast.node* path, u64 n) bool {
     return n > 0 && segment_at(path, 0) == STD_SEGMENT;
 }
 
-// The number of files the first `n` segments may name, one per search root. A
-// A path that starts with `std` has one candidate in the standard library
+// Count the possible files for the first `n` segments, one per search root.
+// A path that starts with `std` has one possible file in the standard library
 // directory. `std` names that directory, so `import std;` names no file. Other
 // paths use the entry directory and `-I` roots. They never use the standard
 // library directory.
-fn candidate_count(module_set* set, ast.node* path, u64 n) u64 {
+fn selection_count(module_set* set, ast.node* path, u64 n) u64 {
     if (n == 0) {
         return 0;
     }
@@ -301,9 +301,9 @@ fn candidate_count(module_set* set, ast.node* path, u64 n) u64 {
     return 1 + set->roots.len;
 }
 
-// The `i`-th candidate file of the first `n` segments, the roots in order,
+// The `i`-th selected file of the first `n` segments, the roots in order,
 // built into `out`.
-fn candidate_at(module_set* set, strbuf.str_buf mut* out, ast.node* path, u64 n, u64 i) string {
+fn selection_at(module_set* set, strbuf.str_buf mut* out, ast.node* path, u64 n, u64 i) string {
     if (is_std_path(path, n)) {
         // `std.io` is `<std>/io.ft`
         return file_of(out, set->std_dir, path, 1, n);
@@ -328,12 +328,12 @@ fn file_exists(string path) bool {
 // Only a found path is interned, so the loader keeps no copy of a
 // path it merely looked at.
 fn find_file(module_set mut* set, ast.node* path, u64 n, string mut* out) bool {
-    u64 count = candidate_count(set, path, n);
+    u64 count = selection_count(set, path, n);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     u64 mut i = 0;
     while (i < count) {
-        string file = candidate_at(set, &b, path, n, i);
+        string file = selection_at(set, &b, path, n, i);
         if (file_exists(file)) {
             *out = containers.pool_intern(&set->pool, file);
             return true;
@@ -387,19 +387,19 @@ fn file_start(string file) diag.loc {
 
 // `note: looked for <path>` once per root and reading, the notes a module
 // that was not found carries.
-fn note_candidates(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+fn note_selections(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
                         u64 n) void {
-    u64 count = candidate_count(set, path, n);
+    u64 count = selection_count(set, path, n);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     u64 mut i = 0;
     while (i < count) {
-        // Quotes the candidate from its construction buffer. The message copies
+        // Quotes the path from its construction buffer. The message copies
         // the bytes, and the sink copies them again. Thus, the loader does not
         // intern a path that it only probes.
         msg_begin(set);
         msg_str(set, "looked for ");
-        msg_str(set, candidate_at(set, &b, path, n, i));
+        msg_str(set, selection_at(set, &b, path, n, i));
         diag.note(session.diags(s), at, msg_end(set));
         i += 1;
     }
@@ -414,9 +414,9 @@ fn error_not_found(session.session mut* s, module_set mut* set, diag.loc at, ast
     msg_quote(set, name);
     msg_str(set, " not found");
     diag.error(session.diags(s), at, msg_end(set));
-    note_candidates(s, set, at, path, n);
+    note_selections(s, set, at, path, n);
     if (n >= 2) {
-        note_candidates(s, set, at, path, n - 1);
+        note_selections(s, set, at, path, n - 1);
     }
 }
 

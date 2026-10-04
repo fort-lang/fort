@@ -125,10 +125,10 @@ fn charge_work(graph mut* g, u64 attempted) bool {
     return true;
 }
 
-fn charge_query(graph mut* g, u64 known, u64 candidates)
+fn charge_query(graph mut* g, u64 known, u64 selections)
     ownership_api.proof_status {
-    if (candidates > U64_MAX - known) { return work_failure(g, U64_MAX, true); }
-    u64 attempted = known + candidates;
+    if (selections > U64_MAX - known) { return work_failure(g, U64_MAX, true); }
+    u64 attempted = known + selections;
     if (g->work > g->limits.w || attempted > g->limits.w - g->work) {
         return work_failure(g, attempted, false);
     }
@@ -935,15 +935,15 @@ fn query(void mut* opaque, ownership_api.graph_request* request)
         out.residual_fort = true;
         return out;
     }
-    out.proof = charge_query(g, targets.fort_targets.len, request->candidates.len);
+    out.proof = charge_query(g, targets.fort_targets.len, request->selections.len);
     if (!ownership_api.successful(out.proof)) {
         out.residual_fort = true;
         return out;
     }
     u64 remaining = g->limits.t - targets.fort_targets.len;
-    u64 mut candidates = request->candidates.len;
-    if (candidates > remaining) { candidates = remaining; }
-    u64 capacity = targets.fort_targets.len + candidates;
+    u64 mut selections = request->selections.len;
+    if (selections > remaining) { selections = remaining; }
+    u64 capacity = targets.fort_targets.len + selections;
     del(g->query_targets);
     g->query_targets = new(ownership_api.entity_id, capacity);
     u64 mut kept = 0;
@@ -954,27 +954,27 @@ fn query(void mut* opaque, ownership_api.graph_request* request)
         i += 1;
     }
     i = 0;
-    while (i < request->candidates.len) {
-        ownership_api.entity_id candidate = request->candidates[i];
+    while (i < request->selections.len) {
+        ownership_api.entity_id selected = request->selections[i];
         bool mut known = false;
         u64 mut body = 0;
         while (body < g->bodies.len) {
-            if (ownership_keys.function(g->bodies[body].key, candidate.function) == 0) {
+            if (ownership_keys.function(g->bodies[body].key, selected.function) == 0) {
                 known = true;
                 break;
             }
             body += 1;
         }
-        if (candidate.kind != ownership_api.entity_kind.target || !known) {
+        if (selected.kind != ownership_api.entity_kind.target || !known) {
             out.residual_fort = true;
         } else {
             u64 mut j = 0;
-            while (j < kept && ownership_keys.entity(g->query_targets[j], candidate) != 0) {
+            while (j < kept && ownership_keys.entity(g->query_targets[j], selected) != 0) {
                 j += 1;
             }
             if (j == kept) {
                 if (kept >= g->limits.t) { out.residual_fort = true; }
-                else { g->query_targets[kept] = candidate; kept += 1; }
+                else { g->query_targets[kept] = selected; kept += 1; }
             }
         }
         i += 1;
