@@ -455,6 +455,8 @@ fn plus_count(u64 a, u64 b) u64 {
     return a + b;
 }
 
+fn max_count(u64 a, u64 b) u64 { return a > b ? a : b; }
+
 fn place_depth(ownership_api.place_path path) u64 {
     return path.projections.len;
 }
@@ -471,7 +473,7 @@ fn contents_counts(ownership_api.contents_fact fact) charge_counts {
     c.w = 1;
     u64 mut i = 0;
     while (i < fact.borrows.len) {
-        c.d = plus_count(c.d, place_depth(fact.borrows[i].containing));
+        c.d = max_count(c.d, place_depth(fact.borrows[i].containing));
         c.r = plus_count(c.r, region_count(fact.borrows[i].range));
         i += 1;
     }
@@ -486,8 +488,8 @@ fn allocation_counts(ownership_api.allocation_fact fact) charge_counts {
     c.w = 1;
     u64 mut i = 0;
     while (i < fact.history.len) {
-        c.d = plus_count(c.d, place_depth(fact.history[i].before.place));
-        c.d = plus_count(c.d, place_depth(fact.history[i].after.place));
+        c.d = max_count(c.d, place_depth(fact.history[i].before.place));
+        c.d = max_count(c.d, place_depth(fact.history[i].after.place));
         i += 1;
     }
     return c;
@@ -538,12 +540,19 @@ fn require_counts(state mut* s, ownership_api.services* svc,
     }
     if (counts.w > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.w,
-            ownership_api.limit_scope.computation, counts.w};
+            ownership_api.limit_scope.computation, 1};
         count += 1;
     }
     ownership_api.charge_request req = ownership_api.charge_request{
         ownership_api.work_kind.transfer, op, at, items[0..count]};
-    ownership_api.charge_result charged = ownership_api.charge(svc, &req);
+    ownership_api.charge_result mut charged = ownership_api.charge_result{.allowed = true};
+    u64 mut remaining = counts.w;
+    while (remaining > 1) {
+        charged = ownership_api.charge_work(svc, ownership_api.work_kind.transfer, op, at);
+        if (!charged.allowed) { break; }
+        remaining -= 1;
+    }
+    if (charged.allowed) { charged = ownership_api.charge(svc, &req); }
     if (!charged.allowed) {
         out.proof = charged.proof;
         if (charged.limit.present &&
@@ -572,12 +581,21 @@ fn require_charge(state mut* s, ownership_api.services* svc,
     ownership_api.operation_position op, ownership_api.source_position at)
     ownership_api.mutation_result {
     charge_counts mut counts = charge_counts{};
-    if (category == ownership_api.limit_category.r) { counts.r = amount; }
-    if (category == ownership_api.limit_category.p) { counts.p = amount; }
-    if (category == ownership_api.limit_category.g) { counts.g = amount; }
-    if (category == ownership_api.limit_category.h) { counts.h = amount; }
-    counts.w = 1;
-    if (category == ownership_api.limit_category.w) { counts.w = amount; }
+    if (amount == 0 || category == ownership_api.limit_category.t ||
+        category == ownership_api.limit_category.v) {
+        return require_counts(s, svc, counts, op, at);
+    }
+    switch (category) {
+    case ownership_api.limit_category.d: counts.d = amount; break;
+    case ownership_api.limit_category.r: counts.r = amount; break;
+    case ownership_api.limit_category.p: counts.p = amount; break;
+    case ownership_api.limit_category.g: counts.g = amount; break;
+    case ownership_api.limit_category.h: counts.h = amount; break;
+    case ownership_api.limit_category.e: counts.e = amount; break;
+    case ownership_api.limit_category.w: break;
+    case ownership_api.limit_category.t, ownership_api.limit_category.v: break;
+    }
+    counts.w = category == ownership_api.limit_category.w ? amount : 1;
     return require_counts(s, svc, counts, op, at);
 }
 
@@ -1212,7 +1230,7 @@ fn strong_contents(state mut* s, ownership_api.services* svc,
         ownership_api.contents_fact mut next = fact;
         next.place = aliases[i];
         charge_counts part = contents_counts(next);
-        counts.d = plus_count(counts.d, part.d);
+        counts.d = max_count(counts.d, part.d);
         counts.r = plus_count(counts.r, part.r);
         i += 1;
     }
@@ -1252,7 +1270,7 @@ fn weak_contents(state mut* s, ownership_api.services* svc,
         ownership_api.contents_fact mut selected = fact;
         selected.place = selections[j];
         charge_counts part = contents_counts(selected);
-        counts.d = plus_count(counts.d, part.d);
+        counts.d = max_count(counts.d, part.d);
         counts.r = plus_count(counts.r, part.r);
         j += 1;
     }
@@ -1329,7 +1347,7 @@ fn transfer_owner(state mut* s, ownership_api.services* svc,
         return bad_selection(s, svc, op, at);
     }
     charge_counts mut counts = charge_counts{};
-    counts.d = plus_count(place_depth(s->allocations[i].owner.place),
+    counts.d = max_count(place_depth(s->allocations[i].owner.place),
         place_depth(after.place));
     counts.e = 1;
     counts.w = 1;
