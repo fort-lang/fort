@@ -1,0 +1,70 @@
+//! run
+//! flags: -I ../../src/fort -I support
+/// Tests complete raw paths at the absolute depth boundary.
+import ownership_api;
+import ownership_local_env;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+import types;
+
+// D19: capture accepts an origin at D and preserves input obligations on refusal.
+fn origin_boundary() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 1);
+    ownership_api.projection[17] mut parts = {};
+    ownership_raw_env.projections(parts[..]);
+    ownership_raw.origin mut input = e.root.storage.origins[0];
+    input.place.projections = parts[0..16];
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw.result mut captured = ownership_raw.capture_origin(&e.local.state,
+        &e.local.service, &input, ownership_raw_env.NO_BOUNDS,
+        ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.accepts(&captured);
+    assert(captured.storage.origins[0].place.projections.len == 16);
+    assert(captured.storage.leaves[0].place.projections.len == 16);
+    ownership_raw.free_result(&captured);
+    input.place.projections = parts[..];
+    req = ownership_raw_env.request(&e);
+    captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.rejects(&captured);
+    assert(captured.storage.leaves_len == 0 && captured.storage.origins.len == 0);
+    assert(e.local.counts.last_kind == ownership_api.event_kind.incomplete_proof);
+    assert(ownership_state.equal(&e.local.state, &before));
+    assert(e.root.storage.origins.len == 1 && e.root.storage.leaves_len == 1);
+}
+
+// D20: a leaf at D accepts. A child beyond D never enters retained storage.
+fn layout_boundary() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 1);
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_env.accepted(ownership_raw.begin_work(&e.local.state, &e.local.service,
+        &req, &cursor));
+    ownership_api.projection[16] mut parts = {};
+    ownership_raw_env.projections(parts[..]);
+    ownership_api.place_path mut path = ownership_local_env.place(1);
+    path.projections = parts[..];
+    ownership_raw.context mut output = {};
+    defer ownership_raw.free(&output);
+    ownership_raw_env.accepted(ownership_raw.layout(&output, &e.local.service,
+        &cursor.selected, e.byte, path, 0));
+    assert(output.leaves_len == 1 && output.leaves[0].place.projections.len == 16);
+    ownership_raw.free(&output);
+    types.node* array = types.type_array(&e.table, e.byte, 1);
+    ownership_raw_env.rejected(ownership_raw.layout(&output, &e.local.service,
+        &cursor.selected, array, path, 0));
+    assert(output.leaves_len == 0 && output.paths.blocks == null);
+    path.projections = parts[0..15];
+    ownership_raw_env.accepted(ownership_raw.layout(&output, &e.local.service,
+        &cursor.selected, array, path, 0));
+    assert(output.leaves_len == 1 && output.leaves[0].place.projections.len == 16);
+}
+
+fn main() i32 { origin_boundary(); layout_boundary(); return 0; }

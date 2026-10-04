@@ -1,0 +1,245 @@
+//! run
+//! flags: -I ../../src/fort -I support
+/// Compares paid type queries with the unchanged shallow type oracle.
+import check_env;
+import ownership_api;
+import ownership_limits;
+import ownership_type_work;
+import prim;
+import std.strbuf;
+import types;
+
+struct fixture { ownership_limits.meter meter; ownership_api.services service; }
+
+fn event(void mut* opaque, ownership_api.event_request* request)
+    ownership_api.event_result {
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+
+fn init(fixture mut* f) void {
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_limits.configure(&f->meter, &limits));
+    f->service.budget_context = cast(&f->meter, void mut*);
+    f->service.budget = ownership_limits.callback;
+    f->service.event = event;
+}
+
+fn work_at(fixture mut* f) ownership_type_work.work {
+    return ownership_type_work.create(&f->service, ownership_api.work_kind.substitution,
+        ownership_api.operation_position{.operation = 7},
+        ownership_api.source_position{.line = 23, .col = 4});
+}
+
+fn oracle(types.node* destination, types.node* source,
+    ownership_type_work.relation selected) bool {
+    switch (selected) {
+    case ownership_type_work.relation.equal: return types.type_equal(destination, source);
+    case ownership_type_work.relation.shape: return types.type_same_shape(destination, source);
+    case ownership_type_work.relation.assignable: return types.type_assignable(destination, source);
+    case ownership_type_work.relation.cast_allowed:
+        return types.type_cast_allowed(destination, source);
+    case ownership_type_work.relation.adds_mut:
+        return types.type_cast_adds_mut(destination, source);
+    case ownership_type_work.relation.adds_own:
+        return types.type_cast_adds_own(destination, source);
+    }
+}
+
+fn oracle_pairs() void {
+    string[24] sources = {
+        "u8", "u8", "u8*", "u8* own", "u8*", "u8 mut*", "u8*", "u8[2]",
+        "u8[2]", "u8[2]", "u8@", "u8@ own", "u8@", "u8 mut@", "u8@", "Left",
+        "Left", "fn (u8*) void", "fn (u8 mut*) void", "fn () u8*", "fn () void",
+        "u8*", "u8*", "string",
+    };
+    string[24] destinations = {
+        "u8", "u16", "u8*", "u8*", "u8* own", "u8*", "u8 mut*", "u8[2]",
+        "u8[3]", "u16[2]", "u8@", "u8@", "u8@ own", "u8@", "u8 mut@", "Left",
+        "Right", "fn (u8*) void", "fn (u8*) void", "fn () u16*", "fn () noreturn",
+        "void*", "u8@", "u8@",
+    };
+    check_env.env mut e = {};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut declarations = strbuf.create();
+    defer strbuf.free(&declarations);
+    strbuf.append(&declarations, "struct Left { u8 value; }\nstruct Right { u8 value; }\n");
+    u64 mut i = 0;
+    while (i < sources.len) {
+        strbuf.append(&declarations, "fn case");
+        strbuf.append_u64(&declarations, i + 1);
+        strbuf.append(&declarations, "(");
+        strbuf.append(&declarations, sources[i]);
+        strbuf.append(&declarations, " source, ");
+        strbuf.append(&declarations, destinations[i]);
+        strbuf.append(&declarations, " destination) void {}\n");
+        i += 1;
+    }
+    assert(check_env.check_decls(&e, strbuf.view(&declarations)));
+    ownership_type_work.relation[6] queries = {
+        ownership_type_work.relation.equal, ownership_type_work.relation.shape,
+        ownership_type_work.relation.assignable, ownership_type_work.relation.cast_allowed,
+        ownership_type_work.relation.adds_mut, ownership_type_work.relation.adds_own,
+    };
+    fixture mut f = {};
+    init(&f);
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    u64 mut comparisons = 0;
+    i = 0;
+    while (i < sources.len) {
+        strbuf.clear(&name);
+        strbuf.append(&name, "case");
+        strbuf.append_u64(&name, i + 1);
+        types.node* signature = check_env.sym_main(&e, strbuf.view(&name))->ty;
+        u64 mut query_index = 0;
+        while (query_index < queries.len) {
+            ownership_type_work.relation query = queries[query_index];
+            ownership_type_work.work mut paid = work_at(&f);
+            bool expected = oracle(signature->params[1], signature->params[0], query);
+            ownership_type_work.result actual = ownership_type_work.compare(&paid,
+                signature->params[1], signature->params[0], query);
+            eprintln(i + 1, " ", cast(query, u32), " ", expected, " ", actual.value);
+            assert(ownership_api.successful(actual.proof) && actual.value == expected);
+            comparisons += 1;
+            query_index += 1;
+        }
+        i += 1;
+    }
+    assert(comparisons == 144 && f.meter.used.d == 0 && f.meter.used.w > 144);
+}
+
+// D21, D22, and D23: type depth uses work instead of path precision.
+fn deep_types() void {
+    types.table mut tt = {};
+    defer types.type_table_free(&tt);
+    types.table mut other = {};
+    defer types.type_table_free(&other);
+    types.node* byte = types.type_prim(&tt, prim.prim_kind.prim_u8);
+    types.node* mut array = byte;
+    types.node* mut pointer = byte;
+    types.node* mut second = types.type_prim(&other, prim.prim_kind.prim_u8);
+    u64 mut i = 0;
+    while (i < 65) {
+        array = types.type_array(&tt, array, 1);
+        pointer = types.type_ptr(&tt, pointer, false, false);
+        second = types.type_ptr(&other, second, false, false);
+        i += 1;
+    }
+    fixture mut f = {};
+    init(&f);
+    ownership_type_work.work mut paid = work_at(&f);
+    ownership_type_work.result mut measured = ownership_type_work.measure(&paid, array, false);
+    assert(ownership_api.successful(measured.proof) && measured.number == 1);
+    paid = work_at(&f);
+    measured = ownership_type_work.measure(&paid, array, true);
+    assert(ownership_api.successful(measured.proof) && measured.number == 1);
+    paid = work_at(&f);
+    measured = ownership_type_work.compare(&paid, pointer, second,
+        ownership_type_work.relation.equal);
+    assert(ownership_api.successful(measured.proof) && measured.value);
+    assert(f.meter.used.d == 0 && f.meter.used.w > 195);
+}
+
+// D26 and D27: malformed cycles and object-size overflow supply no correspondence.
+fn invalid_metadata() void {
+    fixture mut f = {};
+    init(&f);
+    types.node mut cyclic = types.node{.kind = types.type_kind.k_array, .len = 1};
+    cyclic.elem = &cyclic;
+    ownership_type_work.work mut paid = work_at(&f);
+    ownership_type_work.result mut measured = ownership_type_work.measure(&paid, &cyclic, false);
+    assert(!ownership_api.successful(measured.proof));
+    paid = work_at(&f);
+    measured = ownership_type_work.compare(&paid, &cyclic, &cyclic,
+        ownership_type_work.relation.equal);
+    assert(!ownership_api.successful(measured.proof) && !measured.value);
+    types.table mut tt = {};
+    defer types.type_table_free(&tt);
+    types.node* integer = types.type_prim(&tt, prim.prim_kind.prim_u64);
+    types.node* oversized = types.type_array(&tt, integer, types.TYPE_MAX_SIZE);
+    paid = work_at(&f);
+    measured = ownership_type_work.measure(&paid, oversized, false);
+    assert(!ownership_api.successful(measured.proof));
+    assert(measured.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+}
+
+// D24 and D25: nominal recursion stops at identity. Function marks remain exact.
+fn nominal_and_function_types() void {
+    check_env.env mut e = {};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check_env.check_decls(&e, "struct Link { Link* next; u8 value; }"));
+    types.node* record = check_env.sym_main(&e, "Link")->ty;
+    fixture mut f = {};
+    init(&f);
+    ownership_type_work.work mut paid = work_at(&f);
+    ownership_type_work.result mut checked = ownership_type_work.compare(&paid, record, record,
+        ownership_type_work.relation.equal);
+    assert(ownership_api.successful(checked.proof) && checked.value && checked.number == 2);
+    paid = work_at(&f);
+    checked = ownership_type_work.measure(&paid, record, false);
+    assert(ownership_api.successful(checked.proof) && checked.number == 16);
+    types.node left_byte = types.node{.kind = types.type_kind.k_prim,
+        .prim = prim.prim_kind.prim_u8};
+    types.node right_byte = types.node{.kind = types.type_kind.k_prim,
+        .prim = prim.prim_kind.prim_u8};
+    types.node* mut@ own left_params = new(types.node*, 96);
+    types.node* mut@ own right_params = new(types.node*, 96);
+    u64 mut i = 0;
+    while (i < left_params.len) {
+        left_params[i] = &left_byte;
+        right_params[i] = &right_byte;
+        i += 1;
+    }
+    types.node mut left = types.node{.kind = types.type_kind.k_fn, .elem = &left_byte,
+        .params = move(left_params)};
+    defer del(left.params);
+    types.node mut right = types.node{.kind = types.type_kind.k_fn, .elem = &right_byte,
+        .params = move(right_params)};
+    defer del(right.params);
+    paid = work_at(&f);
+    checked = ownership_type_work.compare(&paid, &left, &right,
+        ownership_type_work.relation.shape);
+    assert(ownership_api.successful(checked.proof) && checked.value && checked.number == 196);
+    types.node mut left_pointer = types.node{.kind = types.type_kind.k_ptr, .elem = &left_byte,
+        .is_mut = true};
+    types.node right_pointer = types.node{.kind = types.type_kind.k_ptr, .elem = &right_byte};
+    left.params[95] = &left_pointer;
+    right.params[95] = &right_pointer;
+    paid = work_at(&f);
+    checked = ownership_type_work.compare(&paid, &left, &right,
+        ownership_type_work.relation.shape);
+    assert(ownership_api.successful(checked.proof) && !checked.value);
+    left_pointer.is_mut = false;
+    left_pointer.is_own = true;
+    paid = work_at(&f);
+    checked = ownership_type_work.compare(&paid, &left, &right,
+        ownership_type_work.relation.equal);
+    assert(ownership_api.successful(checked.proof) && !checked.value);
+}
+
+fn work_refusal() void {
+    fixture mut f = {};
+    init(&f);
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.w = 1;
+    assert(ownership_limits.configure(&f.meter, &limits));
+    types.node byte = types.node{.kind = types.type_kind.k_prim, .prim = prim.prim_kind.prim_u8};
+    ownership_type_work.work mut paid = work_at(&f);
+    ownership_type_work.result compared = ownership_type_work.compare(&paid, &byte, &byte,
+        ownership_type_work.relation.equal);
+    assert(!ownership_api.successful(compared.proof) && !compared.value);
+    assert(f.meter.used.w == 1 && f.meter.used.d == 0);
+    assert(compared.proof.terminal.limit.operation.operation == 7);
+    assert(compared.proof.terminal.limit.source.line == 23);
+}
+
+fn main() i32 {
+    oracle_pairs();
+    deep_types();
+    invalid_metadata();
+    nominal_and_function_types();
+    work_refusal();
+    return 0;
+}

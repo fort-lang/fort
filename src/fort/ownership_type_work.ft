@@ -1,0 +1,324 @@
+/// Runs finite paid type queries with iterative worklists.
+import ownership_api;
+import types;
+
+enum relation { equal, shape, assignable, cast_allowed, adds_mut, adds_own }
+enum problem_kind { none, metadata, size_overflow }
+
+struct work {
+    ownership_api.services* service;
+    ownership_api.work_kind kind;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.proof_status proof;
+    problem_kind problem;
+}
+
+struct result { ownership_api.proof_status proof; bool value; u64 number; }
+struct frame { types.node* left; types.node* right; u64 next; bool entered; bool bits; }
+struct frames { frame mut@ own items; u64 len; }
+
+fn create(ownership_api.services* service, ownership_api.work_kind kind,
+    ownership_api.operation_position operation, ownership_api.source_position source) work {
+    return work{.service = service, .kind = kind, .operation = operation, .source = source,
+        .proof = ownership_api.proof_status{.kind = ownership_api.proof_kind.complete}};
+}
+
+fn refuse(work mut* paid) bool {
+    paid->problem = problem_kind.metadata;
+    paid->proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        paid->operation, paid->source);
+    return false;
+}
+
+fn spend(work mut* paid) bool {
+    if (!ownership_api.successful(paid->proof)) { return false; }
+    ownership_api.charge_result charged = ownership_api.charge_work(paid->service,
+        paid->kind, paid->operation, paid->source);
+    if (!charged.allowed) { paid->proof = charged.proof; }
+    return charged.allowed;
+}
+
+fn free(frames mut* pending) void { del(pending->items); pending->len = 0; }
+
+fn push(work mut* paid, frames mut* pending, frame item) bool {
+    if (!spend(paid)) { return false; }
+    u64 ceiling = types.TYPE_MAX_SIZE / sizeof(frame);
+    if (pending->len >= ceiling) { return refuse(paid); }
+    if (pending->len == pending->items.len) {
+        u64 capacity = pending->items.len == 0 ? 8 :
+            (pending->items.len <= ceiling / 2 ? pending->items.len * 2 : ceiling);
+        if (capacity <= pending->len || capacity > ceiling) { return refuse(paid); }
+        frame mut@ own bigger = new(frame, capacity);
+        u64 mut i = 0;
+        while (i < pending->len) {
+            if (!spend(paid)) { del(bigger); return false; }
+            bigger[i] = pending->items[i];
+            i += 1;
+        }
+        del(pending->items);
+        pending->items = move(bigger);
+    }
+    pending->items[pending->len] = item;
+    pending->len += 1;
+    return true;
+}
+
+// Nominal declarations end traversal. Structural cycles supply no checked correspondence.
+fn validate(work mut* paid, types.node* ty, u64 mut* nodes) bool {
+    frames mut pending = {};
+    defer free(&pending);
+    if (!push(paid, &pending, frame{.left = ty})) { return false; }
+    while (pending.len > 0) {
+        if (!spend(paid)) { return false; }
+        frame mut* current = &pending.items[pending.len - 1];
+        types.node* selected = current->left;
+        if (selected == null) { return refuse(paid); }
+        if (!current->entered) {
+            u64 mut i = 0;
+            while (i + 1 < pending.len) {
+                if (!spend(paid)) { return false; }
+                if (pending.items[i].left == selected) { return refuse(paid); }
+                i += 1;
+            }
+            if (*nodes == ownership_api.U64_MAX) { return refuse(paid); }
+            *nodes += 1;
+            current->entered = true;
+        }
+        bool structural = selected->kind == types.type_kind.k_ptr ||
+            selected->kind == types.type_kind.k_voidptr ||
+            selected->kind == types.type_kind.k_span ||
+            selected->kind == types.type_kind.k_array || selected->kind == types.type_kind.k_fn;
+        if (structural && current->next == 0) {
+            current->next = 1;
+            if (!push(paid, &pending, frame{.left = selected->elem})) { return false; }
+        } else if (selected->kind == types.type_kind.k_fn &&
+            current->next - 1 < selected->params.len) {
+            u64 index = current->next - 1;
+            if (current->next == ownership_api.U64_MAX) { return refuse(paid); }
+            current->next += 1;
+            if (!push(paid, &pending, frame{.left = selected->params[index]})) { return false; }
+        } else { pending.len -= 1; }
+    }
+    return true;
+}
+
+fn same(work mut* paid, types.node* left, types.node* right, bool bits) bool {
+    frames mut pending = {};
+    defer free(&pending);
+    if (!push(paid, &pending, frame{.left = left, .right = right, .bits = bits})) {
+        return false;
+    }
+    while (pending.len > 0) {
+        if (!spend(paid)) { return false; }
+        frame pair = pending.items[pending.len - 1];
+        pending.len -= 1;
+        types.node* a = pair.left;
+        types.node* b = pair.right;
+        if (a == b) { continue; }
+        if (a->kind != b->kind) { return false; }
+        switch (a->kind) {
+        case types.type_kind.k_void, types.type_kind.k_null, types.type_kind.k_error: break;
+        case types.type_kind.k_prim: if (a->prim != b->prim) { return false; } break;
+        case types.type_kind.k_string:
+            if (pair.bits && a->is_own != b->is_own) { return false; }
+            break;
+        case types.type_kind.k_struct, types.type_kind.k_enum:
+            if (a->decl == null || a->decl != b->decl) { return false; }
+            break;
+        case types.type_kind.k_array:
+            if (a->len != b->len) { return false; }
+            if (!push(paid, &pending, frame{.left = a->elem, .right = b->elem,
+                .bits = pair.bits})) { return false; }
+            break;
+        case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_span:
+            if (pair.bits && (a->is_mut != b->is_mut || a->is_own != b->is_own)) { return false; }
+            if (!push(paid, &pending, frame{.left = a->elem, .right = b->elem,
+                .bits = pair.bits})) { return false; }
+            break;
+        case types.type_kind.k_fn:
+            if (a->is_noreturn != b->is_noreturn || a->params.len != b->params.len) {
+                return false;
+            }
+            if (!push(paid, &pending, frame{.left = a->elem, .right = b->elem, .bits = true})) {
+                return false;
+            }
+            u64 mut i = 0;
+            while (i < a->params.len) {
+                if (!push(paid, &pending, frame{.left = a->params[i], .right = b->params[i],
+                    .bits = true})) { return false; }
+                i += 1;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
+fn assign(work mut* paid, types.node* destination, types.node* source) bool {
+    types.node* mut d = destination;
+    types.node* mut s = source;
+    if (d->kind == types.type_kind.k_error || s->kind == types.type_kind.k_error) { return true; }
+    if (s->kind == types.type_kind.k_null) {
+        return d->kind == types.type_kind.k_ptr || d->kind == types.type_kind.k_voidptr ||
+            d->kind == types.type_kind.k_fn;
+    }
+    if (d->kind == types.type_kind.k_null || d->kind == types.type_kind.k_void ||
+        s->kind == types.type_kind.k_void) { return false; }
+    bool mut immutable = true;
+    bool mut outer = false;
+    while (true) {
+        if (!spend(paid)) { return false; }
+        if (d == s) { return true; }
+        if (d->kind != s->kind) { return false; }
+        switch (d->kind) {
+        case types.type_kind.k_void, types.type_kind.k_null, types.type_kind.k_error: return true;
+        case types.type_kind.k_prim: return d->prim == s->prim;
+        case types.type_kind.k_struct, types.type_kind.k_enum, types.type_kind.k_fn:
+            return same(paid, d, s, true);
+        case types.type_kind.k_array:
+            if (d->len != s->len) { return false; }
+            d = d->elem;
+            s = s->elem;
+            continue;
+        case types.type_kind.k_string, types.type_kind.k_voidptr, types.type_kind.k_ptr,
+            types.type_kind.k_span: break;
+        }
+        if (d->is_mut && !s->is_mut) { return false; }
+        if (s->is_mut && !d->is_mut && !immutable) { return false; }
+        if (d->is_own && !s->is_own) { return false; }
+        if (s->is_own && !d->is_own && (!immutable || outer)) { return false; }
+        if (d->elem == null) { return true; }
+        immutable = immutable && !d->is_mut;
+        outer = outer || d->is_own;
+        d = d->elem;
+        s = s->elem;
+    }
+}
+
+fn marks(work mut* paid, types.node* value, bool ownership) bool {
+    types.node* mut selected = value;
+    while (true) {
+        if (!spend(paid)) { return false; }
+        if (selected->kind == types.type_kind.k_array) { selected = selected->elem; continue; }
+        if (!types.type_is_reference(selected)) { return false; }
+        if (ownership ? selected->is_own : selected->is_mut) { return true; }
+        if (selected->elem == null) { return false; }
+        selected = selected->elem;
+    }
+}
+
+fn adds(work mut* paid, types.node* destination, types.node* source, bool ownership) bool {
+    types.node* mut d = destination;
+    types.node* mut s = source;
+    while (true) {
+        if (!spend(paid)) { return false; }
+        if (d->kind == types.type_kind.k_array) {
+            if (s->kind != types.type_kind.k_array) { return marks(paid, d, ownership); }
+            d = d->elem;
+            s = s->elem;
+            continue;
+        }
+        if (!types.type_is_reference(d)) { return false; }
+        if (!types.type_is_reference(s)) { return marks(paid, d, ownership); }
+        if (ownership ? d->is_own && !s->is_own : d->is_mut && !s->is_mut) { return true; }
+        if (d->elem == null) { return false; }
+        if (s->elem == null) { return marks(paid, d->elem, ownership); }
+        d = d->elem;
+        s = s->elem;
+    }
+}
+
+fn orphaned(work mut* paid, types.node* destination, types.node* source) bool {
+    types.node* mut d = destination;
+    types.node* mut s = source;
+    bool mut outer = false;
+    while (d->kind == types.type_kind.k_array || types.type_is_reference(d)) {
+        if (!spend(paid)) { return false; }
+        if (d->kind == types.type_kind.k_array) { d = d->elem; s = s->elem; continue; }
+        if (s->is_own && !d->is_own && outer) { return true; }
+        outer = outer || d->is_own;
+        if (d->elem == null) { return false; }
+        d = d->elem;
+        s = s->elem;
+    }
+    return false;
+}
+
+fn cast_allowed(work mut* paid, types.node* d, types.node* s) bool {
+    if (!spend(paid)) { return false; }
+    if (d->kind == types.type_kind.k_error || s->kind == types.type_kind.k_error) { return true; }
+    if (s->kind == types.type_kind.k_null || d->kind == types.type_kind.k_null ||
+        d->kind == types.type_kind.k_void || s->kind == types.type_kind.k_void) { return false; }
+    if (same(paid, d, s, true) || assign(paid, d, s)) { return true; }
+    if (!ownership_api.successful(paid->proof) || adds(paid, d, s, false)) { return false; }
+    if (!ownership_api.successful(paid->proof)) { return false; }
+    if (types.type_is_scalar(s) && types.type_is_scalar(d)) {
+        return types.scalar_cast_allowed(d, s);
+    }
+    if (types.is_ptr_like(s)) {
+        return types.is_ptr_like(d) || types.is_u64(d) ||
+            (s->kind == types.type_kind.k_voidptr && d->kind == types.type_kind.k_fn);
+    }
+    if (types.is_u64(s)) { return types.is_ptr_like(d); }
+    if (s->kind == types.type_kind.k_fn) { return d->kind == types.type_kind.k_voidptr; }
+    if (types.string_family(s) && types.string_family(d)) { return true; }
+    return s->kind == types.type_kind.k_span && d->kind == types.type_kind.k_span &&
+        same(paid, d, s, false) && !orphaned(paid, d, s);
+}
+
+fn compare(work mut* paid, types.node* destination, types.node* source, relation selected) result {
+    u64 mut nodes = 0;
+    bool mut value = false;
+    if (validate(paid, destination, &nodes) && validate(paid, source, &nodes)) {
+        switch (selected) {
+        case relation.equal: value = same(paid, destination, source, true); break;
+        case relation.shape: value = same(paid, destination, source, false); break;
+        case relation.assignable: value = assign(paid, destination, source); break;
+        case relation.cast_allowed: value = cast_allowed(paid, destination, source); break;
+        case relation.adds_mut: value = adds(paid, destination, source, false); break;
+        case relation.adds_own: value = adds(paid, destination, source, true); break;
+        }
+    }
+    return result{paid->proof, ownership_api.successful(paid->proof) && value, nodes};
+}
+
+fn measure(work mut* paid, types.node* ty, bool alignment) result {
+    u64 mut nodes = 0;
+    if (!validate(paid, ty, &nodes)) { return result{.proof = paid->proof}; }
+    frames mut pending = {};
+    defer free(&pending);
+    types.node* mut selected = ty;
+    while (selected->kind == types.type_kind.k_array) {
+        if (!push(paid, &pending, frame{.left = selected})) { return result{.proof = paid->proof}; }
+        selected = selected->elem;
+    }
+    if (!spend(paid)) { return result{.proof = paid->proof}; }
+    if (selected->kind == types.type_kind.k_void || selected->kind == types.type_kind.k_null ||
+        (!alignment && selected->kind == types.type_kind.k_error) ||
+        (selected->kind == types.type_kind.k_struct && (selected->layout == null ||
+        selected->decl == null || selected->layout->state != types.layout_state.l_resolved))) {
+        refuse(paid);
+        return result{.proof = paid->proof};
+    }
+    u64 mut number = 0;
+    // The selected leaf is not an array. These leaf queries cannot call themselves.
+    if (alignment) { number = types.type_alignof(selected); }
+    else if (!types.size_checked(selected, &number)) { refuse(paid); }
+    while (!alignment && pending.len > 0 && ownership_api.successful(paid->proof)) {
+        if (!spend(paid)) { break; }
+        types.node* array = pending.items[pending.len - 1].left;
+        pending.len -= 1;
+        if (number != 0 && array->len > types.TYPE_MAX_SIZE / number) {
+            refuse(paid);
+            paid->problem = problem_kind.size_overflow;
+            break;
+        }
+        number *= array->len;
+    }
+    if (number > types.TYPE_MAX_SIZE) {
+        refuse(paid);
+        paid->problem = problem_kind.size_overflow;
+    } else if (alignment && number == 0) { refuse(paid); }
+    return result{paid->proof, ownership_api.successful(paid->proof), number};
+}

@@ -1,0 +1,42 @@
+/// Measures actual test allocations and finite work permission.
+import ownership_api;
+import ownership_limits;
+import ownership_type_work;
+
+extern fn fort_depth_alloc_begin() void;
+extern fn fort_depth_alloc_end() u64;
+extern fn fort_depth_alloc_created() u64;
+extern fn fort_depth_alloc_released() u64;
+
+struct fixture { ownership_limits.meter meter; ownership_api.services service; }
+
+fn event(void mut* opaque, ownership_api.event_request* request)
+    ownership_api.event_result {
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+
+fn configure(fixture mut* f, u64 work) void {
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    // The production table requires a non-zero bound. A zero allowance starts exhausted.
+    limits.w = work == 0 ? 1 : work;
+    assert(ownership_limits.configure(&f->meter, &limits));
+    if (work == 0) { f->meter.used.w = 1; }
+    f->service.budget_context = cast(&f->meter, void mut*);
+    f->service.budget = ownership_limits.callback;
+    f->service.event = event;
+}
+
+fn work(fixture mut* f) ownership_type_work.work {
+    return ownership_type_work.create(&f->service, ownership_api.work_kind.substitution,
+        ownership_api.operation_position{.operation = 7},
+        ownership_api.source_position{.line = 23, .col = 4});
+}
+
+fn begin() void { fort_depth_alloc_begin(); }
+
+fn finish() u64 {
+    assert(fort_depth_alloc_end() == 0);
+    u64 created = fort_depth_alloc_created();
+    assert(created == fort_depth_alloc_released());
+    return created;
+}

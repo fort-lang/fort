@@ -1159,6 +1159,43 @@ fn relocate(ownership_state.state mut* next, ownership_api.place_path path,
     return out;
 }
 
+fn relocate_backing_owner(ownership_state.state mut* next, ownership_api.services* svc,
+    backing_request* change, ownership_api.allocation_fact mut* item)
+    ownership_api.proof_status {
+    ownership_api.owner_location before = item->owner;
+    ownership_api.owner_location mut after = before;
+    after.place = relocate(next, before.place, change->old_elements, change->new_elements);
+    ownership_state.charge_counts mut counts = ownership_state.charge_counts{};
+    counts.d = ownership_state.max_count(ownership_state.place_depth(before.place),
+        ownership_state.place_depth(after.place));
+    counts.e = 1;
+    counts.w = 1;
+    ownership_api.mutation_result charged = ownership_state.require_counts(next,
+        svc, counts, change->base.operation, change->base.source_position);
+    if (!charged.applied) { return charged.proof; }
+    ownership_state.append_history(next, item, ownership_api.history_fact{item->key,
+        change->base.operation, change->base.source_position,
+        ownership_api.effect_kind.transfer, before, after});
+    item->owner = after;
+    return complete();
+}
+
+fn relocate_backing_edge(ownership_state.state mut* next, ownership_api.services* svc,
+    backing_request* change, ownership_api.graph_edge mut* edge) ownership_api.proof_status {
+    ownership_api.place_path mapped = relocate(next, edge->place,
+        change->old_elements, change->new_elements);
+    ownership_state.charge_counts mut counts = ownership_state.charge_counts{};
+    counts.d = ownership_state.max_count(ownership_state.place_depth(edge->place),
+        ownership_state.place_depth(mapped));
+    counts.r = 1;
+    counts.w = 1;
+    ownership_api.mutation_result charged = ownership_state.require_counts(next,
+        svc, counts, change->base.operation, change->base.source_position);
+    if (!charged.applied) { return charged.proof; }
+    edge->place = mapped;
+    return complete();
+}
+
 fn change_backing(ownership_state.state mut* next, ownership_api.services* svc,
     backing_request* change) ownership_api.proof_status {
     if (!change->correspondence_proved || !valid_selection(next, &change->header) ||
@@ -1250,39 +1287,17 @@ fn change_backing(ownership_state.state mut* next, ownership_api.services* svc,
         ownership_api.allocation_fact mut* item = &next->allocations[i];
         if (item->obligation && i != owner && prefix(next, item->owner.place,
             change->old_elements)) {
-            ownership_api.owner_location before = item->owner;
-            ownership_api.owner_location mut after = before;
-            after.place = relocate(next, before.place, change->old_elements, change->new_elements);
-            ownership_state.charge_counts mut counts = ownership_state.charge_counts{};
-            counts.d = ownership_state.max_count(ownership_state.place_depth(before.place),
-                ownership_state.place_depth(after.place));
-            counts.e = 1;
-            counts.w = 1;
-            ownership_api.mutation_result charged = ownership_state.require_counts(next,
-                svc, counts, change->base.operation, change->base.source_position);
-            if (!charged.applied) { return charged.proof; }
-            ownership_state.append_history(next, item, ownership_api.history_fact{item->key,
-                change->base.operation, change->base.source_position,
-                ownership_api.effect_kind.transfer, before, after});
-            item->owner = after;
+            ownership_api.proof_status proof = relocate_backing_owner(next, svc, change, item);
+            if (!ownership_api.successful(proof)) { return proof; }
         }
         i += 1;
     }
     i = 0;
     while (i < next->edges_len) {
         if (prefix(next, next->edges[i].place, change->old_elements)) {
-            ownership_api.place_path mapped = relocate(next, next->edges[i].place,
-                change->old_elements, change->new_elements);
-            ownership_state.charge_counts mut counts = ownership_state.charge_counts{};
-            counts.d = ownership_state.max_count(
-                ownership_state.place_depth(next->edges[i].place),
-                ownership_state.place_depth(mapped));
-            counts.r = 1;
-            counts.w = 1;
-            ownership_api.mutation_result charged = ownership_state.require_counts(next,
-                svc, counts, change->base.operation, change->base.source_position);
-            if (!charged.applied) { return charged.proof; }
-            next->edges[i].place = mapped;
+            ownership_api.proof_status proof = relocate_backing_edge(next, svc, change,
+                &next->edges[i]);
+            if (!ownership_api.successful(proof)) { return proof; }
         }
         i += 1;
     }

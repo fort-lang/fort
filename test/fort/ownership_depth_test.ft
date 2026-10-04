@@ -4,6 +4,8 @@
 import ownership_api;
 import ownership_keys;
 import ownership_limits;
+import ownership_regions;
+import ownership_transfer;
 import ownership_state;
 
 struct fixture {
@@ -323,6 +325,95 @@ fn projected_owners() void {
     assert(core.allocations_len == 32 && f.meter.used.e == 64);
 }
 
+// D15: selected cleanup at D keeps unselected obligations and sources.
+fn region_cleanup() void {
+    fixture mut f = {};
+    init(&f);
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    ownership_api.projection[16] mut path = {};
+    parts(path[..]);
+    path[15].kind = ownership_api.projection_kind.fixed_index;
+    path[15].index.kind = ownership_api.fact_kind.exact;
+    ownership_api.allocation_fact first = owned(1, place(1, path[..]));
+    ownership_api.allocation_fact second = owned(2, place(2, path[0..8]));
+    ownership_state.append_allocations(&core, first);
+    ownership_state.append_allocations(&core, second);
+    ownership_api.source_fact mut source = ownership_api.source_fact{
+        .key = ownership_api.entity_id{.kind = ownership_api.entity_kind.source, .ordinal = 1},
+        .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live,
+        .allocation = first.key};
+    ownership_state.append_sources(&core, source);
+    source.key.ordinal = 2;
+    source.allocation = second.key;
+    ownership_state.append_sources(&core, source);
+    ownership_api.place_path selected = place(1, path[0..15]);
+    ownership_api.place_path[1] aliases = {selected};
+    ownership_regions.selection selected_choice = ownership_regions.selection{
+        selected, aliases[..], true, true, true};
+    ownership_regions.choice[1] choices = {ownership_regions.choice{
+        .source = selected_choice, .destination = selected_choice}};
+    ownership_transfer.event_binding[1] bindings = {ownership_transfer.event_binding{
+        .key = ownership_api.entity_id{.kind = ownership_api.entity_kind.event, .ordinal = 1}}};
+    ownership_regions.request cleanup_request = ownership_regions.request{
+        .base = ownership_transfer.request{.destination_owns = true, .leaves_empty_proved = true,
+            .event_map_complete_proved = true, .event_bindings = bindings[..]},
+        .kind = ownership_regions.action.cleanup_range, .choices = choices[..],
+        .exhaustive_proved = true, .aliases_substituted_proved = true,
+        .range_begin = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact},
+        .range_end = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 1},
+        .range_complete_proved = true, .limits = f.limits};
+    ownership_state.state mut before = ownership_state.clone(&core);
+    defer ownership_state.free(&before);
+    ownership_regions.result mut cleaned = ownership_regions.apply(&core, &f.service,
+        &cleanup_request);
+    defer ownership_regions.free(&cleaned);
+    assert(ownership_api.successful(cleaned.proof) && cleaned.len == 1);
+    assert(ownership_state.equal(&core, &before) && f.meter.used.d == 16);
+    assert(!cleaned.states[0].allocations[0].obligation);
+    assert(cleaned.states[0].allocations[0].history.len == 1);
+    assert(cleaned.states[0].sources[0].validity == ownership_api.validity_kind.released);
+    assert(cleaned.states[0].allocations[1].obligation);
+    assert(ownership_state.same_place(cleaned.states[0].allocations[1].owner.place,
+        second.owner.place));
+    assert(cleaned.states[0].sources[1].validity == ownership_api.validity_kind.live);
+    assert(cleaned.states[0].sources[1].key.ordinal == 2);
+}
+
+// D16: the production relocation helpers charge maximum owner and edge depth.
+fn backing_relocation() void {
+    fixture mut f = {};
+    init(&f);
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    ownership_api.projection[16] mut path = {};
+    parts(path[..]);
+    ownership_api.place_path old_path = place(1, path[0..8]);
+    ownership_api.place_path new_path = place(2, path[..]);
+    ownership_api.allocation_fact owner = owned(1, old_path);
+    ownership_state.append_allocations(&core, owner);
+    ownership_api.source_fact source = ownership_api.source_fact{
+        .key = ownership_api.entity_id{.kind = ownership_api.entity_kind.source, .ordinal = 1},
+        .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live,
+        .allocation = owner.key};
+    ownership_state.append_sources(&core, source);
+    ownership_api.graph_edge edge = ownership_api.graph_edge{
+        .key = ownership_api.entity_id{.kind = ownership_api.entity_kind.relation, .ordinal = 1},
+        .kind = ownership_api.edge_kind.owned, .place = old_path};
+    ownership_state.append_edges(&core, edge);
+    ownership_regions.backing_request request = ownership_regions.backing_request{
+        .old_elements = old_path, .new_elements = new_path};
+    assert(ownership_api.successful(ownership_regions.relocate_backing_owner(&core, &f.service,
+        &request, &core.allocations[0])));
+    assert(ownership_api.successful(ownership_regions.relocate_backing_edge(&core, &f.service,
+        &request, &core.edges[0])));
+    assert(f.meter.used.d == 16 && f.meter.used.w == 2 && f.meter.used.e == 1);
+    assert(core.allocations[0].obligation && core.allocations[0].history.len == 1);
+    assert(ownership_state.same_place(core.allocations[0].owner.place, new_path));
+    assert(ownership_state.same_place(core.edges[0].place, new_path));
+    assert(core.sources[0].validity == ownership_api.validity_kind.live);
+}
+
 fn main() i32 {
     independent_depths();
     boundary_atomicity();
@@ -334,5 +425,7 @@ fn main() i32 {
     counted_work();
     owner_boundaries();
     projected_owners();
+    region_cleanup();
+    backing_relocation();
     return 0;
 }
