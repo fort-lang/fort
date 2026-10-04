@@ -576,6 +576,9 @@ fn private_local(program* in, ownership_api.place_path place) bool {
     if (place.projections.len != 0 || place.root.kind != ownership_api.entity_kind.slot ||
         ownership_keys.function(place.root.function, in->identity) != 0 ||
         place.root.ordinal >= fir.local_count(in->function)) { return false; }
+    types.node* result_type = in->function->ty->elem;
+    if (place.root.ordinal == 0 && (result_type->kind == types.type_kind.k_array ||
+        result_type->kind == types.type_kind.k_struct)) { return false; }
     u32 mut b = 0;
     while (b < fir.block_count(in->function)) {
         u32 mut i = 0;
@@ -831,8 +834,16 @@ fn direct_effect(program* in, path mut* p, u32 block, u32 gap)
         u64 index = known ? ownership_transfer.owner_index(&p->facts, storage) : U64_MAX;
         ownership_api.entity_id allocation = index == U64_MAX ? ownership_api.entity_id{} :
             p->facts.allocations[index].key;
-        ownership_api.proof_status proof = check_release(in, p, allocation, true, op, at);
-        if (!ownership_api.successful(proof)) { return proof; }
+        u64 contents = known ? ownership_transfer.contents_index(&p->facts, storage) : U64_MAX;
+        bool empty = contents != U64_MAX &&
+            ownership_transfer.empty_owner_proved(p->facts.contents[contents]) &&
+            ownership_transfer.owner_count(&p->facts, storage) == 0 &&
+            ownership_transfer.owner_overlap(&p->facts, storage) ==
+                ownership_transfer.overlap_kind.none;
+        if (!empty) {
+            ownership_api.proof_status proof = check_release(in, p, allocation, true, op, at);
+            if (!ownership_api.successful(proof)) { return proof; }
+        }
     }
     note_alias(in, p, operation_value);
     return complete();
@@ -859,7 +870,8 @@ fn ordered_effects(program* in, path mut* p, step* s, ownership_api.outcome_fact
     while (i < outcome.effects.len) {
         ownership_api.ordered_effect effect = outcome.effects[i];
         ownership_api.proof_status mut proof = complete();
-        bool unconditional = effect.guard.kind == ownership_api.entity_kind.none;
+        bool unconditional = effect.guard.kind == ownership_api.entity_kind.none &&
+            outcome.guard.kind == ownership_api.entity_kind.none;
         if (effect.kind == ownership_api.effect_kind.write ||
             effect.kind == ownership_api.effect_kind.invalidate ||
             effect.kind == ownership_api.effect_kind.transfer ||

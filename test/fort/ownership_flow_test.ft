@@ -1993,7 +1993,7 @@ fn loan_case(u32 scenario, u32 variant) void {
         fir.constant value = fir.const_zero(fir.place_type(&function, target));
         fir.block_append(&function, 0, fir.stmt_assign(target,
             fir.rvalue_use(&function, fir.operand_const(value)), where, 3));
-    } else if (scenario == 5 || scenario == 7) {
+    } else if (scenario == 5 || scenario == 7 || scenario == 13) {
         fir.block_append(&function, 0, fir.stmt_del(fir.place_local(3), where, 3));
     } else {
         fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(7),
@@ -2035,7 +2035,18 @@ fn loan_case(u32 scenario, u32 variant) void {
     }
     ownership_state.append_contents(&entry, header);
     ownership_api.allocation_fact mut owned = ownership_local_env.allocation(2, 2, 3, 1);
-    if (scenario == 2 && variant == 3) { owned.obligation = false; }
+    if ((scenario == 2 && variant == 3) || (scenario == 13 && variant != 2)) {
+        owned.obligation = false;
+    }
+    if (scenario == 13) {
+        ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+        empty.place = slot(3);
+        if (variant == 1) { empty.span_length.kind = ownership_api.fact_kind.unknown; }
+        if (variant == 2) {
+            owned.owner.place = ownership_api.place_path{slot(2).root, dereference[..], true};
+        }
+        ownership_state.append_contents(&entry, empty);
+    }
     ownership_state.append_allocations(&entry, owned);
     if (scenario == 5 || scenario == 12) {
         ownership_api.source_fact held = ownership_local_env.source(2,
@@ -2084,11 +2095,19 @@ fn loan_case(u32 scenario, u32 variant) void {
             effects[0].allocation = variant == 8 ? container : allocation;
         }
         if (variant >= 4) { effects[0].guard = id(ownership_api.entity_kind.predicate, 1); }
+        if (variant >= 9) {
+            effects[0].guard = ownership_api.entity_id{};
+            effects[0].kind = variant == 9 ? ownership_api.effect_kind.write :
+                ownership_api.effect_kind.release;
+        }
     }
     ownership_api.outcome_fact[1] mut outcomes = {
         ownership_api.outcome_fact{.kind = ownership_api.outcome_kind.function_return,
             .possible_caller_return = true, .effects = effects[0..1]},
     };
+    if (scenario == 0 && variant >= 9) {
+        outcomes[0].guard = id(ownership_api.entity_kind.predicate, 1);
+    }
     if (scenario == 2) {
         outcomes[0].effects = effects[0..0];
         outcomes[0].kind = variant == 2 ? ownership_api.outcome_kind.unresolved_foreign :
@@ -2120,11 +2139,12 @@ fn loan_case(u32 scenario, u32 variant) void {
         (variant < 2 || variant == 4 || variant == 5 || variant == 8)) ||
         (scenario == 1 && variant == 1) ||
         (scenario == 5 && variant == 4) ||
-        (scenario == 2 && variant == 3) || (scenario == 4 && variant == 0) || scenario == 8);
+        (scenario == 2 && variant == 3) || (scenario == 4 && variant == 0) || scenario == 8 ||
+        (scenario == 13 && variant == 0));
     bool incomplete = (scenario == 2 && variant != 3) ||
         (scenario == 3 && variant != 0) || (scenario == 5 && (variant == 1 || variant == 2)) ||
         scenario == 7 || (scenario == 0 && (variant == 3 || variant == 6 || variant == 7)) ||
-        (scenario == 9 && variant != 0);
+        (scenario == 9 && variant != 0) || (scenario == 0 && variant >= 9) || scenario == 13;
     ownership_flow.analysis mut result = ownership_flow.solve(&input);
     if (result.failures != (fails ? cast(1, u64) : cast(0, u64))) {
         eprintln("loan case ", scenario, ":", variant, ": ", result.failures, " ", recorded.text);
@@ -2138,7 +2158,7 @@ fn loan_case(u32 scenario, u32 variant) void {
         assert(recorded.text == (incomplete ? (scenario == 2 ?
             "call preserves collection storage" : "effect preserves collection storage") :
             "cannot change collection storage during a range loop"));
-        if (!incomplete) { assert(recorded.witnessed); }
+        assert(recorded.witnessed == !incomplete);
     }
     ownership_flow.free(&result);
 }
@@ -2153,6 +2173,8 @@ fn loan_accepts_a_proved_call() void {
     loan_case(0, 6);
     loan_case(0, 7);
     loan_case(0, 8);
+    loan_case(0, 9);
+    loan_case(0, 10);
 }
 fn loan_refuses_a_call_that_releases_the_collection() void {
     loan_case(1, 0);
@@ -2309,6 +2331,61 @@ fn loan_alias_retargeting(u32 variant) void {
     ownership_flow.free(&result);
 }
 
+// Aggregate result storage can alias the caller's protected collection.
+fn loan_result_storage(bool aggregate) void {
+    fixture mut f = {};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* integer = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* span = types.type_span(tt, integer, false, true);
+    types.node* array = types.type_array(tt, span, 1);
+    types.node* result_type = aggregate ? array : integer;
+    types.node*[1] params = {types.type_ptr(tt, array, false, true)};
+    fir.func mut function = fir.func_new(tt, null,
+        types.type_fn(tt, result_type, params[..], false));
+    defer fir.func_free(&function);
+    diag.loc where = {};
+    assert(fir.local_add(&function, span, fir.local_kind.lk_temp, null, where) == 2);
+    types.node* wide = types.type_prim(tt, prim.prim_kind.prim_u64);
+    assert(fir.local_add(&function, wide, fir.local_kind.lk_temp, null, where) == 3);
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(3),
+        fir.rvalue_use(&function, fir.operand_const(fir.const_zero(wide))), where, 0));
+    fir.place collection = fir.place_index(&function,
+        fir.place_deref(&function, fir.place_local(1)), 3);
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(2),
+        fir.rvalue_use(&function, fir.operand_copy(collection)), where, 0));
+    fir.block_append(&function, 0, fir.stmt_loan_begin(1, collection, 2, where, 1));
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(0),
+        fir.rvalue_use(&function, fir.operand_const(fir.const_zero(result_type))), where, 2));
+    fir.block_append(&function, 0, fir.stmt_loan_end(1, where, 3));
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 4));
+    ownership_api.projection[2] parts = {
+        ownership_api.projection{.kind = ownership_api.projection_kind.dereference},
+        ownership_api.projection{.kind = ownership_api.projection_kind.fixed_index,
+            .index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact},
+            .captured_version = id(ownership_api.entity_kind.value, 3)},
+    };
+    ownership_flow.place_binding[1] binding = {
+        ownership_flow.place_binding{.place = collection, .storage =
+            ownership_api.place_path{slot(1).root, parts[..], false}, .complete = true},
+    };
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    input.places = binding[..];
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.operation = 3},
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}, 1),
+    };
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == (aggregate ? cast(1, u64) : cast(0, u64)));
+    assert(result.normal_returns == (aggregate ? cast(0, u64) : cast(1, u64)));
+    if (aggregate) { assert(result.first_failure.kind == ownership_api.proof_kind.incomplete); }
+    ownership_flow.free(&result);
+}
+
 fn loan_direct_work_requires_permission() void {
     fixture mut f = fixture{};
     init(&f);
@@ -2351,6 +2428,11 @@ fn loan_direct_work_requires_permission() void {
 }
 
 fn main() i32 {
+    loan_result_storage(true);
+    loan_result_storage(false);
+    loan_case(13, 0);
+    loan_case(13, 1);
+    loan_case(13, 2);
     loan_alias_retargeting(0);
     loan_alias_retargeting(1);
     loan_alias_retargeting(2);
