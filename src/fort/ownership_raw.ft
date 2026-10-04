@@ -5,6 +5,7 @@ import ownership_api;
 import ownership_keys;
 import ownership_state;
 import ownership_transfer;
+import ownership_type_work;
 import types;
 
 u64 U64_MAX = 18446744073709551615;
@@ -708,34 +709,32 @@ fn sum(context mut* ctx, expression a, expression b) expression {
     return out;
 }
 
-fn size(types.node* ty, ownership_api.services* svc, request* req, u64 depth,
-    u64 mut* bytes) ownership_api.proof_status {
-    if (depth >= req->limits.d) {
-        return fail(svc, req, ownership_api.entity_id{}, false,
-            "raw type sizing exceeds its depth limit");
-    }
-    ownership_api.proof_status mut proof = charge(svc, req, ownership_api.limit_category.w, 1);
-    if (!ownership_api.successful(proof)) { return proof; }
-    if (ty == null || ty->kind == types.type_kind.k_void || ty->kind == types.type_kind.k_null ||
-        ty->kind == types.type_kind.k_error || (ty->kind == types.type_kind.k_struct &&
-        (ty->layout == null || ty->layout->state != types.layout_state.l_resolved ||
-        ty->decl == null))) {
-        return fail(svc, req, ownership_api.entity_id{}, false,
-            "raw type layout remains unresolved");
-    }
-    if (ty->kind == types.type_kind.k_array) {
-        u64 mut element = 0;
-        proof = size(ty->elem, svc, req, depth + 1, &element);
-        if (!ownership_api.successful(proof)) { return proof; }
-        if (element != 0 && ty->len > types.TYPE_MAX_SIZE / element) {
+fn type_failure(ownership_api.services* svc, request* req,
+    ownership_api.proof_status proof) ownership_api.proof_status {
+    if (ownership_api.successful(proof) || svc->event == null ||
+        cached_key(req).kind != ownership_api.entity_kind.event) { return proof; }
+    raw_event_route mut route = raw_event_route{.selected = req, .original = *svc};
+    ownership_api.services mut mapped = *svc;
+    mapped.event_context = cast(&route, void mut*);
+    mapped.event = cached_event;
+    return ownership_state.report_failure(&mapped, proof, req->base.operation,
+        req->base.source_position);
+}
+
+fn size(types.node* ty, ownership_api.services* svc, request* req, u64 mut* bytes)
+    ownership_api.proof_status {
+    ownership_type_work.work mut paid = ownership_type_work.create(svc,
+        ownership_api.work_kind.transfer, req->base.operation, req->base.source_position);
+    ownership_type_work.result measured = ownership_type_work.measure(&paid, ty, false);
+    if (!ownership_api.successful(measured.proof)) {
+        if (paid.problem != ownership_type_work.problem_kind.none) {
             return fail(svc, req, ownership_api.entity_id{}, false,
-                "raw array size exceeds the object limit");
+                paid.problem == ownership_type_work.problem_kind.size_overflow ?
+                "raw array size exceeds the object limit" : "raw type layout remains unresolved");
         }
-        *bytes = ty->len * element;
-    } else if (!types.size_checked(ty, bytes)) {
-        return fail(svc, req, ownership_api.entity_id{}, false,
-            "raw type size remains unproved");
+        return type_failure(svc, req, measured.proof);
     }
+    *bytes = measured.number;
     return complete();
 }
 
@@ -821,22 +820,19 @@ fn residual_work(calculation mut* work, ownership_api.place_path path) bool {
     }
     return false;
 }
-fn alignment_work(calculation mut* work, types.node* ty, u64 depth, u64 mut* alignment) bool {
-    if (depth >= work->selected->limits.d) {
-        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
-            "raw type alignment exceeds its depth limit");
+fn alignment_work(calculation mut* work, types.node* ty, u64 mut* alignment) bool {
+    ownership_type_work.work mut paid = ownership_type_work.create(work->service,
+        ownership_api.work_kind.transfer, work->selected->base.operation,
+        work->selected->base.source_position);
+    ownership_type_work.result measured = ownership_type_work.measure(&paid, ty, true);
+    if (!ownership_api.successful(measured.proof)) {
+        work->proof = paid.problem != ownership_type_work.problem_kind.none ?
+            fail(work->service, work->selected, ownership_api.entity_id{}, false,
+                "raw type alignment needs checked metadata") :
+            type_failure(work->service, work->selected, measured.proof);
         return false;
     }
-    if (!spend(work, 1)) { return false; }
-    if (ty == null) {
-        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
-            "raw type alignment needs checked metadata");
-        return false;
-    }
-    if (ty->kind == types.type_kind.k_array) {
-        return alignment_work(work, ty->elem, depth + 1, alignment);
-    }
-    *alignment = types.type_alignof(ty);
+    *alignment = measured.number;
     return true;
 }
 fn append_leaf(context mut* ctx, ownership_api.services* svc, request* req,
@@ -862,106 +858,194 @@ fn append_leaf(context mut* ctx, ownership_api.services* svc, request* req,
     ctx->leaves_len += 1;
     return complete();
 }
-fn layout(context mut* ctx, ownership_api.services* svc, request* req, types.node* ty,
-    ownership_api.place_path path, u64 offset, u64 depth) ownership_api.proof_status {
-    u64 mut bytes = 0;
-    if (depth >= req->limits.d || path.projections.len >= req->limits.d) {
-        return fail(svc, req, path.root, false, "raw storage layout remains unresolved");
-    }
-    u64 sizing_depth = depth > path.projections.len ? depth : path.projections.len;
-    ownership_api.proof_status mut proof = size(ty, svc, req, sizing_depth, &bytes);
+struct layout_frame {
+    types.node* ty;
+    ownership_api.place_path path;
+    u64 offset;
+    u64 bytes;
+    u64 next;
+    u64 end;
+    u64 stride;
+    u32 field;
+    bool entered;
+}
+struct layout_frames { layout_frame mut@ own items; u64 len; }
+
+fn layout_push(ownership_api.services* svc, request* req, layout_frames mut* pending,
+    layout_frame item) ownership_api.proof_status {
+    ownership_api.proof_status mut proof = charge(svc, req, ownership_api.limit_category.w, 1);
     if (!ownership_api.successful(proof)) { return proof; }
-    if (offset > U64_MAX - bytes) {
-        return fail(svc, req, path.root, false, "raw storage layout remains unresolved");
+    u64 ceiling = types.TYPE_MAX_SIZE / sizeof(layout_frame);
+    if (pending->len >= ceiling) {
+        return fail(svc, req, item.path.root, false,
+            "raw layout worklist exceeds the object limit");
     }
-    proof = charge(svc, req, ownership_api.limit_category.w, 1);
-    if (!ownership_api.successful(proof)) { return proof; }
-    if (ty->kind == types.type_kind.k_array) {
-        u64 mut stride = 0;
-        proof = size(ty->elem, svc, req, sizing_depth + 1, &stride);
-        if (!ownership_api.successful(proof)) { return proof; }
-        u64 mut i = 0;
-        while (i < ty->len) {
-            proof = charge(svc, req, ownership_api.limit_category.w,
-                add_work(path.projections.len, 2));
-            if (!ownership_api.successful(proof)) { return proof; }
-            ownership_api.projection mut part = ownership_api.projection{};
-            part.kind = ownership_api.projection_kind.fixed_index;
-            part.index.kind = ownership_api.fact_kind.exact;
-            part.index.value = cast(i, i64);
-            ownership_api.projection mut@ own parts = new(ownership_api.projection,
-                path.projections.len + 1);
-            u64 mut j = 0;
-            while (j < path.projections.len) { parts[j] = path.projections[j]; j += 1; }
-            parts[j] = part;
-            ownership_api.place_path mut child = path;
-            child.projections = parts[..];
-            proof = layout(ctx, svc, req, ty->elem, child, offset + i * stride, depth + 1);
-            del(parts);
-            if (!ownership_api.successful(proof)) { return proof; }
-            i += 1;
+    if (pending->len == pending->items.len) {
+        u64 capacity = pending->items.len == 0 ? 8 :
+            (pending->items.len <= ceiling / 2 ? pending->items.len * 2 : ceiling);
+        if (capacity <= pending->len || capacity > ceiling) {
+            return fail(svc, req, item.path.root, false,
+                "raw layout worklist exceeds the object limit");
         }
-        return complete();
-    }
-    if (ty->kind == types.type_kind.k_struct) {
-        ast.sym* record = cast(ty->decl, ast.sym*);
-        if (record->node == null) { return fail(svc, req, path.root, false,
-            "struct fields are missing"); }
-        u64 mut end = offset;
+        layout_frame mut@ own bigger = new(layout_frame, capacity);
         u64 mut i = 0;
-        u32 mut field = 0;
-        while (i < ast.ast_len(record->node)) {
+        while (i < pending->len) {
             proof = charge(svc, req, ownership_api.limit_category.w, 1);
-            if (!ownership_api.successful(proof)) { return proof; }
-            ast.node* member = ast.ast_child(record->node, i);
-            if (member->kind == ast.ast_kind.k_field_decl) {
-                if (member->aux > bytes || offset + member->aux < end) {
-                    return fail(svc, req, path.root, false, "struct field layout is invalid");
-                }
-                u64 start = offset + member->aux;
-                if (start > end) {
-                    proof = append_leaf(ctx, svc, req, storage_leaf{path, end, start, null, false,
-                        true});
-                    if (!ownership_api.successful(proof)) { return proof; }
-                }
-                proof = charge(svc, req, ownership_api.limit_category.w,
-                    add_work(path.projections.len, 2));
-                if (!ownership_api.successful(proof)) { return proof; }
-                ownership_api.projection mut part = ownership_api.projection{};
-                part.kind = ownership_api.projection_kind.field;
-                part.field = field;
-                ownership_api.projection mut@ own parts = new(ownership_api.projection,
-                    path.projections.len + 1);
-                u64 mut j = 0;
-                while (j < path.projections.len) { parts[j] = path.projections[j]; j += 1; }
-                parts[j] = part;
-                ownership_api.place_path mut child = path;
-                child.projections = parts[..];
-                proof = layout(ctx, svc, req, member->ty, child, start, depth + 1);
-                del(parts);
-                if (!ownership_api.successful(proof)) { return proof; }
-                u64 mut field_bytes = 0;
-                proof = size(member->ty, svc, req, sizing_depth + 1, &field_bytes);
-                if (!ownership_api.successful(proof)) { return proof; }
-                if (field_bytes > offset + bytes - start) {
-                    return fail(svc, req, path.root, false, "struct field extent is invalid");
-                }
-                end = start + field_bytes;
-                field += 1;
-            }
+            if (!ownership_api.successful(proof)) { del(bigger); return proof; }
+            bigger[i] = pending->items[i];
             i += 1;
         }
-        if (end < offset + bytes) {
-            return append_leaf(ctx, svc, req, storage_leaf{path, end, offset + bytes, null, false,
-                true});
-        }
-        return complete();
+        del(pending->items);
+        pending->items = move(bigger);
     }
-    return append_leaf(ctx, svc, req, storage_leaf{path, offset, offset + bytes, ty,
-        types.type_is_reference(ty) && ty->is_own, false});
+    pending->items[pending->len] = item;
+    pending->len += 1;
+    return complete();
 }
 
-/// Copies internal storage. The caller charges this copy before it calls clone.
+fn layout_child(context mut* ctx, ownership_api.services* svc, request* req,
+    layout_frames mut* pending, layout_frame parent, types.node* child_type,
+    ownership_api.projection part, u64 offset) ownership_api.proof_status {
+    // Permission precedes child allocation and storage.
+    if (parent.path.projections.len >= req->limits.d) {
+        return fail(svc, req, parent.path.root, false, "raw storage layout remains unresolved");
+    }
+    u64 len = parent.path.projections.len + 1;
+    ownership_api.proof_status mut proof = charge(svc, req, ownership_api.limit_category.d, len);
+    if (!ownership_api.successful(proof)) { return proof; }
+    proof = charge(svc, req, ownership_api.limit_category.w,
+        add_work(add_work(parent.path.projections.len, 2), add_work(len, 4)));
+    if (!ownership_api.successful(proof)) { return proof; }
+    ownership_api.projection mut@ own parts = new(ownership_api.projection, len);
+    defer del(parts);
+    u64 mut i = 0;
+    while (i < parent.path.projections.len) { parts[i] = parent.path.projections[i]; i += 1; }
+    parts[i] = part;
+    ownership_api.place_path mut path = parent.path;
+    path.projections = parts[..];
+    path = ownership_state.copy_place(&ctx->paths, path);
+    return layout_push(svc, req, pending, layout_frame{
+        .ty = child_type, .path = path, .offset = offset});
+}
+
+fn layout(context mut* ctx, ownership_api.services* svc, request* req, types.node* ty,
+    ownership_api.place_path path, u64 offset) ownership_api.proof_status {
+    if (path.projections.len > req->limits.d) {
+        return fail(svc, req, path.root, false, "raw storage layout remains unresolved");
+    }
+    layout_frames mut pending = {};
+    defer del(pending.items);
+    ownership_api.proof_status mut proof = layout_push(svc, req, &pending,
+        layout_frame{.ty = ty, .path = path, .offset = offset});
+    if (!ownership_api.successful(proof)) { return proof; }
+    while (pending.len > 0) {
+        proof = charge(svc, req, ownership_api.limit_category.w, 1);
+        if (!ownership_api.successful(proof)) { return proof; }
+        layout_frame mut* current = &pending.items[pending.len - 1];
+        types.node* selected = current->ty;
+        if (!current->entered) {
+            u64 mut i = 0;
+            while (i + 1 < pending.len) {
+                proof = charge(svc, req, ownership_api.limit_category.w, 1);
+                if (!ownership_api.successful(proof)) { return proof; }
+                types.node* ancestor = pending.items[i].ty;
+                if (selected == ancestor || (selected != null && ancestor != null &&
+                    selected->kind == types.type_kind.k_struct &&
+                    ancestor->kind == types.type_kind.k_struct &&
+                    selected->decl == ancestor->decl)) {
+                    return fail(svc, req, current->path.root, false,
+                        "raw inline layout contains a cycle");
+                }
+                i += 1;
+            }
+            if (current->path.projections.len > 0) {
+                proof = charge(svc, req, ownership_api.limit_category.d,
+                    current->path.projections.len);
+                if (!ownership_api.successful(proof)) { return proof; }
+            }
+            proof = size(selected, svc, req, &current->bytes);
+            if (!ownership_api.successful(proof)) { return proof; }
+            if (current->offset > U64_MAX - current->bytes) {
+                return fail(svc, req, current->path.root, false,
+                    "raw storage layout remains unresolved");
+            }
+            current->entered = true;
+            current->end = current->offset;
+            if (selected->kind == types.type_kind.k_array) {
+                proof = size(selected->elem, svc, req, &current->stride);
+                if (!ownership_api.successful(proof)) { return proof; }
+            }
+        }
+        if (selected->kind == types.type_kind.k_array) {
+            if (current->next == selected->len) { pending.len -= 1; continue; }
+            u64 index = current->next;
+            if (index > types.TYPE_MAX_SIZE ||
+                (current->stride != 0 && index > U64_MAX / current->stride)) {
+                return fail(svc, req, current->path.root, false, "raw array layout is invalid");
+            }
+            current->next += 1;
+            ownership_api.projection part = ownership_api.projection{
+                .kind = ownership_api.projection_kind.fixed_index,
+                .index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+                    .value = cast(index, i64)}};
+            proof = layout_child(ctx, svc, req, &pending, *current, selected->elem, part,
+                current->offset + index * current->stride);
+            if (!ownership_api.successful(proof)) { return proof; }
+            continue;
+        }
+        if (selected->kind == types.type_kind.k_struct) {
+            ast.sym* record = cast(selected->decl, ast.sym*);
+            if (record->node == null) {
+                return fail(svc, req, current->path.root, false, "struct fields are missing");
+            }
+            if (current->next == ast.ast_len(record->node)) {
+                if (current->end < current->offset + current->bytes) {
+                    proof = append_leaf(ctx, svc, req, storage_leaf{current->path, current->end,
+                        current->offset + current->bytes, null, false, true});
+                    if (!ownership_api.successful(proof)) { return proof; }
+                }
+                pending.len -= 1;
+                continue;
+            }
+            ast.node* member = ast.ast_child(record->node, current->next);
+            current->next += 1;
+            if (member == null) {
+                return fail(svc, req, current->path.root, false, "struct fields are missing");
+            }
+            if (member->kind != ast.ast_kind.k_field_decl) { continue; }
+            if (member->aux > current->bytes || current->offset + member->aux < current->end) {
+                return fail(svc, req, current->path.root, false, "struct field layout is invalid");
+            }
+            u64 start = current->offset + member->aux;
+            u64 mut field_bytes = 0;
+            proof = size(member->ty, svc, req, &field_bytes);
+            if (!ownership_api.successful(proof)) { return proof; }
+            if (field_bytes > current->offset + current->bytes - start ||
+                current->field == 4294967295) {
+                return fail(svc, req, current->path.root, false, "struct field extent is invalid");
+            }
+            if (start > current->end) {
+                proof = append_leaf(ctx, svc, req, storage_leaf{current->path, current->end,
+                    start, null, false, true});
+                if (!ownership_api.successful(proof)) { return proof; }
+            }
+            current->end = start + field_bytes;
+            ownership_api.projection part = ownership_api.projection{
+                .kind = ownership_api.projection_kind.field, .field = current->field};
+            current->field += 1;
+            proof = layout_child(ctx, svc, req, &pending, *current, member->ty, part, start);
+            if (!ownership_api.successful(proof)) { return proof; }
+            continue;
+        }
+        proof = append_leaf(ctx, svc, req, storage_leaf{current->path, current->offset,
+            current->offset + current->bytes, selected,
+            types.type_is_reference(selected) && selected->is_own, false});
+        if (!ownership_api.successful(proof)) { return proof; }
+        pending.len -= 1;
+    }
+    return complete();
+}
+
 fn clone(context* input, ownership_state.state* core) context {
     context mut out = context{};
     out.core = core;
@@ -1128,43 +1212,6 @@ fn measure_context_work(calculation mut* work, address@ values, u64 operands,
     *price = total;
     return true;
 }
-fn type_nodes_work(calculation mut* work, types.node* ty, u64 depth, u64 mut* nodes) bool {
-    if (depth >= work->selected->limits.d) {
-        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
-            "raw type comparison exceeds its depth limit");
-        return false;
-    }
-    if (!spend(work, 1)) { return false; }
-    if (ty == null) {
-        work->proof = fail(work->service, work->selected, ownership_api.entity_id{}, false,
-            "raw type comparison needs checked metadata");
-        return false;
-    }
-    *nodes = add_work(*nodes, 1);
-    if (ty->kind == types.type_kind.k_ptr || ty->kind == types.type_kind.k_voidptr ||
-        ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_array ||
-        ty->kind == types.type_kind.k_fn) {
-        if (!type_nodes_work(work, ty->elem, depth + 1, nodes)) { return false; }
-    }
-    if (ty->kind == types.type_kind.k_fn) {
-        u64 mut i = 0;
-        while (i < ty->params.len) {
-            if (!spend(work, 1)) { return false; }
-            if (!type_nodes_work(work, ty->params[i], depth + 1, nodes)) { return false; }
-            i += 1;
-        }
-    }
-    return true;
-}
-fn type_work(calculation mut* work, types.node* from, types.node* to, u64 mut* price) bool {
-    u64 mut nodes = 0;
-    if (!type_nodes_work(work, from, 0, &nodes) ||
-        !type_nodes_work(work, to, 0, &nodes)) { return false; }
-    // Eight full node passes cover equality, conversion, marks, shape, and orphan tests.
-    u64 count = add_work(nodes, 1);
-    *price = count > U64_MAX / 8 ? U64_MAX : count * 8;
-    return true;
-}
 fn bounded_addresses(address@ values, request* req) bool {
     u64 mut i = 0;
     while (i < values.len) {
@@ -1310,7 +1357,7 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
             item.end.terms.len > req->limits.p || !validate_expression_work(&work, item.count) ||
             !validate_expression_work(&work, item.begin) ||
             !validate_expression_work(&work, item.end) || residual_work(&work, item.place) ||
-            item.place.projections.len >= req->limits.d ||
+            item.place.projections.len > req->limits.d ||
             !same_key(item.allocation,
             core->sources[source].allocation) || item.alignment == 0 ||
             (item.alignment & (item.alignment - 1)) != 0) {
@@ -1337,12 +1384,12 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
         item.place = copy_place_work(&work, &out.storage, item.place);
         if (!ownership_api.successful(work.proof)) { discard(&out, work.proof); return out; }
         item.first_leaf = out.storage.leaves_len;
-        out.proof = layout(&out.storage, svc, req, item.layout, item.place, 0, 0);
+        out.proof = layout(&out.storage, svc, req, item.layout, item.place, 0);
         if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
         item.leaf_count = out.storage.leaves_len - item.first_leaf;
         if (core->sources[source].kind != ownership_api.source_kind.trusted_foreign) {
             u64 mut stride = 0;
-            out.proof = size(item.layout, svc, req, item.place.projections.len, &stride);
+            out.proof = size(item.layout, svc, req, &stride);
             if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
             if (!fits_work(&work, item.count) ||
                 !same_expression_work(&work, item.begin, literal(0))) {
@@ -1476,12 +1523,17 @@ fn cast_reference(context* ctx, ownership_api.services* svc, address@ values,
     result mut out = start(ctx, svc, values, req, 0);
     if (!ownership_api.successful(out.proof)) { return out; }
     calculation mut work = calculation{ctx, svc, req, complete()};
-    u64 mut price = 0;
-    if (!type_work(&work, from, to, &price) || !spend(&work, price)) {
-        discard(&out, work.proof); return out;
+    ownership_type_work.work mut paid = ownership_type_work.create(svc,
+        ownership_api.work_kind.transfer, req->base.operation, req->base.source_position);
+    ownership_type_work.result compared = ownership_type_work.compare(&paid, to, from,
+        ownership_type_work.relation.cast_allowed);
+    if (!ownership_api.successful(compared.proof)) {
+        discard(&out, paid.problem != ownership_type_work.problem_kind.none ?
+            fail(svc, req, ownership_api.entity_id{}, false, "reference cast is not permitted") :
+            type_failure(svc, req, compared.proof));
+        return out;
     }
-    if (from == null || to == null || !types.type_cast_allowed(to, from) ||
-        !types.type_is_reference(from) || !types.type_is_reference(to)) {
+    if (!compared.value || !types.type_is_reference(from) || !types.type_is_reference(to)) {
         discard(&out, fail(svc, req, ownership_api.entity_id{}, false,
             "reference cast is not permitted"));
         return out;
@@ -1589,7 +1641,7 @@ fn slice_ptr(context* ctx, ownership_api.services* svc, address@ values,
     result mut out = start_range(ctx, svc, values, lower, upper, req);
     if (!ownership_api.successful(out.proof)) { return out; }
     u64 mut stride = 0;
-    out.proof = size(element, svc, req, 0, &stride);
+    out.proof = size(element, svc, req, &stride);
     if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
     calculation mut work = calculation{ctx, svc, req, complete()};
     if (!le_work(&work, literal(0), lower) || !le_work(&work, lower, upper)) {
@@ -1664,7 +1716,7 @@ fn access(context* ctx, ownership_api.services* svc, address@ values,
         return fail(svc, req, ownership_api.entity_id{}, false, "raw alternatives are incomplete");
     }
     u64 mut bytes = 0;
-    proof = size(accessed, svc, req, 0, &bytes);
+    proof = size(accessed, svc, req, &bytes);
     if (!ownership_api.successful(proof)) { return proof; }
     context mut scratch = context{};
     defer free(&scratch);
@@ -1686,7 +1738,7 @@ fn access(context* ctx, ownership_api.services* svc, address@ values,
             }
             if (!ownership_api.successful(work.proof)) { return work.proof; }
             u64 mut alignment = 0;
-            if (!alignment_work(&work, accessed, 0, &alignment)) { return work.proof; }
+            if (!alignment_work(&work, accessed, &alignment)) { return work.proof; }
             if (item.alignment < alignment || item.alignment % alignment != 0 ||
                 !aligned_work(&work, item.offset, alignment)) {
                 if (!ownership_api.successful(work.proof)) { return work.proof; }

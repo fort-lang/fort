@@ -1,0 +1,165 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+/// Measures populated worklist cleanup at each finite work refusal.
+import ownership_api;
+import ownership_depth_env;
+import ownership_limits;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+import ownership_type_work;
+import prim;
+import types;
+
+fn allocator_controls() void {
+    ownership_depth_env.begin();
+    u8 mut@ own retained = new(u8, 32);
+    assert(ownership_depth_env.fort_depth_alloc_end() == 1);
+    assert(ownership_depth_env.fort_depth_alloc_created() == 1);
+    assert(ownership_depth_env.fort_depth_alloc_released() == 0);
+    del(retained);
+    assert(ownership_depth_env.fort_depth_alloc_released() == 1);
+    ownership_depth_env.begin();
+    u8 mut@ own released = new(u8, 32);
+    del(released);
+    assert(ownership_depth_env.finish() == 1);
+}
+
+fn query(ownership_type_work.work mut* paid, types.node* first, types.node* second,
+    u32 mode) ownership_type_work.result {
+    if (mode == 0) { return ownership_type_work.measure(paid, first, false); }
+    if (mode == 1) { return ownership_type_work.measure(paid, first, true); }
+    return ownership_type_work.compare(paid, first, second,
+        mode == 2 ? ownership_type_work.relation.equal : ownership_type_work.relation.shape);
+}
+
+// D28: each refusal releases worklists after creation, growth, and traversal.
+fn type_refusals(types.node* first, types.node* second, u32 mode) void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_depth_env.configure(&f, ownership_limits.production().w);
+    ownership_type_work.work mut paid = ownership_depth_env.work(&f);
+    ownership_depth_env.begin();
+    ownership_type_work.result mut checked = query(&paid, first, second, mode);
+    u64 mut created = ownership_depth_env.finish();
+    eprintln("cleanup start ", mode, " status ", cast(checked.proof.kind, u32),
+        " value ", checked.value, " created ", created, " work ", f.meter.used.w,
+        " bound ", f.meter.bounds.w);
+    assert(ownership_api.successful(checked.proof) && checked.value && created >= 3);
+    u64 cost = f.meter.used.w;
+    u64[4] expected = {2713, 2648, 5056, 1096};
+    assert(cost == expected[mode]);
+    u64 mut bound = 0;
+    u64 mut populated = 0;
+    while (bound < cost) {
+        ownership_depth_env.configure(&f, bound);
+        paid = ownership_depth_env.work(&f);
+        ownership_depth_env.begin();
+        checked = query(&paid, first, second, mode);
+        created = ownership_depth_env.finish();
+        assert(!ownership_api.successful(checked.proof) && !checked.value);
+        assert(checked.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(checked.proof.terminal.limit.operation.operation == 7);
+        assert(checked.proof.terminal.limit.source.line == 23);
+        assert(f.meter.used.w == (bound == 0 ? 1 : bound) && f.meter.used.d == 0);
+        if (created > 0) { populated += 1; }
+        bound += 1;
+    }
+    assert(populated > 0 && bound == cost);
+    ownership_depth_env.configure(&f, cost);
+    paid = ownership_depth_env.work(&f);
+    ownership_depth_env.begin();
+    checked = query(&paid, first, second, mode);
+    assert(ownership_depth_env.finish() > 0);
+    assert(ownership_api.successful(checked.proof) && checked.value && f.meter.used.w == cost);
+    eprintln("type cleanup ", mode, " cost ", cost, " populated ", populated);
+}
+
+fn type_worklists() void {
+    types.table mut first = {};
+    types.table mut second = {};
+    defer types.type_table_free(&first);
+    defer types.type_table_free(&second);
+    types.node* a = types.type_prim(&first, prim.prim_kind.prim_u8);
+    types.node* b = types.type_prim(&second, prim.prim_kind.prim_u8);
+    types.node* mut array = a;
+    types.node* mut left = a;
+    types.node* mut right = b;
+    u64 mut i = 0;
+    while (i < 65) {
+        array = types.type_array(&first, array, 1);
+        left = types.type_ptr(&first, left, false, false);
+        right = types.type_ptr(&second, right, false, false);
+        i += 1;
+    }
+    type_refusals(array, array, 0);
+    type_refusals(array, array, 1);
+    type_refusals(left, right, 2);
+    types.node*[96] mut left_params = {};
+    types.node*[96] mut right_params = {};
+    i = 0;
+    while (i < left_params.len) { left_params[i] = a; right_params[i] = b; i += 1; }
+    types.node* left_function = types.type_fn(&first, a, left_params[..], false);
+    types.node* right_function = types.type_fn(&second, b, right_params[..], false);
+    type_refusals(left_function, right_function, 3);
+}
+
+fn raw_worklists() void {
+    ownership_raw_env.env mut e = {};
+    defer ownership_raw_env.close(&e);
+    ownership_raw_env.heap(&e, 1);
+    types.node* mut array = e.byte;
+    u64 mut i = 0;
+    while (i < 16) { array = types.type_array(&e.table, array, 1); i += 1; }
+    ownership_raw.origin mut input = e.root.storage.origins[0];
+    input.layout = array;
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw_env.fresh_work(&e);
+    ownership_depth_env.begin();
+    ownership_raw.result mut captured = ownership_raw.capture_origin(&e.local.state,
+        &e.local.service, &input, ownership_raw_env.NO_BOUNDS,
+        ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.accepts(&captured);
+    assert(captured.storage.leaves_len == 1);
+    assert(captured.storage.leaves[0].place.projections.len == 16);
+    ownership_raw.free_result(&captured);
+    u64 mut created = ownership_depth_env.finish();
+    assert(created >= 32);
+    u64 cost = e.budget.meter.used.w;
+    u64 mut bound = 0;
+    u64 mut populated = 0;
+    while (bound < cost) {
+        ownership_raw_env.fresh_work(&e);
+        ownership_raw_env.remaining_work(&e, bound);
+        ownership_depth_env.begin();
+        captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+            ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+        ownership_raw_env.rejected(captured.proof);
+        assert(captured.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(captured.proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(e.budget.meter.used.w == e.budget.meter.bounds.w);
+        assert(captured.proof.terminal.limit.operation.operation == req.base.operation.operation);
+        assert(captured.storage.leaves_len == 0 && captured.addresses.len == 0);
+        ownership_raw.free_result(&captured);
+        created = ownership_depth_env.finish();
+        if (created > 0) { populated += 1; }
+        assert(ownership_state.equal(&before, &e.local.state));
+        assert(e.root.storage.origins.len == 1 && e.root.storage.leaves_len == 1);
+        bound += 1;
+    }
+    assert(populated > 0 && bound == cost);
+    ownership_raw_env.fresh_work(&e);
+    ownership_raw_env.remaining_work(&e, cost);
+    ownership_depth_env.begin();
+    captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    ownership_raw_env.accepts(&captured);
+    ownership_raw.free_result(&captured);
+    assert(ownership_depth_env.finish() > 0);
+    assert(e.budget.meter.used.w == e.budget.meter.bounds.w);
+    eprintln("raw cleanup cost ", cost, " populated ", populated);
+}
+
+fn main() i32 { allocator_controls(); type_worklists(); raw_worklists(); return 0; }
