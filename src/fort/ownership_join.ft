@@ -894,7 +894,7 @@ fn join(ownership_state.state* a, ownership_state.state* b,
     ownership_state.state mut out = compose(a, b, svc, ownership_api.work_kind.join,
         valid, op, at);
     if (!valid) { return out; }
-    cover_bounds(&out, limits, at);
+    cover_bounds(&out, svc, limits, ownership_api.work_kind.join, op, at);
     dedup_contents(&out);
     dedup_collision_facts(&out);
     return out;
@@ -954,34 +954,11 @@ fn blur_region(ownership_state.state mut* s, ownership_api.region input)
 }
 
 fn cover_regions(ownership_state.state mut* s, ownership_api.limit_table* limits,
-    ownership_api.source_position at) void {
-    u64 mut used = plus_count(s->allocations_len, s->regions_len);
-    used = plus_count(used, s->nodes_len);
-    used = plus_count(used, s->edges_len);
-    u64 mut i = 0;
-    while (i < s->regions_len) {
-        used = plus_count(used, s->regions[i].partitions.len);
-        i += 1;
-    }
-    i = 0;
-    while (i < s->edges_len) {
-        used = plus_count(used, s->edges[i].range.partitions.len);
-        i += 1;
-    }
-    i = 0;
-    while (i < s->contents_len) {
-        u64 mut j = 0;
-        while (j < s->contents[i].borrows.len) {
-            used = plus_count(used, 1);
-            used = plus_count(used, s->contents[i].borrows[j].range.partitions.len);
-            j += 1;
-        }
-        i += 1;
-    }
+    u64 used, ownership_api.source_position at) void {
     if (used <= limits->r && !has_bound_loss(s, ownership_api.limit_category.r)) {
         return;
     }
-    i = 0;
+    u64 mut i = 0;
     while (i < s->allocations_len) {
         ownership_api.allocation_fact mut* fact = &s->allocations[i];
         remember_loss(s, ownership_api.limit_category.r, limits->r, at, fact->key);
@@ -1148,9 +1125,18 @@ fn cover_shapes(ownership_state.state mut* s, ownership_api.limit_table* limits,
     }
 }
 
-fn cover_bounds(ownership_state.state mut* s, ownership_api.limit_table* limits,
-    ownership_api.source_position at) void {
-    cover_regions(s, limits, at);
+fn cover_bounds(ownership_state.state mut* s, ownership_api.services* svc,
+    ownership_api.limit_table* limits, ownership_api.work_kind kind,
+    ownership_api.operation_position op, ownership_api.source_position at) void {
+    ownership_state.region_measurement measured = ownership_state.measure_regions(s, svc,
+        ownership_state.region_candidate{}, kind, op, at);
+    if (!ownership_api.successful(measured.proof)) {
+        if (ownership_api.successful(s->proof)) {
+            s->proof = record_failure(svc, measured.proof, op, at);
+        }
+        return;
+    }
+    cover_regions(s, limits, measured.amount, at);
     cover_predicates(s, limits, at);
     cover_guards(s, limits, at);
     cover_shapes(s, limits, at);
@@ -1260,7 +1246,7 @@ fn widen(ownership_state.state* a, ownership_state.state* b,
     trim_ranges(&out, limits, at);
     dedup_contents(&out);
     dedup_collision_facts(&out);
-    cover_bounds(&out, limits, at);
+    cover_bounds(&out, svc, limits, ownership_api.work_kind.widening, op, at);
     dedup_contents(&out);
     dedup_collision_facts(&out);
     return out;

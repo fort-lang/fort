@@ -182,6 +182,20 @@ Work order is transfer, join, widening, substitution, summary_solver.
 The budget service checks the whole request before granting permission.
 It returns the first exhausted category under this order. It records used, bound, and attempted
 units.
+D requests absolute projection depth. R requests prospective retained region cardinality.
+P requests prospective predicate cardinality in one represented state.
+The meter stores the greatest accepted D, R, and P amounts.
+Separate states can use one meter. Repeated facts do not add R or P units.
+W remains cumulative. Each new cardinality-query step needs one W permission before work.
+Canonical region keys identify allocation representatives, explicit regions, and borrowed regions.
+A partition key identifies a partition under its region key.
+A node uses its allocation key when present. Source-validity rows add no separate region.
+Unkeyed retained borrows and explicit regions prove no equality. Count each separately.
+An absent graph-edge range adds no region. Join covering uses the same region mapping.
+Scalar contents without guarded alternatives add no G unit.
+Raw capture includes borrowed core regions and predicates in its prospective R/P requests.
+Its additional raw-region and predicate mapping remains subject to feature qualification.
+
 Counter saturation means exhaustion. A saturated result cannot grant mutation permission.
 A denied result without exhaustion evidence is an invalid service result, not a measured work limit.
 Denied charges leave caller state and known obligations unchanged.

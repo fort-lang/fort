@@ -1,0 +1,392 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| state precision ok
+/// Tests prospective region identity and independent predicate states.
+import ownership_api;
+import ownership_join;
+import ownership_keys;
+import ownership_limits;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+
+struct fixture { ownership_limits.meter meter; ownership_api.services service; }
+fn event(void mut* opaque, ownership_api.event_request* request) ownership_api.event_result {
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+fn configure(fixture mut* f, u64 regions, u64 predicates) void {
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.r = regions;
+    limits.p = predicates;
+    limits.g = 1;
+    assert(ownership_limits.configure(&f->meter, &limits));
+    f->service.budget_context = cast(&f->meter, void mut*);
+    f->service.budget = ownership_limits.callback;
+    f->service.event = event;
+}
+fn key(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{.function = ownership_api.function_id{
+        .declaration = ownership_api.declaration_id{1, 1}}, .kind = kind, .ordinal = ordinal};
+}
+fn place(u32 ordinal) ownership_api.place_path {
+    return ownership_api.place_path{.root = key(ownership_api.entity_kind.slot, ordinal)};
+}
+fn fact(u32 slot, ownership_api.borrow_relation@ borrows) ownership_api.contents_fact {
+    return ownership_api.contents_fact{.place = place(slot),
+        .kind = ownership_api.contents_kind.reference,
+        .value_version = key(ownership_api.entity_kind.value, slot), .borrows = borrows};
+}
+fn measure(ownership_state.state* s, fixture mut* f) u64 {
+    ownership_state.region_measurement result = ownership_state.measure_regions(s, &f->service,
+        ownership_state.region_candidate{}, ownership_api.work_kind.transfer,
+        ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(result.proof));
+    return result.amount;
+}
+
+fn replacement() void {
+    fixture mut f = {};
+    configure(&f, 1, 1);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    borrow[0].range.key = key(ownership_api.entity_kind.region, 20);
+    ownership_api.contents_fact mut incoming = fact(2, borrow[..]);
+    assert(ownership_state.add_contents(&s, &f.service, incoming,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_api.place_path[2] aliases = {place(2), place(3)};
+    u64 mut i = 0;
+    while (i < 16) {
+        incoming.value_version.ordinal += 1;
+        assert(ownership_state.strong_contents(&s, &f.service, incoming, aliases[..], true,
+            ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+        assert(s.contents_len == 2 && measure(&s, &f) == 1 && f.meter.used.r == 1);
+        i += 1;
+    }
+    u64 work = f.meter.used.w;
+    ownership_state.state mut before = ownership_state.clone(&s);
+    defer ownership_state.free(&before);
+    borrow[0].range.key.ordinal = 21;
+    // Replacement discards only the selected aliases. The other region remains.
+    ownership_api.place_path[1] first = {place(2)};
+    ownership_api.mutation_result denied = ownership_state.strong_contents(&s, &f.service,
+        incoming, first[..], true, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(!denied.applied && denied.precision_lost);
+    assert(denied.loss.category == ownership_api.limit_category.r);
+    assert(ownership_state.equal(&s, &before) && f.meter.used.w > work);
+    ownership_api.borrow_relation@ none = {};
+    incoming.borrows = none;
+    assert(ownership_state.strong_contents(&s, &f.service, incoming, aliases[..], true,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(measure(&s, &f) == 0 && f.meter.used.r == 1);
+    incoming.borrows = borrow[..];
+    assert(ownership_state.strong_contents(&s, &f.service, incoming, aliases[..], true,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(measure(&s, &f) == 1 && s.contents[0].borrows[0].range.key.ordinal == 21);
+    assert(before.contents[0].borrows[0].range.key.ordinal == 20);
+    assert(before.contents[0].borrows.ptr != s.contents[0].borrows.ptr);
+}
+
+fn representatives() void {
+    fixture mut f = {};
+    configure(&f, 3, 1);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.allocation_fact allocation = ownership_api.allocation_fact{
+        .key = key(ownership_api.entity_kind.allocation, 1),
+        .count = ownership_api.multiplicity{true, true, true}, .obligation = true};
+    assert(ownership_state.add_allocation(&s, &f.service, allocation,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_api.graph_node node = ownership_api.graph_node{
+        .key = key(ownership_api.entity_kind.graph_node, 2), .allocation = allocation.key};
+    assert(ownership_state.add_node(&s, &f.service, node,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(measure(&s, &f) == 1 && f.meter.used.r == 1);
+    ownership_api.source_fact source = ownership_api.source_fact{
+        .key = key(ownership_api.entity_kind.source, 10), .allocation = allocation.key,
+        .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live};
+    assert(ownership_state.add_source(&s, &f.service, source,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(measure(&s, &f) == 1 && s.sources_len == 1);
+    ownership_api.region_partition[1] partition = {
+        ownership_api.region_partition{.key = key(ownership_api.entity_kind.region, 8)}};
+    ownership_api.region range = ownership_api.region{
+        .key = key(ownership_api.entity_kind.region, 7), .partitions = partition[..]};
+    assert(ownership_state.add_region(&s, &f.service, range,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_api.borrow_relation[1] borrow = {ownership_api.borrow_relation{.range = range}};
+    assert(ownership_state.add_contents(&s, &f.service, fact(4, borrow[..]),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_api.graph_edge edge = ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 3), .range = range};
+    assert(ownership_state.add_edge(&s, &f.service, edge,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(measure(&s, &f) == 3 && f.meter.used.r == 3);
+    ownership_state.state mut copied = ownership_state.clone(&s);
+    defer ownership_state.free(&copied);
+    assert(ownership_state.equal(&s, &copied) && measure(&copied, &f) == 3);
+    assert(copied.regions[0].partitions.ptr != s.regions[0].partitions.ptr);
+    ownership_state.state mut joined = ownership_join.join(&s, &copied, &f.service,
+        &f.meter.bounds, ownership_api.operation_position{}, ownership_api.source_position{});
+    defer ownership_state.free(&joined);
+    assert(ownership_api.successful(joined.proof) && measure(&joined, &f) == 3);
+    assert(joined.losses_len == 0 && joined.allocations[0].obligation);
+    assert(joined.allocations[0].count.zero && joined.allocations[0].count.one &&
+        joined.allocations[0].count.many);
+    ownership_api.region mut distinct = range;
+    distinct.key.ordinal = 9;
+    ownership_api.region[1] mut added = {distinct};
+    ownership_state.region_measurement mut measured = ownership_state.measure_regions(&s,
+        &f.service, ownership_state.region_candidate{.regions = added[..]},
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(measured.proof) && measured.amount == 5);
+    // The same partition key under a different region denotes a separate partition.
+    distinct.key = ownership_api.entity_id{};
+    added[0] = distinct;
+    measured = ownership_state.measure_regions(&s, &f.service,
+        ownership_state.region_candidate{.regions = added[..]},
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(measured.proof) && measured.amount == 5);
+}
+
+fn predicate_states() void {
+    fixture mut f = {};
+    configure(&f, 1, 1);
+    ownership_state.state mut a = ownership_state.empty();
+    ownership_state.state mut b = ownership_state.empty();
+    defer ownership_state.free(&a);
+    defer ownership_state.free(&b);
+    ownership_api.predicate_atom mut atom = ownership_api.predicate_atom{
+        .key = key(ownership_api.entity_kind.predicate, 1)};
+    assert(ownership_state.add_predicate(&a, &f.service, atom,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(ownership_state.add_predicate(&b, &f.service, atom,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(a.predicates_len == 1 && b.predicates_len == 1 && f.meter.used.p == 1);
+    ownership_state.state mut copied = ownership_state.clone(&a);
+    defer ownership_state.free(&copied);
+    ownership_state.state mut joined = ownership_join.join(&a, &copied, &f.service,
+        &f.meter.bounds, ownership_api.operation_position{}, ownership_api.source_position{});
+    defer ownership_state.free(&joined);
+    assert(joined.predicates_len == 1 && joined.losses_len == 0);
+    atom.key.ordinal = 2;
+    u64 prior = f.meter.used.w;
+    ownership_api.operation_position op = ownership_api.operation_position{.operation = 17};
+    ownership_api.source_position at = ownership_api.source_position{.line = 29};
+    ownership_api.mutation_result denied = ownership_state.add_predicate(&a, &f.service,
+        atom, op, at);
+    assert(!denied.applied && denied.precision_lost && a.predicates_len == 1);
+    assert(denied.loss.category == ownership_api.limit_category.p);
+    assert(denied.proof.terminal.limit.attempted == 2);
+    assert(ownership_keys.operation(denied.proof.terminal.operation, op) == 0);
+    assert(ownership_keys.source(denied.proof.terminal.source, at) == 0);
+    assert(f.meter.used.w == prior && f.meter.used.p == 1);
+    configure(&f, 1, 2);
+    assert(ownership_state.add_predicate(&a, &f.service, atom, op, at).applied);
+    assert(a.predicates_len == 2 && f.meter.used.p == 2);
+}
+
+fn scalars_and_refusal() void {
+    fixture mut f = {};
+    configure(&f, 1, 1);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.borrow_relation@ none = {};
+    ownership_api.contents_fact mut scalar = fact(1, none);
+    scalar.kind = ownership_api.contents_kind.scalar;
+    u64 mut i = 0;
+    while (i < 32) {
+        scalar.place = place(cast(i + 1, u32));
+        assert(ownership_state.add_contents(&s, &f.service, scalar,
+            ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+        i += 1;
+    }
+    assert(s.contents_len == 32 && f.meter.used.g == 0 && f.meter.used.r == 0);
+    assert(f.meter.used.w > 32);
+    ownership_api.proof_status before = s.proof;
+    f.meter.used.r = ownership_api.U64_MAX;
+    f.meter.bounds.r = ownership_api.U64_MAX;
+    ownership_api.charge_item[1] mut item = {ownership_api.charge_item{
+        ownership_api.limit_category.r, ownership_api.limit_scope.state, 1}};
+    ownership_api.charge_request req = ownership_api.charge_request{.items = item[..]};
+    ownership_api.charge_result mut denied = ownership_limits.try_charge(&f.meter, &req);
+    assert(!denied.allowed && denied.limit.saturated && f.meter.used.r == ownership_api.U64_MAX);
+    assert(s.contents_len == 32 && s.proof.kind == before.kind);
+    f.meter.used.p = ownership_api.U64_MAX;
+    f.meter.bounds.p = ownership_api.U64_MAX;
+    item[0].category = ownership_api.limit_category.p;
+    denied = ownership_limits.try_charge(&f.meter, &req);
+    assert(!denied.allowed && denied.limit.saturated && f.meter.used.p == ownership_api.U64_MAX);
+    assert(s.predicates_len == 0 && s.proof.kind == before.kind);
+}
+
+fn raw_scope() void {
+    ownership_raw_env.env mut e = {};
+    ownership_raw_env.heap(&e, 1);
+    defer ownership_raw_env.close(&e);
+    ownership_raw.origin input = e.root.storage.origins[0];
+    ownership_raw.request req = ownership_raw_env.request(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.r = 1;
+    assert(ownership_limits.configure(&e.budget.meter, &limits));
+    ownership_raw.result mut captured = ownership_raw.capture_origin(&e.local.state,
+        &e.local.service, &input, ownership_raw_env.NO_BOUNDS,
+        ownership_raw_env.NO_RELATIONS, &req);
+    assert(!ownership_api.successful(captured.proof));
+    assert(captured.proof.terminal.limit.category == ownership_api.limit_category.r);
+    assert(captured.proof.terminal.limit.attempted == 3 && captured.storage.leaves_len == 0);
+    ownership_raw.free_result(&captured);
+    assert(ownership_state.equal(&e.local.state, &before));
+    limits.r = 3;
+    assert(ownership_limits.configure(&e.budget.meter, &limits));
+    captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    assert(ownership_api.successful(captured.proof) && captured.storage.leaves_len == 1);
+    assert(e.budget.meter.used.r == 3);
+    ownership_raw.free_result(&captured);
+    ownership_state.append_predicates(&e.local.state, ownership_api.predicate_atom{
+        .key = key(ownership_api.entity_kind.predicate, 3)});
+    limits.p = 1;
+    assert(ownership_limits.configure(&e.budget.meter, &limits));
+    captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    assert(!ownership_api.successful(captured.proof));
+    assert(captured.proof.terminal.limit.category == ownership_api.limit_category.p);
+    assert(captured.proof.terminal.limit.attempted == 2 && e.local.state.predicates_len == 1);
+    ownership_raw.free_result(&captured);
+    limits.p = 2;
+    assert(ownership_limits.configure(&e.budget.meter, &limits));
+    captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    assert(ownership_api.successful(captured.proof) && e.budget.meter.used.p == 2);
+    ownership_raw.free_result(&captured);
+}
+
+fn query_work_kinds() void {
+    fixture mut f = {};
+    ownership_state.state mut s = ownership_state.empty();
+    ownership_state.state mut empty = ownership_state.empty();
+    defer ownership_state.free(&s);
+    defer ownership_state.free(&empty);
+    ownership_state.append_allocations(&s, ownership_api.allocation_fact{
+        .key = key(ownership_api.entity_kind.allocation, 1), .obligation = true,
+        .count = ownership_api.multiplicity{.one = true}});
+    ownership_api.work_kind[2] kinds = {ownership_api.work_kind.join,
+        ownership_api.work_kind.widening};
+    ownership_api.operation_position op = ownership_api.operation_position{
+        key(ownership_api.entity_kind.allocation, 1).function, 3, 17, false};
+    ownership_api.source_position at = ownership_api.source_position{.line = 29, .col = 4};
+    u64 mut i = 0;
+    while (i < kinds.len) {
+        configure(&f, 1, 1);
+        f.meter.bounds.w = 1;
+        ownership_state.state mut out = kinds[i] == ownership_api.work_kind.join ?
+            ownership_join.join(&s, &empty, &f.service, &f.meter.bounds, op, at) :
+            ownership_join.widen(&s, &empty, &f.service, &f.meter.bounds, op, at);
+        assert(!ownership_api.successful(out.proof) && out.allocations[0].obligation);
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(out.proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(out.proof.terminal.limit.work == kinds[i] && f.meter.used.w == 1);
+        assert(ownership_keys.operation(out.proof.terminal.limit.operation, op) == 0);
+        assert(ownership_keys.source(out.proof.terminal.limit.source, at) == 0);
+        ownership_state.free(&out);
+        assert(s.allocations_len == 1 && s.allocations[0].obligation);
+        i += 1;
+    }
+}
+
+fn weak_region_union() void {
+    fixture mut f = {};
+    configure(&f, 1, 1);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    borrow[0].range.key = key(ownership_api.entity_kind.region, 20);
+    ownership_api.contents_fact incoming = fact(2, borrow[..]);
+    ownership_api.place_path[1] selected = {place(2)};
+    ownership_api.entity_id guard = key(ownership_api.entity_kind.guard, 1);
+    assert(ownership_state.add_contents(&s, &f.service, incoming,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    borrow[0].range.key.ordinal = 21;
+    ownership_state.state mut before = ownership_state.clone(&s);
+    defer ownership_state.free(&before);
+    ownership_api.mutation_result denied = ownership_state.weak_contents(&s, &f.service,
+        incoming, selected[..], guard, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(!denied.applied && denied.precision_lost);
+    assert(denied.loss.category == ownership_api.limit_category.r);
+    assert(denied.proof.terminal.limit.attempted == 2 && ownership_state.equal(&s, &before));
+    configure(&f, 2, 1);
+    assert(ownership_state.weak_contents(&s, &f.service, incoming, selected[..], guard,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(s.contents_len == 2 && measure(&s, &f) == 2);
+    assert(s.contents[0].borrows[0].range.key.ordinal == 20);
+    assert(s.contents[1].borrows[0].range.key.ordinal == 21 && s.correlations_len == 1);
+}
+
+fn missing_identity_counts() void {
+    fixture mut f = {};
+    configure(&f, 16, 1);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.region_partition[2] mut partitions = {};
+    ownership_api.borrow_relation[1] mut borrow = {ownership_api.borrow_relation{
+        .range = ownership_api.region{.partitions = partitions[..]}}};
+    ownership_api.contents_fact[1] added = {fact(2, borrow[..])};
+    ownership_state.region_candidate mut candidate = ownership_state.region_candidate{
+        .contents = added[..], .copies = 2};
+    ownership_state.region_measurement mut result = ownership_state.measure_regions(&s,
+        &f.service, candidate, ownership_api.work_kind.transfer,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(ownership_api.successful(result.proof) && result.amount == 6);
+    borrow[0].range.key = key(ownership_api.entity_kind.region, 3);
+    result = ownership_state.measure_regions(&s, &f.service, candidate,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(result.proof) && result.amount == 5);
+    partitions[0].key = key(ownership_api.entity_kind.region, 4);
+    partitions[1].key = partitions[0].key;
+    result = ownership_state.measure_regions(&s, &f.service, candidate,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(result.proof) && result.amount == 2);
+    ownership_api.graph_node[2] mut nodes = {
+        ownership_api.graph_node{.key = key(ownership_api.entity_kind.graph_node, 7)},
+        ownership_api.graph_node{.key = key(ownership_api.entity_kind.graph_node, 7)}};
+    candidate = ownership_state.region_candidate{.nodes = nodes[..]};
+    result = ownership_state.measure_regions(&s, &f.service, candidate,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(result.proof) && result.amount == 1);
+    nodes[1].key.ordinal = 8;
+    result = ownership_state.measure_regions(&s, &f.service, candidate,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(result.proof) && result.amount == 2);
+    nodes[0].key = ownership_api.entity_id{};
+    nodes[1].key = ownership_api.entity_id{};
+    result = ownership_state.measure_regions(&s, &f.service, candidate,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(result.proof) && result.amount == 2);
+}
+
+fn main() i32 {
+    replacement();
+    representatives();
+    predicate_states();
+    scalars_and_refusal();
+    raw_scope();
+    query_work_kinds();
+    weak_region_union();
+    missing_identity_counts();
+    println("state precision ok");
+    return 0;
+}

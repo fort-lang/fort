@@ -34,7 +34,8 @@ fn budget(void mut* opaque, ownership_api.charge_request* req)
     u64 mut i = 0;
     while (i < req->items.len) { ctx->last[i] = req->items[i]; i += 1; }
     ownership_api.charge_result mut out = ownership_api.charge_result{};
-    if (ctx->deny) {
+    if (ctx->deny && (ctx->deny_work ||
+        req->items[0].category != ownership_api.limit_category.w)) {
         u64 limit_index = ctx->deny_work ? req->items.len - 1 : 0;
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
             req->operation, req->source);
@@ -366,7 +367,8 @@ fn refusal_preserves_state() void {
     ownership_state.state mut before = ownership_state.clone(&s);
     ctx.deny = true;
     ownership_api.source_fact fresh = source(1, ownership_api.source_kind.heap, a.key);
-    ownership_api.mutation_result mut p = ownership_state.add_source(&s, &svc, fresh,
+    ownership_api.allocation_fact distinct = allocation(2, 2, 1);
+    ownership_api.mutation_result mut p = ownership_state.add_allocation(&s, &svc, distinct,
         ownership_api.operation_position{}, ownership_api.source_position{});
     assert(!p.applied && p.precision_lost && p.loss.category == ownership_api.limit_category.r);
     assert(ownership_state.equal(&s, &before) && ctx.events == 0);
@@ -453,9 +455,10 @@ fn g07() void {
     selected.place.projections = index[..];
     ownership_state.add_contents(&s, &svc, selected,
         ownership_api.operation_position{}, ownership_api.source_position{});
-    assert(ctx.last_len == 3 && ctx.last[0].category == ownership_api.limit_category.d);
-    assert(ctx.last[0].amount == 1 && ctx.last[1].category == ownership_api.limit_category.g);
-    assert(ctx.last[2].category == ownership_api.limit_category.w);
+    assert(ctx.last_len == 4 && ctx.last[0].category == ownership_api.limit_category.d);
+    assert(ctx.last[0].amount == 1 && ctx.last[1].category == ownership_api.limit_category.r);
+    assert(ctx.last[1].amount == 2 && ctx.last[2].category == ownership_api.limit_category.g);
+    assert(ctx.last[3].category == ownership_api.limit_category.w);
     index[0].index.value = 9;
     ownership_state.end_source(&s, &svc, header.key,
         ownership_api.operation_position{}, ownership_api.source_position{});
@@ -505,7 +508,7 @@ fn callbacks() void {
         ownership_api.operation_position{}, ownership_api.source_position{});
     assert(p.proof.kind == ownership_api.proof_kind.incomplete && p.proof.failed);
     assert(p.proof.terminal.reason == ownership_api.incomplete_reason.missing_events);
-    assert(ownership_state.view(&s).allocations.len == 1 && ctx.calls == 1);
+    assert(ownership_state.view(&s).allocations.len == 1 && ctx.calls == 4);
     assert(ctx.events == 0);
     assert(ownership_state.view(&s).allocations[0].obligation);
     assert(ownership_state.view(&s).sources.len == 0);
@@ -518,7 +521,7 @@ fn callbacks() void {
     assert(!p.applied && p.precision_lost);
     assert(p.loss.category == ownership_api.limit_category.r);
     assert(ownership_state.view(&s).proof.kind == ownership_api.proof_kind.complete);
-    assert(ownership_state.view(&s).allocations.len == 0 && ctx.calls == 2);
+    assert(ownership_state.view(&s).allocations.len == 0 && ctx.calls == 8);
     assert(ctx.events == 0);
     ownership_state.free(&s);
     s = ownership_state.empty();
@@ -527,8 +530,8 @@ fn callbacks() void {
         ownership_api.operation_position{}, ownership_api.source_position{});
     assert(p.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
     assert(!p.applied && !p.precision_lost);
-    assert(ownership_state.view(&s).allocations.len == 0 && ctx.calls == 3);
-    assert(ctx.first == ownership_api.limit_category.r);
+    assert(ownership_state.view(&s).allocations.len == 0 && ctx.calls == 9);
+    assert(ctx.first == ownership_api.limit_category.w);
     assert(ctx.events == 1 && ctx.last_event == ownership_api.event_kind.work_failure);
     assert(ctx.last_reason == ownership_api.incomplete_reason.work_limit);
     ownership_state.free(&s);
