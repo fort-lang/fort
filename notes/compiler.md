@@ -119,7 +119,10 @@ came here.
   An unresolved write or call prevents later loan capture on that path.
   Direct loan and address-fact work charges W before mutation.
   Guarded effects use the same overlap tests.
+  Either an outcome guard or an effect guard requires a condition witness for definite invalidity.
   A guarded overlapping effect gives incomplete proof without a condition witness.
+  Aggregate result storage belongs to the caller. It is not private local storage.
+  A proved empty unrelated owner permits deletion only when no owner can overlap it.
   The ordinary source guard remains until the driver selects the ownership proof.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
