@@ -2,6 +2,8 @@
 import ownership_api;
 import ownership_keys;
 import ownership_state;
+import ast;
+import types;
 
 struct alternative {
     ownership_api.entity_id guard;
@@ -680,5 +682,920 @@ fn take_successor(storage_context mut* c) successor mut* own {
     if (c->retained == null) { return null; }
     successor mut* own out = move(c->retained->core);
     clear(c);
+    return out;
+}
+
+// The private boundary validates supplied foreign-call operands.
+struct boundary_event {
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.entity_id key;
+}
+struct boundary_operand {
+    types.node* ty;
+    ownership_api.entity_id version;
+    ownership_api.place_path holding;
+}
+struct storage_binding {
+    ownership_api.entity_id root;
+    types.node* ty;
+}
+struct boundary_request {
+    ownership_api.ffi_request call;
+    ownership_state.state* before;
+    boundary_event@ events;
+    ownership_api.checked_binding@ declarations;
+    boundary_operand@ operands;
+    storage_binding@ storage;
+    bool event_map_complete;
+    bool source_map_complete;
+    bool graph_complete;
+    bool inline_owned_layout_complete;
+}
+struct prepared_operand {
+    types.node* ty;
+    ownership_api.contents_fact value;
+}
+struct selected_allocation {
+    ownership_api.entity_id allocation;
+    ownership_api.entity_id node;
+    ownership_api.place_path owner;
+    ownership_api.graph_edge incoming;
+    u64 argument;
+}
+struct boundary_plan {
+    prepared_operand mut@ own operands;
+    selected_allocation mut@ own selected;
+    u64 selected_len;
+    ownership_state.state paths;
+}
+struct preparation {
+    boundary_plan mut* own selected;
+    ownership_api.proof_status proof;
+}
+struct preparation_context {
+    copy_context copy;
+    storage_request metadata;
+    boundary_request* request;
+    string message;
+    ownership_api.event_kind kind;
+    ownership_api.entity_id relation;
+}
+struct checked_place {
+    types.node* ty;
+    u64 offset;
+    bool complete;
+}
+
+fn free_boundary_plan(boundary_plan mut* plan) void {
+    del(plan->operands);
+    del(plan->selected);
+    ownership_state.free(&plan->paths);
+    *plan = boundary_plan{};
+}
+fn drop_boundary_plan(boundary_plan mut* own plan) void {
+    if (plan != null) { free_boundary_plan(plan); }
+    del(plan);
+}
+fn same_key(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    return ownership_keys.entity(a, b) == 0;
+}
+fn preparation_fail(preparation_context mut* c, string text,
+    ownership_api.event_kind kind, ownership_api.entity_id relation) bool {
+    if (!ownership_api.successful(c->copy.proof)) { return false; }
+    c->message = text;
+    c->kind = kind;
+    c->relation = relation;
+    if (kind == ownership_api.event_kind.invalid_use ||
+        kind == ownership_api.event_kind.caller_requirement) {
+        c->copy.proof.failed = true;
+    } else {
+        failed(&c->copy, ownership_api.incomplete_reason.unknown_effect, relation);
+    }
+    return false;
+}
+fn preparation_report(preparation_context mut* c) void {
+    if (ownership_api.successful(c->copy.proof)) { return; }
+    ownership_api.terminal_failure first = c->copy.proof.terminal;
+    ownership_api.event_descriptor mut event = {};
+    event.key = c->metadata.event;
+    event.operation = c->metadata.operation;
+    event.source = c->metadata.source;
+    event.kind = c->kind;
+    event.evidence = c->copy.proof.kind == ownership_api.proof_kind.complete ?
+        ownership_api.evidence_kind.unconditional :
+        ownership_api.evidence_kind.abstract_possibility;
+    event.reason = first.reason;
+    event.relation = c->relation;
+    event.text = c->message;
+    event.limit = first.limit;
+    if (first.reason == ownership_api.incomplete_reason.work_limit) {
+        event.kind = ownership_api.event_kind.work_failure;
+        if (event.text.len == 0) {
+            event.text = "The work or representation budget refuses the operation.";
+        }
+    }
+    ownership_api.witness_link[1] mut witness = {};
+    if (event.evidence == ownership_api.evidence_kind.unconditional) {
+        witness[0].key = event.key;
+        witness[0].key.kind = ownership_api.entity_kind.witness;
+        witness[0].condition = event.relation;
+        witness[0].validated = true;
+        event.witnesses = witness[..];
+    }
+    ownership_api.event_request req = {event, c->copy.proof};
+    c->copy.proof = ownership_api.record_event(c->copy.services, &req).proof;
+    if (first.present) {
+        c->copy.proof.kind = ownership_api.proof_kind.incomplete;
+        c->copy.proof.failed = true;
+        c->copy.proof.terminal = first;
+    }
+}
+fn checked_preparation_price(u64 count, u64 width, u64 mut* out) bool {
+    if (width != 0 && count > ownership_state.U64_MAX / width) { return false; }
+    *out = count * width;
+    return true;
+}
+fn preparation_price(preparation_context mut* c, u64 count, u64 width) bool {
+    u64 mut price = 0;
+    if (!checked_preparation_price(count, width, &price)) {
+        c->message = "The work price is not representable.";
+        c->kind = ownership_api.event_kind.work_failure;
+        failed(&c->copy, ownership_api.incomplete_reason.work_limit, ownership_api.entity_id{});
+        return false;
+    }
+    return spend(&c->copy, price);
+}
+fn preparation_place(preparation_context mut* c, ownership_api.place_path a,
+    ownership_api.place_path b) bool {
+    if (!spend(&c->copy, 1) || a.residual || b.residual || !same_key(a.root, b.root) ||
+        a.projections.len != b.projections.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.projections.len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        ownership_api.projection x = a.projections[i];
+        ownership_api.projection y = b.projections[i];
+        if (x.kind != y.kind || x.field != y.field || x.index.kind != y.index.kind ||
+            x.index.value != y.index.value || !same_key(x.index.symbol, y.index.symbol) ||
+            !same_key(x.captured_version, y.captured_version)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn preparation_contents(preparation_context mut* c, ownership_api.place_path place) u64 {
+    ownership_state.state* s = c->request->before;
+    u64 mut found = ownership_state.U64_MAX;
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        if (preparation_place(c, place, s->contents[i].place)) {
+            if (found != ownership_state.U64_MAX) { return ownership_state.U64_MAX; }
+            found = i;
+        }
+        if (!ownership_api.successful(c->copy.proof)) { return ownership_state.U64_MAX; }
+        i += 1;
+    }
+    return found;
+}
+fn preparation_source(preparation_context mut* c, ownership_api.entity_id key) u64 {
+    ownership_state.state* s = c->request->before;
+    u64 mut found = ownership_state.U64_MAX;
+    u64 mut i = 0;
+    while (i < s->sources_len) {
+        if (!spend(&c->copy, 1)) { return ownership_state.U64_MAX; }
+        if (same_key(s->sources[i].key, key)) {
+            if (found != ownership_state.U64_MAX) { return ownership_state.U64_MAX; }
+            found = i;
+        }
+        i += 1;
+    }
+    return found;
+}
+fn preparation_allocation(preparation_context mut* c, ownership_api.entity_id key) u64 {
+    ownership_state.state* s = c->request->before;
+    u64 mut found = ownership_state.U64_MAX;
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (!spend(&c->copy, 1)) { return ownership_state.U64_MAX; }
+        if (same_key(s->allocations[i].key, key)) {
+            if (found != ownership_state.U64_MAX) { return ownership_state.U64_MAX; }
+            found = i;
+        }
+        i += 1;
+    }
+    return found;
+}
+fn preparation_size(preparation_context mut* c, types.node* ty, u64 depth,
+    u64 mut* bytes) bool {
+    if (ty == null || depth >= 64 || !spend(&c->copy, 1)) { return false; }
+    if (ty->kind == types.type_kind.k_array) {
+        u64 mut stride = 0;
+        return preparation_size(c, ty->elem, depth + 1, &stride) &&
+            checked_preparation_price(ty->len, stride, bytes);
+    }
+    if (ty->kind == types.type_kind.k_struct) {
+        if (ty->layout == null || ty->layout->state != types.layout_state.l_resolved) {
+            return false;
+        }
+        *bytes = ty->layout->size;
+        return true;
+    }
+    if (ty->kind == types.type_kind.k_ptr || ty->kind == types.type_kind.k_voidptr ||
+        ty->kind == types.type_kind.k_fn) { *bytes = 8; return true; }
+    if (ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_string) {
+        *bytes = 16; return true;
+    }
+    if (ty->kind == types.type_kind.k_prim || ty->kind == types.type_kind.k_enum) {
+        *bytes = types.type_sizeof(ty); return true;
+    }
+    return false;
+}
+fn preparation_type(preparation_context mut* c, ownership_api.place_path path)
+    checked_place {
+    checked_place mut out = {};
+    if (path.residual) { return out; }
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->request->storage.len) {
+        if (!spend(&c->copy, 1)) { return out; }
+        if (same_key(path.root, c->request->storage[i].root)) {
+            found += 1;
+            out.ty = c->request->storage[i].ty;
+        }
+        i += 1;
+    }
+    if (found != 1 || out.ty == null) { return checked_place{}; }
+    i = 0;
+    while (i < path.projections.len) {
+        if (!spend(&c->copy, 1)) { return checked_place{}; }
+        ownership_api.projection part = path.projections[i];
+        if (part.kind == ownership_api.projection_kind.field) {
+            if (out.ty->kind != types.type_kind.k_struct || out.ty->decl == null ||
+                out.ty->layout == null || out.ty->layout->state != types.layout_state.l_resolved) {
+                return checked_place{};
+            }
+            ast.sym* record = cast(out.ty->decl, ast.sym*);
+            if (record->node == null) { return checked_place{}; }
+            u64 mut n = 0;
+            u32 mut field = 0;
+            types.node* mut next = null;
+            while (n < ast.ast_len(record->node)) {
+                if (!spend(&c->copy, 1)) { return checked_place{}; }
+                ast.node* member = ast.ast_child(record->node, n);
+                if (member->kind == ast.ast_kind.k_field_decl) {
+                    if (field == part.field) {
+                        if (member->aux > ownership_state.U64_MAX - out.offset) {
+                            return checked_place{};
+                        }
+                        out.offset += member->aux;
+                        next = member->ty;
+                        break;
+                    }
+                    field += 1;
+                }
+                n += 1;
+            }
+            if (next == null) { return checked_place{}; }
+            out.ty = next;
+        } else if (part.kind == ownership_api.projection_kind.fixed_index) {
+            if (out.ty->kind != types.type_kind.k_array ||
+                part.index.kind != ownership_api.fact_kind.exact || part.index.value < 0 ||
+                cast(part.index.value, u64) >= out.ty->len) { return checked_place{}; }
+            u64 mut stride = 0;
+            u64 mut offset = 0;
+            if (!preparation_size(c, out.ty->elem, 0, &stride) ||
+                !checked_preparation_price(cast(part.index.value, u64), stride, &offset) ||
+                offset > ownership_state.U64_MAX - out.offset) { return checked_place{}; }
+            out.offset += offset;
+            out.ty = out.ty->elem;
+        } else { return checked_place{}; }
+        i += 1;
+    }
+    out.complete = true;
+    return out;
+}
+fn preparation_abi(types.node* ty, bool result_type) bool {
+    return ty != null && (ty->kind == types.type_kind.k_ptr ||
+        ty->kind == types.type_kind.k_voidptr || ty->kind == types.type_kind.k_prim ||
+        ty->kind == types.type_kind.k_enum || ty->kind == types.type_kind.k_fn ||
+        (result_type && ty->kind == types.type_kind.k_void));
+}
+fn preparation_view(preparation_context mut* c) bool {
+    ownership_state.state* s = c->request->before;
+    ownership_api.state_view v = c->request->call.before;
+    if (!spend(&c->copy, 12) || !ownership_api.successful(v.proof)) { return false; }
+    if (v.contents.len != s->contents_len || v.sources.len != s->sources_len ||
+        v.allocations.len != s->allocations_len || v.regions.len != s->regions_len ||
+        v.nodes.len != s->nodes_len || v.edges.len != s->edges_len ||
+        v.shapes.len != s->shapes_len || v.predicates.len != s->predicates_len ||
+        v.guards.len != s->guards_len || v.correlations.len != s->correlations_len ||
+        v.losses.len != s->losses_len) { return false; }
+    return (v.contents.len == 0 ||
+        &v.contents[0] == cast(&s->contents[0], ownership_api.contents_fact*)) &&
+        (v.sources.len == 0 || &v.sources[0] == cast(&s->sources[0], ownership_api.source_fact*)) &&
+        (v.allocations.len == 0 ||
+        &v.allocations[0] == cast(&s->allocations[0], ownership_api.allocation_fact*)) &&
+        (v.regions.len == 0 || &v.regions[0] == cast(&s->regions[0], ownership_api.region*)) &&
+        (v.nodes.len == 0 || &v.nodes[0] == cast(&s->nodes[0], ownership_api.graph_node*)) &&
+        (v.edges.len == 0 || &v.edges[0] == cast(&s->edges[0], ownership_api.graph_edge*)) &&
+        (v.shapes.len == 0 ||
+        &v.shapes[0] == cast(&s->shapes[0], ownership_api.shape_description*)) &&
+        (v.predicates.len == 0 ||
+        &v.predicates[0] == cast(&s->predicates[0], ownership_api.predicate_atom*)) &&
+        (v.guards.len == 0 || &v.guards[0] == cast(&s->guards[0], ownership_api.guard_fact*)) &&
+        (v.correlations.len == 0 ||
+        &v.correlations[0] == cast(&s->correlations[0], ownership_api.correlation*)) &&
+        (v.losses.len == 0 || &v.losses[0] == cast(&s->losses[0], ownership_api.lost_fact*));
+}
+fn preparation_metadata(preparation_context mut* c) bool {
+    boundary_request* r = c->request;
+    if (!r->event_map_complete || r->events.len == 0) {
+        return preparation_fail(c, "The event map is missing.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    u64 mut matches = 0;
+    u64 mut i = 0;
+    while (i < r->events.len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        boundary_event event = r->events[i];
+        if (event.key.kind != ownership_api.entity_kind.event ||
+            ownership_keys.function(event.key.function, event.operation.function) != 0) {
+            return preparation_fail(c, "The event function does not match the operation.",
+                ownership_api.event_kind.incomplete_proof, event.key);
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!spend(&c->copy, 1)) { return false; }
+            if (same_key(event.key, r->events[j].key) ||
+                ownership_keys.operation(event.operation, r->events[j].operation) == 0) {
+                return preparation_fail(c, "The event map has duplicate keys.",
+                    ownership_api.event_kind.incomplete_proof, event.key);
+            }
+            j += 1;
+        }
+        if (ownership_keys.operation(event.operation, r->call.operation) == 0) {
+            matches += 1;
+            c->metadata.event = event.key;
+            if (!r->source_map_complete ||
+                ownership_keys.source(event.source, r->call.source) != 0) {
+                return preparation_fail(c, "The supplied source correspondence is missing.",
+                    ownership_api.event_kind.incomplete_proof, event.key);
+            }
+        }
+        i += 1;
+    }
+    if (matches != 1) { return preparation_fail(c, "The event map is missing.",
+        ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}); }
+    ownership_api.checked_binding binding = r->call.declaration;
+    if (binding.symbol == null || binding.symbol->kind != ast.sym_kind.s_extern_fn) {
+        return preparation_fail(c, "The declaration is not an extern function.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    if (binding.ty == null || binding.ty->kind != types.type_kind.k_fn ||
+        binding.ty != binding.symbol->ty || binding.symbol->error || binding.symbol->node == null ||
+        !preparation_abi(binding.ty->elem, true)) {
+        return preparation_fail(c, "The binding has no checked function type.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    matches = 0;
+    i = 0;
+    while (i < r->declarations.len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        ownership_api.checked_binding checked = r->declarations[i];
+        if (ownership_keys.declaration(binding.declaration, checked.declaration) == 0) {
+            matches += 1;
+            if (checked.symbol != binding.symbol || checked.ty != binding.ty) {
+                return preparation_fail(c, "The binding has no checked function type.",
+                    ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+            }
+        }
+        i += 1;
+    }
+    if (matches != 1) { return preparation_fail(c, "The binding has no checked function type.",
+        ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}); }
+    bool variadic = (binding.symbol->node->flags & ast.FLAG_VARIADIC) != 0;
+    if (r->operands.len != r->call.arguments.len ||
+        r->operands.len < binding.ty->params.len ||
+        (!variadic && r->operands.len != binding.ty->params.len)) {
+        return preparation_fail(c, "The fixed signature argument count does not match.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    if (r->before == null || !ownership_api.successful(r->before->proof)) {
+        return preparation_fail(c, "The caller state is missing or incomplete.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    return true;
+}
+fn preparation_read(preparation_context mut* c, ownership_api.contents_fact value,
+    bool variadic) bool {
+    if (value.kind == ownership_api.contents_kind.unknown || value.place.residual) {
+        return preparation_fail(c, "The captured argument version does not match.",
+            ownership_api.event_kind.incomplete_proof, value.value_version);
+    }
+    if (value.kind == ownership_api.contents_kind.reference && value.borrows.len == 0 &&
+        (!value.owner_empty || value.span_length.kind != ownership_api.fact_kind.exact ||
+        value.span_length.value != 0)) {
+        return preparation_fail(c, "The captured argument version does not match.",
+            ownership_api.event_kind.incomplete_proof, value.value_version);
+    }
+    u64 mut i = 0;
+    while (i < value.borrows.len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        ownership_api.borrow_relation relation = value.borrows[i];
+        u64 source = preparation_source(c, relation.source);
+        if (!relation.representation_complete || !same_key(relation.value_version,
+            value.value_version) || source == ownership_state.U64_MAX ||
+            !preparation_place(c, relation.containing, value.place)) {
+            return preparation_fail(c, "The captured argument version does not match.",
+                ownership_api.event_kind.incomplete_proof, relation.source);
+        }
+        ownership_api.source_fact src = c->request->before->sources[source];
+        if (src.validity == ownership_api.validity_kind.released) {
+            return preparation_fail(c, variadic ? "The variadic pointer source is released." :
+                "The argument source is released.", ownership_api.event_kind.invalid_use, src.key);
+        }
+        if (src.validity == ownership_api.validity_kind.ended) {
+            return preparation_fail(c, "The argument source has ended.",
+                ownership_api.event_kind.invalid_use, src.key);
+        }
+        if (src.validity != ownership_api.validity_kind.live ||
+            src.kind == ownership_api.source_kind.unknown_fort) {
+            return preparation_fail(c, "The captured argument version does not match.",
+                ownership_api.event_kind.incomplete_proof, src.key);
+        }
+        if (src.allocation.kind == ownership_api.entity_kind.allocation) {
+            u64 allocation = preparation_allocation(c, src.allocation);
+            if (allocation == ownership_state.U64_MAX) {
+                return preparation_fail(c, "The captured argument version does not match.",
+                    ownership_api.event_kind.incomplete_proof, src.key);
+            }
+            ownership_api.validity_kind validity =
+                c->request->before->allocations[allocation].validity;
+            if (validity == ownership_api.validity_kind.released) {
+                return preparation_fail(c, "The argument source is released.",
+                    ownership_api.event_kind.invalid_use, src.key);
+            }
+            if (validity != ownership_api.validity_kind.live) {
+                return preparation_fail(c, "The captured argument version does not match.",
+                    ownership_api.event_kind.incomplete_proof, src.key);
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+fn preparation_arguments(preparation_context mut* c, boundary_plan mut* plan) bool {
+    boundary_request* r = c->request;
+    u64 mut i = 0;
+    while (i < r->operands.len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        boundary_operand operand = r->operands[i];
+        bool variadic = i >= r->call.declaration.ty->params.len;
+        if (operand.ty == null || !preparation_abi(operand.ty, false) ||
+            (!variadic && operand.ty != r->call.declaration.ty->params[i])) {
+            return preparation_fail(c,
+                "The supplied tail type violates the checked extern ABI precondition.",
+                ownership_api.event_kind.incomplete_proof, operand.version);
+        }
+        if (ownership_keys.function(operand.version.function, r->call.operation.function) != 0) {
+            return preparation_fail(c, "The captured argument function key does not match.",
+                ownership_api.event_kind.incomplete_proof, operand.version);
+        }
+        u64 at = preparation_contents(c, operand.holding);
+        if (at == ownership_state.U64_MAX || !same_key(operand.version,
+            r->call.arguments[i].value_version) || !same_key(operand.version,
+            r->before->contents[at].value_version) || !preparation_place(c,
+            operand.holding, r->call.arguments[i].place)) {
+            return preparation_fail(c, "The captured argument version does not match.",
+                ownership_api.event_kind.incomplete_proof, operand.version);
+        }
+        if (!preparation_read(c, r->before->contents[at], variadic)) { return false; }
+        plan->operands[i].ty = operand.ty;
+        plan->operands[i].value = copy_contents(&c->copy, &plan->paths,
+            r->before->contents[at]);
+        if (!ownership_api.successful(c->copy.proof)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn preparation_graph_fail(preparation_context mut* c) bool {
+    return preparation_fail(c, "Canonical owned descendant coverage is incomplete.",
+        ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+}
+fn preparation_node(preparation_context mut* c, ownership_api.entity_id allocation) u64 {
+    ownership_state.state* s = c->request->before;
+    u64 mut found = ownership_state.U64_MAX;
+    u64 mut i = 0;
+    while (i < s->nodes_len) {
+        if (!spend(&c->copy, 1)) { return ownership_state.U64_MAX; }
+        if (same_key(s->nodes[i].allocation, allocation)) {
+            if (found != ownership_state.U64_MAX) {
+                preparation_fail(c, "Canonical node and allocation correspondence is ambiguous.",
+                    ownership_api.event_kind.incomplete_proof, allocation);
+                return ownership_state.U64_MAX;
+            }
+            found = i;
+        }
+        i += 1;
+    }
+    if (found == ownership_state.U64_MAX) { return found; }
+    ownership_api.graph_node node = s->nodes[found];
+    if (node.residual || node.key.kind != ownership_api.entity_kind.graph_node) {
+        preparation_graph_fail(c); return ownership_state.U64_MAX;
+    }
+    i = 0;
+    while (i < s->nodes_len) {
+        if (!spend(&c->copy, 1)) { return ownership_state.U64_MAX; }
+        if (i != found && same_key(node.key, s->nodes[i].key)) {
+            preparation_fail(c, "Canonical node and allocation correspondence is ambiguous.",
+                ownership_api.event_kind.incomplete_proof, allocation);
+            return ownership_state.U64_MAX;
+        }
+        i += 1;
+    }
+    return found;
+}
+fn preparation_target(preparation_context mut* c, ownership_api.entity_id node) u64 {
+    ownership_state.state* s = c->request->before;
+    u64 mut found = ownership_state.U64_MAX;
+    u64 mut i = 0;
+    while (i < s->nodes_len) {
+        if (!spend(&c->copy, 1)) { return ownership_state.U64_MAX; }
+        if (same_key(node, s->nodes[i].key)) {
+            if (found != ownership_state.U64_MAX || s->nodes[i].residual) {
+                preparation_graph_fail(c); return ownership_state.U64_MAX;
+            }
+            found = i;
+        }
+        i += 1;
+    }
+    return found;
+}
+fn preparation_owner(preparation_context mut* c, ownership_api.contents_fact value,
+    ownership_api.allocation_fact owner) bool {
+    if (value.kind != ownership_api.contents_kind.reference || value.owner_empty ||
+        value.borrows.len != 1 || !owner.obligation || owner.owner.detached ||
+        owner.owner.transfer_pending || owner.owner.place.residual ||
+        !owner.count.one || owner.count.zero || owner.count.many ||
+        owner.validity != ownership_api.validity_kind.live ||
+        !value.borrows[0].representation_complete ||
+        !same_key(value.borrows[0].value_version, value.value_version) ||
+        !preparation_place(c, value.place, owner.owner.place)) { return false; }
+    u64 source = preparation_source(c, value.borrows[0].source);
+    if (source == ownership_state.U64_MAX) { return false; }
+    ownership_api.source_fact src = c->request->before->sources[source];
+    if (!same_key(src.allocation, owner.key) || src.validity != ownership_api.validity_kind.live) {
+        return false;
+    }
+    return src.kind == ownership_api.source_kind.trusted_foreign ||
+        (src.kind == ownership_api.source_kind.heap &&
+        value.span_length.kind == ownership_api.fact_kind.exact &&
+        owner.logical_length.kind == ownership_api.fact_kind.exact &&
+        value.span_length.value == owner.logical_length.value);
+}
+fn preparation_ambiguous(preparation_context mut* c, ownership_api.allocation_fact owner)
+    bool {
+    ownership_state.state* s = c->request->before;
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (!spend(&c->copy, 1)) { return true; }
+        ownership_api.allocation_fact other = s->allocations[i];
+        if (!same_key(other.key, owner.key) && other.obligation &&
+            other.validity != ownership_api.validity_kind.released &&
+            preparation_place(c, other.owner.place, owner.owner.place)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+fn preparation_append(preparation_context mut* c, boundary_plan mut* plan,
+    u64 allocation, u64 argument, ownership_api.graph_edge incoming) bool {
+    ownership_api.allocation_fact fact = c->request->before->allocations[allocation];
+    u64 mut i = 0;
+    while (i < plan->selected_len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        if (same_key(plan->selected[i].allocation, fact.key)) {
+            if (plan->selected[i].argument != argument) {
+                return preparation_fail(c, "Two own operands select the same allocation.",
+                    ownership_api.event_kind.caller_requirement, fact.key);
+            }
+            return true;
+        }
+        i += 1;
+    }
+    u64 node = preparation_node(c, fact.key);
+    if (!ownership_api.successful(c->copy.proof) ||
+        plan->selected_len >= plan->selected.len || !spend(&c->copy, 1)) { return false; }
+    selected_allocation mut item = {};
+    item.allocation = fact.key;
+    if (node != ownership_state.U64_MAX) { item.node = c->request->before->nodes[node].key; }
+    item.argument = argument;
+    item.owner = copy_path(&c->copy, &plan->paths, fact.owner.place);
+    item.incoming = copy_edge(&c->copy, &plan->paths, incoming);
+    if (!ownership_api.successful(c->copy.proof)) { return false; }
+    plan->selected[plan->selected_len] = item;
+    plan->selected_len += 1;
+    return true;
+}
+fn preparation_edge(preparation_context mut* c, boundary_plan mut* plan,
+    u64 parent, ownership_api.graph_edge edge) bool {
+    ownership_state.state* s = c->request->before;
+    selected_allocation selected = plan->selected[parent];
+    if (edge.kind == ownership_api.edge_kind.residual || edge.place.residual ||
+        edge.range.residual || !same_key(edge.place.root, selected.allocation) ||
+        edge.key.kind != ownership_api.entity_kind.relation ||
+        edge.from.kind != ownership_api.entity_kind.graph_node ||
+        selected.node.kind != ownership_api.entity_kind.graph_node) {
+        return preparation_graph_fail(c);
+    }
+    u64 target = preparation_target(c, edge.to);
+    if (target == ownership_state.U64_MAX) { return preparation_graph_fail(c); }
+    u64 allocation = preparation_allocation(c, s->nodes[target].allocation);
+    if (allocation == ownership_state.U64_MAX) { return preparation_graph_fail(c); }
+    u64 source = preparation_source(c, edge.range.source);
+    checked_place leaf = preparation_type(c, edge.place);
+    if (!leaf.complete || !types.type_is_reference(leaf.ty) ||
+        (edge.kind == ownership_api.edge_kind.owned) != leaf.ty->is_own ||
+        source == ownership_state.U64_MAX ||
+        !same_key(s->sources[source].allocation, selected.allocation) ||
+        edge.range.offset.kind != ownership_api.fact_kind.exact || edge.range.offset.value < 0 ||
+        !edge.range.access.arithmetic_proved ||
+        edge.range.access.begin.kind != ownership_api.fact_kind.exact ||
+        edge.range.access.end.kind != ownership_api.fact_kind.exact ||
+        edge.range.access.begin.value < 0 ||
+        edge.range.access.end.value < edge.range.access.begin.value) {
+        return preparation_graph_fail(c);
+    }
+    u64 offset = cast(edge.range.offset.value, u64);
+    u64 low = cast(edge.range.access.begin.value, u64);
+    u64 high = cast(edge.range.access.end.value, u64);
+    u64 mut bytes = 0;
+    if (!preparation_size(c, leaf.ty, 0, &bytes) || low > ownership_state.U64_MAX - offset ||
+        offset + low != leaf.offset || high - low != bytes) { return preparation_graph_fail(c); }
+    ownership_api.place_path mut root = {};
+    root.root = selected.allocation;
+    checked_place payload = preparation_type(c, root);
+    u64 mut extent = 0;
+    if (!payload.complete || edge.range.layout != payload.ty ||
+        !preparation_size(c, payload.ty, 0, &extent) ||
+        edge.range.extent.kind != ownership_api.fact_kind.exact || edge.range.extent.value < 0 ||
+        cast(edge.range.extent.value, u64) != extent || offset > extent || high > extent - offset ||
+        edge.range.alignment < 8 || edge.range.leaves.len != 1 ||
+        s->sources[source].validity != ownership_api.validity_kind.live ||
+        !spend(&c->copy, 1)) { return preparation_graph_fail(c); }
+    ownership_api.layout_leaf supplied = edge.range.leaves[0];
+    if (supplied.ty != leaf.ty || supplied.owning != leaf.ty->is_own || supplied.padding ||
+        !supplied.bytes.arithmetic_proved ||
+        supplied.bytes.begin.kind != ownership_api.fact_kind.exact ||
+        supplied.bytes.end.kind != ownership_api.fact_kind.exact ||
+        supplied.bytes.begin.value != cast(leaf.offset, i64) ||
+        supplied.bytes.end.value < supplied.bytes.begin.value ||
+        cast(supplied.bytes.end.value - supplied.bytes.begin.value, u64) != bytes) {
+        return preparation_graph_fail(c);
+    }
+    u64 mut partition = 0;
+    while (partition < edge.range.partitions.len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        ownership_api.region_partition part = edge.range.partitions[partition];
+        if (part.residual || !part.bytes.arithmetic_proved ||
+            part.bytes.begin.kind != ownership_api.fact_kind.exact ||
+            part.bytes.end.kind != ownership_api.fact_kind.exact ||
+            part.bytes.begin.value < 0 || part.bytes.end.value < part.bytes.begin.value ||
+            cast(part.bytes.end.value, u64) > extent) { return preparation_graph_fail(c); }
+        partition += 1;
+    }
+    u64 holding = preparation_contents(c, edge.place);
+    if (holding == ownership_state.U64_MAX) { return preparation_graph_fail(c); }
+    ownership_api.contents_fact value = s->contents[holding];
+    if (value.kind != ownership_api.contents_kind.reference || value.borrows.len != 1 ||
+        !value.borrows[0].representation_complete || !same_key(value.value_version,
+        value.borrows[0].value_version)) { return preparation_graph_fail(c); }
+    u64 child_source = preparation_source(c, value.borrows[0].source);
+    if (child_source == ownership_state.U64_MAX ||
+        !same_key(s->sources[child_source].allocation, s->allocations[allocation].key) ||
+        s->sources[child_source].validity != ownership_api.validity_kind.live ||
+        s->allocations[allocation].validity != ownership_api.validity_kind.live) {
+        return preparation_graph_fail(c);
+    }
+    if (edge.kind == ownership_api.edge_kind.borrowed) { return true; }
+    if (preparation_ambiguous(c, s->allocations[allocation]) ||
+        !preparation_owner(c, value, s->allocations[allocation])) {
+        return preparation_graph_fail(c);
+    }
+    return preparation_append(c, plan, allocation, selected.argument, edge);
+}
+fn preparation_child_path(preparation_context mut* c, boundary_plan mut* plan,
+    ownership_api.place_path parent, ownership_api.projection part) ownership_api.place_path {
+    ownership_api.place_path mut path = parent;
+    if (parent.projections.len == ownership_state.U64_MAX) { return ownership_api.place_path{}; }
+    ownership_api.charge_item[1] items = {ownership_api.charge_item{
+        ownership_api.limit_category.d, ownership_api.limit_scope.path, 1}};
+    ownership_api.charge_request charge = {ownership_api.work_kind.substitution,
+        c->metadata.operation, c->metadata.source, items[..]};
+    ownership_api.charge_result paid = ownership_api.charge(c->copy.services, &charge);
+    if (!paid.allowed) {
+        c->copy.proof = paid.proof;
+        return ownership_api.place_path{};
+    }
+    ownership_state.slice_block mut* store = block(&c->copy, &plan->paths);
+    u64 len = parent.projections.len + 1;
+    if (store == null || !array_permission(&c->copy, len)) { return ownership_api.place_path{}; }
+    store->projections = new(ownership_api.projection, len);
+    u64 mut i = 0;
+    while (i < parent.projections.len) {
+        if (!spend(&c->copy, 1)) { return ownership_api.place_path{}; }
+        store->projections[i] = parent.projections[i]; i += 1;
+    }
+    store->projections[i] = part;
+    path.projections = store->projections[..];
+    return path;
+}
+fn preparation_fields(preparation_context mut* c, boundary_plan mut* plan,
+    u64 parent, types.node* ty, ownership_api.place_path path, u64 depth) bool {
+    if (ty == null || depth >= 64 || !spend(&c->copy, 1)) { return preparation_graph_fail(c); }
+    if (types.type_is_reference(ty)) {
+        if (!ty->is_own) { return true; }
+        u64 at = preparation_contents(c, path);
+        if (at == ownership_state.U64_MAX) { return preparation_graph_fail(c); }
+        ownership_api.contents_fact value = c->request->before->contents[at];
+        if (value.kind == ownership_api.contents_kind.empty_owner && value.owner_empty &&
+            value.borrows.len == 0 && value.span_length.kind == ownership_api.fact_kind.exact &&
+            value.span_length.value == 0) { return true; }
+        u64 mut matches = 0;
+        u64 mut i = 0;
+        while (i < c->request->before->edges_len) {
+            if (!spend(&c->copy, 1)) { return false; }
+            ownership_api.graph_edge edge = c->request->before->edges[i];
+            if (same_key(edge.from, plan->selected[parent].node) &&
+                edge.kind == ownership_api.edge_kind.owned &&
+                preparation_place(c, edge.place, path)) {
+                matches += 1;
+            }
+            i += 1;
+        }
+        return matches == 1 || preparation_graph_fail(c);
+    }
+    if (ty->kind == types.type_kind.k_array) {
+        u64 mut i = 0;
+        while (i < ty->len) {
+            if (!spend(&c->copy, 1) || i > 9223372036854775807) { return false; }
+            ownership_api.projection mut part = {};
+            part.kind = ownership_api.projection_kind.fixed_index;
+            part.index.kind = ownership_api.fact_kind.exact;
+            part.index.value = cast(i, i64);
+            ownership_api.place_path child = preparation_child_path(c, plan, path, part);
+            if (!ownership_api.successful(c->copy.proof) ||
+                !preparation_fields(c, plan, parent, ty->elem, child, depth + 1)) { return false; }
+            i += 1;
+        }
+    } else if (ty->kind == types.type_kind.k_struct) {
+        if (ty->layout == null || ty->layout->state != types.layout_state.l_resolved ||
+            ty->decl == null) { return preparation_graph_fail(c); }
+        ast.sym* record = cast(ty->decl, ast.sym*);
+        if (record->node == null) { return preparation_graph_fail(c); }
+        u64 mut i = 0;
+        u32 mut ordinal = 0;
+        while (i < ast.ast_len(record->node)) {
+            if (!spend(&c->copy, 1)) { return false; }
+            ast.node* field = ast.ast_child(record->node, i);
+            if (field->kind == ast.ast_kind.k_field_decl) {
+                ownership_api.projection mut part = {};
+                part.kind = ownership_api.projection_kind.field;
+                part.field = ordinal;
+                ownership_api.place_path child =
+                    preparation_child_path(c, plan, path, part);
+                if (!ownership_api.successful(c->copy.proof) ||
+                    !preparation_fields(c, plan, parent, field->ty, child, depth + 1)) {
+                    return false;
+                }
+                ordinal += 1;
+            }
+            i += 1;
+        }
+    }
+    return true;
+}
+fn preparation_closure(preparation_context mut* c, boundary_plan mut* plan, u64 start) bool {
+    ownership_state.state* s = c->request->before;
+    u64 mut at = start;
+    while (at < plan->selected_len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        selected_allocation parent = plan->selected[at];
+        u64 mut i = 0;
+        while (i < s->edges_len) {
+            if (!spend(&c->copy, 1)) { return false; }
+            ownership_api.graph_edge edge = s->edges[i];
+            if (same_key(edge.from, parent.node)) {
+                u64 mut j = 0;
+                while (j < i) {
+                    if (!spend(&c->copy, 1)) { return false; }
+                    if (same_key(edge.key, s->edges[j].key)) { return preparation_graph_fail(c); }
+                    j += 1;
+                }
+                if (!preparation_edge(c, plan, at, edge)) { return false; }
+            }
+            i += 1;
+        }
+        ownership_api.place_path mut root = {};
+        root.root = parent.allocation;
+        checked_place payload = preparation_type(c, root);
+        if (!payload.complete || !preparation_fields(c, plan, at, payload.ty, root, 0)) {
+            return preparation_graph_fail(c);
+        }
+        i = 0;
+        while (i < s->allocations_len) {
+            if (!spend(&c->copy, 1)) { return false; }
+            ownership_api.allocation_fact child = s->allocations[i];
+            if (child.obligation && same_key(child.owner.place.root, parent.allocation)) {
+                u64 mut matches = 0;
+                u64 mut j = 0;
+                while (j < plan->selected_len) {
+                    if (!spend(&c->copy, 1)) { return false; }
+                    if (same_key(child.key, plan->selected[j].allocation)) { matches += 1; }
+                    j += 1;
+                }
+                if (matches != 1) { return preparation_graph_fail(c); }
+            }
+            i += 1;
+        }
+        at += 1;
+    }
+    return true;
+}
+fn preparation_selection(preparation_context mut* c, boundary_plan mut* plan) bool {
+    boundary_request* r = c->request;
+    u64 mut i = 0;
+    while (i < r->call.declaration.ty->params.len) {
+        if (!spend(&c->copy, 1)) { return false; }
+        types.node* parameter = r->call.declaration.ty->params[i];
+        if (types.type_is_reference(parameter) && parameter->is_own) {
+            ownership_api.contents_fact value = plan->operands[i].value;
+            checked_place holding = preparation_type(c, value.place);
+            if (value.place.root.kind != ownership_api.entity_kind.slot) {
+                return preparation_fail(c,
+                    "The own argument has no actual external owning holding operand.",
+                    ownership_api.event_kind.caller_requirement, value.value_version);
+            }
+            if (!holding.complete || !types.type_is_reference(holding.ty) || !holding.ty->is_own) {
+                return preparation_fail(c, "The own argument has no unique owning operand.",
+                    ownership_api.event_kind.caller_requirement, value.value_version);
+            }
+            if (value.kind == ownership_api.contents_kind.empty_owner && value.owner_empty &&
+                value.borrows.len == 0 && value.span_length.kind == ownership_api.fact_kind.exact &&
+                value.span_length.value == 0) { i += 1; continue; }
+            if (value.borrows.len != 1) { return preparation_graph_fail(c); }
+            u64 source = preparation_source(c, value.borrows[0].source);
+            if (source == ownership_state.U64_MAX) { return preparation_graph_fail(c); }
+            u64 owner = preparation_allocation(c, r->before->sources[source].allocation);
+            if (owner == ownership_state.U64_MAX) { return preparation_graph_fail(c); }
+            ownership_api.allocation_fact allocation = r->before->allocations[owner];
+            if (allocation.count.zero || allocation.count.many || !allocation.count.one ||
+                preparation_ambiguous(c, allocation)) {
+                return preparation_fail(c, "The owning operand remains ambiguous.",
+                    ownership_api.event_kind.incomplete_proof, allocation.key);
+            }
+            if (!preparation_owner(c, value, allocation)) {
+                return preparation_fail(c, "The owning operand remains ambiguous.",
+                    ownership_api.event_kind.incomplete_proof, allocation.key);
+            }
+            if (!r->graph_complete || !r->inline_owned_layout_complete) {
+                return preparation_graph_fail(c);
+            }
+            u64 start = plan->selected_len;
+            if (!preparation_append(c, plan, owner, i, ownership_api.graph_edge{}) ||
+                !preparation_closure(c, plan, start)) { return false; }
+        }
+        i += 1;
+    }
+    return true;
+}
+fn prepare_boundary(ownership_api.services* svc, boundary_request* req) preparation {
+    preparation_context mut c = {};
+    c.copy.services = svc;
+    c.copy.proof.kind = ownership_api.proof_kind.complete;
+    c.metadata.operation = req->call.operation;
+    c.metadata.source = req->call.source;
+    if (req->events.len != 0) { c.metadata.event = req->events[0].key; }
+    c.copy.request = &c.metadata;
+    c.request = req;
+    c.kind = ownership_api.event_kind.incomplete_proof;
+    preparation mut out = {};
+    if (preparation_metadata(&c) && validate_state(&c.copy, req->before) &&
+        preparation_view(&c) &&
+        preparation_price(&c, req->operands.len, 1) &&
+        preparation_price(&c, req->before->allocations_len, 1)) {
+        out.selected = new(boundary_plan);
+        out.selected->operands = new(prepared_operand, req->operands.len);
+        out.selected->selected = new(selected_allocation, req->before->allocations_len);
+        out.selected->paths = ownership_state.empty();
+        if (!preparation_arguments(&c, out.selected) ||
+            !preparation_selection(&c, out.selected)) {
+            drop_boundary_plan(move(out.selected));
+        }
+    }
+    if (out.selected == null && ownership_api.successful(c.copy.proof)) {
+        preparation_fail(&c, "The binding has no checked function type.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    preparation_report(&c);
+    out.proof = c.copy.proof;
     return out;
 }

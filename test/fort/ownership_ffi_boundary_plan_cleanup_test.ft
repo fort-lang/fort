@@ -1,0 +1,132 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept preparation_success_cleanup
+//| accept preparation_early_cleanup
+//| accept preparation_late_cleanup
+//| accept preparation_replacement_cleanup
+//| accept preparation_retained_cleanup
+//| accept preparation_take_cleanup
+/// Tests six populated private-plan lifetimes with separate allocator observations.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_boundary_env as env;
+import ownership_ffi_storage_env;
+import ownership_state;
+import heap;
+
+struct held { ownership_ffi.boundary_plan mut* own plan; }
+
+fn prefix_cost(env.env mut* e) u64 {
+    ownership_ffi.preparation_context mut c = {};
+    c.copy.services = &e->raw.local.service;
+    c.copy.proof.kind = ownership_api.proof_kind.complete;
+    c.metadata.operation = e->request.call.operation;
+    c.metadata.source = e->request.call.source;
+    c.metadata.event = e->events[0].key;
+    c.copy.request = &c.metadata;
+    c.request = &e->request;
+    assert(ownership_ffi.preparation_metadata(&c));
+    assert(ownership_ffi.validate_state(&c.copy, e->request.before));
+    assert(ownership_ffi.preparation_view(&c));
+    assert(ownership_ffi.preparation_price(&c, e->request.operands.len, 1));
+    assert(ownership_ffi.preparation_price(&c, e->request.before->allocations_len, 1));
+    return e->raw.budget.calls;
+}
+fn one_round(env.env mut* e, u32 mode, u64 early, u64 late, u64 objects) void {
+    held[8] mut history = {};
+    u64 mut i = 0;
+    while (i < objects) {
+        env.reset(e, 0);
+        if (mode == 3 || mode == 4) {
+            ownership_ffi.preparation prior = ownership_ffi.prepare_boundary(
+                &e->raw.local.service, &e->request);
+            assert(ownership_api.successful(prior.proof) && prior.selected != null);
+            history[i].plan = move(prior.selected);
+            env.reset(e, 0);
+        }
+        if (mode == 1) { e->raw.budget.deny_at = early; }
+        if (mode == 2 || mode == 4) { e->raw.budget.deny_at = late; }
+        ownership_ffi.preparation out = ownership_ffi.prepare_boundary(
+            &e->raw.local.service, &e->request);
+        if (mode == 1 || mode == 2 || mode == 4) {
+            assert(out.selected == null && out.proof.failed);
+            assert(out.proof.terminal.present && out.proof.terminal.limit.present);
+            assert(e->raw.budget.calls == (mode == 1 ? early : late));
+            if (mode == 4) {
+                assert(history[i].plan->selected_len == 32);
+                assert(history[i].plan->operands[31].value.borrows[0].range.leaves.len == 2);
+                assert(history[i].plan->selected[31].owner.projections[1].index.value == 31);
+            }
+        } else {
+            assert(ownership_api.successful(out.proof) && out.selected != null);
+            assert(out.selected->selected_len == 32);
+            assert(out.selected->operands[31].value.borrows[0].range.partitions.len == 2);
+            if (mode == 3) { ownership_ffi.drop_boundary_plan(move(history[i].plan)); }
+            history[i].plan = move(out.selected);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < objects) {
+        if (mode == 5) {
+            ownership_ffi.boundary_plan mut* own taken = move(history[i].plan);
+            assert(history[i].plan == null && taken != null);
+            ownership_ffi.drop_boundary_plan(move(taken));
+        } else { ownership_ffi.drop_boundary_plan(move(history[i].plan)); }
+        i += 1;
+    }
+}
+fn boundary_cleanup_objects(u32 mode, u64 objects) void {
+    assert(objects > 0 && objects <= 8);
+    assert(mode < 6);
+    env.env mut e = {};
+    env.open(&e, 33, "many");
+    defer env.close(&e);
+    env.populated(&e);
+    env.finish(&e);
+    ownership_ffi.preparation calibration = ownership_ffi.prepare_boundary(
+        &e.raw.local.service, &e.request);
+    assert(ownership_api.successful(calibration.proof) && calibration.selected != null);
+    u64 late = e.raw.budget.calls;
+    ownership_ffi.drop_boundary_plan(move(calibration.selected));
+    env.reset(&e, 0);
+    u64 early = prefix_cost(&e) + 24;
+    assert(early < late && late < 65536);
+    u64 mut round = 0;
+    while (round < 64) {
+        one_round(&e, mode, early, late, objects);
+        ownership_ffi_storage_env.live_bytes();
+        heap.system_view();
+        round += 1;
+    }
+    one_round(&e, mode, early, late, objects);
+    u64 before_live = ownership_ffi_storage_env.live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_api.U64_MAX;
+    u64 mut best_system = ownership_api.U64_MAX;
+    round = 0;
+    while (round < 256) {
+        one_round(&e, mode, early, late, objects);
+        u64 live = heap.distance(before_live, ownership_ffi_storage_env.live_bytes());
+        u64 system = heap.distance(before_system, heap.system_view());
+        if (round >= 240 && live < best_live) { best_live = live; }
+        if (round >= 240 && system < best_system) { best_system = system; }
+        round += 1;
+    }
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 2048 : 256;
+    assert(best_live < bound);
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+    env.unchanged(&e);
+}
+fn boundary_cleanup(u32 mode) void { boundary_cleanup_objects(mode, 8); }
+
+fn main() i32 {
+    boundary_cleanup_objects(0, 2); println("accept preparation_success_cleanup");
+    boundary_cleanup_objects(1, 2); println("accept preparation_early_cleanup");
+    boundary_cleanup_objects(2, 2); println("accept preparation_late_cleanup");
+    boundary_cleanup_objects(3, 2); println("accept preparation_replacement_cleanup");
+    boundary_cleanup_objects(4, 2); println("accept preparation_retained_cleanup");
+    boundary_cleanup_objects(5, 2); println("accept preparation_take_cleanup");
+    return 0;
+}

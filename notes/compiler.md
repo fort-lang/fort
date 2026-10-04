@@ -331,6 +331,27 @@ came here.
   leaves after operand effects. With a holding temporary, check the actual result destination at the
   final write after defer. The 17 normative traces in memory model 2.6 are design evidence, not
   compiler probes.
+- **Foreign-call preparation reads actual caller facts** (D17.13).
+  `ownership_ffi.prepare_boundary` validates a checked extern declaration and captured operands.
+  Its producer supplies complete operation, source, event, declaration, and storage correspondence.
+  The supplied public state view names the paired core state's arrays.
+  Checked type metadata stays valid until the producer releases the private plan.
+  Preparation reads all fixed and variadic arguments before it selects an owning operand.
+  A selected allocation needs its actual unique live owner and caller obligation.
+  Canonical-empty owners select no allocation. An orphan owned cycle supplies no external owner.
+  Complete graph flags do not repair inconsistent nodes, allocations, edges, or owner locations.
+  Owned descendants need actual complete holding contents and checked typed field correspondence.
+  Borrowed edges preserve their allocations outside the selected closure. Borrowed cycles need no
+  acyclic ownership proof.
+  The private plan copies operand facts, owner paths, edge paths, and nested region arrays.
+  These copies preserve the original borrow sources. Checked layout metadata remains borrowed.
+  Each scan and copy receives separate work permission. Each work charge has amount one.
+  Semantic field and array descent receives path permission before it creates the next path.
+  Checked price overflow refuses before delegated work. Cleanup needs no later work permission.
+  A failed preparation releases its partial plan. It preserves caller facts and retained results.
+  Unknown source or owner correspondence supplies no unconditional diagnostic witness.
+  Preparation creates no transfer, fresh foreign source, foreign outcome, or public result view.
+  The foreign signature hook and driver integration remain separate compiler work.
 - **Raw storage retains its typed source facts** (T-275, D17.17).
   `spec/memory-model.md` 2.8 defines source objects, byte offsets, access windows, alignment, and
   reference representation effects. Pointer casts preserve those facts through void pointers.
@@ -352,7 +373,8 @@ came here.
   Each raw consumer charges repeated source searches, comparisons, copies, and allocations.
   A metadata copy price pays no later arithmetic work. Each address alternative pays its own work.
   Typed access proves nonnegative, representable offsets and endpoints for foreign sources too.
-  Foreign trust supplies no static extent or alignment. Endpoint proof charges and releases scratch expressions.
+  Foreign trust supplies no static extent or alignment.
+  Endpoint proof charges and releases scratch expressions.
   Type casts pay iterative comparison work before they use the existing reference conversion matrix.
   Header reads pay for their delegated borrow and source walks before transfer inspection.
   Cleanup requires no work permission after the first terminal refusal.
