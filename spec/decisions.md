@@ -1899,6 +1899,10 @@ string `switch`; `goto` (never). Amended 2026-09-10: spans were called slices (D
 Amended 2026-10-01 (T-272): removed compile-time ownership proof from the deferred features.
 D17.14 and D19.8 define that proof and its staged delivery.
 A stricter rule that forbids current zero-value inspections after `move` or `del` remains deferred.
+Note 2026-10-03: The deferred stricter rule is the recorded branch ruling of 2026-09-18:
+"every read of an emptied local is an error".
+Branch `feat/local-linear-check` records that ruling at `77bb6a41`.
+Main never adopted it. D17.9 keeps zero-value inspections legal.
 The proof adds no general resource type system for file descriptors, sockets, or scalar handles.
 
 Deferred at the C boundary (2026-09-11, T-025): an extern link name or alias.
