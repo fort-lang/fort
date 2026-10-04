@@ -100,87 +100,22 @@ came here.
   on an rvalue. `check_emptiable` reads the operand of `move` and `del` through `empty_of`, and
   the linear check (T-182) will read the same bits to judge emptiability on the tree (T-260).
   bootstrap-0 writes neither bit, because the freeze (section 8) leaves the C unchanged.
-- **A range loop holds a span or string header once** (T-263, D7.5, D17.10).
-  `fir_lower.range_collection` copies the header into a lent temporary before the loop head.
-  An owning fixed array still lends its original storage. `check_stmt.check_range_writes` checks
-  the resolved body for assignment, `del`, `move`, and implicit return moves of collection storage.
-  The check includes containing paths and local reference initializers. Scalar element writes
-  remain legal. This AST check has no alias dataflow or call-effect analysis. It conservatively
-  refuses fort calls and other ownership writes during a range loan. An owning element can own
-  the object that contains the collection. Its release can therefore free the collection storage.
-  Trusted extern calls retain their D17.13 contracts. T-291 replaces the temporary refusal with
-  inferred loan proof. T-292 accepts proven safe helpers and refuses helpers that free storage.
-  The T-263 ticket records the probes and the cost. Do not treat this AST check as exact loan proof.
-  `range_collection` fills an inactive FIR-layout capture candidate (D17.10, `spec/fir.md` 5.2).
-  It records the captured place and the original protected place.
-  A non-owning fixed array copy has no original protected place.
-  An indirect collection place holds its selected address before use.
-  Later pointer writes therefore cannot retarget the candidate's original place.
-  Selected range nodes have declaration IDs; repeated deferred lowering has separate expansion IDs.
-  Production releases unused candidates. No candidate enters verified FIR or proves source coverage.
-- **Range lowering records inactive operation-gap boundary proposals** (D17.10, `spec/fir.md` 9.5).
-  The lowering records capture after collection evaluation and body entry before `live(x)`.
-  It records body cleanup after body defers, loan exit after local `dead` markers, and outer cleanup
-  before the next outer effect. A switch break keeps the range loan active. Continue, loop break,
-  return, and fall-off close the body loan on their own paths. An abort has no normal exit triple.
-  A zero-iteration path has capture but does not enter the body. Nested loans name their parent.
-  Each deferred lowering occurrence has its own expansion ID and exit occurrence.
-  A context proposal maps its ID to the source `defer`, enclosing context, and exit occurrence.
-  Return unwind hides ended inner loans before it lowers enclosing defers. A range in an outer
-  body defer sees the active outer loan. A range in a function defer sees no ended loan.
-  A terminating inner defer records suppression for skipped defers in crossed outer scopes.
-  The walk stops at the exit target. A continue or break does not suppress defers beyond it.
-  A skipped defer records a suppression proposal with no capture. All proposals stay outside FIR.
-  The producer frees unused proposals on each path. A caller owns returned proposals.
-  Source completeness remains false until independent source correspondence validates them.
-- **The inactive range audit compares checked source with FIR operations** (`spec/fir.md` 5.2).
-  A separate selected-source walk assigns declaration IDs without reading producer records.
-  Counter-zero FIR operations identify produced expansions, including disconnected blocks.
-  A source-only scope replay derives defer chains, exit occurrences, and cleanup events.
-  Empty scope expansions consume occurrence numbers. Repeated defers can use numbers 2 and 5.
-  Source exits and verified FIR operations constrain each produced context match.
-  The FIR loop edge and live marker identify body entry before candidate binding checks.
-  Source intervals and a CFG walk must agree on each expansion's required dead gaps.
-  Each required gap matches exactly one cleanup triple. Candidate subsets supply no gap proof.
-  A separate proof derives linear call-result capture and protected paths from actual body uses.
-  It traces unique temporary definitions, checked callees, ordered operands, and exact projections.
-  An address or array slice of a temporary's fixed storage stays incomplete without alias proof.
-  An address or slice of backing storage does not expose that temporary's slot.
-  Held callee, argument, and address operations precede the effects that require them.
-  Index and bound calls supply operand effects. They do not supply collection storage roots.
-  Stored header reads follow index and explicit-bound effects.
-  An absent upper bound reads length then.
-  The proof rejects missing, duplicate, overwritten, substituted, and cross-expansion links.
-  A top-level conditional result proves its predicate, exact switch edges, both arms, and join.
-  Aggregate arms write the joined destination directly.
-  Scalar arms retain their exact produced operands.
-  Nested scalar results use move for owning checked types and copy for non-owning checked types.
-  Nested result arms repeat that proof. Constant predicates still require both emitted arms.
-  Direct nested aggregate result arms share only their proved parent's destination family.
-  Each edge matches the exact source arm, aggregate destination, CFG interval, and nested join exit.
-  Nested siblings retain that family. Independent operand regions keep separate destinations.
-  Each destination write matches exactly one arm in its proved family.
-  Each arm retains its checked source, statement index, and observed FIR exit.
-  Extra predecessors, extra writes, arm swaps, and substituted joins cause keyed refusal.
-  Literal boolean selections of two string literals can prove folded bytes without a value table.
-  Other folded values stay incomplete. Predicate calls retain their refusal policy.
-  Conditional callees and arguments prove both arms and the joined operand consumed by the call.
-  The proof retains held values before later writers.
-  Dereference, member, header, cast, index, and slice links repeat the operand proof after joins.
-  Conditional indices and both bounds retain their conversions and evaluation order.
-  Function-name selections retain both arms even with literal predicates.
-  Replacing their consumed join with a selected function symbol causes keyed refusal.
-  Arm destination stores can precede unrelated backing-storage reads.
-  Fixed temporary slot exposure keeps its separate refusal policy.
-  Operand intervals use stack values. Their traversal crosses only fully proved joins.
-  Session vectors keep numeric indices across growth.
-  Report copies survive session and candidate teardown.
-  Checked source and types outlive the report. FIR stays alive during binding inspection.
-  Unknown forms and ambiguous partitions stay keyed incomplete, including deferred expansions.
-  This correspondence proves no returned-storage liveness or callee ownership effect.
-  The report retains source and exit evidence after candidate teardown.
-  Structural validity, source coverage, and ownership proof remain separate false verdicts.
-  Deferred absence validation and publication follow in a later pass.
+- **A range loan is part of FIR** (D17.10, D19.8, `spec/fir.md` 7, 9.3, 9.5, 10).
+  The lowering captures the collection, then emits `loan_begin` before counter initialization.
+  It preserves the source place before a held address. A copied non-owning array has no loan.
+  Done begins with `loan_end`. Return unwind ends each crossed loan after that scope's dead markers.
+  An aborting defer stops unwind. Continue, break, and fall-off leave the loan open until done.
+  Each deferred expansion takes a new ID. V14 applies seven rules to reachable FIR statements.
+  It checks unique begins, collection types, stack order, equal joins, and empty returns.
+  It checks header reads.
+  It prunes unselected constant-switch edges and imposes no loan condition on aborts.
+  A wrong placement can fail V14. V14 does not prove storage preservation by an executable effect.
+  The ownership flow solver reads those effects from FIR and instantiated ordered call outcomes.
+  It captures allocation sources at begin.
+  Unresolved place bindings and unknown calls stay incomplete.
+  Guarded effects use the same overlap tests.
+  A guarded overlapping effect gives incomplete proof without a condition witness.
+  The ordinary source guard remains until the driver selects the ownership proof.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a
@@ -656,7 +591,7 @@ came here.
   Collection and call effects charge W before they change facts.
   A repeated allocation site keeps a bounded record of released allocations and their histories.
   A retained borrow prevents reuse of that site's current identity.
-  A whole-body range loan starts at body entry and ends at loan exit.
+  A range loan starts at loan_begin and ends at loan_end.
   Direct and summarized writes to captured storage use one overlap test.
   At normal return, the pass checks complete returned-borrow relations after expanded effects.
   A proved empty reference needs no borrow. Scalar result fields add no source obligation.
@@ -900,17 +835,10 @@ came here.
   `fort -S src/fort/main.ft` took 3.2 s to 3.4 s through FIR and 1.4 s to 1.6 s through the
   direct path, and `fort --fir` alone took 2.1 s to 2.2 s, so the lowering and the verifier take
   most of the difference.
-- **Range-loan carriers belong to one FIR function** (D17.10, D19.8, `spec/fir.md` 5.2, 8).
-  Declaration IDs name selected source nodes. Expansion IDs name lowering occurrences.
-  Loan IDs name whole-body loans. A clone copies the carrier vectors, and function teardown
-  releases them. V14 checks references, protected places, cleanup on each normal exit, parent
-  order, active-loan joins, and the supplied seven-count structural claim. It follows only the
-  selected edge of a constant switch. It cannot prove that the
-  supplied declarations cover the selected source. The source-coverage verdict needs an
-  independent source check. The build-mode pass remaps operation gaps, follows folded writes,
-  and keeps source positions.
-  The LLVM translator ignores all carrier records. The carrier suite compares LLVM text in four
-  build modes and detects any output change.
+- **Loan statements emit no LLVM** (D19.8, `spec/fir.md` 12).
+  The translator ignores both statement kinds before it changes pending source notes.
+  The LLVM equality test removes the statements and compares actual emitted text in four modes.
+  Build-mode passes keep statement order and verify V14 again.
 
 ## 7. The runtime and the standard library
 

@@ -73,54 +73,6 @@ fn build_mode(fir.func mut* f, bool release, bool no_bounds) void {
     remove_dead(f);
     fold_stores(f, done);
     merge_blocks(f, done);
-    sort_boundaries(f);
-}
-
-fn boundary_drop(fir.func mut* f, u32 block, u64 position) void {
-    u64 mut base = 0;
-    u64 mut k = 0;
-    while (k < f->range_boundaries.len) {
-        fir.range_boundary* bd = &f->range_boundaries.items[k];
-        if (bd->block == block && cast(bd->position, u64) == position
-            && cast(bd->order, u64) >= base) {
-            base = cast(bd->order, u64) + 1;
-        }
-        k += 1;
-    }
-    k = 0;
-    while (k < f->range_boundaries.len) {
-        fir.range_boundary mut* bd = &f->range_boundaries.items[k];
-        if (bd->block == block && cast(bd->position, u64) > position) {
-            if (cast(bd->position, u64) == position + 1) {
-                if (cast(bd->order, u64) + base > fir.U32_LIMIT) {
-                    panic("fir_passes.boundary_drop: range boundary order overflow");
-                }
-                bd->order = cast(cast(bd->order, u64) + base, u32);
-            }
-            bd->position -= 1;
-        }
-        k += 1;
-    }
-}
-
-fn boundary_less(fir.range_boundary a, fir.range_boundary b) bool {
-    if (a.block != b.block) { return a.block < b.block; }
-    if (a.position != b.position) { return a.position < b.position; }
-    return a.order < b.order;
-}
-
-fn sort_boundaries(fir.func mut* f) void {
-    u64 mut i = 1;
-    while (i < f->range_boundaries.len) {
-        fir.range_boundary value = f->range_boundaries.items[i];
-        u64 mut j = i;
-        while (j > 0 && boundary_less(value, f->range_boundaries.items[j - 1])) {
-            f->range_boundaries.items[j] = f->range_boundaries.items[j - 1];
-            j -= 1;
-        }
-        f->range_boundaries.items[j] = value;
-        i += 1;
-    }
 }
 
 // ---- the checks --------------------------------------------------------------------------------
@@ -433,7 +385,6 @@ fn drop_dead(fir.func mut* f, u32 b, u32@ uses) bool {
             bl->statements.items[kept] = s;
             kept += 1;
         } else {
-            boundary_drop(f, b, kept);
         }
         i += 1;
     }
@@ -550,49 +501,6 @@ fn fold_stores(fir.func mut* f, removal@ done) void {
 
 // The folded write replaces the last statement of `before`. The old store followed the
 // final gap of `before` and gap 0 of `after`. Keep that order before the replacement write.
-fn boundary_fold_store(fir.func mut* f, u32 before, u32 after, u64 last) void {
-    u64 mut order = 0;
-    u64 mut i = 0;
-    while (i < f->range_boundaries.len) {
-        fir.range_boundary mut* bd = &f->range_boundaries.items[i];
-        if (bd->block == before && cast(bd->position, u64) == last - 1) {
-            bd->order = cast(order, u32);
-            order += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while (i < f->range_boundaries.len) {
-        fir.range_boundary mut* bd = &f->range_boundaries.items[i];
-        if (bd->block == before && cast(bd->position, u64) == last) {
-            bd->position = cast(last - 1, u32);
-            bd->order = cast(order, u32);
-            order += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while (i < f->range_boundaries.len) {
-        fir.range_boundary mut* bd = &f->range_boundaries.items[i];
-        if (bd->block == after && bd->position == 0) {
-            bd->block = before;
-            bd->position = cast(last - 1, u32);
-            bd->order = cast(order, u32);
-            order += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while (i < f->range_boundaries.len) {
-        fir.range_boundary mut* bd = &f->range_boundaries.items[i];
-        if (bd->block == after && bd->position == 1) {
-            bd->block = before;
-            bd->position = cast(last, u32);
-        }
-        i += 1;
-    }
-}
-
 // Folds the store of block `b`, which ended in the removed `check(overwrite: p)`, when its last
 // statement is `_t = rvalue` and the first statement of its continuation is `p = move _t`.
 fn fold_store(fir.func mut* f, u32 b, fir.place p, u32@ uses) void {
@@ -620,7 +528,6 @@ fn fold_store(fir.func mut* f, u32 b, fir.place p, u32@ uses) void {
         || o.place.proj_len != 0 || o.place.local != held->place.local) {
         return;
     }
-    boundary_fold_store(f, b, next, last);
     held->place = store->place;
     u64 mut i = 1;
     while (i < cont->statements.len) {
@@ -628,8 +535,6 @@ fn fold_store(fir.func mut* f, u32 b, fir.place p, u32@ uses) void {
         i += 1;
     }
     cont->statements.len -= 1;
-    boundary_drop(f, next, 0);
-    sort_boundaries(f);
 }
 
 // Whether two places have the same base and the same projections, index locals included.
@@ -684,35 +589,6 @@ fn merge_blocks(fir.func mut* f, removal mut@ done) void {
 fn absorb(fir.func mut* f, u32 k, u32 c) void {
     fir.block mut* into = fir.block_mut(f, k);
     fir.block mut* from = fir.block_mut(f, c);
-    u64 offset = into->statements.len;
-    u64 mut base = 0;
-    u64 mut j = 0;
-    while (j < f->range_boundaries.len) {
-        fir.range_boundary* bd = &f->range_boundaries.items[j];
-        if (bd->block == k && cast(bd->position, u64) == offset
-            && cast(bd->order, u64) >= base) {
-            base = cast(bd->order, u64) + 1;
-        }
-        j += 1;
-    }
-    j = 0;
-    while (j < f->range_boundaries.len) {
-        fir.range_boundary mut* bd = &f->range_boundaries.items[j];
-        if (bd->block == c) {
-            bd->block = k;
-            if (cast(bd->position, u64) + offset > fir.U32_LIMIT) {
-                panic("fir_passes.absorb: range boundary position overflow");
-            }
-            if (bd->position == 0) {
-                if (cast(bd->order, u64) + base > fir.U32_LIMIT) {
-                    panic("fir_passes.absorb: range boundary order overflow");
-                }
-                bd->order = cast(cast(bd->order, u64) + base, u32);
-            }
-            bd->position = cast(cast(bd->position, u64) + offset, u32);
-        }
-        j += 1;
-    }
     u64 mut i = 0;
     while (i < from->statements.len) {
         push_statement(into, from->statements.items[i]);
@@ -737,15 +613,6 @@ fn renumber(fir.func mut* f, bool@ gone) void {
             live += 1;
         }
         b += 1;
-    }
-    u64 mut k = 0;
-    while (k < f->range_boundaries.len) {
-        fir.range_boundary mut* bd = &f->range_boundaries.items[k];
-        if (gone[cast(bd->block, u64)]) {
-            panic("fir_passes.renumber: lost range boundary");
-        }
-        bd->block = number[cast(bd->block, u64)];
-        k += 1;
     }
     b = 0;
     while (b < n) {

@@ -175,113 +175,12 @@ A FIR module holds:
 
 A function holds its symbol, its fort function type, its locals (5.3) and its blocks (5.4).
 
-It can also hold non-emitting range-loan carriers (D17.10, D19.8).
-A declaration ID names one selected range node in the checked source tree.
-An expansion ID names one lowering occurrence of that declaration.
-Runtime iterations of one occurrence use the same expansion ID.
-An expansion records its declaration ID, deferred context, exit occurrence, and source positions.
-Distinct expansion IDs can have the same deferred context and exit occurrence.
-A loan ID names one whole-body loan of an expansion.
-A loan can name one enclosing loan in the same function.
-These structural IDs are separate from analyzer source and allocation IDs.
-
-A capture binds a loan to a captured FIR place and a source position.
-`borrowed_header` names a non-owning span or string header and its original protected place.
-`owning_fixed_array_place` names an owning fixed array and its original protected place.
-`non_owning_array_copy` names a copied non-owning fixed array without an original protected place.
-The two protected capture kinds keep both places, even when both places have one spelling.
-
-A boundary names a loan, a block, an operation gap, an order, a kind, and a source position.
-Gap 0 precedes the first statement. Gap `n` precedes the terminator after `n` statements.
-The order distinguishes boundaries at one gap.
-The kinds are `capture`, `body_entry`, `body_cleanup`, `loan_exit`, and `outer_cleanup`.
-A proposed absence record names a declaration with no expansion and one reason:
-`checked_selection`, `checked_unreachable`, or `no_lowered_operation`.
-An absence proposal alone proves no source suppression.
-
-The function owns these records and releases them with its other vectors.
-A clone copies each owned vector. A parsed function owns its new vectors.
-The structural completeness claim records seven counts: declarations, expansions, protected
-expansions, loans, bindings, boundaries, and absences.
-The manifest reports structural validity and selected-source completeness separately.
-Only independent source correspondence can set selected-source completeness.
-Ordinary FIR without a range declaration makes no source range-coverage claim.
-The first source audit enumerates selected checked-source range nodes without reading the
-producer's declaration list. It counts produced range lowering operations independently.
-For a produced operation whose path it can prove, the audit matches the declaration, expansion,
-capture, original protected path, and ordered boundaries against checked source and verified FIR.
-A source-only scope replay derives enclosing defer chains and exit occurrences without candidate
-records. It counts scope expansions that produce no range operation.
-It matches source exits with verified FIR exit locations before comparing candidate context records.
-Repeated lowerings keep one declaration ID and distinct expansion identities.
-The FIR loop edge and range-variable live marker identify each body entry independently.
-Source traversal derives cleanup events and disjoint statement intervals for each expansion.
-A verified CFG walk derives the required body-scope dead gaps from that entry.
-The two derivations must agree. Each required gap matches exactly one cleanup triple.
-Candidate order, numbering, parent links, or selected subsets cannot establish this correspondence.
-Missing, duplicate, moved, or cross-expansion records cause keyed refusal.
-An ambiguous context or gap partition remains incomplete.
-For linear call-result paths, an independent proof derives the capture from actual range-body uses.
-It traces the result, address, header, and protected path through verified FIR before candidate
-checks.
-Each linear temporary has one complete reaching definition.
-That definition matches the current statement and exit context.
-The proof rejects another write or deletion, including a write after the captured read.
-An address of fixed storage rooted in that temporary stays incomplete without alias proof.
-A fixed-array slice of that storage has the same limit.
-It matches the checked callee, result type, ordered arguments, exact destinations, and projections.
-Held callee, argument, and address operations precede later effects that require their capture.
-Complete operand intervals must retain checked-source evaluation order.
-Index and span-bound calls supply operand effects. They do not supply collection storage roots.
-The proof retains u64 conversions and reads a stored header after index or explicit-bound effects.
-An absent upper bound uses that later length read. Pointer slices retain their unchecked contract.
-Missing, duplicate, overwritten, substituted, or cross-expansion links cause keyed refusal.
-A top-level conditional-result proof derives the joined destination from its consuming read (D19.8).
-It matches the checked predicate, exact true and default edges, both source arms, and their join.
-Each arm entry has only its required switch predecessor. The join has only its two required exits.
-Scalar arm stores consume their exact produced operands.
-Nested scalar results require move for an owning checked type and copy for a non-owning checked type.
-Aggregate arms write their destination directly.
-Each required arm path establishes the destination. Nested result arms repeat the same proof.
-Only direct nested aggregate result arms can share one proved destination family.
-Each family edge matches the exact checked parent arm, equal aggregate destination, and CFG arm
-interval. The nested join supplies that parent arm's exit.
-Nested sibling result arms can share their parent's destination through these exact edges.
-Independent callee, argument, bound, and wrapper operand regions keep distinct destinations.
-A general source descendant supplies no family edge.
-Each destination write matches exactly one arm in its proved destination family.
-Unproved or ambiguous family links cause keyed refusal.
-A constant predicate still requires both emitted arms.
-Runtime reachability supplies no omitted-arm proof.
-Distinct call nodes keep separate result identities, including equal callees, types, and arguments.
-Missing, extra, overwritten, substituted, or cross-expansion writes cause keyed refusal.
-A literal boolean selection of two string literals can prove its folded literal bytes.
-The proof also checks the constant shape.
-Other folded expressions remain incomplete when the audit lacks their checker value table.
-Conditional callees and arguments prove both arms and the joined value consumed by their call.
-Held joined values precede later writers. Complete intervals retain operand evaluation order.
-Dereference, member, header, cast, index, and slice operations repeat that proof after joins.
-Conditional indices and both bounds retain their u64 conversions and base-before-bound order.
-Lower bounds precede upper bounds. Stored header reads follow explicit bound effects.
-Function-name selections retain both emitted arms even with literal predicates.
-The call must consume their joined function temporary.
-A selected-symbol substitution supplies no producer-correspondence proof and causes keyed refusal.
-An arm destination store can precede unrelated backing-storage reads.
-The proof still refuses unproved exposure of a joined temporary's fixed storage.
-Stack operand intervals cross only regions whose two arms and exact exits already prove their join.
-Calls in conditional predicates retain keyed refusal.
-Direct and deferred result proofs use separate keys.
-Proof sessions own their vectors. Stored record indices remain valid across vector growth.
-Report keys, bindings, boundaries, and faults copy before proof or candidate teardown.
-These copies retain existing source, type, symbol, literal, and FIR projection borrows.
-Checked source and types outlive the report. FIR remains alive while the caller interprets bindings.
-This internal record contract adds no source annotation, ABI field, or runtime tracking (D19.8).
-Unknown source forms, ambiguous definitions, and unproved folded constants remain incomplete.
-Source correspondence proves no returned-storage liveness or callee ownership effect.
-The keyed failure retains checked-source defer and verified FIR exit evidence.
-The audit keeps its rows and failures outside FIR.
-It proves no deferred absence and sets no structural or selected-source completeness claim.
-Independent context and absence validation and V14 verification precede source publication.
+Loan statements belong to the function's ordinary statement vectors (section 7).
+A loan ID identifies one emitted loop occurrence in that function.
+The lowering assigns IDs in creation order. Each deferred expansion takes a new ID.
+Runtime iterations of an occurrence use the same ID.
+FIR is the program. No second source walk supplies a loan or its duration.
+A clone copies loan statements with the other statements.
 
 ### 5.3 Locals
 
@@ -476,6 +375,9 @@ Rules:
 - `del(move p)` frees the allocation that the owning value at `p` holds and empties `p` (D17.9,
   item 17).
 - `live(_n)` says that the scope of the named local `n` begins here.
+- `loan_begin L p [h]` opens collection loan `L` of place `p`.
+  Optional local `h` names the held header or address. It adds no executable read.
+- `loan_end L` closes collection loan `L`. It adds no executable read.
 - `dead(_n)` says that the scope of the named local `n` ends here. An analysis reports an owning
   local that still holds a value.
 
@@ -611,6 +513,12 @@ A parameter needs no statement. The translator stores each scalar parameter into
   A span or string header goes into a temporary with its outermost `own` removed.
   That header copy holds the pointer and length once, and lends the collection storage.
   The checker refuses operations that invalidate that storage inside the body (D17.10).
+  A span, string, or owning fixed array takes a new loan ID `L`.
+  The lowering writes `loan_begin L p [h]` after capture and before counter initialization.
+  `p` names the source collection place before any held address.
+  `h` names the header temporary or held address when this lowering makes one.
+  A copied non-owning fixed array takes no loan.
+  `loan_end L` is the first statement in done.
   A counter `_i: u64 = const u64 0`; the
   blocks head, body, step and done; `_c = lt(copy _i, len)` and `switch(copy _c)` in head, where
   `len` is the constant length of an array or `copy c.1` of a span or `string`; `live(_x)` and
@@ -789,17 +697,17 @@ as the location of their exit. The scope around a `for` falls off at the closing
 body. When an expansion holds an expansion of its own, the inner statements carry the location
 of the inner exit.
 
-For a range body, capture follows collection evaluation and precedes the loop head (5.2).
-Body entry precedes the loop variable's `live` marker and element copy on the true head edge.
-The loan stays active through the last element use and each deferred body statement.
-Body cleanup follows those defers and precedes the body's `dead` markers.
-Loan exit follows those markers. Outer cleanup follows loan exit before any outer scope effect.
-Each normal fall-off, continue, break from the loop, and return follows this order.
-A break from an inner `switch` leaves the range body active.
-A return evaluates its expression before this cleanup (9.6).
-An abort path has no fabricated normal loan exit or outer cleanup.
-The zero-iteration edge never enters the body, although the collection has a capture.
-Each deferred lowering occurrence has its own expansion ID; runtime iterations share that ID.
+A range loan stays open through head, body, and step.
+Body fall-off, continue, and loop break emit no loan statement. Done closes the loan first.
+The zero-iteration edge also reaches done with the loan open.
+An exit can cross a loop scope without stopping there. Today only return does this.
+Such an exit writes `loan_end L` immediately after that scope's `dead` markers.
+It writes the end before deferred statements of the next scope outward.
+A break from an inner switch keeps the range loan open.
+A return evaluates its expression before this unwind (9.6).
+A deferred statement that ends its block stops the unwind.
+That path ends in an abort terminator without an invented loan end.
+Each deferred expansion with a range loop takes a new loan ID.
 
 ### 9.6 Return and the end of a body
 
@@ -971,23 +879,26 @@ statement index.
   the empty set and every other block with the set of all temporaries, so a block that no edge
   reaches, such as the block after a terminator (D14.2), passes. V13 follows every edge, the edge
   that V9 prunes on a constant `switch` included.
-- **V14**: each range carrier names a valid function record, place, block, and operation gap
-  (5.2). Declaration, expansion, loan, capture, and absence keys are unique in their respective
-  sets. An expansion names a declaration. A loan names an expansion. A parent names an existing
-  loan without a cycle. A protected capture names both a captured place and an original place.
-  Its type matches its capture kind. Boundaries have increasing gap positions and orders.
-  A complete structural claim matches its seven recorded counts. Each declared range has an
-  expansion or an absence. Each expansion has one loan. Each loan has one binding, a capture
-  boundary, and a body-entry boundary. Several normal exits can each have a cleanup triple.
-  On each normal path that enters the body, body cleanup precedes loan exit, and outer cleanup
-  follows loan exit. An abort-only body needs no normal cleanup triple.
-  A child enters while its parent body is active.
-  Active-loan states agree at a CFG join. A normal return has no active loan.
-  A boundary in an unreachable block cannot support a complete structural claim.
-  A constant switch reaches only its selected edge for this rule.
-  Different incoming capture histories merge conservatively and cannot establish a missing
-  capture. A partial record has no structural completeness claim and cannot establish source
-  completeness. A complete structural claim does not establish selected-source completeness.
+- **V14**: the verifier tests loan statements with these seven rules:
+  1. Each ID has exactly one reachable `loan_begin L p [h]`.
+     `p` is a well-formed span, string, or owning fixed-array place.
+     Optional `h` is a non-owning span or string temporary, or a held address temporary.
+  2. The walk starts at `bb0` with no open loan.
+     It follows all edges except unselected edges of a constant switch.
+  3. A begin requires its ID closed and opens it.
+     An end requires its ID to be the greatest open ID and closes it.
+  4. Incoming open-loan sets at a join must be equal.
+  5. A return has no open loan. Fail, trap, and unreachable have no loan constraint.
+     Goto, switch, and check pass the set unchanged.
+  6. No executable statement or terminator reads header `h` while its loan is closed.
+  7. The walk does not test unreachable blocks.
+
+V14 reports these exact messages:
+`a loan statement out of order`, `a loan has two begin statements`,
+`a return with an open loan`, `incoming loan states conflict`,
+`a read of a loan header while the loan is closed`, and
+`a loan of a place that is not a collection`.
+
 V9 closes the termination gap of section 1. The direct path wrote `unreachable` at the end of a
 body because `check_terminates` said that the body terminates, and the translator writes the
 `unreachable` that the lowering puts there for the same reason. With V9, a disagreement is an
@@ -1039,13 +950,11 @@ changes the function, and the verifier runs after it. The passes run in this ord
 4. The verifier again.
 5. The translator (section 12).
 
-The build-mode pass relocates every range boundary when it removes a statement or merges blocks.
-When a store folds into an earlier assignment, boundaries between that assignment and the old
-store move before the combined write. They follow boundaries already at that gap, in order.
-Boundaries after the old store move after the combined write.
-The pass keeps each boundary's source position and relative order (D19.8).
-It can renumber order fields when gaps merge.
-Carrier references do not make a runtime-dead assignment live.
+The build-mode pass keeps loan statements in order.
+It removes only dead whole-temporary assignments and folds adjacent stores of fixed shape.
+A loan statement stops store folding. Block merging appends statements in order.
+The pass does not move an executable operation across a loan statement.
+V14 verifies the result again.
 
 FIR changes at two points of this order, and `--fir-after=<pass>` (D14.1) names them: `lower`
 is the output of the lowering (section 9), and `build-mode` is the output of step 3.
@@ -1062,8 +971,8 @@ of a check holds only in the modes that keep that check (section 14).
 The translator writes one FIR function as LLVM IR text. It keeps every item of `toolchain.md` 6;
 12.5 records where its text deviated from the text of the direct path, which T-255 deleted. It
 does not read the tree and it does not read the build mode.
-It emits no instruction, table, field, call, check, or trap for a range carrier (D19.8).
-Equivalent executable FIR emits identical LLVM text with and without carriers.
+It emits no instruction, table, field, call, check, or trap for a loan statement (D19.8).
+Equivalent executable FIR emits identical LLVM text with and without loan statements.
 
 ### 12.1 Locals and places
 
@@ -1133,7 +1042,7 @@ Equivalent executable FIR emits identical LLVM text with and without carriers.
 - `call` is `call` with the signature of 12.3; an extern call carries `#3` (item 8).
 - `del(move p)` loads the pointer (field 0 for a span or `string`), calls `std.rt.free`, and
   zeroes `p` (item 17).
-- `live` and `dead` print nothing.
+- `live`, `dead`, `loan_begin`, and `loan_end` print nothing.
 
 ### 12.3 Signatures
 
@@ -1272,28 +1181,13 @@ parameter may carry its name in the same way.
 
 ```ebnf
 function    = "fn" name "(" [ param { "," param } ] ")" "->" ( type | "noreturn" ) "{" { local }
-              { range_carrier } block { block } "}" ;
-range_carrier = "range" ( range_complete | range_declaration | range_expansion | range_loan
-              | range_binding | range_boundary | range_absence ) ";" ;
-range_complete = "complete" uint uint uint uint uint uint uint ;
-range_declaration = "declaration" uint [ position ] ;
-range_expansion = "expansion" uint "declaration" uint "context" uint "exit" uint
-              [ position [ "exit" line_col ] ] ;
-range_loan = "loan" uint "expansion" uint "ordinal" uint [ "parent" uint ]
-              [ "whole_body" ] ;
-range_binding = "binding" uint capture_kind "captured" place [ "original" place ]
-              [ position ] ;
-range_boundary = "boundary" uint boundary_kind block_ref uint "order" uint
-              [ position ] ;
-range_absence = "absence" uint absence_kind [ position ] ;
-capture_kind = "borrowed_header" | "owning_fixed_array_place" | "non_owning_array_copy" ;
-boundary_kind = "capture" | "body_entry" | "body_cleanup" | "loan_exit" | "outer_cleanup" ;
-absence_kind = "checked_selection" | "checked_unreachable" | "no_lowered_operation" ;
+              block { block } "}" ;
 param       = local_ref [ "(" identifier ")" ] ":" type ;
 local       = "let" local_ref [ "(" identifier ")" ] ":" type [ position ] ";" ;
 block       = block_ref ":" "{" { statement } terminator "}" ;
 statement   = ( assign | "del" "(" "move" place ")" | "live" "(" local_ref ")"
-              | "dead" "(" local_ref ")" ) [ location ] ";" ;
+              | "dead" "(" local_ref ")" | "loan_begin" uint place [ local_ref ]
+              | "loan_end" uint ) [ location ] ";" ;
 assign      = place "=" rvalue ;
 terminator  = ( "goto" block_ref | switch | "return" | check | fail | "trap" | "unreachable" )
               [ location ] ";" ;
@@ -1334,12 +1228,6 @@ rvalue names of section 6. A `mut` after `addr` gives the result a `mut` pointer
 after `slice`, which appears only on a slice of a fixed-array place, gives a `mut` span (section
 6). `kind` is one of the kinds of section 8. `name` is a dotted symbol name of D9.7. `identifier`,
 `string`, `dec_digit` and `hex_digit` are those of `grammar.md` 1.
-
-The seven numbers after `range complete` give the counts from section 5.2 in that order.
-They claim completeness only for the supplied structural contract.
-The textual form has no selected-source completeness claim (D17.10, D19.8).
-The parser keeps declaration, expansion, loan, binding, boundary, and absence records in order.
-It keeps the source and exit positions that the text gives.
 
 This program:
 
@@ -1458,7 +1346,18 @@ Different branch states are legal when later operations satisfy each state.
 Keep zero-iteration paths and residual obligations across loops and crossed scopes.
 Use borrow liveness to permit release after the last semantic use.
 An escaping result or retained field preserves caller obligations beyond local last use.
-The whole-body range loan keeps its duration regardless of local last use (D17.10).
+The range loan lasts from `loan_begin` through `loan_end`, regardless of local last use (D17.10).
+The proof reads direct effects from actual FIR statements and ordered effects from call outcomes.
+It rejects changes to the collection, containing storage, and fixed-storage extensions.
+It permits an indirect element write after the collection path.
+A release cannot free the captured header allocation or an allocation that contains its path.
+An unknown captured allocation makes any release incomplete.
+An unknown call during the loan reports `cannot prove call preserves collection storage`.
+Trusted extern calls supply only signature transfers (D17.13).
+FIR place bindings map projected and global storage to ownership paths.
+The solver checks the current function, actual base, and actual projection sequence.
+Bindings for one global base use one ownership root and a complete root binding.
+Missing, mismatched, and unresolved bindings cannot prove preservation.
 A dead marker ends local storage and requires discharge of residual owned leaves.
 Temporary storage ends at its source-defined boundary.
 Parameter storage ends at every normal return after deferred effects, even without dead markers.
@@ -1807,7 +1706,8 @@ Each item of `toolchain.md` 6 that describes a function body, and the part of FI
 - **Item 16, bounds checks**: the kinds `bounds` and `span`; the index projection; `slice` and
   `slice_ptr`.
 - **Item 17, `new` and `del`**: `alloc`, `del`, and the kind `alloc_count`.
-- **Item 18, ownership**: `move`, the kind `overwrite`, and the zeroing of the entry block (9.2).
+- **Item 18, ownership**: `move`, `loan_begin`, `loan_end`, the kind `overwrite`, and entry zeroing
+  (9.2). Loan statements emit no LLVM instruction.
 - **Item 19, builtins**: the lowering of the print family, `assert` and `panic` (9.4).
 - **Item 20, `noreturn`**: `trap`, rule V8, and the end of a body (9.6).
 
