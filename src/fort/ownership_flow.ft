@@ -1,5 +1,6 @@
 /// Solves supplied ownership effects over verified FIR edges.
 import ast;
+import diag;
 import fir;
 import fir_flow;
 import ownership_api;
@@ -102,6 +103,7 @@ struct path {
     loan_state mut@ own held;
     ownership_state.state aliases;
     bool uncertain_return;
+    bool loan_sources_unknown;
 }
 
 struct bucket {
@@ -149,6 +151,7 @@ fn clone_path(path* program) path {
     }
     out.aliases = ownership_state.clone(&program->aliases);
     out.uncertain_return = program->uncertain_return;
+    out.loan_sources_unknown = program->loan_sources_unknown;
     return out;
 }
 
@@ -179,7 +182,8 @@ fn free(analysis mut* r) void {
 }
 
 fn path_equal(path* a, path* b) bool {
-    if (a->held.len != b->held.len || !ownership_state.equal(&a->aliases, &b->aliases)) {
+    if (a->held.len != b->held.len || a->loan_sources_unknown != b->loan_sources_unknown ||
+        !ownership_state.equal(&a->aliases, &b->aliases)) {
         return false;
     }
     u64 mut i = 0;
@@ -525,6 +529,15 @@ fn resolve_alias(path mut* p, ownership_api.place_path value) ownership_api.plac
     return saved;
 }
 
+fn unknown_address(path mut* p, ownership_api.place_path place) bool {
+    if (place.projections.len == 0 || place.projections[0].kind !=
+        ownership_api.projection_kind.dereference) { return false; }
+    ownership_api.place_path root = ownership_api.place_path{.root = place.root};
+    u64 index = ownership_transfer.contents_index(&p->aliases, root);
+    return index != U64_MAX &&
+        p->aliases.contents[index].kind == ownership_api.contents_kind.unknown;
+}
+
 fn active_loans(path* p) bool {
     u32 mut i = 0;
     while (i < p->loans.count) {
@@ -692,42 +705,83 @@ fn check_fir_target(program* in, path mut* p, fir.place target,
     return check_target(in, p, mapped, known, true, op, at);
 }
 
-fn note_alias(program* in, path mut* p, fir.statement* operation_value) void {
-    if (operation_value->kind != fir.stmt_kind.st_assign ||
-        operation_value->place.base != fir.base_kind.bk_local ||
-        operation_value->place.proj_len != 0) {
+fn invalidate_aliases(program* in, path mut* p, ownership_api.place_path target,
+    bool known) void {
+    if (!known) {
+        if (p->held.len > 0) { p->loan_sources_unknown = true; }
+        ownership_state.free(&p->aliases);
+        p->aliases = ownership_state.empty();
         return;
     }
-    ownership_api.place_path mut destination = ownership_api.place_path{};
-    if (!storage_place(in, operation_value->place, &destination)) { return; }
-    u64 old = ownership_transfer.contents_index(&p->aliases, destination);
-    if (old != U64_MAX) {
-        p->aliases.contents[old].borrows = p->aliases.contents[old].borrows[0..0];
+    ownership_api.place_path resolved = resolve_alias(p, target);
+    u64 mut i = 0;
+    while (i < p->aliases.contents_len) {
+        ownership_api.place_path pointer = p->aliases.contents[i].place;
+        if (protected_target(target, pointer) || protected_target(resolved, pointer) ||
+            (!private_local(in, pointer) && ownership_places.compare(resolved, pointer, true) ==
+                ownership_places.overlap.possible)) {
+            p->aliases.contents[i].borrows = p->aliases.contents[i].borrows[0..0];
+            p->aliases.contents[i].kind = ownership_api.contents_kind.unknown;
+        }
+        i += 1;
     }
-    if (operation_value->value.kind != fir.rvalue_kind.rv_addr) { return; }
+}
+
+fn invalidate_fir_aliases(program* in, path mut* p, fir.place target) void {
+    ownership_api.place_path mut mapped = ownership_api.place_path{};
+    bool known = storage_place(in, target, &mapped);
+    invalidate_aliases(in, p, mapped, known);
+}
+
+fn note_alias(program* in, path mut* p, fir.statement* operation_value) void {
+    if (operation_value->kind != fir.stmt_kind.st_assign) { return; }
+    ownership_api.place_path mut destination = ownership_api.place_path{};
+    if (!storage_place(in, operation_value->place, &destination)) {
+        invalidate_aliases(in, p, destination, false);
+        return;
+    }
+    ownership_api.place_path resolved = resolve_alias(p, destination);
     ownership_api.place_path mut target = ownership_api.place_path{};
-    if (!storage_place(in, operation_value->value.place, &target)) { return; }
+    bool address = operation_value->value.kind == fir.rvalue_kind.rv_addr &&
+        storage_place(in, operation_value->value.place, &target);
+    if (address) { target = resolve_alias(p, target); }
+    invalidate_aliases(in, p, destination, true);
+    if (!address) { return; }
     ownership_api.borrow_relation[1] relation = {
-        ownership_api.borrow_relation{.containing = resolve_alias(p, target)},
+        ownership_api.borrow_relation{.containing = target},
     };
     ownership_api.contents_fact fact = ownership_api.contents_fact{
-        .place = destination, .kind = ownership_api.contents_kind.reference,
+        .place = resolved, .kind = ownership_api.contents_kind.reference,
         .borrows = relation[..]};
+    u64 old = ownership_transfer.contents_index(&p->aliases, resolved);
     if (old == U64_MAX) { ownership_state.append_contents(&p->aliases, fact); }
-    else {
-        p->aliases.contents[old] = ownership_state.copy_contents(&p->aliases, fact);
-    }
+    else { p->aliases.contents[old] = ownership_state.copy_contents(&p->aliases, fact); }
 }
 
 fn direct_effect(program* in, path mut* p, u32 block, u32 gap)
     ownership_api.proof_status {
     if (gap >= fir.block_statement_count(in->function, block)) { return complete(); }
     fir.statement* operation_value = fir.block_statement(in->function, block, gap);
+    bool address = operation_value->kind == fir.stmt_kind.st_assign &&
+        operation_value->value.kind == fir.rvalue_kind.rv_addr;
+    bool call = operation_value->kind == fir.stmt_kind.st_assign &&
+        operation_value->value.kind == fir.rvalue_kind.rv_call && p->held.len > 0;
+    if (!active_loans(p) && p->aliases.contents_len == 0 && !address && !call &&
+        operation_value->kind != fir.stmt_kind.st_loan_begin &&
+        operation_value->kind != fir.stmt_kind.st_loan_end) { return complete(); }
+    ownership_api.operation_position op = ownership_api.operation_position{
+        .function = in->identity, .block = block, .operation = gap};
+    ownership_api.source_position at = location_source(in, operation_value->loc);
+    ownership_api.charge_result charged = ownership_api.charge_work(in->services,
+        ownership_api.work_kind.transfer, op, at);
+    if (!charged.allowed) { return charged_failure(in, charged.proof, op, at); }
+
     if (operation_value->kind == fir.stmt_kind.st_loan_begin ||
         operation_value->kind == fir.stmt_kind.st_loan_end) {
         u32 index = loan_index(in->function, operation_value->loan);
         if (index == 4294967295) { return invalid_input(in); }
         if (operation_value->kind == fir.stmt_kind.st_loan_begin) {
+            if (p->loan_sources_unknown) { return loan_failure(in, op, at, false); }
             fir_flow.bits_set(&p->loans, index);
             loan_state mut* held = &p->held[cast(index, u64)];
             ownership_state.free(&held->facts);
@@ -737,10 +791,11 @@ fn direct_effect(program* in, path mut* p, u32 block, u32 gap)
             held->known = storage_place(in, operation_value->place, &storage);
             held->original = ownership_state.copy_place(&held->facts, storage);
             held->place = ownership_state.copy_place(&held->facts, resolve_alias(p, storage));
+            if (unknown_address(p, storage) || unknown_address(p, held->place)) {
+                held->known = false;
+            }
             if (!held->known) {
-                ownership_api.operation_position op = ownership_api.operation_position{
-                    .function = in->identity, .block = block, .operation = gap};
-                return loan_failure(in, op, ownership_api.source_position{}, false);
+                return loan_failure(in, op, at, false);
             }
         } else {
             fir_flow.bits_clear(&p->loans, index);
@@ -749,12 +804,11 @@ fn direct_effect(program* in, path mut* p, u32 block, u32 gap)
         }
         return complete();
     }
-    ownership_api.operation_position op = ownership_api.operation_position{
-        .function = in->identity, .block = block, .operation = gap};
-    ownership_api.source_position at = ownership_api.source_position{
-        .line = operation_value->loc.line, .col = operation_value->loc.col};
     if (operation_value->kind == fir.stmt_kind.st_dead) {
-        return check_fir_target(in, p, fir.place_local(operation_value->local), op, at);
+        fir.place ended = fir.place_local(operation_value->local);
+        ownership_api.proof_status proof = check_fir_target(in, p, ended, op, at);
+        if (ownership_api.successful(proof)) { invalidate_fir_aliases(in, p, ended); }
+        return proof;
     }
     fir.place mut target = fir.place{};
     if (fir.stmt_writes_place(operation_value, &target)) {
@@ -767,6 +821,7 @@ fn direct_effect(program* in, path mut* p, u32 block, u32 gap)
         if (read_value.empties) {
             ownership_api.proof_status proof = check_fir_target(in, p, read_value.place, op, at);
             if (!ownership_api.successful(proof)) { return proof; }
+            invalidate_fir_aliases(in, p, read_value.place);
         }
         i += 1;
     }
@@ -821,14 +876,7 @@ fn ordered_effects(program* in, path mut* p, step* s, ownership_api.outcome_fact
             effect.kind == ownership_api.effect_kind.invalidate ||
             effect.kind == ownership_api.effect_kind.transfer ||
             effect.kind == ownership_api.effect_kind.storage_end) {
-            u64 mut j = 0;
-            while (j < p->aliases.contents_len) {
-                ownership_api.place_path pointer = p->aliases.contents[j].place;
-                if (protected_target(effect.place, pointer)) {
-                    p->aliases.contents[j].borrows = p->aliases.contents[j].borrows[0..0];
-                }
-                j += 1;
-            }
+            invalidate_aliases(in, p, effect.place, effect_place_known(in, effect.place));
         }
         i += 1;
     }
@@ -853,6 +901,7 @@ fn invalidate_version(path mut* p, ownership_api.entity_id version) void {
 
 fn unknown_call(path mut* p) void {
     p->uncertain_return = true;
+    p->loan_sources_unknown = true;
     ownership_state.free(&p->aliases);
     p->aliases = ownership_state.empty();
     p->facts.predicates_len = 0;
@@ -894,9 +943,9 @@ fn call_continues(program* in, path mut* p, step* s, analysis mut* out) bool {
                     "call preserves collection storage"));
                 return false;
             }
-            ownership_api.proof_status proof = ordered_effects(in, p, s, outcome);
-            if (!ownership_api.successful(proof)) { note_failure(out, proof); return false; }
         }
+        ownership_api.proof_status proof = ordered_effects(in, p, s, outcome);
+        if (!ownership_api.successful(proof)) { note_failure(out, proof); return false; }
         if (outcome.guard.kind != ownership_api.entity_kind.none &&
             (outcome.kind == ownership_api.outcome_kind.function_return ||
             outcome.kind == ownership_api.outcome_kind.normal_process_exit ||
@@ -1019,7 +1068,7 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
             note_failure(out, direct);
             return false;
         }
-        if (active_loans(p) && gap < count) {
+        if (gap < count) {
             fir.statement* operation_value = fir.block_statement(in->function, block, gap);
             if (operation_value->kind == fir.stmt_kind.st_assign &&
                 operation_value->value.kind == fir.rvalue_kind.rv_call) {
@@ -1031,7 +1080,12 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                         supplied.kind == step_kind.call_outcome) { found = true; }
                     call_i += 1;
                 }
-                if (!found) {
+                if (!found && !active_loans(p)) {
+                    ownership_state.free(&p->aliases);
+                    p->aliases = ownership_state.empty();
+                    if (p->held.len > 0) { p->loan_sources_unknown = true; }
+                }
+                else if (!found) {
                     ownership_api.operation_position op = ownership_api.operation_position{
                         .function = in->identity, .block = block, .operation = gap};
                     note_failure(out, failure(in, op, ownership_api.source_position{},
@@ -1096,25 +1150,28 @@ fn return_position(program* in, u32 block) ownership_api.operation_position {
     return op;
 }
 
-fn return_source(program* in, u32 block) ownership_api.source_position {
+fn location_source(program* in, diag.loc where) ownership_api.source_position {
     ownership_api.source_position mut at = ownership_api.source_position{};
-    fir.block* current = fir.block_at(in->function, block);
-    at.filename_present = current->term.loc.file.len > 0;
+    at.filename_present = where.file.len > 0;
     u64 mut i = 0;
     while (i < in->source_files.len) {
         source_file_binding file_at = in->source_files[i];
-        if (file_at.filename == current->term.loc.file) {
+        if (file_at.filename == where.file) {
             at.module = file_at.module;
             at.file = file_at.file;
             break;
         }
         i += 1;
     }
-    at.line = current->term.loc.line;
-    at.col = current->term.loc.col;
-    at.end_line = current->term.loc.end_line;
-    at.end_col = current->term.loc.end_col;
+    at.line = where.line;
+    at.col = where.col;
+    at.end_line = where.end_line;
+    at.end_col = where.end_col;
     return at;
+}
+
+fn return_source(program* in, u32 block) ownership_api.source_position {
+    return location_source(in, fir.block_at(in->function, block)->term.loc);
 }
 
 fn source_filename(void mut* opaque, ownership_api.source_position at) string {
@@ -1399,6 +1456,7 @@ fn widen_path(program* in, path* a, path* b,
         out.aliases = ownership_state.clone(&a->aliases);
     }
     out.uncertain_return = a->uncertain_return || b->uncertain_return;
+    out.loan_sources_unknown = a->loan_sources_unknown || b->loan_sources_unknown;
     return out;
 }
 
