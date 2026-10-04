@@ -113,6 +113,11 @@ came here.
   The ownership flow solver reads those effects from FIR and instantiated ordered call outcomes.
   It captures allocation sources at begin.
   Unresolved place bindings and unknown calls stay incomplete.
+  Direct and ordered writes invalidate address facts after storage resolution.
+  Calls invalidate these facts before a loan and between iterations.
+  A missing call step clears these facts outside a loan.
+  An unresolved write or call prevents later loan capture on that path.
+  Direct loan and address-fact work charges W before mutation.
   Guarded effects use the same overlap tests.
   A guarded overlapping effect gives incomplete proof without a condition witness.
   The ordinary source guard remains until the driver selects the ownership proof.

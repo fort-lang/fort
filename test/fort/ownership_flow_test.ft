@@ -2204,7 +2204,161 @@ fn loan_unknown_header_release_is_incomplete() void {
 }
 fn loan_closed_after_return_unwind() void { loan_case(8, 0); }
 
+fn loan_alias_retargeting(u32 variant) void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* span = types.type_span(tt, types.type_prim(tt, prim.prim_kind.prim_i32),
+        false, true);
+    types.node* pointer = types.type_ptr(tt, span, false, true);
+    types.node* indirect_pointer = types.type_ptr(tt, pointer, false, true);
+    types.node*[2] params = {span, span};
+    fir.func mut function = fir.func_new(tt, null,
+        types.type_fn(tt, types.type_void(tt), params[..], false));
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    assert(fir.local_add(&function, pointer, fir.local_kind.lk_temp, null, where) == 3);
+    assert(fir.local_add(&function, indirect_pointer, fir.local_kind.lk_temp, null, where) == 4);
+    assert(fir.local_add(&function, span, fir.local_kind.lk_temp, null, where) == 5);
+    assert(fir.local_add(&function, types.type_void(tt), fir.local_kind.lk_temp, null, where) == 6);
+    assert(fir.local_add(&function, pointer, fir.local_kind.lk_temp, null, where) == 7);
+    fir.place p = fir.place_deref(&function, fir.place_local(3));
+    fir.place q = fir.place_deref(&function, fir.place_local(4));
+    fir.place collection = variant >= 2 ? p : fir.place_local(1);
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(3),
+        fir.rvalue_addr(&function, fir.place_local(variant >= 2 ? cast(1, u32) : cast(2, u32)),
+            true), where, 0));
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(4),
+        fir.rvalue_addr(&function, fir.place_local(3), true), where, 1));
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(7),
+        fir.rvalue_addr(&function, fir.place_local(variant >= 2 ? cast(2, u32) : cast(1, u32)),
+            true), where, 2));
+    types.node*[2] call_params = {indirect_pointer, pointer};
+    ast.sym callee = ast.sym{.ty =
+        types.type_fn(tt, types.type_void(tt), call_params[..], false)};
+    u32 args = fir.operand_push(&function, fir.operand_copy(fir.place_local(4)));
+    assert(fir.operand_push(&function, fir.operand_copy(fir.place_local(7))) == args + 1);
+    fir.statement call = fir.stmt_assign(fir.place_local(6),
+        fir.rvalue_call_extern(&callee, args, 2), where, 3);
+    if (variant == 6) {
+        fir.block_append(&function, 0, fir.stmt_assign(q,
+            fir.rvalue_addr(&function, fir.place_local(2), true), where, 3));
+    } else if (variant >= 2) { fir.block_append(&function, 0, call); }
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(5),
+        fir.rvalue_use(&function, fir.operand_copy(collection)), where, 4));
+    fir.block_append(&function, 0, fir.stmt_loan_begin(1, collection, 5, where, 5));
+    u32 effect_at = fir.block_statement_count(&function, 0);
+    if (variant == 0) {
+        fir.block_append(&function, 0, fir.stmt_assign(q,
+            fir.rvalue_addr(&function, fir.place_local(1), true), where, 6));
+    } else if (variant == 1) { fir.block_append(&function, 0, call); }
+    fir.place changed = variant >= 2 ? fir.place_local(2) : p;
+    fir.block_append(&function, 0, fir.stmt_assign(changed,
+        fir.rvalue_use(&function, fir.operand_const(fir.const_zero(span))), where, 7));
+    fir.block_append(&function, 0, fir.stmt_loan_end(1, where, 8));
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 9));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    ownership_api.projection[1] dereference = {
+        ownership_api.projection{.kind = ownership_api.projection_kind.dereference},
+    };
+    ownership_flow.place_binding[2] bindings = {
+        ownership_flow.place_binding{.place = p, .storage =
+            ownership_api.place_path{slot(3).root, dereference[..], false}, .complete = true},
+        ownership_flow.place_binding{.place = q, .storage =
+            ownership_api.place_path{slot(4).root, dereference[..], false}, .complete = true},
+    };
+    input.places = variant == 6 ? bindings[0..1] : bindings[..];
+    ownership_api.ordered_effect[1] effects = {
+        ownership_api.ordered_effect{.kind = ownership_api.effect_kind.write,
+            .place = variant >= 2 ? slot(3) : bindings[1].storage},
+    };
+    ownership_api.outcome_fact[1] mut outcomes = {
+        ownership_api.outcome_fact{.kind = ownership_api.outcome_kind.function_return,
+            .possible_caller_return = true, .effects = effects[..]},
+    };
+    ownership_flow.step[1] mut steps = {
+        ownership_flow.step{.gap = variant >= 2 ? cast(3, u32) : effect_at,
+            .kind = ownership_flow.step_kind.call_outcome, .outcomes = outcomes[..],
+            .outcomes_complete = true},
+    };
+    steps[0].operation.operation = steps[0].gap;
+    if (variant >= 4) {
+        outcomes[0].kind = ownership_api.outcome_kind.unknown_fort;
+        outcomes[0].effects = effects[0..0];
+        steps[0].outcomes_complete = variant == 5;
+    }
+    if (variant != 0 && variant != 3 && variant != 6) { input.steps = steps[..]; }
+    ownership_flow.event_binding[32] mut events = {};
+    u32 mut i = 0;
+    while (i < fir.block_statement_count(&function, 0)) {
+        ownership_api.operation_position op = ownership_api.operation_position{.operation = i};
+        events[cast(i * 2, u64)] = flow_event(op, ownership_api.event_kind.invalid_use,
+            ownership_api.entity_id{}, i * 2 + 1);
+        events[cast(i * 2 + 1, u64)] = flow_event(op, ownership_api.event_kind.incomplete_proof,
+            ownership_api.entity_id{}, i * 2 + 2);
+        i += 1;
+    }
+    input.events = events[0..cast(i * 2, u64)];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 1 && result.normal_returns == 0);
+    assert(result.first_failure.kind == (variant == 0 ? ownership_api.proof_kind.complete :
+        ownership_api.proof_kind.incomplete));
+    ownership_flow.free(&result);
+}
+
+fn loan_direct_work_requires_permission() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* span = types.type_span(tt, types.type_prim(tt, prim.prim_kind.prim_i32),
+        false, true);
+    types.node*[1] params = {span};
+    fir.func mut function = fir.func_new(tt, null,
+        types.type_fn(tt, types.type_void(tt), params[..], false));
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc_make("paid.ft", 21, 3);
+    assert(fir.local_add(&function, span, fir.local_kind.lk_temp, null, where) == 2);
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(2),
+        fir.rvalue_use(&function, fir.operand_copy(fir.place_local(1))), where, 0));
+    fir.block_append(&function, 0, fir.stmt_loan_begin(1, fir.place_local(1), 2, where, 1));
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(2),
+        fir.rvalue_use(&function, fir.operand_copy(fir.place_local(1))), where, 2));
+    fir.block_append(&function, 0, fir.stmt_loan_end(1, where, 3));
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 4));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    f.limits.w = 1;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    ownership_flow.event_binding[1] events = {
+        flow_event(ownership_api.operation_position{.operation = 2},
+            ownership_api.event_kind.work_failure, ownership_api.entity_id{}, 1),
+    };
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 1 && result.normal_returns == 0);
+    assert(result.first_failure.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(result.first_failure.terminal.limit.used == 1 && f.meter.used.w == 1);
+    assert(result.first_failure.terminal.limit.operation.operation == 2);
+    assert(result.first_failure.terminal.limit.source.line == 21);
+    assert(result.first_failure.terminal.limit.source.col == 3);
+    assert(result.first_failure.terminal.limit.source.filename_present && f.events == 1);
+    ownership_flow.free(&result);
+}
+
 fn main() i32 {
+    loan_alias_retargeting(0);
+    loan_alias_retargeting(1);
+    loan_alias_retargeting(2);
+    loan_alias_retargeting(3);
+    loan_alias_retargeting(4);
+    loan_alias_retargeting(5);
+    loan_alias_retargeting(6);
+    loan_direct_work_requires_permission();
     loan_accepts_a_proved_call();
     loan_refuses_a_call_that_releases_the_collection();
     loan_refuses_an_unknown_call();
