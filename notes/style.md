@@ -79,6 +79,19 @@ internal details and function-body comments.
 Use `#` for shell, CMake, and configuration comments. Put script documentation after the
 shebang.
 
+### 1.6 Agent prompts
+
+State the compiler task first. Name the source files, compiler invariant, and expected diagnostics.
+Name the required test cases, targets, commands, and evidence.
+
+Describe changed FIR edges as altered compiler test inputs.
+For a test that removes a compiler check, name the removed check and the expected assertion.
+Use *source correspondence*, *control flow*, *allocation cleanup*, and *ownership analysis*
+precisely.
+Keep the required case counts and validation scope when you revise a prompt.
+Keep the review depth.
+Keep exact identifiers and diagnostic text.
+
 ## 2. C sources
 
 - clang-tidy's `readability-inconsistent-declaration-parameter-name` fires only under
