@@ -1,0 +1,684 @@
+/// Stores supplied foreign results with counted copies and stable retained views.
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+
+struct alternative {
+    ownership_api.entity_id guard;
+    ownership_state.state* before;
+}
+struct successor {
+    ownership_state.state mut@ own states;
+    ownership_api.entity_id mut@ own guards;
+    u64 len;
+}
+struct effect_block {
+    ownership_api.ordered_effect mut@ own items;
+    effect_block mut* own next;
+}
+struct fact_store {
+    ownership_state.state facts;
+    effect_block mut* own effects;
+}
+struct result {
+    successor mut* own core;
+    ownership_api.source_fact mut@ own trusted_sources;
+    ownership_api.ordered_effect mut@ own signature_transfers;
+    ownership_api.outcome_fact mut@ own outcomes;
+    fact_store store;
+    ownership_api.proof_status proof;
+    bool hidden_effects_outside_proof;
+}
+struct storage_context { result mut* own retained; }
+struct storage_request {
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.entity_id event;
+    alternative@ alternatives;
+    ownership_api.contents_fact@ arguments;
+    ownership_api.source_fact@ trusted_sources;
+    ownership_api.ordered_effect@ signature_transfers;
+    ownership_api.outcome_fact@ outcomes;
+    ownership_api.proof_status proof;
+    bool hidden_effects_outside_proof;
+}
+struct staging {
+    ownership_api.contents_fact mut@ own arguments;
+    ownership_api.ordered_effect mut@ own transfers;
+    alternative mut@ own alternatives;
+    fact_store store;
+}
+struct copy_context {
+    ownership_api.services* services;
+    storage_request* request;
+    ownership_api.proof_status proof;
+}
+struct construction {
+    result mut* own selected;
+    ownership_api.proof_status proof;
+}
+
+fn free_successor(successor mut* s) void {
+    u64 mut i = 0;
+    while (i < s->len) { ownership_state.free(&s->states[i]); i += 1; }
+    del(s->states);
+    del(s->guards);
+    *s = successor{};
+}
+fn free_store(fact_store mut* s) void {
+    effect_block mut* own mut b = move(s->effects);
+    while (b != null) {
+        effect_block mut* own next = move(b->next);
+        del(b->items);
+        del(b);
+        b = move(next);
+    }
+    ownership_state.free(&s->facts);
+}
+fn free_result(result mut* r) void {
+    if (r->core != null) { free_successor(r->core); }
+    del(r->core);
+    del(r->trusted_sources);
+    del(r->signature_transfers);
+    del(r->outcomes);
+    free_store(&r->store);
+    *r = result{};
+}
+fn clear(storage_context mut* c) void {
+    if (c->retained != null) { free_result(c->retained); }
+    del(c->retained);
+}
+fn free_staging(staging mut* s) void {
+    del(s->arguments);
+    del(s->transfers);
+    del(s->alternatives);
+    free_store(&s->store);
+}
+fn failed(copy_context mut* c, ownership_api.incomplete_reason reason,
+    ownership_api.entity_id relation) void {
+    if (!ownership_api.successful(c->proof)) { return; }
+    c->proof = ownership_api.incomplete(reason, c->request->operation, c->request->source);
+    c->proof.terminal.relation = relation;
+}
+fn spend(copy_context mut* c, u64 amount) bool {
+    if (!ownership_api.successful(c->proof)) { return false; }
+    ownership_api.charge_item[1] items = {
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 1}};
+    ownership_api.charge_request req = {ownership_api.work_kind.substitution,
+        c->request->operation, c->request->source, items[..]};
+    u64 mut i = 0;
+    while (i < amount) {
+        ownership_api.charge_result paid = ownership_api.charge(c->services, &req);
+        if (!paid.allowed) { c->proof = paid.proof; return false; }
+        i += 1;
+    }
+    return true;
+}
+fn array_permission(copy_context mut* c, u64 len) bool {
+    return spend(c, 1) && (len == 0 || spend(c, len));
+}
+fn report(copy_context mut* c) void {
+    if (ownership_api.successful(c->proof)) { return; }
+    ownership_api.terminal_failure first = c->proof.terminal;
+    ownership_api.event_descriptor mut event = {};
+    event.key = c->request->event;
+    event.operation = c->request->operation;
+    event.source = c->request->source;
+    event.kind = ownership_api.event_kind.incomplete_proof;
+    if (first.reason == ownership_api.incomplete_reason.work_limit) {
+        event.kind = ownership_api.event_kind.work_failure;
+    }
+    event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    event.reason = first.reason;
+    event.relation = first.relation;
+    event.limit = first.limit;
+    ownership_api.event_request req = {event, c->proof};
+    c->proof = ownership_api.record_event(c->services, &req).proof;
+    // A report refusal cannot replace the first failed operation or exhaustion.
+    if (first.present) {
+        c->proof.kind = ownership_api.proof_kind.incomplete;
+        c->proof.failed = true;
+        c->proof.terminal = first;
+    }
+}
+fn block(copy_context mut* c, ownership_state.state mut* s)
+    ownership_state.slice_block mut* {
+    if (!spend(c, 1)) { return null; }
+    ownership_state.slice_block mut* own b = new(ownership_state.slice_block);
+    ownership_state.slice_block mut* view = b;
+    ownership_state.keep(s, move(b));
+    return view;
+}
+fn copy_path(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.place_path input) ownership_api.place_path {
+    ownership_api.place_path mut out = input;
+    if (input.projections.len == 0) { return out; }
+    // Storage copies supplied paths. The semantic producer proves their depth.
+    ownership_state.slice_block mut* b = block(c, s);
+    if (b == null || !array_permission(c, input.projections.len)) {
+        return ownership_api.place_path{};
+    }
+    b->projections = new(ownership_api.projection, input.projections.len);
+    u64 mut i = 0;
+    while (i < input.projections.len) {
+        if (!spend(c, 1)) { return ownership_api.place_path{}; }
+        b->projections[i] = input.projections[i];
+        i += 1;
+    }
+    out.projections = b->projections[..];
+    return out;
+}
+
+fn copy_leaves(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.layout_leaf@ input) ownership_api.layout_leaf@ {
+    ownership_api.layout_leaf@ none = {};
+    if (input.len == 0) { return none; }
+    ownership_state.slice_block mut* b = block(c, s);
+    if (b == null || !array_permission(c, input.len)) { return none; }
+    b->leaves = new(ownership_api.layout_leaf, input.len);
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!spend(c, 1)) { return none; }
+        b->leaves[i] = input[i];
+        i += 1;
+    }
+    return b->leaves[..];
+}
+
+fn copy_partitions(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.region_partition@ input) ownership_api.region_partition@ {
+    ownership_api.region_partition@ none = {};
+    if (input.len == 0) { return none; }
+    ownership_state.slice_block mut* b = block(c, s);
+    if (b == null || !array_permission(c, input.len)) { return none; }
+    b->partitions = new(ownership_api.region_partition, input.len);
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!spend(c, 1)) { return none; }
+        b->partitions[i] = input[i];
+        i += 1;
+    }
+    return b->partitions[..];
+}
+
+fn copy_entities(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.entity_id@ input) ownership_api.entity_id@ {
+    ownership_api.entity_id@ none = {};
+    if (input.len == 0) { return none; }
+    ownership_state.slice_block mut* b = block(c, s);
+    if (b == null || !array_permission(c, input.len)) { return none; }
+    b->entities = new(ownership_api.entity_id, input.len);
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!spend(c, 1)) { return none; }
+        b->entities[i] = input[i];
+        i += 1;
+    }
+    return b->entities[..];
+}
+
+fn copy_region(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.region input) ownership_api.region {
+    ownership_api.region mut out = input;
+    out.leaves = copy_leaves(c, s, input.leaves);
+    out.partitions = copy_partitions(c, s, input.partitions);
+    return out;
+}
+fn copy_contents(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.contents_fact input) ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = input;
+    out.place = copy_path(c, s, input.place);
+    if (input.borrows.len == 0) { return out; }
+    ownership_state.slice_block mut* b = block(c, s);
+    if (b == null || !array_permission(c, input.borrows.len)) {
+        return ownership_api.contents_fact{};
+    }
+    b->borrows = new(ownership_api.borrow_relation, input.borrows.len);
+    u64 mut i = 0;
+    while (i < input.borrows.len) {
+        if (!spend(c, 1)) { return ownership_api.contents_fact{}; }
+        b->borrows[i] = input.borrows[i];
+        b->borrows[i].containing = copy_path(c, s, input.borrows[i].containing);
+        b->borrows[i].range = copy_region(c, s, input.borrows[i].range);
+        i += 1;
+    }
+    out.borrows = b->borrows[..];
+    return out;
+}
+fn copy_allocation(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.allocation_fact input) ownership_api.allocation_fact {
+    ownership_api.allocation_fact mut out = input;
+    out.owner.place = copy_path(c, s, input.owner.place);
+    if (input.history.len == 0) { return out; }
+    ownership_state.slice_block mut* b = block(c, s);
+    if (b == null || !array_permission(c, input.history.len)) {
+        return ownership_api.allocation_fact{};
+    }
+    b->history = new(ownership_api.history_fact, input.history.len);
+    u64 mut i = 0;
+    while (i < input.history.len) {
+        if (!spend(c, 1)) { return ownership_api.allocation_fact{}; }
+        b->history[i] = input.history[i];
+        b->history[i].before.place = copy_path(c, s, input.history[i].before.place);
+        b->history[i].after.place = copy_path(c, s, input.history[i].after.place);
+        i += 1;
+    }
+    out.history = b->history[..];
+    return out;
+}
+fn copy_edge(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.graph_edge input) ownership_api.graph_edge {
+    ownership_api.graph_edge mut out = input;
+    out.place = copy_path(c, s, input.place);
+    out.range = copy_region(c, s, input.range);
+    return out;
+}
+fn copy_shape(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.shape_description input) ownership_api.shape_description {
+    ownership_api.shape_description mut out = input;
+    out.parameters = copy_entities(c, s, input.parameters);
+    out.clauses = copy_entities(c, s, input.clauses);
+    out.descendants = copy_entities(c, s, input.descendants);
+    return out;
+}
+fn copy_guard(copy_context mut* c, ownership_state.state mut* s,
+    ownership_api.guard_fact input) ownership_api.guard_fact {
+    ownership_api.guard_fact mut out = input;
+    out.positive = copy_entities(c, s, input.positive);
+    out.negative = copy_entities(c, s, input.negative);
+    return out;
+}
+fn allocation_known(copy_context mut* c, ownership_state.state* s,
+    ownership_api.entity_id key) bool {
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (!spend(c, 1)) { return false; }
+        if (ownership_keys.entity(s->allocations[i].key, key) == 0) { return true; }
+        i += 1;
+    }
+    return false;
+}
+fn validate_state(copy_context mut* c, ownership_state.state* s) bool {
+    if (s == null || !spend(c, 1)) {
+        failed(c, ownership_api.incomplete_reason.invalid_input, ownership_api.entity_id{});
+        return false;
+    }
+    if (s->contents_len > s->contents.len ||
+        s->sources_len > s->sources.len ||
+        s->allocations_len > s->allocations.len ||
+        s->regions_len > s->regions.len ||
+        s->nodes_len > s->nodes.len ||
+        s->edges_len > s->edges.len ||
+        s->shapes_len > s->shapes.len ||
+        s->predicates_len > s->predicates.len ||
+        s->guards_len > s->guards.len ||
+        s->correlations_len > s->correlations.len ||
+        s->losses_len > s->losses.len) {
+        failed(c, ownership_api.incomplete_reason.invalid_input, ownership_api.entity_id{});
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < s->sources_len) {
+        if (!spend(c, 1)) { return false; }
+        ownership_api.source_fact fact = s->sources[i];
+        if (fact.key.kind != ownership_api.entity_kind.source ||
+            (fact.allocation.kind == ownership_api.entity_kind.allocation &&
+            !allocation_known(c, s, fact.allocation))) {
+            failed(c, ownership_api.incomplete_reason.missing_correspondence, fact.key);
+            return false;
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!spend(c, 1)) { return false; }
+            if (ownership_keys.entity(s->sources[j].key, fact.key) == 0) {
+                failed(c, ownership_api.incomplete_reason.invalid_input, fact.key);
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->allocations_len) {
+        if (!spend(c, 1)) { return false; }
+        ownership_api.entity_id key = s->allocations[i].key;
+        if (key.kind != ownership_api.entity_kind.allocation) {
+            failed(c, ownership_api.incomplete_reason.invalid_input, key);
+            return false;
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!spend(c, 1)) { return false; }
+            if (ownership_keys.entity(s->allocations[j].key, key) == 0) {
+                failed(c, ownership_api.incomplete_reason.invalid_input, key);
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->contents_len) {
+        if (!spend(c, 1)) { return false; }
+        ownership_api.contents_fact fact = s->contents[i];
+        u64 mut b = 0;
+        while (b < fact.borrows.len) {
+            if (!spend(c, 1)) { return false; }
+            ownership_api.borrow_relation relation = fact.borrows[b];
+            if (relation.representation_complete) {
+                bool mut found = false;
+                u64 mut j = 0;
+                while (j < s->sources_len) {
+                    if (!spend(c, 1)) { return false; }
+                    if (ownership_keys.entity(s->sources[j].key, relation.source) == 0) {
+                        found = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if (!found || ownership_keys.entity(relation.range.source, relation.source) != 0) {
+                    failed(c, ownership_api.incomplete_reason.missing_correspondence,
+                        relation.source);
+                    return false;
+                }
+            }
+            b += 1;
+        }
+        i += 1;
+    }
+    return ownership_api.successful(c->proof);
+}
+fn copy_state(copy_context mut* c, ownership_state.state* input,
+    ownership_state.state mut* out) bool {
+    if (!validate_state(c, input)) { return false; }
+    if (input->contents_len != 0) {
+        if (!array_permission(c, input->contents_len)) { return false; }
+        out->contents = new(ownership_api.contents_fact, input->contents_len);
+        u64 mut i = 0;
+        while (i < input->contents_len) {
+            if (!spend(c, 1)) { return false; }
+            out->contents[i] = copy_contents(c, out, input->contents[i]);
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->contents_len += 1;
+            i += 1;
+        }
+    }
+    if (input->sources_len != 0) {
+        if (!array_permission(c, input->sources_len)) { return false; }
+        out->sources = new(ownership_api.source_fact, input->sources_len);
+        u64 mut i = 0;
+        while (i < input->sources_len) {
+            if (!spend(c, 1)) { return false; }
+            out->sources[i] = input->sources[i];
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->sources_len += 1;
+            i += 1;
+        }
+    }
+    if (input->allocations_len != 0) {
+        if (!array_permission(c, input->allocations_len)) { return false; }
+        out->allocations = new(ownership_api.allocation_fact, input->allocations_len);
+        u64 mut i = 0;
+        while (i < input->allocations_len) {
+            if (!spend(c, 1)) { return false; }
+            out->allocations[i] = copy_allocation(c, out, input->allocations[i]);
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->allocations_len += 1;
+            i += 1;
+        }
+    }
+    if (input->regions_len != 0) {
+        if (!array_permission(c, input->regions_len)) { return false; }
+        out->regions = new(ownership_api.region, input->regions_len);
+        u64 mut i = 0;
+        while (i < input->regions_len) {
+            if (!spend(c, 1)) { return false; }
+            out->regions[i] = copy_region(c, out, input->regions[i]);
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->regions_len += 1;
+            i += 1;
+        }
+    }
+    if (input->nodes_len != 0) {
+        if (!array_permission(c, input->nodes_len)) { return false; }
+        out->nodes = new(ownership_api.graph_node, input->nodes_len);
+        u64 mut i = 0;
+        while (i < input->nodes_len) {
+            if (!spend(c, 1)) { return false; }
+            out->nodes[i] = input->nodes[i];
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->nodes_len += 1;
+            i += 1;
+        }
+    }
+    if (input->edges_len != 0) {
+        if (!array_permission(c, input->edges_len)) { return false; }
+        out->edges = new(ownership_api.graph_edge, input->edges_len);
+        u64 mut i = 0;
+        while (i < input->edges_len) {
+            if (!spend(c, 1)) { return false; }
+            out->edges[i] = copy_edge(c, out, input->edges[i]);
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->edges_len += 1;
+            i += 1;
+        }
+    }
+    if (input->shapes_len != 0) {
+        if (!array_permission(c, input->shapes_len)) { return false; }
+        out->shapes = new(ownership_api.shape_description, input->shapes_len);
+        u64 mut i = 0;
+        while (i < input->shapes_len) {
+            if (!spend(c, 1)) { return false; }
+            out->shapes[i] = copy_shape(c, out, input->shapes[i]);
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->shapes_len += 1;
+            i += 1;
+        }
+    }
+    if (input->predicates_len != 0) {
+        if (!array_permission(c, input->predicates_len)) { return false; }
+        out->predicates = new(ownership_api.predicate_atom, input->predicates_len);
+        u64 mut i = 0;
+        while (i < input->predicates_len) {
+            if (!spend(c, 1)) { return false; }
+            out->predicates[i] = input->predicates[i];
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->predicates_len += 1;
+            i += 1;
+        }
+    }
+    if (input->guards_len != 0) {
+        if (!array_permission(c, input->guards_len)) { return false; }
+        out->guards = new(ownership_api.guard_fact, input->guards_len);
+        u64 mut i = 0;
+        while (i < input->guards_len) {
+            if (!spend(c, 1)) { return false; }
+            out->guards[i] = copy_guard(c, out, input->guards[i]);
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->guards_len += 1;
+            i += 1;
+        }
+    }
+    if (input->correlations_len != 0) {
+        if (!array_permission(c, input->correlations_len)) { return false; }
+        out->correlations = new(ownership_api.correlation, input->correlations_len);
+        u64 mut i = 0;
+        while (i < input->correlations_len) {
+            if (!spend(c, 1)) { return false; }
+            out->correlations[i] = input->correlations[i];
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->correlations_len += 1;
+            i += 1;
+        }
+    }
+    if (input->losses_len != 0) {
+        if (!array_permission(c, input->losses_len)) { return false; }
+        out->losses = new(ownership_api.lost_fact, input->losses_len);
+        u64 mut i = 0;
+        while (i < input->losses_len) {
+            if (!spend(c, 1)) { return false; }
+            out->losses[i] = input->losses[i];
+            if (!ownership_api.successful(c->proof)) { return false; }
+            out->losses_len += 1;
+            i += 1;
+        }
+    }
+    out->proof = input->proof;
+    return true;
+}
+fn copy_effect(copy_context mut* c, fact_store mut* s,
+    ownership_api.ordered_effect input) ownership_api.ordered_effect {
+    ownership_api.ordered_effect mut out = input;
+    out.place = copy_path(c, &s->facts, input.place);
+    return out;
+}
+fn copy_effects(copy_context mut* c, fact_store mut* s,
+    ownership_api.ordered_effect@ input) ownership_api.ordered_effect@ {
+    ownership_api.ordered_effect@ none = {};
+    if (input.len == 0 || !spend(c, 1)) { return none; }
+    effect_block mut* own b = new(effect_block);
+    effect_block mut* view = b;
+    b->next = move(s->effects);
+    s->effects = move(b);
+    if (!array_permission(c, input.len)) { return none; }
+    view->items = new(ownership_api.ordered_effect, input.len);
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!spend(c, 1)) { return none; }
+        view->items[i] = copy_effect(c, s, input[i]);
+        i += 1;
+    }
+    return view->items[..];
+}
+fn prepare_staging(copy_context mut* c, staging mut* s) bool {
+    storage_request* req = c->request;
+    if (!array_permission(c, req->arguments.len)) { return false; }
+    s->arguments = new(ownership_api.contents_fact, req->arguments.len);
+    u64 mut i = 0;
+    while (i < req->arguments.len) {
+        if (!spend(c, 1)) { return false; }
+        s->arguments[i] = copy_contents(c, &s->store.facts, req->arguments[i]);
+        i += 1;
+    }
+    if (!array_permission(c, req->signature_transfers.len)) { return false; }
+    s->transfers = new(ownership_api.ordered_effect, req->signature_transfers.len);
+    i = 0;
+    while (i < req->signature_transfers.len) {
+        if (!spend(c, 1)) { return false; }
+        s->transfers[i] = copy_effect(c, &s->store, req->signature_transfers[i]);
+        i += 1;
+    }
+    if (!array_permission(c, req->alternatives.len)) { return false; }
+    s->alternatives = new(alternative, req->alternatives.len);
+    i = 0;
+    while (i < req->alternatives.len) {
+        if (!spend(c, 1)) { return false; }
+        s->alternatives[i] = req->alternatives[i];
+        i += 1;
+    }
+    return true;
+}
+fn populate(copy_context mut* c, staging* staged, result mut* out) bool {
+    storage_request* req = c->request;
+    if (!spend(c, 1)) { return false; }
+    out->core = new(successor);
+    if (!array_permission(c, staged->alternatives.len)) { return false; }
+    out->core->states = new(ownership_state.state, staged->alternatives.len);
+    out->core->len = staged->alternatives.len;
+    if (!array_permission(c, staged->alternatives.len)) { return false; }
+    out->core->guards = new(ownership_api.entity_id, staged->alternatives.len);
+    u64 mut i = 0;
+    while (i < staged->alternatives.len) {
+        if (!spend(c, 1)) { return false; }
+        out->core->guards[i] = staged->alternatives[i].guard;
+        if (!copy_state(c, staged->alternatives[i].before, &out->core->states[i])) { return false; }
+        i += 1;
+    }
+    if (!array_permission(c, req->trusted_sources.len)) { return false; }
+    out->trusted_sources = new(ownership_api.source_fact, req->trusted_sources.len);
+    i = 0;
+    while (i < req->trusted_sources.len) {
+        if (!spend(c, 1)) { return false; }
+        out->trusted_sources[i] = req->trusted_sources[i];
+        i += 1;
+    }
+    if (!array_permission(c, staged->transfers.len)) { return false; }
+    out->signature_transfers = new(ownership_api.ordered_effect, staged->transfers.len);
+    i = 0;
+    while (i < staged->transfers.len) {
+        if (!spend(c, 1)) { return false; }
+        out->signature_transfers[i] = copy_effect(c, &out->store, staged->transfers[i]);
+        i += 1;
+    }
+    if (!array_permission(c, req->outcomes.len)) { return false; }
+    out->outcomes = new(ownership_api.outcome_fact, req->outcomes.len);
+    i = 0;
+    while (i < req->outcomes.len) {
+        if (!spend(c, 1)) { return false; }
+        out->outcomes[i] = req->outcomes[i];
+        out->outcomes[i].effects = copy_effects(c, &out->store, req->outcomes[i].effects);
+        i += 1;
+    }
+    if (!spend(c, 1)) { return false; }
+    out->proof = req->proof;
+    out->hidden_effects_outside_proof = req->hidden_effects_outside_proof;
+    return true;
+}
+fn construct(ownership_api.services* svc, storage_request* req) construction {
+    copy_context mut c = {svc, req, ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete}};
+    construction mut out = {};
+    if (req->proof.failed || req->proof.terminal.present) {
+        out.proof = req->proof;
+        out.proof.kind = ownership_api.proof_kind.incomplete;
+        out.proof.failed = true;
+        return out;
+    }
+    if (req->event.kind != ownership_api.entity_kind.event ||
+        ownership_keys.function(req->event.function, req->operation.function) != 0) {
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_correspondence,
+            req->operation, req->source);
+        return out;
+    }
+    staging mut staged = {};
+    defer free_staging(&staged);
+    result mut* own mut selected = null;
+    if (prepare_staging(&c, &staged) && spend(&c, 1)) {
+        selected = new(result);
+        if (populate(&c, &staged, selected)) {
+            out.selected = move(selected);
+            out.proof = c.proof;
+            return out;
+        }
+    }
+    if (selected != null) { free_result(selected); }
+    del(selected);
+    report(&c);
+    out.proof = c.proof;
+    return out;
+}
+fn public_view(result* r) ownership_api.ffi_result {
+    ownership_api.ffi_result mut out = {};
+    out.proof = r->proof;
+    out.trusted_sources = r->trusted_sources[..];
+    out.signature_transfers = r->signature_transfers[..];
+    out.outcomes = r->outcomes[..];
+    out.hidden_effects_outside_proof = r->hidden_effects_outside_proof;
+    return out;
+}
+fn retain(storage_context mut* c, ownership_api.services* svc,
+    storage_request* req) ownership_api.ffi_result {
+    construction mut built = construct(svc, req);
+    ownership_api.ffi_result mut out = {};
+    if (!ownership_api.successful(built.proof)) { out.proof = built.proof; return out; }
+    clear(c);
+    c->retained = move(built.selected);
+    return public_view(c->retained);
+}
+fn take_successor(storage_context mut* c) successor mut* own {
+    if (c->retained == null) { return null; }
+    successor mut* own out = move(c->retained->core);
+    clear(c);
+    return out;
+}

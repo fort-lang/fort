@@ -379,6 +379,15 @@ came here.
   Retained graphs copy allocation keys and validity for known foreign allocation releases.
   These partial snapshot rows contain no owner path or history. They do not prove owner identity.
   The graph charges snapshot storage and each lookup. A refused lookup retains its complete keys.
+  Foreign result storage owns copied successor states and nested path, region, and effect views.
+  Checked type metadata stays borrowed. Its owner keeps it alive through result teardown.
+  Each copied projection and record requires a separate work charge.
+  Storage copies supplied paths. The semantic producer proves their depth.
+  A failed replacement preserves the complete prior result and returns empty failed views.
+  A residual incomplete proof retains its facts. A failed supplied proof permits no publication.
+  Taking a successor transfers its stores. Result teardown cannot free those transferred stores.
+  Repeated take returns empty. Cleanup and repeated teardown require no new work permission.
+  The three foreign storage suites probe supplied facts. They establish no source producer.
   The 12 normative traces are design evidence. The two raw suites probe supplied facts.
   The two raw suites establish the supplied raw facts.
   `src/fort/ownership_raw_bytes.ft` owns a stable core object and its paired raw context.
