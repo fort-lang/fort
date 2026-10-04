@@ -1,0 +1,386 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept S01
+//| accept S02
+//| accept S03
+//| accept S07
+//| accept S08
+//| accept S10
+//| accept S12
+//| accept S13
+//| accept S15
+//| accept all_state_arrays
+//| accept storage_allocator_controls
+/// Tests retained foreign facts after input release and result replacement.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_storage_env;
+import ownership_keys;
+import ownership_state;
+import heap;
+
+fn s01() void {
+    ownership_ffi.result mut empty = {};
+    ownership_ffi.free_result(&empty);
+    ownership_ffi.free_result(&empty);
+    assert(empty.core == null && empty.trusted_sources.len == 0);
+    assert(empty.signature_transfers.len == 0 && empty.outcomes.len == 0);
+    assert(empty.store.effects == null && empty.store.facts.blocks == null);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.clear(&context);
+    ownership_ffi.clear(&context);
+    assert(context.retained == null);
+}
+
+fn s02() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    defer ownership_ffi.clear(&context);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 2);
+    ownership_api.ffi_result out = ownership_ffi.retain(&context, &e.raw.local.service, &req);
+    ownership_ffi_storage_env.accepted(out);
+    assert(context.retained->core->len == 1);
+    assert(ownership_state.equal(&context.retained->core->states[0], &e.raw.local.state));
+    assert(&context.retained->core->states[0].contents[0].place.projections[0] !=
+        &e.raw.local.state.contents[0].place.projections[0]);
+    assert(&context.retained->core->states[0].contents[0].borrows[0] !=
+        &e.raw.local.state.contents[0].borrows[0]);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.nested(&context.retained->core->states[0], 32);
+    ownership_ffi_storage_env.views(out, 32);
+    assert(out.trusted_sources[0].kind == ownership_api.source_kind.trusted_foreign);
+    assert(context.retained->core->states[0].allocations[0].logical_length.kind ==
+        ownership_api.fact_kind.unknown);
+}
+
+fn s03() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    defer ownership_ffi.clear(&context);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 3);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    e.transfers[0].operation.operation = 401;
+    e.effects[0].operation.operation = 402;
+    e.raw.local.state.allocations[0].logical_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 0};
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_api.ffi_result second = ownership_ffi.retain(&context,
+        &e.raw.local.service, &req);
+    ownership_ffi_storage_env.accepted(second);
+    assert(second.signature_transfers[0].operation.operation == 401);
+    assert(second.outcomes[0].effects[0].operation.operation == 402);
+    assert(context.retained->core->states[0].allocations[0].logical_length.value == 0);
+    assert(context.retained->core->states[0].allocations[0].logical_length.kind ==
+        ownership_api.fact_kind.exact);
+    assert(context.retained->core->states[0].allocations[0].obligation);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.nested(&context.retained->core->states[0], 32);
+    ownership_ffi_storage_env.views(second, 32);
+}
+
+fn s07() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 7);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi.free_result(context.retained);
+    ownership_ffi.free_result(context.retained);
+    assert(context.retained->core == null && context.retained->outcomes.len == 0);
+    assert(context.retained->store.facts.blocks == null);
+    ownership_ffi.clear(&context);
+    ownership_ffi.clear(&context);
+    assert(context.retained == null);
+}
+
+fn s08() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    defer ownership_ffi.clear(&context);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 8);
+    ownership_api.ffi_result out = ownership_ffi.retain(&context, &e.raw.local.service, &req);
+    ownership_ffi_storage_env.accepted(out);
+    assert(&out.signature_transfers[0] != cast(&e.transfers[0], ownership_api.ordered_effect*));
+    assert(&out.outcomes[0] != cast(&e.outcomes[0], ownership_api.outcome_fact*));
+    assert(&out.signature_transfers[0].place.projections[0] !=
+        &e.transfers[0].place.projections[0]);
+    assert(&out.outcomes[0].effects[0] != cast(&e.effects[0], ownership_api.ordered_effect*));
+    assert(&out.outcomes[0].effects[0].place.projections[0] !=
+        &e.effects[0].place.projections[0]);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.views(out, 32);
+    assert(out.trusted_sources[0].boundary.operation == 9);
+    assert(out.signature_transfers[0].allocation.ordinal == 9);
+    assert(out.outcomes[0].possible_caller_return);
+}
+
+fn s10() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    defer ownership_ffi.clear(&context);
+    ownership_ffi.storage_request mut req = ownership_ffi_storage_env.request(&e, 10);
+    req.alternatives = e.alternatives[..];
+    e.selected = req;
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    assert(context.retained->core->len == 2);
+    assert(context.retained->core->guards[0].ordinal == 1);
+    assert(context.retained->core->guards[1].ordinal == 2);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.nested(&context.retained->core->states[0], 32);
+    ownership_state.state* empty = &context.retained->core->states[1];
+    assert(empty->allocations_len == 0 && empty->sources_len == 0);
+    assert(empty->contents_len == 1 && empty->contents[0].owner_empty);
+    assert(empty->contents[0].borrows.len == 0);
+    assert(context.retained->core->states[0].allocations[0].obligation);
+}
+
+fn s12() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut first = {};
+    ownership_ffi.storage_context mut second = {};
+    defer ownership_ffi.clear(&first);
+    defer ownership_ffi.clear(&second);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 12);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&first,
+        &e.raw.local.service, &req));
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_api.ffi_result out = ownership_ffi.retain(&second, &e.raw.local.service, &req);
+    ownership_ffi_storage_env.accepted(out);
+    assert(first.retained != second.retained);
+    assert(first.retained->core != second.retained->core);
+    assert(&first.retained->core->states[0] != &second.retained->core->states[0]);
+    assert(&first.retained->core->states[0].contents[0].borrows[0] !=
+        &second.retained->core->states[0].contents[0].borrows[0]);
+    assert(&first.retained->outcomes[0].effects[0] != &second.retained->outcomes[0].effects[0]);
+    ownership_ffi.clear(&first);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.nested(&second.retained->core->states[0], 32);
+    ownership_ffi_storage_env.views(out, 32);
+}
+
+fn s13() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    defer ownership_ffi.clear(&context);
+    e.transfers[1] = e.transfers[0];
+    e.transfers[1].key.function.instance = 2;
+    e.transfers[1].operation.function.instance = 2;
+    e.transfers[1].place.root.function.instance = 2;
+    e.transfers[1].source.function.instance = 2;
+    e.transfers[1].allocation.function.instance = 2;
+    e.effects[1] = e.transfers[1];
+    e.outcomes[1].guard = ownership_ffi_storage_env.id(ownership_api.entity_kind.guard, 1);
+    e.outcomes[1].guard.function.instance = 2;
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 13);
+    ownership_api.ffi_result out = ownership_ffi.retain(&context, &e.raw.local.service, &req);
+    ownership_ffi_storage_env.accepted(out);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_api.ordered_effect first = out.signature_transfers[0];
+    ownership_api.ordered_effect second = out.signature_transfers[1];
+    assert(first.key.function.instance == 1 && second.key.function.instance == 2);
+    assert(first.key.ordinal == second.key.ordinal);
+    assert(first.operation.operation == second.operation.operation);
+    assert(first.operation.function.instance == 1 && second.operation.function.instance == 2);
+    assert(first.source.function.instance == 1 && second.source.function.instance == 2);
+    assert(first.place.root.function.instance == 1 && second.place.root.function.instance == 2);
+    assert(first.allocation.function.instance == 1 && second.allocation.function.instance == 2);
+    assert(out.outcomes[1].guard.function.instance == 2);
+    assert(out.outcomes[1].effects[0].key.function.instance == 2);
+    assert(out.outcomes[1].effects[0].place.projections[0].field == 0);
+    assert(ownership_keys.entity(first.key, second.key) != 0);
+}
+
+fn s15() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    defer ownership_ffi.clear(&context);
+    e.raw.local.state.contents[0].place.residual = true;
+    ownership_api.contents_fact mut changed = e.raw.local.state.contents[0];
+    ownership_api.borrow_relation[1] mut relations = {changed.borrows[0]};
+    relations[0].range.residual = true;
+    relations[0].representation_complete = false;
+    changed.borrows = relations[..];
+    e.raw.local.state.contents[0] = ownership_state.copy_contents(&e.raw.local.state, changed);
+    e.raw.local.state.proof.kind = ownership_api.proof_kind.incomplete;
+    ownership_ffi.storage_request mut req = ownership_ffi_storage_env.request(&e, 15);
+    req.proof.kind = ownership_api.proof_kind.incomplete;
+    e.selected = req;
+    ownership_api.ffi_result out = ownership_ffi.retain(&context, &e.raw.local.service, &req);
+    assert(context.retained != null && !ownership_api.successful(out.proof));
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete && !out.proof.failed);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_state.state* stored = &context.retained->core->states[0];
+    assert(stored->contents[0].place.residual);
+    assert(stored->contents[0].borrows[0].range.residual);
+    assert(!stored->contents[0].borrows[0].representation_complete);
+    assert(stored->allocations[0].obligation && stored->allocations[0].count.one);
+    assert(stored->proof.kind == ownership_api.proof_kind.incomplete);
+    ownership_ffi_storage_env.views(out, 32);
+}
+
+fn all_state_arrays() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi_storage_env.all_arrays(&e);
+    ownership_ffi.storage_context mut context = {};
+    defer ownership_ffi.clear(&context);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 18);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_state.state* copied = &context.retained->core->states[0];
+    assert(ownership_state.equal(copied, &e.raw.local.state));
+    assert(copied->regions_len == 1 && copied->nodes_len == 1 && copied->edges_len == 1);
+    assert(copied->shapes_len == 1 && copied->predicates_len == 1 && copied->guards_len == 1);
+    assert(copied->correlations_len == 1 && copied->losses_len == 1);
+    assert(&copied->regions[0].leaves[0] != &e.raw.local.state.regions[0].leaves[0]);
+    assert(&copied->regions[0].partitions[0] != &e.raw.local.state.regions[0].partitions[0]);
+    assert(&copied->allocations[0].history[0] != &e.raw.local.state.allocations[0].history[0]);
+    assert(&copied->shapes[0].parameters[0] != &e.raw.local.state.shapes[0].parameters[0]);
+    assert(&copied->shapes[0].clauses[0] != &e.raw.local.state.shapes[0].clauses[0]);
+    assert(&copied->shapes[0].descendants[0] != &e.raw.local.state.shapes[0].descendants[0]);
+    assert(&copied->guards[0].positive[0] != &e.raw.local.state.guards[0].positive[0]);
+    assert(&copied->guards[0].negative[0] != &e.raw.local.state.guards[0].negative[0]);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.nested(copied, 32);
+    assert(copied->contents[0].borrows[0].range.leaves.len == 2);
+    assert(copied->contents[0].borrows[0].range.partitions.len == 2);
+    assert(copied->contents[0].borrows[0].range.partitions[1].residual);
+    assert(copied->regions[0].offset.value == 2 && copied->regions[0].extent.value == 16);
+    assert(copied->regions[0].alignment == 8 && copied->regions[0].leaves[0].owning);
+    assert(copied->regions[0].leaves[1].padding);
+    assert(copied->regions[0].leaves[0].ty == e.raw.byte);
+    assert(copied->allocations[0].history[0].after.place.projections[0].field == 4);
+    assert(copied->allocations[0].history[0].after.transfer_pending);
+    assert(copied->allocations[0].history[0].source.line == 17);
+    assert(copied->edges[0].place.projections[0].field == 0);
+    assert(copied->edges[0].range.leaves[1].padding);
+    assert(copied->shapes[0].parameters[1].ordinal == 304);
+    assert(copied->shapes[0].clauses[0].ordinal == 305);
+    assert(copied->shapes[0].descendants[0].ordinal == 301);
+    assert(copied->guards[0].positive[0].ordinal == 305);
+    assert(copied->guards[0].negative[1].ordinal == 304);
+    assert(copied->predicates[0].right.ordinal == 92);
+    assert(copied->correlations[0].relation.ordinal == 303);
+    assert(copied->losses[0].bound == 256 && copied->losses[0].first_source.line == 17);
+}
+
+fn one_cleanup(ownership_ffi_storage_env.env mut* e, u32 mode,
+    ownership_ffi.storage_request* req, u64 final_cost, u64 selected_cost) void {
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi_storage_env.reset(e, 0);
+    if (mode == 2 || mode == 5) {
+        ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+            &e->raw.local.service, req));
+        ownership_ffi_storage_env.reset(e, 0);
+    }
+    if (mode == 1 || mode == 5) { e->raw.budget.deny_at = final_cost; }
+    if (mode == 4) { e->raw.budget.deny_at = selected_cost; }
+    ownership_api.ffi_result out = ownership_ffi.retain(&context, &e->raw.local.service, req);
+    if (mode == 1 || mode == 4 || mode == 5) {
+        ownership_ffi_storage_env.rejected(out, req);
+        if (mode == 5) {
+            assert(context.retained != null);
+            ownership_ffi_storage_env.nested(&context.retained->core->states[0], 32);
+        } else { assert(context.retained == null); }
+    } else {
+        ownership_ffi_storage_env.accepted(out);
+        assert(context.retained->core->states[0].regions_len == 1);
+        assert(context.retained->core->states[0].guards[0].positive.len == 1);
+        assert(context.retained->core->states[0].allocations[0].history.len == 1);
+        if (mode == 3) {
+            ownership_ffi.successor mut* own taken = ownership_ffi.take_successor(&context);
+            assert(taken != null && context.retained == null);
+            ownership_ffi_storage_env.nested(&taken->states[0], 32);
+            ownership_ffi.free_successor(taken);
+            del(taken);
+        }
+    }
+    ownership_ffi.clear(&context);
+}
+
+fn storage_cleanup(u32 mode) void {
+    assert(mode <= 5);
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi_storage_env.all_arrays(&e);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 21);
+    ownership_ffi.storage_context mut measured = {};
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&measured,
+        &e.raw.local.service, &req));
+    u64 final_cost = e.raw.budget.calls;
+    ownership_ffi.clear(&measured);
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_ffi.staging mut staged = {};
+    ownership_ffi.copy_context mut copying = {&e.raw.local.service, &req,
+        ownership_api.proof_status{.kind = ownership_api.proof_kind.complete}};
+    assert(ownership_ffi.prepare_staging(&copying, &staged));
+    u64 selected_cost = e.raw.budget.calls + 2;
+    ownership_ffi.free_staging(&staged);
+    assert(selected_cost < final_cost);
+    u64 mut warm = 0;
+    while (warm < 32) {
+        one_cleanup(&e, mode, &req, final_cost, selected_cost);
+        ownership_ffi_storage_env.live_bytes();
+        heap.system_view();
+        warm += 1;
+    }
+    u64 before_live = ownership_ffi_storage_env.live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_api.U64_MAX;
+    u64 mut best_system = ownership_api.U64_MAX;
+    u64 mut round = 0;
+    while (round < 128) {
+        one_cleanup(&e, mode, &req, final_cost, selected_cost);
+        u64 live = heap.distance(before_live, ownership_ffi_storage_env.live_bytes());
+        u64 system = heap.distance(before_system, heap.system_view());
+        if (round >= 112 && live < best_live) { best_live = live; }
+        if (round >= 112 && system < best_system) { best_system = system; }
+        round += 1;
+    }
+    u64 live_bound = heap.ADDRESS_IS_A_VIEW ? 2048 : 256;
+    if (best_live >= live_bound) { println("allocator live bytes ", mode, " ", best_live); }
+    assert(best_live < live_bound);
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+}
+
+fn main() i32 {
+    s01(); println("accept S01");
+    s02(); println("accept S02");
+    s03(); println("accept S03");
+    s07(); println("accept S07");
+    s08(); println("accept S08");
+    s10(); println("accept S10");
+    s12(); println("accept S12");
+    s13(); println("accept S13");
+    s15(); println("accept S15");
+    all_state_arrays(); println("accept all_state_arrays");
+    storage_cleanup(0);
+    storage_cleanup(1);
+    storage_cleanup(2);
+    storage_cleanup(3);
+    storage_cleanup(4);
+    storage_cleanup(5);
+    println("accept storage_allocator_controls");
+    return 0;
+}

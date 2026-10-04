@@ -1,0 +1,273 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept S04
+//| reject S11
+//| reject S14
+//| reject S16
+//| reject S17
+//| reject invalid_state_headers
+//| reject failed_supplied_proof
+/// Refuses each charged result copy and preserves independent previous results.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_storage_env;
+import ownership_keys;
+import ownership_limits;
+import ownership_state;
+
+fn sweep(u32 case_number, bool prior) void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_context mut reference = {};
+    defer ownership_ffi.clear(&context);
+    defer ownership_ffi.clear(&reference);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, case_number);
+    if (prior) {
+        ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+            &e.raw.local.service, &req));
+        ownership_ffi_storage_env.reset(&e, 0);
+        ownership_ffi_storage_env.accepted(ownership_ffi.retain(&reference,
+            &e.raw.local.service, &req));
+    }
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_ffi_storage_env.start_trace(&e);
+    ownership_ffi.storage_context mut measured = {};
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&measured,
+        &e.raw.local.service, &req));
+    u64 cost = e.raw.budget.calls;
+    assert(cost == e.trace_len && cost > 1000 && cost < ownership_limits.PRODUCTION_W);
+    e.capture = false;
+    ownership_ffi.clear(&measured);
+    u64 mut i = 0;
+    while (i < e.trace_len) {
+        ownership_ffi_storage_env.charge_row row = e.trace[i];
+        assert(row.allowed && row.amount == 1);
+        assert(row.work == ownership_api.work_kind.substitution);
+        assert(row.category == ownership_api.limit_category.w);
+        assert(row.scope == ownership_api.limit_scope.computation);
+        assert(ownership_keys.operation(row.operation, req.operation) == 0);
+        assert(ownership_keys.source(row.source, req.source) == 0);
+        i += 1;
+    }
+    ownership_ffi.result mut* selected = context.retained;
+    e.transfers[0].operation.operation = 901;
+    e.effects[0].operation.operation = 902;
+    i = 1;
+    while (i <= cost) {
+        ownership_ffi_storage_env.reset(&e, i);
+        ownership_api.ffi_result failed = ownership_ffi.retain(&context,
+            &e.raw.local.service, &req);
+        ownership_ffi_storage_env.rejected(failed, &req);
+        assert(e.raw.budget.calls == i && e.events == 1 && e.event_called);
+        assert(failed.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(failed.proof.terminal.limit.present);
+        assert(failed.proof.terminal.limit.used == 7 && failed.proof.terminal.limit.bound == 7);
+        assert(failed.proof.terminal.limit.attempted == 1);
+        assert(ownership_keys.operation(failed.proof.terminal.limit.operation, req.operation) == 0);
+        assert(ownership_keys.source(failed.proof.terminal.limit.source, req.source) == 0);
+        assert(ownership_state.equal(&before, &e.raw.local.state));
+        assert(context.retained == selected);
+        if (prior) {
+            assert(ownership_ffi_storage_env.same_result(context.retained, reference.retained));
+            ownership_ffi_storage_env.views(ownership_ffi.public_view(context.retained), 32);
+        }
+        assert(e.transfers[0].operation.operation == 901);
+        assert(e.effects[0].operation.operation == 902);
+        i += 1;
+    }
+    ownership_ffi_storage_env.reset(&e, 0);
+}
+
+fn s04() void { sweep(4, true); }
+
+fn s11() void { sweep(11, true); }
+
+fn s14() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 14);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    // This cut follows argument-vector allocation and precedes its nested copy.
+    ownership_ffi_storage_env.reset(&e, 35);
+    e.refuse_event = true;
+    ownership_api.ffi_result failed = ownership_ffi.retain(&context,
+        &e.raw.local.service, &req);
+    ownership_ffi_storage_env.rejected(failed, &req);
+    assert(e.event_called && e.events == 1 && context.retained == null);
+    assert(failed.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(failed.proof.terminal.limit.work == ownership_api.work_kind.substitution);
+    assert(failed.proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(failed.proof.terminal.limit.scope == ownership_api.limit_scope.computation);
+    assert(failed.proof.terminal.limit.used == 7 && failed.proof.terminal.limit.bound == 7);
+    assert(failed.proof.terminal.limit.attempted == 1);
+    assert(ownership_keys.operation(failed.proof.terminal.limit.operation, req.operation) == 0);
+    assert(ownership_keys.source(failed.proof.terminal.limit.source, req.source) == 0);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    ownership_ffi.clear(&context);
+    ownership_ffi_storage_env.reset(&e, 0);
+}
+
+fn s16() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_context mut reference = {};
+    defer ownership_ffi.clear(&context);
+    defer ownership_ffi.clear(&reference);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 16);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&reference,
+        &e.raw.local.service, &req));
+    e.raw.local.state.allocations[0].key.ordinal = 999;
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_api.ffi_result failed = ownership_ffi.retain(&context,
+        &e.raw.local.service, &req);
+    ownership_ffi_storage_env.rejected(failed, &req);
+    assert(failed.proof.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(failed.proof.terminal.relation.ordinal == 9);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    assert(ownership_ffi_storage_env.same_result(context.retained, reference.retained));
+    ownership_ffi_storage_env.views(ownership_ffi.public_view(context.retained), 32);
+}
+
+fn s17() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_context mut reference = {};
+    ownership_ffi.storage_context mut measured = {};
+    defer ownership_ffi.clear(&context);
+    defer ownership_ffi.clear(&reference);
+    defer ownership_ffi.clear(&measured);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 17);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&reference,
+        &e.raw.local.service, &req));
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&measured,
+        &e.raw.local.service, &req));
+    u64 cost = e.raw.budget.calls;
+    assert(cost > 1000);
+    ownership_ffi.clear(&measured);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_ffi_storage_env.reset(&e, cost);
+    ownership_api.ffi_result failed = ownership_ffi.retain(&context,
+        &e.raw.local.service, &req);
+    ownership_ffi_storage_env.rejected(failed, &req);
+    assert(e.raw.budget.calls == cost && e.events == 1);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    assert(ownership_ffi_storage_env.same_result(context.retained, reference.retained));
+    ownership_ffi_storage_env.views(ownership_ffi.public_view(context.retained), 32);
+    ownership_ffi_storage_env.reset(&e, 0);
+}
+
+fn bad_length(ownership_state.state mut* s, u32 selected, bool invalid) void {
+    switch (selected) {
+    case 0: s->contents_len = invalid ? s->contents.len + 1 : 34; break;
+    case 1: s->sources_len = invalid ? s->sources.len + 1 : 32; break;
+    case 2: s->allocations_len = invalid ? s->allocations.len + 1 : 32; break;
+    case 3: s->regions_len = invalid ? s->regions.len + 1 : 1; break;
+    case 4: s->nodes_len = invalid ? s->nodes.len + 1 : 1; break;
+    case 5: s->edges_len = invalid ? s->edges.len + 1 : 1; break;
+    case 6: s->shapes_len = invalid ? s->shapes.len + 1 : 1; break;
+    case 7: s->predicates_len = invalid ? s->predicates.len + 1 : 1; break;
+    case 8: s->guards_len = invalid ? s->guards.len + 1 : 1; break;
+    case 9: s->correlations_len = invalid ? s->correlations.len + 1 : 1; break;
+    case 10: s->losses_len = invalid ? s->losses.len + 1 : 1; break;
+    default: assert(false);
+    }
+}
+
+fn invalid_state_headers() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi_storage_env.all_arrays(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_context mut reference = {};
+    defer ownership_ffi.clear(&context);
+    defer ownership_ffi.clear(&reference);
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 19);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&reference,
+        &e.raw.local.service, &req));
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    u32 mut selected = 0;
+    while (selected < 11) {
+        bad_length(&e.raw.local.state, selected, true);
+        ownership_ffi_storage_env.reset(&e, 0);
+        ownership_api.ffi_result failed = ownership_ffi.retain(&context,
+            &e.raw.local.service, &req);
+        ownership_ffi_storage_env.rejected(failed, &req);
+        assert(failed.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+        assert(ownership_ffi_storage_env.same_result(context.retained, reference.retained));
+        bad_length(&e.raw.local.state, selected, false);
+        assert(ownership_state.equal(&before, &e.raw.local.state));
+        selected += 1;
+    }
+    e.alternatives[0].before = null;
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_api.ffi_result failed = ownership_ffi.retain(&context,
+        &e.raw.local.service, &req);
+    ownership_ffi_storage_env.rejected(failed, &req);
+    assert(failed.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(ownership_ffi_storage_env.same_result(context.retained, reference.retained));
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+}
+
+fn failed_supplied_proof() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_context mut reference = {};
+    defer ownership_ffi.clear(&context);
+    defer ownership_ffi.clear(&reference);
+    ownership_ffi.storage_request mut req = ownership_ffi_storage_env.request(&e, 20);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&reference,
+        &e.raw.local.service, &req));
+    req.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        req.operation, req.source);
+    req.proof.terminal.relation = e.raw.local.state.sources[0].key;
+    ownership_ffi_storage_env.reset(&e, 0);
+    ownership_api.ffi_result failed = ownership_ffi.retain(&context,
+        &e.raw.local.service, &req);
+    ownership_ffi_storage_env.rejected(failed, &req);
+    assert(e.raw.budget.calls == 0 && e.events == 0);
+    assert(ownership_state.same_proof(failed.proof, req.proof));
+    assert(ownership_ffi_storage_env.same_result(context.retained, reference.retained));
+}
+
+fn main() i32 {
+    s04(); println("accept S04");
+    s11(); println("reject S11");
+    s14(); println("reject S14");
+    s16(); println("reject S16");
+    s17(); println("reject S17");
+    invalid_state_headers(); println("reject invalid_state_headers");
+    failed_supplied_proof(); println("reject failed_supplied_proof");
+    return 0;
+}

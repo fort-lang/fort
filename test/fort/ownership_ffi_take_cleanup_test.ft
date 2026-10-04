@@ -1,0 +1,83 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept S05
+//| accept S06
+//| accept S09
+/// Tests independent successor ownership and zero-length allocation obligations.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_storage_env;
+import ownership_state;
+
+fn s05() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 5);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi.successor mut* own taken = ownership_ffi.take_successor(&context);
+    assert(taken != null && context.retained == null);
+    ownership_ffi.clear(&context);
+    ownership_ffi_storage_env.free_input(&e);
+    assert(taken->len == 1 && taken->guards[0].ordinal == 1);
+    ownership_ffi_storage_env.nested(&taken->states[0], 32);
+    assert(taken->states[0].contents[0].borrows[0].range.layout == e.raw.byte);
+    ownership_ffi.free_successor(taken);
+    assert(taken->len == 0 && taken->states.len == 0 && taken->guards.len == 0);
+    del(taken);
+}
+
+fn s06() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 6);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi.successor mut* own first = ownership_ffi.take_successor(&context);
+    ownership_ffi.successor mut* own second = ownership_ffi.take_successor(&context);
+    assert(first != null && second == null && context.retained == null);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.nested(&first->states[0], 32);
+    ownership_ffi.free_successor(first);
+    ownership_ffi.free_successor(first);
+    del(first);
+    del(second);
+    ownership_ffi.clear(&context);
+}
+
+fn s09() void {
+    ownership_ffi_storage_env.env mut e = {};
+    ownership_ffi_storage_env.open(&e, 32);
+    defer ownership_ffi_storage_env.close(&e);
+    ownership_ffi.storage_context mut context = {};
+    e.raw.local.state.allocations[0].logical_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 0};
+    ownership_ffi.storage_request req = ownership_ffi_storage_env.request(&e, 9);
+    ownership_ffi_storage_env.accepted(ownership_ffi.retain(&context,
+        &e.raw.local.service, &req));
+    ownership_ffi.successor mut* own taken = ownership_ffi.take_successor(&context);
+    ownership_ffi_storage_env.free_input(&e);
+    ownership_ffi_storage_env.nested(&taken->states[0], 32);
+    ownership_api.allocation_fact allocation = taken->states[0].allocations[0];
+    assert(allocation.logical_length.kind == ownership_api.fact_kind.exact);
+    assert(allocation.logical_length.value == 0 && allocation.obligation);
+    assert(allocation.validity == ownership_api.validity_kind.live && allocation.count.one);
+    assert(!taken->states[0].contents[0].owner_empty);
+    assert(taken->states[0].contents[0].borrows.len == 1);
+    assert(taken->states[0].sources[0].allocation.ordinal == 9);
+    ownership_ffi.free_successor(taken);
+    del(taken);
+    ownership_ffi.clear(&context);
+}
+
+fn main() i32 {
+    s05(); println("accept S05");
+    s06(); println("accept S06");
+    s09(); println("accept S09");
+    return 0;
+}

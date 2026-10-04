@@ -1,0 +1,480 @@
+/// Supplies owned caller facts and observes counted foreign result storage.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_arithmetic_env;
+import ownership_keys;
+import ownership_limits;
+import ownership_raw_env;
+import ownership_state;
+import ownership_transfer;
+import heap;
+import std.libc;
+import std.str;
+
+struct charge_row {
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.work_kind work;
+    ownership_api.limit_category category;
+    ownership_api.limit_scope scope;
+    u64 amount;
+    bool allowed;
+}
+
+struct env {
+    ownership_raw_env.env raw;
+    ownership_state.state empty;
+    ownership_ffi.alternative[2] alternatives;
+    ownership_api.contents_fact mut@ own arguments;
+    ownership_api.source_fact mut@ own sources;
+    ownership_api.ordered_effect mut@ own transfers;
+    ownership_api.ordered_effect mut@ own effects;
+    ownership_api.outcome_fact mut@ own outcomes;
+    ownership_ffi.storage_request selected;
+    u64 events;
+    bool refuse_event;
+    bool event_called;
+    charge_row mut@ own trace;
+    u64 trace_len;
+    bool capture;
+}
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_ffi_arithmetic_env.id(kind, ordinal);
+}
+
+fn place(u32 slot) ownership_api.place_path {
+    ownership_api.place_path mut out = {};
+    out.root = id(ownership_api.entity_kind.slot, slot);
+    return out;
+}
+
+fn projected(ownership_state.state mut* s, u32 slot, u32 field)
+    ownership_api.place_path {
+    ownership_api.place_path mut out = place(slot);
+    ownership_api.projection[1] mut path = {};
+    path[0].kind = ownership_api.projection_kind.field;
+    path[0].field = field;
+    out.projections = ownership_state.copy_projections(s, path[..]);
+    return out;
+}
+
+fn source(u32 ordinal) ownership_api.source_fact {
+    ownership_api.source_fact mut out = {};
+    out.key = id(ownership_api.entity_kind.source, ordinal);
+    out.kind = ownership_api.source_kind.trusted_foreign;
+    out.validity = ownership_api.validity_kind.live;
+    out.allocation = id(ownership_api.entity_kind.allocation, ordinal);
+    out.boundary = ownership_api.operation_position{
+        ownership_ffi_arithmetic_env.function(), 1, ordinal, false};
+    return out;
+}
+
+fn reference(env mut* e, ownership_api.place_path path, u32 ordinal, u32 version)
+    ownership_api.contents_fact {
+    ownership_api.borrow_relation[1] mut relations = {};
+    relations[0].key = id(ownership_api.entity_kind.relation, version);
+    relations[0].value_version = id(ownership_api.entity_kind.value, version);
+    relations[0].containing = path;
+    relations[0].source = id(ownership_api.entity_kind.source, ordinal);
+    relations[0].range.key = id(ownership_api.entity_kind.region, version);
+    relations[0].range.source = relations[0].source;
+    relations[0].range.layout = e->raw.byte;
+    relations[0].representation_complete = true;
+    ownership_api.contents_fact mut out = {};
+    out.place = path;
+    out.kind = ownership_api.contents_kind.reference;
+    out.value_version = relations[0].value_version;
+    out.borrows = relations[..];
+    return ownership_state.copy_contents(&e->raw.local.state, out);
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    env mut* e = cast(opaque, env mut*);
+    assert(ownership_keys.operation(req->event.operation, e->selected.operation) == 0);
+    assert(ownership_keys.source(req->event.source, e->selected.source) == 0);
+    assert(ownership_keys.entity(req->event.key, e->selected.event) == 0);
+    e->events += 1;
+    e->event_called = true;
+    ownership_api.event_result mut out = {};
+    out.proof = req->current;
+    out.retained = true;
+    if (e->refuse_event) {
+        ownership_api.operation_position mut other = req->event.operation;
+        other.operation += 1;
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            other, req->event.source);
+        out.retained = false;
+    }
+    return out;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    env mut* e = cast(opaque, env mut*);
+    assert(req->items.len == 1 && req->items[0].amount == 1);
+    assert(req->items[0].category == ownership_api.limit_category.w);
+    assert(req->items[0].scope == ownership_api.limit_scope.computation);
+    assert(ownership_keys.operation(req->operation, e->selected.operation) == 0);
+    assert(ownership_keys.source(req->source, e->selected.source) == 0);
+    ownership_api.charge_result out = ownership_raw_env.budget(
+        cast(&e->raw.budget, void mut*), req);
+    if (e->capture) {
+        assert(e->trace_len < e->trace.len);
+        e->trace[e->trace_len] = charge_row{req->operation, req->source, req->work,
+            req->items[0].category, req->items[0].scope, req->items[0].amount, out.allowed};
+        e->trace_len += 1;
+    }
+    return out;
+}
+
+fn start_trace(env mut* e) void {
+    assert(e->trace.len == 0);
+    e->trace = new(charge_row, ownership_limits.PRODUCTION_W);
+    e->trace_len = 0;
+    e->capture = true;
+}
+
+fn reset(env mut* e, u64 refusal) void {
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_limits.configure(&e->raw.budget.meter, &limits));
+    e->raw.budget.calls = 0;
+    e->raw.budget.deny_at = refusal;
+    e->events = 0;
+    e->event_called = false;
+}
+
+fn request(env mut* e, u32 case_number) ownership_ffi.storage_request {
+    ownership_ffi.storage_request mut out = {};
+    out.operation = ownership_api.operation_position{
+        ownership_ffi_arithmetic_env.function(), 2, case_number * 16, false};
+    u32 line = 2000 + case_number * 3;
+    out.source = ownership_api.source_position{31, 1, line, 5, line, 17, true};
+    out.event = id(ownership_api.entity_kind.event, out.operation.operation);
+    out.alternatives = e->alternatives[..1];
+    out.arguments = e->arguments[..];
+    out.trusted_sources = e->sources[..];
+    out.signature_transfers = e->transfers[..];
+    out.outcomes = e->outcomes[..];
+    out.proof.kind = ownership_api.proof_kind.complete;
+    out.hidden_effects_outside_proof = true;
+    e->selected = out;
+    return out;
+}
+
+fn open(env mut* e, u64 copies) void {
+    assert(copies > 0 && copies <= 32);
+    ownership_raw_env.open(&e->raw);
+    e->raw.local.service.event_context = cast(e, void mut*);
+    e->raw.local.service.event = event;
+    e->raw.local.service.budget_context = cast(e, void mut*);
+    e->raw.local.service.budget = budget;
+    ownership_state.state mut* s = &e->raw.local.state;
+    s->proof.kind = ownership_api.proof_kind.complete;
+    s->sources = new(ownership_api.source_fact, copies);
+    s->sources_len = copies;
+    s->allocations = new(ownership_api.allocation_fact, copies);
+    s->allocations_len = copies;
+    s->contents = new(ownership_api.contents_fact, copies + 2);
+    s->contents_len = copies + 2;
+    e->arguments = new(ownership_api.contents_fact, copies);
+    e->sources = new(ownership_api.source_fact, copies);
+    e->transfers = new(ownership_api.ordered_effect, copies);
+    e->effects = new(ownership_api.ordered_effect, copies);
+    e->outcomes = new(ownership_api.outcome_fact, copies);
+    u64 mut i = 0;
+    while (i < copies) {
+        u32 ordinal = i == 0 ? 9 : cast(100 + i, u32);
+        u32 slot = i == 0 ? 3 : ordinal;
+        u32 version = i == 0 ? 91 : ordinal * 10 + 1;
+        ownership_api.place_path path = projected(s, slot, cast(i, u32));
+        s->sources[i] = source(ordinal);
+        s->allocations[i].key = s->sources[i].allocation;
+        s->allocations[i].site = s->allocations[i].key;
+        s->allocations[i].validity = ownership_api.validity_kind.live;
+        s->allocations[i].count.one = true;
+        s->allocations[i].obligation = true;
+        s->allocations[i].owner.place = path;
+        s->contents[i] = reference(e, path, ordinal, version);
+        e->arguments[i] = s->contents[i];
+        e->sources[i] = s->sources[i];
+        e->transfers[i].key = id(ownership_api.entity_kind.event, cast(10 + i, u32));
+        e->transfers[i].kind = ownership_api.effect_kind.transfer;
+        e->transfers[i].operation = s->sources[i].boundary;
+        e->transfers[i].place = path;
+        e->transfers[i].source = s->sources[i].key;
+        e->transfers[i].allocation = s->allocations[i].key;
+        e->effects[i] = e->transfers[i];
+        e->outcomes[i].kind = ownership_api.outcome_kind.function_return;
+        e->outcomes[i].possible_caller_return = true;
+        e->outcomes[i].effects = e->effects[i..i + 1];
+        i += 1;
+    }
+    s->contents[copies] = reference(e, place(8), 9, 81);
+    s->contents[copies + 1] = ownership_transfer.empty_value(place(9));
+    s->contents[copies + 1].value_version = id(ownership_api.entity_kind.value, 90);
+    e->empty = ownership_state.empty();
+    e->empty.contents = new(ownership_api.contents_fact, 1);
+    e->empty.contents_len = 1;
+    e->empty.contents[0] = ownership_transfer.empty_value(place(3));
+    e->alternatives[0] = ownership_ffi.alternative{
+        id(ownership_api.entity_kind.guard, 1), s};
+    e->alternatives[1] = ownership_ffi.alternative{
+        id(ownership_api.entity_kind.guard, 2), &e->empty};
+    reset(e, 0);
+}
+
+fn free_input(env mut* e) void {
+    ownership_state.free(&e->raw.local.state);
+    ownership_state.free(&e->empty);
+    del(e->arguments);
+    del(e->sources);
+    del(e->transfers);
+    del(e->effects);
+    del(e->outcomes);
+}
+
+fn close(env mut* e) void {
+    free_input(e);
+    del(e->trace);
+    ownership_raw_env.close(&e->raw);
+}
+
+fn accepted(ownership_api.ffi_result out) void {
+    assert(ownership_api.successful(out.proof));
+    assert(out.hidden_effects_outside_proof);
+}
+
+fn rejected(ownership_api.ffi_result out, ownership_ffi.storage_request* req) void {
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.trusted_sources.len == 0 && out.signature_transfers.len == 0);
+    assert(out.outcomes.len == 0 && !out.hidden_effects_outside_proof);
+    assert(ownership_keys.operation(out.proof.terminal.operation, req->operation) == 0);
+    assert(ownership_keys.source(out.proof.terminal.source, req->source) == 0);
+}
+
+fn nested(ownership_state.state* s, u64 copies) void {
+    assert(s->sources_len == copies && s->allocations_len == copies);
+    assert(s->contents_len == copies + 2);
+    ownership_api.contents_fact value = s->contents[0];
+    assert(value.place.root.ordinal == 3 && value.place.projections.len == 1);
+    assert(value.place.projections[0].kind == ownership_api.projection_kind.field);
+    assert(value.place.projections[0].field == 0);
+    assert(value.value_version.ordinal == 91 && value.borrows.len == 1);
+    ownership_api.borrow_relation relation = value.borrows[0];
+    assert(relation.source.ordinal == 9 && relation.value_version.ordinal == 91);
+    assert(ownership_state.same_place(relation.containing, value.place));
+    assert(relation.range.source.ordinal == 9 && relation.range.layout != null);
+    assert(s->allocations[0].obligation && s->allocations[0].count.one);
+    assert(ownership_state.same_place(s->allocations[0].owner.place, value.place));
+    assert(s->contents[copies].value_version.ordinal == 81);
+    assert(s->contents[copies + 1].owner_empty);
+    assert(s->contents[copies + 1].value_version.ordinal == 90);
+}
+
+fn views(ownership_api.ffi_result out, u64 copies) void {
+    assert(out.trusted_sources.len == copies && out.signature_transfers.len == copies);
+    assert(out.outcomes.len == copies);
+    u64 mut i = 0;
+    while (i < copies) {
+        assert(out.signature_transfers[i].place.projections.len == 1);
+        assert(out.signature_transfers[i].place.projections[0].field == cast(i, u32));
+        assert(out.outcomes[i].effects.len == 1);
+        assert(ownership_state.same_place(out.outcomes[i].effects[0].place,
+            out.signature_transfers[i].place));
+        assert(ownership_keys.entity(out.outcomes[i].effects[0].source,
+            out.trusted_sources[i].key) == 0);
+        i += 1;
+    }
+}
+
+fn same_effect(ownership_api.ordered_effect a, ownership_api.ordered_effect b) bool {
+    return ownership_keys.entity(a.key, b.key) == 0 && a.kind == b.kind &&
+        ownership_keys.operation(a.operation, b.operation) == 0 &&
+        ownership_state.same_place(a.place, b.place) &&
+        ownership_keys.entity(a.source, b.source) == 0 &&
+        ownership_keys.entity(a.allocation, b.allocation) == 0 &&
+        ownership_keys.entity(a.guard, b.guard) == 0;
+}
+
+fn same_result(ownership_ffi.result* a, ownership_ffi.result* b) bool {
+    if (!ownership_state.same_proof(a->proof, b->proof) ||
+        a->hidden_effects_outside_proof != b->hidden_effects_outside_proof ||
+        a->core->len != b->core->len ||
+        a->trusted_sources.len != b->trusted_sources.len ||
+        a->signature_transfers.len != b->signature_transfers.len ||
+        a->outcomes.len != b->outcomes.len) { return false; }
+    u64 mut i = 0;
+    while (i < a->core->len) {
+        if (ownership_keys.entity(a->core->guards[i], b->core->guards[i]) != 0 ||
+            !ownership_state.equal(&a->core->states[i], &b->core->states[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->trusted_sources.len) {
+        if (!ownership_state.same_source(a->trusted_sources[i], b->trusted_sources[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->signature_transfers.len) {
+        if (!same_effect(a->signature_transfers[i], b->signature_transfers[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->outcomes.len) {
+        ownership_api.outcome_fact left = a->outcomes[i];
+        ownership_api.outcome_fact right = b->outcomes[i];
+        if (left.kind != right.kind || ownership_keys.entity(left.guard, right.guard) != 0 ||
+            left.possible_caller_return != right.possible_caller_return ||
+            left.cleanup_required != right.cleanup_required ||
+            left.cleanup_proved != right.cleanup_proved ||
+            left.effects.len != right.effects.len) { return false; }
+        u64 mut j = 0;
+        while (j < left.effects.len) {
+            if (!same_effect(left.effects[j], right.effects[j])) { return false; }
+            j += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn all_arrays(env mut* e) void {
+    ownership_state.state mut* s = &e->raw.local.state;
+    ownership_api.region mut range = s->contents[0].borrows[0].range;
+    range.offset = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 2};
+    range.extent = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 16};
+    range.alignment = 8;
+    range.access.begin = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 2};
+    range.access.end = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 8};
+    range.access.arithmetic_proved = true;
+    ownership_api.layout_leaf[2] mut leaves = {};
+    leaves[0].bytes = range.access;
+    leaves[0].ty = e->raw.byte;
+    leaves[0].owning = true;
+    leaves[1].bytes = range.access;
+    leaves[1].ty = e->raw.byte;
+    leaves[1].padding = true;
+    range.leaves = leaves[..];
+    ownership_api.region_partition[2] mut partitions = {};
+    partitions[0].key = id(ownership_api.entity_kind.region, 211);
+    partitions[0].membership = id(ownership_api.entity_kind.predicate, 212);
+    partitions[0].bytes = range.access;
+    partitions[1] = partitions[0];
+    partitions[1].key.ordinal = 213;
+    partitions[1].residual = true;
+    range.partitions = partitions[..];
+    s->regions = new(ownership_api.region, 1);
+    s->regions_len = 1;
+    s->regions[0] = ownership_state.copy_region(s, range);
+    ownership_api.borrow_relation[1] mut relations = {s->contents[0].borrows[0]};
+    relations[0].range = range;
+    ownership_api.contents_fact mut contents = s->contents[0];
+    contents.borrows = relations[..];
+    s->contents[0] = ownership_state.copy_contents(s, contents);
+    e->arguments[0] = s->contents[0];
+    ownership_api.history_fact[1] mut history = {};
+    history[0].allocation = s->allocations[0].key;
+    history[0].operation = s->sources[0].boundary;
+    history[0].source = ownership_api.source_position{31, 1, 17, 2, 17, 10, true};
+    history[0].kind = ownership_api.effect_kind.transfer;
+    history[0].before.place = s->contents[0].place;
+    history[0].after.place = projected(s, 33, 4);
+    history[0].after.transfer_pending = true;
+    s->allocations[0].history = ownership_state.copy_histories(s, history[..]);
+    s->nodes = new(ownership_api.graph_node, 1);
+    s->nodes_len = 1;
+    s->nodes[0].key = id(ownership_api.entity_kind.graph_node, 301);
+    s->nodes[0].allocation = s->allocations[0].key;
+    s->nodes[0].structural_template = id(ownership_api.entity_kind.template, 302);
+    s->edges = new(ownership_api.graph_edge, 1);
+    s->edges_len = 1;
+    ownership_api.graph_edge mut edge = {};
+    edge.key = id(ownership_api.entity_kind.relation, 303);
+    edge.from = s->nodes[0].key;
+    edge.to = id(ownership_api.entity_kind.graph_node, 304);
+    edge.kind = ownership_api.edge_kind.owned;
+    edge.place = s->contents[0].place;
+    edge.range = range;
+    s->edges[0] = ownership_state.copy_edge(s, edge);
+    s->shapes = new(ownership_api.shape_description, 1);
+    s->shapes_len = 1;
+    ownership_api.entity_id[2] parameters = {
+        id(ownership_api.entity_kind.graph_node, 301),
+        id(ownership_api.entity_kind.graph_node, 304)};
+    ownership_api.entity_id[1] clauses = {id(ownership_api.entity_kind.predicate, 305)};
+    ownership_api.shape_description mut shape = {};
+    shape.key = id(ownership_api.entity_kind.template, 302);
+    shape.parameters = parameters[..];
+    shape.clauses = clauses[..];
+    shape.descendants = parameters[..1];
+    shape.acyclic_proved = true;
+    shape.separation_proved = true;
+    s->shapes[0] = ownership_state.copy_shape(s, shape);
+    s->predicates = new(ownership_api.predicate_atom, 1);
+    s->predicates_len = 1;
+    s->predicates[0].key = clauses[0];
+    s->predicates[0].kind = ownership_api.predicate_kind.equality;
+    s->predicates[0].left = s->contents[0].value_version;
+    s->predicates[0].right = id(ownership_api.entity_kind.value, 92);
+    s->guards = new(ownership_api.guard_fact, 1);
+    s->guards_len = 1;
+    ownership_api.guard_fact mut guard = {};
+    guard.key = e->alternatives[0].guard;
+    guard.positive = clauses[..];
+    guard.negative = parameters[..];
+    s->guards[0] = ownership_state.copy_guard(s, guard);
+    s->correlations = new(ownership_api.correlation, 1);
+    s->correlations_len = 1;
+    s->correlations[0] = ownership_api.correlation{
+        guard.key, s->contents[0].value_version, edge.key};
+    s->losses = new(ownership_api.lost_fact, 1);
+    s->losses_len = 1;
+    s->losses[0] = ownership_api.lost_fact{ownership_api.limit_category.r, 256,
+        history[0].source, s->sources[0].key, ownership_api.incomplete_reason.missing_path};
+}
+
+$if ($cfg(target_os) == "linux") {
+    extern fn open_memstream(char mut* own mut* buffer, u64 mut* length) void mut*;
+    extern fn malloc_info(i32 options, void mut* stream) i32;
+    extern fn fclose(void mut* stream) i32;
+
+    fn metric(string data, string prefix) u64 {
+        i64 mut found = str.find(data, prefix);
+        assert(found >= 0);
+        string mut tail = data[cast(found, u64)..];
+        while (true) {
+            found = str.find(tail[prefix.len..], prefix);
+            if (found < 0) { break; }
+            tail = tail[prefix.len + cast(found, u64)..];
+        }
+        found = str.find(tail, "size=\"");
+        assert(found >= 0);
+        tail = tail[cast(found, u64) + 6..];
+        found = str.index_of(tail, '\"');
+        assert(found >= 0);
+        u64 mut value = 0;
+        assert(str.parse_u64(tail[..cast(found, u64)], 10, &value));
+        return value;
+    }
+
+    fn live_bytes() u64 {
+        char mut* own mut buffer = null;
+        u64 mut length = 0;
+        void mut* stream = open_memstream(&buffer, &length);
+        assert(stream != null && malloc_info(0, stream) == 0 && fclose(stream) == 0);
+        string data = cast(buffer[0..length], string);
+        u64 arena = metric(data, "<system type=\"current\"");
+        u64 fast = metric(data, "<total type=\"fast\"");
+        u64 rest = metric(data, "<total type=\"rest\"");
+        u64 mapped = metric(data, "<total type=\"mmap\"");
+        libc.free(cast(move(buffer), void* own));
+        assert(arena >= fast && arena - fast >= rest);
+        return arena - fast - rest + mapped;
+    }
+} else {
+    fn live_bytes() u64 { return heap.system_view(); }
+}
