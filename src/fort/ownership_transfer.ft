@@ -243,15 +243,18 @@ fn owner_reference_proved(ownership_state.state* s,
         value.borrows.len != 1 || !value.borrows[0].representation_complete ||
         !same_entity(value.borrows[0].value_version, value.value_version) ||
         owner.validity != ownership_api.validity_kind.live ||
-        !owner.obligation || !owner.count.one || owner.count.zero || owner.count.many ||
-        value.span_length.kind != ownership_api.fact_kind.exact ||
-        owner.logical_length.kind != ownership_api.fact_kind.exact ||
-        value.span_length.value != owner.logical_length.value) { return false; }
+        !owner.obligation || !owner.count.one || owner.count.zero || owner.count.many) {
+        return false;
+    }
     u64 source = source_index(s, value.borrows[0].source);
-    return source != U64_MAX &&
-        s->sources[source].kind == ownership_api.source_kind.heap &&
-        s->sources[source].validity == ownership_api.validity_kind.live &&
-        same_entity(s->sources[source].allocation, owner.key);
+    if (source == U64_MAX ||
+        s->sources[source].validity != ownership_api.validity_kind.live ||
+        !same_entity(s->sources[source].allocation, owner.key)) { return false; }
+    if (s->sources[source].kind == ownership_api.source_kind.trusted_foreign) { return true; }
+    return s->sources[source].kind == ownership_api.source_kind.heap &&
+        value.span_length.kind == ownership_api.fact_kind.exact &&
+        owner.logical_length.kind == ownership_api.fact_kind.exact &&
+        value.span_length.value == owner.logical_length.value;
 }
 
 fn empty_owner_proved(ownership_api.contents_fact value) bool {
@@ -286,6 +289,72 @@ fn borrows_valid(ownership_state.state* s, ownership_api.contents_fact value)
     return ownership_api.validity_kind.live;
 }
 
+// Charge source and allocation checks before foreign extent trust can apply.
+fn read_sources(ownership_state.state* s, ownership_api.services* svc, request* req,
+    ownership_api.contents_fact value, bool mut* foreign) ownership_api.proof_status {
+    *foreign = value.borrows.len != 0;
+    u64 mut i = 0;
+    while (i < value.borrows.len) {
+        ownership_api.charge_result mut charged = ownership_api.charge_work(svc,
+            ownership_api.work_kind.transfer, req->operation, req->source_position);
+        if (!charged.allowed) {
+            return ownership_state.report_failure(svc, charged.proof,
+                req->operation, req->source_position);
+        }
+        ownership_api.borrow_relation relation = value.borrows[i];
+        if (!relation.representation_complete) {
+            return unproved(svc, req, relation.source);
+        }
+        u64 mut index = 0;
+        while (index < s->sources_len) {
+            charged = ownership_api.charge_work(svc, ownership_api.work_kind.transfer,
+                req->operation, req->source_position);
+            if (!charged.allowed) {
+                return ownership_state.report_failure(svc, charged.proof,
+                    req->operation, req->source_position);
+            }
+            if (same_entity(s->sources[index].key, relation.source)) { break; }
+            index += 1;
+        }
+        // A live unknown fort source still passes, as it did before. It gives no extent trust.
+        if (index == s->sources_len ||
+            s->sources[index].validity == ownership_api.validity_kind.unknown) {
+            return unproved(svc, req, relation.source);
+        }
+        ownership_api.source_fact source = s->sources[index];
+        if (source.validity != ownership_api.validity_kind.live) {
+            return invalid(svc, req, ownership_api.event_kind.invalid_use, relation.source,
+                "reference source is no longer live");
+        }
+        if (source.kind != ownership_api.source_kind.trusted_foreign) { *foreign = false; }
+        if (source.allocation.kind == ownership_api.entity_kind.allocation) {
+            index = 0;
+            while (index < s->allocations_len) {
+                charged = ownership_api.charge_work(svc, ownership_api.work_kind.transfer,
+                    req->operation, req->source_position);
+                if (!charged.allowed) {
+                    return ownership_state.report_failure(svc, charged.proof,
+                        req->operation, req->source_position);
+                }
+                if (same_entity(s->allocations[index].key, source.allocation)) { break; }
+                index += 1;
+            }
+            if (index == s->allocations_len ||
+                s->allocations[index].validity == ownership_api.validity_kind.unknown) {
+                return unproved(svc, req, source.allocation);
+            }
+            if (s->allocations[index].validity != ownership_api.validity_kind.live) {
+                return invalid(svc, req, ownership_api.event_kind.invalid_use, relation.source,
+                    "reference allocation is no longer live");
+            }
+        }
+        i += 1;
+    }
+    ownership_api.proof_status mut proof = ownership_api.proof_status{};
+    proof.kind = ownership_api.proof_kind.complete;
+    return proof;
+}
+
 fn check_read(ownership_state.state* s, ownership_api.services* svc, request* req,
     ownership_api.contents_fact value, bool dereference) ownership_api.proof_status {
     if (value.kind == ownership_api.contents_kind.unknown) {
@@ -299,22 +368,18 @@ fn check_read(ownership_state.state* s, ownership_api.services* svc, request* re
         value.borrows.len == 0 && !value.owner_empty) {
         return unproved(svc, req, req->source.root);
     }
-    ownership_api.validity_kind valid = borrows_valid(s, value);
-    if (valid == ownership_api.validity_kind.unknown) {
-        return unproved(svc, req, req->source_key);
-    }
-    if (valid != ownership_api.validity_kind.live) {
-        return invalid(svc, req, ownership_api.event_kind.invalid_use, req->source_key,
-            "reference source is no longer live");
-    }
+    bool mut foreign = false;
+    ownership_api.proof_status sources = read_sources(s, svc, req, value, &foreign);
+    if (!ownership_api.successful(sources)) { return sources; }
     if (dereference && (value.owner_empty ||
         (value.span_length.kind == ownership_api.fact_kind.exact &&
         value.span_length.value == 0))) {
         return invalid(svc, req, ownership_api.event_kind.invalid_use, req->source_key,
             "empty reference has no element");
     }
-    if (dereference && (value.span_length.kind != ownership_api.fact_kind.exact ||
-        value.span_length.value < 0)) {
+    if (dereference && ((value.span_length.kind != ownership_api.fact_kind.exact && !foreign) ||
+        (value.span_length.kind == ownership_api.fact_kind.exact &&
+        value.span_length.value < 0))) {
         return unproved(svc, req, req->source.root);
     }
     ownership_api.proof_status mut proof = ownership_api.proof_status{};

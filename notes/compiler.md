@@ -369,6 +369,16 @@ came here.
   Zero-element allocations retain ownership with zero logical access extent.
   Foreign byte effects remain outside proof under D17.13. Known allocation release still invalidates
   related borrows, even when foreign extent trust remains available.
+  Trusted foreign owner identity needs a complete current borrow and a unique live obligation.
+  It needs no invented span length or allocation length. Heap owner identity keeps length equality.
+  Ordinary reads charge source and allocation searches before they use foreign extent trust.
+  `ownership_transfer.read_sources` charges one W unit for each borrow and for each source and
+  allocation candidate that it compares. The earlier `borrows_valid` charged none.
+  A live `unknown_fort` source still passes a read. It supplies no extent trust.
+  Every feasible source must be trusted before an unknown extent can pass.
+  Retained graphs copy allocation keys and validity for known foreign allocation releases.
+  These partial snapshot rows contain no owner path or history. They do not prove owner identity.
+  The graph charges snapshot storage and each lookup. A refused lookup retains its complete keys.
   The 12 normative traces are design evidence. The two raw suites probe supplied facts.
   The two raw suites establish the supplied raw facts.
   `src/fort/ownership_raw_bytes.ft` owns a stable core object and its paired raw context.

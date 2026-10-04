@@ -8,6 +8,7 @@
 //| dead-borrow replacement
 //| zero-element allocation, release, and transfer
 //| conservative transfer failures
+//| live unknown fort source read
 /// Tests local ownership transfer facts and rejected operations.
 import ownership_api;
 import ownership_local_env;
@@ -349,6 +350,33 @@ fn conservative_failures() void {
     ownership_local_env.free(&e);
 }
 
+// A live unknown fort source passes a read. It supplies no foreign extent trust.
+fn unknown_fort_read() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.source_fact unknown = ownership_local_env.source(40,
+        ownership_api.source_kind.unknown_fort, ownership_api.entity_id{});
+    assert(ownership_state.add_source(&e.state, &e.service, unknown,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_api.borrow_relation[1] borrows = {ownership_local_env.borrow(unknown.key, 41,
+        ownership_local_env.place(1))};
+    ownership_api.contents_fact mut value = ownership_local_env.reference(41, unknown.key,
+        borrows[..]);
+    value.place = ownership_local_env.place(1);
+    assert(ownership_state.add_contents(&e.state, &e.service, value,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    succeeded(ownership_local_env.inspect(&e, 1));
+    succeeded(ownership_local_env.use(&e, 1));
+    // Without an exact length, the dereference needs a proved extent.
+    e.state.contents[0].span_length = ownership_api.scalar_fact{};
+    incomplete(ownership_local_env.use(&e, 1));
+    // An unknown validity stays unproved.
+    e.state.contents[0].span_length = value.span_length;
+    e.state.sources[0].validity = ownership_api.validity_kind.unknown;
+    incomplete(ownership_local_env.inspect(&e, 1));
+    ownership_local_env.free(&e);
+}
+
 fn main() i32 {
     live_heap_view();
     released_heap_view();
@@ -371,5 +399,7 @@ fn main() i32 {
     println("zero-element allocation, release, and transfer");
     conservative_failures();
     println("conservative transfer failures");
+    unknown_fort_read();
+    println("live unknown fort source read");
     return 0;
 }

@@ -1,0 +1,220 @@
+/// Supplies foreign helper facts and exact operation observations.
+import ownership_api;
+import ownership_ffi_arithmetic_env;
+import ownership_keys;
+import ownership_limits;
+import ownership_places;
+import ownership_regions;
+import types;
+import ownership_raw_env;
+import ownership_state;
+import ownership_transfer;
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_ffi_arithmetic_env.id(kind, ordinal);
+}
+fn place(u32 slot) ownership_api.place_path {
+    ownership_api.place_path mut out = {};
+    out.root = id(ownership_api.entity_kind.slot, slot);
+    return out;
+}
+fn request(ownership_ffi_arithmetic_env.env mut* e, ownership_transfer.action kind,
+    u32 operation, u32 line, u32 src, u32 dst) ownership_transfer.request {
+    ownership_transfer.request mut out =
+        ownership_ffi_arithmetic_env.request(e, operation, line).base;
+    out.kind = kind;
+    out.source = place(src);
+    out.destination = place(dst);
+    out.source_key = id(ownership_api.entity_kind.source, 9);
+    out.leaves_empty_proved = true;
+    return out;
+}
+fn value(ownership_ffi_arithmetic_env.env* e, u32 slot) ownership_api.contents_fact {
+    u64 index = ownership_transfer.contents_index(&e->raw.local.state, place(slot));
+    assert(index != ownership_transfer.U64_MAX);
+    return e->raw.local.state.contents[index];
+}
+fn replace(ownership_ffi_arithmetic_env.env mut* e, ownership_api.contents_fact fact) void {
+    ownership_transfer.request req = request(e, ownership_transfer.action.inspect, 1, 1, 9, 9);
+    ownership_api.place_path[1] aliases = {fact.place};
+    assert(ownership_state.strong_contents(&e->raw.local.state, &e->raw.local.service,
+        fact, aliases[..], true, req.operation, req.source_position).applied);
+}
+fn seed_reference(ownership_ffi_arithmetic_env.env mut* e, u32 slot, u32 source,
+    u32 version) void {
+    ownership_api.borrow_relation[1] mut relations = {};
+    relations[0].key = id(ownership_api.entity_kind.relation, version);
+    relations[0].value_version = id(ownership_api.entity_kind.value, version);
+    relations[0].containing = place(slot);
+    relations[0].source = id(ownership_api.entity_kind.source, source);
+    relations[0].range.key = id(ownership_api.entity_kind.region, version);
+    relations[0].range.source = relations[0].source;
+    relations[0].range.layout = e->raw.byte;
+    relations[0].representation_complete = true;
+    ownership_api.contents_fact mut fact = {};
+    fact.place = place(slot);
+    fact.kind = ownership_api.contents_kind.reference;
+    fact.value_version = relations[0].value_version;
+    fact.borrows = relations[..];
+    replace(e, fact);
+}
+fn open(ownership_ffi_arithmetic_env.env mut* e, bool owner) void {
+    ownership_raw_env.open(&e->raw);
+    e->raw.local.service.event_context = cast(&e->observed, void mut*);
+    e->raw.local.service.event = ownership_ffi_arithmetic_env.event;
+    ownership_transfer.request req = request(e, ownership_transfer.action.inspect, 1, 1, 9, 9);
+    ownership_api.source_fact mut source = {};
+    source.key = id(ownership_api.entity_kind.source, 9);
+    source.kind = ownership_api.source_kind.trusted_foreign;
+    source.validity = ownership_api.validity_kind.live;
+    source.boundary = ownership_api.operation_position{
+        ownership_ffi_arithmetic_env.function(), 1, 9, false};
+    if (owner) { source.allocation = id(ownership_api.entity_kind.allocation, 9); }
+    assert(ownership_state.add_source(&e->raw.local.state, &e->raw.local.service, source,
+        req.operation, req.source_position).applied);
+    if (owner) {
+        ownership_api.allocation_fact mut allocation = {};
+        allocation.key = source.allocation;
+        allocation.site = source.allocation;
+        allocation.validity = ownership_api.validity_kind.live;
+        allocation.count.one = true;
+        allocation.obligation = true;
+        allocation.owner.place = place(9);
+        assert(ownership_state.add_allocation(&e->raw.local.state, &e->raw.local.service,
+            allocation, req.operation, req.source_position).applied);
+    }
+    seed_reference(e, 9, 9, 91);
+    if (owner) { seed_reference(e, 8, 9, 81); }
+    ownership_api.contents_fact mut empty = ownership_transfer.empty_value(place(2));
+    empty.value_version = id(ownership_api.entity_kind.value, 90);
+    assert(ownership_state.add_contents(&e->raw.local.state, &e->raw.local.service, empty,
+        req.operation, req.source_position).applied);
+}
+fn add_owner(ownership_ffi_arithmetic_env.env mut* e, u32 slot, i64 length,
+    bool known) void {
+    ownership_transfer.request req = request(e, ownership_transfer.action.inspect, 1, 1, 9, 9);
+    ownership_api.source_fact mut source = {};
+    source.key = id(ownership_api.entity_kind.source, slot);
+    source.kind = ownership_api.source_kind.heap;
+    source.validity = ownership_api.validity_kind.live;
+    source.boundary = ownership_api.operation_position{
+        ownership_ffi_arithmetic_env.function(), 1, slot, false};
+    source.allocation = id(ownership_api.entity_kind.allocation, slot);
+    ownership_api.allocation_fact mut allocation = {};
+    allocation.key = source.allocation;
+    allocation.site = allocation.key;
+    allocation.validity = ownership_api.validity_kind.live;
+    allocation.count.one = true;
+    allocation.obligation = true;
+    allocation.owner.place = place(slot);
+    if (known) {
+        allocation.logical_length = ownership_api.scalar_fact{
+            .kind = ownership_api.fact_kind.exact, .value = length};
+    }
+    assert(ownership_state.add_source(&e->raw.local.state, &e->raw.local.service, source,
+        req.operation, req.source_position).applied);
+    assert(ownership_state.add_allocation(&e->raw.local.state, &e->raw.local.service, allocation,
+        req.operation, req.source_position).applied);
+    if (e->raw.local.state.sources_len == 2 &&
+        e->raw.local.state.sources[0].key.ordinal > slot) {
+        ownership_api.source_fact held = e->raw.local.state.sources[0];
+        e->raw.local.state.sources[0] = e->raw.local.state.sources[1];
+        e->raw.local.state.sources[1] = held;
+    }
+    if (e->raw.local.state.allocations_len == 2 &&
+        e->raw.local.state.allocations[0].key.ordinal > slot) {
+        ownership_api.allocation_fact held = e->raw.local.state.allocations[0];
+        e->raw.local.state.allocations[0] = e->raw.local.state.allocations[1];
+        e->raw.local.state.allocations[1] = held;
+    }
+    seed_reference(e, slot, slot, slot * 10 + 1);
+    if (known) {
+        ownership_api.contents_fact mut contents = value(e, slot);
+        contents.span_length = allocation.logical_length;
+        replace(e, contents);
+    }
+}
+fn prepare(ownership_ffi_arithmetic_env.env mut* e, ownership_transfer.request* req) void {
+    e->binding[0].operation = req->operation;
+    e->binding[0].key = id(ownership_api.entity_kind.event, req->operation.operation);
+    e->observed.operation = req->operation;
+    e->observed.source = req->source_position;
+    e->observed.event = e->binding[0].key;
+}
+fn project(ownership_ffi_arithmetic_env.env mut* e, ownership_api.place_path path,
+    bool owning) void {
+    ownership_api.contents_fact mut fact = value(e, 9);
+    ownership_api.borrow_relation[1] mut relation = {fact.borrows[0]};
+    relation[0].containing = path;
+    fact.place = path;
+    fact.borrows = relation[..];
+    if (owning) { e->raw.local.state.allocations[0].owner.place = path; }
+    replace(e, fact);
+    replace(e, ownership_transfer.empty_value(place(9)));
+}
+fn projected_apply(ownership_ffi_arithmetic_env.env mut* e,
+    ownership_transfer.request* base, ownership_places.action kind, bool accept,
+    ownership_api.event_kind event) void {
+    prepare(e, base);
+    ownership_places.request mut req = {};
+    req.base = *base;
+    req.kind = kind;
+    req.ty = types.type_ptr(&e->raw.table, e->raw.byte, true, false);
+    req.source_region_proved = true;
+    req.destination_region_proved = true;
+    req.alias_substituted_proved = true;
+    ownership_state.state mut before = ownership_state.clone(&e->raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_api.proof_status proof = ownership_places.apply(&e->raw.local.state,
+        &e->raw.local.service, &req);
+    if (accept) { assert(ownership_api.successful(proof)); }
+    else {
+        assert(!ownership_api.successful(proof) && proof.failed && e->observed.kind == event);
+        assert(ownership_state.equal(&before, &e->raw.local.state));
+    }
+}
+fn region_apply(ownership_ffi_arithmetic_env.env mut* e,
+    ownership_transfer.request* base, ownership_regions.action kind, bool owning)
+    ownership_regions.result {
+    prepare(e, base);
+    ownership_regions.request mut req = {};
+    req.base = *base;
+    req.kind = kind;
+    req.ty = types.type_ptr(&e->raw.table, e->raw.byte, owning, false);
+    req.exhaustive_proved = true;
+    req.aliases_substituted_proved = true;
+    req.limits = ownership_limits.production();
+    if (kind == ownership_regions.action.cleanup_range) {
+        req.range_begin = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+            .value = 2};
+        req.range_end = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+            .value = 3};
+        req.range_complete_proved = true;
+    }
+    ownership_api.place_path[1] source = {base->source};
+    ownership_api.place_path[1] destination = {base->destination};
+    ownership_regions.choice[1] mut choices = {};
+    choices[0].source = ownership_regions.selection{base->source, source[..], true, true, true};
+    choices[0].destination = ownership_regions.selection{
+        base->destination, destination[..], true, true, true};
+    req.choices = choices[..];
+    return ownership_regions.apply(&e->raw.local.state, &e->raw.local.service, &req);
+}
+fn apply(ownership_ffi_arithmetic_env.env mut* e, ownership_transfer.request* req,
+    bool accept, ownership_api.event_kind kind) ownership_api.proof_status {
+    prepare(e, req);
+    ownership_state.state mut before = ownership_state.clone(&e->raw.local.state);
+    defer ownership_state.free(&before);
+    u64 events = e->observed.events;
+    ownership_api.proof_status proof = ownership_transfer.apply(&e->raw.local.state,
+        &e->raw.local.service, req);
+    if (accept) {
+        assert(ownership_api.successful(proof) && e->observed.events == events);
+    } else {
+        assert(!ownership_api.successful(proof) && proof.failed);
+        assert(ownership_state.equal(&before, &e->raw.local.state));
+        assert(e->observed.events == events + 1 && e->observed.kind == kind);
+    }
+    return proof;
+}
+fn close(ownership_ffi_arithmetic_env.env mut* e) void { ownership_raw_env.close(&e->raw); }
