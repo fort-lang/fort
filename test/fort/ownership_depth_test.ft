@@ -1,0 +1,338 @@
+//! run
+//! flags: -I ../../src/fort
+/// Tests absolute path permission and cumulative work.
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_state;
+
+struct fixture {
+    ownership_limits.meter meter;
+    ownership_api.services service;
+    ownership_api.limit_table limits;
+    u64 work_requests;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* request)
+    ownership_api.charge_result {
+    fixture mut* f = cast(opaque, fixture mut*);
+    for (ownership_api.charge_item item : request->items) {
+        if (item.category == ownership_api.limit_category.w) {
+            assert(item.amount == 1);
+            f->work_requests += 1;
+        }
+    }
+    return ownership_limits.try_charge(&f->meter, request);
+}
+
+fn event(void mut* opaque, ownership_api.event_request* request)
+    ownership_api.event_result {
+    return ownership_api.event_result{.proof = request->current, .retained = true,
+        .stored_key = request->event.key};
+}
+
+fn init(fixture mut* f) void {
+    f->limits = ownership_limits.production();
+    assert(ownership_limits.configure(&f->meter, &f->limits));
+    f->service.budget_context = cast(f, void mut*);
+    f->service.budget = budget;
+    f->service.event = event;
+}
+
+fn permission(fixture mut* f, u64 depth) ownership_api.charge_result {
+    ownership_api.charge_item[2] items = {
+        ownership_api.charge_item{ownership_api.limit_category.d,
+            ownership_api.limit_scope.path, depth},
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 1},
+    };
+    ownership_api.charge_request mut request = ownership_api.charge_request{
+        .work = ownership_api.work_kind.transfer, .items = items[..]};
+    return ownership_limits.try_charge(&f->meter, &request);
+}
+
+// D01 and D02: independent paths do not add their depths.
+fn independent_depths() void {
+    fixture mut f = {};
+    init(&f);
+    u64 mut i = 0;
+    while (i < 64) { assert(permission(&f, 2).allowed); i += 1; }
+    assert(f.meter.used.d == 2 && f.meter.used.w == 64);
+    assert(permission(&f, 4).allowed && permission(&f, 2).allowed);
+    assert(f.meter.used.d == 4 && f.meter.used.w == 66);
+}
+
+// D03, D04, and D05: exact depth, sentinel refusal, and mixed atomicity.
+fn boundary_atomicity() void {
+    fixture mut f = {};
+    init(&f);
+    assert(permission(&f, 15).allowed && permission(&f, 16).allowed);
+    ownership_api.charge_result mut over = permission(&f, 17);
+    assert(!over.allowed && over.limit.category == ownership_api.limit_category.d);
+    assert(over.limit.attempted == 17 && !over.limit.saturated);
+    assert(f.meter.used.d == 16 && f.meter.used.w == 2);
+    f.limits.d = ownership_api.U64_MAX;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    over = permission(&f, ownership_api.U64_MAX);
+    assert(!over.allowed && !over.limit.saturated);
+    assert(f.meter.used.d == 0 && f.meter.used.w == 0);
+    f.limits.d = 16;
+    f.limits.w = 1;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    assert(ownership_api.charge_work(&f.service, ownership_api.work_kind.transfer,
+        ownership_api.operation_position{}, ownership_api.source_position{}).allowed);
+    over = permission(&f, 4);
+    assert(!over.allowed && over.limit.category == ownership_api.limit_category.w);
+    assert(f.meter.used.d == 0 && f.meter.used.w == 1);
+}
+
+// D06 and D08: canonical refusal and callback normalization keep the same keys.
+fn refusal_identity() void {
+    fixture mut f = {};
+    init(&f);
+    f.meter.used.r = f.limits.r;
+    ownership_api.charge_item[2] items = {
+        ownership_api.charge_item{ownership_api.limit_category.d,
+            ownership_api.limit_scope.path, 17},
+        ownership_api.charge_item{ownership_api.limit_category.r,
+            ownership_api.limit_scope.state, 1},
+    };
+    ownership_api.charge_request mut request = ownership_api.charge_request{
+        .work = ownership_api.work_kind.transfer, .items = items[..]};
+    request.operation.operation = 7;
+    request.source.line = 23;
+    ownership_api.charge_result direct = ownership_limits.try_charge(&f.meter, &request);
+    ownership_api.charge_result mapped = ownership_api.charge(&f.service, &request);
+    assert(!direct.allowed && !mapped.allowed);
+    assert(direct.limit.category == ownership_api.limit_category.d);
+    assert(direct.proof.kind == ownership_api.proof_kind.complete && !direct.proof.failed);
+    assert(mapped.proof.kind == ownership_api.proof_kind.incomplete && mapped.proof.failed);
+    assert(mapped.limit.attempted == direct.limit.attempted);
+    assert(ownership_keys.operation(direct.limit.operation, mapped.limit.operation) == 0);
+    assert(ownership_keys.source(direct.limit.source, mapped.limit.source) == 0);
+    assert(f.meter.used.d == 0 && f.meter.used.r == f.limits.r);
+}
+
+// D07: batch insertion order does not change permission or its first refusal.
+fn batch_order() void {
+    fixture mut f = {};
+    fixture mut g = {};
+    init(&f);
+    init(&g);
+    ownership_api.charge_item[2] shallow = {
+        ownership_api.charge_item{ownership_api.limit_category.d,
+            ownership_api.limit_scope.path, 2},
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 1},
+    };
+    ownership_api.charge_item[2] mut deep = {shallow[0], shallow[1]};
+    deep[0].amount = 17;
+    ownership_api.charge_request[2] mut forward = {
+        ownership_api.charge_request{.items = shallow[..]},
+        ownership_api.charge_request{.items = deep[..]},
+    };
+    forward[0].operation.operation = 1;
+    forward[1].operation.operation = 2;
+    ownership_api.charge_request[2] reverse = {forward[1], forward[0]};
+    ownership_api.charge_result a = ownership_limits.charge_batch(&f.meter, forward[..]);
+    ownership_api.charge_result b = ownership_limits.charge_batch(&g.meter, reverse[..]);
+    assert(!a.allowed && !b.allowed && a.limit.operation.operation == 2);
+    assert(ownership_keys.operation(a.limit.operation, b.limit.operation) == 0);
+    assert(f.meter.used.d == 2 && g.meter.used.d == 2);
+    assert(f.meter.used.w == 1 && g.meter.used.w == 1);
+}
+
+fn parts(ownership_api.projection mut@ path) void {
+    u64 mut i = 0;
+    while (i < path.len) {
+        path[i].kind = ownership_api.projection_kind.field;
+        path[i].field = cast(i, u32);
+        i += 1;
+    }
+}
+
+fn place(u32 ordinal, ownership_api.projection@ path) ownership_api.place_path {
+    ownership_api.entity_id root = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.slot, .ordinal = ordinal};
+    return ownership_api.place_path{root, path, false};
+}
+
+// D09 and D10: borrow and history paths use a maximum.
+fn producer_depths() void {
+    ownership_api.projection[16] mut path = {};
+    parts(path[..]);
+    ownership_api.borrow_relation[16] mut borrows = {};
+    u64 mut i = 0;
+    while (i < borrows.len) {
+        borrows[i].containing = place(1, path[0..i + 1]);
+        borrows[i].range.key.kind = ownership_api.entity_kind.region;
+        borrows[i].range.key.ordinal = cast(i + 1, u32);
+        i += 1;
+    }
+    ownership_api.contents_fact value = ownership_api.contents_fact{
+        .place = place(1, path[0..2]), .borrows = borrows[..]};
+    ownership_state.charge_counts mut count = ownership_state.contents_counts(value);
+    assert(count.d == 16 && count.r == 16 && count.w == 1);
+    ownership_api.history_fact[10] mut history = {};
+    i = 0;
+    while (i < history.len) {
+        history[i].before.place = place(1, path[0..8]);
+        history[i].after.place = place(2, path[..]);
+        i += 1;
+    }
+    ownership_api.allocation_fact allocation = ownership_api.allocation_fact{
+        .owner = ownership_api.owner_location{.place = place(1, path[0..2])},
+        .history = history[..]};
+    count = ownership_state.allocation_counts(allocation);
+    assert(count.d == 16 && count.e == 10 && count.w == 1);
+}
+
+// D11 and D12: both selected aliases remain within one absolute depth bound.
+fn alias_updates() void {
+    fixture mut f = {};
+    init(&f);
+    f.limits.d = 3;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    ownership_api.projection[3] mut path = {};
+    parts(path[..]);
+    ownership_api.place_path[2] aliases = {place(1, path[0..2]), place(2, path[..])};
+    ownership_api.contents_fact value = ownership_api.contents_fact{
+        .kind = ownership_api.contents_kind.scalar};
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    ownership_api.mutation_result mut changed = ownership_state.strong_contents(&core,
+        &f.service, value, aliases[..], true, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(changed.applied && core.contents_len == 2 && f.meter.used.d == 3);
+    ownership_api.entity_id guard = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.guard, .ordinal = 1};
+    changed = ownership_state.weak_contents(&core, &f.service, value, aliases[..], guard,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(changed.applied && core.contents_len == 4 && core.correlations_len == 2);
+    assert(f.meter.used.d == 3 && f.meter.used.w == 2);
+}
+
+// D17: unsupported categories cannot receive work-only permission.
+fn generic_categories() void {
+    fixture mut f = {};
+    init(&f);
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    ownership_api.mutation_result allowed = ownership_state.require_charge(&core,
+        &f.service, ownership_api.limit_category.d, 16, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(allowed.applied && f.meter.used.d == 16 && f.meter.used.w == 1);
+    ownership_api.mutation_result denied = ownership_state.require_charge(&core,
+        &f.service, ownership_api.limit_category.t, 1, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(!denied.applied && denied.proof.terminal.reason ==
+        ownership_api.incomplete_reason.invalid_input);
+    assert(f.meter.used.w == 1 && f.meter.used.t == 0);
+}
+
+fn counted_work() void {
+    fixture mut f = {};
+    init(&f);
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    ownership_state.charge_counts mut count = ownership_state.charge_counts{.d = 2, .w = 5};
+    ownership_api.mutation_result mut paid = ownership_state.require_counts(&core, &f.service,
+        count, ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(paid.applied && f.work_requests == 5 && f.meter.used.w == 5);
+    assert(f.meter.used.d == 2);
+    f.limits.w = 2;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    paid = ownership_state.require_counts(&core, &f.service, count,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!paid.applied && f.meter.used.w == 2 && f.meter.used.d == 0);
+    assert(paid.proof.terminal.limit.category == ownership_api.limit_category.w);
+}
+
+fn owned(u32 ordinal, ownership_api.place_path storage) ownership_api.allocation_fact {
+    return ownership_api.allocation_fact{
+        .key = ownership_api.entity_id{.kind = ownership_api.entity_kind.allocation,
+            .ordinal = ordinal},
+        .owner = ownership_api.owner_location{.place = storage},
+        .validity = ownership_api.validity_kind.live,
+        .count = ownership_api.multiplicity{.one = true}, .obligation = true};
+}
+
+// D13 and D14: transfer and release use absolute owner depth.
+fn owner_boundaries() void {
+    fixture mut f = {};
+    init(&f);
+    ownership_api.projection[17] mut path = {};
+    parts(path[..]);
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    ownership_api.allocation_fact allocation = owned(1, place(1, path[0..8]));
+    ownership_state.append_allocations(&core, allocation);
+    ownership_api.source_fact source = ownership_api.source_fact{
+        .key = ownership_api.entity_id{.kind = ownership_api.entity_kind.source, .ordinal = 1},
+        .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live,
+        .allocation = allocation.key};
+    ownership_state.append_sources(&core, source);
+    ownership_api.owner_location after = ownership_api.owner_location{
+        .place = place(2, path[0..16])};
+    ownership_api.mutation_result mut changed = ownership_state.transfer_owner(&core, &f.service,
+        allocation.key, after, true, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(changed.applied && f.meter.used.d == 16 && f.meter.used.w == 1);
+    assert(core.allocations[0].validity == ownership_api.validity_kind.live);
+    assert(core.sources[0].validity == ownership_api.validity_kind.live);
+    assert(core.sources[0].key.ordinal == 1 && core.allocations[0].history.len == 1);
+    core.allocations[0].owner.place = ownership_state.copy_place(&core, place(2, path[..]));
+    ownership_state.state mut before = ownership_state.clone(&core);
+    defer ownership_state.free(&before);
+    changed = ownership_state.release_member(&core, &f.service, allocation.key, true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!changed.applied && changed.precision_lost);
+    assert(ownership_state.equal(&before, &core) && f.meter.used.w == 1);
+    core.allocations[0].owner.place = ownership_state.copy_place(&core, after.place);
+    changed = ownership_state.release_member(&core, &f.service, allocation.key, true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(changed.applied && f.meter.used.d == 16 && f.meter.used.w == 2);
+    assert(!core.allocations[0].obligation && core.allocations[0].history.len == 2);
+    assert(core.allocations[0].validity == ownership_api.validity_kind.released);
+}
+
+// D18: one caller meter covers 32 independent projected owners.
+fn projected_owners() void {
+    fixture mut f = {};
+    init(&f);
+    ownership_api.projection[2] mut path = {};
+    parts(path[..]);
+    path[1].kind = ownership_api.projection_kind.fixed_index;
+    path[1].index.kind = ownership_api.fact_kind.exact;
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    u32 mut i = 1;
+    while (i <= 32) {
+        ownership_api.allocation_fact allocation = owned(i, place(i, path[..]));
+        ownership_state.append_allocations(&core, allocation);
+        ownership_api.owner_location after = ownership_api.owner_location{
+            .place = place(i + 32, path[..])};
+        assert(ownership_state.transfer_owner(&core, &f.service, allocation.key, after, true,
+            ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+        assert(ownership_state.release_member(&core, &f.service, allocation.key, true,
+            ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+        assert(!core.allocations[cast(i - 1, u64)].obligation);
+        assert(f.meter.used.d == 2 && f.meter.used.w == cast(i, u64) * 2);
+        i += 1;
+    }
+    assert(core.allocations_len == 32 && f.meter.used.e == 64);
+}
+
+fn main() i32 {
+    independent_depths();
+    boundary_atomicity();
+    refusal_identity();
+    batch_order();
+    producer_depths();
+    alias_updates();
+    generic_categories();
+    counted_work();
+    owner_boundaries();
+    projected_owners();
+    return 0;
+}

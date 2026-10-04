@@ -588,6 +588,12 @@ came here.
   Function return and process termination remain separate under the global-boundary rules.
   A noreturn type proves no caller return. It proves neither abort nor completed process cleanup.
   `spec/toolchain.md` 4.2 separates validated invalidity witnesses from abstract possibility.
+  D checks absolute projection depth and stores the greatest permitted depth.
+  Borrow, history, alias, and relocation paths use their maximum depth.
+  W stays cumulative. Each W request item has amount one.
+  A counted multi-unit mutation pays earlier W units before its final mixed request.
+  The final mixed request checks all items before any counter changes.
+  A refusal keeps earlier paid work. It changes no input state.
   Keep proof events independent of rendered diagnostic limits. Suppression cannot change a verdict.
   The T-317 event store owns its meter because teardown releases caller state before event storage.
   The seven A01-A07 traces have read evidence. They do not measure current compiler acceptance.
