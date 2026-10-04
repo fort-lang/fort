@@ -12,18 +12,22 @@
 //| selected paths 2
 //| boundary repeats 10
 //| absence remains open
-//| output compared 234
-/// Checks selected source inventory against inactive range proposals.
+//| output compared 271
+//| activation groups 13 probes 19
+/// Checks source correspondence and complete range carrier publication.
 import ast;
 import check;
+import check_env;
 import consts;
 import diag;
 import fir;
 import fir_llvm;
 import fir_lower;
 import fir_print;
+import fir_parse;
 import fir_verify;
 import gen;
+import heap;
 import gen_env;
 import gen_fir;
 import gen_data;
@@ -200,6 +204,16 @@ fn export_ledger() void {
     strbuf.append(&text, strbuf.view(&legacy_evidence));
     strbuf.append(&text, "\n]}\n");
     probe_file(dir, "conditional-evidence.json", strbuf.view(&text));
+    strbuf.clear(&text);
+    strbuf.append(&text, "{\"primary_groups\":13,\"source_probes\":19,\"probes\":[\n");
+    strbuf.append(&text, strbuf.view(&activation_evidence));
+    strbuf.append(&text, "\n]}\n");
+    probe_file(dir, "activation-evidence.json", strbuf.view(&text));
+    strbuf.clear(&text);
+    strbuf.append(&text, "{\"refusals\":[\n");
+    strbuf.append(&text, strbuf.view(&activation_damage_evidence));
+    strbuf.append(&text, "\n]}\n");
+    probe_file(dir, "activation-damage.json", strbuf.view(&text));
 }
 
 fn check_output(lower_env.env mut* e, ast.node* decl, fir.func* f,
@@ -215,7 +229,15 @@ fn check_output(lower_env.env mut* e, ast.node* decl, fir.func* f,
     defer strbuf.free(&audited_text);
     strbuf.str_buf mut ordinary_text = strbuf.create();
     defer strbuf.free(&ordinary_text);
-    conditional_snapshot(f, &audited_text);
+    fir.func mut executable = fir.func{};
+    defer fir.func_free(&executable);
+    if (f->range_source_complete) {
+        executable = fir.func_clone(f);
+        fir.range_clear(&executable);
+        conditional_snapshot(&executable, &audited_text);
+    } else {
+        conditional_snapshot(f, &audited_text);
+    }
     conditional_snapshot(&ordinary, &ordinary_text);
     assert(strbuf.view(&audited_text) == strbuf.view(&ordinary_text));
     gen.emitter mut audited_ir = gen.emitter{};
@@ -6113,7 +6135,1576 @@ fn coverage_borrowed_pointee_matrix() void {
     assert(repair_r2_invalid - invalid == 9);
 }
 
+
+// Publication records source coverage separately from later ownership proof.
+u32 mut activation_probes = 0;
+strbuf.str_buf mut activation_evidence = strbuf.str_buf{};
+
+fn activation_receipt(string name, fir_lower.range_source_audit* audit) void {
+    assert(audit->structural_valid && audit->source_complete && !audit->ownership_proved);
+    assert(audit->protected_declarations <= audit->selected_declarations);
+    assert(audit->required_expansions == audit->matched_captures);
+    assert(audit->capture_candidates == audit->produced_expansions);
+    if (activation_probes != 0) { strbuf.append(&activation_evidence, ",\n"); }
+    json.writer mut j = json.writer{};
+    json.json_init(&j, &activation_evidence);
+    json.json_object_begin(&j);
+    json.json_key(&j, "probe");
+    json.json_str(&j, name);
+    json.json_key(&j, "selected_declarations");
+    json.json_uint(&j, cast(audit->selected_declarations, u64));
+    json.json_key(&j, "protected_declarations");
+    json.json_uint(&j, cast(audit->protected_declarations, u64));
+    json.json_key(&j, "required_expansions");
+    json.json_uint(&j, cast(audit->required_expansions, u64));
+    json.json_key(&j, "protected_expansions");
+    json.json_uint(&j, cast(audit->protected_paths, u64));
+    json.json_key(&j, "matched_captures");
+    json.json_uint(&j, cast(audit->matched_captures, u64));
+    json.json_key(&j, "capture_candidates");
+    json.json_uint(&j, cast(audit->capture_candidates, u64));
+    json.json_key(&j, "suppression_candidates");
+    json.json_uint(&j, cast(audit->suppression_candidates, u64));
+    json.json_key(&j, "validated_absences");
+    json.json_uint(&j, cast(audit->validated_absences, u64));
+    json.json_key(&j, "structural_valid");
+    json.json_bool(&j, audit->structural_valid);
+    json.json_key(&j, "source_complete");
+    json.json_bool(&j, audit->source_complete);
+    json.json_key(&j, "ownership_proved");
+    json.json_bool(&j, audit->ownership_proved);
+    json.json_key(&j, "expansions");
+    json.json_array_begin(&j);
+    u64 mut i = 0;
+    while (i < audit->rows.len) {
+        fir_lower.range_audit_row row = audit->rows.items[i];
+        json.json_object_begin(&j);
+        json.json_key(&j, "key");
+        conditional_json_key(&j, row.key);
+        json.json_key(&j, "capture_kind");
+        json.json_uint(&j, cast(row.binding.kind, u64));
+        json.json_key(&j, "capture_local");
+        json.json_uint(&j, cast(row.binding.captured.local, u64));
+        json.json_key(&j, "boundaries");
+        json.json_array_begin(&j);
+        u32 mut k = 0;
+        while (k < row.boundaries_len) {
+            fir.range_boundary b = audit->boundaries.items[row.boundaries_first + k];
+            json.json_array_begin(&j);
+            json.json_uint(&j, cast(b.kind, u64));
+            json.json_uint(&j, cast(b.block, u64));
+            json.json_uint(&j, cast(b.position, u64));
+            json.json_uint(&j, cast(b.order, u64));
+            conditional_json_loc(&j, b.source);
+            json.json_array_end(&j);
+            k += 1;
+        }
+        json.json_array_end(&j);
+        json.json_key(&j, "verified");
+        json.json_bool(&j, true);
+        json.json_object_end(&j);
+        i += 1;
+    }
+    json.json_array_end(&j);
+    json.json_key(&j, "absences");
+    json.json_array_begin(&j);
+    i = 0;
+    while (i < audit->absences.len) {
+        fir_lower.range_audit_absence row = audit->absences.items[i];
+        assert(row.verified && row.registered_defer != null);
+        json.json_object_begin(&j);
+        json.json_key(&j, "key");
+        conditional_json_key(&j, row.key);
+        json.json_key(&j, "reason");
+        json.json_uint(&j, cast(row.reason, u64));
+        json.json_key(&j, "registered_defer");
+        conditional_json_loc(&j, row.registered_defer->loc);
+        json.json_key(&j, "terminating_source");
+        conditional_json_loc(&j, row.terminating_source->loc);
+        json.json_key(&j, "terminating_position");
+        conditional_json_loc(&j, row.terminating_position);
+        json.json_key(&j, "terminating_exit");
+        conditional_json_loc(&j, row.terminating_exit);
+        json.json_key(&j, "block");
+        json.json_uint(&j, cast(row.block, u64));
+        json.json_key(&j, "statement");
+        json.json_uint(&j, cast(row.statement, u64));
+        json.json_key(&j, "verified");
+        json.json_bool(&j, row.verified);
+        json.json_object_end(&j);
+        i += 1;
+    }
+    json.json_array_end(&j);
+    json.json_object_end(&j);
+    activation_probes += 1;
+}
+
+fn activation_lower_case(lower_env.env mut* e, string@ source, string name,
+    fir.func mut* f, fir_lower.range_candidate_set mut* proposed, string probe) void {
+    lower_env.check_lines(e, source, true);
+    ast.node* decl = lower_env.decl(e, name);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e->c.ck, decl, f, proposed, &why));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    if (!fir_lower.publish_range_source(decl, f, proposed, &e->rt, &audit)) {
+        println(probe, " failed: ", cast(audit.failure.reason, u32), " declaration ",
+            audit.failure.key.declaration, " expansion ", audit.failure.key.expansion);
+        panic("source publication refused required probe");
+    }
+    assert(f->range_source_complete && f->range_supplied_complete);
+    assert(f->range_expansions.len == proposed->captures.len);
+    assert(f->range_captures.len == proposed->captures.len);
+    assert(f->range_boundaries.len == proposed->boundaries.len);
+    activation_roundtrip(e, f);
+    activation_receipt(probe, &audit);
+    check_output(e, decl, f, probe, true);
+}
+
+fn activation_lower_capture(lower_env.env mut* e, string@ source, string name,
+    fir.func mut* f, fir_lower.range_capture_candidate_vec mut* captures,
+    string probe) void {
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    activation_lower_case(e, source, name, f, &proposed, probe);
+    *captures = move(proposed.captures);
+}
+
+fn activation_text_of(fir.func* f, strbuf.str_buf mut* out) string {
+    fir_print.print_function(f, out);
+    return strbuf.view(out);
+}
+
+fn activation_is_local(fir.place p, u32 n) bool {
+    return p.base == fir.base_kind.bk_local && p.local == n && p.proj_len == 0;
+}
+
+fn activation_occurs_once(string haystack, string needle) bool {
+    i64 at = str.find(haystack, needle);
+    if (at < 0) {
+        return false;
+    }
+    return str.find(haystack[cast(at, u64) + needle.len..], needle) < 0;
+}
+
+fn activation_boundary(fir_lower.range_candidate_set* proposed, u32 loan,
+            fir.range_boundary_kind kind, u32 line) fir.range_boundary* {
+    u64 mut i = 0;
+    while (i < proposed->boundaries.len) {
+        fir.range_boundary* b = &proposed->boundaries.items[i].boundary;
+        if (b->loan == loan && b->kind == kind && b->source.line == line) {
+            return b;
+        }
+        i += 1;
+    }
+    panic("range boundary test: missing boundary");
+}
+
+fn activation_boundary_count(fir_lower.range_candidate_set* proposed, u32 loan,
+                  fir.range_boundary_kind kind) u64 {
+    u64 mut result = 0;
+    u64 mut i = 0;
+    while (i < proposed->boundaries.len) {
+        fir.range_boundary* b = &proposed->boundaries.items[i].boundary;
+        if (b->loan == loan && b->kind == kind) {
+            result += 1;
+        }
+        i += 1;
+    }
+    return result;
+}
+
+fn activation_defer_context(fir_lower.range_candidate_set* proposed,
+                 u32 id) fir_lower.range_defer_context_candidate* {
+    u64 mut i = 0;
+    while (i < proposed->deferred.len) {
+        fir_lower.range_defer_context_candidate* c = &proposed->deferred.items[i];
+        if (c->id == id) { return c; }
+        i += 1;
+    }
+    panic("range boundary test: missing deferred context");
+}
+
+fn activation_cleanup_at(fir.func* f, fir_lower.range_candidate_set* proposed, u32 loan,
+              u32 line) void {
+    fir.range_boundary* start = activation_boundary(proposed, loan,
+        fir.range_boundary_kind.body_cleanup, line);
+    fir.range_boundary* end = activation_boundary(proposed, loan,
+        fir.range_boundary_kind.loan_exit, line);
+    fir.range_boundary* outer = activation_boundary(proposed, loan,
+        fir.range_boundary_kind.outer_cleanup, line);
+    assert(start->block == end->block && end->block == outer->block);
+    assert(start->position <= end->position && end->position == outer->position);
+    assert(end->order < outer->order);
+    assert(end->position <= fir.block_statement_count(f, end->block));
+}
+
+fn activation_owning_span() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(u8 mut@ own bytes) void {",
+        "    for (u8 x : bytes) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_owning_span");
+    assert(cs.len == 1);
+    fir_lower.range_capture_candidate c = cs.items[0];
+    assert(c.declaration == 1 && c.expansion == 1 && c.binding.loan == 1);
+    assert(c.binding.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.binding.original_present && activation_is_local(c.binding.original, 1));
+    assert(activation_is_local(c.binding.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.binding.captured)));
+    assert(fir.type_owning(fir.place_type(&f, c.binding.original)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+    assert(str.find(text, "move _1") < 0);
+}
+
+fn activation_owning_string() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(string own text) void {",
+        "    for (char x : text) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_owning_string");
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && activation_is_local(c.original, 1));
+    assert(activation_is_local(c.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.captured)));
+    assert(fir.type_owning(fir.place_type(&f, c.original)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+}
+
+fn activation_borrowed_span() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(u8@ bytes) void {",
+        "    for (u8 x : bytes) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_borrowed_span");
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && activation_is_local(c.original, 1));
+    assert(activation_is_local(c.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.original)));
+    assert(!fir.type_owning(fir.place_type(&f, c.captured)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+}
+
+fn activation_borrowed_string() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(string text) void {",
+        "    for (char x : text) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_borrowed_string");
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && activation_is_local(c.original, 1));
+    assert(activation_is_local(c.captured, 3));
+    assert(!fir.type_owning(fir.place_type(&f, c.original)));
+    assert(!fir.type_owning(fir.place_type(&f, c.captured)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, copy _3.1)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+}
+
+fn activation_owning_array() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn walk(u8 mut* own[2] items) void {",
+        "    for (u8 mut* item : items) { }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_owning_array");
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.owning_fixed_array_place);
+    assert(c.original_present && activation_is_local(c.original, 1));
+    assert(activation_is_local(c.captured, 1));
+    assert(fir.type_owning(fir.place_type(&f, c.captured)));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(str.find(text, "= copy _1 #2:") < 0);
+    assert(str.find(text, "lt(copy _3, const u64 2)") >= 0);
+    assert(str.find(text, "_2 = copy _1[_3]") >= 0);
+    assert(str.find(text, "move _1") < 0);
+}
+
+fn activation_copied_array() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn walk(i32[2] mut values) void {",
+        "    for (i32 x : values) {",
+        "        values[0] = 9;",
+        "    }",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_copied_array");
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.non_owning_array_copy);
+    assert(!c.original_present && activation_is_local(c.captured, 3));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(str.find(text, "_3 = copy _1") >= 0);
+    assert(str.find(text, "lt(copy _4, const u64 2)") >= 0);
+    assert(str.find(text, "_2 = copy _3[_4]") >= 0);
+    assert(str.find(text, "_1[") >= 0);
+}
+
+fn activation_indirect_field() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "struct holder { u8 mut@ own items; }",
+        "fn walk(holder mut* mut h, holder mut* next) void {",
+        "    for (u8 x : h->items) { }",
+        "    h = next;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_indirect_field");
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && c.original.proj_len == 1);
+    assert(fir.place_projection(&f, c.original, 0).kind == fir.proj_kind.pj_deref);
+    assert(c.original.base == fir.base_kind.bk_local && c.original.local != 1);
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(str.find(text, "addr mut((*_1).0)") >= 0);
+    assert(str.find(text, "copy (*_") >= 0);
+    assert(str.find(text, "= copy _2") >= 0);
+    assert(str.find(text, "lt(copy _") >= 0);
+}
+
+fn activation_projected_index() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "fn select(i32 mut* count) i32 {",
+        "    *count += 1;",
+        "    return 0;",
+        "}",
+        "fn walk(u8 mut@ own[2] items, i32 mut count) i32 {",
+        "    for (u8 x : items[select(&count)]) {",
+        "        count += 1;",
+        "    }",
+        "    return count;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_capture_candidate_vec mut cs = fir_lower.range_capture_candidate_vec{};
+    defer fir_lower.range_capture_candidates_free(&cs);
+    activation_lower_capture(&e, source[..], "walk", &f, &cs, "activation_projected_index");
+    assert(cs.len == 1);
+    fir.range_capture c = cs.items[0].binding;
+    assert(c.kind == fir.range_capture_kind.borrowed_header);
+    assert(c.original_present && c.original.proj_len == 1);
+    fir.projection pj = fir.place_projection(&f, c.original, 0);
+    assert(pj.kind == fir.proj_kind.pj_index && pj.index != 2);
+    assert(activation_is_local(c.captured, 4));
+    strbuf.str_buf mut printed = strbuf.create();
+    defer strbuf.free(&printed);
+    string text = activation_text_of(&f, &printed);
+    assert(activation_occurs_once(text, "call fn main.select"));
+    assert(str.find(text, "check(") >= 0);
+    assert(str.find(text, "copy _4.1") >= 0);
+    i64 head = str.find(text, "lt(copy _10, copy _4.1)");
+    assert(head >= 0);
+    assert(str.find(text, "_2 = add(") > head);
+}
+
+fn activation_nested_loans() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] outer, i32[2] inner, bool stop) i32 {",
+        "    i32 mut sum = 0;",
+        "    for (i32 x : outer) {",
+        "        sum += x;",
+        "        for (i32 y : inner) {",
+        "            if (stop) { break; }",
+        "            sum += y;",
+        "        }",
+        "        sum += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_nested_loans");
+    assert(cs.declarations.len == 2 && cs.captures.len == 2);
+    assert(cs.captures.items[1].loan.parent_present);
+    assert(cs.captures.items[1].loan.parent == cs.captures.items[0].loan.id);
+    activation_cleanup_at(&f, &cs, 2, 6);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 1);
+    assert(activation_boundary_count(&cs, 2, fir.range_boundary_kind.loan_exit) == 2);
+}
+
+fn activation_final_use_tail() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn walk(i32[2] values, bool stop) i32 {",
+        "    i32 mut sum = 0;",
+        "    for (i32 x : values) {",
+        "        sum += x;",
+        "        if (stop) { sum += 1; }",
+        "        sum += 2;",
+        "    }",
+        "    return sum;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_final_use_tail");
+    assert(cs.captures.len == 1);
+    fir.range_boundary* end = activation_boundary(&cs, 1, fir.range_boundary_kind.body_cleanup, 7);
+    assert(end->position > 0);
+    fir.statement* before = fir.block_statement(&f, end->block, end->position - 1);
+    assert(before->loc.line == 6);
+    activation_cleanup_at(&f, &cs, 1, 7);
+}
+
+fn activation_continue_and_falloff() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] values, bool skip) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer count +%= 1;",
+        "        defer count +%= 2;",
+        "        if (skip) {",
+        "            continue;",
+        "        }",
+        "        count +%= x;",
+        "    }",
+        "    return count;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_continue_and_falloff");
+    assert(cs.captures.len == 1);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.capture) == 1);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.body_entry) == 1);
+    activation_cleanup_at(&f, &cs, 1, 7);
+    activation_cleanup_at(&f, &cs, 1, 10);
+    fir.range_boundary* continued = activation_boundary(&cs, 1,
+        fir.range_boundary_kind.body_cleanup, 7);
+    u32 mut two_at = 0;
+    u32 mut one_at = 0;
+    u32 mut at = 0;
+    while (at < continued->position) {
+        fir.statement* s = fir.block_statement(&f, continued->block, at);
+        if (s->exit_loc.line == 7 && s->loc.line == 5) { two_at = at + 1; }
+        if (s->exit_loc.line == 7 && s->loc.line == 4) { one_at = at + 1; }
+        at += 1;
+    }
+    assert(two_at > 0 && one_at > two_at);
+    fir.range_boundary* next = activation_boundary(&cs, 1, fir.range_boundary_kind.body_entry, 3);
+    assert(next->position == 0);
+    assert(fir.block_statement(&f, next->block, 0)->kind == fir.stmt_kind.st_live);
+    fir.statement* element = fir.block_statement(&f, next->block, 1);
+    fir.operand read = fir.rvalue_operand(&f, element->value, 0);
+    assert(read.kind == fir.operand_kind.ok_copy && read.place.proj_len == 1);
+    assert(read.place.local == cs.captures.items[0].binding.captured.local);
+    fir.range_boundary* ended = activation_boundary(&cs, 1,
+        fir.range_boundary_kind.outer_cleanup, 7);
+    fir.terminator* exit = &fir.block_at(&f, ended->block)->term;
+    assert(exit->kind == fir.term_kind.tk_goto);
+    fir.terminator* step = &fir.block_at(&f, exit->target)->term;
+    assert(step->kind == fir.term_kind.tk_goto);
+    fir.terminator* head = &fir.block_at(&f, step->target)->term;
+    assert(head->kind == fir.term_kind.tk_switch);
+    assert(fir.term_arm(&f, head, 0).target == next->block);
+}
+
+fn activation_deferred_nested_range() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[12] source = {
+        "fn walk(i32[2] values, bool skip) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer {",
+        "            for (i32 y : values) { count +%= y; }",
+        "        }",
+        "        if (skip) { continue; }",
+        "        count +%= x;",
+        "    }",
+        "    return count;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_deferred_nested_range");
+    assert(cs.declarations.len == 2 && cs.captures.len == 3);
+    assert(cs.captures.items[0].declaration == 1);
+    assert(cs.captures.items[1].declaration == 2 && cs.captures.items[2].declaration == 2);
+    assert(cs.captures.items[1].expansion != cs.captures.items[2].expansion);
+    assert(cs.captures.items[1].occurrence.context != 0);
+    assert(cs.captures.items[1].occurrence.context != cs.captures.items[2].occurrence.context);
+    assert(cs.captures.items[1].occurrence.exit_occurrence !=
+           cs.captures.items[2].occurrence.exit_occurrence);
+    assert(cs.captures.items[1].occurrence.source.line == 5);
+    assert(cs.captures.items[2].occurrence.source.line == 5);
+    u64 mut i = 1;
+    while (i < cs.captures.len) {
+        fir.range_expansion* occurrence = &cs.captures.items[i].occurrence;
+        fir_lower.range_defer_context_candidate* context = activation_defer_context(&cs,
+                                                                          occurrence->context);
+        assert(context->source_node->loc.line == 4 && context->parent == 0);
+        assert(context->exit_occurrence == occurrence->exit_occurrence);
+        assert(context->exit_source.line == occurrence->exit_source.line);
+        i += 1;
+    }
+    assert(cs.captures.items[1].loan.parent == 1 && cs.captures.items[2].loan.parent == 1);
+    activation_cleanup_at(&f, &cs, 1, 7);
+    activation_cleanup_at(&f, &cs, 1, 9);
+    assert(cs.suppressions.len == 0);
+}
+
+fn activation_switch_and_loop_break() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[16] source = {
+        "fn walk(i32[2] values, i32 mode, bool stop) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        switch (mode) {",
+        "        case 0:",
+        "            count +%= x;",
+        "            break;",
+        "        default:",
+        "            count +%= 1;",
+        "        }",
+        "        if (stop) { break; }",
+        "        count +%= 2;",
+        "    }",
+        "    return count;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_switch_and_loop_break");
+    assert(cs.captures.len == 1);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 2);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.body_cleanup) == 2);
+    activation_cleanup_at(&f, &cs, 1, 11);
+    activation_cleanup_at(&f, &cs, 1, 13);
+    u64 mut i = 0;
+    while (i < cs.boundaries.len) {
+        fir.range_boundary* b = &cs.boundaries.items[i].boundary;
+        assert(b->source.line != 7);
+        i += 1;
+    }
+}
+
+fn activation_break_done_path() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[10] source = {
+        "fn walk(i32[2] values, bool stop) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values) {",
+        "        defer count +%= 1;",
+        "        if (stop) { break; }",
+        "        count +%= x;",
+        "    }",
+        "    count +%= 2;",
+        "    return count;",
+        "}",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_break_done_path");
+    activation_cleanup_at(&f, &cs, 1, 5);
+    activation_cleanup_at(&f, &cs, 1, 7);
+    fir.range_boundary* broken = activation_boundary(&cs, 1, fir.range_boundary_kind.loan_exit, 5);
+    assert(fir.block_at(&f, broken->block)->term.kind == fir.term_kind.tk_goto);
+    assert(fir.block_at(&f, broken->block)->term.target !=
+           activation_boundary(&cs, 1, fir.range_boundary_kind.body_entry, 3)->block);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 2);
+}
+
+fn activation_return_cleanup_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[9] source = {
+        "fn walk(i32[2] values, i32 mut base) i32 {",
+        "    defer base +%= 10;",
+        "    for (i32 x : values) {",
+        "        defer base +%= 1;",
+        "        return x + base;",
+        "    }",
+        "    return base;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_return_cleanup_order");
+    activation_cleanup_at(&f, &cs, 1, 5);
+    fir.range_boundary* body = activation_boundary(&cs, 1, fir.range_boundary_kind.body_cleanup, 5);
+    fir.range_boundary* outer = activation_boundary(&cs, 1,
+        fir.range_boundary_kind.outer_cleanup, 5);
+    assert(body->position > 1);
+    u32 mut result_at = 0;
+    u32 mut defer_at = 0;
+    u32 mut at = 0;
+    while (at < body->position) {
+        fir.statement* s = fir.block_statement(&f, body->block, at);
+        if (s->loc.line == 5) { result_at = at + 1; }
+        if (s->loc.line == 4 && s->exit_loc.line == 5) { defer_at = at + 1; }
+        at += 1;
+    }
+    assert(result_at > 0 && defer_at > result_at);
+    assert(outer->position < fir.block_statement_count(&f, outer->block));
+    assert(fir.block_statement(&f, outer->block, outer->position)->loc.line == 2);
+    assert(fir.block_at(&f, outer->block)->term.kind == fir.term_kind.tk_return);
+}
+
+fn activation_abort_without_cleanup() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[7] source = {
+        "fn walk(i32[2] values) noreturn {",
+        "    for (i32 x : values) {",
+        "        panic(\"stop\");",
+        "    }",
+        "    while (true) { }",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_abort_without_cleanup");
+    assert(cs.captures.len == 1);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.body_entry) == 1);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.body_cleanup) == 0);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.loan_exit) == 0);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.outer_cleanup) == 0);
+}
+
+fn activation_zero_iterations() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn walk(i32[1] values) i32 {",
+        "    i32 mut count = 0;",
+        "    for (i32 x : values[0..0]) { count +%= x; }",
+        "    return count;",
+        "}",
+        "",
+    };
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&cs);
+    activation_lower_case(&e, source[..], "walk", &f, &cs, "activation_zero_iterations");
+    assert(cs.captures.len == 1);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.capture) == 1);
+    assert(activation_boundary_count(&cs, 1, fir.range_boundary_kind.body_entry) == 1);
+    fir.range_boundary* entry = activation_boundary(&cs, 1, fir.range_boundary_kind.body_entry, 3);
+    assert(entry->position == 0 && entry->block != 0);
+    assert(fir.block_statement(&f, entry->block, 0)->kind == fir.stmt_kind.st_live);
+}
+
+fn activation_p13_probe(string@ source, u32 expansions, u32 absences,
+    u32 carrier_absences, string name) void {
+    lower_env.env mut e = {};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source, true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = {};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut candidates = {};
+    defer fir_lower.range_candidate_set_free(&candidates);
+    fir_lower.report mut why = {};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &candidates, &why));
+    fir_lower.range_source_audit mut audit = {};
+    defer fir_lower.range_source_audit_free(&audit);
+    bool ok = fir_lower.publish_range_source(decl, &f, &candidates, &e.rt, &audit);
+    assert(ok && audit.structural_valid && audit.source_complete && !audit.ownership_proved);
+    assert(audit.selected_declarations == 1 && audit.required_expansions == expansions);
+    assert(audit.produced_expansions == expansions && audit.matched_captures == expansions);
+    assert(audit.validated_absences == absences && audit.absences.len == cast(absences, u64));
+    assert(f.range_expansions.len == cast(expansions, u64));
+    assert(f.range_absences.len == cast(carrier_absences, u64));
+    assert(f.range_source_complete && f.range_supplied_complete);
+    fir_verify.violation mut bad = {};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+    u64 mut i = 0;
+    while (i < audit.absences.len) {
+        fir_lower.range_audit_absence row = audit.absences.items[i];
+        assert(row.reason == fir_lower.range_absence_cause.suppressed_defer);
+        assert(row.verified && row.key.declaration == 1 && row.key.expansion == 0);
+        assert(row.key.context != 0 && row.key.exit_occurrence != 0);
+        assert(row.registered_defer->loc.line == 2 && row.terminating_defer != null);
+        assert(row.terminating_source->kind == ast.ast_kind.k_call_stmt);
+        assert(fir_lower.builtin_call(row.terminating_source->a));
+        assert(row.terminating_source->a->a->sym->name == "panic");
+        assert(row.key.exit_source.line == row.terminating_exit.line);
+        assert(fir.block_at(&f, row.block)->term.kind == fir.term_kind.tk_fail);
+        i += 1;
+    }
+    assert(audit.protected_declarations == 1);
+    activation_roundtrip(&e, &f);
+    activation_receipt(name, &audit);
+    check_output(&e, decl, &f, name, true);
+}
+
+fn activation_p13() void {
+    string[8] mixed = {
+        "fn walk(i32@ values, bool first, bool stop) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    if (first) { return; }",
+        "    if (stop) { defer panic(\"stop\"); return; }",
+        "    return;",
+        "}", "", "",
+    };
+    activation_p13_probe(mixed[..], 2, 1, 0, "activation_mixed_defer");
+    string[5] suppressed = {
+        "fn walk(i32@ values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    defer panic(\"stop\");",
+        "    return;", "}",
+    };
+    activation_p13_probe(suppressed[..], 0, 1, 1, "activation_suppressed_defer");
+}
+
+
+u32 mut activation_roundtrips = 0;
+u32 mut activation_refusals = 0;
+strbuf.str_buf mut activation_damage_evidence = strbuf.str_buf{};
+
+// Text preserves carriers. Parsing cannot grant checked-source coverage.
+fn activation_roundtrip(lower_env.env mut* e, fir.func* f) void {
+    strbuf.str_buf mut before = strbuf.create();
+    defer strbuf.free(&before);
+    fir_print.print_function(f, &before);
+    u64 errors = check_env.errors(&e->c);
+    fir.module mut parsed = fir_parse.parse_module(&e->c.m.s, "activation.fir",
+        strbuf.view(&before), fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck});
+    defer fir.module_free(&parsed);
+    assert(check_env.errors(&e->c) == errors && fir.module_function_count(&parsed) == 1);
+    fir.func* copy = fir.module_function_at(&parsed, 0);
+    assert(copy->range_supplied_complete && !copy->range_source_complete);
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(copy, &e->rt, &bad));
+    strbuf.str_buf mut after = strbuf.create();
+    defer strbuf.free(&after);
+    fir_print.print_function(copy, &after);
+    assert(strbuf.view(&before) == strbuf.view(&after));
+    activation_roundtrips += 1;
+}
+
+fn activation_refuse(lower_env.env mut* e, ast.node* decl, fir.func mut* f,
+    fir_lower.range_candidate_set* proposed, string name) void {
+    strbuf.str_buf mut before = strbuf.create();
+    defer strbuf.free(&before);
+    conditional_snapshot(f, &before);
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(!fir_lower.publish_range_source(decl, f, proposed, &e->rt, &audit));
+    assert(audit.failure.reason != fir_lower.range_audit_fault.none);
+    assert(audit.failure.key.function == cast(decl->sym, ast.sym*));
+    assert(!audit.source_complete && !audit.ownership_proved);
+    strbuf.str_buf mut after = strbuf.create();
+    defer strbuf.free(&after);
+    conditional_snapshot(f, &after);
+    assert(strbuf.view(&before) == strbuf.view(&after));
+    if (activation_refusals != 0) { strbuf.append(&activation_damage_evidence, ",\n"); }
+    json.writer mut j = json.writer{};
+    json.json_init(&j, &activation_damage_evidence);
+    json.json_object_begin(&j);
+    json.json_key(&j, "case");
+    json.json_str(&j, name);
+    json.json_key(&j, "reason");
+    json.json_uint(&j, cast(audit.failure.reason, u64));
+    json.json_key(&j, "key");
+    conditional_json_key(&j, audit.failure.key);
+    json.json_key(&j, "structural_valid");
+    json.json_bool(&j, audit.structural_valid);
+    json.json_key(&j, "source_complete");
+    json.json_bool(&j, audit.source_complete);
+    json.json_key(&j, "FIR_unchanged");
+    json.json_bool(&j, true);
+    json.json_object_end(&j);
+    activation_refusals += 1;
+}
+
+fn activation_wrong_function() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn walk(i32@ values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    defer panic(\"stop\");", "    return;", "}",
+        "fn other(i32@ values) void { }",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    ast.node* other = lower_env.decl(&e, "other");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    assert(f.ty == other->sym->ty);
+    f.sym = other->sym;
+    fir_verify.violation mut bad = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(!fir_lower.publish_range_source(decl, &f, &proposed, &e.rt, &audit));
+    assert(audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+    assert(audit.failure.reason == fir_lower.range_audit_fault.context);
+    activation_refuse(&e, decl, &f, &proposed, "wrong function identity");
+}
+
+fn activation_damage(u32 mode) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn walk(i32@ values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    defer panic(\"stop\");",
+        "    return;", "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    assert(proposed.suppressions.len == 1 && proposed.captures.len == 0);
+    u32 mut abort_block = 0;
+    while (abort_block < fir.block_count(&f)
+        && fir.block_at(&f, abort_block)->term.kind != fir.term_kind.tk_fail) {
+        abort_block += 1;
+    }
+    assert(abort_block < fir.block_count(&f));
+    fir.terminator mut* abort = &fir.block_mut(&f, abort_block)->term;
+    string[23] names = {
+        "missing suppression", "duplicate suppression", "extra declaration",
+        "wrong suppression context", "wrong suppression occurrence", "wrong suppression source",
+        "wrong suppression exit", "wrong suppression declaration",
+        "omitted declaration and records",
+        "wrong registered defer", "wrong parent context", "wrong terminator kind",
+        "wrong terminator source", "wrong terminator statement", "wrong terminator exit",
+        "preexisting declaration", "preexisting complete claim", "invalid terminator target",
+        "preexisting source claim", "invalid candidate length", "extra null context",
+        "missing context", "wrong context exit",
+    };
+    switch (mode) {
+    case 0: proposed.suppressions.len = 0;
+    case 1:
+        fir_lower.range_suppression_candidate_add(&proposed.suppressions,
+            proposed.suppressions.items[0]);
+    case 2:
+        assert(proposed.declarations.len < proposed.declarations.items.len);
+        proposed.declarations.items[proposed.declarations.len] = proposed.declarations.items[0];
+        proposed.declarations.len += 1;
+    case 3: proposed.suppressions.items[0].context += 1;
+    case 4: proposed.suppressions.items[0].exit_occurrence += 1;
+    case 5: proposed.suppressions.items[0].source.col += 1;
+    case 6: proposed.suppressions.items[0].exit_source.col += 1;
+    case 7: proposed.suppressions.items[0].declaration += 1;
+    case 8: proposed.declarations.len = 0; proposed.suppressions.len = 0;
+    case 9: proposed.deferred.items[1].source_node = decl->b;
+    case 10: proposed.deferred.items[1].parent += 1;
+    case 11: abort->kind = fir.term_kind.tk_unreachable;
+    case 12: abort->loc.col += 1;
+    case 13: abort->stmt += 1;
+    case 14: abort->exit_loc.col += 1;
+    case 15: fir.range_declaration_add(&f, proposed.declarations.items[0]);
+    case 16: f.range_supplied_complete = true;
+    case 17: abort->kind = fir.term_kind.tk_goto; abort->target = fir.block_count(&f);
+    case 18: f.range_source_complete = true;
+    case 19: proposed.suppressions.len = proposed.suppressions.items.len + 1;
+    case 20:
+        fir_lower.range_defer_context_candidate_add(&proposed.deferred,
+            fir_lower.range_defer_context_candidate{.id = 3, .source_node = null});
+    case 21: proposed.deferred.len -= 1;
+    case 22: proposed.deferred.items[1].exit_source.col += 1;
+    }
+    if (mode >= 12 && mode <= 14) {
+        fir_lower.range_source_audit mut key_audit = {};
+        defer fir_lower.range_source_audit_free(&key_audit);
+        assert(!fir_lower.publish_range_source(decl, &f, &proposed, &e.rt, &key_audit));
+        fir_lower.range_audit_key key = key_audit.failure.key;
+        assert(key.function == cast(decl->sym, ast.sym*));
+        assert(key.declaration == 1 && key.expansion == 1);
+        assert(key.context != 0 && key.exit_occurrence != 0);
+        assert(key.context_source.line == 2 && key.exit_source.line == 4);
+        assert(fir_lower.range_audit_loc_eq(key.source, proposed.declarations.items[0].source));
+    }
+    activation_refuse(&e, decl, &f, &proposed, names[mode]);
+}
+
+fn activation_unknown_termination(bool foreign) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] mut source = {
+        "fn stop() noreturn { while (true) { } }",
+        "fn walk(i32@ values) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    defer stop();",
+        "    return;", "}",
+    };
+    if (foreign) { source[0] = "extern fn stop() noreturn;"; }
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    assert(proposed.captures.len == 0);
+    string mut name = "unknown fort termination";
+    if (foreign) { name = "unknown extern termination"; }
+    activation_refuse(&e, decl, &f, &proposed, name);
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    fir.func mut complete = fir.func{};
+    defer fir.func_free(&complete);
+    assert(!fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt,
+        &complete, &why, &audit));
+    assert(fir.block_count(&complete) == 0 && !complete.range_source_complete);
+}
+
+fn activation_no_eligible_exit() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {
+        "fn walk(i32@ values) noreturn {",
+        "    defer { for (i32 x : values) { } }",
+        "    panic(\"stop\");", "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt, &f, &why, &audit));
+    assert(audit.structural_valid && audit.source_complete && !audit.ownership_proved);
+    assert(audit.selected_declarations == 1 && audit.required_expansions == 0);
+    assert(audit.validated_absences == 1 && audit.absences.len == 1);
+    fir_lower.range_audit_absence row = audit.absences.items[0];
+    assert(row.reason == fir_lower.range_absence_cause.no_eligible_exit);
+    assert(row.verified && row.registered_defer->loc.line == 2);
+    assert(row.terminating_defer == null && row.terminating_source->loc.line == 3);
+    assert(row.key.exit_source.line == 3 && row.terminating_exit.line == 0);
+    assert(f.range_declarations.len == 1 && f.range_absences.len == 1);
+    assert(f.range_captures.len == 0 && f.range_loans.len == 0);
+    activation_roundtrip(&e, &f);
+    check_output(&e, decl, &f, "activation_no_eligible_exit", true);
+}
+
+fn activation_refusal_matrix() void {
+    u32 mut mode = 0;
+    while (mode < 23) { activation_damage(mode); mode += 1; }
+    activation_unknown_termination(false);
+    activation_unknown_termination(true);
+    assert(activation_refusals == 25);
+    activation_no_eligible_exit();
+}
+
+$if ($cfg(target_os) == "linux") {
+    extern fn open_memstream(char mut* own mut* buffer, u64 mut* length) void mut*;
+    extern fn malloc_info(i32 options, void mut* stream) i32;
+    extern fn fclose(void mut* stream) i32;
+    fn activation_metric(string data, string prefix) u64 {
+        i64 mut found = str.find(data, prefix);
+        assert(found >= 0);
+        string mut tail = data[cast(found, u64)..];
+        while (true) {
+            found = str.find(tail[prefix.len..], prefix);
+            if (found < 0) { break; }
+            tail = tail[prefix.len + cast(found, u64)..];
+        }
+        found = str.find(tail, "size=\"");
+        assert(found >= 0);
+        tail = tail[cast(found, u64) + 6..];
+        found = str.index_of(tail, '\"');
+        assert(found >= 0);
+        u64 mut value = 0;
+        assert(str.parse_u64(tail[..cast(found, u64)], 10, &value));
+        return value;
+    }
+    fn activation_live_bytes() u64 {
+        char mut* own mut buffer = null;
+        u64 mut length = 0;
+        void mut* stream = open_memstream(&buffer, &length);
+        assert(stream != null && malloc_info(0, stream) == 0 && fclose(stream) == 0);
+        string data = cast(buffer[0..length], string);
+        u64 arena = activation_metric(data, "<system type=\"current\"");
+        u64 fast = activation_metric(data, "<total type=\"fast\"");
+        u64 rest = activation_metric(data, "<total type=\"rest\"");
+        u64 mapped = activation_metric(data, "<total type=\"mmap\"");
+        libc.free(cast(move(buffer), void* own));
+        assert(arena >= fast && arena - fast >= rest);
+        return arena - fast - rest + mapped;
+    }
+} else {
+    fn activation_live_bytes() u64 { return heap.system_view(); }
+}
+
+// The checked tree remains live while each round owns and releases its FIR and audit.
+// Empty owned capacity is not a supplied carrier record.
+fn activation_empty_capacity(fir.func mut* f) void {
+    fir.range_declaration_add(f, fir.range_declaration{});
+    fir.range_expansion_add(f, fir.range_expansion{});
+    fir.range_loan_add(f, fir.range_loan{});
+    fir.range_capture_add(f, fir.range_capture{});
+    fir.range_boundary_add(f, fir.range_boundary{});
+    fir.range_absence_add(f, fir.range_absence{});
+    f->range_declarations.len = 0;
+    f->range_expansions.len = 0;
+    f->range_loans.len = 0;
+    f->range_captures.len = 0;
+    f->range_boundaries.len = 0;
+    f->range_absences.len = 0;
+    assert(f->range_declarations.items.len > 0 && f->range_absences.items.len > 0);
+}
+
+fn activation_without_range() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[2] source = {"extern fn stop() noreturn;", "fn walk() noreturn { stop(); }"};
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt, &f, &why, &audit));
+    assert(audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+    assert(audit.selected_declarations == 0 && audit.required_expansions == 0);
+    assert(f.range_declarations.len == 0 && f.range_captures.len == 0);
+    assert(!f.range_source_complete && !f.range_supplied_complete);
+    check_output(&e, decl, &f, "activation_without_range", true);
+}
+
+fn activation_storage_one(lower_env.env mut* e, ast.node* decl, u32 mode) void {
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e->c.ck, decl, &f, &proposed, &why));
+    assert(proposed.captures.len == 2 && proposed.suppressions.len == 1);
+    activation_empty_capacity(&f);
+    fir.range_declaration mut* original_buffer = f.range_declarations.items.ptr;
+    if (mode == 1) { proposed.suppressions.items[0].exit_source.col += 1; }
+    if (mode == 2) {
+        proposed.captures.items[1].loan.parent_present = true;
+        proposed.captures.items[1].loan.parent = 1;
+    }
+    if (mode == 3) { f.range_source_complete = true; }
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    bool accepted = fir_lower.publish_range_source(decl, &f, &proposed, &e->rt, &audit);
+    if (mode == 0) {
+        assert(accepted && audit.source_complete && audit.validated_absences == 1);
+        assert(f.range_captures.len == 2 && f.range_source_complete);
+        assert(f.range_declarations.items.ptr != original_buffer);
+    } else {
+        assert(!accepted && !audit.source_complete && !audit.ownership_proved);
+        assert(f.range_captures.len == 0 && f.range_declarations.len == 0);
+        assert(f.range_declarations.items.ptr == original_buffer);
+        if (mode == 1) {
+            assert(audit.failure.reason == fir_lower.range_audit_fault.absence);
+            assert(audit.rows.len == 2 && audit.absences.len == 1);
+        }
+        if (mode == 2) {
+            assert(audit.failure.reason == fir_lower.range_audit_fault.context);
+            assert(audit.rows.len == 2 && audit.validated_absences == 1);
+            assert(audit.failure.key.expansion == 2);
+        }
+        if (mode == 3) {
+            assert(audit.failure.reason == fir_lower.range_audit_fault.structural);
+            assert(audit.rows.len == 0 && audit.absences.len == 0);
+        }
+    }
+}
+
+fn activation_storage_round(lower_env.env mut* e, ast.node* decl, u32 mode) void {
+    u64 mut objects = 0;
+    while (objects < 64) {
+        if (mode < 4) { activation_storage_one(e, decl, mode); }
+        else {
+            fir.func mut f = fir.func{};
+            defer fir.func_free(&f);
+            fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+            defer fir_lower.range_source_audit_free(&audit);
+            fir_lower.report mut why = fir_lower.report{};
+            bool accepted = fir_lower.lower_function_with_range_source(&e->c.ck, decl,
+                &e->rt, &f, &why, &audit);
+            if (mode == 6) {
+                assert(!accepted && !audit.source_complete && !audit.ownership_proved);
+                assert(fir.block_count(&f) == 0 && !f.range_source_complete);
+            } else {
+                assert(accepted && audit.source_complete && audit.structural_valid);
+                assert(!audit.ownership_proved && f.range_source_complete);
+                if (mode == 4) {
+                    assert(audit.selected_declarations == 20 && audit.absences.len == 20);
+                    assert(audit.required_expansions == 0 && f.range_absences.len == 20);
+                } else {
+                    assert(audit.selected_declarations == 2 && f.range_loans.len > 1);
+                    assert(cast(audit.required_expansions, u64) == f.range_expansions.len);
+                }
+            }
+        }
+        objects += 1;
+    }
+}
+
+fn activation_storage(u32 mode) void {
+    assert(mode < 7);
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] source = {
+        "fn walk(i32@ values, bool first, bool stop) void {",
+        "    defer { for (i32 x : values) { } }",
+        "    if (first) { return; }",
+        "    if (stop) { defer panic(\"stop\"); return; }",
+        "    return;", "}",
+    };
+    if (mode == 4) {
+        string[23] mut many = {};
+        many[0] = "fn walk(i32@ values) noreturn {";
+        u64 mut i = 1;
+        while (i <= 20) { many[i] = "    defer { for (i32 x : values) { } }"; i += 1; }
+        many[21] = "    panic(\"stop\");";
+        many[22] = "}";
+        lower_env.check_lines(&e, many[..], true);
+    } else if (mode == 5) {
+        string[6] nested = {
+            "fn walk(i32@ values) void {", "    for (i32 x : values) {",
+            "        defer { for (i32 y : values) { } }", "        return;", "    }", "}",
+        };
+        lower_env.check_lines(&e, nested[..], true);
+    } else if (mode == 6) {
+        string[5] unknown = {
+            "extern fn stop() noreturn;", "fn walk(i32@ values) void {",
+            "    defer { for (i32 x : values) { } }", "    defer stop();", "}",
+        };
+        lower_env.check_lines(&e, unknown[..], true);
+    } else { lower_env.check_lines(&e, source[..], true); }
+    ast.node* decl = lower_env.decl(&e, "walk");
+    u64 mut warm = 0;
+    while (warm < 64) { activation_storage_round(&e, decl, mode); warm += 1; }
+    activation_storage_round(&e, decl, mode);
+    u64 before_live = activation_live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = 18446744073709551615;
+    u64 mut best_system = 18446744073709551615;
+    u64 mut round = 0;
+    while (round < 256) {
+        activation_storage_round(&e, decl, mode);
+        u64 live = activation_live_bytes();
+        u64 system = heap.system_view();
+        u64 distance_live = heap.distance(before_live, live);
+        u64 distance_system = heap.distance(before_system, system);
+        if (round >= 240 && distance_live < best_live) { best_live = distance_live; }
+        if (round >= 240 && distance_system < best_system) { best_system = distance_system; }
+        round += 1;
+    }
+    println("activation storage mode ", mode, " live ", best_live, " system ", best_system);
+    assert(best_live < (heap.ADDRESS_IS_A_VIEW ? 2048 : 256));
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+}
+
+// Publication also retains the prerequisite call-result proofs.
+fn activation_call_results(bool deferred, bool conditional) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[8] mut source = {
+        "fn pass(i32@ value) i32@ { return value; }",
+        "fn walk(i32@ first, i32@ second, bool choose) void {",
+        "    for (i32 x : pass(first)) { }",
+        "}", "", "", "", "",
+    };
+    string mut name = "activation_linear_direct";
+    if (conditional) {
+        source[2] = "    for (i32 x : choose ? pass(first) : pass(second)) { }";
+        name = "activation_conditional_direct";
+    }
+    if (deferred) {
+        source[2] = "    defer { for (i32 x : pass(first)) { } }";
+        source[3] = "    if (choose) { return; }";
+        source[4] = "    return;";
+        source[5] = "}";
+        name = "activation_linear_deferred";
+        if (conditional) {
+            source[2] = "    defer { for (i32 x : choose ? pass(first) : pass(second)) { } }";
+            name = "activation_conditional_deferred";
+        }
+    }
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_source_audit mut audit = fir_lower.range_source_audit{};
+    defer fir_lower.range_source_audit_free(&audit);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt, &f, &why, &audit));
+    assert(audit.source_complete && audit.structural_valid && !audit.ownership_proved);
+    assert(audit.selected_declarations == 1 && audit.validated_absences == 0);
+    assert(audit.required_expansions == (deferred ? 2 : 1));
+    assert(f.range_captures.len == (deferred ? 2 : 1));
+    activation_roundtrip(&e, &f);
+    check_output(&e, decl, &f, name, true);
+}
+
+fn activation_missing_expansion() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {"fn walk(i32@ values) void {",
+        "    for (i32 x : values) { }", "}"};
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut proposed = fir_lower.range_candidate_set{};
+    defer fir_lower.range_candidate_set_free(&proposed);
+    fir_lower.report mut why = fir_lower.report{};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &proposed, &why));
+    proposed.captures.len = 0;
+    proposed.boundaries.len = 0;
+    activation_refuse(&e, decl, &f, &proposed, "missing required expansion");
+}
+
+fn activation_primary_matrix() void {
+    activation_owning_span();
+    activation_owning_string();
+    activation_borrowed_span();
+    activation_borrowed_string();
+    activation_owning_array();
+    activation_copied_array();
+    activation_indirect_field();
+    activation_projected_index();
+    activation_nested_loans();
+    activation_final_use_tail();
+    activation_continue_and_falloff();
+    activation_deferred_nested_range();
+    activation_switch_and_loop_break();
+    activation_break_done_path();
+    activation_return_cleanup_order();
+    activation_abort_without_cleanup();
+    activation_zero_iterations();
+    activation_p13();
+    assert(activation_probes == 19);
+}
+
+// Each mutation keeps ordinary FIR valid and changes the checked collection source.
+fn activation_direct_source(u32 mode, bool deferred) void {
+    string[4] mut source = {
+        "", "fn walk(i32[2] a, i32[2] b) void {", "    for (i32 x : a) { }", "}",
+    };
+    if (mode == 1) {
+        source[0] = "struct holder { i32@ a; i32@ b; }";
+        source[1] = "fn walk(holder v) void {";
+        source[2] = "    for (i32 x : v.a) { }";
+    } else if (mode == 2) {
+        source[0] = "struct holder { u8 mut* own[2] a; u8 mut* own[2] b; }";
+        source[1] = "fn walk(holder v) void {";
+        source[2] = "    for (u8 mut* x : v.a) { }";
+    } else if (mode == 3) {
+        source[1] = "fn walk(i32@[2] v) void {";
+        source[2] = "    for (i32 x : v[0]) { }";
+    } else if (mode == 4) {
+        source[0] = "struct holder { i32@ a; i32@ b; }";
+        source[1] = "fn walk(holder* v) void {";
+        source[2] = "    for (i32 x : v->a) { }";
+    } else if (mode == 5) {
+        source[1] = "fn walk() void {";
+        source[2] = "    for (char x : \"ab\") { }";
+    }
+    if (deferred) {
+        if (mode == 0) { source[2] = "    defer { for (i32 x : a) { } }"; }
+        else if (mode == 1) { source[2] = "    defer { for (i32 x : v.a) { } }"; }
+        else if (mode == 2) { source[2] = "    defer { for (u8 mut* x : v.a) { } }"; }
+        else if (mode == 3) { source[2] = "    defer { for (i32 x : v[0]) { } }"; }
+        else if (mode == 4) { source[2] = "    defer { for (i32 x : v->a) { } }"; }
+        else { source[2] = "    defer { for (char x : \"ab\") { } }"; }
+    }
+    lower_env.env mut e = {};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = {};
+    defer fir.func_free(&f);
+    fir_lower.range_candidate_set mut cs = {};
+    defer fir_lower.range_candidate_set_free(&cs);
+    fir_lower.report mut why = {};
+    assert(fir_lower.lower_function_with_range_candidates(&e.c.ck, decl, &f, &cs, &why));
+    assert(cs.captures.len == 1);
+    fir.func mut control = fir.func_clone(&f);
+    defer fir.func_free(&control);
+    fir_lower.range_source_audit mut audit = {};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.publish_range_source(decl, &control, &cs, &e.rt, &audit));
+    assert(audit.structural_valid && audit.source_complete && !audit.ownership_proved);
+    string[12] names = {
+        "direct array parameter", "deferred array parameter",
+        "direct header field", "deferred header field",
+        "direct owning array field", "deferred owning array field",
+        "direct constant index", "deferred constant index",
+        "direct held address", "deferred held address",
+        "direct string literal", "deferred string literal",
+    };
+    u32 mut name_at = mode * 2;
+    if (deferred) { name_at += 1; }
+    check_output(&e, decl, &control, names[name_at], true);
+    fir.range_capture capture = cs.captures.items[0].binding;
+    u32 mut edits = 0;
+    if (mode == 2) {
+        fir.place mut other = {};
+        assert(linear_other_field(&f, capture.captured, &other));
+        u64 mut i = 0;
+        while (i < f.projs.len) {
+            if (f.projs.items[i].kind == fir.proj_kind.pj_field
+                && f.projs.items[i].field == 0) {
+                f.projs.items[i].field = 1;
+                edits += 1;
+            }
+            i += 1;
+        }
+    } else {
+        u32 mut b = 0;
+        while (b < fir.block_count(&f)) {
+            u32 mut i = 0;
+            while (i < fir.block_statement_count(&f, b)) {
+                fir.statement mut* write = &fir.block_mut(&f, b)->statements.items[i];
+                if (mode == 3 && write->kind == fir.stmt_kind.st_assign
+                    && write->value.kind == fir.rvalue_kind.rv_cast && write->value.ops_len == 1
+                    && write->place.local == fir.place_projection(&f, capture.original,
+                        capture.original.proj_len - 1).index) {
+                    fir.operand mut bound = fir.operand_at(&f, write->value.ops_first);
+                    if (bound.kind == fir.operand_kind.ok_const
+                        && bound.value.kind == fir.const_kind.ck_int
+                        && bound.value.value.mag == 0 && write->loc.line == 3) {
+                        bound.value.value.mag = 1;
+                        f.ops.items[write->value.ops_first] = bound;
+                        edits += 1;
+                    }
+                } else if (mode == 4 && write->kind == fir.stmt_kind.st_assign
+                    && write->value.kind == fir.rvalue_kind.rv_addr && write->loc.line == 3) {
+                    fir.place mut other = {};
+                    if (linear_other_field(&f, write->value.place, &other)) {
+                        write->value.place = other;
+                        edits += 1;
+                    }
+                } else if (write->kind == fir.stmt_kind.st_assign
+                    && fir_lower.range_audit_place_eq(&f, write->place, capture.captured)
+                    && write->value.kind == fir.rvalue_kind.rv_use && write->value.ops_len == 1) {
+                    fir.operand mut value = fir.operand_at(&f, write->value.ops_first);
+                    if (mode == 0) {
+                        u32 mut other = 0;
+                        while (other < fir.local_count(&f) && (fir.local_at(&f, other)->sym == null
+                            || fir.local_at(&f, other)->sym->name != "b")) { other += 1; }
+                        assert(other < fir.local_count(&f));
+                        value = fir.operand_copy(fir.place_local(other));
+                    } else if (mode == 1) {
+                        fir.place mut other = {};
+                        assert(linear_other_field(&f, value.place, &other));
+                        value.place = other;
+                        cs.captures.items[0].binding.original = other;
+                    } else if (mode == 5) {
+                        assert(value.kind == fir.operand_kind.ok_const
+                            && value.value.kind == fir.const_kind.ck_string);
+                        value.value.text = "cd";
+                    } else { i += 1; continue; }
+                    f.ops.items[write->value.ops_first] = value;
+                    edits += 1;
+                }
+                i += 1;
+            }
+            b += 1;
+        }
+    }
+    assert(edits > 0);
+    fir_verify.violation mut bad = {};
+    assert(!fir_verify.find_violation(&f, &e.rt, &bad));
+    activation_refuse(&e, decl, &f, &cs, names[name_at]);
+}
+
+// A failed lowering must clear all verdicts and owned audit vectors from the previous call.
+fn activation_audit_reuse() void {
+    lower_env.env mut e = {};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[1] source = {"fn walk(i32@ values) void { for (i32 x : values) { } print(1); }"};
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "walk");
+    fir.func mut f = {};
+    defer fir.func_free(&f);
+    fir_lower.report mut why = {};
+    fir_lower.range_source_audit mut audit = {};
+    defer fir_lower.range_source_audit_free(&audit);
+    assert(fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt, &f, &why, &audit));
+    assert(audit.source_complete && audit.rows.len == 1);
+    fir.func_free(&f);
+    ast.sym mut* mut entry = null;
+    u64 mut i = 0;
+    while (i < check.check_sym_count(&e.c.ck)) {
+        if (e.c.ck.syms[i]->name == "print_i64") { entry = e.c.ck.syms[i]; break; }
+        i += 1;
+    }
+    assert(entry != null);
+    entry->name = "missing_print_i64";
+    assert(!fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt, &f, &why, &audit));
+    assert(!audit.structural_valid && !audit.source_complete && !audit.ownership_proved);
+    assert(audit.rows.len == 0 && audit.absences.len == 0 && audit.boundaries.len == 0);
+    assert(audit.selected_declarations == 0 && audit.produced_expansions == 0);
+    assert(fir.block_count(&f) == 0 && !f.range_supplied_complete && !f.range_source_complete);
+    entry->name = "print_i64";
+    assert(fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt, &f, &why, &audit));
+    assert(audit.source_complete && audit.rows.len == 1 && audit.matched_captures == 1);
+    fir.func_free(&f);
+    assert(fir_lower.lower_function_with_range_source(&e.c.ck, decl, &e.rt, &f, &why, &audit));
+    assert(audit.source_complete && audit.rows.len == 1 && audit.matched_captures == 1);
+}
+
+fn activation_review_repairs() void {
+    u32 mut mode = 0;
+    while (mode < 6) {
+        activation_direct_source(mode, false);
+        activation_direct_source(mode, true);
+        mode += 1;
+    }
+    activation_audit_reuse();
+}
+
 fn main() i32 {
+    string mut storage_mode = "";
+    if (sys.env("FORT_RANGE_ACTIVATION_STORAGE", &storage_mode)) {
+        u64 mut parsed = 0;
+        assert(str.parse_u64(storage_mode, 10, &parsed) && parsed < 7);
+        activation_storage(cast(parsed, u32));
+        return 0;
+    }
     string mut coverage = "";
     if (sys.env("FORT_CONDITIONAL_COVERAGE_REGRESSION", &coverage)) {
         coverage_reuse_matrix();
@@ -6135,6 +7726,8 @@ fn main() i32 {
         conditional_operand_matrix();
         return 0;
     }
+    defer strbuf.free(&activation_damage_evidence);
+    defer strbuf.free(&activation_evidence);
     defer strbuf.free(&probe_rows);
     defer strbuf.free(&conditional_evidence);
     defer strbuf.free(&conditional_mutations);
@@ -6226,7 +7819,24 @@ fn main() i32 {
     eprintln("coverage reuse pairs ", coverage_reuse_pairs, " rows ", coverage_reuse_rows,
              " valid mutations ", coverage_reuse_mutations);
     eprintln("coverage borrowed pointee pairs 6 rows 9 invalid transfers 9");
+    activation_primary_matrix();
+    assert(output_comparisons == 253 && activation_roundtrips == 19);
+    activation_refusal_matrix();
+    assert(output_comparisons == 254 && activation_roundtrips == 20);
+    activation_missing_expansion();
+    activation_call_results(false, false);
+    activation_call_results(true, false);
+    activation_call_results(false, true);
+    activation_call_results(true, true);
+    assert(output_comparisons == 258 && activation_roundtrips == 24);
+    activation_without_range();
+    assert(output_comparisons == 259);
+    activation_wrong_function();
+    assert(activation_refusals == 27);
+    activation_review_repairs();
+    assert(output_comparisons == 271 && activation_refusals == 39);
     export_ledger();
-    println("output compared 234");
+    println("output compared 271");
+    println("activation groups 13 probes 19");
     return 0;
 }

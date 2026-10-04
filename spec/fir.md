@@ -240,7 +240,8 @@ A top-level conditional-result proof derives the joined destination from its con
 It matches the checked predicate, exact true and default edges, both source arms, and their join.
 Each arm entry has only its required switch predecessor. The join has only its two required exits.
 Scalar arm stores consume their exact produced operands.
-Nested scalar results require move for an owning checked type and copy for a non-owning checked type.
+Nested scalar results require move for an owning checked type and copy for a non-owning checked
+type.
 Aggregate arms write their destination directly.
 Each required arm path establishes the destination. Nested result arms repeat the same proof.
 Only direct nested aggregate result arms can share one proved destination family.
@@ -279,9 +280,48 @@ This internal record contract adds no source annotation, ABI field, or runtime t
 Unknown source forms, ambiguous definitions, and unproved folded constants remain incomplete.
 Source correspondence proves no returned-storage liveness or callee ownership effect.
 The keyed failure retains checked-source defer and verified FIR exit evidence.
-The audit keeps its rows and failures outside FIR.
+The candidate audit keeps its rows and failures outside FIR.
 It proves no deferred absence and sets no structural or selected-source completeness claim.
-Independent context and absence validation and V14 verification precede source publication.
+
+Complete source publication repeats the selected-source schedule without candidate identities
+(D17.10, D19.8).
+It validates each required deferred context, including contexts with no range operation.
+Reverse registration order determines which defer executes before another defer.
+A verified builtin panic can prove that an earlier executing defer suppresses a registered defer.
+The proof matches its exact FIR block, statement index, source position, and expansion exit.
+A registered defer with no eligible scope exit needs the same verified terminating source evidence.
+A noreturn type alone proves neither suppression nor abort behavior.
+Unknown termination keeps source publication incomplete.
+Runtime unreachability cannot remove a source-required expansion.
+
+The audit retains one absence row for each suppressed source context.
+Each row names the range declaration, registered defer, exit context, terminating source, and
+reason.
+One declaration can have expansions at some exits and validated absences at other exits.
+FIR records one `no_lowered_operation` absence only when that declaration has zero expansions.
+It records no declaration absence for a declaration with an expansion.
+The private audit retains the other absence rows.
+Selected declarations, protected declarations, required expansions, and protected expansions have
+separate counts. Candidates and validated absences also have separate counts.
+
+Publication first verifies the ordinary FIR, then proves complete source correspondence.
+The FIR function symbol and checked type must match the selected source function.
+Direct and materialized collections both need exact source and protected-place correspondence.
+Equal checked types or equal root symbols alone do not prove the selected collection.
+This requirement also applies to copied non-owning arrays and held indirect addresses.
+It builds a separate owned carrier set and checks V14 before it publishes any carrier.
+A failed publication keeps the original FIR unchanged and reports the failed source key and reason.
+When replay identifies a missing expansion, the key retains its declaration, expansion, defer, and
+exit context.
+A complete source-lowering interface instead releases its failed output and returns an empty
+function.
+It clears the previous audit before candidate lowering. A lowering failure retains no success claim.
+The complete set supplies structural counts and selected-source coverage together.
+Structural validity and source coverage grant no ownership proof.
+A function with no selected range keeps its source-coverage claim false.
+Text parsing preserves structural carriers but grants no checked-source coverage.
+The candidate-lowering interface keeps its carriers outside FIR.
+This publication interface adds no emitting operation, runtime field, or source annotation (D19.8).
 
 ### 5.3 Locals
 

@@ -143,6 +143,9 @@ came here.
   Source intervals and a CFG walk must agree on each expansion's required dead gaps.
   Each required gap matches exactly one cleanup triple. Candidate subsets supply no gap proof.
   A separate proof derives linear call-result capture and protected paths from actual body uses.
+  Direct collections also prove their exact checked root, projections, index, and captured source.
+  A copied non-owning array still needs that source proof. Equal types prove no source identity.
+  Literal string captures match their checked bytes.
   It traces unique temporary definitions, checked callees, ordered operands, and exact projections.
   An address or array slice of a temporary's fixed storage stays incomplete without alias proof.
   An address or slice of backing storage does not expose that temporary's slot.
@@ -179,8 +182,46 @@ came here.
   Unknown forms and ambiguous partitions stay keyed incomplete, including deferred expansions.
   This correspondence proves no returned-storage liveness or callee ownership effect.
   The report retains source and exit evidence after candidate teardown.
-  Structural validity, source coverage, and ownership proof remain separate false verdicts.
-  Deferred absence validation and publication follow in a later pass.
+  This candidate audit keeps structural validity, source coverage, and ownership proof false.
+- **Complete range publication independently validates deferred absences** (`spec/fir.md` 5.2).
+  `fir_lower.publish_range_source` repeats the selected-source schedule without candidate
+  identities.
+  It matches each context and suppression record, including contexts with no range operation.
+  Only a verified builtin panic establishes the supported terminating source proof.
+  The proof names the registered defer, earlier executing defer, exact FIR operation, and source
+  exit.
+  Unknown noreturn callees establish no absence proof.
+  A declaration can expand at one exit and have a validated absence at another exit.
+  FIR gets one absence only for a declaration with zero expansions.
+  The audit owns its per-context absence rows and borrows their checked-source pointers.
+  Selected and protected declaration counts differ for copied non-owning arrays.
+  `required_expansions` counts all required captures. `protected_paths` counts protected captures.
+  Publication verifies ordinary FIR, proves source correspondence, and stages the complete carrier
+  set.
+  The FIR function symbol and checked type must match the selected source function.
+  V14 must accept that set before publication moves its owned vectors to the original FIR.
+  Failure leaves the original FIR unchanged. It publishes no partial carrier set.
+  `lower_function_with_range_source` releases failed output and returns an empty function.
+  It clears a reused audit before candidate lowering. Candidate refusal retains no previous verdict.
+  A missing replay expansion retains its declaration, expansion, defer, and exit context in the key.
+  A report survives candidate teardown. Checked source and FIR outlive binding inspection.
+  Report teardown releases rows, boundaries, and absences. Replay teardown releases all scratch
+  vectors.
+  A deferred exit also releases its saved loan vector. Staged FIR teardown releases unused carriers.
+  Structural validity, source coverage, and ownership proof remain separate verdicts.
+  The complete source interface grants no ownership proof and has no driver registration.
+  `test/fort/fir_loan_correspondence_test.ft` compares executable FIR and LLVM before and after
+  publication.
+  `FORT_RANGE_PROBE_DIR` exports `activation-evidence.json` and `activation-damage.json` from that
+  test.
+  The audit table records complete keys, capture kinds, boundary gaps, absence reasons, and
+  verdicts.
+  `FORT_RANGE_ACTIVATION_STORAGE` selects a repeated storage control from 0 through 6.
+  The controls measure success, source refusal, staged refusal, and structural refusal separately.
+  Additional controls measure absence growth, nested loans, and failed source lowering.
+  Each control runs 64 warm rounds, one calibration round, and 256 measured rounds.
+  Each round creates and releases 64 function, candidate, and audit objects.
+  Its final measurement window uses the last 16 rounds. Numeric bounds appear beside its assertions.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a

@@ -18,6 +18,7 @@ import check;
 import consts;
 import diag;
 import fir;
+import fir_verify;
 import gen;
 import lexer;
 import modules;
@@ -178,6 +179,8 @@ enum range_audit_fault {
     capture,
     protected_path,
     boundary,
+    absence,
+    structural,
 }
 
 // A key stays in the report after the caller releases candidate storage.
@@ -209,6 +212,30 @@ struct range_audit_boundary_vec {
     u64 len;
 }
 
+enum range_absence_cause {
+    suppressed_defer,
+    no_eligible_exit,
+}
+
+// The report keeps each source context. FIR keeps one zero-expansion declaration record.
+struct range_audit_absence {
+    range_audit_key key;
+    range_absence_cause reason;
+    ast.node* registered_defer;
+    ast.node* terminating_defer;
+    ast.node* terminating_source;
+    diag.loc terminating_position;
+    diag.loc terminating_exit;
+    u32 block;
+    u32 statement;
+    bool verified;
+}
+
+struct range_audit_absence_vec {
+    range_audit_absence mut@ own items;
+    u64 len;
+}
+
 struct range_audit_operation {
     u32 block;
     u32 position;
@@ -227,13 +254,18 @@ struct range_audit_failure {
     range_audit_fault reason;
 }
 
-/// An inactive report borrows the checked tree through its keys and locations.
-/// Release it before the checked tree. No field grants source or ownership proof.
+/// Records structural validity and checked-source coverage as separate verdicts.
 struct range_source_audit {
     range_audit_row_vec rows;
     range_audit_boundary_vec boundaries;
+    range_audit_absence_vec absences;
     u32 selected_declarations;
+    u32 protected_declarations;
+    u32 required_expansions;
     u32 produced_expansions;
+    u32 capture_candidates;
+    u32 suppression_candidates;
+    u32 validated_absences;
     u32 matched_captures;
     u32 protected_paths;
     u32 matched_boundaries;
@@ -246,7 +278,22 @@ struct range_source_audit {
 fn range_source_audit_free(range_source_audit mut* audit) void {
     del(audit->rows.items);
     del(audit->boundaries.items);
+    del(audit->absences.items);
     *audit = range_source_audit{};
+}
+
+fn range_audit_absence_add(range_audit_absence_vec mut* v, range_audit_absence item) void {
+    if (v->len >= fir.U32_LIMIT) { panic("range audit: too many absences"); }
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "range audit: absence capacity overflow");
+        range_audit_absence mut@ own bigger = new(range_audit_absence, cap);
+        u64 mut i = 0;
+        while (i < v->len) { bigger[i] = v->items[i]; i += 1; }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = item;
+    v->len += 1;
 }
 
 fn range_audit_row_add(range_audit_row_vec mut* v, range_audit_row row) void {
@@ -653,9 +700,14 @@ fn audit_range_inventory(ast.node* decl, range_candidate_set* proposed,
     defer gen.refs_free(&selected);
     range_audit_selected(decl->b, &selected);
     out->selected_declarations = cast(selected.len, u32);
+    out->capture_candidates = cast(proposed->captures.len, u32);
+    out->suppression_candidates = cast(proposed->suppressions.len, u32);
     u64 mut i = 0;
     while (i < selected.len) {
         ast.node* n = gen.refs_at(&selected, i);
+        if (n->b->ty->kind != types.type_kind.k_array || fir.type_owning(n->b->ty)) {
+            out->protected_declarations += 1;
+        }
         range_audit_key key = range_audit_key{.function = decl->sym,
                                               .declaration = cast(i + 1, u32),
                                               .source = n->loc};
@@ -837,16 +889,22 @@ struct range_audit_source_range {
     u32 context;
     u32 occurrence;
     diag.loc exit_source;
+    u32 parent;
 }
 
 struct range_audit_replay {
     fir.func* f;
+    ast.sym* function;
+    gen.node_ref_vec* selected;
     scope_vec scopes;
     gen.node_ref_vec defers;
     range_defer_context_candidate_vec contexts;
     range_audit_source_range mut@ own ranges;
     u64 ranges_len;
     range_audit_operation_vec gaps;
+    range_audit_absence_vec absences;
+    ast.node* executing_defer;
+    range_audit_absence stop;
     u64 floor;
     u32 counter;
     u32 stmt;
@@ -855,6 +913,7 @@ struct range_audit_replay {
     u32 next_occurrence;
     diag.loc exit_source;
     bool ended;
+    bool unwind_ended;
     bool incomplete;
 }
 
@@ -864,6 +923,42 @@ fn range_audit_replay_free(range_audit_replay mut* walk) void {
     del(walk->contexts.items);
     del(walk->ranges);
     del(walk->gaps.items);
+    del(walk->absences.items);
+}
+
+// A suppressed subtree supplies no candidate identities to this source walk.
+fn range_audit_replay_absent(range_audit_replay mut* walk, ast.node* n,
+                             ast.node* registered, range_absence_cause reason) void {
+    if (n == null || walk->selected == null) { return; }
+    if (n->kind == ast.ast_kind.k_compile_if) {
+        range_audit_replay_absent(walk, selected_branch(n), registered, reason);
+        return;
+    }
+    if (n->kind == ast.ast_kind.k_range_for) {
+        u64 mut i = 0;
+        while (i < walk->selected->len && gen.refs_at(walk->selected, i) != n) { i += 1; }
+        if (i == walk->selected->len) { walk->incomplete = true; return; }
+        range_audit_absence mut item = walk->stop;
+        item.key = range_audit_key{.function = walk->function,
+            .declaration = cast(i + 1, u32), .context = walk->context,
+            .exit_occurrence = walk->occurrence, .source = n->loc,
+            .context_source = registered->loc, .exit_source = walk->exit_source};
+        if (reason == range_absence_cause.no_eligible_exit) {
+            item.key.exit_source = walk->stop.terminating_position;
+        }
+        item.reason = reason;
+        item.registered_defer = registered;
+        range_audit_absence_add(&walk->absences, item);
+    }
+    range_audit_replay_absent(walk, n->a, registered, reason);
+    range_audit_replay_absent(walk, n->b, registered, reason);
+    range_audit_replay_absent(walk, n->c, registered, reason);
+    range_audit_replay_absent(walk, n->d, registered, reason);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        range_audit_replay_absent(walk, ast.ast_child(n, i), registered, reason);
+        i += 1;
+    }
 }
 
 fn range_audit_replay_push(range_audit_replay mut* walk, scope_kind kind) void {
@@ -889,6 +984,7 @@ fn range_audit_replay_expand(range_audit_replay mut* walk, u64 depth, diag.loc a
     u32 parent = walk->context;
     u32 saved_occurrence = walk->occurrence;
     diag.loc saved_exit = walk->exit_source;
+    ast.node* saved_defer = walk->executing_defer;
     if (cast(walk->next_occurrence, u64) >= fir.U32_LIMIT) {
         panic("range audit: exit occurrence overflow");
     }
@@ -902,12 +998,19 @@ fn range_audit_replay_expand(range_audit_replay mut* walk, u64 depth, diag.loc a
         walk->context = cast(walk->contexts.len + 1, u32);
         range_defer_context_candidate_add(&walk->contexts,
             range_defer_context_candidate{walk->context, parent, walk->occurrence, deferred, at});
-        if (!suppressed && !walk->ended) { range_audit_replay_stmt(walk, deferred->a); }
+        if (!suppressed && !walk->ended) {
+            walk->executing_defer = deferred;
+            range_audit_replay_stmt(walk, deferred->a);
+        } else {
+            range_audit_replay_absent(walk, deferred->a, deferred,
+                range_absence_cause.suppressed_defer);
+        }
     }
     walk->floor = saved_floor;
     walk->context = parent;
     walk->occurrence = saved_occurrence;
     walk->exit_source = saved_exit;
+    walk->executing_defer = saved_defer;
 }
 
 fn range_audit_replay_gap(range_audit_replay mut* walk, u64 depth, diag.loc at) void {
@@ -922,6 +1025,16 @@ fn range_audit_replay_gap(range_audit_replay mut* walk, u64 depth, diag.loc at) 
 fn range_audit_replay_close(range_audit_replay mut* walk, diag.loc at) void {
     u64 depth = walk->scopes.len - 1;
     if (!walk->ended) { range_audit_replay_expand(walk, depth, at, false); }
+    else if (!walk->unwind_ended) {
+        u64 mut i = walk->defers.len;
+        u64 first = walk->scopes.items[depth].defers_first;
+        while (i > first) {
+            i -= 1;
+            ast.node* registered = gen.refs_at(&walk->defers, i);
+            range_audit_replay_absent(walk, registered->a, registered,
+                range_absence_cause.no_eligible_exit);
+        }
+    }
     range_audit_replay_gap(walk, depth, at);
     walk->defers.len = walk->scopes.items[depth].defers_first;
     walk->scopes.len = depth;
@@ -941,14 +1054,28 @@ fn range_audit_replay_scope(range_audit_replay mut* walk, ast.node* n,
 }
 
 fn range_audit_replay_exit(range_audit_replay mut* walk, ast.node* n, exit_kind kind) void {
+    u64 count = walk->scopes.len;
+    u32 mut@ own saved = new(u32, count);
+    u64 mut i = 0;
+    while (i < count) { saved[i] = walk->scopes.items[i].range_loan; i += 1; }
+    defer {
+        u64 mut restore = 0;
+        while (restore < count && restore < walk->scopes.len) {
+            walk->scopes.items[restore].range_loan = saved[restore];
+            restore += 1;
+        }
+        del(saved);
+    }
     u64 mut depth = walk->scopes.len;
     while (depth > walk->floor) {
         depth -= 1;
         range_audit_replay_expand(walk, depth, n->loc, walk->ended);
         range_audit_replay_gap(walk, depth, n->loc);
+        walk->scopes.items[depth].range_loan = 0;
         if (exit_stops_at(kind, walk->scopes.items[depth].kind)) { break; }
     }
     walk->ended = true;
+    walk->unwind_ended = true;
 }
 
 fn range_audit_replay_range(range_audit_replay mut* walk, ast.node* n) void {
@@ -965,8 +1092,17 @@ fn range_audit_replay_range(range_audit_replay mut* walk, ast.node* n) void {
         walk->ranges = move(bigger);
     }
     u64 index = walk->ranges_len;
+    u32 mut parent = 0;
+    u64 mut depth = walk->scopes.len;
+    while (depth > 0) {
+        depth -= 1;
+        if (walk->scopes.items[depth].range_loan != 0) {
+            parent = walk->scopes.items[depth].range_loan;
+            break;
+        }
+    }
     walk->ranges[index] = range_audit_source_range{n, walk->counter, 0, walk->context,
-                                                  walk->occurrence, walk->exit_source};
+                                                  walk->occurrence, walk->exit_source, parent};
     walk->ranges_len += 1;
     range_audit_replay_push(walk, scope_kind.sc_loop);
     walk->scopes.items[walk->scopes.len - 1].range_loan = cast(index + 1, u32);
@@ -999,6 +1135,10 @@ fn range_audit_replay_abort(range_audit_replay mut* walk, ast.node* n) bool {
         if (t->stmt == walk->stmt && range_audit_loc_eq(t->loc, at)
             && range_audit_loc_eq(t->exit_loc, walk->exit_source)
             && (t->kind == fir.term_kind.tk_fail || t->kind == fir.term_kind.tk_trap)) {
+            walk->stop = range_audit_absence{.terminating_defer = walk->executing_defer,
+                .terminating_source = n, .block = b, .statement = walk->stmt,
+                .terminating_position = t->loc, .terminating_exit = t->exit_loc,
+                .verified = builtin_abort};
             return true;
         }
         b += 1;
@@ -1008,6 +1148,8 @@ fn range_audit_replay_abort(range_audit_replay mut* walk, ast.node* n) bool {
 }
 
 fn range_audit_replay_stmt(range_audit_replay mut* walk, ast.node* n) void {
+    walk->stop = range_audit_absence{};
+    walk->unwind_ended = false;
     if (n->kind == ast.ast_kind.k_block) {
         range_audit_replay_scope(walk, n, scope_kind.sc_block);
         return;
@@ -1489,6 +1631,11 @@ fn range_material_place(range_material_context* proof, ast.node* n, fir.place p,
                                         at, false, depth + 1, matched)) { return false; }
     } else if (n->kind == ast.ast_kind.k_span) {
         if (!range_material_slice(proof, n, value, at, depth + 1, matched)) { return false; }
+    } else if (n->kind == ast.ast_kind.k_string) {
+        if (value.kind != fir.rvalue_kind.rv_use || value.ops_len != 1) { return false; }
+        fir.operand literal = fir.operand_at(f, value.ops_first);
+        if (literal.kind != fir.operand_kind.ok_const
+            || !range_material_constant(n, literal.value)) { return false; }
     } else { return false; }
     if (!matched->emitted) { matched->first = at; }
     matched->emitted = true;
@@ -3064,6 +3211,20 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
                                     source, &walk, out, &row)) {
             return range_audit_fail(out, key, range_audit_fault.boundary);
         }
+        if (!materialized) {
+            if (!range_material_capture(f, n, op, body_block, &derived)) {
+                return range_audit_fail(out, key, range_audit_fault.protected_path);
+            }
+            if (c->binding.kind != derived.kind
+                || !range_audit_place_eq(f, c->binding.captured, derived.captured)) {
+                return range_audit_fail(out, key, range_audit_fault.capture);
+            }
+            if (c->binding.original_present != derived.original_present
+                || (derived.original_present
+                    && !range_audit_place_eq(f, c->binding.original, derived.original))) {
+                return range_audit_fail(out, key, range_audit_fault.protected_path);
+            }
+        }
         range_audit_row_add(&out->rows, row);
         out->matched_captures += 1;
         if (c->binding.original_present) { out->protected_paths += 1; }
@@ -3096,6 +3257,10 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
             if (!found) { break; }
             extra_at += 1;
         }
+        if (extra_at == proposed->boundaries.len) {
+            return range_audit_fail(out, range_audit_key{.function = decl->sym},
+                range_audit_fault.boundary);
+        }
         range_boundary_candidate* extra = &proposed->boundaries.items[extra_at];
         range_audit_key mut key = range_audit_key{.function = decl->sym,
                                                   .declaration = extra->declaration,
@@ -3113,6 +3278,260 @@ fn audit_produced_ranges(ast.node* decl, fir.func* f, range_candidate_set* propo
             capture_at += 1;
         }
         return range_audit_fail(out, key, range_audit_fault.boundary);
+    }
+    return true;
+}
+
+fn range_audit_context_key(range_audit_replay* walk,
+                           range_defer_context_candidate context) range_audit_key {
+    range_audit_key mut key = range_audit_key{.function = walk->function,
+        .context = context.id, .exit_occurrence = context.exit_occurrence,
+        .exit_source = context.exit_source};
+    if (context.source_node == null) { return key; }
+    key.context_source = context.source_node->loc;
+    u64 mut i = 0;
+    while (i < walk->ranges_len) {
+        range_audit_source_range source = walk->ranges[i];
+        if (source.context == context.id) {
+            key.expansion = cast(i + 1, u32);
+            key.source = source.node->loc;
+            break;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < walk->selected->len) {
+        ast.node* source = gen.refs_at(walk->selected, i);
+        if ((key.expansion != 0 && range_audit_loc_eq(source->loc, key.source))
+            || (key.expansion == 0 && range_audit_contains(context.source_node, source))) {
+            key.declaration = cast(i + 1, u32);
+            key.source = source->loc;
+            break;
+        }
+        i += 1;
+    }
+    return key;
+}
+
+fn range_audit_all_contexts(range_audit_replay* walk, range_candidate_set* proposed,
+                            range_source_audit mut* out) bool {
+    u64 mut i = 0;
+    while (i < walk->contexts.len) {
+        range_defer_context_candidate expected = walk->contexts.items[i];
+        range_audit_key key = range_audit_context_key(walk, expected);
+        if (i >= proposed->deferred.len) {
+            return range_audit_fail(out, key, range_audit_fault.context);
+        }
+        range_defer_context_candidate actual = proposed->deferred.items[i];
+        if (actual.id != expected.id || actual.parent != expected.parent
+            || actual.exit_occurrence != expected.exit_occurrence
+            || actual.source_node != expected.source_node
+            || !range_audit_loc_eq(actual.exit_source, expected.exit_source)) {
+            return range_audit_fail(out, key, range_audit_fault.context);
+        }
+        i += 1;
+    }
+    if (proposed->deferred.len != walk->contexts.len) {
+        range_defer_context_candidate extra = proposed->deferred.items[walk->contexts.len];
+        range_audit_key key = range_audit_context_key(walk, extra);
+        return range_audit_fail(out, key, range_audit_fault.context);
+    }
+    return true;
+}
+
+fn range_audit_absences(range_audit_replay* walk, range_candidate_set* proposed,
+                        range_source_audit mut* out) bool {
+    u64 mut suppression = 0;
+    u64 mut i = 0;
+    while (i < walk->absences.len) {
+        range_audit_absence expected = walk->absences.items[i];
+        range_audit_absence_add(&out->absences, expected);
+        if (!expected.verified || expected.terminating_source == null) {
+            return range_audit_fail(out, expected.key, range_audit_fault.absence);
+        }
+        if (expected.reason == range_absence_cause.suppressed_defer) {
+            if (expected.terminating_defer == null || suppression >= proposed->suppressions.len) {
+                return range_audit_fail(out, expected.key, range_audit_fault.absence);
+            }
+            range_suppression_candidate actual = proposed->suppressions.items[suppression];
+            if (actual.declaration != expected.key.declaration
+                || actual.context != expected.key.context
+                || actual.exit_occurrence != expected.key.exit_occurrence
+                || !range_audit_loc_eq(actual.source, expected.key.source)
+                || !range_audit_loc_eq(actual.exit_source, expected.key.exit_source)) {
+                return range_audit_fail(out, expected.key, range_audit_fault.absence);
+            }
+            suppression += 1;
+        }
+        out->validated_absences += 1;
+        i += 1;
+    }
+    if (suppression != proposed->suppressions.len) {
+        range_suppression_candidate extra = proposed->suppressions.items[suppression];
+        range_audit_key key = range_audit_key{.function = walk->function,
+            .declaration = extra.declaration, .context = extra.context,
+            .exit_occurrence = extra.exit_occurrence, .source = extra.source,
+            .exit_source = extra.exit_source};
+        return range_audit_fail(out, key, range_audit_fault.absence);
+    }
+    return true;
+}
+
+// Source correspondence and V14 must pass before any record reaches the caller's FIR.
+fn publish_range_source(ast.node* decl, fir.func mut* f, range_candidate_set* proposed,
+                         fir_verify.runtime* rt, range_source_audit mut* out) bool {
+    range_source_audit_free(out);
+    range_audit_key first = range_audit_key{.function = decl->sym, .source = decl->loc};
+    fir_verify.violation mut bad = fir_verify.violation{};
+    if (proposed->declarations.len > proposed->declarations.items.len
+        || proposed->captures.len > proposed->captures.items.len
+        || proposed->boundaries.len > proposed->boundaries.items.len
+        || proposed->suppressions.len > proposed->suppressions.items.len
+        || proposed->deferred.len > proposed->deferred.items.len) {
+        return range_audit_fail(out, first, range_audit_fault.structural);
+    }
+    if (fir_verify.find_violation(f, rt, &bad)
+        || f->range_declarations.len != 0 || f->range_expansions.len != 0
+        || f->range_loans.len != 0 || f->range_captures.len != 0
+        || f->range_boundaries.len != 0 || f->range_absences.len != 0
+        || f->range_supplied_complete || f->range_source_complete) {
+        return range_audit_fail(out, first, range_audit_fault.structural);
+    }
+    out->structural_valid = true;
+    if (f->sym != cast(decl->sym, ast.sym*) || f->ty != decl->sym->ty) {
+        return range_audit_fail(out, first, range_audit_fault.context);
+    }
+    bool matched = audit_produced_ranges(decl, f, proposed, out);
+    out->structural_valid = true;
+    if (!matched) { return false; }
+    out->capture_candidates = cast(proposed->captures.len, u32);
+    out->suppression_candidates = cast(proposed->suppressions.len, u32);
+    gen.node_ref_vec mut selected = gen.node_ref_vec{};
+    defer gen.refs_free(&selected);
+    range_audit_selected(decl->b, &selected);
+    if (selected.len == 0) {
+        if (proposed->suppressions.len != 0) {
+            range_suppression_candidate extra = proposed->suppressions.items[0];
+            range_audit_key key = range_audit_key{.function = decl->sym,
+                .declaration = extra.declaration, .context = extra.context,
+                .exit_occurrence = extra.exit_occurrence, .source = extra.source,
+                .exit_source = extra.exit_source};
+            return range_audit_fail(out, key, range_audit_fault.absence);
+        }
+        return true;
+    }
+    range_audit_replay mut walk = range_audit_replay{
+        .f = f, .function = decl->sym, .selected = &selected};
+    defer range_audit_replay_free(&walk);
+    range_audit_replay_scope(&walk, decl->b, scope_kind.sc_fn);
+    out->required_expansions = cast(walk.ranges_len, u32);
+    if (walk.incomplete || walk.ranges_len != out->rows.len) {
+        range_audit_key mut key = first;
+        if (walk.ranges_len > out->rows.len) {
+            range_audit_source_range missing = walk.ranges[out->rows.len];
+            key.expansion = cast(out->rows.len + 1, u32);
+            u64 mut selected_at = 0;
+            while (selected_at < selected.len
+                && gen.refs_at(&selected, selected_at) != missing.node) {
+                selected_at += 1;
+            }
+            if (selected_at < selected.len) { key.declaration = cast(selected_at + 1, u32); }
+            key.context = missing.context;
+            key.exit_occurrence = missing.occurrence;
+            key.source = missing.node->loc;
+            key.exit_source = missing.exit_source;
+            ast.node* registered = range_audit_defer_at(decl->b, missing.node);
+            if (registered != null) { key.context_source = registered->loc; }
+        }
+        return range_audit_fail(out, key, range_audit_fault.context);
+    }
+    if (!range_audit_all_contexts(&walk, proposed, out)
+        || !range_audit_absences(&walk, proposed, out)) { return false; }
+    fir.func mut staged = fir.func_clone(f);
+    defer fir.func_free(&staged);
+    u64 mut i = 0;
+    while (i < selected.len) {
+        ast.node* selected_node = gen.refs_at(&selected, i);
+        u32 declaration = cast(i + 1, u32);
+        fir.range_declaration_add(&staged, fir.range_declaration{declaration, selected_node->loc});
+        u64 mut expansions = 0;
+        u64 mut j = 0;
+        while (j < out->rows.len) {
+            if (out->rows.items[j].key.declaration == declaration) { expansions += 1; }
+            j += 1;
+        }
+        if (expansions == 0) {
+            u64 mut absences = 0;
+            j = 0;
+            while (j < out->absences.len) {
+                if (out->absences.items[j].key.declaration == declaration) { absences += 1; }
+                j += 1;
+            }
+            if (absences == 0) {
+                range_audit_key key = range_audit_key{.function = decl->sym,
+                    .declaration = declaration, .source = selected_node->loc};
+                return range_audit_fail(out, key, range_audit_fault.absence);
+            }
+            fir.range_absence_add(&staged, fir.range_absence{
+                declaration, fir.range_absence_kind.no_lowered_operation, selected_node->loc});
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < proposed->captures.len) {
+        range_capture_candidate* candidate = &proposed->captures.items[i];
+        range_audit_source_range expected = walk.ranges[i];
+        if (candidate->loan.id != candidate->expansion
+            || candidate->loan.expansion != candidate->expansion
+            || candidate->loan.ordinal != 0 || !candidate->loan.whole_body
+            || candidate->binding.loan != candidate->loan.id
+            || candidate->loan.parent_present != (expected.parent != 0)
+            || candidate->loan.parent != expected.parent) {
+            return range_audit_fail(out, out->rows.items[i].key, range_audit_fault.context);
+        }
+        fir.range_expansion_add(&staged, candidate->occurrence);
+        fir.range_loan_add(&staged, candidate->loan);
+        fir.range_capture_add(&staged, candidate->binding);
+        i += 1;
+    }
+    i = 0;
+    while (i < proposed->boundaries.len) {
+        fir.range_boundary_add(&staged, proposed->boundaries.items[i].boundary);
+        i += 1;
+    }
+    staged.range_supplied_complete = true;
+    staged.range_source_complete = true;
+    staged.range_claim = fir.range_counts(&staged);
+    if (fir_verify.find_violation(&staged, rt, &bad)) {
+        out->structural_valid = false;
+        return range_audit_fail(out, first, range_audit_fault.structural);
+    }
+    fir.range_clear(f);
+    f->range_declarations = move(staged.range_declarations);
+    f->range_expansions = move(staged.range_expansions);
+    f->range_loans = move(staged.range_loans);
+    f->range_captures = move(staged.range_captures);
+    f->range_boundaries = move(staged.range_boundaries);
+    f->range_absences = move(staged.range_absences);
+    f->range_claim = staged.range_claim;
+    f->range_supplied_complete = true;
+    f->range_source_complete = true;
+    out->source_complete = true;
+    return true;
+}
+
+/// Produces complete checked-source carriers. Driver registration remains separate.
+fn lower_function_with_range_source(check.checker mut* ck, ast.node* decl,
+    fir_verify.runtime* rt, fir.func mut* out, report mut* why,
+    range_source_audit mut* audit) bool {
+    range_source_audit_free(audit);
+    range_candidate_set mut proposed = range_candidate_set{};
+    defer range_candidate_set_free(&proposed);
+    if (!lower_function_with_range_candidates(ck, decl, out, &proposed, why)) { return false; }
+    if (!publish_range_source(decl, out, &proposed, rt, audit)) {
+        fir.func_free(out);
+        *why = report{decl->kind, audit->failure.key.source, ""};
+        return false;
     }
     return true;
 }
