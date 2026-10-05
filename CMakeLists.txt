@@ -530,6 +530,14 @@ set_tests_properties(highlight_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Validate ownership audit evidence with synthetic report fixtures.
+add_test(NAME ownership_audit_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_audit_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(ownership_audit_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.
