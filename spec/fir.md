@@ -1379,6 +1379,13 @@ The proof preserves source evaluation order. It reads the order that FIR emits.
 It does not add a new span-header/index-expression order guarantee (D6.3).
 
 Whole-feature selection and migration follow `toolchain.md` 1 (D19.8).
+Selection requests complete proof even while source producers remain unavailable.
+Missing producers remain incomplete. Incomplete selected proof prevents code generation.
+Incremental audits and measured source repairs can precede complete feature qualification.
+Scoped CI enforcement accepts only its declared obligations. It supplies no complete closure proof.
+The coverage report separates correspondence, solver completion, and ownership acceptance.
+Retain checked symbols, FIR, and proof contexts until their dependent analyses finish teardown.
+Never combine checker-local pointers or numeric keys from different contexts.
 The complete ownership feature requires place, heap, raw-region, convergence, and global-boundary
 rules. This base contract makes no compiler-completion claim.
 

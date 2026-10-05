@@ -32,7 +32,8 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--cfg <list>`      | add compile-time `key=value` pairs; repeatable (D21.1)      | none       |
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
 | `--check`           | check source and selected ownership proof (D20.1)          | off        |
-| `--ownership-check` | select the ownership feature during delivery (D19.8)       | off        |
+| `--ownership-check` | request complete ownership proof (D19.8)                  | off        |
+| `--ownership-report <file>` | write coverage JSON; needs ownership selection    | none       |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
 | `--index`           | fill the document's identifier index (D20.3)               | off        |
 | `--tokens`          | write the entry file's tokens to stdout and stop (D14.1)   | off        |
@@ -45,16 +46,40 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
-Ownership delivery selects the whole feature temporarily with --ownership-check (D19.8).
-This option selects the complete proof in check mode and build mode.
-It never exempts one operation, an imported fort module, or an available runtime body.
-Complete feature validation before migrating compiler, runtime, library, and LSP source.
-Use isolated source and FIR fixtures during feature development. Keep the ordinary gate unchanged
-while selection remains optional. After migration, require the analysis by default and remove
---ownership-check. This staged contract does not claim current compiler completion.
+Ownership delivery uses one temporary --ownership-check option (D19.8).
+It always requests complete proof in check mode and build mode. There is no stage selection option.
+Run all integrated analyses before build-mode transformations. Missing producers remain incomplete.
+Complete proof with zero violations exits 0. Violations or incomplete proof exit 1.
+Usage, tool, and internal failures exit 2. Incomplete selected proof prevents code generation.
+Reject ownership selection with --tokens, --ast, --fir, --fir-after, --fir-test, or
+--fir-verify-report. Selection permits --fir-stats in build mode.
+It never exempts an operation, an imported fort module, or an available runtime body.
+Ordinary unselected builds retain their behavior.
+
+--ownership-report takes the following argument and requires --ownership-check (D19.8).
+The last report path wins. It names a separate file, not stdout or stderr.
+The report records coverage under section 1.1. It changes neither text diagnostics nor JSON version
+1.
+Incomplete proof uses the existing error diagnostic format. Report-writing failure exits 2.
+Reject a report path that names an input or a compiler output. Preserve those files.
+Check mode can create the report's temporary file. It still creates no build temporary directory.
+
+Permit source audits, measured source repairs, and scoped CI enforcement during delivery (D19.8).
+The first audit gate validates inventory, report integrity, and tool execution.
+It accepts exit 0 or 1 with valid fresh evidence. Violations and incompleteness remain
+informational.
+Scoped enforcement rejects violations, missing bodies, and incomplete proof within its declared
+scope.
+Results outside that scope remain visible. Scoped acceptance never changes the compiler exit status.
+Keep existing build and fixpoint gates. Use source and FIR fixtures during feature development.
+Keep the conservative range-call guard until complete selected proof establishes loan preservation.
+Complete feature qualification and source migration before default enablement.
+Then require analysis by default and remove --ownership-check.
+Incremental reports do not claim current compiler completion.
 The proof adds no runtime ownership checks. It preserves the representations and ABI in section 6.
 
-- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg` and `-Xcc` take the following argument;
+- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg`, `--ownership-report` and `-Xcc`
+  take the following argument;
   `-l<lib>` is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc`
   arguments are passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
 - `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1).
@@ -298,6 +323,194 @@ FORT_STD_DIR=/opt/fort/std fort main.ft
 
 The only environment variables read are `FORT_STD_DIR` (D14.1) and `TMPDIR`, which locates the
 temporary directory for the intermediate IR file (D19.1).
+
+### 1.1 Ownership coverage reports (D19.8)
+
+The compiler report and the audit attestation use separate JSON version 1 documents.
+Neither document changes the diagnostic JSON of section 4.1.
+The compiler writes one report for one checked closure. The runner attests the invocation and bytes.
+The compiler needs no git executable, revision option, or cryptographic hash implementation.
+Version 1 requires the members and types below. Reject duplicate JSON members and unknown versions.
+All count and key integers are nonnegative. Source lines and columns start at 1.
+Integers exclude Boolean values and fit u64. Context-local function keys fit u32.
+Count overflow gives report failure, not wrapped totals.
+
+**Compiler report.** The top-level object has these members:
+
+| Member | Type and meaning |
+|---|---|
+| `kind` | String `fort-ownership-report`. |
+| `version` | Integer 1. |
+| `complete` | Boolean true; the report is complete, not necessarily its proof. |
+| `compiler_version` | The string that --version identifies. |
+| `invocation` | Entry, working directory, arguments, target, configuration, and mode. |
+| `files` | Array of the loaded source files. |
+| `enumeration` | Selected body count, inactive declaration count, and enumeration status. |
+| `analyses` | Availability and closure outcome for each named analysis. |
+| `limits` | The versioned numeric production limit table. |
+| `meters` | Actual counted ledgers and their separate scopes. |
+| `bodies` | One row for each discovered selected fort body. |
+| `totals` | Counts derived from the body rows. |
+| `first_incomplete` | The first incomplete reason, or null. |
+| `failure` | The first front-end, lowering, verification, analysis, or tool failure, or null. |
+| `verdict` | String `accepted`, `rejected`, or `failed`. |
+| `exit_status` | Integer 0, 1, or 2; the compiler's final status. |
+
+`invocation` contains `entry`, `cwd`, `argv`, `target`, `configuration`, and `mode`.
+Entry, working directory, and target are strings. Arguments form a string array without argv[0].
+Configuration is an array of objects with string `key` and `value`, sorted by key.
+It contains effective values, including target-supplied values and last-option overrides.
+Mode contains Boolean `check`, `release`, and `no_bounds_check` members.
+The entry and each file path use the loader's filename. The runner normalizes paths for comparison.
+
+Each file row contains integer `id`, string `path`, and string `module`.
+File IDs start at 0 and increase without gaps in loaded-file order.
+`enumeration` contains Boolean `complete`, integer `selected_bodies`, and integer
+`inactive_declarations`. Count functions with bodies in inactive configuration branches separately.
+Count neither extern declarations nor inactive bodies as selected bodies.
+Lexical counts never establish a complete checked-body denominator.
+Front-end failure can prevent complete enumeration. Retain discovered rows and set its status false.
+
+Use these seven analysis names, in this order:
+`graph`, `liveness`, `local`, `stored_borrows`, `raw`, `calls_heap`, and `process_exit`.
+Each `analyses` row contains `name`, `producer`, and `status`.
+Producer is `integrated` or `unavailable`. Status is `complete`, `incomplete`, `failed`, or
+`unexecuted`. An unavailable producer has an incomplete closure outcome, even with no selected body.
+Closure outcomes include required non-body facts, such as globals and generated startup.
+The report runs integrated analyses. It never substitutes supplied test facts or permissive
+services.
+`limits` contains integer `version`, `d`, `r`, `p`, `g`, `h`, `t`, `e`, `w`, and `v`.
+Use the actual production table. Do not copy numeric values into this specification (D17.18).
+
+Each meter row contains integer `id`, string `name`, `owner`, `counts`, and `first_refusal`.
+Owner is null for a closure computation, or the context-local function key of its computation.
+Counts form an array with string `category` and `scope`, plus integer `used` and `bound`.
+Category uses D, R, P, G, H, T, E, W, or V. Scope uses ownership_api.limit_scope names.
+Report only categories the actual ledger measures. Absence does not mean zero use.
+First refusal uses the reason object below, or null. Meter IDs start at 0 without gaps.
+The first milestone names the existing graph ledger `graph_private` and service ledgers `services`.
+Graph construction and queries use the graph's retained private W ledger.
+Service dispatch and liveness charges use their actual service ledger. Report these scopes
+separately.
+Never sum separate ledgers as one shared meter. Never reset or split a computation to hide refusal.
+Required accounting that no ledger covers remains incomplete. Graph completion supplies no shared
+graph/liveness accounting claim.
+
+Each body row contains `source`, `key`, `checking`, `lowering`, `verification`, `analyses`,
+`ownership`, `violations`, and `first_incomplete`.
+`source` contains integer `file`, `line`, `col`, `end_line`, `end_col`, and `instance`, plus string
+`module` and `name`. Its file ID refers to `files`. Its range identifies the declaration name.
+Ranges use section 4.1. Instance is 0 for ordinary v1 function definitions.
+`key` is null before canonical key construction, or an object with integer `module`, `declaration`,
+and `instance` from ownership_api.function_id.
+Assign module keys in checked dependency order and declaration keys in selected source order.
+Number keys from 0. Keys remain local to this checked closure.
+The normalized path, name range, name, and instance define source identity across contexts.
+The module name remains context metadata. Numeric keys and pointers do not define source identity.
+
+Checking, lowering, and verification each use `complete`, `failed`, or `unexecuted`.
+Each body's analysis array contains the seven named rows in the same order.
+A row contains `name`, `correspondence`, `solver`, `proof`, and integer `violations`.
+Correspondence and solver use `complete`, `incomplete`, `failed`, or `unexecuted`.
+Proof and body ownership use `complete`, `violated`, `incomplete`, `failed`, or `unexecuted`.
+Complete correspondence means the stage has all required facts for that body's declared obligations.
+A solver can finish with incomplete correspondence. Its proof remains incomplete unless independent
+facts prove all affected obligations (D17.18).
+Only validated errors increment violations. Abstract possibilities remain incomplete proof.
+Body violations sum its analysis violation counts. Do not count the same diagnostic twice.
+After successful prerequisites, unavailable analysis rows have unexecuted correspondence and solver,
+and incomplete proof.
+Do not run a dependent stage when checking, lowering, or verification fails.
+Retain its row with unexecuted correspondence, solver, and proof.
+Missing rows never mean successful analysis.
+Derive body ownership from proof rows with this precedence: failed, violated, incomplete,
+unexecuted, complete. A failed prerequisite makes body ownership failed.
+Retain incompleteness separately when a validated violation also exists.
+
+`totals` contains integer `bodies` and `violations`, plus checking, lowering, verification, and
+ownership counter objects. Each counter names all statuses allowed for that field, including zeros.
+It also contains an `analyses` array with the seven names and correspondence, solver, and proof
+counter objects, plus integer `violations`.
+Each status counter object's counts sum to the selected body count.
+The body count equals the row count and `enumeration.selected_bodies`.
+These totals count context-body occurrences. They do not combine proofs from overlapping closures.
+
+Each reason object contains `stage`, `code`, `source`, and `limit`.
+Stage is `enumeration`, `checking`, `lowering`, `verification`, `tool`, or an analysis name.
+Code is a string. Incomplete reasons use ownership_api.incomplete_reason names or
+`missing_producer`.
+Failure codes use `source_error`, `unsupported_lowering`, `verification_failure`,
+`analysis_failure`,
+or `tool_failure`. Source is null without a location, or has `file`, `line`, `col`, `end_line`,
+and `end_col`. These members are integers.
+Limit is null, or an object with string `category` and integer `used` and `bound`.
+Category uses D, R, P, G, H, T, E, W, or V. Keep the first refused charge and its location.
+Use analysis order, then canonical function and source order, to select a report's first reason.
+Keep each affected body's first incomplete reason even when report diagnostics reach their limit.
+Stream coverage rows or retain bounded summary records. The report requires no expanded proof trace.
+Failure to retain required rows or write them gives exit 2. Never publish truncated coverage.
+
+Accepted means exit 0, complete enumeration, complete closure outcomes for all seven required
+analyses, complete body proofs, and zero violations.
+Unavailable producers prevent exit 0, including missing non-body obligations in an empty closure.
+An empty body array alone establishes no complete ownership acceptance.
+Rejected means exit 1. Failed means exit 2.
+Source errors and unsupported lowering exit 1. Verifier violations and internal service failures
+exit 2.
+Keep available failed and unexecuted rows in either case. A crash may produce no valid report.
+Solver completion, graph completion, and a complete JSON document do not establish ownership safety.
+
+Write to a new temporary file beside the report path. Complete the document, close it, then rename
+it
+atomically over that path. Publish only a complete document with `complete: true`.
+On report failure, remove the temporary file and exit 2. An older destination can remain unchanged.
+The runner therefore uses a fresh report path that does not exist before the invocation.
+After a successful ownership proof, a later build-tool failure updates the final report outcome.
+An error before report initialization can leave no report. CI treats that case as a failed attempt.
+
+**Audit attestation.** The runner writes a `fort-ownership-audit` version 1 object.
+Its members are `kind`, `version`, `complete`, `source_revision`, `compiler_revision`,
+`compiler_sha256`, `target`, `configuration`, `inventory`, `attempts`, and `totals`.
+Revisions are full git object names from source and compiler build provenance. They need not match.
+The compiler digest and all other SHA-256 values are 64 lowercase hexadecimal characters.
+The runner verifies the compiler bytes and source bytes before and after each invocation.
+It rejects changed bytes, missing provenance, mismatched revisions, and missing or invalid reports.
+Capture candidate .ft input hashes before invocation under the entry, search, and standard roots.
+Reject a reported file that the captured input manifest lacks.
+
+Target is a string. Configuration uses the compiler report's key/value array.
+Inventory is a sorted string array of tracked compiler paths from `git ls-files -- src/fort`.
+Retain paths ending in .ft. Run main.ft first, then the remaining roots in inventory order.
+An attempt row contains `root`, `cwd`, `argv`, `exit_status`, `report_path`, `report_sha256`, and
+`inputs`. Inputs contain normalized `path` and `sha256` for each reported closure file.
+Root, working directory, and report path are strings. Arguments form a string array, including
+argv[0].
+Exit status is an integer. Report digest is null when no report exists. Inputs form an object array.
+Each input path and digest is a string. Preserve failed attempt evidence even when validation fails.
+Normalize compiler source paths relative to the audited checkout. Normalize standard files relative
+to the selected standard root, with a `std/` prefix. Keep other files as absolute paths.
+The context identity is the root, target, effective configuration, search roots, and standard root.
+Capture search and standard roots from the invocation. Do not merge local numeric keys across
+contexts. Use normalized source identities to deduplicate file and declaration counts only.
+
+Attestation totals contain `root_attempts`, `unique_files`, `unique_source_bodies`, and
+`context_bodies`. Count the first two from attempts and input paths. Count the latter two from body
+identities and body rows. Each inventory root has one attempted invocation for this target.
+Each total is an integer. Retain unsuccessful attempts. Exit 2 or invalid evidence fails the audit.
+Use atomic publication for the attestation too. Its complete marker describes complete evidence.
+It grants no ownership acceptance.
+
+The first CI validator accepts exit 0 or 1 only with fresh valid reports and a valid attestation.
+It checks names, versions, types, identities, status combinations, row totals, and invocation bytes.
+It rejects missing roots, duplicate identities within a context, stale paths, and truncated
+evidence.
+It also rejects incomplete selected-body enumeration. Discovered rows prove no complete denominator.
+Preserve that failed root and report. Unsupported lowering can remain valid exit-1 audit evidence
+when its selected-body denominator is complete.
+Exit 2 or a missing valid report fails the gate. No coverage-regression baseline applies initially.
+Later scoped enforcement reads the same reports and requires complete proof within its declared
+scope.
+It never converts exit 1 into accepted complete compiler proof.
 
 ## 2. Build pipeline
 
