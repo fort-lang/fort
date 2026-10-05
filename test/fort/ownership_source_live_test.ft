@@ -1,0 +1,391 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| direct ok
+//| indirect ok
+//| calls ok
+//| meters ok
+//| cleanup ok
+/// Checks source-derived liveness inputs with production services.
+import fir;
+import heap;
+import ownership_api;
+import ownership_graph;
+import ownership_keys;
+import ownership_limits;
+import ownership_liveness;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_live;
+import std.strbuf;
+
+fn direct_reads_writes_moves_branches_and_loops() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn local(bool branch, i32 value) i32 {\n");
+    strbuf.append(&text, "i32 mut current = value;\nif (branch) { current = 1; }\n");
+    strbuf.append(&text, "while (branch) { current = 2; break; }\nreturn current;\n}\n");
+    strbuf.append(&text, "fn consume(u8 mut* own p) void {\n");
+    strbuf.append(&text, "u8 mut* own q = move(p);\ndel(q);\n}\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "local");
+    ownership_source.body* consume = ownership_source_env.find(&e, "main", "consume");
+    assert(row->verification == ownership_source.status.complete);
+    assert(consume->verification == ownership_source.status.complete);
+    assert(row->live.bindings.len == cast(fir.local_count(&row->function), u64));
+    u64 mut i = 0;
+    while (i < row->live.bindings.len) {
+        ownership_liveness.binding bound = row->live.bindings[i];
+        assert(bound.local == cast(i, u32));
+        assert(bound.slot.ordinal == bound.local);
+        assert(bound.slot.kind == ownership_api.entity_kind.slot);
+        assert(ownership_keys.function(bound.slot.function, row->key) == 0);
+        i += 1;
+    }
+    assert(ownership_api.successful(row->live.correspondence));
+    assert(row->live.accesses.len == 0 && row->live.calls.len == 0);
+    assert(row->live.direct_len > 0);
+    bool mut read = false;
+    bool mut write = false;
+    i = 0;
+    while (i < row->live.direct_len) {
+        ownership_source_live.direct_access access = row->live.direct[i];
+        assert(!access.indirect);
+        assert(access.source.filename_present && access.source.line > 0 && access.source.col > 0);
+        assert(access.source.file == row->source.file);
+        assert(access.source.module == row->key.declaration.module);
+        if (access.write) { write = true; } else { read = true; }
+        i += 1;
+    }
+    assert(read && write);
+    bool mut move = false;
+    i = 0;
+    while (i < consume->live.direct_len) {
+        if (consume->live.direct[i].empties) { move = true; }
+        i += 1;
+    }
+    assert(move);
+    ownership_source.analyze(&e.source);
+    assert(row->liveness_correspondence == ownership_source.status.complete);
+    assert(row->liveness_solver == ownership_source.status.complete);
+    assert(consume->liveness_solver == ownership_source.status.complete);
+    assert(ownership_api.successful(row->live.result.proof));
+    assert(!ownership_api.successful(row->liveness_proof));
+    assert(row->first_incomplete_stage == ownership_source.analysis_stage.graph);
+    assert(row->first_incomplete.terminal.reason ==
+        ownership_api.incomplete_reason.source_coverage);
+    ownership_liveness.answer used = ownership_liveness.query(&row->live.result,
+        ownership_liveness.point{0, 0, 0, false}, row->live.bindings[2].slot);
+    assert(ownership_api.successful(used.proof) && used.used);
+}
+
+fn symbol_free_temporaries_keep_unique_local_bindings() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn arithmetic(i32 value) i32 { return value + 1; }\n"));
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "arithmetic");
+    assert(row->verification == ownership_source.status.complete);
+    assert(row->live.bindings.len >= 3);
+    assert(fir.local_at(&row->function, 0)->sym == null);
+    u32 last = fir.local_count(&row->function) - 1;
+    assert(fir.local_at(&row->function, last)->kind == fir.local_kind.lk_temp);
+    assert(fir.local_at(&row->function, last)->sym == null);
+    assert(row->live.bindings[cast(last, u64)].slot.ordinal == last);
+    ownership_source.analyze(&e.source);
+    assert(row->liveness_solver == ownership_source.status.complete);
+}
+
+fn indirect_reads_and_writes_keep_incomplete_correspondence() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn read(i32* p) i32 { return *p; }\nfn write(i32 mut* p) void { *p = 2; }\n"));
+    ownership_source.body* read = ownership_source_env.find(&e, "main", "read");
+    ownership_source.body* write = ownership_source_env.find(&e, "main", "write");
+    assert(read->verification == ownership_source.status.complete);
+    assert(write->verification == ownership_source.status.complete);
+    assert(read->live.accesses.len == 1);
+    assert(write->live.accesses.len == 1);
+    assert(!read->live.accesses[0].write && write->live.accesses[0].write);
+    assert(!read->live.accesses[0].complete && !write->live.accesses[0].complete);
+    assert(read->live.accesses[0].targets.len == 0 && write->live.accesses[0].targets.len == 0);
+    ownership_source.analyze(&e.source);
+    assert(read->liveness_correspondence == ownership_source.status.incomplete);
+    assert(write->liveness_correspondence == ownership_source.status.incomplete);
+    assert(read->liveness_solver == ownership_source.status.incomplete);
+    // A conservative solver can finish with an unresolved write.
+    assert(write->liveness_solver == ownership_source.status.complete);
+    assert(!ownership_api.successful(write->liveness_proof));
+    assert(read->live.result.proof.terminal.source.line == 1);
+    assert(read->live.result.proof.terminal.source.file == read->source.file);
+    assert(read->live.correspondence.terminal.reason ==
+        ownership_api.incomplete_reason.missing_correspondence);
+}
+
+fn fort_calls_remain_incomplete_and_extern_calls_keep_trust() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "extern fn external(i32 value) i32;\n");
+    strbuf.append(&text, "extern fn release(u8* own p) void;\n");
+    strbuf.append(&text, "fn target(i32 value) i32 { return value; }\n");
+    strbuf.append(&text, "fn fort_call(i32 value) i32 { return target(value); }\n");
+    strbuf.append(&text, "fn extern_call(i32 value) i32 { return external(value); }\n");
+    strbuf.append(&text, "fn transfer(u8* own p) void { release(move(p)); }\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    assert(e.source.bodies.len == 4);
+    ownership_source.body* fort_call = ownership_source_env.find(&e, "main", "fort_call");
+    ownership_source.body* extern_call = ownership_source_env.find(&e, "main", "extern_call");
+    ownership_source.body* transfer = ownership_source_env.find(&e, "main", "transfer");
+    assert(fort_call->live.calls.len == 1 && !fort_call->live.calls[0].complete);
+    assert(extern_call->live.calls.len == 1 && extern_call->live.calls[0].complete);
+    assert(transfer->live.calls.len == 1 && transfer->live.calls[0].complete);
+    assert(fort_call->live.correspondence.terminal.reason ==
+        ownership_api.incomplete_reason.unknown_effect);
+    ownership_source.analyze(&e.source);
+    assert(fort_call->liveness_solver == ownership_source.status.incomplete);
+    assert(extern_call->liveness_solver == ownership_source.status.complete);
+    assert(transfer->liveness_solver == ownership_source.status.complete);
+    assert(extern_call->liveness_correspondence == ownership_source.status.complete);
+    ownership_api.graph_request mut request = ownership_api.graph_request{};
+    request.query = ownership_api.graph_query_kind.targets;
+    request.operation = extern_call->live.calls[0].operation;
+    u64 graph_before = e.source.graph.work;
+    u64 services_before = extern_call->live.events.budget.used.w;
+    ownership_api.graph_result answer = ownership_api.graph(&extern_call->live.services, &request);
+    assert(ownership_api.successful(answer.proof));
+    assert(answer.targets.len == 0);
+    ownership_graph.target_view targets = ownership_graph.targets_at(&e.source.graph,
+        request.operation);
+    assert(targets.foreign_targets.len == 1 && !targets.residual_fort);
+    assert(e.source.graph.work == graph_before);
+    assert(extern_call->live.events.budget.used.w == services_before + 1);
+    assert(extern_call->liveness_solver == ownership_source.status.complete);
+}
+
+fn actual_source_exhausts_the_production_service_ledger() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn many_locals() void {\n");
+    u64 mut i = 0;
+    while (i < 400) {
+        strbuf.append(&text, "i32 local");
+        strbuf.append_u64(&text, i);
+        strbuf.append(&text, " = 0;\n");
+        i += 1;
+    }
+    strbuf.append(&text, "}\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "many_locals");
+    ownership_source.analyze(&e.source);
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(row->live.events.budget.bounds.w == limits.w);
+    assert(row->live.events.budget.used.w == limits.w);
+    assert(row->liveness_solver == ownership_source.status.incomplete);
+    assert(row->live.first_refusal.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(row->live.first_refusal.terminal.source.filename_present);
+    assert(row->live.first_refusal.terminal.source.line == 2);
+    assert(row->live.first_refusal.terminal.source.file == row->source.file);
+    ownership_api.proof_status first = row->live.first_refusal;
+    ownership_api.charge_result again = ownership_api.charge_work(&row->live.services,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{.function = row->key},
+        ownership_api.source_position{});
+    assert(!again.allowed);
+    assert(ownership_keys.source(again.proof.terminal.source, first.terminal.source) == 0);
+    assert(again.proof.terminal.limit.used == first.terminal.limit.used);
+    assert(row->live.events.budget.used.w == limits.w);
+}
+
+fn mixed_targets_preserve_fort_effect_obligations() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "extern fn external(i32 value) i32;\n");
+    strbuf.append(&text, "fn target(i32 value) i32 { return value; }\n");
+    strbuf.append(&text, "fn mixed(i32 value) i32 {\n");
+    strbuf.append(&text, "external(value);\nreturn target(value);\n}\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "mixed");
+    ownership_source.analyze(&e.source);
+    assert(row->live.calls.len == 2);
+    assert(row->live.calls[0].complete && !row->live.calls[1].complete);
+    assert(row->liveness_correspondence == ownership_source.status.incomplete);
+    assert(row->liveness_solver == ownership_source.status.incomplete);
+    ownership_api.graph_request request = ownership_api.graph_request{
+        .query = ownership_api.graph_query_kind.targets,
+        .operation = row->live.calls[0].operation};
+    u64 private_before = e.source.graph.work;
+    u64 services_before = row->live.events.budget.used.w;
+    ownership_api.graph_result answer = ownership_api.graph(&row->live.services, &request);
+    assert(ownership_api.successful(answer.proof));
+    assert(answer.targets.len == 0 && !answer.residual_fort);
+    ownership_graph.target_view targets = ownership_graph.targets_at(&e.source.graph,
+        request.operation);
+    assert(targets.foreign_targets.len == 1);
+    assert(e.source.graph.work == private_before);
+    assert(row->live.events.budget.used.w == services_before + 1);
+    ownership_api.graph_request fort_request = ownership_api.graph_request{
+        .query = ownership_api.graph_query_kind.targets,
+        .operation = row->live.calls[1].operation};
+    ownership_api.graph_result fort_answer = ownership_api.graph(&row->live.services,
+        &fort_request);
+    assert(ownership_api.successful(fort_answer.proof));
+    assert(fort_answer.targets.len == 1 && !fort_answer.residual_fort);
+    assert(ownership_keys.function(fort_answer.targets[0].function,
+        ownership_source_env.find(&e, "main", "target")->key) == 0);
+    assert(e.source.graph.work == private_before + 1);
+    assert(row->live.events.budget.used.w == services_before + 2);
+    assert(row->live.correspondence.terminal.reason ==
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(!ownership_api.successful(row->ownership));
+}
+
+fn private_query_refusal_preserves_its_meter_and_source() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn target() void {}\nfn caller() void { target(); }\n"));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "caller");
+    ownership_source.analyze(&e.source);
+    ownership_api.entity_id[64] mut selections = {};
+    u64 mut i = 0;
+    while (i < selections.len) {
+        selections[i] = ownership_api.entity_id{
+            ownership_source_env.find(&e, "main", "target")->key,
+            ownership_api.entity_kind.target, 0};
+        i += 1;
+    }
+    ownership_api.graph_request request = ownership_api.graph_request{
+        .query = ownership_api.graph_query_kind.targets, .operation = row->live.calls[0].operation,
+        .selections = selections[..]};
+    u64 services_before = row->live.events.budget.used.w;
+    u64 mut queries = 0;
+    while (!e.source.graph_first_refusal.terminal.present) {
+        ownership_api.graph_result answer = ownership_api.graph(&row->live.services, &request);
+        queries += 1;
+        assert(queries < 1100);
+        if (!ownership_api.successful(answer.proof)) {
+            assert(answer.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        }
+    }
+    ownership_api.proof_status first = e.source.graph_first_refusal;
+    assert(first.terminal.limit.bound == ownership_limits.PRODUCTION_W);
+    assert(first.terminal.limit.used == e.source.graph.work);
+    assert(first.terminal.source.file == row->source.file);
+    assert(first.terminal.source.line == 2 && first.terminal.source.filename_present);
+    assert(!row->live.first_refusal.terminal.present);
+    assert(row->live.events.budget.used.w == services_before + queries);
+    ownership_api.graph_result again = ownership_api.graph(&row->live.services, &request);
+    assert(!ownership_api.successful(again.proof));
+    assert(ownership_keys.source(first.terminal.source, again.proof.terminal.source) == 0);
+    assert(first.terminal.limit.used == again.proof.terminal.limit.used);
+    assert(e.source.graph.work == first.terminal.limit.used);
+}
+
+fn unresolved_function_value_preserves_fort_targets() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn unresolved(fn () void target) void { target(); }\n"));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "unresolved");
+    ownership_source.analyze(&e.source);
+    assert(row->live.calls.len == 1 && !row->live.calls[0].complete);
+    assert(row->liveness_correspondence == ownership_source.status.incomplete);
+    ownership_api.graph_request request = ownership_api.graph_request{
+        .query = ownership_api.graph_query_kind.targets,
+        .operation = row->live.calls[0].operation};
+    ownership_api.graph_result answer = ownership_api.graph(&row->live.services, &request);
+    assert(answer.residual_fort);
+    assert(answer.targets.len == 0);
+    assert(row->live.correspondence.terminal.reason ==
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(!ownership_api.successful(row->ownership));
+}
+
+fn teardown_releases_success_failure_and_refusal_storage() void {
+    strbuf.str_buf mut refused_source = strbuf.create();
+    defer strbuf.free(&refused_source);
+    strbuf.append(&refused_source, "fn refused() void {\n");
+    u64 mut local = 0;
+    while (local < 400) {
+        strbuf.append(&refused_source, "i32 local");
+        strbuf.append_u64(&refused_source, local);
+        strbuf.append(&refused_source, " = 0;\n");
+        local += 1;
+    }
+    strbuf.append(&refused_source, "}\n");
+    u64 mut round = 0;
+    u64 mut early = 0;
+    while (round < 24) {
+        {
+            ownership_source_env.env mut e = ownership_source_env.env{};
+            ownership_source_env.open(&e);
+            assert(ownership_source_env.prepare(&e,
+                "fn direct(i32 value) i32 { return value; }\n"));
+            ownership_source.analyze(&e.source);
+            ownership_source_env.close(&e);
+            assert(e.source.bodies.len == 0 && e.source.checker == null);
+            assert(!e.source.prepared && !e.source.graph_built);
+        }
+        {
+            ownership_source_env.env mut e = ownership_source_env.env{};
+            ownership_source_env.open(&e);
+            assert(ownership_source_env.prepare(&e, "fn indirect(i32* p) i32 { return *p; }\n"));
+            ownership_source.analyze(&e.source);
+            ownership_source_env.close(&e);
+        }
+        {
+            ownership_source_env.env mut e = ownership_source_env.env{};
+            ownership_source_env.open(&e);
+            assert(ownership_source_env.prepare(&e, "fn unsupported() void { println(1); }\n"));
+            ownership_source.analyze(&e.source);
+            ownership_source_env.close(&e);
+        }
+        {
+            ownership_source_env.env mut e = ownership_source_env.env{};
+            ownership_source_env.open(&e);
+            assert(ownership_source_env.prepare(&e, strbuf.view(&refused_source)));
+            ownership_source.analyze(&e.source);
+            assert(e.source.bodies[0].live.first_refusal.terminal.present);
+            ownership_source_env.close(&e);
+        }
+        if (round == 8) { early = heap.system_view(); }
+        round += 1;
+    }
+    assert(heap.distance(early, heap.system_view()) < 4096);
+}
+
+fn main() i32 {
+    direct_reads_writes_moves_branches_and_loops();
+    symbol_free_temporaries_keep_unique_local_bindings();
+    println("direct ok");
+    indirect_reads_and_writes_keep_incomplete_correspondence();
+    println("indirect ok");
+    fort_calls_remain_incomplete_and_extern_calls_keep_trust();
+    mixed_targets_preserve_fort_effect_obligations();
+    unresolved_function_value_preserves_fort_targets();
+    println("calls ok");
+    actual_source_exhausts_the_production_service_ledger();
+    private_query_refusal_preserves_its_meter_and_source();
+    println("meters ok");
+    teardown_releases_success_failure_and_refusal_storage();
+    println("cleanup ok");
+    return 0;
+}

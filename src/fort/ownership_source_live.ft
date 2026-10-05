@@ -1,0 +1,276 @@
+/// Produces local liveness inputs from verified source FIR.
+// The caller keeps this context and its FIR at stable addresses through free.
+import diag;
+import fir;
+import ownership_api;
+import ownership_events;
+import ownership_keys;
+import ownership_limits;
+import ownership_liveness;
+
+struct direct_access {
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    fir.place place;
+    u32 read;
+    bool write;
+    bool empties;
+    bool indirect;
+    bool is_use;
+}
+
+struct context {
+    fir.func* function;
+    ownership_api.function_id identity;
+    u32 file;
+    ownership_api.source_position declaration;
+    ownership_events.store events;
+    ownership_api.services services;
+    ownership_api.services production;
+    ownership_api.proof_status first_refusal;
+    ownership_api.proof_status correspondence;
+    ownership_liveness.binding mut@ own bindings;
+    ownership_liveness.access mut@ own accesses;
+    ownership_liveness.call mut@ own calls;
+    direct_access mut@ own direct;
+    u64 direct_len;
+    ownership_liveness.analysis result;
+    bool initialized;
+    bool solved;
+}
+
+fn complete() ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+fn source(context* c, ownership_api.operation_position op) ownership_api.source_position {
+    diag.loc mut at = diag.loc{};
+    if (op.block < fir.block_count(c->function)) {
+        u32 len = fir.block_statement_count(c->function, op.block);
+        if (op.terminator && op.operation == len) {
+            at = fir.block_at(c->function, op.block)->term.loc;
+        } else if (!op.terminator && op.operation < len) {
+            at = fir.block_statement(c->function, op.block, op.operation)->loc;
+        }
+    }
+    if (at.line == 0 || at.col == 0) { return c->declaration; }
+    return ownership_api.source_position{c->identity.declaration.module, c->file,
+        at.line, at.col, at.end_line, at.end_col, true};
+}
+
+fn locate(context* c, ownership_api.proof_status p) ownership_api.proof_status {
+    ownership_api.proof_status mut out = p;
+    if (out.terminal.present) {
+        out.terminal.source = source(c, out.terminal.operation);
+        if (out.terminal.limit.present) { out.terminal.limit.source = out.terminal.source; }
+    }
+    return out;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* request)
+    ownership_api.charge_result {
+    context mut* c = cast(opaque, context mut*);
+    if (c->first_refusal.terminal.present) {
+        return ownership_api.charge_result{.proof = c->first_refusal,
+            .limit = c->first_refusal.terminal.limit};
+    }
+    ownership_api.charge_request mut mapped = *request;
+    mapped.source = source(c, mapped.operation);
+    ownership_api.charge_result out = ownership_api.charge(&c->production, &mapped);
+    if (!out.allowed) { c->first_refusal = out.proof; }
+    return out;
+}
+
+fn position(context* c, u32 block, u32 gap) ownership_api.operation_position {
+    return ownership_api.operation_position{c->identity, block, gap,
+        gap == fir.block_statement_count(c->function, block)};
+}
+
+fn read_at(context* c, ownership_api.operation_position op, u32 index, fir.read mut* out)
+    bool {
+    if (op.terminator) {
+        return fir.term_read(c->function, &fir.block_at(c->function, op.block)->term, index, out);
+    }
+    return fir.stmt_read(c->function,
+        fir.block_statement(c->function, op.block, op.operation), index, out);
+}
+
+fn access_count(context* c) u64 {
+    u64 mut total = 0;
+    u32 mut block = 0;
+    while (block < fir.block_count(c->function)) {
+        u32 len = fir.block_statement_count(c->function, block);
+        u32 mut gap = 0;
+        while (gap <= len) {
+            ownership_api.operation_position op = position(c, block, gap);
+            fir.read mut value = fir.read{};
+            u32 mut index = 0;
+            while (read_at(c, op, index, &value)) {
+                if (total == ownership_api.U64_MAX || cast(index, u64) == fir.U32_LIMIT) {
+                    panic("ownership_source_live: access count overflow");
+                }
+                total += 1;
+                index += 1;
+            }
+            fir.place mut destination = fir.place{};
+            if (!op.terminator && fir.stmt_writes_place(
+                    fir.block_statement(c->function, block, gap), &destination)) {
+                if (total == ownership_api.U64_MAX) {
+                    panic("ownership_source_live: access count overflow");
+                }
+                total += 1;
+            }
+            gap += 1;
+        }
+        block += 1;
+    }
+    return total;
+}
+
+fn remember_missing(context mut* c, ownership_api.operation_position op,
+    ownership_api.incomplete_reason reason) void {
+    ownership_api.source_position at = source(c, op);
+    if (!c->correspondence.terminal.present ||
+        ownership_keys.source(at, c->correspondence.terminal.source) < 0) {
+        c->correspondence = ownership_api.incomplete(reason, op, at);
+    }
+}
+
+fn append_access(context mut* c, ownership_api.operation_position op, fir.place place_value,
+    u32 read, bool write, bool empties, bool is_use) void {
+    bool indirect = ownership_liveness.indirect(c->function, place_value);
+    c->direct[c->direct_len] = direct_access{op, source(c, op), place_value, read, write,
+        empties, indirect, is_use};
+    c->direct_len += 1;
+    if (indirect && (write || is_use)) {
+        remember_missing(c, op, ownership_api.incomplete_reason.missing_correspondence);
+    }
+}
+
+fn trusted_call(fir.statement* instruction) bool {
+    fir.rvalue value = instruction->value;
+    return value.callee == fir.callee_kind.cl_extern;
+}
+
+/// Retains unresolved rows. Direct extern signatures need no hidden-effect summary.
+fn prepare(context mut* c, fir.func* function, ownership_api.function_id identity,
+    u32 file, ownership_api.source_position declaration) void {
+    c->function = function;
+    c->identity = identity;
+    c->file = file;
+    c->declaration = declaration;
+    c->correspondence = complete();
+    ownership_api.limit_table limits = ownership_limits.production();
+    if (!ownership_events.bind(&c->events, &limits, &c->production)) {
+        panic("ownership_source_live: service binding failed");
+    }
+    c->services = c->production;
+    c->services.budget_context = cast(c, void mut*);
+    c->services.budget = budget;
+    c->initialized = true;
+    u64 locals = cast(fir.local_count(function), u64);
+    c->bindings = new(ownership_liveness.binding, locals);
+    u64 mut i = 0;
+    while (i < locals) {
+        u32 local = cast(i, u32);
+        c->bindings[i] = ownership_liveness.binding{local,
+            ownership_api.entity_id{identity, ownership_api.entity_kind.slot, local}};
+        i += 1;
+    }
+    c->direct = new(direct_access, access_count(c));
+    u64 mut unresolved = 0;
+    u64 mut calls = 0;
+    u32 mut block = 0;
+    while (block < fir.block_count(function)) {
+        u32 len = fir.block_statement_count(function, block);
+        u32 mut gap = 0;
+        while (gap <= len) {
+            ownership_api.operation_position op = position(c, block, gap);
+            fir.read mut value = fir.read{};
+            u32 mut index = 0;
+            while (read_at(c, op, index, &value)) {
+                append_access(c, op, value.place, index, false, value.empties, value.is_use);
+                if (value.is_use && ownership_liveness.indirect(function, value.place)) {
+                    unresolved += 1;
+                }
+                index += 1;
+            }
+            if (!op.terminator) {
+                fir.statement* instruction = fir.block_statement(function, block, gap);
+                fir.place mut destination = fir.place{};
+                if (fir.stmt_writes_place(instruction, &destination)) {
+                    append_access(c, op, destination, 0, true, false, false);
+                    if (ownership_liveness.indirect(function, destination)) { unresolved += 1; }
+                }
+                if (instruction->kind == fir.stmt_kind.st_assign &&
+                    instruction->value.kind == fir.rvalue_kind.rv_call) { calls += 1; }
+            }
+            gap += 1;
+        }
+        block += 1;
+    }
+    c->accesses = new(ownership_liveness.access, unresolved);
+    c->calls = new(ownership_liveness.call, calls);
+    u64 mut access = 0;
+    i = 0;
+    while (i < c->direct_len) {
+        direct_access row = c->direct[i];
+        fir.read mut value = fir.read{};
+        bool use = row.write || (read_at(c, row.operation, row.read, &value) && value.is_use);
+        if (row.indirect && use) {
+            c->accesses[access] = ownership_liveness.access{
+                .operation = row.operation, .read = row.read, .write = row.write};
+            access += 1;
+        }
+        i += 1;
+    }
+    u64 mut call = 0;
+    block = 0;
+    while (block < fir.block_count(function)) {
+        u32 mut gap = 0;
+        while (gap < fir.block_statement_count(function, block)) {
+            fir.statement* instruction = fir.block_statement(function, block, gap);
+            if (instruction->kind == fir.stmt_kind.st_assign &&
+                instruction->value.kind == fir.rvalue_kind.rv_call) {
+                ownership_api.operation_position op = position(c, block, gap);
+                bool trusted = trusted_call(instruction);
+                c->calls[call] = ownership_liveness.call{.operation = op, .complete = trusted};
+                if (!trusted) {
+                    remember_missing(c, op, ownership_api.incomplete_reason.unknown_effect);
+                }
+                call += 1;
+            }
+            gap += 1;
+        }
+        block += 1;
+    }
+}
+
+fn solve(context mut* c) void {
+    if (!c->initialized || c->solved) { panic("ownership_source_live: invalid solve order"); }
+    ownership_liveness.program input = ownership_liveness.program{c->function, c->identity,
+        true, &c->services, c->bindings[..], c->accesses[..], c->calls[..]};
+    c->result = ownership_liveness.solve(&input);
+    c->result.proof = locate(c, c->result.proof);
+    c->solved = true;
+}
+
+fn free_state(context mut* c) void {
+    ownership_liveness.free(&c->result);
+    del(c->bindings);
+    del(c->accesses);
+    del(c->calls);
+    del(c->direct);
+    c->services = ownership_api.services{};
+    c->production = ownership_api.services{};
+    c->function = null;
+    c->initialized = false;
+    c->solved = false;
+    c->direct_len = 0;
+}
+
+fn free(context mut* c) void {
+    free_state(c);
+    ownership_events.free(&c->events);
+    *c = context{};
+}
