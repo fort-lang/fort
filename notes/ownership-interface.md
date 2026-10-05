@@ -162,7 +162,7 @@ No numeric test value selects a production default.
 | G | state | One guarded alternative. |
 | H | computation | One structural template or bounded parameter. |
 | T | call | One explicit target alternative. |
-| E | function | One ordered effect node or summary relation. |
+| E | function | One retained ordered effect node or summary relation. |
 | W | computation | One work unit from the table below. |
 | V | report | One event, witness link, or rendered record. |
 
@@ -184,8 +184,18 @@ It returns the first exhausted category under this order. It records used, bound
 units.
 D requests absolute projection depth. R requests prospective retained region cardinality.
 P requests prospective predicate cardinality in one represented state.
-The meter stores the greatest accepted D, R, and P amounts.
+E requests prospective retained relation cardinality for one function computation.
+The meter stores the greatest accepted D, R, P, and E amounts.
 Separate states can use one meter. Repeated facts do not add R or P units.
+Graph rebuilds and separate function computations do not accumulate E copies.
+A graph counts each retained relation occurrence and each unknown-contents fallback.
+A state history mutator counts its retained history occurrences plus the incoming history.
+Source validity changes retain no ordered history row. They request W without E.
+Join and widening request complete canonical history cardinality.
+Refusal preserves history and obligations.
+An explicit domain table can impose a stricter E bound than the service table.
+That local refusal records loss and incomplete proof without inventing a service counter value.
+Equal source keys alone do not identify equal destinations or value versions.
 W remains cumulative. Each new cardinality-query step needs one W permission before work.
 Canonical region keys identify allocation representatives, explicit regions, and borrowed regions.
 A partition key identifies a partition under its region key.

@@ -1,0 +1,431 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| effect precision ok
+/// Tests retained relations across rebuilds, function scopes, and permission refusals.
+import ownership_api;
+import ownership_borrows;
+import ownership_borrows_env;
+import ownership_depth_env;
+import ownership_keys;
+import ownership_join;
+import ownership_limits;
+import ownership_state;
+
+struct monitor {
+    ownership_limits.meter meter;
+    ownership_api.limit_category previous;
+    u64 requests;
+    u64 attempted;
+}
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    monitor mut* m = cast(opaque, monitor mut*);
+    assert(ownership_keys.canonical_charges(req) && req->items.len == 1);
+    ownership_api.charge_item item = req->items[0];
+    assert(req->work == ownership_api.work_kind.summary_solver);
+    if (item.category == ownership_api.limit_category.e) {
+        assert(m->previous == ownership_api.limit_category.w);
+        assert(item.scope == ownership_api.limit_scope.function);
+        m->requests += 1;
+        m->attempted = item.amount;
+    } else {
+        assert(item.category == ownership_api.limit_category.w && item.amount == 1);
+    }
+    m->previous = item.category;
+    return ownership_limits.try_charge(&m->meter, req);
+}
+fn configure(ownership_borrows_env.env mut* e, monitor mut* m, u64 effects, u64 work) void {
+    *m = monitor{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.e = effects;
+    limits.w = work;
+    assert(ownership_limits.configure(&m->meter, &limits));
+    e->services.budget_context = cast(m, void mut*);
+    e->services.budget = budget;
+}
+fn setup(ownership_borrows_env.env mut* e) void {
+    ownership_borrows_env.open(e);
+    ownership_borrows_env.local_use(e, 2, false);
+    ownership_borrows_env.source(e, 100, ownership_api.source_kind.symbolic_caller);
+    ownership_borrows_env.storage(e, 2, 102, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.seed(e, ownership_borrows_env.path(2), 100, 10);
+    ownership_borrows_env.seed(e, ownership_borrows_env.path(2), 100, 11);
+    // Two relations in one valid contents record require two distinct count permissions.
+    ownership_api.contents_fact mut fact = e->local.state.contents[0];
+    ownership_api.borrow_relation[2] mut relations = {fact.borrows[0],
+        e->local.state.contents[1].borrows[0]};
+    relations[1].value_version = fact.value_version;
+    fact.borrows = relations[..];
+    e->local.state.contents_len = 0;
+    ownership_state.append_contents(&e->local.state, fact);
+    ownership_api.entity_id allocation = ownership_borrows_env.id(
+        ownership_api.entity_kind.allocation, 200);
+    ownership_api.history_fact[1] history = {ownership_api.history_fact{
+        .allocation = allocation, .operation = ownership_api.operation_position{.operation = 3}}};
+    ownership_state.append_allocations(&e->local.state, ownership_api.allocation_fact{
+        .key = allocation, .obligation = true,
+        .count = ownership_api.multiplicity{true, true, true},
+        .history = history[..]});
+}
+fn request(ownership_borrows_env.env mut* e, u32 function) ownership_borrows.request {
+    ownership_borrows.request mut req = ownership_borrows_env.input(e);
+    req.reporting.operation = ownership_api.operation_position{
+        .function = ownership_api.function_id{ownership_api.declaration_id{2, function}, 1},
+        .block = 3, .operation = 7};
+    req.reporting.event.function = req.reporting.operation.function;
+    req.reporting.source = ownership_api.source_position{2, 1, 23, 4, 23, 8, false};
+    return req;
+}
+fn successful(ownership_borrows.graph* kept, u64 edges) void {
+    assert(ownership_api.successful(kept->proof) && kept->edges_len == edges);
+}
+fn refusal(ownership_api.proof_status proof, ownership_api.limit_category category,
+    u64 used, u64 bound, u64 attempted, u32 function) void {
+    assert(proof.failed && proof.terminal.present);
+    assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    ownership_api.exhaustion limit = proof.terminal.limit;
+    assert(limit.present && limit.category == category && !limit.saturated);
+    assert(limit.scope == ownership_api.scope_of(category));
+    assert(limit.work == ownership_api.work_kind.summary_solver);
+    assert(limit.used == used && limit.bound == bound && limit.attempted == attempted);
+    assert(limit.operation.function.declaration.module == 2);
+    assert(limit.operation.function.declaration.declaration == function);
+    assert(limit.operation.function.instance == 1 && limit.operation.block == 3);
+    assert(limit.operation.operation == 7 && !limit.operation.terminator);
+    assert(limit.source.module == 2 && limit.source.file == 1);
+    assert(limit.source.line == 23 && limit.source.col == 4);
+    assert(limit.source.end_line == 23 && limit.source.end_col == 8);
+}
+fn rebuilds() void {
+    ownership_borrows_env.env mut e = {};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    monitor mut m = {};
+    configure(&e, &m, 2, ownership_limits.PRODUCTION_W);
+    ownership_borrows.request req = request(&e, 1);
+    u64 mut work = 0;
+    u64 mut i = 0;
+    while (i < 4) {
+        ownership_depth_env.begin();
+        ownership_borrows.graph mut kept = ownership_borrows.solve(&req);
+        successful(&kept, 2);
+        assert(kept.snapshot.contents_len == 1 && kept.edges[0].relation.source.ordinal == 100);
+        assert(m.meter.used.e == 2 && m.meter.used.w > work && m.attempted == 2);
+        work = m.meter.used.w;
+        ownership_borrows.free(&kept);
+        assert(ownership_depth_env.finish() > 0);
+        assert(m.meter.used.e == 2 && m.meter.used.w == work);
+        assert(ownership_state.equal(&e.local.state, &before));
+        i += 1;
+    }
+    assert(m.requests == 8);
+    // Live kept copies and separate functions do not consume additional relation capacity.
+    ownership_depth_env.begin();
+    ownership_borrows.graph mut first = ownership_borrows.solve(&req);
+    ownership_borrows.request other = request(&e, 2);
+    ownership_borrows.graph mut second = ownership_borrows.solve(&other);
+    successful(&first, 2);
+    successful(&second, 2);
+    assert(first.edges.ptr != second.edges.ptr && m.meter.used.e == 2);
+    ownership_borrows.free(&first);
+    ownership_borrows.free(&second);
+    ownership_depth_env.finish();
+    e.local.state.contents[0].borrows = e.local.state.contents[0].borrows[0..1];
+    ownership_borrows.graph mut smaller = ownership_borrows.solve(&req);
+    successful(&smaller, 1);
+    assert(m.attempted == 1 && m.meter.used.e == 2);
+    ownership_borrows.free(&smaller);
+    e.local.state.contents_len = 0;
+    u64 requests = m.requests;
+    ownership_borrows.graph mut empty = ownership_borrows.solve(&req);
+    successful(&empty, 0);
+    assert(m.requests == requests && empty.snapshot.sources_len == before.sources_len);
+    ownership_borrows.free(&empty);
+}
+fn relation_refusals() void {
+    ownership_borrows_env.env mut e = {};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    // A different destination keeps its relation even when the source matches.
+    ownership_borrows_env.storage(&e, 3, 103, ownership_borrows.destination_kind.local_value);
+    ownership_borrows_env.seed(&e, ownership_borrows_env.path(3), 100, 12);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    monitor mut m = {};
+    configure(&e, &m, 2, ownership_limits.PRODUCTION_W);
+    ownership_borrows.request req = request(&e, 2);
+    ownership_depth_env.begin();
+    ownership_borrows.graph mut denied = ownership_borrows.solve(&req);
+    refusal(denied.proof, ownership_api.limit_category.e, 2, 2, 3, 2);
+    assert(m.requests == 3 && m.attempted == 3);
+    assert(denied.snapshot.contents.len == 0 && denied.edges.len == 0);
+    ownership_borrows.free(&denied);
+    ownership_depth_env.finish();
+    assert(ownership_state.equal(&e.local.state, &before));
+    assert(e.local.state.allocations[0].obligation &&
+        e.local.state.allocations[0].history.len == 1);
+    configure(&e, &m, 3, ownership_limits.PRODUCTION_W);
+    ownership_borrows.graph mut exact = ownership_borrows.solve(&req);
+    successful(&exact, 3);
+    assert(exact.edges[0].destination != exact.edges[2].destination);
+    ownership_borrows.free(&exact);
+    e.local.state.contents_len = 1;
+    e.local.state.contents[0].kind = ownership_api.contents_kind.unknown;
+    configure(&e, &m, 2, ownership_limits.PRODUCTION_W);
+    denied = ownership_borrows.solve(&req);
+    refusal(denied.proof, ownership_api.limit_category.e, 2, 2, 3, 2);
+    ownership_borrows.free(&denied);
+    e.local.state.contents[0].borrows = e.local.state.contents[0].borrows[0..0];
+    configure(&e, &m, 1, ownership_limits.PRODUCTION_W);
+    ownership_borrows.graph mut unknown = ownership_borrows.solve(&req);
+    successful(&unknown, 1);
+    assert(unknown.edges[0].unknown && m.attempted == 1 && m.meter.used.e == 1);
+    ownership_borrows.free(&unknown);
+}
+fn work_refusals() void {
+    ownership_borrows_env.env mut e = {};
+    setup(&e);
+    defer ownership_borrows_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&before);
+    monitor mut m = {};
+    configure(&e, &m, 2, ownership_limits.PRODUCTION_W);
+    ownership_borrows.request req = request(&e, 1);
+    ownership_borrows.graph mut full = ownership_borrows.solve(&req);
+    successful(&full, 2);
+    u64 cost = m.meter.used.w;
+    ownership_borrows.free(&full);
+    u64 mut bound = 1;
+    u64 mut populated = 0;
+    while (bound < cost) {
+        configure(&e, &m, 2, bound);
+        ownership_depth_env.begin();
+        ownership_borrows.graph mut denied = ownership_borrows.solve(&req);
+        refusal(denied.proof, ownership_api.limit_category.w, bound, bound, 1, 1);
+        assert(m.meter.used.e <= 2 && ownership_state.equal(&e.local.state, &before));
+        ownership_borrows.free(&denied);
+        if (ownership_depth_env.finish() > 0) { populated += 1; }
+        bound += 1;
+    }
+    assert(populated > 0);
+    configure(&e, &m, 2, cost);
+    ownership_depth_env.begin();
+    full = ownership_borrows.solve(&req);
+    successful(&full, 2);
+    assert(m.meter.used.w == cost && m.meter.used.e == 2);
+    ownership_borrows.free(&full);
+    ownership_depth_env.finish();
+    eprintln("kept cost ", cost, " populated refusals ", populated);
+}
+fn meter_refusals() void {
+    ownership_limits.meter mut m = {};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.e = ownership_api.U64_MAX;
+    assert(ownership_limits.configure(&m, &limits));
+    ownership_api.charge_item[2] mut items = {
+        ownership_api.charge_item{ownership_api.limit_category.e,
+            ownership_api.limit_scope.function,
+            1},
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 1}};
+    ownership_api.charge_request req = ownership_api.charge_request{
+        .work = ownership_api.work_kind.summary_solver, .items = items[..]};
+    m.used.e = ownership_api.U64_MAX;
+    ownership_api.charge_result mut denied = ownership_limits.try_charge(&m, &req);
+    assert(!denied.allowed && denied.limit.category == ownership_api.limit_category.e);
+    assert(denied.limit.saturated && denied.limit.used == ownership_api.U64_MAX);
+    assert(denied.limit.attempted == 1 && m.used.w == 0 && m.used.e == ownership_api.U64_MAX);
+    m.used.e = 0;
+    items[0].amount = ownership_api.U64_MAX;
+    denied = ownership_limits.try_charge(&m, &req);
+    assert(!denied.allowed && !denied.limit.saturated);
+    assert(denied.limit.attempted == ownership_api.U64_MAX && m.used.e == 0 && m.used.w == 0);
+    items[0].amount = 2;
+    m.used.w = limits.w;
+    denied = ownership_limits.try_charge(&m, &req);
+    assert(!denied.allowed && denied.limit.category == ownership_api.limit_category.w);
+    assert(m.used.e == 0 && m.used.w == limits.w);
+}
+fn history_state() void {
+    ownership_state.state mut core = ownership_state.empty();
+    defer ownership_state.free(&core);
+    ownership_depth_env.fixture mut f = {};
+    ownership_depth_env.configure(&f, ownership_limits.PRODUCTION_W);
+    f.meter.bounds.e = 2;
+    ownership_api.entity_id first = ownership_borrows_env.id(
+        ownership_api.entity_kind.allocation, 1);
+    ownership_api.entity_id second = ownership_borrows_env.id(
+        ownership_api.entity_kind.allocation, 2);
+    ownership_api.allocation_fact mut a = ownership_api.allocation_fact{
+        .key = first, .validity = ownership_api.validity_kind.live,
+        .count = ownership_api.multiplicity{false, true, false}, .obligation = true};
+    ownership_state.append_allocations(&core, a);
+    ownership_api.operation_position op = ownership_api.operation_position{.operation = 7};
+    ownership_api.source_position at = ownership_api.source_position{.line = 23, .col = 4};
+    ownership_api.owner_location after = ownership_api.owner_location{
+        .place = ownership_borrows_env.path(2)};
+    assert(ownership_state.transfer_owner(&core, &f.service, first, after, true, op, at).applied);
+    assert(ownership_state.release_member(&core, &f.service, first, true, op, at).applied);
+    assert(core.allocations[0].history.len == 2 && f.meter.used.e == 2);
+    assert(core.allocations[0].history[0].kind == ownership_api.effect_kind.transfer);
+    assert(core.allocations[0].history[1].kind == ownership_api.effect_kind.release);
+    a.key = second;
+    ownership_state.append_allocations(&core, a);
+    ownership_state.state mut before = ownership_state.clone(&core);
+    defer ownership_state.free(&before);
+    ownership_depth_env.begin();
+    ownership_api.mutation_result mut denied = ownership_state.transfer_owner(&core, &f.service,
+        second, after, true, op, at);
+    ownership_depth_env.finish();
+    assert(!denied.applied && denied.precision_lost && ownership_state.equal(&core, &before));
+    assert(denied.proof.terminal.limit.category == ownership_api.limit_category.e);
+    assert(denied.proof.terminal.limit.used == 2 && denied.proof.terminal.limit.attempted == 3);
+    assert(core.allocations[1].obligation && core.allocations[0].history.len == 2);
+    denied = ownership_state.release_member(&core, &f.service, second, true, op, at);
+    assert(!denied.applied && ownership_state.equal(&core, &before));
+    ownership_api.history_fact[1] history = {ownership_api.history_fact{.allocation = second}};
+    a.key.ordinal = 3;
+    a.history = history[..];
+    denied = ownership_state.add_allocation(&core, &f.service, a, op, at);
+    assert(!denied.applied && denied.proof.terminal.limit.attempted == 3);
+    assert(ownership_state.equal(&core, &before));
+    // Query refusal preserves both existing histories and the unmodified owner.
+    u64 mut bound = 1;
+    while (bound <= 3) {
+        ownership_depth_env.configure(&f, bound);
+        f.meter.bounds.e = 3;
+        ownership_depth_env.begin();
+        denied = ownership_state.transfer_owner(&core, &f.service, second, after, true, op, at);
+        ownership_depth_env.finish();
+        assert(!denied.applied && ownership_state.equal(&core, &before));
+        assert(denied.proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(denied.proof.terminal.limit.used == bound && f.meter.used.e == 0);
+        bound += 1;
+    }
+    ownership_depth_env.configure(&f, ownership_limits.PRODUCTION_W);
+    f.meter.bounds.e = 3;
+    assert(ownership_state.transfer_owner(&core, &f.service, second, after, true, op, at).applied);
+    assert(f.meter.used.e == 3 && core.allocations[1].history.len == 1);
+    // An independent core requests its own history count through the same meter.
+    ownership_state.state mut separate = ownership_state.empty();
+    defer ownership_state.free(&separate);
+    a.key.ordinal = 4;
+    assert(ownership_state.add_allocation(&separate, &f.service, a, op, at).applied);
+    assert(separate.allocations[0].history.len == 1 && f.meter.used.e == 3);
+    ownership_api.source_fact source = ownership_api.source_fact{
+        .key = ownership_borrows_env.id(ownership_api.entity_kind.source, 20),
+        .validity = ownership_api.validity_kind.live};
+    ownership_state.append_sources(&separate, source);
+    u64 work = f.meter.used.w;
+    assert(ownership_state.end_source(&separate, &f.service, source.key, op, at).applied);
+    assert(ownership_state.end_source(&separate, &f.service, source.key, op, at).applied);
+    assert(f.meter.used.e == 3 && f.meter.used.w == work + 2);
+}
+fn joined_histories() void {
+    ownership_state.state mut left = ownership_state.empty();
+    ownership_state.state mut right = ownership_state.empty();
+    defer ownership_state.free(&left);
+    defer ownership_state.free(&right);
+    ownership_api.entity_id key = ownership_borrows_env.id(
+        ownership_api.entity_kind.allocation, 1);
+    ownership_api.allocation_fact allocation = ownership_api.allocation_fact{
+        .key = key, .site = key, .validity = ownership_api.validity_kind.live,
+        .count = ownership_api.multiplicity{false, true, false}, .obligation = true,
+        .owner = ownership_api.owner_location{.place = ownership_borrows_env.path(5)}};
+    ownership_state.append_allocations(&left, allocation);
+    ownership_state.append_allocations(&right, allocation);
+    ownership_depth_env.fixture mut f = {};
+    ownership_depth_env.configure(&f, ownership_limits.PRODUCTION_W);
+    f.meter.bounds.e = 1;
+    ownership_api.owner_location after = ownership_api.owner_location{
+        .place = ownership_borrows_env.path(2)};
+    ownership_api.operation_position mut op = ownership_api.operation_position{.operation = 1};
+    ownership_api.source_position at = ownership_api.source_position{.line = 23, .col = 4};
+    assert(ownership_state.transfer_owner(&left, &f.service, key, after, true, op, at).applied);
+    op.operation = 2;
+    assert(ownership_state.transfer_owner(&right, &f.service, key, after, true, op, at).applied);
+    assert(f.meter.used.e == 1);
+    ownership_state.state mut before_left = ownership_state.clone(&left);
+    ownership_state.state mut before_right = ownership_state.clone(&right);
+    defer ownership_state.free(&before_left);
+    defer ownership_state.free(&before_right);
+    op.operation = 7;
+    u32 mut order = 0;
+    while (order < 4) {
+        ownership_depth_env.begin();
+        ownership_state.state mut joined = order == 0 ?
+            ownership_join.join(&left, &right, &f.service, &f.meter.bounds, op, at) :
+            order == 1 ? ownership_join.join(&right, &left, &f.service, &f.meter.bounds, op, at) :
+            order == 2 ? ownership_join.widen(&left, &right, &f.service, &f.meter.bounds, op, at) :
+            ownership_join.widen(&right, &left, &f.service, &f.meter.bounds, op, at);
+        assert(joined.proof.failed && joined.allocations[0].history.len == 2);
+        assert(joined.allocations[0].obligation && joined.losses_len > 0);
+        ownership_api.exhaustion limit = joined.proof.terminal.limit;
+        assert(limit.present && limit.category == ownership_api.limit_category.e);
+        assert(limit.scope == ownership_api.limit_scope.function && limit.attempted == 2);
+        assert(limit.used == 1 && limit.bound == 1 && f.meter.used.e == 1);
+        assert(limit.work == (order < 2 ? ownership_api.work_kind.join :
+            ownership_api.work_kind.widening));
+        assert(ownership_keys.operation(limit.operation, op) == 0);
+        assert(ownership_keys.source(limit.source, at) == 0);
+        ownership_state.free(&joined);
+        assert(ownership_depth_env.finish() > 0);
+        assert(ownership_state.equal(&left, &before_left));
+        assert(ownership_state.equal(&right, &before_right));
+        order += 1;
+    }
+    u64 mut work = f.meter.used.w;
+    u32 mut repeat = 0;
+    while (repeat < 3) {
+        ownership_state.state mut same = ownership_join.join(&left, &left, &f.service,
+            &f.meter.bounds, op, at);
+        assert(ownership_api.successful(same.proof) && same.allocations[0].history.len == 1);
+        assert(f.meter.used.e == 1 && f.meter.used.w > work);
+        work = f.meter.used.w;
+        ownership_state.free(&same);
+        repeat += 1;
+    }
+    ownership_state.state mut bottom = ownership_state.empty();
+    defer ownership_state.free(&bottom);
+    bottom.proof.kind = ownership_api.proof_kind.bottom;
+    ownership_state.state mut reaching = ownership_join.join(&bottom, &left, &f.service,
+        &f.meter.bounds, op, at);
+    assert(ownership_api.successful(reaching.proof) && reaching.allocations[0].history.len == 1);
+    ownership_state.free(&reaching);
+    ownership_depth_env.configure(&f, ownership_limits.PRODUCTION_W);
+    ownership_api.limit_table mut local = f.meter.bounds;
+    local.e = 1;
+    ownership_state.state mut stricter = ownership_join.join(&left, &right, &f.service,
+        &local, op, at);
+    assert(stricter.proof.failed && !stricter.proof.terminal.limit.present);
+    assert(stricter.allocations[0].history.len == 2 && stricter.allocations[0].obligation);
+    assert(stricter.losses[stricter.losses_len - 1].category == ownership_api.limit_category.e);
+    assert(stricter.losses[stricter.losses_len - 1].bound == 1);
+    u64 cost = f.meter.used.w;
+    ownership_state.free(&stricter);
+    ownership_depth_env.configure(&f, cost - 1);
+    ownership_depth_env.begin();
+    ownership_state.state mut denied = ownership_join.join(&left, &right, &f.service,
+        &f.meter.bounds, op, at);
+    assert(denied.proof.failed && denied.proof.terminal.limit.category ==
+        ownership_api.limit_category.w);
+    assert(denied.proof.terminal.limit.work == ownership_api.work_kind.join);
+    assert(denied.allocations[0].history.len == 2 && denied.allocations[0].obligation);
+    ownership_state.free(&denied);
+    ownership_depth_env.finish();
+    assert(ownership_state.equal(&left, &before_left) &&
+        ownership_state.equal(&right, &before_right));
+}
+fn main() i32 {
+    rebuilds();
+    relation_refusals();
+    work_refusals();
+    meter_refusals();
+    history_state();
+    joined_histories();
+    println("effect precision ok");
+    return 0;
+}

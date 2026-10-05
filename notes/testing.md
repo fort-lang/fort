@@ -40,6 +40,8 @@ bullet at a time and without a rewrite.
   Record run URLs, job conclusions, and relevant test counts in the ticket.
   A missing, pending, cancelled, or failed required result does not pass the gate.
   Local tests provide development evidence. They do not replace PR CI.
+  Count results with exit status 0 in each required group before a commit or handoff.
+  A result row records an attempt. Its presence does not establish a pass.
   `AGENTS.md` defines the review, branch-update, and GitHub merge procedure.
 - The local `gate` target remains available for diagnosis. It is not a merge requirement.
   It runs `check-all`, then the configure, build, and test steps for `asan-debug` and `ubsan-debug`.

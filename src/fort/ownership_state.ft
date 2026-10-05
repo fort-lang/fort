@@ -741,12 +741,42 @@ fn allocation_counts(ownership_api.allocation_fact fact) charge_counts {
     return c;
 }
 
+// Count retained history occurrences before E permission.
+fn history_permission(state* s, ownership_api.services* svc, u64 incoming,
+    ownership_api.work_kind kind, ownership_api.operation_position op,
+    ownership_api.source_position at,
+    charge_counts mut* counts) ownership_api.charge_result {
+    ownership_api.charge_result mut permission = ownership_api.charge_work(svc,
+        kind, op, at);
+    if (!permission.allowed) { return permission; }
+    u64 mut amount = incoming;
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        permission = ownership_api.charge_work(svc, kind, op, at);
+        if (!permission.allowed) { return permission; }
+        amount = plus_count(amount, s->allocations[i].history.len);
+        i += 1;
+    }
+    counts->e = amount;
+    return permission;
+}
+
 fn require_counts(state mut* s, ownership_api.services* svc,
     charge_counts counts, ownership_api.operation_position op,
     ownership_api.source_position at) ownership_api.mutation_result {
     ownership_api.mutation_result mut out = ownership_api.mutation_result{};
     out.proof = s->proof;
     if (!ownership_api.successful(s->proof)) { return out; }
+    charge_counts mut prospective = counts;
+    if (counts.e > 0) {
+        ownership_api.charge_result measured = history_permission(s, svc, counts.e,
+            ownership_api.work_kind.transfer,
+            op, at, &prospective);
+        if (!measured.allowed) {
+            out.proof = report_failure(svc, measured.proof, op, at);
+            return out;
+        }
+    }
     if (counts.d == 0 && counts.r == 0 && counts.p == 0 && counts.g == 0 &&
         counts.h == 0 && counts.e == 0 && counts.w == 0) {
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input, op, at);
@@ -781,7 +811,7 @@ fn require_counts(state mut* s, ownership_api.services* svc,
     }
     if (counts.e > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.e,
-            ownership_api.limit_scope.function, counts.e};
+            ownership_api.limit_scope.function, prospective.e};
         count += 1;
     }
     if (counts.w > 0) {
@@ -1576,7 +1606,6 @@ fn end_source(state mut* s, ownership_api.services* svc,
     u64 i = source_index(s, key);
     if (i == U64_MAX) { return bad_selection(s, svc, op, at); }
     charge_counts mut counts = charge_counts{};
-    counts.e = 1;
     counts.w = 1;
     ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
     if (!result.applied) { return result; }

@@ -54,7 +54,8 @@ fn path(u32 slot) ownership_api.place_path { return ownership_local_env.place(sl
 fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
     counters mut* count = cast(opaque, counters mut*);
     assert(ownership_keys.canonical_charges(req));
-    assert(req->items.len == 1 && req->items[0].amount == 1);
+    assert(req->items.len == 1 && req->items[0].amount > 0);
+    u64 amount = req->items[0].amount;
     ownership_api.limit_category category = req->items[0].category;
     assert(category == ownership_api.limit_category.w ||
         category == ownership_api.limit_category.e);
@@ -62,20 +63,24 @@ fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.cha
     u64 mut used = 0;
     u64 mut bound = 0;
     if (category == ownership_api.limit_category.w) {
+        assert(amount == 1);
         used = count->work;
         bound = count->deny_work;
         count->work += 1;
     } else {
         used = count->relations;
         bound = count->deny_relations;
-        count->relations += 1;
     }
     ownership_api.charge_result mut out = ownership_api.charge_result{};
-    if (bound > 0 && used >= bound) {
+    if (bound > 0 && (category == ownership_api.limit_category.e ? amount > bound :
+        used >= bound)) {
         out.limit = ownership_api.exhaustion{.present = true, .category = category,
             .scope = req->items[0].scope, .work = req->work, .used = used, .bound = bound,
-            .attempted = 1, .operation = req->operation, .source = req->source};
+            .attempted = amount, .operation = req->operation, .source = req->source};
         return out;
+    }
+    if (category == ownership_api.limit_category.e && amount > count->relations) {
+        count->relations = amount;
     }
     out.allowed = true;
     out.proof.kind = ownership_api.proof_kind.complete;
