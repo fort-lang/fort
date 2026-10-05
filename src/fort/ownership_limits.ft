@@ -74,7 +74,7 @@ fn add(ownership_api.used_counts mut* t, ownership_api.limit_category c, u64 n) 
     case ownership_api.limit_category.g: t->g += n;
     case ownership_api.limit_category.h: t->h += n;
     case ownership_api.limit_category.t: t->t += n;
-    case ownership_api.limit_category.e: t->e += n;
+    case ownership_api.limit_category.e: if (n > t->e) { t->e = n; }
     case ownership_api.limit_category.w: t->w += n;
     case ownership_api.limit_category.v: t->v += n;
     }
@@ -103,7 +103,7 @@ fn valid_request(ownership_api.charge_request* req) bool {
 }
 
 /// Checks each item before it changes a counter. A precision refusal is not a verdict.
-/// D, R, and P store their greatest permitted absolute amounts. Other counters accumulate.
+/// D, R, P, and E store their greatest permitted absolute amounts. Other counters accumulate.
 fn try_charge(meter mut* m, ownership_api.charge_request* req) ownership_api.charge_result {
     if (!m->configured || !ownership_api.valid_limits(&m->bounds) ||
         !valid_request(req)) { return invalid(req); }
@@ -112,10 +112,11 @@ fn try_charge(meter mut* m, ownership_api.charge_request* req) ownership_api.cha
         ownership_api.charge_item item = req->items[i];
         u64 count = used(&m->used, item.category);
         u64 max = bound(&m->bounds, item.category);
-        bool state_amount = item.category == ownership_api.limit_category.r ||
-            item.category == ownership_api.limit_category.p;
-        bool absolute = item.category == ownership_api.limit_category.d || state_amount;
-        bool saturated = state_amount ? count == ownership_api.U64_MAX :
+        bool retained_amount = item.category == ownership_api.limit_category.r ||
+            item.category == ownership_api.limit_category.p ||
+            item.category == ownership_api.limit_category.e;
+        bool absolute = item.category == ownership_api.limit_category.d || retained_amount;
+        bool saturated = retained_amount ? count == ownership_api.U64_MAX :
             !absolute && item.amount > ownership_api.U64_MAX - count;
         bool exceeds = absolute ? saturated || item.amount > max ||
             item.amount == ownership_api.U64_MAX :

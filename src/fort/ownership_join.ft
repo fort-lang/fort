@@ -1125,6 +1125,45 @@ fn cover_shapes(ownership_state.state mut* s, ownership_api.limit_table* limits,
     }
 }
 
+// A join preserves history when its complete retained cardinality exceeds E.
+fn cover_histories(ownership_state.state mut* s, ownership_api.services* svc,
+    ownership_api.limit_table* limits, ownership_api.work_kind kind,
+    ownership_api.operation_position op, ownership_api.source_position at) void {
+    if (s->allocations_len == 0) { return; }
+    ownership_state.charge_counts mut counts = {};
+    ownership_api.charge_result measured = ownership_state.history_permission(s, svc, 0,
+        kind, op, at, &counts);
+    if (!measured.allowed) {
+        if (ownership_api.successful(s->proof)) {
+            s->proof = record_failure(svc, measured.proof, op, at);
+        }
+        return;
+    }
+    if (counts.e == 0) { return; }
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.e, ownership_api.limit_scope.function, counts.e}};
+    ownership_api.charge_request req = ownership_api.charge_request{kind, op, at, item[..]};
+    ownership_api.charge_result charged = ownership_api.charge(svc, &req);
+    if (!charged.allowed) {
+        if (charged.limit.present && charged.limit.category == ownership_api.limit_category.e) {
+            remember_loss(s, ownership_api.limit_category.e, charged.limit.bound, at,
+                ownership_api.entity_id{});
+        }
+        if (ownership_api.successful(s->proof)) {
+            s->proof = record_failure(svc, charged.proof, op, at);
+        }
+        return;
+    }
+    if (counts.e > limits->e) {
+        // The explicit domain table can be stricter than the supplied service table.
+        remember_loss(s, ownership_api.limit_category.e, limits->e, at, ownership_api.entity_id{});
+        if (ownership_api.successful(s->proof)) {
+            s->proof = record_failure(svc, ownership_api.incomplete(
+                ownership_api.incomplete_reason.work_limit, op, at), op, at);
+        }
+    }
+}
+
 fn cover_bounds(ownership_state.state mut* s, ownership_api.services* svc,
     ownership_api.limit_table* limits, ownership_api.work_kind kind,
     ownership_api.operation_position op, ownership_api.source_position at) void {
@@ -1140,6 +1179,7 @@ fn cover_bounds(ownership_state.state mut* s, ownership_api.services* svc,
     cover_predicates(s, limits, at);
     cover_guards(s, limits, at);
     cover_shapes(s, limits, at);
+    cover_histories(s, svc, limits, kind, op, at);
 }
 
 fn trim_place(ownership_state.state mut* s, ownership_api.place_path input,

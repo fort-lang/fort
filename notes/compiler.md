@@ -593,6 +593,13 @@ came here.
   `spec/toolchain.md` 4.2 separates validated invalidity witnesses from abstract possibility.
   D checks absolute projection depth and stores the greatest permitted depth.
   Borrow, history, alias, and relocation paths use their maximum depth.
+  E requests retained cardinality. Graph rebuilds keep E unchanged and consume cumulative W.
+  State history mutators count retained history occurrences before they add incoming history.
+  `ownership_state.require_counts` treats its E input as incoming history.
+  It then forms the full request.
+  Source validity changes retain no ordered history row. They consume W without E.
+  Join and widening count canonical merged histories with their own W work kinds.
+  An E refusal preserves histories and obligations, then marks the result incomplete.
   W stays cumulative. Each W request item has amount one.
   A counted multi-unit mutation pays earlier W units before its final mixed request.
   The final mixed request checks all items before any counter changes.
