@@ -1,0 +1,672 @@
+/// Writes version 1 ownership coverage from retained source analyses.
+import containers;
+import diag;
+import json;
+import modules;
+import ownership_api;
+import ownership_events;
+import ownership_limits;
+import ownership_source;
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+
+// These POSIX functions have the same ABI on both supported targets.
+extern fn mkstemp(char mut* path) i32;
+extern fn rename(char* from, char* to) i32;
+
+u64 ANALYSIS_COUNT = 7;
+string[ANALYSIS_COUNT] ANALYSES = {
+    "graph", "liveness", "local", "stored_borrows", "raw", "calls_heap", "process_exit"};
+string[3] STAGES = {"checking", "lowering", "verification"};
+string[3] STAGE_STATUSES = {"complete", "failed", "unexecuted"};
+string[4] WORK_STATUSES = {"complete", "incomplete", "failed", "unexecuted"};
+string[5] PROOF_STATUSES = {"complete", "violated", "incomplete", "failed", "unexecuted"};
+string[ownership_api.LIMIT_COUNT] CATEGORIES = {"D", "R", "P", "G", "H", "T", "E", "W", "V"};
+string[ownership_api.LIMIT_COUNT] SCOPES = {
+    "path", "state", "state", "state", "computation", "call", "function", "computation", "report"};
+
+struct invocation {
+    string entry;
+    string cwd;
+    string@ arguments;
+    string target;
+    string compiler_version;
+    string@ config_keys;
+    string@ config_values;
+    bool check;
+    bool release;
+    bool no_bounds_check;
+}
+
+struct reason {
+    bool present;
+    string stage;
+    string code;
+    ownership_api.source_position source;
+    ownership_api.exhaustion limit;
+}
+
+fn work_status(ownership_source.status value) string {
+    switch (value) {
+    case ownership_source.status.unexecuted: return "unexecuted";
+    case ownership_source.status.complete: return "complete";
+    case ownership_source.status.incomplete: return "incomplete";
+    case ownership_source.status.failed: return "failed";
+    }
+}
+
+fn proof_status(ownership_api.proof_status value) string {
+    if (ownership_api.successful(value)) { return "complete"; }
+    if (value.terminal.present &&
+        value.terminal.reason == ownership_api.incomplete_reason.invalid_input) { return "failed"; }
+    if (value.terminal.present || value.kind == ownership_api.proof_kind.incomplete) {
+        return "incomplete";
+    }
+    if (value.failed) { return "failed"; }
+    return "unexecuted";
+}
+
+fn incomplete_code(ownership_api.incomplete_reason value) string {
+    switch (value) {
+    case ownership_api.incomplete_reason.none: return "source_coverage";
+    case ownership_api.incomplete_reason.missing_transfer: return "missing_transfer";
+    case ownership_api.incomplete_reason.missing_graph: return "missing_graph";
+    case ownership_api.incomplete_reason.missing_ffi: return "missing_ffi";
+    case ownership_api.incomplete_reason.missing_globals: return "missing_globals";
+    case ownership_api.incomplete_reason.missing_renderer: return "missing_renderer";
+    case ownership_api.incomplete_reason.missing_budget: return "missing_budget";
+    case ownership_api.incomplete_reason.missing_events: return "missing_events";
+    case ownership_api.incomplete_reason.work_limit: return "work_limit";
+    case ownership_api.incomplete_reason.report_limit: return "report_limit";
+    case ownership_api.incomplete_reason.missing_capture: return "missing_capture";
+    case ownership_api.incomplete_reason.missing_path: return "missing_path";
+    case ownership_api.incomplete_reason.missing_boundary: return "missing_boundary";
+    case ownership_api.incomplete_reason.missing_correspondence: return "missing_correspondence";
+    case ownership_api.incomplete_reason.source_coverage: return "source_coverage";
+    case ownership_api.incomplete_reason.unknown_effect: return "unknown_effect";
+    case ownership_api.incomplete_reason.invalid_input: return "invalid_input";
+    }
+}
+
+fn proof_reason(string stage, ownership_api.proof_status proof) reason {
+    if (!proof.terminal.present) { return reason{}; }
+    return reason{true, stage, incomplete_code(proof.terminal.reason),
+        proof.terminal.source, proof.terminal.limit};
+}
+
+fn fallback_reason(string stage, string code, ownership_api.source_position source) reason {
+    return reason{.present = true, .stage = stage, .code = code, .source = source};
+}
+
+fn prerequisites(ownership_source.body* row) bool {
+    return row->verification == ownership_source.status.complete;
+}
+
+fn stage_status(ownership_source.body* row, u64 stage) string {
+    if (stage == 0) { return work_status(row->checking); }
+    if (stage == 1) { return work_status(row->lowering); }
+    return work_status(row->verification);
+}
+
+// A producer does not change solver outcomes when later report rendering refuses V.
+fn analysis_status(ownership_source.body* row, u64 stage, u64 field) string {
+    if (!prerequisites(row)) { return "unexecuted"; }
+    if (stage >= 2) { return field == 2 ? "incomplete" : "unexecuted"; }
+    if (stage == 0) {
+        if (field == 0) { return work_status(row->graph_correspondence); }
+        if (field == 1) { return work_status(row->graph_solver); }
+        return proof_status(row->graph_proof);
+    }
+    if (field == 0) { return work_status(row->liveness_correspondence); }
+    if (field == 1) { return work_status(row->liveness_solver); }
+    return proof_status(row->liveness_proof);
+}
+
+fn body_ownership(ownership_source.body* row) string {
+    if (!prerequisites(row)) { return "failed"; }
+    u64 mut status = 0;
+    while (status < PROOF_STATUSES.len) {
+        // Precedence is failed, violated, incomplete, unexecuted, complete.
+        string wanted = status == 0 ? "failed" : status == 1 ? "violated" :
+            status == 2 ? "incomplete" : status == 3 ? "unexecuted" : "complete";
+        u64 mut stage = 0;
+        while (stage < ANALYSIS_COUNT) {
+            if (analysis_status(row, stage, 2) == wanted) { return wanted; }
+            stage += 1;
+        }
+        status += 1;
+    }
+    return "unexecuted";
+}
+
+fn body_reason(ownership_source.body* row) reason {
+    if (!prerequisites(row)) { return reason{}; }
+    reason first = proof_reason(row->first_incomplete_stage ==
+        ownership_source.analysis_stage.graph ? "graph" : "liveness", row->first_incomplete);
+    if (first.present) { return first; }
+    return fallback_reason("local", "missing_producer", row->source);
+}
+
+fn closure_status(ownership_source.context* c, u64 stage) string {
+    if (stage >= 2) { return "incomplete"; }
+    bool mut executed = stage == 0 && c->graph_built;
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        string solver = analysis_status(&c->bodies[i], stage, 1);
+        if (solver == "failed") { return "failed"; }
+        if (solver != "unexecuted") { executed = true; }
+        i += 1;
+    }
+    // The source producers retain an explicit accounting gap.
+    return executed ? "incomplete" : "unexecuted";
+}
+
+fn first_incomplete(ownership_source.context* c) reason {
+    reason graph = proof_reason("graph", c->graph_first_refusal);
+    if (graph.present) { return graph; }
+    u64 mut stage = 0;
+    while (stage < 2) {
+        u64 mut i = 0;
+        while (i < c->bodies.len) {
+            ownership_source.body* row = &c->bodies[i];
+            ownership_api.proof_status value = stage == 0 ? row->graph_proof : row->liveness_proof;
+            reason got = proof_reason(ANALYSES[stage], value);
+            if (got.present) { return got; }
+            i += 1;
+        }
+        if (closure_status(c, stage) == "incomplete") {
+            return fallback_reason(ANALYSES[stage], "source_coverage",
+                ownership_api.source_position{});
+        }
+        stage += 1;
+    }
+    return fallback_reason("local", "missing_producer", ownership_api.source_position{});
+}
+
+fn failure(ownership_source.context* c, i32 exit_status) reason {
+    // An internal failure determines exit 2 even when another body fails lowering.
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        if (c->bodies[i].verification == ownership_source.status.failed) {
+            return fallback_reason("verification", "verification_failure", c->bodies[i].source);
+        }
+        if (prerequisites(&c->bodies[i])) {
+            u64 mut stage = 0;
+            while (stage < 2) {
+                if (analysis_status(&c->bodies[i], stage, 2) == "failed") {
+                    return fallback_reason(ANALYSES[stage], "analysis_failure",
+                        c->bodies[i].source);
+                }
+                stage += 1;
+            }
+        }
+        i += 1;
+    }
+    if (!c->enumeration_complete) {
+        return fallback_reason("checking", "source_error", ownership_api.source_position{});
+    }
+    i = 0;
+    while (i < c->bodies.len) {
+        if (c->bodies[i].lowering == ownership_source.status.failed) {
+            ownership_source.body* row = &c->bodies[i];
+            diag.loc at = row->lowering_failure.at;
+            ownership_api.source_position source = at.file.len > 0 ?
+                ownership_source.source(c, row->source.module, at) : row->source;
+            return fallback_reason("lowering", "unsupported_lowering", source);
+        }
+        i += 1;
+    }
+    if (exit_status == 2) {
+        return fallback_reason("tool", "tool_failure", ownership_api.source_position{});
+    }
+    return reason{};
+}
+
+fn verdict(ownership_source.context* c) i32 {
+    reason failed = failure(c, 1);
+    if (failed.code == "verification_failure" || failed.code == "analysis_failure") { return 2; }
+    if (!c->enumeration_complete || failed.present) { return 1; }
+    u64 mut stage = 0;
+    while (stage < ANALYSIS_COUNT) {
+        if (closure_status(c, stage) != "complete") { return 1; }
+        stage += 1;
+    }
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        if (body_ownership(&c->bodies[i]) != "complete") { return 1; }
+        i += 1;
+    }
+    return 0;
+}
+
+fn location(ownership_source.context* c, ownership_api.source_position source,
+    string entry) diag.loc {
+    if (!source.filename_present) { return diag.loc_make(entry, 1, 1); }
+    string file = modules.file_at(c->modules, cast(source.file, u64));
+    return diag.loc_range(file, source.line, source.col,
+        source.end_line, source.end_col);
+}
+
+fn diagnostic(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    reason why, ownership_source.body mut* charged) void {
+    if (charged != null) {
+        ownership_api.operation_position op = ownership_api.operation_position{
+            .function = charged->key};
+        ownership_api.charge_result permission = ownership_events.charge_rendered(
+            &charged->live.events, op, why.source.filename_present ? why.source : charged->source);
+        if (!permission.allowed) {
+            if (!charged->live.first_refusal.terminal.present) {
+                charged->live.first_refusal = permission.proof;
+            }
+            // Keep the reserved terminal error even when normal rendering refuses V.
+        }
+    }
+    strbuf.str_buf mut message = strbuf.create();
+    defer strbuf.free(&message);
+    strbuf.append(&message, "ownership proof is incomplete (");
+    strbuf.append(&message, why.stage);
+    strbuf.append(&message, ": ");
+    strbuf.append(&message, why.code);
+    strbuf.push(&message, ')');
+    diag.error(diagnostics, location(c, why.source, entry), strbuf.view(&message));
+}
+
+/// Emits one closure error and each separate service work refusal.
+fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry) void {
+    ownership_source.body mut* mut charged = null;
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        if (c->bodies[i].live.initialized) { charged = &c->bodies[i]; break; }
+        i += 1;
+    }
+    diagnostic(c, diagnostics, entry, first_incomplete(c), charged);
+    i = 0;
+    while (i < c->bodies.len) {
+        ownership_source.body mut* row = &c->bodies[i];
+        reason why = proof_reason("liveness", row->live.first_refusal);
+        if (why.present && why.limit.present &&
+            (why.limit.category == ownership_api.limit_category.w ||
+             why.limit.category == ownership_api.limit_category.v)) {
+            diagnostic(c, diagnostics, entry, why, row);
+        }
+        i += 1;
+    }
+}
+
+fn key_string(json.writer mut* j, string key, string value) void {
+    json.json_key(j, key);
+    json.json_str(j, value);
+}
+
+fn key_uint(json.writer mut* j, string key, u64 value) void {
+    json.json_key(j, key);
+    json.json_uint(j, value);
+}
+
+fn key_bool(json.writer mut* j, string key, bool value) void {
+    json.json_key(j, key);
+    json.json_bool(j, value);
+}
+
+fn write_key(json.writer mut* j, ownership_api.function_id key) void {
+    json.json_object_begin(j);
+    key_uint(j, "module", cast(key.declaration.module, u64));
+    key_uint(j, "declaration", cast(key.declaration.declaration, u64));
+    key_uint(j, "instance", cast(key.instance, u64));
+    json.json_object_end(j);
+}
+
+fn write_range(json.writer mut* j, ownership_api.source_position source) void {
+    key_uint(j, "file", cast(source.file, u64));
+    key_uint(j, "line", cast(source.line, u64));
+    key_uint(j, "col", cast(source.col, u64));
+    key_uint(j, "end_line", cast(source.end_line, u64));
+    key_uint(j, "end_col", cast(source.end_col, u64));
+}
+
+fn write_reason(json.writer mut* j, reason why) void {
+    if (!why.present) { json.json_null(j); return; }
+    json.json_object_begin(j);
+    key_string(j, "stage", why.stage);
+    key_string(j, "code", why.code);
+    json.json_key(j, "source");
+    if (why.source.filename_present) {
+        json.json_object_begin(j);
+        write_range(j, why.source);
+        json.json_object_end(j);
+    } else { json.json_null(j); }
+    json.json_key(j, "limit");
+    if (why.limit.present) {
+        json.json_object_begin(j);
+        key_string(j, "category", CATEGORIES[cast(why.limit.category, u64)]);
+        key_uint(j, "used", why.limit.used);
+        key_uint(j, "bound", why.limit.bound);
+        json.json_object_end(j);
+    } else { json.json_null(j); }
+    json.json_object_end(j);
+}
+
+fn write_invocation(json.writer mut* j, invocation* call) void {
+    json.json_object_begin(j);
+    key_string(j, "entry", call->entry);
+    key_string(j, "cwd", call->cwd);
+    json.json_key(j, "argv");
+    json.json_array_begin(j);
+    u64 mut argument = 0;
+    while (argument < call->arguments.len) {
+        json.json_str(j, call->arguments[argument]);
+        argument += 1;
+    }
+    json.json_array_end(j);
+    key_string(j, "target", call->target);
+    json.json_key(j, "configuration");
+    json.json_array_begin(j);
+    u64 mut index = 0;
+    while (index < call->config_keys.len) {
+        string key = call->config_keys[index];
+        json.json_object_begin(j);
+        key_string(j, "key", key);
+        key_string(j, "value", call->config_values[index]);
+        json.json_object_end(j);
+        index += 1;
+    }
+    json.json_array_end(j);
+    json.json_key(j, "mode");
+    json.json_object_begin(j);
+    key_bool(j, "check", call->check);
+    key_bool(j, "release", call->release);
+    key_bool(j, "no_bounds_check", call->no_bounds_check);
+    json.json_object_end(j);
+    json.json_object_end(j);
+}
+
+fn write_files(json.writer mut* j, ownership_source.context* c) void {
+    json.json_array_begin(j);
+    u64 mut i = 0;
+    while (i < modules.file_count(c->modules)) {
+        json.json_object_begin(j);
+        key_uint(j, "id", i);
+        key_string(j, "path", modules.file_at(c->modules, i));
+        key_string(j, "module", c->modules->modules.items[i]->path);
+        json.json_object_end(j);
+        i += 1;
+    }
+    json.json_array_end(j);
+}
+
+fn write_limits(json.writer mut* j, ownership_api.limit_table* limits) void {
+    string[ownership_api.LIMIT_COUNT] names = {"d", "r", "p", "g", "h", "t", "e", "w", "v"};
+    json.json_object_begin(j);
+    key_uint(j, "version", cast(limits->version, u64));
+    u64 mut i = 0;
+    while (i < names.len) {
+        ownership_api.limit_category kind = cast(i, ownership_api.limit_category);
+        key_uint(j, names[i], ownership_limits.bound(limits, kind));
+        i += 1;
+    }
+    json.json_object_end(j);
+}
+
+fn write_count(json.writer mut* j, u64 category, u64 used, u64 bound) void {
+    json.json_object_begin(j);
+    key_string(j, "category", CATEGORIES[category]);
+    key_string(j, "scope", SCOPES[category]);
+    key_uint(j, "used", used);
+    key_uint(j, "bound", bound);
+    json.json_object_end(j);
+}
+
+fn write_meters(json.writer mut* j, ownership_source.context* c) void {
+    json.json_array_begin(j);
+    u64 mut id = 0;
+    if (c->graph_built) {
+        json.json_object_begin(j);
+        key_uint(j, "id", id);
+        key_string(j, "name", "graph_private");
+        json.json_key(j, "owner");
+        json.json_null(j);
+        json.json_key(j, "counts");
+        json.json_array_begin(j);
+        write_count(j, cast(ownership_api.limit_category.w, u64), c->graph.work, c->graph.limits.w);
+        json.json_array_end(j);
+        json.json_key(j, "first_refusal");
+        write_reason(j, proof_reason("graph", c->graph_first_refusal));
+        json.json_object_end(j);
+        id += 1;
+    }
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        ownership_source.body* row = &c->bodies[i];
+        if (!row->live.initialized) { i += 1; continue; }
+        json.json_object_begin(j);
+        key_uint(j, "id", id);
+        key_string(j, "name", "services");
+        json.json_key(j, "owner");
+        write_key(j, row->key);
+        json.json_key(j, "counts");
+        json.json_array_begin(j);
+        u64 mut category = 0;
+        while (category < ownership_api.LIMIT_COUNT) {
+            ownership_api.limit_category kind = cast(category, ownership_api.limit_category);
+            write_count(j, category, ownership_limits.used(&row->live.events.budget.used, kind),
+                ownership_limits.bound(&row->live.events.budget.bounds, kind));
+            category += 1;
+        }
+        json.json_array_end(j);
+        json.json_key(j, "first_refusal");
+        write_reason(j, proof_reason("liveness", row->live.first_refusal));
+        json.json_object_end(j);
+        id += 1;
+        i += 1;
+    }
+    json.json_array_end(j);
+}
+
+fn write_analysis(json.writer mut* j, ownership_source.body* row, u64 stage) void {
+    json.json_object_begin(j);
+    key_string(j, "name", ANALYSES[stage]);
+    key_string(j, "correspondence", analysis_status(row, stage, 0));
+    key_string(j, "solver", analysis_status(row, stage, 1));
+    key_string(j, "proof", analysis_status(row, stage, 2));
+    key_uint(j, "violations", 0);
+    json.json_object_end(j);
+}
+
+fn write_body(json.writer mut* j, ownership_source.body* row) void {
+    json.json_object_begin(j);
+    json.json_key(j, "source");
+    json.json_object_begin(j);
+    write_range(j, row->source);
+    key_uint(j, "instance", 0);
+    key_string(j, "module", row->module->path);
+    key_string(j, "name", row->declaration->name);
+    json.json_object_end(j);
+    json.json_key(j, "key");
+    if (row->keyed) { write_key(j, row->key); } else { json.json_null(j); }
+    u64 mut stage = 0;
+    while (stage < STAGES.len) {
+        key_string(j, STAGES[stage], stage_status(row, stage));
+        stage += 1;
+    }
+    json.json_key(j, "analyses");
+    json.json_array_begin(j);
+    stage = 0;
+    while (stage < ANALYSIS_COUNT) { write_analysis(j, row, stage); stage += 1; }
+    json.json_array_end(j);
+    key_string(j, "ownership", body_ownership(row));
+    key_uint(j, "violations", 0);
+    json.json_key(j, "first_incomplete");
+    write_reason(j, body_reason(row));
+    json.json_object_end(j);
+}
+
+fn counter(json.writer mut* j, ownership_source.context* c, string@ statuses,
+    u64 group, u64 stage, u64 field) void {
+    json.json_object_begin(j);
+    u64 mut status_index = 0;
+    while (status_index < statuses.len) {
+        string wanted = statuses[status_index];
+        u64 mut count = 0;
+        u64 mut i = 0;
+        while (i < c->bodies.len) {
+            ownership_source.body* row = &c->bodies[i];
+            string got = group == 0 ? stage_status(row, stage) : group == 1 ?
+                body_ownership(row) : analysis_status(row, stage, field);
+            if (got == wanted) {
+                if (count == ownership_api.U64_MAX) { panic("ownership report: count overflow"); }
+                count += 1;
+            }
+            i += 1;
+        }
+        key_uint(j, wanted, count);
+        status_index += 1;
+    }
+    json.json_object_end(j);
+}
+
+fn write_totals(json.writer mut* j, ownership_source.context* c) void {
+    json.json_object_begin(j);
+    key_uint(j, "bodies", c->bodies.len);
+    key_uint(j, "violations", 0);
+    u64 mut stage = 0;
+    while (stage < STAGES.len) {
+        json.json_key(j, STAGES[stage]);
+        counter(j, c, STAGE_STATUSES[..], 0, stage, 0);
+        stage += 1;
+    }
+    json.json_key(j, "ownership");
+    counter(j, c, PROOF_STATUSES[..], 1, 0, 0);
+    json.json_key(j, "analyses");
+    json.json_array_begin(j);
+    stage = 0;
+    while (stage < ANALYSIS_COUNT) {
+        json.json_object_begin(j);
+        key_string(j, "name", ANALYSES[stage]);
+        json.json_key(j, "correspondence");
+        counter(j, c, WORK_STATUSES[..], 2, stage, 0);
+        json.json_key(j, "solver");
+        counter(j, c, WORK_STATUSES[..], 2, stage, 1);
+        json.json_key(j, "proof");
+        counter(j, c, PROOF_STATUSES[..], 2, stage, 2);
+        key_uint(j, "violations", 0);
+        json.json_object_end(j);
+        stage += 1;
+    }
+    json.json_array_end(j);
+    json.json_object_end(j);
+}
+
+/// Builds a complete coverage document. It retains no expanded event history.
+fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
+    i32 exit_status) void {
+    json.writer mut j = json.writer{};
+    json.json_init(&j, out);
+    json.json_object_begin(&j);
+    key_string(&j, "kind", "fort-ownership-report");
+    key_uint(&j, "version", 1);
+    key_bool(&j, "complete", true);
+    key_string(&j, "compiler_version", call->compiler_version);
+    json.json_key(&j, "invocation");
+    write_invocation(&j, call);
+    json.json_key(&j, "files");
+    write_files(&j, c);
+    json.json_key(&j, "enumeration");
+    json.json_object_begin(&j);
+    key_bool(&j, "complete", c->enumeration_complete);
+    key_uint(&j, "selected_bodies", c->bodies.len);
+    key_uint(&j, "inactive_declarations", c->inactive_declarations);
+    json.json_object_end(&j);
+    json.json_key(&j, "analyses");
+    json.json_array_begin(&j);
+    u64 mut stage = 0;
+    while (stage < ANALYSIS_COUNT) {
+        json.json_object_begin(&j);
+        key_string(&j, "name", ANALYSES[stage]);
+        key_string(&j, "producer", stage < 2 ? "integrated" : "unavailable");
+        key_string(&j, "status", closure_status(c, stage));
+        json.json_object_end(&j);
+        stage += 1;
+    }
+    json.json_array_end(&j);
+    ownership_api.limit_table limits = ownership_limits.production();
+    json.json_key(&j, "limits");
+    write_limits(&j, &limits);
+    json.json_key(&j, "meters");
+    write_meters(&j, c);
+    json.json_key(&j, "bodies");
+    json.json_array_begin(&j);
+    u64 mut i = 0;
+    while (i < c->bodies.len) { write_body(&j, &c->bodies[i]); i += 1; }
+    json.json_array_end(&j);
+    json.json_key(&j, "totals");
+    write_totals(&j, c);
+    json.json_key(&j, "first_incomplete");
+    write_reason(&j, first_incomplete(c));
+    json.json_key(&j, "failure");
+    write_reason(&j, failure(c, exit_status));
+    key_string(&j, "verdict", exit_status == 0 ? "accepted" : exit_status == 1 ?
+        "rejected" : "failed");
+    key_uint(&j, "exit_status", cast(exit_status, u64));
+    json.json_object_end(&j);
+    strbuf.push(out, '\n');
+}
+
+// Canonicalize the parent too. This detects aliases for destinations that do not exist.
+fn destination(string path, strbuf.str_buf mut* out) bool {
+    if (path.len == 0 || str.index_of(path, '\0') >= 0) { return false; }
+    i64 slash = str.last_index_of(path, '/');
+    string parent = slash < 0 ? "." : slash == 0 ? "/" : path[..cast(slash, u64)];
+    string name = slash < 0 ? path : path[cast(slash, u64) + 1..];
+    if (name.len == 0) { return false; }
+    if (os.real_path(path, out)) { return true; }
+    if (!os.real_path(parent, out)) { return false; }
+    if (strbuf.view(out) != "/") { strbuf.push(out, '/'); }
+    strbuf.append(out, name);
+    return true;
+}
+
+/// Rejects aliases for loaded inputs and the selected compiler output.
+fn path_allowed(string path, string entry, string output, modules.module_set* set) bool {
+    strbuf.str_buf mut selected = strbuf.create();
+    defer strbuf.free(&selected);
+    if (!destination(path, &selected)) { return false; }
+    strbuf.str_buf mut other = strbuf.create();
+    defer strbuf.free(&other);
+    if (destination(entry, &other) && strbuf.view(&selected) == strbuf.view(&other)) {
+        return false;
+    }
+    strbuf.clear(&other);
+    if (destination(output, &other) && strbuf.view(&selected) == strbuf.view(&other)) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < modules.file_count(set)) {
+        strbuf.clear(&other);
+        if (destination(modules.file_at(set, i), &other) &&
+            strbuf.view(&selected) == strbuf.view(&other)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+/// Publishes only after writing and closing a new adjacent temporary file.
+fn publish(string path, u8@ bytes) bool {
+    strbuf.str_buf mut temporary = strbuf.create();
+    defer strbuf.free(&temporary);
+    strbuf.append(&temporary, path);
+    strbuf.append(&temporary, ".tmp.XXXXXX");
+    char mut@ own temp_path = str.to_cstr(strbuf.view(&temporary));
+    defer del(temp_path);
+    char mut@ own output_path = str.to_cstr(path);
+    defer del(output_path);
+    i32 fd = mkstemp(temp_path.ptr);
+    if (fd < 0) { return false; }
+    bool written = io.write_all(fd, bytes);
+    bool closed = io.close(fd);
+    if (written && closed && rename(temp_path.ptr, output_path.ptr) == 0) { return true; }
+    libc.unlink(temp_path.ptr);
+    return false;
+}

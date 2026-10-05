@@ -18,6 +18,8 @@ import index;
 import json;
 import lexer;
 import modules;
+import ownership_report;
+import ownership_source;
 import parser;
 import prim;
 import session;
@@ -110,6 +112,9 @@ struct options {
     bool release;         // --release
     bool no_bounds_check; // --no-bounds-check
     bool check; // --check: the front end alone
+    bool ownership_check; // Request complete closure proof.
+    bool have_ownership_report;
+    string ownership_report; // The last --ownership-report path.
     bool json; // --json, the document on stdout
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
@@ -160,6 +165,9 @@ fn help() void {
     println("  --cfg <list>       set key=value pairs; repeatable");
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            run the front end only and stop; emit nothing");
+    println("  --ownership-check  request complete ownership proof");
+    println("  --ownership-report <file>");
+    println("                     write coverage JSON; needs --ownership-check");
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
@@ -310,6 +318,8 @@ fn parse_flag(options mut* opts, string arg) bool {
         opts->no_bounds_check = true;
     } else if (arg == "--check") {
         opts->check = true;
+    } else if (arg == "--ownership-check") {
+        opts->ownership_check = true;
     } else if (arg == "--json") {
         opts->json = true;
     } else if (arg == "--index") {
@@ -355,8 +365,9 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     bool is_target = arg == "--target";
     bool is_cfg = arg == "--cfg";
     bool is_cc_arg = arg == "-Xcc";
+    bool is_report = arg == "--ownership-report";
     if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cfg
-        && !is_cc_arg) {
+        && !is_cc_arg && !is_report) {
         return false;
     }
     string mut value = "";
@@ -380,6 +391,9 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
         if (!parse_cfg(opts, value)) {
             *ok = false;
         }
+    } else if (is_report) {
+        opts->have_ownership_report = true;
+        opts->ownership_report = value;
     } else {
         containers.str_push(&opts->cc_args, value);
     }
@@ -442,6 +456,14 @@ fn parse(options mut* opts, string@ args) i32 {
     }
     if (!opts->have_entry) {
         usage_error("no entry file");
+        return PARSE_ERROR;
+    }
+    if (opts->have_ownership_report && !opts->ownership_check) {
+        usage_error("--ownership-report requires --ownership-check");
+        return PARSE_ERROR;
+    }
+    if (opts->ownership_check && (opts->tokens || opts->ast || opts->fir || opts->fir_test)) {
+        usage_error("--ownership-check does not combine with token, AST or FIR inspection");
         return PARSE_ERROR;
     }
     if (opts->tokens && (opts->check || opts->json || opts->index)) {
@@ -1498,7 +1520,7 @@ fn fir_test_entry(options* opts, string program) i32 {
 
 // Runs the front end, then the available build or check passes. --check and --fir write no
 // file, so they take any target form that the compiler accepts, as a check does.
-fn compile_entry(options* opts, string program) i32 {
+fn compile_entry(options* opts, string program, string@ arguments) i32 {
     bool front_only = opts->check || opts->fir;
     if (front_only && !target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
@@ -1520,48 +1542,128 @@ fn compile_entry(options* opts, string program) i32 {
     analysis mut an = analysis_create(&s);
     bool mut analysis_live = true;
     defer analysis_release(&an, &analysis_live);
-    i32 status = front_end(&s, opts, program, &an);
+    i32 mut status = front_end(&s, opts, program, &an);
+    ownership_source.context mut proof = ownership_source.context{};
+    defer ownership_source.free(&proof);
+    string out_path = opts->have_output ? opts->output : default_output(&p, opts);
+    if (opts->ownership_check && status != EXIT_USAGE) {
+        if (opts->have_ownership_report && !ownership_report.path_allowed(
+            opts->ownership_report, opts->entry, out_path, &an.set)) {
+            error("ownership report path names an input, an output, or an invalid destination");
+            return EXIT_USAGE;
+        }
+        ownership_source.prepare(&proof, &an.ck, &an.set, status == EXIT_OK);
+        ownership_source.analyze(&proof);
+        i32 selected = ownership_report.verdict(&proof);
+        ownership_report.diagnose(&proof, session.diags(&s), opts->entry);
+        if (selected == EXIT_USAGE) {
+            error("internal error: ownership source analysis failed");
+        }
+        status = selected;
+    }
+    if (status == EXIT_OK && !opts->check) {
+        status = compile_checked(&s, opts, &an, &analysis_live, &p);
+    }
+    if (opts->ownership_check && opts->have_ownership_report && proof.prepared) {
+        if (!write_ownership_report(opts, arguments, &proof, &s, status)) {
+            error("cannot write ownership report");
+            return EXIT_USAGE;
+        }
+    }
     if (opts->check && opts->json && (status == EXIT_OK || status == EXIT_COMPILE_ERROR)) {
-        // the document answers for both verdicts, so it goes first
         check_document(&s, opts, &an, &p);
-        return status;
     }
-    if (status != EXIT_OK) {
-        return status;
+    return status;
+}
+
+// Writes configuration in key order. The session supplies effective target values.
+fn report_configuration(session.session* s, options* opts, containers.str_vec mut* keys,
+    containers.str_vec mut* values) void {
+    containers.str_push(keys, "target_os");
+    containers.str_push(keys, "target_arch");
+    containers.str_push(keys, "target_abi");
+    u64 mut i = 0;
+    while (i < opts->cfg_keys.len) {
+        containers.str_push(keys, containers.str_at(&opts->cfg_keys, i));
+        i += 1;
     }
-    if (opts->check) {
-        // --check stops after the front end, no module emitted
-        return EXIT_OK;
+    i = 1;
+    while (i < keys->len) {
+        string key = containers.str_at(keys, i);
+        u64 mut at = i;
+        while (at > 0 && str.cmp(containers.str_at(keys, at - 1), key) > 0) {
+            containers.str_set(keys, at, containers.str_at(keys, at - 1));
+            at -= 1;
+        }
+        containers.str_set(keys, at, key);
+        i += 1;
     }
+    i = 0;
+    while (i < keys->len) {
+        string mut value = "";
+        if (!session.config_get(s, containers.str_at(keys, i), &value)) {
+            panic("ownership report: effective configuration is absent");
+        }
+        containers.str_push(values, value);
+        i += 1;
+    }
+}
+
+fn write_ownership_report(options* opts, string@ arguments, ownership_source.context* proof,
+    session.session* s, i32 status) bool {
+    char[modules.CWD_CAP] mut cwd = {};
+    if (libc.getcwd(&cwd[0], cwd.len) == null) { return false; }
+    containers.str_vec mut keys = containers.str_create();
+    defer containers.str_free(&keys);
+    containers.str_vec mut values = containers.str_create();
+    defer containers.str_free(&values);
+    report_configuration(s, opts, &keys, &values);
+    strbuf.str_buf mut version = strbuf.create();
+    defer strbuf.free(&version);
+    strbuf.append(&version, "fort ");
+    strbuf.append(&version, VERSION);
+    ownership_report.invocation call = ownership_report.invocation{
+        opts->entry, str.from_cstr(&cwd[0]), arguments, opts->target, strbuf.view(&version),
+        keys.items[..keys.len], values.items[..values.len], opts->check, opts->release,
+        opts->no_bounds_check};
+    strbuf.str_buf mut report = strbuf.create();
+    defer strbuf.free(&report);
+    ownership_report.build(&report, proof, &call, status);
+    return ownership_report.publish(opts->ownership_report, strbuf.bytes(&report));
+}
+
+// Selected analysis precedes this build pipeline and its mode transformations.
+fn compile_checked(session.session mut* s, options* opts, analysis mut* an,
+    bool mut* analysis_live, containers.pool mut* p) i32 {
     if (opts->fir_report) {
         // --fir-verify-report stops before the emitter, as --fir does
-        return fir_report_entry(&an, opts);
+        return fir_report_entry(an, opts);
     }
     if (opts->fir) {
         // --fir stops before the emitter
-        return fir_entry(&an, opts);
+        return fir_entry(an, opts);
     }
     string mut out_path = opts->output;
     if (!opts->have_output) {
-        out_path = default_output(&p, opts);
+        out_path = default_output(p, opts);
     }
     if (opts->emit_ir) {
         // -S writes the module to the output and stops, so it needs no
         // temporary.
-        return emit_module(&s, opts, &an, out_path);
+        return emit_module(s, opts, an, out_path);
     }
     string mut parent = TMP_DIR_DEFAULT;
     i32 mut failure = 0;
-    string dir = make_temp_dir(&p, &parent, &failure);
+    string dir = make_temp_dir(p, &parent, &failure);
     if (dir.len == 0) {
         error_path("cannot create a temporary directory in", parent,
                    str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
-    string ir_path = join_path(&p, dir, entry_base(opts->entry), IR_SUFFIX);
-    i32 mut built = emit_module(&s, opts, &an, ir_path);
+    string ir_path = join_path(p, dir, entry_base(opts->entry), IR_SUFFIX);
+    i32 mut built = emit_module(s, opts, an, ir_path);
     // Release analysis storage before fork duplicates the process page tables.
-    analysis_release(&an, &analysis_live);
+    if (!opts->ownership_check) { analysis_release(an, analysis_live); }
     if (built == EXIT_OK) {
         built = run_cc(opts, ir_path, out_path);
     }
@@ -1598,5 +1700,5 @@ fn run(string@ args) i32 {
     if (opts.fir_test) {
         return fir_test_entry(&opts, args[0]);
     }
-    return compile_entry(&opts, args[0]);
+    return compile_entry(&opts, args[0], args[1..]);
 }
