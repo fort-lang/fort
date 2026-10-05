@@ -1,0 +1,1092 @@
+/// Constructs bounded canonical alternatives for compiler ownership analysis.
+import ownership_api;
+import ownership_keys;
+
+u64 U64_MAX = 18446744073709551615;
+u64 MAX_VARIABLES = 128;
+
+enum component_kind { unsigned_number, signed_number, entity }
+enum predicate_kind { opaque, equality, distinctness, membership }
+enum boolean_operation { both, either }
+enum failure_kind { none, bytes, variables, nodes, rows, proofs, arithmetic }
+enum contradiction_rule { equal_distinct, empty_membership, disjoint_membership }
+struct proof_literal { u64 variable_index; bool positive; }
+struct contradiction { contradiction_rule rule; u64 first; u64 second; proof_literal@ premises; }
+struct construction_failure { failure_kind kind; u64 used; u64 bound; u64 attempted; }
+
+struct key_component {
+    component_kind kind;
+    u64 unsigned_value;
+    i64 signed_value;
+    ownership_api.entity_id entity_value;
+}
+struct semantic_key { key_component@ parts; }
+struct binding { u32 family; semantic_key subject; semantic_key payload; }
+struct variable {
+    semantic_key identity;
+    predicate_kind kind;
+    semantic_key left;
+    semantic_key right;
+    u64 lo;
+    u64 hi;
+}
+struct storage_limits { u64 bytes; u64 variables; u64 nodes; u64 rows; u64 proofs; }
+struct query {
+    ownership_api.services* services;
+    ownership_api.work_kind work;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    storage_limits limits;
+    u64 other_retained_bytes;
+}
+struct node { u64 variable_index; u64 low; u64 high; }
+struct row { binding@ bindings; u64 condition; }
+struct block {
+    key_component mut@ own components;
+    binding mut@ own bindings;
+    proof_literal mut@ own premises;
+    block mut* own next;
+}
+struct map {
+    variable mut@ own variables;
+    u64 variables_len;
+    node mut@ own nodes;
+    u64 nodes_len;
+    row mut@ own rows;
+    u64 rows_len;
+    contradiction mut@ own contradictions;
+    u64 contradictions_len;
+    block mut* own blocks;
+    u64 bytes;
+    u64 external_bytes;
+    u64 peak_bytes;
+    construction_failure failure;
+    ownership_api.proof_status proof;
+}
+struct condition { map store; u64 root; }
+struct candidate { map prospective; bool exact; u64 g; }
+struct permission { bool allowed; u64 g; }
+struct comparison { ownership_api.proof_status proof; bool equal; }
+struct measurement {
+    ownership_api.proof_status proof;
+    construction_failure failure;
+    bool exact;
+    u64 g;
+}
+struct installation {
+    ownership_api.proof_status proof;
+    construction_failure failure;
+    bool applied;
+}
+
+fn defaults() storage_limits { return storage_limits{16777216, MAX_VARIABLES, 8192, 1024, 8192}; }
+fn empty() map {
+    map mut out = map{};
+    out.proof.kind = ownership_api.proof_kind.complete;
+    return out;
+}
+fn successful(map* input) bool { return ownership_api.successful(input->proof); }
+fn invalid(map mut* output, query* req) void {
+    if (successful(output)) {
+        output->proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+            req->operation, req->source);
+    }
+}
+fn limited(map mut* output, failure_kind kind, u64 used, u64 bound, u64 attempted,
+    query* req) void {
+    if (successful(output)) {
+        output->proof = ownership_api.incomplete(ownership_api.incomplete_reason.source_coverage,
+            req->operation, req->source);
+        output->failure = construction_failure{kind, used, bound, attempted};
+    }
+}
+fn step(map mut* output, query* req) bool {
+    if (!successful(output)) { return false; }
+    ownership_api.charge_result charged = ownership_api.charge_work(req->services, req->work,
+        req->operation, req->source);
+    if (!charged.allowed) { output->proof = charged.proof; return false; }
+    return true;
+}
+fn free(map mut* input) void {
+    block mut* own mut item = move(input->blocks);
+    while (item != null) {
+        block mut* own next = move(item->next);
+        del(item->components);
+        del(item->bindings);
+        del(item->premises);
+        del(item);
+        item = move(next);
+    }
+    del(input->variables);
+    del(input->nodes);
+    del(input->rows);
+    del(input->contradictions);
+    *input = map{};
+}
+fn free_condition(condition mut* input) void { free(&input->store); input->root = 0; }
+fn free_candidate(candidate mut* input) void {
+    free(&input->prospective);
+    input->exact = false;
+    input->g = 0;
+}
+fn discard(map mut* output) void {
+    ownership_api.proof_status proof = output->proof;
+    construction_failure failure = output->failure;
+    u64 peak = output->peak_bytes;
+    free(output);
+    output->proof = proof;
+    output->failure = failure;
+    output->peak_bytes = peak;
+}
+fn start(query* req) map {
+    map mut out = empty();
+    out.external_bytes = req->other_retained_bytes;
+    out.peak_bytes = req->other_retained_bytes;
+    if (req->other_retained_bytes > req->limits.bytes) {
+        limited(&out, failure_kind.bytes, 0, req->limits.bytes, req->other_retained_bytes, req);
+    }
+    if (req->services == null || req->limits.bytes == 0 || req->limits.variables == 0 ||
+        req->limits.variables > MAX_VARIABLES || req->limits.nodes == 0 || req->limits.rows == 0) {
+        invalid(&out, req);
+    }
+    return out;
+}
+fn allocate(map mut* output, u64 count, u64 width, query* req) bool {
+    if (!step(output, req)) { return false; }
+    if (width == 0) { invalid(output, req); return false; }
+    if (count > U64_MAX / width) {
+        limited(output, failure_kind.arithmetic, count, U64_MAX / width, count, req);
+        return false;
+    }
+    u64 bytes = count == 0 ? 1 : count * width;
+    if (bytes > req->limits.bytes || output->external_bytes > req->limits.bytes - bytes ||
+        output->bytes > req->limits.bytes - bytes - output->external_bytes) {
+        limited(output, failure_kind.bytes, output->bytes + output->external_bytes,
+            req->limits.bytes, bytes, req);
+        return false;
+    }
+    output->bytes += bytes;
+    u64 total = output->bytes + output->external_bytes;
+    if (total > output->peak_bytes) { output->peak_bytes = total; }
+    return true;
+}
+fn keep(map mut* output, block mut* own item) void {
+    item->next = move(output->blocks);
+    output->blocks = move(item);
+}
+fn component_valid(key_component value) bool {
+    ownership_api.entity_id absent = ownership_api.entity_id{};
+    switch (value.kind) {
+    case component_kind.unsigned_number:
+        return value.signed_value == 0 && ownership_keys.entity(value.entity_value, absent) == 0;
+    case component_kind.signed_number:
+        return value.unsigned_value == 0 && ownership_keys.entity(value.entity_value, absent) == 0;
+    case component_kind.entity:
+        return value.unsigned_value == 0 && value.signed_value == 0 &&
+            value.entity_value.kind != ownership_api.entity_kind.none;
+    }
+}
+fn key_valid(map mut* output, semantic_key input, query* req) bool {
+    if (!step(output, req)) { return false; }
+    if (input.parts.len == 0) { invalid(output, req); return false; }
+    u64 mut i = 0;
+    while (i < input.parts.len) {
+        if (!step(output, req)) { return false; }
+        if (!component_valid(input.parts[i])) { invalid(output, req); return false; }
+        i += 1;
+    }
+    return true;
+}
+fn key_order(map mut* output, semantic_key left, semantic_key right, query* req) i32 {
+    u64 mut i = 0;
+    while (i < left.parts.len && i < right.parts.len) {
+        if (!step(output, req)) { return 0; }
+        key_component a = left.parts[i];
+        key_component b = right.parts[i];
+        if (a.kind != b.kind) { return cast(a.kind, u32) < cast(b.kind, u32) ? -1 : 1; }
+        switch (a.kind) {
+        case component_kind.unsigned_number:
+            if (a.unsigned_value != b.unsigned_value) {
+                return a.unsigned_value < b.unsigned_value ? -1 : 1;
+            }
+            break;
+        case component_kind.signed_number:
+            if (a.signed_value != b.signed_value) {
+                return a.signed_value < b.signed_value ? -1 : 1;
+            }
+            break;
+        case component_kind.entity:
+            i32 order = ownership_keys.entity(a.entity_value, b.entity_value);
+            if (order != 0) { return order; }
+            break;
+        }
+        i += 1;
+    }
+    if (!step(output, req)) { return 0; }
+    if (left.parts.len == right.parts.len) { return 0; }
+    return left.parts.len < right.parts.len ? -1 : 1;
+}
+fn copy_key(map mut* output, semantic_key input, query* req) semantic_key {
+    semantic_key mut result = semantic_key{};
+    if (!key_valid(output, input, req) ||
+        !allocate(output, 1, sizeof(block), req) ||
+        !allocate(output, input.parts.len, sizeof(key_component), req)) { return result; }
+    block mut* own item = new(block);
+    item->components = new(key_component, input.parts.len);
+    u64 mut i = 0;
+    while (i < input.parts.len) {
+        if (!step(output, req)) { del(item->components); del(item); return result; }
+        item->components[i] = input.parts[i];
+        i += 1;
+    }
+    result.parts = item->components[..];
+    keep(output, move(item));
+    return result;
+}
+fn subject_order(map mut* output, binding left, binding right, query* req) i32 {
+    if (!step(output, req)) { return 0; }
+    if (left.family != right.family) { return left.family < right.family ? -1 : 1; }
+    return key_order(output, left.subject, right.subject, req);
+}
+fn bindings_equal(map mut* output, binding@ left, binding@ right, query* req) bool {
+    if (!step(output, req)) { return false; }
+    if (left.len != right.len) { return false; }
+    u64 mut i = 0;
+    while (i < left.len) {
+        if (!step(output, req) || subject_order(output, left[i], right[i], req) != 0 ||
+            key_order(output, left[i].payload, right[i].payload, req) != 0) { return false; }
+        i += 1;
+    }
+    return successful(output);
+}
+fn copied_bindings(map mut* output, binding@ input, query* req) binding@ {
+    binding@ none = {};
+    if (input.len == 0) { return none; }
+    if (!allocate(output, 1, sizeof(block), req) ||
+        !allocate(output, input.len, sizeof(binding), req)) { return none; }
+    block mut* own item = new(block);
+    item->bindings = new(binding, input.len);
+    u64 mut used = 0;
+    u64 mut i = 0;
+    while (i < input.len && successful(output)) {
+        if (!step(output, req)) { break; }
+        binding mut value = input[i];
+        if (!key_valid(output, value.subject, req) || !key_valid(output, value.payload, req)) {
+            break;
+        }
+        u64 mut position = 0;
+        while (position < used) {
+            i32 order = subject_order(output, item->bindings[position], value, req);
+            if (!successful(output) || order >= 0) { break; }
+            position += 1;
+        }
+        if (!successful(output)) { break; }
+        if (position < used && subject_order(output, item->bindings[position], value, req) == 0) {
+            if (key_order(output, item->bindings[position].payload, value.payload, req) != 0) {
+                invalid(output, req);
+            }
+            i += 1;
+            continue;
+        }
+        value.subject = copy_key(output, value.subject, req);
+        value.payload = copy_key(output, value.payload, req);
+        if (!successful(output)) { break; }
+        u64 mut tail = used;
+        while (tail > position) {
+            if (!step(output, req)) { break; }
+            item->bindings[tail] = item->bindings[tail - 1];
+            tail -= 1;
+        }
+        if (!successful(output)) { break; }
+        item->bindings[position] = value;
+        used += 1;
+        i += 1;
+    }
+    if (!successful(output)) { del(item->bindings); del(item); return none; }
+    binding@ result = item->bindings[0..used];
+    keep(output, move(item));
+    return result;
+}
+fn variable_order(map mut* output, variable left, variable right, query* req) i32 {
+    if (!step(output, req)) { return 0; }
+    if (left.kind != right.kind) { return cast(left.kind, u32) < cast(right.kind, u32) ? -1 : 1; }
+    if (left.kind == predicate_kind.opaque) {
+        return key_order(output, left.identity, right.identity, req);
+    }
+    i32 mut order = key_order(output, left.left, right.left, req);
+    if (order != 0) { return order; }
+    if (left.kind != predicate_kind.membership) {
+        return key_order(output, left.right, right.right, req);
+    }
+    if (!step(output, req)) { return 0; }
+    if (left.lo != right.lo) { return left.lo < right.lo ? -1 : 1; }
+    if (left.hi != right.hi) { return left.hi < right.hi ? -1 : 1; }
+    return 0;
+}
+fn declare(map mut* output, variable input, query* req) u64 {
+    if (!key_valid(output, input.identity, req)) { return 0; }
+    variable mut value = input;
+    if ((value.kind != predicate_kind.membership && (value.lo != 0 || value.hi != 0)) ||
+        (value.kind == predicate_kind.opaque &&
+            (value.left.parts.len != 0 || value.right.parts.len != 0)) ||
+        (value.kind == predicate_kind.membership && value.right.parts.len != 0)) {
+        invalid(output, req);
+        return 0;
+    }
+    if (value.kind != predicate_kind.opaque) {
+        if (!key_valid(output, value.left, req)) { return 0; }
+        if (value.kind != predicate_kind.membership) {
+            if (!key_valid(output, value.right, req)) { return 0; }
+            if (key_order(output, value.left, value.right, req) > 0) {
+                semantic_key swap = value.left;
+                value.left = value.right;
+                value.right = swap;
+            }
+        }
+    }
+    u64 mut same = U64_MAX;
+    bool mut declared = false;
+    u64 mut i = 0;
+    while (i < output->variables_len) {
+        if (!step(output, req)) { return 0; }
+        variable old = output->variables[i];
+        bool meaning = variable_order(output, old, value, req) == 0;
+        if (key_order(output, old.identity, value.identity, req) == 0) {
+            if (!meaning) { invalid(output, req); return 0; }
+            declared = true;
+        }
+        if (meaning && same == U64_MAX) { same = i; }
+        i += 1;
+    }
+    if (!successful(output)) { return 0; }
+    if (declared) { return same; }
+    if (output->variables_len >= req->limits.variables) {
+        limited(output, failure_kind.variables, output->variables_len, req->limits.variables,
+            output->variables_len + 1, req);
+        return 0;
+    }
+    u64 need = output->variables_len + 1;
+    if (!allocate(output, need, sizeof(variable), req)) { return 0; }
+    variable mut@ own values = new(variable, need);
+    i = 0;
+    while (i < output->variables_len) {
+        if (!step(output, req)) { del(values); return 0; }
+        values[i] = output->variables[i];
+        i += 1;
+    }
+    value.identity = copy_key(output, value.identity, req);
+    if (value.kind != predicate_kind.opaque) {
+        value.left = copy_key(output, value.left, req);
+        if (value.kind != predicate_kind.membership) {
+            value.right = copy_key(output, value.right, req);
+        }
+    }
+    if (!successful(output)) { del(values); return 0; }
+    values[output->variables_len] = value;
+    output->bytes -= output->variables.len * sizeof(variable);
+    del(output->variables);
+    output->variables = move(values);
+    output->variables_len = need;
+    return same == U64_MAX ? need - 1 : same;
+}
+fn intern(map mut* output, u64 index, u64 low, u64 high, query* req) u64 {
+    if (!step(output, req)) { return 0; }
+    if (low == high) { return low; }
+    u64 mut i = 0;
+    while (i < output->nodes_len) {
+        if (!step(output, req)) { return 0; }
+        node old = output->nodes[i];
+        if (old.variable_index == index && old.low == low && old.high == high) { return i + 2; }
+        i += 1;
+    }
+    if (output->nodes_len >= req->limits.nodes || output->nodes_len > U64_MAX - 3) {
+        limited(output, failure_kind.nodes, output->nodes_len, req->limits.nodes,
+            output->nodes_len == U64_MAX ? U64_MAX : output->nodes_len + 1, req);
+        return 0;
+    }
+    u64 need = output->nodes_len + 1;
+    if (!allocate(output, need, sizeof(node), req)) { return 0; }
+    node mut@ own values = new(node, need);
+    i = 0;
+    while (i < output->nodes_len) {
+        if (!step(output, req)) { del(values); return 0; }
+        values[i] = output->nodes[i];
+        i += 1;
+    }
+    values[output->nodes_len] = node{index, low, high};
+    output->bytes -= output->nodes.len * sizeof(node);
+    del(output->nodes);
+    output->nodes = move(values);
+    output->nodes_len = need;
+    return need + 1;
+}
+fn apply(map mut* output, boolean_operation operation, u64 left, u64 right, query* req) u64 {
+    if (!step(output, req)) { return 0; }
+    if (operation == boolean_operation.both) {
+        if (left == 0 || right == 0) { return 0; }
+        if (left == 1) { return right; }
+        if (right == 1 || left == right) { return left; }
+    } else {
+        if (left == 1 || right == 1) { return 1; }
+        if (left == 0) { return right; }
+        if (right == 0 || left == right) { return left; }
+    }
+    node a = output->nodes[left - 2];
+    node b = output->nodes[right - 2];
+    i32 order = variable_order(output, output->variables[a.variable_index],
+        output->variables[b.variable_index], req);
+    if (!successful(output)) { return 0; }
+    u64 index = order <= 0 ? a.variable_index : b.variable_index;
+    u64 low = apply(output, operation, order <= 0 ? a.low : left,
+        order >= 0 ? b.low : right, req);
+    u64 high = apply(output, operation, order <= 0 ? a.high : left,
+        order >= 0 ? b.high : right, req);
+    if (!successful(output)) { return 0; }
+    return intern(output, index, low, high, req);
+}
+fn invert(map mut* output, u64 root, query* req) u64 {
+    if (!step(output, req)) { return 0; }
+    if (root < 2) { return 1 - root; }
+    node current = output->nodes[root - 2];
+    u64 low = invert(output, current.low, req);
+    u64 high = invert(output, current.high, req);
+    return intern(output, current.variable_index, low, high, req);
+}
+fn import_root(map mut* output, map* input, u64 root, query* req) u64 {
+    if (!step(output, req)) { return 0; }
+    if (!successful(input) || root > input->nodes_len + 1) { invalid(output, req); return 0; }
+    if (root < 2) { return root; }
+    node current = input->nodes[root - 2];
+    u64 index = declare(output, input->variables[current.variable_index], req);
+    u64 low = import_root(output, input, current.low, req);
+    u64 high = import_root(output, input, current.high, req);
+    if (!successful(output)) { return 0; }
+    return intern(output, index, low, high, req);
+}
+fn retain_contradiction(map mut* output, contradiction_rule rule, u64 mut first, u64 mut second,
+    proof_literal@ premises, query* req) void {
+    if (!step(output, req)) { return; }
+    if (rule == contradiction_rule.disjoint_membership &&
+        variable_order(output, output->variables[first], output->variables[second], req) > 0) {
+        u64 swap = first;
+        first = second;
+        second = swap;
+    }
+    if (!allocate(output, 1, sizeof(block), req) ||
+        !allocate(output, premises.len, sizeof(proof_literal), req)) { return; }
+    block mut* own item = new(block);
+    item->premises = new(proof_literal, premises.len);
+    u64 mut i = 0;
+    while (i < premises.len) {
+        if (!step(output, req)) { del(item->premises); del(item); return; }
+        item->premises[i] = premises[i];
+        i += 1;
+    }
+    // Canonical proof records keep repeated joins from accumulating copied explanations.
+    i = 1;
+    while (i < item->premises.len && successful(output)) {
+        if (!step(output, req)) { break; }
+        proof_literal value = item->premises[i];
+        u64 mut position = i;
+        while (position > 0 && successful(output)) {
+            if (!step(output, req)) { break; }
+            proof_literal old = item->premises[position - 1];
+            if (variable_order(output, output->variables[old.variable_index],
+                output->variables[value.variable_index], req) <= 0) { break; }
+            item->premises[position] = old;
+            position -= 1;
+        }
+        item->premises[position] = value;
+        i += 1;
+    }
+    i = 0;
+    while (i < output->contradictions_len && successful(output)) {
+        if (!step(output, req)) { break; }
+        contradiction old = output->contradictions[i];
+        bool mut same = old.rule == rule && old.first == first && old.second == second &&
+            old.premises.len == item->premises.len;
+        u64 mut j = 0;
+        while (j < item->premises.len && same) {
+            if (!step(output, req)) { break; }
+            same = old.premises[j].variable_index == item->premises[j].variable_index &&
+                old.premises[j].positive == item->premises[j].positive;
+            j += 1;
+        }
+        if (same && successful(output)) {
+            output->bytes -= sizeof(block) +
+                (item->premises.len == 0 ? 1 : item->premises.len * sizeof(proof_literal));
+            del(item->premises);
+            del(item);
+            return;
+        }
+        i += 1;
+    }
+    if (!successful(output)) { del(item->premises); del(item); return; }
+    if (output->contradictions_len >= req->limits.proofs || output->contradictions_len == U64_MAX) {
+        limited(output, failure_kind.proofs, output->contradictions_len, req->limits.proofs,
+            output->contradictions_len == U64_MAX ? U64_MAX : output->contradictions_len + 1, req);
+        del(item->premises);
+        del(item);
+        return;
+    }
+    u64 need = output->contradictions_len + 1;
+    if (!allocate(output, need, sizeof(contradiction), req)) {
+        del(item->premises);
+        del(item);
+        return;
+    }
+    contradiction mut@ own records = new(contradiction, need);
+    i = 0;
+    while (i < output->contradictions_len) {
+        if (!step(output, req)) { del(records); del(item->premises); del(item); return; }
+        records[i] = output->contradictions[i];
+        i += 1;
+    }
+    records[output->contradictions_len] = contradiction{rule, first, second, item->premises[..]};
+    output->bytes -= output->contradictions.len * sizeof(contradiction);
+    del(output->contradictions);
+    output->contradictions = move(records);
+    output->contradictions_len = need;
+    keep(output, move(item));
+}
+fn record_path(map mut* output, contradiction_rule rule, u64 first, u64 second,
+    i8@ literals, query* req) void {
+    if (!allocate(output, literals.len, sizeof(proof_literal), req)) { return; }
+    proof_literal mut@ own premises = new(proof_literal, literals.len);
+    u64 mut used = 0;
+    u64 mut i = 0;
+    while (i < literals.len) {
+        if (!step(output, req)) { break; }
+        if (literals[i] >= 0) { premises[used] = proof_literal{i, literals[i] == 1}; used += 1; }
+        i += 1;
+    }
+    retain_contradiction(output, rule, first, second, premises[0..used], req);
+    output->bytes -= literals.len == 0 ? 1 : literals.len * sizeof(proof_literal);
+    del(premises);
+}
+fn import_proofs(map mut* output, map* input, query* req) void {
+    u64 mut i = 0;
+    while (i < input->contradictions_len && successful(output)) {
+        if (!step(output, req)) { return; }
+        contradiction record = input->contradictions[i];
+        if (!allocate(output, record.premises.len, sizeof(proof_literal), req)) { return; }
+        proof_literal mut@ own premises = new(proof_literal, record.premises.len);
+        u64 mut j = 0;
+        while (j < record.premises.len && successful(output)) {
+            if (!step(output, req)) { break; }
+            proof_literal mut value = record.premises[j];
+            value.variable_index = declare(output, input->variables[value.variable_index], req);
+            premises[j] = value;
+            j += 1;
+        }
+        u64 first = declare(output, input->variables[record.first], req);
+        u64 second = record.second == U64_MAX ? U64_MAX :
+            declare(output, input->variables[record.second], req);
+        retain_contradiction(output, record.rule, first, second, premises[..], req);
+        output->bytes -= record.premises.len == 0 ? 1 : record.premises.len * sizeof(proof_literal);
+        del(premises);
+        i += 1;
+    }
+}
+fn include_input(map mut* output, map* input, query* req) bool {
+    if (!step(output, req)) { return false; }
+    if (!successful(input)) { output->proof = input->proof; return false; }
+    if (input->variables_len > input->variables.len || input->nodes_len > input->nodes.len ||
+        input->rows_len > input->rows.len ||
+        input->contradictions_len > input->contradictions.len
+            || input->variables_len > MAX_VARIABLES ||
+        input->nodes_len > U64_MAX - 2) { invalid(output, req); return false; }
+    if (input->bytes > req->limits.bytes ||
+        output->external_bytes > req->limits.bytes - input->bytes ||
+        output->bytes > req->limits.bytes - input->bytes - output->external_bytes) {
+        limited(output, failure_kind.bytes, output->external_bytes + output->bytes,
+            req->limits.bytes,
+            input->bytes, req);
+        return false;
+    }
+    output->external_bytes += input->bytes;
+    u64 total = output->bytes + output->external_bytes;
+    if (total > output->peak_bytes) { output->peak_bytes = total; }
+    u64 mut i = 0;
+    while (i < input->variables_len && successful(output)) {
+        if (!step(output, req)) { return false; }
+        declare(output, input->variables[i], req);
+        i += 1;
+    }
+    import_proofs(output, input, req);
+    return successful(output);
+}
+fn operand(map mut* output, semantic_key mut@ names, u64 mut* used, semantic_key key,
+    query* req) u64 {
+    u64 mut i = 0;
+    while (i < *used) {
+        if (key_order(output, names[i], key, req) == 0) { return i; }
+        if (!successful(output)) { return 0; }
+        i += 1;
+    }
+    if (!step(output, req)) { return 0; }
+    names[*used] = key;
+    *used += 1;
+    return *used - 1;
+}
+fn representative(map mut* output, u64 mut@ parents, u64 index, query* req) u64 {
+    u64 mut current = index;
+    while (successful(output)) {
+        if (!step(output, req)) { return 0; }
+        if (parents[current] == current) { return current; }
+        current = parents[current];
+    }
+    return 0;
+}
+fn same_operand(map mut* output, semantic_key mut@ names, u64 mut* used, u64 mut@ parents,
+    semantic_key left, semantic_key right, query* req) bool {
+    u64 a = operand(output, names, used, left, req);
+    u64 b = operand(output, names, used, right, req);
+    return representative(output, parents, a, req) == representative(output, parents, b, req);
+}
+fn feasible(map mut* output, i8@ literals, query* req) bool {
+    if (!step(output, req)) { return false; }
+    u64 count = output->variables_len * 2;
+    if (!allocate(output, count, sizeof(semantic_key), req) ||
+        !allocate(output, count, sizeof(u64), req)) { return false; }
+    semantic_key mut@ own names = new(semantic_key, count);
+    u64 mut@ own parents = new(u64, count);
+    u64 mut i = 0;
+    while (i < count) {
+        if (!step(output, req)) { break; }
+        parents[i] = i;
+        i += 1;
+    }
+    u64 mut used = 0;
+    i = 0;
+    while (i < output->variables_len && successful(output)) {
+        if (!step(output, req)) { break; }
+        variable value = output->variables[i];
+        if (literals[i] == 1 && value.kind == predicate_kind.equality) {
+            u64 a = operand(output, names[..], &used, value.left, req);
+            u64 b = operand(output, names[..], &used, value.right, req);
+            u64 root_a = representative(output, parents[..], a, req);
+            u64 root_b = representative(output, parents[..], b, req);
+            if (!step(output, req)) { break; }
+            parents[root_b] = root_a;
+        }
+        i += 1;
+    }
+    bool mut possible = successful(output);
+    i = 0;
+    while (i < output->variables_len && possible) {
+        if (!step(output, req)) { break; }
+        variable value = output->variables[i];
+        bool different = (literals[i] == 1 && value.kind == predicate_kind.distinctness) ||
+            (literals[i] == 0 && value.kind == predicate_kind.equality);
+        if (different && same_operand(output, names[..], &used, parents[..], value.left,
+            value.right, req)) {
+            record_path(output, contradiction_rule.equal_distinct, i, U64_MAX, literals, req);
+            possible = false;
+        }
+        if (literals[i] == 1 && value.kind == predicate_kind.membership) {
+            if (value.lo >= value.hi) {
+                record_path(output, contradiction_rule.empty_membership, i, U64_MAX, literals, req);
+                possible = false;
+            }
+            u64 mut j = 0;
+            while (j < i && possible && successful(output)) {
+                if (!step(output, req)) { break; }
+                variable other = output->variables[j];
+                if (literals[j] == 1 && other.kind == predicate_kind.membership &&
+                    same_operand(output, names[..], &used, parents[..], value.left,
+                        other.left, req) && (value.lo >= other.hi || other.lo >= value.hi)) {
+                    record_path(output, contradiction_rule.disjoint_membership, i, j,
+                        literals, req);
+                    possible = false;
+                }
+                j += 1;
+            }
+        }
+        possible = possible && successful(output);
+        i += 1;
+    }
+    output->bytes -= count == 0 ? 2 : count * (sizeof(semantic_key) + sizeof(u64));
+    del(names);
+    del(parents);
+    return possible && successful(output);
+}
+struct pruning { u64 root; bool possible; }
+fn filter_path(map mut* output, u64 root, i8 mut@ literals, query* req) pruning {
+    if (!step(output, req) || !feasible(output, literals[..], req)) { return pruning{}; }
+    if (root < 2) { return pruning{root, true}; }
+    node current = output->nodes[root - 2];
+    literals[current.variable_index] = 0;
+    pruning low = filter_path(output, current.low, literals, req);
+    literals[current.variable_index] = 1;
+    pruning high = filter_path(output, current.high, literals, req);
+    literals[current.variable_index] = -1;
+    if (!successful(output)) { return pruning{}; }
+    if (!low.possible) { return high; }
+    if (!high.possible) { return low; }
+    return pruning{intern(output, current.variable_index, low.root, high.root, req), true};
+}
+fn filter(map mut* output, u64 root, query* req) u64 {
+    if (!allocate(output, output->variables_len, sizeof(i8), req)) { return 0; }
+    i8 mut@ own literals = new(i8, output->variables_len);
+    u64 mut i = 0;
+    while (i < literals.len) {
+        if (!step(output, req)) { break; }
+        literals[i] = -1;
+        i += 1;
+    }
+    pruning result = filter_path(output, root, literals[..], req);
+    output->bytes -= output->variables_len == 0 ? 1 : output->variables_len * sizeof(i8);
+    del(literals);
+    return result.root;
+}
+fn literal(variable input, bool selected, query* req) condition {
+    condition mut result = condition{};
+    result.store = start(req);
+    u64 index = declare(&result.store, input, req);
+    result.root = intern(&result.store, index, selected ? 0 : 1, selected ? 1 : 0, req);
+    result.root = filter(&result.store, result.root, req);
+    if (!successful(&result.store)) { discard(&result.store); result.root = 0; }
+    return result;
+}
+fn positive(variable input, query* req) condition { return literal(input, true, req); }
+fn negative(variable input, query* req) condition { return literal(input, false, req); }
+fn truth(bool selected, query* req) condition {
+    condition mut result = condition{};
+    result.store = start(req);
+    if (step(&result.store, req)) { result.root = selected ? 1 : 0; }
+    return result;
+}
+fn boolean_condition(condition* left, condition* right, boolean_operation operation,
+    query* req) condition {
+    condition mut result = condition{};
+    result.store = start(req);
+    include_input(&result.store, &left->store, req);
+    if (left != right) { include_input(&result.store, &right->store, req); }
+    u64 a = import_root(&result.store, &left->store, left->root, req);
+    u64 b = import_root(&result.store, &right->store, right->root, req);
+    result.root = apply(&result.store, operation, a, b, req);
+    result.root = filter(&result.store, result.root, req);
+    if (!successful(&result.store)) { discard(&result.store); result.root = 0; }
+    return result;
+}
+fn conjunction(condition* left, condition* right, query* req) condition {
+    return boolean_condition(left, right, boolean_operation.both, req);
+}
+fn disjunction(condition* left, condition* right, query* req) condition {
+    return boolean_condition(left, right, boolean_operation.either, req);
+}
+fn negation(condition* input, query* req) condition {
+    condition mut result = condition{};
+    result.store = start(req);
+    include_input(&result.store, &input->store, req);
+    u64 root = import_root(&result.store, &input->store, input->root, req);
+    result.root = invert(&result.store, root, req);
+    result.root = filter(&result.store, result.root, req);
+    if (!successful(&result.store)) { discard(&result.store); result.root = 0; }
+    return result;
+}
+fn bindings_order(map mut* output, binding@ left, binding@ right, query* req) i32 {
+    u64 mut i = 0;
+    while (i < left.len && i < right.len) {
+        if (!step(output, req)) { return 0; }
+        i32 mut order = subject_order(output, left[i], right[i], req);
+        if (order != 0) { return order; }
+        order = key_order(output, left[i].payload, right[i].payload, req);
+        if (order != 0) { return order; }
+        i += 1;
+    }
+    if (!step(output, req)) { return 0; }
+    if (left.len == right.len) { return 0; }
+    return left.len < right.len ? -1 : 1;
+}
+fn insert_row(map mut* output, binding@ values, u64 mut root, query* req) void {
+    if (!step(output, req)) { return; }
+    root = filter(output, root, req);
+    if (!successful(output) || root == 0) { return; }
+    binding@ copied = copied_bindings(output, values, req);
+    if (!successful(output)) { return; }
+    u64 mut i = 0;
+    while (i < output->rows_len) {
+        if (!step(output, req)) { return; }
+        if (bindings_equal(output, output->rows[i].bindings, copied, req)) {
+            u64 merged = apply(output, boolean_operation.either, output->rows[i].condition,
+                root, req);
+            if (step(output, req)) { output->rows[i].condition = merged; }
+            return;
+        }
+        i += 1;
+    }
+    if (!successful(output)) { return; }
+    if (output->rows_len >= req->limits.rows || output->rows_len == U64_MAX) {
+        limited(output, failure_kind.rows, output->rows_len, req->limits.rows,
+            output->rows_len == U64_MAX ? U64_MAX : output->rows_len + 1, req);
+        return;
+    }
+    u64 mut position = 0;
+    while (position < output->rows_len && successful(output)) {
+        if (bindings_order(output, output->rows[position].bindings, copied, req) > 0) { break; }
+        position += 1;
+    }
+    u64 need = output->rows_len + 1;
+    if (!allocate(output, need, sizeof(row), req)) { return; }
+    row mut@ own rows = new(row, need);
+    i = 0;
+    while (i < output->rows_len) {
+        if (!step(output, req)) { del(rows); return; }
+        rows[i < position ? i : i + 1] = output->rows[i];
+        i += 1;
+    }
+    rows[position] = row{copied, root};
+    output->bytes -= output->rows.len * sizeof(row);
+    del(output->rows);
+    output->rows = move(rows);
+    output->rows_len = need;
+}
+fn finish(candidate mut* result, query* req) void {
+    map mut* output = &result->prospective;
+    if (!step(output, req)) { discard(output); return; }
+    if (output->rows_len == U64_MAX) {
+        limited(output, failure_kind.arithmetic, output->rows_len, U64_MAX - 1,
+            output->rows_len, req);
+        discard(output);
+        return;
+    }
+    result->g = output->rows_len;
+    if (output->rows_len == 1) {
+        if (!step(output, req)) { discard(output); return; }
+        if (output->rows[0].condition == 1) { result->g = 0; }
+    }
+    result->exact = true;
+    output->external_bytes = 0;
+}
+fn unconditional(binding@ values, query* req) candidate {
+    candidate mut result = candidate{};
+    result.prospective = start(req);
+    insert_row(&result.prospective, values, 1, req);
+    finish(&result, req);
+    return result;
+}
+fn copy_rows(map mut* output, map* input, query* req) void {
+    u64 mut i = 0;
+    while (i < input->rows_len && successful(output)) {
+        if (!step(output, req)) { return; }
+        row current = input->rows[i];
+        u64 root = import_root(output, input, current.condition, req);
+        insert_row(output, current.bindings, root, req);
+        i += 1;
+    }
+}
+fn clone(map* input, query* req) candidate {
+    candidate mut result = candidate{};
+    result.prospective = start(req);
+    if (include_input(&result.prospective, input, req)) {
+        copy_rows(&result.prospective, input, req);
+    }
+    finish(&result, req);
+    return result;
+}
+fn join(map* left, map* right, query* req) candidate {
+    candidate mut result = candidate{};
+    result.prospective = start(req);
+    if (include_input(&result.prospective, left, req) &&
+        (left == right || include_input(&result.prospective, right, req))) {
+        copy_rows(&result.prospective, left, req);
+        copy_rows(&result.prospective, right, req);
+    }
+    finish(&result, req);
+    return result;
+}
+fn restrict(map* input, condition* selected, query* req) candidate {
+    candidate mut result = candidate{};
+    result.prospective = start(req);
+    map mut* output = &result.prospective;
+    include_input(output, input, req);
+    include_input(output, &selected->store, req);
+    u64 selection = import_root(output, &selected->store, selected->root, req);
+    u64 mut i = 0;
+    while (i < input->rows_len && successful(output)) {
+        if (!step(output, req)) { break; }
+        row current = input->rows[i];
+        u64 root = import_root(output, input, current.condition, req);
+        u64 both = apply(output, boolean_operation.both, root, selection, req);
+        insert_row(output, current.bindings, both, req);
+        i += 1;
+    }
+    finish(&result, req);
+    return result;
+}
+// Removed entries identify subjects. Their payload fields do not participate.
+fn replaced(map mut* output, binding@ input, binding@ removed, binding@ added,
+    query* req) binding@ {
+    binding@ none = {};
+    if (!step(output, req)) { return none; }
+    if (added.len > U64_MAX - input.len) {
+        limited(output, failure_kind.arithmetic, input.len, U64_MAX, added.len, req);
+        return none;
+    }
+    u64 capacity = input.len + added.len;
+    if (!allocate(output, 1, sizeof(block), req) ||
+        !allocate(output, capacity, sizeof(binding), req)) { return none; }
+    block mut* own item = new(block);
+    item->bindings = new(binding, capacity);
+    u64 mut used = 0;
+    u64 mut i = 0;
+    while (i < input.len && successful(output)) {
+        if (!step(output, req)) { break; }
+        bool mut keep_value = true;
+        u64 mut j = 0;
+        while (j < removed.len) {
+            if (!step(output, req)) { break; }
+            if (!key_valid(output, removed[j].subject, req)) { break; }
+            if (subject_order(output, input[i], removed[j], req) == 0) { keep_value = false; }
+            j += 1;
+        }
+        if (keep_value && step(output, req)) { item->bindings[used] = input[i]; used += 1; }
+        i += 1;
+    }
+    i = 0;
+    while (i < added.len && successful(output)) {
+        if (!step(output, req)) { break; }
+        item->bindings[used] = added[i];
+        used += 1;
+        i += 1;
+    }
+    if (!successful(output)) { del(item->bindings); del(item); return none; }
+    binding@ result = item->bindings[0..used];
+    keep(output, move(item));
+    return result;
+}
+fn validate_update(map mut* output, binding@ removed, binding@ added, query* req) bool {
+    u64 mut i = 0;
+    while (i < removed.len && successful(output)) {
+        if (!step(output, req) || !key_valid(output, removed[i].subject, req)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < added.len && successful(output)) {
+        if (!step(output, req) || !key_valid(output, added[i].subject, req) ||
+            !key_valid(output, added[i].payload, req)) { return false; }
+        u64 mut j = 0;
+        while (j < i && successful(output)) {
+            if (!step(output, req)) { return false; }
+            if (subject_order(output, added[i], added[j], req) == 0 &&
+                key_order(output, added[i].payload, added[j].payload, req) != 0) {
+                invalid(output, req);
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return successful(output);
+}
+fn update(map* input, condition* decision, binding@ removed, binding@ added, bool weak_update,
+    query* req) candidate {
+    candidate mut result = candidate{};
+    result.prospective = start(req);
+    map mut* output = &result.prospective;
+    include_input(output, input, req);
+    validate_update(output, removed, added, req);
+    u64 mut selected = 1;
+    u64 mut unselected = 0;
+    if (weak_update) {
+        include_input(output, &decision->store, req);
+        selected = import_root(output, &decision->store, decision->root, req);
+        unselected = invert(output, selected, req);
+    }
+    u64 mut i = 0;
+    while (i < input->rows_len && successful(output)) {
+        if (!step(output, req)) { break; }
+        row current = input->rows[i];
+        u64 root = import_root(output, input, current.condition, req);
+        if (weak_update) {
+            u64 old_root = apply(output, boolean_operation.both, root, unselected, req);
+            insert_row(output, current.bindings, old_root, req);
+        }
+        binding@ changed = replaced(output, current.bindings, removed, added, req);
+        u64 new_root = apply(output, boolean_operation.both, root, selected, req);
+        insert_row(output, changed, new_root, req);
+        i += 1;
+    }
+    finish(&result, req);
+    return result;
+}
+fn replace(map* input, binding@ removed, binding@ added, query* req) candidate {
+    return update(input, null, removed, added, false, req);
+}
+fn weak(map* input, condition* decision, binding@ removed, binding@ added, query* req) candidate {
+    return update(input, decision, removed, added, true, req);
+}
+// The caller grants mixed precision permission for the measured complete amount.
+fn measure(candidate* input, query* req) measurement {
+    map mut scratch = start(req);
+    if (!step(&scratch, req)) {
+        return measurement{.proof = scratch.proof, .failure = scratch.failure};
+    }
+    if (input->g == U64_MAX) {
+        invalid(&scratch, req);
+        return measurement{.proof = scratch.proof};
+    }
+    return measurement{input->prospective.proof, input->prospective.failure, input->exact,
+        input->g};
+}
+fn install(map mut* destination, candidate mut* input, permission granted, query* req)
+    installation {
+    map mut scratch = start(req);
+    if (!step(&scratch, req)) {
+        return installation{.proof = scratch.proof, .failure = scratch.failure};
+    }
+    if (destination == &input->prospective || !input->exact
+        || !successful(&input->prospective) || !granted.allowed ||
+        granted.g != input->g || input->g == U64_MAX) {
+        invalid(&scratch, req);
+        return installation{scratch.proof, scratch.failure, false};
+    }
+    if (destination->bytes > req->limits.bytes - req->other_retained_bytes ||
+        input->prospective.bytes >
+            req->limits.bytes - req->other_retained_bytes - destination->bytes) {
+        u64 used = destination->bytes > U64_MAX - req->other_retained_bytes ? U64_MAX :
+            destination->bytes + req->other_retained_bytes;
+        limited(&scratch, failure_kind.bytes, used, req->limits.bytes,
+            input->prospective.bytes, req);
+        return installation{scratch.proof, scratch.failure, false};
+    }
+    free(destination);
+    *destination = move(input->prospective);
+    input->exact = false;
+    input->g = 0;
+    return installation{.proof = destination->proof, .applied = true};
+}
+fn equal(map* left, map* right, query* req) comparison {
+    comparison mut result = comparison{};
+    candidate mut joined = join(left, right, req);
+    if (joined.exact) {
+        // Canonical union changes neither operand exactly when both denote the same alternatives.
+        map mut* scratch = &joined.prospective;
+        bool mut same = left->rows_len == right->rows_len &&
+            left->rows_len == scratch->rows_len;
+        u64 mut i = 0;
+        while (i < left->rows_len && same && successful(scratch)) {
+            if (!step(scratch, req)) { break; }
+            bool mut found = false;
+            u64 mut j = 0;
+            while (j < right->rows_len && successful(scratch)) {
+                if (!step(scratch, req)) { break; }
+                if (bindings_equal(scratch, left->rows[i].bindings, right->rows[j].bindings, req)) {
+                    u64 a = import_root(scratch, left, left->rows[i].condition, req);
+                    u64 b = import_root(scratch, right, right->rows[j].condition, req);
+                    found = a == b && successful(scratch);
+                    break;
+                }
+                j += 1;
+            }
+            same = found;
+            i += 1;
+        }
+        result.equal = same && successful(scratch);
+    }
+    result.proof = joined.prospective.proof;
+    free_candidate(&joined);
+    return result;
+}

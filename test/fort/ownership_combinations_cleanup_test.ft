@@ -1,0 +1,399 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| combination cleanup ok
+/// Measures temporary cleanup before each constructor work refusal.
+import ownership_api;
+import ownership_combinations;
+import ownership_combinations_env;
+
+fn construct(u32 mode, ownership_combinations.map* left, ownership_combinations.map* right,
+    ownership_combinations.condition* choice, ownership_combinations.binding@ old_values,
+    ownership_combinations.binding@ new_values, ownership_combinations.query* req)
+    ownership_combinations.candidate {
+    if (mode == 0) { return ownership_combinations.unconditional(old_values, req); }
+    if (mode == 1) { return ownership_combinations.clone(left, req); }
+    if (mode == 2) { return ownership_combinations.join(left, right, req); }
+    if (mode == 3) { return ownership_combinations.restrict(left, choice, req); }
+    if (mode == 4) { return ownership_combinations.replace(left, old_values, new_values, req); }
+    return ownership_combinations.weak(left, choice, old_values, new_values, req);
+}
+fn condition_construct(u32 mode, ownership_combinations.variable descriptor,
+    ownership_combinations.condition* left, ownership_combinations.condition* right,
+    ownership_combinations.query* req) ownership_combinations.condition {
+    if (mode == 0) { return ownership_combinations.positive(descriptor, req); }
+    if (mode == 1) { return ownership_combinations.conjunction(left, right, req); }
+    if (mode == 2) { return ownership_combinations.disjunction(left, right, req); }
+    if (mode == 3) { return ownership_combinations.negation(left, req); }
+    if (mode == 4) { return ownership_combinations.negative(descriptor, req); }
+    ownership_combinations.variable mut typed = descriptor;
+    typed.kind = ownership_combinations.predicate_kind.equality;
+    typed.left = typed.identity;
+    typed.right = typed.identity;
+    if (mode == 5) { return ownership_combinations.positive(typed, req); }
+    ownership_combinations.key_component[1] other = {ownership_combinations_env.number(71)};
+    ownership_combinations.key_component[1] identity = {ownership_combinations_env.number(72)};
+    typed.right = ownership_combinations_env.key(other[..]);
+    ownership_combinations.condition mut equality = ownership_combinations.positive(typed, req);
+    defer ownership_combinations.free_condition(&equality);
+    typed.kind = ownership_combinations.predicate_kind.distinctness;
+    typed.identity = ownership_combinations_env.key(identity[..]);
+    ownership_combinations.condition mut distinct = ownership_combinations.positive(typed, req);
+    defer ownership_combinations.free_condition(&distinct);
+    return ownership_combinations.conjunction(&equality, &distinct, req);
+}
+fn preserved(ownership_combinations.map* left, ownership_combinations.map* right) void {
+    assert(left->rows_len == 1 && right->rows_len == 1);
+    assert(left->rows[0].bindings.len == 1 && right->rows[0].bindings.len == 1);
+    assert(left->rows[0].bindings[0].payload.parts[0].unsigned_value == 2);
+    assert(right->rows[0].bindings[0].payload.parts[0].unsigned_value == 3);
+    assert(left->rows[0].condition == 1 && right->rows[0].condition == 1);
+    assert(ownership_combinations.successful(left) && ownership_combinations.successful(right));
+}
+fn work_refusals() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[4] keys = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2),
+        ownership_combinations_env.number(3), ownership_combinations_env.number(4)};
+    ownership_combinations.binding[1] old_values = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[1..2])}};
+    ownership_combinations.binding[1] new_values = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[2..3])}};
+    ownership_combinations.candidate mut left = ownership_combinations.unconditional(old_values[..],
+        &req);
+    ownership_combinations.candidate mut right =
+        ownership_combinations.unconditional(new_values[..],
+        &req);
+    defer ownership_combinations.free_candidate(&left);
+    defer ownership_combinations.free_candidate(&right);
+    ownership_combinations.condition mut c = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[2..3]), &req);
+    ownership_combinations.condition mut d = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[3..4]), &req);
+    defer ownership_combinations.free_condition(&c);
+    defer ownership_combinations.free_condition(&d);
+    u32 mut mode = 0;
+    while (mode < 6) {
+        ownership_combinations_env.configure(&env, 1000000);
+        ownership_combinations_env.begin();
+        ownership_combinations.candidate mut result = construct(mode, &left.prospective,
+            &right.prospective, &c, old_values[..], new_values[..], &req);
+        assert(result.exact);
+        ownership_combinations.free_candidate(&result);
+        assert(ownership_combinations_env.finish() > 0);
+        u64 cost = env.meter.used.w;
+        u64 mut allowance = 0;
+        u64 mut populated = 0;
+        while (allowance < cost) {
+            ownership_combinations_env.configure(&env, allowance);
+            ownership_combinations_env.begin();
+            result = construct(mode, &left.prospective, &right.prospective, &c, old_values[..],
+                new_values[..], &req);
+            ownership_combinations_env.refuses(&result);
+            assert(result.prospective.proof.terminal.reason
+                == ownership_api.incomplete_reason.work_limit);
+            assert(result.prospective.proof.terminal.limit.category
+                == ownership_api.limit_category.w);
+            assert(result.prospective.proof.terminal.limit.operation.operation == 7);
+            assert(result.prospective.proof.terminal.limit.source.line == 23);
+            ownership_combinations.free_candidate(&result);
+            if (ownership_combinations_env.finish() > 0) { populated += 1; }
+            preserved(&left.prospective, &right.prospective);
+            assert(env.meter.used.w == (allowance == 0 ? 1 : allowance));
+            allowance += 1;
+        }
+        ownership_combinations_env.configure(&env, cost);
+        ownership_combinations_env.begin();
+        result = construct(mode, &left.prospective, &right.prospective, &c, old_values[..],
+            new_values[..], &req);
+        assert(result.exact && env.meter.used.w == cost);
+        ownership_combinations.free_candidate(&result);
+        assert(ownership_combinations_env.finish() > 0);
+        assert(populated > 0);
+        eprintln("map constructor ", mode, " work ", cost, " populated refusals ", populated);
+        mode += 1;
+    }
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations_env.begin();
+    ownership_combinations.comparison mut compared = ownership_combinations.equal(&left.prospective,
+        &right.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && !compared.equal);
+    assert(ownership_combinations_env.finish() > 0);
+    u64 comparison_cost = env.meter.used.w;
+    u64 mut comparison_allowance = 0;
+    while (comparison_allowance < comparison_cost) {
+        ownership_combinations_env.configure(&env, comparison_allowance);
+        ownership_combinations_env.begin();
+        compared = ownership_combinations.equal(&left.prospective, &right.prospective, &req);
+        assert(!ownership_api.successful(compared.proof) && !compared.equal);
+        assert(compared.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        ownership_combinations_env.finish();
+        preserved(&left.prospective, &right.prospective);
+        comparison_allowance += 1;
+    }
+    ownership_combinations_env.configure(&env, comparison_cost);
+    compared = ownership_combinations.equal(&left.prospective, &right.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && !compared.equal);
+    assert(env.meter.used.w == comparison_cost);
+    eprintln("equality comparison work ", comparison_cost);
+    mode = 0;
+    while (mode < 7) {
+        ownership_combinations_env.configure(&env, 1000000);
+        ownership_combinations_env.begin();
+        ownership_combinations.condition mut result = condition_construct(mode,
+            ownership_combinations_env.opaque(keys[2..3]), &c, &d, &req);
+        assert(ownership_combinations.successful(&result.store));
+        ownership_combinations.free_condition(&result);
+        assert(ownership_combinations_env.finish() > 0);
+        u64 cost = env.meter.used.w;
+        u64 mut allowance = 0;
+        u64 mut populated = 0;
+        while (allowance < cost) {
+            ownership_combinations_env.configure(&env, allowance);
+            ownership_combinations_env.begin();
+            result = condition_construct(mode, ownership_combinations_env.opaque(keys[2..3]),
+                &c, &d, &req);
+            assert(!ownership_combinations.successful(&result.store) && result.root == 0);
+            assert(result.store.proof.terminal.reason
+                == ownership_api.incomplete_reason.work_limit);
+            ownership_combinations.free_condition(&result);
+            if (ownership_combinations_env.finish() > 0) { populated += 1; }
+            assert(c.root != 0 && d.root != 0);
+            assert(ownership_combinations.successful(&c.store));
+            assert(ownership_combinations.successful(&d.store));
+            allowance += 1;
+        }
+        ownership_combinations_env.configure(&env, cost);
+        ownership_combinations_env.begin();
+        result = condition_construct(mode, ownership_combinations_env.opaque(keys[2..3]),
+            &c, &d, &req);
+        assert(ownership_combinations.successful(&result.store) && env.meter.used.w == cost);
+        ownership_combinations.free_condition(&result);
+        assert(ownership_combinations_env.finish() > 0 && populated > 0);
+        eprintln("condition constructor ", mode, " work ", cost, " populated refusals ", populated);
+        mode += 1;
+    }
+    ownership_combinations_env.configure(&env, 0);
+    ownership_combinations.condition mut constant = ownership_combinations.truth(true, &req);
+    assert(!ownership_combinations.successful(&constant.store));
+    ownership_combinations.free_condition(&constant);
+    ownership_combinations_env.configure(&env, 1);
+    constant = ownership_combinations.truth(true, &req);
+    assert(ownership_combinations.successful(&constant.store) && constant.root == 1);
+    ownership_combinations.free_condition(&constant);
+    ownership_combinations_env.configure(&env, 0);
+    ownership_combinations.measurement mut measured = ownership_combinations.measure(&left, &req);
+    assert(!measured.exact && !ownership_api.successful(measured.proof) && left.exact);
+    ownership_combinations.installation mut refused =
+        ownership_combinations.install(&right.prospective,
+        &left, ownership_combinations.permission{true, 0}, &req);
+    assert(!refused.applied && left.exact);
+    preserved(&left.prospective, &right.prospective);
+    ownership_combinations_env.configure(&env, 1);
+    measured = ownership_combinations.measure(&left, &req);
+    assert(measured.exact && measured.g == 0 && env.meter.used.w == 1);
+    ownership_combinations_env.configure(&env, 1);
+    refused = ownership_combinations.install(&right.prospective, &left,
+        ownership_combinations.permission{true, 0}, &req);
+    assert(refused.applied && !left.exact && env.meter.used.w == 1);
+}
+fn structural_limits() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query mut req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[4] keys = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2),
+        ownership_combinations_env.number(3), ownership_combinations_env.number(4)};
+    ownership_combinations.binding[1] old_values = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[1..2])}};
+    ownership_combinations.binding[1] new_values = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[2..3])}};
+    ownership_combinations.candidate mut base = ownership_combinations.unconditional(old_values[..],
+        &req);
+    defer ownership_combinations.free_candidate(&base);
+    ownership_combinations.condition mut c = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[2..3]), &req);
+    ownership_combinations.condition mut d = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[3..4]), &req);
+    defer ownership_combinations.free_condition(&c);
+    defer ownership_combinations.free_condition(&d);
+    ownership_combinations_env.begin();
+    ownership_combinations.candidate mut result = ownership_combinations.weak(&base.prospective,
+        &c, old_values[..], new_values[..], &req);
+    ownership_combinations_env.accepts(&result, 2, 2);
+    u64 peak = result.prospective.peak_bytes;
+    ownership_combinations.free_candidate(&result);
+    assert(ownership_combinations_env.finish() > 0);
+    req.limits.bytes = peak;
+    result = ownership_combinations.weak(&base.prospective, &c, old_values[..], new_values[..],
+        &req);
+    ownership_combinations_env.accepts(&result, 2, 2);
+    assert(result.prospective.peak_bytes == peak);
+    ownership_combinations.free_candidate(&result);
+    req.limits.bytes = peak - 1;
+    ownership_combinations_env.begin();
+    result = ownership_combinations.weak(&base.prospective, &c, old_values[..], new_values[..],
+        &req);
+    ownership_combinations_env.refuses(&result);
+    assert(result.prospective.failure.kind == ownership_combinations.failure_kind.bytes);
+    assert(result.prospective.failure.bound == peak - 1);
+    assert(!result.prospective.proof.terminal.limit.present);
+    assert(result.prospective.proof.terminal.reason
+        == ownership_api.incomplete_reason.source_coverage);
+    ownership_combinations.free_candidate(&result);
+    assert(ownership_combinations_env.finish() > 0);
+    req.limits = ownership_combinations.defaults();
+    req.limits.rows = 1;
+    result = ownership_combinations.weak(&base.prospective, &c, old_values[..], new_values[..],
+        &req);
+    ownership_combinations_env.refuses(&result);
+    assert(result.prospective.failure.kind == ownership_combinations.failure_kind.rows);
+    assert(result.prospective.failure.used == 1 && result.prospective.failure.attempted == 2);
+    assert(env.meter.used.g == 0 && !result.prospective.proof.terminal.limit.present);
+    ownership_combinations.free_candidate(&result);
+    req.limits.rows = 2;
+    result = ownership_combinations.weak(&base.prospective, &c, old_values[..], new_values[..],
+        &req);
+    ownership_combinations_env.accepts(&result, 2, 2);
+    ownership_combinations.free_candidate(&result);
+    req.limits.variables = 1;
+    ownership_combinations.condition mut condition_result = ownership_combinations.conjunction(&c,
+        &d, &req);
+    assert(!ownership_combinations.successful(&condition_result.store));
+    assert(condition_result.store.failure.kind == ownership_combinations.failure_kind.variables);
+    assert(condition_result.store.failure.used == 1
+        && condition_result.store.failure.attempted == 2);
+    ownership_combinations.free_condition(&condition_result);
+    req.limits.variables = 2;
+    condition_result = ownership_combinations.conjunction(&c, &d, &req);
+    assert(ownership_combinations.successful(&condition_result.store));
+    u64 nodes = condition_result.store.nodes_len;
+    ownership_combinations.free_condition(&condition_result);
+    req.limits.nodes = nodes;
+    condition_result = ownership_combinations.conjunction(&c, &d, &req);
+    assert(ownership_combinations.successful(&condition_result.store));
+    ownership_combinations.free_condition(&condition_result);
+    req.limits.nodes = nodes - 1;
+    condition_result = ownership_combinations.conjunction(&c, &d, &req);
+    assert(!ownership_combinations.successful(&condition_result.store));
+    assert(condition_result.store.failure.kind == ownership_combinations.failure_kind.nodes);
+    ownership_combinations.free_condition(&condition_result);
+    req.limits = ownership_combinations.defaults();
+    req.other_retained_bytes = req.limits.bytes;
+    result = ownership_combinations.clone(&base.prospective, &req);
+    ownership_combinations_env.refuses(&result);
+    assert(result.prospective.failure.kind == ownership_combinations.failure_kind.bytes);
+    ownership_combinations.free_candidate(&result);
+    req.other_retained_bytes = 0;
+    ownership_combinations.map mut numeric = ownership_combinations.empty();
+    assert(!ownership_combinations.allocate(&numeric, ownership_combinations.U64_MAX, 2, &req));
+    assert(numeric.failure.kind == ownership_combinations.failure_kind.arithmetic);
+    assert(numeric.bytes == 0 && numeric.blocks == null);
+    ownership_combinations.free(&numeric);
+    req.limits.proofs = 1;
+    ownership_combinations.variable reflexive = ownership_combinations.variable{
+        .identity = ownership_combinations_env.key(keys[3..4]),
+        .kind = ownership_combinations.predicate_kind.equality,
+        .left = ownership_combinations_env.key(keys[0..1]),
+        .right = ownership_combinations_env.key(keys[0..1])};
+    condition_result = ownership_combinations.positive(reflexive, &req);
+    assert(ownership_combinations.successful(&condition_result.store)
+        && condition_result.root == 1);
+    assert(condition_result.store.contradictions_len == 1);
+    ownership_combinations.free_condition(&condition_result);
+    req.limits.proofs = 0;
+    ownership_combinations_env.begin();
+    condition_result = ownership_combinations.positive(reflexive, &req);
+    assert(!ownership_combinations.successful(&condition_result.store));
+    assert(condition_result.store.failure.kind == ownership_combinations.failure_kind.proofs);
+    assert(condition_result.store.failure.used == 0
+        && condition_result.store.failure.attempted == 1);
+    assert(!condition_result.store.proof.terminal.limit.present);
+    ownership_combinations.free_condition(&condition_result);
+    assert(ownership_combinations_env.finish() > 0);
+    req.limits = ownership_combinations.defaults();
+    base.g = ownership_combinations.U64_MAX;
+    ownership_combinations.measurement saturated_measure =
+        ownership_combinations.measure(&base, &req);
+    assert(!saturated_measure.exact && !ownership_api.successful(saturated_measure.proof));
+    ownership_combinations.map mut destination = ownership_combinations.empty();
+    defer ownership_combinations.free(&destination);
+    ownership_combinations_env.begin();
+    ownership_combinations.installation saturated = ownership_combinations.install(&destination,
+        &base, ownership_combinations.permission{true, ownership_combinations.U64_MAX}, &req);
+    assert(!saturated.applied && base.exact && destination.rows_len == 0);
+    assert(ownership_combinations_env.finish() == 0);
+    base.g = 0;
+    req.other_retained_bytes = req.limits.bytes;
+    ownership_combinations_env.begin();
+    ownership_combinations.installation storage_refused =
+        ownership_combinations.install(&destination,
+        &base, ownership_combinations.permission{true, 0}, &req);
+    assert(!storage_refused.applied && base.exact && destination.rows_len == 0);
+    assert(storage_refused.failure.kind == ownership_combinations.failure_kind.bytes);
+    assert(storage_refused.failure.used == req.limits.bytes);
+    assert(ownership_combinations_env.finish() == 0);
+    req.other_retained_bytes = 0;
+    assert(base.exact && base.prospective.rows_len == 1);
+    eprintln("private payload peak ", peak, " nodes ", nodes);
+}
+fn maximum_depth() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 100000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations_env.begin();
+    ownership_combinations.condition mut current = ownership_combinations.truth(true, &req);
+    ownership_combinations.key_component[1] mut key = {ownership_combinations_env.number(1)};
+    u64 mut i = 0;
+    while (i < ownership_combinations.MAX_VARIABLES) {
+        key[0].unsigned_value = i + 1;
+        ownership_combinations.condition mut literal = ownership_combinations.positive(
+            ownership_combinations_env.opaque(key[..]), &req);
+        ownership_combinations.condition mut next = ownership_combinations.conjunction(&current,
+            &literal, &req);
+        assert(ownership_combinations.successful(&next.store) && next.root > 1);
+        ownership_combinations.free_condition(&current);
+        ownership_combinations.free_condition(&literal);
+        current = move(next);
+        i += 1;
+    }
+    assert(current.store.variables_len == ownership_combinations.MAX_VARIABLES);
+    key[0].unsigned_value = ownership_combinations.MAX_VARIABLES + 1;
+    ownership_combinations.condition mut beyond = ownership_combinations.positive(
+        ownership_combinations_env.opaque(key[..]), &req);
+    ownership_combinations.condition mut refused = ownership_combinations.conjunction(&current,
+        &beyond, &req);
+    assert(!ownership_combinations.successful(&refused.store));
+    assert(refused.store.failure.kind == ownership_combinations.failure_kind.variables);
+    assert(refused.store.failure.used == 128 && refused.store.failure.bound == 128);
+    assert(refused.store.failure.attempted == 129 && current.store.variables_len == 128);
+    ownership_combinations.free_condition(&refused);
+    ownership_combinations.free_condition(&beyond);
+    ownership_combinations.free_condition(&current);
+    assert(ownership_combinations_env.finish() > 0);
+    eprintln("128-variable Boolean depth work ", env.meter.used.w);
+}
+fn allocator_controls() void {
+    ownership_combinations_env.begin();
+    u8 mut@ own retained = new(u8, 32);
+    assert(ownership_combinations_env.fort_depth_alloc_end() == 1);
+    assert(ownership_combinations_env.fort_depth_alloc_created() == 1);
+    assert(ownership_combinations_env.fort_depth_alloc_released() == 0);
+    del(retained);
+    assert(ownership_combinations_env.fort_depth_alloc_released() == 1);
+    ownership_combinations_env.begin();
+    u8 mut@ own released = new(u8, 32);
+    del(released);
+    assert(ownership_combinations_env.finish() == 1);
+}
+fn main() i32 {
+    allocator_controls();
+    work_refusals();
+    structural_limits();
+    maximum_depth();
+    println("combination cleanup ok");
+    return 0;
+}
