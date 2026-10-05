@@ -389,10 +389,293 @@ fn allocator_controls() void {
     del(released);
     assert(ownership_combinations_env.finish() == 1);
 }
+fn unused_fields() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[3] keys = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2),
+        ownership_combinations_env.number(3)};
+    ownership_combinations.key_component[1] mut component = {};
+    ownership_api.entity_id present = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.value, .ordinal = 9};
+    u32 mut mode = 0;
+    while (mode < 6) {
+        component[0] = ownership_combinations.key_component{};
+        component[0].kind = mode < 2 ? ownership_combinations.component_kind.unsigned_number :
+            (mode < 4 ? ownership_combinations.component_kind.signed_number :
+                ownership_combinations.component_kind.entity);
+        if (mode < 2) { component[0].unsigned_value = 4; }
+        else if (mode < 4) { component[0].signed_value = -4; }
+        else { component[0].entity_value = present; }
+        ownership_combinations.binding[1] values = {ownership_combinations.binding{1,
+            ownership_combinations_env.key(keys[0..1]),
+            ownership_combinations_env.key(component[..])}};
+        ownership_combinations_env.begin();
+        ownership_combinations.candidate mut accepted =
+            ownership_combinations.unconditional(values[..], &req);
+        ownership_combinations_env.accepts(&accepted, 0, 1);
+        ownership_combinations.free_candidate(&accepted);
+        assert(ownership_combinations_env.finish() > 0);
+        if (mode == 0 || mode == 5) { component[0].signed_value = 1; }
+        else if (mode == 1 || mode == 3) { component[0].entity_value = present; }
+        else { component[0].unsigned_value = 1; }
+        ownership_combinations_env.begin();
+        ownership_combinations.candidate mut refused =
+            ownership_combinations.unconditional(values[..], &req);
+        ownership_combinations_env.refuses(&refused);
+        assert(refused.prospective.proof.terminal.reason
+            == ownership_api.incomplete_reason.invalid_input);
+        assert(!refused.prospective.proof.terminal.limit.present);
+        assert(refused.prospective.failure.kind == ownership_combinations.failure_kind.none);
+        ownership_combinations.free_candidate(&refused);
+        assert(ownership_combinations_env.finish() > 0);
+        mode += 1;
+    }
+    mode = 0;
+    while (mode < 9) {
+        ownership_combinations.variable mut descriptor = ownership_combinations.variable{
+            .identity = ownership_combinations_env.key(keys[2..3]),
+            .kind = ownership_combinations.predicate_kind.opaque};
+        if (mode >= 4) {
+            descriptor.kind = mode < 6 ? ownership_combinations.predicate_kind.equality :
+                (mode < 8 ? ownership_combinations.predicate_kind.distinctness :
+                    ownership_combinations.predicate_kind.membership);
+            descriptor.left = ownership_combinations_env.key(keys[0..1]);
+            if (mode < 8) { descriptor.right = ownership_combinations_env.key(keys[1..2]); }
+            else { descriptor.lo = 2; descriptor.hi = 6; }
+        }
+        ownership_combinations_env.begin();
+        ownership_combinations.condition mut accepted =
+            ownership_combinations.positive(descriptor, &req);
+        assert(ownership_combinations.successful(&accepted.store) && accepted.root > 1);
+        ownership_combinations.free_condition(&accepted);
+        assert(ownership_combinations_env.finish() > 0);
+        if (mode == 0) { descriptor.left = ownership_combinations_env.key(keys[0..1]); }
+        else if (mode == 1 || mode == 8) {
+            descriptor.right = ownership_combinations_env.key(keys[1..2]);
+        }
+        else if (mode == 2 || mode == 4 || mode == 6) { descriptor.lo = 1; }
+        else { descriptor.hi = 1; }
+        ownership_combinations_env.begin();
+        ownership_combinations.condition mut refused =
+            ownership_combinations.positive(descriptor, &req);
+        assert(!ownership_combinations.successful(&refused.store) && refused.root == 0);
+        assert(refused.store.proof.terminal.reason
+            == ownership_api.incomplete_reason.invalid_input);
+        assert(refused.store.bytes == 0 && refused.store.variables_len == 0);
+        assert(!refused.store.proof.terminal.limit.present);
+        ownership_combinations.free_condition(&refused);
+        assert(ownership_combinations_env.finish() == 0);
+        mode += 1;
+    }
+    eprintln("unused fields component refusals 6 descriptor refusals 9");
+}
+fn same_object_bytes() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query mut req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[2] keys = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2)};
+    ownership_combinations.binding[1] values = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[1..2])}};
+    ownership_combinations.candidate mut input =
+        ownership_combinations.unconditional(values[..], &req);
+    defer ownership_combinations.free_candidate(&input);
+    ownership_combinations.candidate mut separate =
+        ownership_combinations.clone(&input.prospective, &req);
+    defer ownership_combinations.free_candidate(&separate);
+    ownership_combinations.candidate mut same = ownership_combinations.join(&input.prospective,
+        &input.prospective, &req);
+    ownership_combinations_env.accepts(&same, 0, 1);
+    u64 peak = same.prospective.peak_bytes;
+    ownership_combinations.free_candidate(&same);
+    ownership_combinations.candidate mut different = ownership_combinations.join(&input.prospective,
+        &separate.prospective, &req);
+    ownership_combinations_env.accepts(&different, 0, 1);
+    assert(different.prospective.peak_bytes == peak + separate.prospective.bytes);
+    ownership_combinations.free_candidate(&different);
+    req.limits.bytes = peak;
+    ownership_combinations_env.begin();
+    same = ownership_combinations.join(&input.prospective, &input.prospective, &req);
+    ownership_combinations_env.accepts(&same, 0, 1);
+    assert(same.prospective.peak_bytes == peak);
+    ownership_combinations.free_candidate(&same);
+    assert(ownership_combinations_env.finish() > 0);
+    req.limits.bytes = peak - 1;
+    ownership_combinations_env.begin();
+    same = ownership_combinations.join(&input.prospective, &input.prospective, &req);
+    ownership_combinations_env.refuses(&same);
+    assert(same.prospective.failure.kind == ownership_combinations.failure_kind.bytes);
+    ownership_combinations.free_candidate(&same);
+    assert(ownership_combinations_env.finish() > 0);
+    req.limits = ownership_combinations.defaults();
+    ownership_combinations.comparison compared = ownership_combinations.equal(&input.prospective,
+        &input.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    ownership_combinations.condition mut first = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[1..2]), &req);
+    defer ownership_combinations.free_condition(&first);
+    ownership_combinations.condition mut second = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[1..2]), &req);
+    defer ownership_combinations.free_condition(&second);
+    u32 mut mode = 0;
+    while (mode < 2) {
+        req.limits = ownership_combinations.defaults();
+        ownership_combinations.condition mut joined = mode == 0 ?
+            ownership_combinations.conjunction(&first, &first, &req) :
+            ownership_combinations.disjunction(&first, &first, &req);
+        assert(ownership_combinations.successful(&joined.store) && joined.root > 1);
+        u64 boolean_peak = joined.store.peak_bytes;
+        ownership_combinations.free_condition(&joined);
+        ownership_combinations.condition mut distinct = mode == 0 ?
+            ownership_combinations.conjunction(&first, &second, &req) :
+            ownership_combinations.disjunction(&first, &second, &req);
+        assert(ownership_combinations.successful(&distinct.store));
+        assert(distinct.store.peak_bytes == boolean_peak + second.store.bytes);
+        ownership_combinations.free_condition(&distinct);
+        req.limits.bytes = boolean_peak;
+        ownership_combinations_env.begin();
+        joined = mode == 0 ? ownership_combinations.conjunction(&first, &first, &req) :
+            ownership_combinations.disjunction(&first, &first, &req);
+        assert(ownership_combinations.successful(&joined.store));
+        ownership_combinations.free_condition(&joined);
+        assert(ownership_combinations_env.finish() > 0);
+        req.limits.bytes = boolean_peak - 1;
+        ownership_combinations_env.begin();
+        joined = mode == 0 ? ownership_combinations.conjunction(&first, &first, &req) :
+            ownership_combinations.disjunction(&first, &first, &req);
+        assert(!ownership_combinations.successful(&joined.store) && joined.root == 0);
+        assert(joined.store.failure.kind == ownership_combinations.failure_kind.bytes);
+        ownership_combinations.free_condition(&joined);
+        assert(ownership_combinations_env.finish() > 0);
+        assert(first.root > 1 && second.root > 1);
+        mode += 1;
+    }
+    req.limits = ownership_combinations.defaults();
+    ownership_combinations_env.begin();
+    ownership_combinations.installation refused = ownership_combinations.install(&input.prospective,
+        &input, ownership_combinations.permission{true, 0}, &req);
+    assert(!refused.applied && input.exact && input.prospective.rows_len == 1);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(ownership_combinations_env.finish() == 0);
+    eprintln("same-object admission map peak ", peak, " Boolean operations 2");
+}
+fn theory_work_refusals() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query mut req = ownership_combinations_env.query(&env);
+    ownership_combinations_env.theory_pair mut inputs =
+        ownership_combinations_env.transitive_rows(&req);
+    defer ownership_combinations.free_candidate(&inputs.left);
+    defer ownership_combinations.free_candidate(&inputs.right);
+    u64 left_root = inputs.left.prospective.rows[0].condition;
+    u64 right_root = inputs.right.prospective.rows[0].condition;
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations_env.begin();
+    ownership_combinations.candidate mut joined =
+        ownership_combinations.join(&inputs.left.prospective,
+        &inputs.right.prospective, &req);
+    ownership_combinations_env.accepts(&joined, 0, 1);
+    u64 join_cost = env.meter.used.w;
+    u64 peak = joined.prospective.peak_bytes;
+    ownership_combinations.free_candidate(&joined);
+    assert(ownership_combinations_env.finish() > 0);
+    u64 mut allowance = 0;
+    u64 mut populated = 0;
+    u64 mut join_allocations = 0;
+    while (allowance < join_cost) {
+        ownership_combinations_env.configure(&env, allowance);
+        ownership_combinations_env.begin();
+        joined =
+            ownership_combinations.join(&inputs.left.prospective, &inputs.right.prospective, &req);
+        ownership_combinations_env.refuses(&joined);
+        assert(joined.prospective.proof.terminal.reason
+            == ownership_api.incomplete_reason.work_limit);
+        assert(joined.prospective.proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(joined.prospective.proof.terminal.limit.operation.operation == 7);
+        assert(joined.prospective.proof.terminal.limit.source.line == 23);
+        ownership_combinations.free_candidate(&joined);
+        u64 created = ownership_combinations_env.finish();
+        join_allocations += created;
+        if (created > 0) { populated += 1; }
+        assert(inputs.left.exact && inputs.right.exact);
+        assert(inputs.left.prospective.rows[0].condition == left_root);
+        assert(inputs.right.prospective.rows[0].condition == right_root);
+        assert(env.meter.used.w == (allowance == 0 ? 1 : allowance));
+        allowance += 1;
+    }
+    ownership_combinations_env.configure(&env, join_cost);
+    joined = ownership_combinations.join(&inputs.left.prospective, &inputs.right.prospective, &req);
+    ownership_combinations_env.accepts(&joined, 0, 1);
+    assert(env.meter.used.w == join_cost && populated > 0);
+    defer ownership_combinations.free_candidate(&joined);
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.candidate mut copied =
+        ownership_combinations.clone(&joined.prospective, &req);
+    defer ownership_combinations.free_candidate(&copied);
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations_env.begin();
+    ownership_combinations.comparison mut compared =
+        ownership_combinations.equal(&joined.prospective,
+        &copied.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    u64 compare_cost = env.meter.used.w;
+    assert(ownership_combinations_env.finish() > 0);
+    allowance = 0;
+    u64 mut compare_allocations = 0;
+    while (allowance < compare_cost) {
+        ownership_combinations_env.configure(&env, allowance);
+        ownership_combinations_env.begin();
+        compared = ownership_combinations.equal(&joined.prospective, &copied.prospective, &req);
+        assert(!ownership_api.successful(compared.proof) && !compared.equal);
+        assert(compared.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        compare_allocations += ownership_combinations_env.finish();
+        assert(joined.exact && copied.exact && joined.prospective.rows[0].condition == 1);
+        assert(env.meter.used.w == (allowance == 0 ? 1 : allowance));
+        allowance += 1;
+    }
+    ownership_combinations_env.configure(&env, compare_cost);
+    compared = ownership_combinations.equal(&joined.prospective, &copied.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    assert(env.meter.used.w == compare_cost);
+    ownership_combinations_env.configure(&env, 1000000);
+    req.limits.proofs = 0;
+    ownership_combinations_env.begin();
+    ownership_combinations.candidate mut refused =
+        ownership_combinations.join(&inputs.left.prospective,
+        &inputs.right.prospective, &req);
+    ownership_combinations_env.refuses(&refused);
+    assert(refused.prospective.failure.kind == ownership_combinations.failure_kind.proofs);
+    assert(!refused.prospective.proof.terminal.limit.present);
+    ownership_combinations.free_candidate(&refused);
+    assert(ownership_combinations_env.finish() > 0);
+    req.limits = ownership_combinations.defaults();
+    req.limits.bytes = peak;
+    refused =
+        ownership_combinations.join(&inputs.left.prospective, &inputs.right.prospective, &req);
+    ownership_combinations_env.accepts(&refused, 0, 1);
+    ownership_combinations.free_candidate(&refused);
+    req.limits.bytes = peak - 1;
+    refused =
+        ownership_combinations.join(&inputs.left.prospective, &inputs.right.prospective, &req);
+    ownership_combinations_env.refuses(&refused);
+    assert(refused.prospective.failure.kind == ownership_combinations.failure_kind.bytes);
+    ownership_combinations.free_candidate(&refused);
+    assert(inputs.left.prospective.rows[0].condition == left_root);
+    assert(inputs.right.prospective.rows[0].condition == right_root);
+    eprintln("theory union work ", join_cost, " populated refusals ", populated,
+        " equality work ", compare_cost, " peak ", peak);
+    eprintln("theory refused-query allocation calls ", join_allocations,
+        " equality refused-query allocation calls ", compare_allocations);
+}
 fn main() i32 {
     allocator_controls();
     work_refusals();
     structural_limits();
+    unused_fields();
+    same_object_bytes();
+    theory_work_refusals();
     maximum_depth();
     println("combination cleanup ok");
     return 0;

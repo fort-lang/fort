@@ -9,6 +9,10 @@ extern fn fort_depth_alloc_created() u64;
 extern fn fort_depth_alloc_released() u64;
 
 struct fixture { ownership_limits.meter meter; ownership_api.services services; }
+struct theory_pair {
+    ownership_combinations.candidate left;
+    ownership_combinations.candidate right;
+}
 fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
     return ownership_api.event_result{.proof = req->current, .retained = true};
 }
@@ -58,4 +62,38 @@ fn finish() u64 {
     assert(fort_depth_alloc_end() == 0);
     assert(fort_depth_alloc_created() == fort_depth_alloc_released());
     return fort_depth_alloc_created();
+}
+fn transitive_rows(ownership_combinations.query* req) theory_pair {
+    ownership_combinations.key_component[8] keys = {
+        number(101), number(102), number(103), number(201),
+        number(202), number(203), number(301), number(302)};
+    ownership_combinations.variable mut descriptor = ownership_combinations.variable{
+        .identity = key(keys[3..4]), .kind = ownership_combinations.predicate_kind.equality,
+        .left = key(keys[0..1]), .right = key(keys[1..2])};
+    ownership_combinations.condition mut ab = ownership_combinations.positive(descriptor, req);
+    defer ownership_combinations.free_condition(&ab);
+    descriptor.identity = key(keys[4..5]);
+    descriptor.left = key(keys[1..2]);
+    descriptor.right = key(keys[2..3]);
+    ownership_combinations.condition mut bc = ownership_combinations.positive(descriptor, req);
+    defer ownership_combinations.free_condition(&bc);
+    descriptor.identity = key(keys[5..6]);
+    descriptor.left = key(keys[0..1]);
+    ownership_combinations.condition mut ac = ownership_combinations.positive(descriptor, req);
+    defer ownership_combinations.free_condition(&ac);
+    ownership_combinations.condition mut ab_bc = ownership_combinations.conjunction(&ab, &bc, req);
+    defer ownership_combinations.free_condition(&ab_bc);
+    ownership_combinations.condition mut complement = ownership_combinations.negation(&ab_bc, req);
+    defer ownership_combinations.free_condition(&complement);
+    ownership_combinations.binding[1] payload = {ownership_combinations.binding{1,
+        key(keys[6..7]), key(keys[7..8])}};
+    ownership_combinations.candidate mut base =
+        ownership_combinations.unconditional(payload[..], req);
+    defer ownership_combinations.free_candidate(&base);
+    theory_pair mut result = theory_pair{};
+    result.left = ownership_combinations.restrict(&base.prospective, &ac, req);
+    result.right = ownership_combinations.restrict(&base.prospective, &complement, req);
+    accepts(&result.left, 1, 1);
+    accepts(&result.right, 1, 1);
+    return result;
 }

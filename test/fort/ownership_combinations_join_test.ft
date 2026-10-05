@@ -222,10 +222,57 @@ fn independent_facts() void {
     ownership_combinations_env.install(&destination, &pair, &req);
     assert(destination.rows_len == 2 && !pair.exact && env.meter.used.g == 0);
 }
+fn theory_union() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations_env.theory_pair mut inputs =
+        ownership_combinations_env.transitive_rows(&req);
+    defer ownership_combinations.free_candidate(&inputs.left);
+    defer ownership_combinations.free_candidate(&inputs.right);
+    ownership_combinations.candidate mut joined =
+        ownership_combinations.join(&inputs.left.prospective,
+        &inputs.right.prospective, &req);
+    defer ownership_combinations.free_candidate(&joined);
+    ownership_combinations_env.accepts(&joined, 0, 1);
+    assert(joined.prospective.rows[0].condition == 1);
+    assert(joined.prospective.contradictions_len > 0);
+    ownership_combinations.candidate mut reversed =
+        ownership_combinations.join(&inputs.right.prospective,
+        &inputs.left.prospective, &req);
+    defer ownership_combinations.free_candidate(&reversed);
+    ownership_combinations_env.accepts(&reversed, 0, 1);
+    ownership_combinations.candidate mut copied =
+        ownership_combinations.clone(&joined.prospective, &req);
+    defer ownership_combinations.free_candidate(&copied);
+    ownership_combinations_env.accepts(&copied, 0, 1);
+    ownership_combinations.comparison mut compared =
+        ownership_combinations.equal(&joined.prospective,
+        &copied.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    compared = ownership_combinations.equal(&copied.prospective, &reversed.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    ownership_combinations.key_component[2] other_keys = {
+        ownership_combinations_env.number(301), ownership_combinations_env.number(303)};
+    ownership_combinations.binding[1] other = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(other_keys[0..1]),
+            ownership_combinations_env.key(other_keys[1..2])}};
+    ownership_combinations.candidate mut different =
+        ownership_combinations.replace(&inputs.right.prospective,
+        other[..], other[..], &req);
+    defer ownership_combinations.free_candidate(&different);
+    ownership_combinations.candidate mut distinct_payloads =
+        ownership_combinations.join(&inputs.left.prospective,
+        &different.prospective, &req);
+    defer ownership_combinations.free_candidate(&distinct_payloads);
+    ownership_combinations_env.accepts(&distinct_payloads, 2, 2);
+    assert(inputs.left.g == 1 && inputs.right.g == 1);
+}
 fn main() i32 {
     joins();
     complete_keys();
     independent_facts();
+    theory_union();
     println("combination joins ok");
     return 0;
 }
