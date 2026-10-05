@@ -48,3 +48,9 @@ T-098 created `environment.md`, `testing.md`, `compiler.md` and `style.md`; T-09
 of the `## Environment`, `## Build and test` and `## Technical Standards` sections of `AGENTS.md`
 into them, and moved the nine specification files into `spec/`. `style.md` 1, the comment policy,
 is in force now and T-103 lints it.
+
+## Implementation plans
+
+[Ownership source rollout](ownership-source-rollout.md) plans compiler-source ownership integration.
+It covers incremental audits, diagnostics, source repairs, and CI enforcement.
+The plan follows D19.8 and `spec/toolchain.md` 1.1.

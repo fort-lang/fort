@@ -2824,7 +2824,7 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 - history: Amended 2026-09-15 (T-140): the trap signal now follows the selected target.
 
 ### D19.8 FIR, the representation between the checker and the IR text
-- owner: `fir.md`.
+- owner: `fir.md`; `toolchain.md` 1 (ownership selection and coverage reports).
 - rule: The compiler lowers each checked function body to FIR, verifies it, runs its passes over it,
   and translates it to the LLVM IR text of `toolchain.md` 6 (`fir.md`). FIR follows the shape of
   Rust's MIR: a control-flow graph of basic blocks for each function, whose statements read and
@@ -2851,11 +2851,30 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   An address, global, projected place, or aggregate result supplies no permanent escape exemption.
   Ownership verdicts stay identical across checked, release, and bounds-check options.
   The proof does not derive safety from a runtime check that a build mode removes.
-  During feature development, --ownership-check temporarily selects the complete ownership analysis.
-  This whole-feature selection is not an operation-level proof exemption.
+  During feature development, --ownership-check requests complete ownership proof.
+  Run all integrated analyses before build-mode transformations. Missing producers remain
+  incomplete.
+  Complete proof with zero violations exits 0. Violations or incomplete proof exit 1.
+  Usage, tool, and internal failures exit 2. Incomplete selected proof prevents code generation.
+  Initially support selection in check and build modes. Reject selection in source or FIR dump
+  modes.
+  Ordinary builds keep their existing behavior when selection is absent.
+  This whole-feature request is not an operation-level proof exemption.
   Selected analysis never exempts an imported fort module or an available runtime body.
-  Complete feature validation before migrating existing compiler, runtime, library, and LSP source.
-  After migration, require the analysis by default and remove the temporary selection option.
+  `--ownership-report <file>` requires selection and writes the versioned coverage report of
+  toolchain.md 1.1. It changes neither text diagnostics nor diagnostic JSON version 1.
+  Separate source checking, lowering, verification, correspondence, and solver completion in
+  reports.
+  Solver completion alone establishes no complete ownership proof.
+  Retain failed and unexecuted bodies, missing producers, and the first incomplete reason.
+  Permit source audits, measured source repairs, and scoped CI enforcement during feature delivery.
+  An audit gate can accept exit 1 with a valid fresh report. It grants no ownership acceptance.
+  Scoped enforcement requires zero violations and zero incomplete results for its declared scope.
+  Results outside that scope remain visible. Scoped acceptance never changes complete selection.
+  Keep the conservative range-call guard until complete selected proof establishes loan
+  preservation.
+  Complete feature qualification and source migration before default enablement.
+  Then require the analysis by default and remove the temporary selection option.
   Staged delivery does not mean that the current compiler implements the complete proof.
   The analysis adds no runtime ownership checks or representation changes (toolchain.md 6).
 - rationale: two passes derived one fact from the tree four times, and each time nothing compared
@@ -2875,6 +2894,10 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 
   Amended 2026-10-04: Collection loans use non-emitting loan_begin and loan_end statements.
   FIR is the program. One lowering replaces separate source correspondence and side records.
+  Amended 2026-10-05: The rule previously delayed source migration until complete feature
+  validation.
+  Incremental audits and scoped enforcement now permit measured source repairs during delivery.
+  Complete selection still rejects incomplete proof. A separate report records partial coverage.
 
 ## D20 Editor support
 
