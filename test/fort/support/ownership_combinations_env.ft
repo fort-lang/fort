@@ -1,0 +1,61 @@
+/// Supplies complete finite keys and deterministic construction permission.
+import ownership_api;
+import ownership_combinations;
+import ownership_limits;
+
+extern fn fort_depth_alloc_begin() void;
+extern fn fort_depth_alloc_end() u64;
+extern fn fort_depth_alloc_created() u64;
+extern fn fort_depth_alloc_released() u64;
+
+struct fixture { ownership_limits.meter meter; ownership_api.services services; }
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    return ownership_api.event_result{.proof = req->current, .retained = true};
+}
+fn configure(fixture mut* env, u64 work) void {
+    ownership_api.limit_table mut bounds = ownership_limits.production();
+    bounds.w = work == 0 ? 1 : work;
+    assert(ownership_limits.configure(&env->meter, &bounds));
+    if (work == 0) { env->meter.used.w = 1; }
+    env->services.budget_context = cast(&env->meter, void mut*);
+    env->services.budget = ownership_limits.callback;
+    env->services.event = event;
+}
+fn query(fixture mut* env) ownership_combinations.query {
+    return ownership_combinations.query{.services = &env->services,
+        .work = ownership_api.work_kind.substitution,
+        .operation = ownership_api.operation_position{.operation = 7},
+        .source = ownership_api.source_position{.line = 23, .col = 4},
+        .limits = ownership_combinations.defaults()};
+}
+fn number(u64 value) ownership_combinations.key_component {
+    return ownership_combinations.key_component{
+        .kind = ownership_combinations.component_kind.unsigned_number, .unsigned_value = value};
+}
+fn key(ownership_combinations.key_component@ parts) ownership_combinations.semantic_key {
+    return ownership_combinations.semantic_key{parts};
+}
+fn opaque(ownership_combinations.key_component@ parts) ownership_combinations.variable {
+    return ownership_combinations.variable{.identity = key(parts),
+        .kind = ownership_combinations.predicate_kind.opaque};
+}
+fn accepts(ownership_combinations.candidate* input, u64 g, u64 rows) void {
+    assert(input->exact && ownership_combinations.successful(&input->prospective));
+    assert(input->g == g && input->prospective.rows_len == rows);
+}
+fn refuses(ownership_combinations.candidate* input) void {
+    assert(!input->exact && !ownership_combinations.successful(&input->prospective));
+    assert(input->prospective.rows_len == 0 && input->prospective.bytes == 0);
+}
+fn install(ownership_combinations.map mut* output, ownership_combinations.candidate mut* input,
+    ownership_combinations.query* req) void {
+    ownership_combinations.installation result = ownership_combinations.install(output, input,
+        ownership_combinations.permission{true, input->g}, req);
+    assert(result.applied && ownership_api.successful(result.proof));
+}
+fn begin() void { fort_depth_alloc_begin(); }
+fn finish() u64 {
+    assert(fort_depth_alloc_end() == 0);
+    assert(fort_depth_alloc_created() == fort_depth_alloc_released());
+    return fort_depth_alloc_created();
+}

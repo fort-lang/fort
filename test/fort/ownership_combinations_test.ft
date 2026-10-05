@@ -1,0 +1,400 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| guarded combinations ok
+/// Tests complete alternative payloads and exact Boolean conditions.
+import ownership_api;
+import ownership_combinations;
+import ownership_combinations_env;
+
+fn alternatives() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[2] subjects = {
+        ownership_combinations_env.number(10), ownership_combinations_env.number(20)};
+    ownership_combinations.key_component[4] values = {
+        ownership_combinations_env.number(0), ownership_combinations_env.number(1),
+        ownership_combinations_env.number(2), ownership_combinations_env.number(3)};
+    ownership_combinations.key_component[3] decisions = {
+        ownership_combinations_env.number(30), ownership_combinations_env.number(31),
+        ownership_combinations_env.number(32)};
+    ownership_combinations.binding[2] initial = {
+        ownership_combinations.binding{1, ownership_combinations_env.key(subjects[0..1]),
+            ownership_combinations_env.key(values[0..1])},
+        ownership_combinations.binding{1, ownership_combinations_env.key(subjects[1..2]),
+            ownership_combinations_env.key(values[0..1])}};
+    ownership_combinations.binding[2] mut updated = initial;
+    updated[0].payload = ownership_combinations_env.key(values[1..2]);
+    updated[1].payload = ownership_combinations_env.key(values[2..3]);
+    ownership_combinations.candidate mut base = ownership_combinations.unconditional(initial[..],
+        &req);
+    defer ownership_combinations.free_candidate(&base);
+    ownership_combinations_env.accepts(&base, 0, 1);
+    ownership_combinations.condition mut c = ownership_combinations.positive(
+        ownership_combinations_env.opaque(decisions[0..1]), &req);
+    ownership_combinations.condition mut d = ownership_combinations.positive(
+        ownership_combinations_env.opaque(decisions[1..2]), &req);
+    defer ownership_combinations.free_condition(&c);
+    defer ownership_combinations.free_condition(&d);
+    ownership_combinations.candidate mut singleton = ownership_combinations.restrict(
+        &base.prospective, &c, &req);
+    defer ownership_combinations.free_candidate(&singleton);
+    ownership_combinations_env.accepts(&singleton, 1, 1);
+    ownership_combinations.candidate mut pair = ownership_combinations.weak(&base.prospective,
+        &c, initial[0..1], updated[0..1], &req);
+    defer ownership_combinations.free_candidate(&pair);
+    ownership_combinations_env.accepts(&pair, 2, 2);
+    ownership_combinations.candidate mut independent =
+        ownership_combinations.weak(&pair.prospective,
+        &d, initial[1..2], updated[1..2], &req);
+    defer ownership_combinations.free_candidate(&independent);
+    ownership_combinations_env.accepts(&independent, 4, 4);
+    ownership_combinations.map mut refused_destination = ownership_combinations.empty();
+    defer ownership_combinations.free(&refused_destination);
+    ownership_combinations.installation denied =
+        ownership_combinations.install(&refused_destination,
+        &independent, ownership_combinations.permission{independent.g <= 3, independent.g}, &req);
+    assert(!denied.applied && refused_destination.rows_len == 0 && independent.exact);
+    assert(pair.prospective.rows_len == 2 && independent.prospective.rows_len == 4);
+    ownership_combinations.candidate mut shared = ownership_combinations.weak(&pair.prospective,
+        &c, initial[1..2], updated[1..2], &req);
+    defer ownership_combinations.free_candidate(&shared);
+    ownership_combinations_env.accepts(&shared, 2, 2);
+    ownership_combinations.candidate mut correlated = ownership_combinations.weak(&base.prospective,
+        &c, initial[..], updated[..], &req);
+    defer ownership_combinations.free_candidate(&correlated);
+    ownership_combinations_env.accepts(&correlated, 2, 2);
+    ownership_combinations.comparison compared = ownership_combinations.equal(&shared.prospective,
+        &correlated.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    ownership_combinations.candidate mut strong = ownership_combinations.replace(
+        &independent.prospective, initial[0..1], updated[0..1], &req);
+    defer ownership_combinations.free_candidate(&strong);
+    ownership_combinations_env.accepts(&strong, 2, 2);
+    ownership_combinations.candidate mut converged = ownership_combinations.replace(
+        &strong.prospective, initial[1..2], updated[1..2], &req);
+    defer ownership_combinations.free_candidate(&converged);
+    ownership_combinations_env.accepts(&converged, 0, 1);
+    u64 work = env.meter.used.w;
+    ownership_combinations.candidate mut repeated = ownership_combinations.replace(
+        &converged.prospective, initial[..], updated[..], &req);
+    defer ownership_combinations.free_candidate(&repeated);
+    ownership_combinations_env.accepts(&repeated, 0, 1);
+    assert(env.meter.used.w > work && env.meter.used.g == 0);
+    // A path condition differs from the destination choice.
+    ownership_combinations.candidate mut path_pair = ownership_combinations.weak(
+        &singleton.prospective, &d, initial[0..1], updated[0..1], &req);
+    defer ownership_combinations.free_candidate(&path_pair);
+    ownership_combinations_env.accepts(&path_pair, 2, 2);
+    ownership_combinations.candidate mut same_payload = ownership_combinations.weak(
+        &base.prospective, &c, initial[..], initial[..], &req);
+    defer ownership_combinations.free_candidate(&same_payload);
+    ownership_combinations_env.accepts(&same_payload, 0, 1);
+}
+fn boolean_conditions() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[3] keys = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2),
+        ownership_combinations_env.number(3)};
+    ownership_combinations.condition mut c = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[0..1]), &req);
+    ownership_combinations.condition mut d = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[1..2]), &req);
+    defer ownership_combinations.free_condition(&c);
+    defer ownership_combinations.free_condition(&d);
+    ownership_combinations.condition mut both = ownership_combinations.conjunction(&c, &d, &req);
+    defer ownership_combinations.free_condition(&both);
+    ownership_combinations.condition mut inverse = ownership_combinations.negation(&both, &req);
+    defer ownership_combinations.free_condition(&inverse);
+    ownership_combinations.condition mut impossible = ownership_combinations.conjunction(&both,
+        &inverse, &req);
+    defer ownership_combinations.free_condition(&impossible);
+    assert(ownership_combinations.successful(&impossible.store) && impossible.root == 0);
+    ownership_combinations.condition mut complete = ownership_combinations.disjunction(&both,
+        &inverse, &req);
+    defer ownership_combinations.free_condition(&complete);
+    assert(ownership_combinations.successful(&complete.store) && complete.root == 1);
+    ownership_combinations.condition mut neg_c = ownership_combinations.negation(&c, &req);
+    ownership_combinations.condition mut neg_d = ownership_combinations.negation(&d, &req);
+    defer ownership_combinations.free_condition(&neg_c);
+    defer ownership_combinations.free_condition(&neg_d);
+    ownership_combinations.condition mut demorgan = ownership_combinations.disjunction(&neg_c,
+        &neg_d, &req);
+    defer ownership_combinations.free_condition(&demorgan);
+    ownership_combinations.condition mut difference = ownership_combinations.negation(&demorgan,
+        &req);
+    defer ownership_combinations.free_condition(&difference);
+    ownership_combinations.condition mut proof = ownership_combinations.conjunction(&difference,
+        &inverse, &req);
+    defer ownership_combinations.free_condition(&proof);
+    assert(ownership_combinations.successful(&proof.store) && proof.root == 0);
+    // Empty legacy guards enter through an opaque decision. They retain both branches.
+    ownership_combinations.binding@ no_bindings = {};
+    ownership_combinations.candidate mut base = ownership_combinations.unconditional(no_bindings,
+        &req);
+    defer ownership_combinations.free_candidate(&base);
+    ownership_combinations.candidate mut positive =
+        ownership_combinations.restrict(&base.prospective,
+        &c, &req);
+    ownership_combinations.candidate mut negative =
+        ownership_combinations.restrict(&base.prospective,
+        &neg_c, &req);
+    defer ownership_combinations.free_candidate(&positive);
+    defer ownership_combinations.free_candidate(&negative);
+    ownership_combinations_env.accepts(&positive, 1, 1);
+    ownership_combinations_env.accepts(&negative, 1, 1);
+    ownership_combinations.candidate mut joined = ownership_combinations.join(&positive.prospective,
+        &negative.prospective, &req);
+    defer ownership_combinations.free_candidate(&joined);
+    ownership_combinations_env.accepts(&joined, 0, 1);
+    ownership_combinations.candidate mut bottom = ownership_combinations.restrict(&base.prospective,
+        &impossible, &req);
+    defer ownership_combinations.free_candidate(&bottom);
+    ownership_combinations_env.accepts(&bottom, 0, 0);
+}
+fn predicates() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[6] identities = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2),
+        ownership_combinations_env.number(3), ownership_combinations_env.number(4),
+        ownership_combinations_env.number(5), ownership_combinations_env.number(6)};
+    ownership_combinations.key_component[3] operands = {
+        ownership_combinations_env.number(10), ownership_combinations_env.number(11),
+        ownership_combinations_env.number(12)};
+    ownership_combinations.variable mut descriptor = ownership_combinations.variable{
+        .identity = ownership_combinations_env.key(identities[0..1]),
+        .kind = ownership_combinations.predicate_kind.equality,
+        .left = ownership_combinations_env.key(operands[0..1]),
+        .right = ownership_combinations_env.key(operands[1..2])};
+    ownership_combinations.condition mut eq = ownership_combinations.positive(descriptor, &req);
+    defer ownership_combinations.free_condition(&eq);
+    descriptor.identity = ownership_combinations_env.key(identities[1..2]);
+    descriptor.left = ownership_combinations_env.key(operands[1..2]);
+    descriptor.right = ownership_combinations_env.key(operands[0..1]);
+    ownership_combinations.condition mut same = ownership_combinations.positive(descriptor, &req);
+    defer ownership_combinations.free_condition(&same);
+    ownership_combinations.condition mut not_same = ownership_combinations.negation(&same, &req);
+    defer ownership_combinations.free_condition(&not_same);
+    ownership_combinations.condition mut impossible = ownership_combinations.conjunction(&eq,
+        &not_same, &req);
+    defer ownership_combinations.free_condition(&impossible);
+    assert(ownership_combinations.successful(&impossible.store) && impossible.root == 0);
+    ownership_combinations.condition mut aliases = ownership_combinations.conjunction(&eq, &same,
+        &req);
+    defer ownership_combinations.free_condition(&aliases);
+    descriptor.kind = ownership_combinations.predicate_kind.distinctness;
+    ownership_combinations.condition mut changed_alias = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&changed_alias);
+    ownership_combinations.condition mut alias_collision =
+        ownership_combinations.conjunction(&aliases,
+        &changed_alias, &req);
+    defer ownership_combinations.free_condition(&alias_collision);
+    assert(!ownership_combinations.successful(&alias_collision.store));
+    assert(alias_collision.store.proof.terminal.reason
+        == ownership_api.incomplete_reason.invalid_input);
+
+    descriptor.identity = ownership_combinations_env.key(identities[2..3]);
+    descriptor.kind = ownership_combinations.predicate_kind.distinctness;
+    ownership_combinations.condition mut different = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&different);
+    ownership_combinations.condition mut contradiction = ownership_combinations.conjunction(&eq,
+        &different, &req);
+    defer ownership_combinations.free_condition(&contradiction);
+    assert(ownership_combinations.successful(&contradiction.store) && contradiction.root == 0);
+    descriptor.identity = ownership_combinations_env.key(identities[3..4]);
+    descriptor.kind = ownership_combinations.predicate_kind.membership;
+    descriptor.left = ownership_combinations_env.key(operands[0..1]);
+    descriptor.right = ownership_combinations.semantic_key{};
+    descriptor.lo = 0;
+    descriptor.hi = 4;
+    ownership_combinations.condition mut range_a = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&range_a);
+    descriptor.identity = ownership_combinations_env.key(identities[4..5]);
+    descriptor.left = ownership_combinations_env.key(operands[1..2]);
+    descriptor.lo = 4;
+    descriptor.hi = 8;
+    ownership_combinations.condition mut range_b = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&range_b);
+    ownership_combinations.condition mut ranges = ownership_combinations.conjunction(&range_a,
+        &range_b, &req);
+    defer ownership_combinations.free_condition(&ranges);
+    assert(ownership_combinations.successful(&ranges.store) && ranges.root != 0);
+    ownership_combinations.condition mut related = ownership_combinations.conjunction(&ranges,
+        &eq, &req);
+    defer ownership_combinations.free_condition(&related);
+    assert(ownership_combinations.successful(&related.store) && related.root == 0);
+    // Unsupported symbolic bounds carry only an opaque decision.
+    ownership_combinations.condition mut unsupported = ownership_combinations.positive(
+        ownership_combinations_env.opaque(identities[5..6]), &req);
+    defer ownership_combinations.free_condition(&unsupported);
+    ownership_combinations.condition mut possible = ownership_combinations.conjunction(&ranges,
+        &unsupported, &req);
+    defer ownership_combinations.free_condition(&possible);
+    assert(ownership_combinations.successful(&possible.store) && possible.root != 0);
+    descriptor.identity = ownership_combinations_env.key(identities[3..4]);
+    descriptor.left = ownership_combinations_env.key(operands[0..1]);
+    descriptor.lo = 8;
+    descriptor.hi = 9;
+    ownership_combinations.condition mut collision = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&collision);
+    ownership_combinations.condition mut invalid = ownership_combinations.conjunction(&range_a,
+        &collision, &req);
+    defer ownership_combinations.free_condition(&invalid);
+    assert(!ownership_combinations.successful(&invalid.store));
+    assert(invalid.store.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    descriptor.identity = ownership_combinations_env.key(identities[5..6]);
+    descriptor.kind = ownership_combinations.predicate_kind.equality;
+    descriptor.right = descriptor.left;
+    descriptor.lo = 0;
+    descriptor.hi = 0;
+    ownership_combinations.condition mut reflexive = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&reflexive);
+    assert(ownership_combinations.successful(&reflexive.store) && reflexive.root == 1);
+    assert(reflexive.store.contradictions_len == 1);
+    assert(reflexive.store.contradictions[0].rule ==
+        ownership_combinations.contradiction_rule.equal_distinct);
+    assert(reflexive.store.contradictions[0].premises.len == 1);
+    assert(!reflexive.store.contradictions[0].premises[0].positive);
+    descriptor.identity = ownership_combinations_env.key(identities[4..5]);
+    descriptor.kind = ownership_combinations.predicate_kind.distinctness;
+    ownership_combinations.condition mut self_distinct = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&self_distinct);
+    assert(ownership_combinations.successful(&self_distinct.store) && self_distinct.root == 0);
+    assert(self_distinct.store.contradictions_len == 1);
+    assert(self_distinct.store.contradictions[0].premises[0].positive);
+    descriptor.identity = ownership_combinations_env.key(identities[3..4]);
+    descriptor.kind = ownership_combinations.predicate_kind.membership;
+    descriptor.right = ownership_combinations.semantic_key{};
+    descriptor.lo = 4;
+    descriptor.hi = 4;
+    ownership_combinations.condition mut empty_range = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&empty_range);
+    assert(ownership_combinations.successful(&empty_range.store) && empty_range.root == 0);
+    assert(empty_range.store.contradictions_len == 1);
+    assert(empty_range.store.contradictions[0].rule ==
+        ownership_combinations.contradiction_rule.empty_membership);
+}
+fn theory_paths() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[6] identities = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2),
+        ownership_combinations_env.number(3), ownership_combinations_env.number(4),
+        ownership_combinations_env.number(5), ownership_combinations_env.number(6)};
+    ownership_combinations.key_component[3] operands = {
+        ownership_combinations_env.number(10), ownership_combinations_env.number(11),
+        ownership_combinations_env.number(12)};
+    ownership_combinations.variable mut descriptor = ownership_combinations.variable{
+        .identity = ownership_combinations_env.key(identities[0..1]),
+        .kind = ownership_combinations.predicate_kind.equality,
+        .left = ownership_combinations_env.key(operands[0..1]),
+        .right = ownership_combinations_env.key(operands[1..2])};
+    ownership_combinations.condition mut ab = ownership_combinations.positive(descriptor, &req);
+    defer ownership_combinations.free_condition(&ab);
+    descriptor.identity = ownership_combinations_env.key(identities[1..2]);
+    descriptor.left = ownership_combinations_env.key(operands[1..2]);
+    descriptor.right = ownership_combinations_env.key(operands[2..3]);
+    ownership_combinations.condition mut bc = ownership_combinations.positive(descriptor, &req);
+    defer ownership_combinations.free_condition(&bc);
+    descriptor.identity = ownership_combinations_env.key(identities[2..3]);
+    descriptor.kind = ownership_combinations.predicate_kind.distinctness;
+    descriptor.left = ownership_combinations_env.key(operands[0..1]);
+    ownership_combinations.condition mut ac = ownership_combinations.positive(descriptor, &req);
+    defer ownership_combinations.free_condition(&ac);
+    ownership_combinations.condition mut chain = ownership_combinations.conjunction(&ab, &bc, &req);
+    defer ownership_combinations.free_condition(&chain);
+    ownership_combinations.condition mut impossible = ownership_combinations.conjunction(&chain,
+        &ac, &req);
+    defer ownership_combinations.free_condition(&impossible);
+    assert(ownership_combinations.successful(&impossible.store) && impossible.root == 0);
+    assert(impossible.store.contradictions_len > 0);
+    ownership_combinations.contradiction record = impossible.store.contradictions[0];
+    assert(record.rule == ownership_combinations.contradiction_rule.equal_distinct);
+    assert(record.premises.len == 3);
+    descriptor.identity = ownership_combinations_env.key(identities[3..4]);
+    descriptor.kind = ownership_combinations.predicate_kind.equality;
+    ownership_combinations.condition mut equal_ac =
+        ownership_combinations.positive(descriptor, &req);
+    defer ownership_combinations.free_condition(&equal_ac);
+    ownership_combinations.condition mut negative_ac =
+        ownership_combinations.negation(&equal_ac, &req);
+    defer ownership_combinations.free_condition(&negative_ac);
+    ownership_combinations.condition mut negative_contradiction =
+        ownership_combinations.conjunction(
+        &chain, &negative_ac, &req);
+    defer ownership_combinations.free_condition(&negative_contradiction);
+    assert(ownership_combinations.successful(&negative_contradiction.store));
+    assert(negative_contradiction.root == 0);
+    // Another predecessor's equality premise cannot restrict this unrelated alternative.
+    ownership_combinations.condition mut possible =
+        ownership_combinations.disjunction(&ab, &ac, &req);
+    defer ownership_combinations.free_condition(&possible);
+    assert(ownership_combinations.successful(&possible.store) && possible.root != 0);
+    descriptor.identity = ownership_combinations_env.key(identities[4..5]);
+    descriptor.kind = ownership_combinations.predicate_kind.membership;
+    descriptor.right = ownership_combinations.semantic_key{};
+    descriptor.lo = 2;
+    descriptor.hi = 8;
+    ownership_combinations.condition mut first_range = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&first_range);
+    descriptor.identity = ownership_combinations_env.key(identities[5..6]);
+    descriptor.lo = 4;
+    descriptor.hi = 10;
+    ownership_combinations.condition mut overlapping = ownership_combinations.positive(descriptor,
+        &req);
+    defer ownership_combinations.free_condition(&overlapping);
+    ownership_combinations.condition mut intersection =
+        ownership_combinations.conjunction(&first_range,
+        &overlapping, &req);
+    defer ownership_combinations.free_condition(&intersection);
+    assert(ownership_combinations.successful(&intersection.store) && intersection.root != 0);
+    ownership_combinations.condition mut negative_range =
+        ownership_combinations.negation(&first_range,
+        &req);
+    defer ownership_combinations.free_condition(&negative_range);
+    ownership_combinations.condition mut unsupported =
+        ownership_combinations.conjunction(&negative_range,
+        &overlapping, &req);
+    defer ownership_combinations.free_condition(&unsupported);
+    assert(ownership_combinations.successful(&unsupported.store) && unsupported.root != 0);
+    // Clones and equal-state joins preserve one canonical contradiction explanation.
+    ownership_combinations.binding@ none = {};
+    ownership_combinations.candidate mut base = ownership_combinations.unconditional(none, &req);
+    defer ownership_combinations.free_candidate(&base);
+    ownership_combinations.candidate mut bottom = ownership_combinations.restrict(&base.prospective,
+        &impossible, &req);
+    defer ownership_combinations.free_candidate(&bottom);
+    ownership_combinations_env.accepts(&bottom, 0, 0);
+    ownership_combinations.candidate mut copied = ownership_combinations.clone(&bottom.prospective,
+        &req);
+    defer ownership_combinations.free_candidate(&copied);
+    ownership_combinations.candidate mut joined = ownership_combinations.join(&bottom.prospective,
+        &copied.prospective, &req);
+    defer ownership_combinations.free_candidate(&joined);
+    ownership_combinations_env.accepts(&joined, 0, 0);
+    assert(joined.prospective.contradictions_len == bottom.prospective.contradictions_len);
+}
+fn main() i32 {
+    alternatives();
+    boolean_conditions();
+    predicates();
+    theory_paths();
+    println("guarded combinations ok");
+    return 0;
+}

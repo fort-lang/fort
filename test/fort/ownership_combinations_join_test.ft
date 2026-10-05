@@ -1,0 +1,231 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| combination joins ok
+/// Tests predecessor union and complete ownership binding keys.
+import ownership_api;
+import ownership_combinations;
+import ownership_combinations_env;
+
+fn joins() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[4] keys = {
+        ownership_combinations_env.number(1), ownership_combinations_env.number(2),
+        ownership_combinations_env.number(3), ownership_combinations_env.number(4)};
+    ownership_combinations.binding[1] a = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[1..2])}};
+    ownership_combinations.binding[1] b = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[2..3])}};
+    ownership_combinations.candidate mut left = ownership_combinations.unconditional(a[..], &req);
+    ownership_combinations.candidate mut right = ownership_combinations.unconditional(b[..], &req);
+    defer ownership_combinations.free_candidate(&left);
+    defer ownership_combinations.free_candidate(&right);
+    ownership_combinations.candidate mut joined = ownership_combinations.join(&left.prospective,
+        &right.prospective, &req);
+    defer ownership_combinations.free_candidate(&joined);
+    ownership_combinations_env.accepts(&joined, 2, 2);
+    ownership_combinations.candidate mut reversed = ownership_combinations.join(&right.prospective,
+        &left.prospective, &req);
+    defer ownership_combinations.free_candidate(&reversed);
+    ownership_combinations.comparison mut compared =
+        ownership_combinations.equal(&joined.prospective,
+        &reversed.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    ownership_combinations.candidate mut copied = ownership_combinations.clone(&joined.prospective,
+        &req);
+    defer ownership_combinations.free_candidate(&copied);
+    ownership_combinations.candidate mut idempotent =
+        ownership_combinations.join(&joined.prospective,
+        &copied.prospective, &req);
+    defer ownership_combinations.free_candidate(&idempotent);
+    ownership_combinations_env.accepts(&idempotent, 2, 2);
+    compared = ownership_combinations.equal(&joined.prospective, &idempotent.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    ownership_combinations.condition mut decision = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[3..4]), &req);
+    defer ownership_combinations.free_condition(&decision);
+    ownership_combinations.binding[1] added = {ownership_combinations.binding{2,
+        ownership_combinations_env.key(keys[0..1]), ownership_combinations_env.key(keys[3..4])}};
+    ownership_combinations.binding@ none = {};
+    ownership_combinations.candidate mut expanded = ownership_combinations.weak(&joined.prospective,
+        &decision, none, added[..], &req);
+    defer ownership_combinations.free_candidate(&expanded);
+    ownership_combinations_env.accepts(&expanded, 4, 4);
+    // Strong replacement removes only predecessor contents distinctions.
+    ownership_combinations.candidate mut replaced = ownership_combinations.replace(
+        &expanded.prospective, a[..], a[..], &req);
+    defer ownership_combinations.free_candidate(&replaced);
+    ownership_combinations_env.accepts(&replaced, 2, 2);
+    ownership_combinations.candidate mut bottom = ownership_combinations.candidate{};
+    bottom.prospective = ownership_combinations.empty();
+    bottom.exact = true;
+    defer ownership_combinations.free_candidate(&bottom);
+    ownership_combinations.candidate mut reaching = ownership_combinations.join(&bottom.prospective,
+        &left.prospective, &req);
+    defer ownership_combinations.free_candidate(&reaching);
+    ownership_combinations_env.accepts(&reaching, 0, 1);
+    ownership_combinations.map mut installed = ownership_combinations.empty();
+    defer ownership_combinations.free(&installed);
+    ownership_combinations_env.install(&installed, &copied, &req);
+    assert(!copied.exact && copied.prospective.rows_len == 0);
+    compared = ownership_combinations.equal(&joined.prospective, &installed, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    // Moving a map transfers its nested storage once.
+    ownership_combinations.map mut moved = move(installed);
+    defer ownership_combinations.free(&moved);
+    assert(installed.rows_len == 0 && moved.rows_len == 2);
+    ownership_combinations.free(&installed);
+    compared = ownership_combinations.equal(&joined.prospective, &moved, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+}
+fn complete_keys() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[5] mut keys = {
+        ownership_combinations_env.number(10), ownership_combinations_env.number(20),
+        ownership_combinations_env.number(21), ownership_combinations_env.number(30),
+        ownership_combinations_env.number(31)};
+    ownership_combinations.binding[2] projected = {
+        ownership_combinations.binding{1, ownership_combinations_env.key(keys[0..2]),
+            ownership_combinations_env.key(keys[3..5])},
+        ownership_combinations.binding{1, ownership_combinations_env.key(keys[0..3]),
+            ownership_combinations_env.key(keys[3..4])}};
+    ownership_combinations.candidate mut base = ownership_combinations.unconditional(projected[..],
+        &req);
+    defer ownership_combinations.free_candidate(&base);
+    ownership_combinations_env.accepts(&base, 0, 1);
+    assert(base.prospective.rows[0].bindings.len == 2);
+    ownership_combinations.binding[2] reverse = {projected[1], projected[0]};
+    ownership_combinations.candidate mut reordered =
+        ownership_combinations.unconditional(reverse[..],
+        &req);
+    defer ownership_combinations.free_candidate(&reordered);
+    ownership_combinations.comparison mut compared = ownership_combinations.equal(&base.prospective,
+        &reordered.prospective, &req);
+    assert(ownership_api.successful(compared.proof) && compared.equal);
+    ownership_combinations.binding[1] replacement = {projected[0]};
+    ownership_combinations.candidate mut one_field =
+        ownership_combinations.replace(&base.prospective,
+        projected[1..2], replacement[..], &req);
+    defer ownership_combinations.free_candidate(&one_field);
+    ownership_combinations_env.accepts(&one_field, 0, 1);
+    assert(one_field.prospective.rows[0].bindings.len == 1);
+    ownership_combinations.binding[2] mut conflicting = {projected[0], projected[0]};
+    conflicting[1].payload = projected[1].payload;
+    ownership_combinations.candidate mut invalid =
+        ownership_combinations.unconditional(conflicting[..],
+        &req);
+    defer ownership_combinations.free_candidate(&invalid);
+    ownership_combinations_env.refuses(&invalid);
+    assert(invalid.prospective.proof.terminal.reason
+        == ownership_api.incomplete_reason.invalid_input);
+    ownership_combinations.key_component[2] newer_version = {
+        ownership_combinations_env.number(30), ownership_combinations_env.number(32)};
+    ownership_combinations.binding[1] versioned = {projected[0]};
+    ownership_combinations.binding[1] changed_version = {ownership_combinations.binding{1,
+        projected[0].subject, ownership_combinations_env.key(newer_version[..])}};
+    ownership_combinations.candidate mut old_version = ownership_combinations.unconditional(
+        versioned[..], &req);
+    ownership_combinations.candidate mut new_version = ownership_combinations.unconditional(
+        changed_version[..], &req);
+    defer ownership_combinations.free_candidate(&old_version);
+    defer ownership_combinations.free_candidate(&new_version);
+    ownership_combinations.candidate mut versions = ownership_combinations.join(
+        &old_version.prospective, &new_version.prospective, &req);
+    defer ownership_combinations.free_candidate(&versions);
+    ownership_combinations_env.accepts(&versions, 2, 2);
+    // Retention copies descriptor components instead of borrowing the fixture arrays.
+    keys[0].unsigned_value = 99;
+    assert(base.prospective.rows[0].bindings[0].subject.parts[0].unsigned_value == 10);
+    ownership_combinations.key_component[1] signed_key = {
+        ownership_combinations.key_component{.kind =
+            ownership_combinations.component_kind.signed_number,
+            .signed_value = -9223372036854775807 - 1}};
+    ownership_combinations.key_component[1] entity_key = {
+        ownership_combinations.key_component{.kind = ownership_combinations.component_kind.entity,
+            .entity_value = ownership_api.entity_id{.kind = ownership_api.entity_kind.value,
+                .ordinal = 31}}};
+    ownership_combinations.binding[1] typed = {ownership_combinations.binding{1,
+        ownership_combinations_env.key(signed_key[..]),
+            ownership_combinations_env.key(entity_key[..])}};
+    ownership_combinations.candidate mut typed_map = ownership_combinations.unconditional(typed[..],
+        &req);
+    defer ownership_combinations.free_candidate(&typed_map);
+    ownership_combinations_env.accepts(&typed_map, 0, 1);
+    assert(typed_map.prospective.rows[0].bindings[0].payload.parts[0].entity_value.ordinal == 31);
+}
+fn independent_facts() void {
+    ownership_combinations_env.fixture mut env = {};
+    ownership_combinations_env.configure(&env, 1000000);
+    ownership_combinations.query req = ownership_combinations_env.query(&env);
+    ownership_combinations.key_component[9] keys = {
+        ownership_combinations_env.number(10), ownership_combinations_env.number(11),
+        ownership_combinations_env.number(12), ownership_combinations_env.number(13),
+        ownership_combinations_env.number(14), ownership_combinations_env.number(15),
+        ownership_combinations_env.number(16), ownership_combinations_env.number(17),
+        ownership_combinations_env.number(18)};
+    // Distinct families preserve source, obligation, multiplicity, history, and effect order.
+    ownership_combinations.binding[6] mut facts = {};
+    u64 mut i = 0;
+    while (i < facts.len) {
+        facts[i] = ownership_combinations.binding{cast(i + 1, u32),
+            ownership_combinations_env.key(keys[i..i + 1]),
+            ownership_combinations_env.key(keys[6..8])};
+        i += 1;
+    }
+    ownership_combinations.candidate mut base = ownership_combinations.unconditional(facts[..],
+        &req);
+    defer ownership_combinations.free_candidate(&base);
+    ownership_combinations.condition mut decision = ownership_combinations.positive(
+        ownership_combinations_env.opaque(keys[8..9]), &req);
+    defer ownership_combinations.free_condition(&decision);
+    ownership_combinations.binding[1] mut updated = {facts[0]};
+    updated[0].payload = ownership_combinations_env.key(keys[7..9]);
+    ownership_combinations.candidate mut pair = ownership_combinations.weak(&base.prospective,
+        &decision, facts[0..1], updated[..], &req);
+    defer ownership_combinations.free_candidate(&pair);
+    ownership_combinations_env.accepts(&pair, 2, 2);
+    i = 0;
+    while (i < pair.prospective.rows_len) {
+        ownership_combinations.binding@ kept = pair.prospective.rows[i].bindings;
+        assert(kept.len == 6);
+        u64 mut j = 1;
+        while (j < kept.len) {
+            assert(kept[j].family == cast(j + 1, u32));
+            assert(kept[j].payload.parts.len == 2);
+            assert(kept[j].payload.parts[0].unsigned_value == 16);
+            assert(kept[j].payload.parts[1].unsigned_value == 17);
+            j += 1;
+        }
+        i += 1;
+    }
+    ownership_combinations.measurement measured = ownership_combinations.measure(&pair, &req);
+    assert(ownership_api.successful(measured.proof) && measured.exact && measured.g == 2);
+    ownership_combinations.map mut destination = ownership_combinations.empty();
+    defer ownership_combinations.free(&destination);
+    ownership_combinations.installation mut refused =
+        ownership_combinations.install(&destination, &pair,
+        ownership_combinations.permission{false, 2}, &req);
+    assert(!refused.applied && destination.rows_len == 0 && pair.exact);
+    refused = ownership_combinations.install(&destination, &pair,
+        ownership_combinations.permission{true, 1}, &req);
+    assert(!refused.applied && destination.rows_len == 0 && pair.exact);
+    pair.g = ownership_combinations.U64_MAX;
+    refused = ownership_combinations.install(&destination, &pair,
+        ownership_combinations.permission{true, ownership_combinations.U64_MAX}, &req);
+    assert(!refused.applied && pair.prospective.rows_len == 2 && destination.rows_len == 0);
+    pair.g = 2;
+    ownership_combinations_env.install(&destination, &pair, &req);
+    assert(destination.rows_len == 2 && !pair.exact && env.meter.used.g == 0);
+}
+fn main() i32 {
+    joins();
+    complete_keys();
+    independent_facts();
+    println("combination joins ok");
+    return 0;
+}
