@@ -1,0 +1,668 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| ownership scope ok
+/// Tests stable registrations, charged publication, and both weak-link cleanup orders.
+import ownership_api;
+import ownership_depth_env;
+import ownership_limits;
+import ownership_scope;
+
+struct value { u64 number; }
+struct record { ownership_scope.registration mut* own member; }
+struct publication_monitor {
+    ownership_limits.meter meter;
+    ownership_scope.registration mut* left;
+    ownership_scope.registration mut* right;
+    ownership_scope.registration mut* tail;
+    ownership_scope.group mut* left_scope;
+    ownership_scope.group mut* right_scope;
+    u64 calls;
+}
+
+fn before_publication(void mut* opaque, ownership_api.charge_request* request)
+    ownership_api.charge_result {
+    publication_monitor mut* watch = cast(opaque, publication_monitor mut*);
+    assert(watch->left->scope == watch->left_scope && watch->right->scope == watch->right_scope);
+    assert(watch->tail->scope == watch->right_scope && watch->left->following == null);
+    assert(watch->left_scope->count == 1 && watch->right_scope->count == 2);
+    assert(watch->left_scope->owner == watch->left && watch->right_scope->owner == watch->right);
+    assert(watch->right->following == watch->tail && watch->tail->previous == watch->right);
+    assert(request->items.len == 1 && request->items[0].amount == 1);
+    assert(request->items[0].category == ownership_api.limit_category.w);
+    watch->calls += 1;
+    return ownership_limits.try_charge(&watch->meter, request);
+}
+
+fn paid(ownership_depth_env.fixture* f) ownership_scope.work {
+    return ownership_scope.work_for(&f->service, ownership_api.work_kind.join,
+        ownership_api.operation_position{.block = 3, .operation = 7},
+        ownership_api.source_position{.line = 23, .col = 4});
+}
+
+fn configure(ownership_depth_env.fixture mut* f, u64 work) ownership_scope.work {
+    ownership_depth_env.configure(f, work);
+    return paid(f);
+}
+
+fn complete(ownership_scope.work* used) void {
+    assert(ownership_api.successful(used->proof));
+}
+
+fn work_refused(ownership_scope.work* used, u64 bound) void {
+    ownership_api.proof_status proof = used->proof;
+    assert(proof.kind == ownership_api.proof_kind.incomplete && proof.failed);
+    assert(proof.terminal.present);
+    assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    ownership_api.exhaustion limit = proof.terminal.limit;
+    assert(limit.present && limit.category == ownership_api.limit_category.w);
+    assert(limit.scope == ownership_api.limit_scope.computation);
+    assert(limit.work == ownership_api.work_kind.join && !limit.saturated);
+    assert(limit.used == (bound == 0 ? 1 : bound));
+    assert(limit.bound == (bound == 0 ? 1 : bound) && limit.attempted == 1);
+    assert(limit.operation.block == 3 && limit.operation.operation == 7);
+    assert(limit.source.line == 23 && limit.source.col == 4);
+}
+
+fn invalid(ownership_scope.work* used) void {
+    assert(used->proof.kind == ownership_api.proof_kind.incomplete && used->proof.failed);
+    assert(used->proof.terminal.present);
+    assert(used->proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(!used->proof.terminal.limit.present);
+}
+
+fn blocks(u64 created, u64 live) void {
+    assert(ownership_depth_env.fort_depth_alloc_created() == created);
+    assert(ownership_depth_env.fort_depth_alloc_released() == created - live);
+}
+
+fn allocator_controls() void {
+    ownership_depth_env.begin();
+    value mut* own kept = new(value);
+    assert(ownership_depth_env.fort_depth_alloc_end() == 1);
+    assert(ownership_depth_env.fort_depth_alloc_created() == 1);
+    assert(ownership_depth_env.fort_depth_alloc_released() == 0);
+    del(kept);
+    assert(ownership_depth_env.fort_depth_alloc_released() == 1);
+    ownership_depth_env.begin();
+    value mut* own released = new(value);
+    del(released);
+    assert(ownership_depth_env.finish() == 1);
+}
+
+fn identities_and_move() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    value mut* own first_data = new(value);
+    value mut* own second_data = new(value);
+    value mut* own clone_data = new(value);
+    first_data->number = 11;
+    second_data->number = 11;
+    clone_data->number = 11;
+    record mut first = {ownership_scope.create(&used, cast(first_data, void mut*))};
+    record mut second = {ownership_scope.create(&used, cast(second_data, void mut*))};
+    record mut clone = {ownership_scope.retain(&used, first.member, cast(clone_data, void mut*))};
+    complete(&used);
+    assert(first.member != second.member && first.member != clone.member);
+    assert(!ownership_scope.same_group(&used, first.member, second.member));
+    assert(ownership_scope.same_group(&used, first.member, clone.member));
+    assert(first.member->scope->count == 2 && second.member->scope->count == 1);
+    assert(first.member->scope->owner == first.member && clone.member->owned_group == null);
+    ownership_scope.registration mut* identity = first.member;
+    ownership_scope.group mut* shared = first.member->scope;
+    record mut moved = move(first);
+    assert(first.member == null && moved.member == identity);
+    assert(moved.member->scope == shared && clone.member->scope == shared);
+    assert(ownership_scope.payload(&used, moved.member) == cast(first_data, void mut*));
+    blocks(8, 8);
+    ownership_scope.free(&moved.member);
+    assert(moved.member == null && clone.member->scope == shared);
+    assert(shared->owner == clone.member && clone.member->owned_group == shared);
+    assert(shared->first == clone.member && shared->last == clone.member && shared->count == 1);
+    blocks(8, 7);
+    ownership_scope.free(&first.member);
+    ownership_scope.free(&moved.member);
+    blocks(8, 7);
+    ownership_scope.free(&clone.member);
+    ownership_scope.free(&second.member);
+    del(first_data);
+    del(second_data);
+    del(clone_data);
+    assert(ownership_depth_env.finish() == 8);
+}
+
+fn intrusive_unlink() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    value mut@ own data = new(value, 4);
+    ownership_scope.registration mut* own mut a = ownership_scope.create(&used,
+        cast(&data[0], void mut*));
+    ownership_scope.registration mut* own mut b = ownership_scope.retain(&used, a,
+        cast(&data[1], void mut*));
+    ownership_scope.registration mut* own mut c = ownership_scope.retain(&used, a,
+        cast(&data[2], void mut*));
+    ownership_scope.registration mut* own mut d = ownership_scope.retain(&used, a,
+        cast(&data[3], void mut*));
+    complete(&used);
+    ownership_scope.group mut* shared = a->scope;
+    assert(shared->first == a && shared->last == d && shared->count == 4);
+    assert(a->previous == null && a->following == b);
+    assert(b->previous == a && b->following == c);
+    assert(c->previous == b && c->following == d);
+    assert(d->previous == c && d->following == null);
+    ownership_scope.free(&b);
+    assert(a->following == c && c->previous == a && shared->count == 3);
+    ownership_scope.free(&d);
+    assert(shared->last == c && c->following == null && shared->count == 2);
+    ownership_scope.free(&a);
+    assert(shared->first == c && shared->last == c && shared->owner == c);
+    assert(c->previous == null && c->following == null && c->owned_group == shared);
+    assert(shared->count == 1);
+    blocks(6, 3);
+    ownership_scope.free(&c);
+    del(data);
+    assert(ownership_depth_env.finish() == 6);
+}
+
+fn constructors_and_refusal() void {
+    ownership_depth_env.fixture mut f = {};
+    u64 mut bound = 0;
+    while (bound < 3) {
+        ownership_scope.work mut used = configure(&f, bound);
+        ownership_depth_env.begin();
+        value mut* own data = new(value);
+        ownership_scope.registration mut* own mut member = ownership_scope.create(&used,
+            cast(data, void mut*));
+        assert(member == null);
+        work_refused(&used, bound);
+        blocks(1 + bound, 1);
+        ownership_scope.free(&member);
+        del(data);
+        assert(ownership_depth_env.finish() == 1 + bound);
+        bound += 1;
+    }
+    ownership_scope.work mut exact = configure(&f, 3);
+    ownership_depth_env.begin();
+    ownership_scope.registration mut* own mut root = ownership_scope.create(&exact, null);
+    complete(&exact);
+    assert(root != null && f.meter.used.w == 3 && root->data == null);
+    ownership_scope.group mut* shared = root->scope;
+    bound = 0;
+    while (bound < 2) {
+        ownership_scope.work mut used = configure(&f, bound);
+        u64 before = ownership_depth_env.fort_depth_alloc_created();
+        ownership_scope.registration mut* own mut clone = ownership_scope.retain(&used,
+            root, null);
+        assert(clone == null && root->scope == shared && shared->count == 1);
+        assert(shared->owner == root && shared->first == root && shared->last == root);
+        assert(root->previous == null && root->following == null && root->observer == null);
+        work_refused(&used, bound);
+        blocks(before + bound, 2);
+        ownership_scope.free(&clone);
+        bound += 1;
+    }
+    exact = configure(&f, 2);
+    ownership_scope.registration mut* own mut clone = ownership_scope.retain(&exact, root, null);
+    complete(&exact);
+    assert(clone != null && clone != root && shared->count == 2 && f.meter.used.w == 2);
+    shared->count = ownership_api.U64_MAX;
+    exact = configure(&f, 10);
+    u64 before = ownership_depth_env.fort_depth_alloc_created();
+    ownership_scope.registration mut* own mut excess = ownership_scope.retain(&exact, root, null);
+    assert(excess == null && shared->count == ownership_api.U64_MAX);
+    invalid(&exact);
+    assert(ownership_depth_env.fort_depth_alloc_created() == before && f.meter.used.w == 1);
+    shared->count = 2;
+    ownership_scope.free(&clone);
+    ownership_scope.free(&root);
+    assert(ownership_depth_env.finish() == 4);
+}
+
+fn paired_constructor_refusal() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    ownership_scope.registration mut* own mut root = ownership_scope.create(&used, null);
+    u64 mut bound = 0;
+    while (bound < 3) {
+        used = configure(&f, bound);
+        u64 before = ownership_depth_env.fort_depth_alloc_created();
+        ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, root, null);
+        work_refused(&used, bound);
+        assert(raw == null && root->observer == null && root->scope->count == 1);
+        blocks(before + bound, 2);
+        ownership_scope.free(&raw);
+        bound += 1;
+    }
+    used = configure(&f, 3);
+    ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, root, null);
+    complete(&used);
+    assert(raw != null && root->observer == raw->scope && raw->scope->anchor == root);
+    ownership_scope.group mut* pair_scope = raw->scope;
+    bound = 0;
+    while (bound < 2) {
+        used = configure(&f, bound);
+        u64 before = ownership_depth_env.fort_depth_alloc_created();
+        ownership_scope.registration mut* own mut other = ownership_scope.pair(&used, root, null);
+        work_refused(&used, bound);
+        assert(other == null && root->observer == pair_scope && pair_scope->count == 1);
+        assert(pair_scope->anchor == root && pair_scope->owner == raw);
+        blocks(before + bound, 4);
+        ownership_scope.free(&other);
+        bound += 1;
+    }
+    used = configure(&f, 2);
+    ownership_scope.registration mut* own mut other = ownership_scope.pair(&used, root, null);
+    complete(&used);
+    assert(other != raw && other->scope == pair_scope && pair_scope->count == 2);
+    ownership_scope.free(&other);
+    ownership_scope.free(&raw);
+    assert(root->observer == null);
+    ownership_scope.free(&root);
+    assert(ownership_depth_env.finish() == 9);
+}
+
+fn composition() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    value mut@ own data = new(value, 6);
+    ownership_scope.registration mut* own mut a = ownership_scope.create(&used,
+        cast(&data[0], void mut*));
+    ownership_scope.registration mut* own mut b = ownership_scope.create(&used,
+        cast(&data[1], void mut*));
+    ownership_scope.registration mut* own mut c = ownership_scope.retain(&used, b,
+        cast(&data[2], void mut*));
+    ownership_scope.registration mut* own mut d = ownership_scope.create(&used,
+        cast(&data[3], void mut*));
+    ownership_scope.registration mut* own mut e = ownership_scope.retain(&used, d,
+        cast(&data[4], void mut*));
+    ownership_scope.registration mut* own mut g = ownership_scope.retain(&used, d,
+        cast(&data[5], void mut*));
+    ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, c, null);
+    ownership_scope.group mut* shared = a->scope;
+    ownership_scope.group mut* observer = raw->scope;
+    used = configure(&f, 6);
+    assert(ownership_scope.compose(&used, a, b));
+    complete(&used);
+    assert(f.meter.used.w == 6 && shared->count == 3 && shared->owner == a);
+    assert(b->owned_group == null && b->scope == shared && c->scope == shared);
+    assert(a->following == b && b->previous == a && b->following == c);
+    assert(c->previous == b && shared->last == c && c->following == null);
+    assert(c->observer == observer && observer->anchor == c);
+    used = configure(&f, 1);
+    assert(ownership_scope.compose(&used, c, a));
+    complete(&used);
+    assert(f.meter.used.w == 1 && shared->count == 3);
+    used = configure(&f, 8);
+    assert(ownership_scope.compose(&used, b, g));
+    complete(&used);
+    assert(f.meter.used.w == 8 && shared->count == 6 && shared->last == g);
+    assert(c->following == d && d->previous == c && d->following == e);
+    assert(e->previous == d && e->following == g && g->previous == e);
+    assert(d->owned_group == null && e->scope == shared && g->scope == shared);
+    assert(ownership_scope.core(&used, raw) == null);
+    work_refused(&used, 8);
+    ownership_scope.free(&a);
+    assert(shared->owner == b && b->owned_group == shared);
+    ownership_scope.free(&c);
+    assert(observer->anchor == null);
+    ownership_scope.free(&raw);
+    ownership_scope.free(&g);
+    ownership_scope.free(&b);
+    assert(shared->owner == d && d->owned_group == shared);
+    ownership_scope.free(&e);
+    ownership_scope.free(&d);
+    del(data);
+    assert(ownership_depth_env.finish() == 12);
+}
+
+fn composition_refusals() void {
+    u64 mut bound = 0;
+    while (bound < 8) {
+        ownership_depth_env.fixture mut f = {};
+        ownership_scope.work mut used = configure(&f, 100);
+        ownership_depth_env.begin();
+        ownership_scope.registration mut* own mut a = ownership_scope.create(&used, null);
+        ownership_scope.registration mut* own mut b = ownership_scope.create(&used, null);
+        ownership_scope.registration mut* own mut c = ownership_scope.retain(&used, b, null);
+        ownership_scope.registration mut* own mut d = ownership_scope.retain(&used, b, null);
+        ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, c, null);
+        ownership_scope.group mut* left = a->scope;
+        ownership_scope.group mut* right = b->scope;
+        ownership_scope.group mut* observer = raw->scope;
+        used = configure(&f, bound);
+        assert(!ownership_scope.compose(&used, a, d));
+        work_refused(&used, bound);
+        assert(a->scope == left && left->count == 1 && left->owner == a);
+        assert(left->first == a && left->last == a && a->owned_group == left);
+        assert(a->previous == null && a->following == null);
+        assert(b->scope == right && c->scope == right && d->scope == right);
+        assert(right->count == 3 && right->owner == b && b->owned_group == right);
+        assert(right->first == b && right->last == d && b->previous == null);
+        assert(b->following == c && c->previous == b && c->following == d);
+        assert(d->previous == c && d->following == null);
+        assert(c->observer == observer && observer->anchor == c && observer->count == 1);
+        blocks(8, 8);
+        u64 spent = f.meter.used.w;
+        assert(!ownership_scope.compose(&used, a, b) && f.meter.used.w == spent);
+        ownership_scope.free(&b);
+        assert(right->owner == c && c->owned_group == right && observer->anchor == c);
+        ownership_scope.free(&raw);
+        assert(c->observer == null);
+        ownership_scope.free(&d);
+        ownership_scope.free(&c);
+        ownership_scope.free(&a);
+        assert(ownership_depth_env.finish() == 8);
+        bound += 1;
+    }
+}
+
+fn composition_invalid() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    ownership_scope.registration mut* own mut a = ownership_scope.create(&used, null);
+    ownership_scope.registration mut* own mut b = ownership_scope.create(&used, null);
+    ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, a, null);
+    ownership_scope.group mut* left = a->scope;
+    ownership_scope.group mut* right = b->scope;
+    used = configure(&f, 100);
+    assert(!ownership_scope.compose(&used, a, raw));
+    invalid(&used);
+    assert(a->scope == left && b->scope == right && raw->scope->anchor == a);
+    left->count = ownership_api.U64_MAX;
+    used = configure(&f, 100);
+    assert(!ownership_scope.compose(&used, a, b));
+    invalid(&used);
+    assert(left->count == ownership_api.U64_MAX && right->count == 1);
+    assert(a->owned_group == left && b->owned_group == right);
+    left->count = 1;
+    right->count = 2;
+    used = configure(&f, 100);
+    assert(!ownership_scope.compose(&used, a, b));
+    invalid(&used);
+    assert(left->count == 1 && right->count == 2 && a->following == null);
+    right->count = 1;
+    ownership_scope.free(&raw);
+    ownership_scope.free(&a);
+    ownership_scope.free(&b);
+    assert(ownership_depth_env.finish() == 6);
+}
+
+fn weak_link_orders(bool core_first) void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    value mut* own core_data = new(value);
+    value mut* own raw_data = new(value);
+    ownership_scope.registration mut* own mut root = ownership_scope.create(&used,
+        cast(core_data, void mut*));
+    ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, root,
+        cast(raw_data, void mut*));
+    ownership_scope.registration mut* own mut clone = ownership_scope.retain(&used, raw,
+        cast(raw_data, void mut*));
+    ownership_scope.group mut* paired = raw->scope;
+    assert(paired->count == 2 && root->observer == paired);
+    assert(ownership_scope.core(&used, raw) == root && ownership_scope.core(&used, clone) == root);
+    complete(&used);
+    if (core_first) {
+        ownership_scope.free(&root);
+        del(core_data);
+        assert(paired->anchor == null && paired->count == 2);
+        used = configure(&f, 100);
+        assert(ownership_scope.core(&used, raw) == null);
+        invalid(&used);
+        used = configure(&f, 100);
+        assert(ownership_scope.payload(&used, raw) == null);
+        invalid(&used);
+        used = configure(&f, 100);
+        ownership_scope.registration mut* own mut denied = ownership_scope.retain(&used, raw, null);
+        assert(denied == null && paired->count == 2);
+        invalid(&used);
+        ownership_scope.free(&denied);
+    }
+    // Cleanup must use no callback or meter after this point.
+    f = ownership_depth_env.fixture{};
+    ownership_scope.free(&raw);
+    assert(paired->owner == clone && clone->owned_group == paired && paired->count == 1);
+    ownership_scope.free(&raw);
+    ownership_scope.free(&clone);
+    if (!core_first) {
+        assert(root->observer == null && root->scope->count == 1);
+        ownership_scope.free(&root);
+        del(core_data);
+    }
+    ownership_scope.free(&root);
+    ownership_scope.free(&clone);
+    del(raw_data);
+    assert(ownership_depth_env.finish() == 7);
+}
+
+fn exact_core_pairs() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    ownership_scope.registration mut* own mut root = ownership_scope.create(&used, null);
+    ownership_scope.registration mut* own mut clone = ownership_scope.retain(&used, root, null);
+    ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, root, null);
+    ownership_scope.registration mut* own mut other = ownership_scope.pair(&used, clone, null);
+    assert(root->scope == clone->scope && raw->scope != other->scope);
+    assert(ownership_scope.core(&used, raw) == root);
+    assert(ownership_scope.core(&used, other) == clone);
+    ownership_scope.group mut* kept = raw->scope;
+    record mut moved = {move(root)};
+    assert(root == null && kept->anchor == moved.member && moved.member->observer == kept);
+    ownership_scope.free(&clone);
+    assert(other->scope->anchor == null && kept->anchor == moved.member);
+    ownership_scope.free(&other);
+    ownership_scope.free(&raw);
+    assert(moved.member->observer == null);
+    ownership_scope.free(&moved.member);
+    assert(ownership_depth_env.finish() == 7);
+}
+
+fn meter_changes_and_queries() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_depth_env.fixture mut replacement = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    value mut@ own data = new(value, 3);
+    data[0].number = 17;
+    data[1].number = 19;
+    data[2].number = 23;
+    ownership_scope.registration mut* own mut a = ownership_scope.create(&used,
+        cast(&data[0], void mut*));
+    ownership_scope.registration mut* own mut b = ownership_scope.retain(&used, a,
+        cast(&data[1], void mut*));
+    ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, a, null);
+    ownership_scope.group mut* shared = a->scope;
+    ownership_scope.group mut* paired = raw->scope;
+    used = configure(&f, 6);
+    assert(ownership_scope.first(&used, b) == a);
+    assert(cast(ownership_scope.payload(&used, a), value*)->number == 17);
+    assert(ownership_scope.next(&used, a) == b);
+    assert(cast(ownership_scope.payload(&used, b), value*)->number == 19);
+    assert(ownership_scope.next(&used, b) == null);
+    assert(ownership_scope.core(&used, raw) == a);
+    complete(&used);
+    assert(f.meter.used.w == 6 && a->scope == shared && a->observer == paired);
+    used = configure(&f, 0);
+    assert(!ownership_scope.replace(&used, a, cast(&data[2], void mut*)));
+    work_refused(&used, 0);
+    assert(a->data == cast(&data[0], void mut*) && shared->count == 2);
+    used = configure(&replacement, 2);
+    assert(ownership_scope.replace(&used, a, cast(&data[2], void mut*)));
+    assert(cast(ownership_scope.payload(&used, a), value*)->number == 23);
+    complete(&used);
+    assert(replacement.meter.used.w == 2 && f.meter.used.w == 1);
+    assert(a->scope == shared && raw->scope == paired && paired->anchor == a);
+    f = ownership_depth_env.fixture{};
+    replacement = ownership_depth_env.fixture{};
+    ownership_scope.free(&b);
+    ownership_scope.free(&raw);
+    ownership_scope.free(&a);
+    del(data);
+    assert(ownership_depth_env.finish() == 6);
+}
+
+fn zero_partial_and_missing() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    ownership_scope.registration mut* own mut none = null;
+    ownership_scope.free(&none);
+    ownership_scope.free(&none);
+    assert(ownership_scope.first(&used, none) == null);
+    invalid(&used);
+    ownership_scope.registration mut* own mut partial = new(ownership_scope.registration);
+    ownership_scope.free(&partial);
+    ownership_scope.free(&partial);
+    blocks(1, 0);
+    used = configure(&f, 100);
+    f.service.budget = null;
+    ownership_scope.registration mut* own mut denied = ownership_scope.create(&used, null);
+    assert(denied == null && used.proof.terminal.reason ==
+        ownership_api.incomplete_reason.missing_budget);
+    used = configure(&f, 100);
+    f.service.event = null;
+    denied = ownership_scope.create(&used, null);
+    assert(denied == null && used.proof.terminal.reason ==
+        ownership_api.incomplete_reason.missing_events);
+    used = ownership_scope.work_for(null, ownership_api.work_kind.join,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    denied = ownership_scope.create(&used, null);
+    assert(denied == null);
+    invalid(&used);
+    ownership_scope.free(&denied);
+    assert(ownership_depth_env.finish() == 1);
+}
+
+fn query_refusals_and_empty_payload() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    ownership_scope.registration mut* own mut a = ownership_scope.create(&used, null);
+    ownership_scope.registration mut* own mut b = ownership_scope.retain(&used, a, null);
+    ownership_scope.registration mut* own mut raw = ownership_scope.pair(&used, a, null);
+    u32 mut mode = 0;
+    while (mode < 6) {
+        used = configure(&f, 0);
+        switch (mode) {
+        case 0: assert(ownership_scope.first(&used, a) == null); break;
+        case 1: assert(ownership_scope.next(&used, a) == null); break;
+        case 2: assert(ownership_scope.payload(&used, a) == null); break;
+        case 3: assert(ownership_scope.core(&used, raw) == null); break;
+        case 4: assert(!ownership_scope.same_group(&used, a, b)); break;
+        case 5: assert(!ownership_scope.replace(&used, a, null)); break;
+        default: assert(false);
+        }
+        work_refused(&used, 0);
+        assert(a->scope == b->scope && a->scope->count == 2);
+        assert(a->following == b && b->previous == a);
+        assert(a->observer == raw->scope && raw->scope->anchor == a);
+        blocks(5, 5);
+        mode += 1;
+    }
+    used = configure(&f, 1);
+    assert(ownership_scope.payload(&used, a) == null);
+    complete(&used);
+    used = configure(&f, 1);
+    assert(ownership_scope.next(&used, b) == null);
+    complete(&used);
+    used = configure(&f, 1);
+    assert(ownership_scope.first(&used, b) == a);
+    complete(&used);
+    used = configure(&f, 1);
+    assert(ownership_scope.same_group(&used, a, b));
+    complete(&used);
+    used = configure(&f, 1);
+    assert(ownership_scope.core(&used, raw) == a);
+    complete(&used);
+    used = configure(&f, 1);
+    assert(ownership_scope.replace(&used, b, null));
+    complete(&used);
+    ownership_scope.free(&raw);
+    ownership_scope.free(&b);
+    ownership_scope.free(&a);
+    assert(ownership_depth_env.finish() == 5);
+}
+
+fn publication_callback_order() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_scope.work mut used = configure(&f, 100);
+    ownership_depth_env.begin();
+    ownership_scope.registration mut* own mut a = ownership_scope.create(&used, null);
+    ownership_scope.registration mut* own mut b = ownership_scope.create(&used, null);
+    ownership_scope.registration mut* own mut c = ownership_scope.retain(&used, b, null);
+    publication_monitor mut watch = {.left = a, .right = b, .tail = c,
+        .left_scope = a->scope, .right_scope = b->scope};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.w = 6;
+    assert(ownership_limits.configure(&watch.meter, &limits));
+    f.service.budget_context = cast(&watch, void mut*);
+    f.service.budget = before_publication;
+    used = paid(&f);
+    assert(ownership_scope.compose(&used, a, c));
+    complete(&used);
+    assert(watch.calls == 6 && watch.meter.used.w == 6);
+    assert(a->scope == b->scope && a->scope == c->scope && a->scope->count == 3);
+    assert(a->following == b && b->previous == a && b->following == c && c->previous == b);
+    f = ownership_depth_env.fixture{};
+    ownership_scope.free(&a);
+    ownership_scope.free(&b);
+    ownership_scope.free(&c);
+    assert(ownership_depth_env.finish() == 5);
+}
+
+fn work_kinds_and_saturation() void {
+    ownership_api.work_kind[5] kinds = {ownership_api.work_kind.transfer,
+        ownership_api.work_kind.join, ownership_api.work_kind.widening,
+        ownership_api.work_kind.substitution, ownership_api.work_kind.summary_solver};
+    ownership_depth_env.fixture mut f = {};
+    ownership_depth_env.begin();
+    u64 mut i = 0;
+    while (i < kinds.len) {
+        ownership_scope.work mut used = configure(&f, 0);
+        used.kind = kinds[i];
+        ownership_scope.registration mut* own mut denied = ownership_scope.create(&used, null);
+        assert(denied == null && used.proof.terminal.limit.work == kinds[i]);
+        assert(used.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(used.proof.terminal.limit.used == 1 && used.proof.terminal.limit.bound == 1);
+        ownership_scope.free(&denied);
+        i += 1;
+    }
+    ownership_scope.work mut used = configure(&f, 100);
+    f.meter.used.w = ownership_api.U64_MAX;
+    ownership_scope.registration mut* own mut denied = ownership_scope.create(&used, null);
+    assert(denied == null && used.proof.terminal.limit.saturated);
+    assert(used.proof.terminal.limit.used == ownership_api.U64_MAX);
+    assert(used.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(f.meter.used.w == ownership_api.U64_MAX);
+    ownership_scope.free(&denied);
+    assert(ownership_depth_env.finish() == 0);
+}
+
+fn main() i32 {
+    allocator_controls();
+    identities_and_move();
+    intrusive_unlink();
+    constructors_and_refusal();
+    paired_constructor_refusal();
+    composition();
+    composition_refusals();
+    composition_invalid();
+    weak_link_orders(true);
+    weak_link_orders(false);
+    exact_core_pairs();
+    meter_changes_and_queries();
+    zero_partial_and_missing();
+    query_refusals_and_empty_payload();
+    publication_callback_order();
+    work_kinds_and_saturation();
+    println("ownership scope ok");
+    return 0;
+}

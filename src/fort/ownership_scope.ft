@@ -1,0 +1,219 @@
+/// Retains private analysis registrations across record moves and scope composition.
+import ownership_api;
+
+struct work {
+    ownership_api.services* service;
+    ownership_api.work_kind kind;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.proof_status proof;
+}
+
+struct group {
+    registration mut* first;
+    registration mut* last;
+    registration mut* owner;
+    registration mut* anchor;
+    u64 count;
+    bool paired;
+}
+
+struct registration {
+    group mut* scope;
+    registration mut* previous;
+    registration mut* following;
+    group mut* own owned_group;
+    group mut* observer;
+    void mut* data;
+}
+
+fn work_for(ownership_api.services* service, ownership_api.work_kind kind,
+    ownership_api.operation_position operation, ownership_api.source_position source) work {
+    return work{service, kind, operation, source,
+        ownership_api.proof_status{.kind = ownership_api.proof_kind.complete}};
+}
+
+fn invalid(work mut* paid) bool {
+    paid->proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        paid->operation, paid->source);
+    return false;
+}
+
+fn spend(work mut* paid) bool {
+    if (!ownership_api.successful(paid->proof)) { return false; }
+    if (paid->service == null) { return invalid(paid); }
+    ownership_api.charge_result charged = ownership_api.charge_work(paid->service, paid->kind,
+        paid->operation, paid->source);
+    if (!charged.allowed) { paid->proof = charged.proof; }
+    return charged.allowed;
+}
+
+fn live(work mut* paid, registration* member) bool {
+    if (member == null || member->scope == null) { return invalid(paid); }
+    group* kept = member->scope;
+    if (kept->count == 0 || kept->first == null || kept->last == null || kept->owner == null ||
+        (kept->paired && kept->anchor == null)) { return invalid(paid); }
+    return true;
+}
+
+// The caller grants the first allocation permission before this helper runs.
+fn created(work mut* paid, void mut* data, registration mut* anchor)
+    registration mut* own {
+    group mut* own kept = new(group);
+    if (!spend(paid)) { del(kept); return null; }
+    registration mut* own member = new(registration);
+    if (!spend(paid)) { del(member); del(kept); return null; }
+    kept->first = member;
+    kept->last = member;
+    kept->owner = member;
+    kept->anchor = anchor;
+    kept->paired = anchor != null;
+    kept->count = 1;
+    member->scope = kept;
+    member->data = data;
+    if (anchor != null) { anchor->observer = kept; }
+    member->owned_group = move(kept);
+    return move(member);
+}
+
+fn create(work mut* paid, void mut* data) registration mut* own {
+    if (!spend(paid)) { return null; }
+    return created(paid, data, null);
+}
+
+// The caller pays for fixed validation and the member allocation before this helper runs.
+fn retained(work mut* paid, group mut* kept, void mut* data) registration mut* own {
+    if (kept->count == ownership_api.U64_MAX) { invalid(paid); return null; }
+    registration mut* own member = new(registration);
+    if (!spend(paid)) { del(member); return null; }
+    member->scope = kept;
+    member->previous = kept->last;
+    member->data = data;
+    kept->last->following = member;
+    kept->last = member;
+    kept->count += 1;
+    return move(member);
+}
+
+fn retain(work mut* paid, registration mut* member, void mut* data)
+    registration mut* own {
+    if (!spend(paid) || !live(paid, member)) { return null; }
+    return retained(paid, member->scope, data);
+}
+
+fn pair(work mut* paid, registration mut* anchor, void mut* data)
+    registration mut* own {
+    if (!spend(paid) || !live(paid, anchor)) { return null; }
+    if (anchor->scope->paired) { invalid(paid); return null; }
+    if (anchor->observer != null) {
+        group mut* kept = anchor->observer;
+        if (!kept->paired || kept->anchor != anchor || kept->count == 0 ||
+            kept->last == null) { invalid(paid); return null; }
+        return retained(paid, kept, data);
+    }
+    return created(paid, data, anchor);
+}
+
+fn same_group(work mut* paid, registration* left, registration* right) bool {
+    if (!spend(paid) || !live(paid, left) || !live(paid, right)) { return false; }
+    return left->scope == right->scope;
+}
+
+fn replace(work mut* paid, registration mut* member, void mut* data) bool {
+    if (!spend(paid) || !live(paid, member)) { return false; }
+    member->data = data;
+    return true;
+}
+
+fn first(work mut* paid, registration mut* member) registration mut* {
+    if (!spend(paid) || !live(paid, member)) { return null; }
+    return member->scope->first;
+}
+
+fn next(work mut* paid, registration mut* member) registration mut* {
+    if (!spend(paid) || !live(paid, member)) { return null; }
+    return member->following;
+}
+
+fn payload(work mut* paid, registration* member) void mut* {
+    if (!spend(paid) || !live(paid, member)) { return null; }
+    return member->data;
+}
+
+fn core(work mut* paid, registration mut* member) registration mut* {
+    if (!spend(paid) || !live(paid, member)) { return null; }
+    if (!member->scope->paired) { invalid(paid); return null; }
+    return member->scope->anchor;
+}
+
+// Each inspected member prepays its publication rewrite. Refusal changes no link.
+fn compose(work mut* paid, registration mut* left, registration mut* right) bool {
+    if (!spend(paid) || !live(paid, left) || !live(paid, right)) { return false; }
+    group mut* kept = left->scope;
+    group mut* removed = right->scope;
+    if (kept->paired || removed->paired) { return invalid(paid); }
+    if (kept == removed) { return true; }
+    if (removed->count > ownership_api.U64_MAX - kept->count ||
+        kept->last->following != null || removed->first->previous != null ||
+        kept->owner->owned_group != kept) { return invalid(paid); }
+    registration mut* mut current = removed->first;
+    registration mut* mut previous = null;
+    u64 mut count = 0;
+    bool mut owns = false;
+    while (current != null) {
+        if (!spend(paid) || !spend(paid)) { return false; }
+        if (count == removed->count || current->scope != removed ||
+            current->previous != previous) { return invalid(paid); }
+        if (current == removed->owner) {
+            if (current->owned_group != removed) { return invalid(paid); }
+            owns = true;
+        } else if (current->owned_group != null) { return invalid(paid); }
+        count += 1;
+        previous = current;
+        current = current->following;
+    }
+    if (count != removed->count || previous != removed->last || !owns) { return invalid(paid); }
+    if (!spend(paid)) { return false; }
+    registration mut* head = removed->first;
+    registration mut* tail = removed->last;
+    group mut* own obsolete = move(removed->owner->owned_group);
+    current = head;
+    while (current != null) {
+        current->scope = kept;
+        current = current->following;
+    }
+    kept->last->following = head;
+    head->previous = kept->last;
+    kept->last = tail;
+    kept->count += count;
+    del(obsolete);
+    return true;
+}
+
+// Clear both weak-link directions before either endpoint ends.
+fn free(registration mut* own mut* slot) void {
+    registration mut* own member = move(*slot);
+    if (member == null) { return; }
+    if (member->observer != null) {
+        member->observer->anchor = null;
+        member->observer = null;
+    }
+    group mut* kept = member->scope;
+    if (kept != null) {
+        if (member->previous != null) { member->previous->following = member->following; }
+        else { kept->first = member->following; }
+        if (member->following != null) { member->following->previous = member->previous; }
+        else { kept->last = member->previous; }
+        kept->count -= 1;
+        if (kept->count == 0 && kept->anchor != null) {
+            kept->anchor->observer = null;
+            kept->anchor = null;
+        }
+        if (member->owned_group != null && kept->first != null) {
+            kept->owner = kept->first;
+            kept->first->owned_group = move(member->owned_group);
+        }
+    }
+    del(member->owned_group);
+    del(member);
+}
