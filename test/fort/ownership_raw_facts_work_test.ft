@@ -1,0 +1,218 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| construction prefixes203
+//| copy prefixes196
+//| union prefixes719
+//| raw fact work ok
+/// Tests each paid prefix and allocation cleanup without registration or consumer state.
+import ownership_api;
+import ownership_depth_env;
+import ownership_raw_facts;
+import ownership_raw_facts_env;
+import ownership_type_work;
+import types;
+
+fn build(ownership_type_work.work mut* paid, types.node* layout)
+    ownership_raw_facts.payload_result {
+    ownership_raw_facts.raw_region_view[6] mut regions = {};
+    ownership_raw_facts.closed_bound_view[6] mut bounds = {};
+    ownership_raw_facts.ordered_relation_view[6] mut relations = {};
+    ownership_raw_facts.affine_term[2] terms = {
+        ownership_raw_facts.affine_term{
+            ownership_raw_facts_env.id(ownership_api.entity_kind.value, 2),
+            ownership_raw_facts.signed(-2)},
+        ownership_raw_facts.affine_term{
+            ownership_raw_facts_env.id(ownership_api.entity_kind.value, 1),
+            ownership_raw_facts.signed(4)}};
+    ownership_api.projection[1] projections = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 2}};
+    ownership_api.predicate_atom[1] positive = {ownership_raw_facts_env.atom(1,
+        ownership_api.predicate_kind.inequality, 1, 2, 0, 0)};
+    u64[6] indices = {0, 1, 2, 3, 4, 5};
+    u64 mut i = 0;
+    while (i < 6) {
+        regions[i] = ownership_raw_facts_env.region(layout, cast(i + 1, u32), 1, 0, i + 1);
+        regions[i].place.projections = projections[..];
+        bounds[i] = ownership_raw_facts_env.bound(cast(i + 1, u32), 0, cast(i + 1, i64));
+        relations[i] = ownership_raw_facts.ordered_relation_view{
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(i * 2), terms[..], true},
+            ownership_raw_facts.literal(0)};
+        i += 1;
+    }
+    ownership_raw_facts.choice_view[1] choices = {ownership_raw_facts.choice_view{
+        .kind = ownership_raw_facts.decision_kind.path,
+        .decision = ownership_raw_facts_env.id(ownership_api.entity_kind.guard, 1),
+        .subject = ownership_raw_facts_env.path(1),
+        .value_version = ownership_raw_facts_env.id(ownership_api.entity_kind.value, 1),
+        .alternative = ownership_raw_facts_env.id(ownership_api.entity_kind.relation, 1),
+        .polarity = true, .positive = positive[..], .regions = indices[..], .bounds = indices[..],
+        .relations = indices[..], .complete = true}};
+    return ownership_raw_facts.build_payload(ownership_raw_facts.raw_fact_view{
+        regions[..], bounds[..], relations[..], choices[..], true, false}, paid);
+}
+fn work_refusal(ownership_api.proof_status proof, u64 allowance) void {
+    ownership_raw_facts_env.refused(proof, ownership_api.incomplete_reason.work_limit);
+    assert(proof.terminal.limit.present && proof.terminal.limit.category ==
+        ownership_api.limit_category.w);
+    assert(proof.terminal.limit.work == ownership_api.work_kind.substitution);
+    assert(proof.terminal.limit.attempted == 1 && !proof.terminal.limit.saturated);
+    assert(proof.terminal.limit.used == (allowance == 0 ? 1 : allowance));
+    assert(proof.terminal.limit.bound == (allowance == 0 ? 1 : allowance));
+}
+fn construction_prefixes() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    types.node layout = ownership_raw_facts_env.integer();
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut complete = build(&paid, &layout);
+    ownership_raw_facts_env.good(&complete);
+    u64 cost = f.meter.used.w;
+    ownership_raw_facts.free_payload(&complete.payload);
+    assert(ownership_depth_env.finish() > 0 && cost > 100);
+    u64 mut allowance = 0;
+    while (allowance <= cost) {
+        paid = ownership_raw_facts_env.configure(&f, allowance);
+        ownership_depth_env.begin();
+        ownership_raw_facts.payload_result mut result = build(&paid, &layout);
+        if (allowance < cost) {
+            work_refusal(result.proof, allowance);
+            assert(result.payload == null);
+        } else {
+            ownership_raw_facts_env.good(&result);
+            assert(f.meter.used.w == cost && result.payload->regions.len == 6);
+        }
+        u64 used = f.meter.used.w;
+        ownership_raw_facts.free_payload(&result.payload);
+        ownership_raw_facts.free_payload(&result.payload);
+        assert(f.meter.used.w == used);
+        ownership_depth_env.finish();
+        allowance += 1;
+    }
+    println("construction prefixes", cost);
+}
+fn copying_prefixes() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    types.node layout = ownership_raw_facts_env.integer();
+    ownership_raw_facts.payload_result mut input = build(&paid, &layout);
+    ownership_raw_facts_env.good(&input);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut complete = ownership_raw_facts.copy_payload(
+        input.payload, &paid);
+    ownership_raw_facts_env.good(&complete);
+    u64 cost = f.meter.used.w;
+    ownership_raw_facts.free_payload(&complete.payload);
+    assert(ownership_depth_env.finish() > 0);
+    u64 mut allowance = 0;
+    while (allowance <= cost) {
+        paid = ownership_raw_facts_env.configure(&f, allowance);
+        ownership_depth_env.begin();
+        ownership_raw_facts.payload_result mut result = ownership_raw_facts.copy_payload(
+            input.payload, &paid);
+        if (allowance < cost) {
+            work_refusal(result.proof, allowance); assert(result.payload == null);
+        }
+        else { ownership_raw_facts_env.good(&result); assert(f.meter.used.w == cost); }
+        ownership_raw_facts.free_payload(&result.payload);
+        ownership_depth_env.finish();
+        assert(input.payload->regions[0].source.ordinal == 1);
+        assert(input.payload->choices[0].descriptor.regions.len == 6);
+        allowance += 1;
+    }
+    ownership_raw_facts.free_payload(&input.payload);
+    println("copy prefixes", cost);
+}
+fn union_prefixes() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    types.node layout = ownership_raw_facts_env.integer();
+    ownership_raw_facts.payload_result mut first = build(&paid, &layout);
+    ownership_raw_facts.payload_result mut equal = ownership_raw_facts.copy_payload(first.payload,
+        &paid);
+    ownership_raw_facts_env.good(&first); ownership_raw_facts_env.good(&equal);
+    ownership_raw_facts.raw_fact_payload*[2] live = {first.payload, equal.payload};
+    ownership_api.predicate_atom[1] predicates = {ownership_raw_facts_env.atom(7,
+        ownership_api.predicate_kind.membership, 1, 1, 0, 2)};
+    ownership_raw_facts.core_region_view[1] regions = {ownership_raw_facts.core_region_view{
+        .identity = ownership_raw_facts.core_region_identity{
+            ownership_raw_facts.region_identity_kind.region,
+            ownership_raw_facts_env.id(ownership_api.entity_kind.region, 7), {}},
+        .meaning = ownership_raw_facts_env.region(&layout, 1, 1, 0, 1), .alias_complete = true}};
+    ownership_raw_facts.union_request req = ownership_raw_facts.union_request{
+        .core = ownership_raw_facts.core_fact_view{regions[..], predicates[..]}, .live = live[..]};
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_depth_env.begin();
+    ownership_raw_facts.union_result mut complete = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.counts(&complete, 7, 12);
+    u64 cost = f.meter.used.w;
+    ownership_raw_facts.free_union_result(&complete);
+    assert(ownership_depth_env.finish() > 0 && cost > 500);
+    u64 mut allowance = 0;
+    while (allowance <= cost) {
+        paid = ownership_raw_facts_env.configure(&f, allowance);
+        ownership_depth_env.begin();
+        ownership_raw_facts.union_result mut result =
+            ownership_raw_facts.measure_union(&req, &paid);
+        if (allowance < cost) {
+            work_refusal(result.proof, allowance);
+            assert(result.r == 0 && result.p == 0 && result.choices == null);
+        } else { ownership_raw_facts_env.counts(&result, 7, 12); assert(f.meter.used.w == cost); }
+        u64 used = f.meter.used.w;
+        ownership_raw_facts.free_union_result(&result);
+        ownership_raw_facts.free_union_result(&result);
+        assert(f.meter.used.w == used);
+        ownership_depth_env.finish();
+        assert(first.payload->regions.len == 6 && equal.payload->bounds.len == 6);
+        assert(first.payload->relations[1].constant.magnitude == 1);
+        allowance += 1;
+    }
+    ownership_raw_facts.free_payload(&first.payload);
+    ownership_raw_facts.free_payload(&equal.payload);
+    println("union prefixes", cost);
+}
+fn replacement_errors() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    types.node layout = ownership_raw_facts_env.integer();
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut first = build(&paid, &layout);
+    ownership_raw_facts.payload_result mut other = ownership_raw_facts.copy_payload(first.payload,
+        &paid);
+    ownership_raw_facts.raw_fact_payload*[2] live = {first.payload, first.payload};
+    ownership_raw_facts.union_request mut req = ownership_raw_facts.union_request{
+        .live = live[..], .proposed = other.payload, .replaced = first.payload,
+        .replacement_index = 2};
+    ownership_raw_facts.union_result mut result =
+            ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.refused(result.proof, ownership_api.incomplete_reason.invalid_input);
+    assert(result.choices == null && result.r == 0 && result.p == 0);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    req.replacement_index = 0;
+    result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.counts(&result, 6, 12);
+    ownership_raw_facts.free_union_result(&result);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    req.live = live[..1]; req.replaced = other.payload; req.proposed = other.payload;
+    result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.refused(result.proof, ownership_api.incomplete_reason.invalid_input);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    req.replaced = null; req.proposed = first.payload;
+    result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.refused(result.proof, ownership_api.incomplete_reason.invalid_input);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    req.replaced = first.payload; req.proposed = null;
+    result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.refused(result.proof, ownership_api.incomplete_reason.invalid_input);
+    ownership_raw_facts.free_union_result(&result);
+    ownership_raw_facts.free_payload(&first.payload);
+    ownership_raw_facts.free_payload(&other.payload);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn main() i32 {
+    construction_prefixes(); copying_prefixes(); union_prefixes(); replacement_errors();
+    println("raw fact work ok");
+    return 0;
+}

@@ -1,0 +1,96 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| raw nominal aliases ok
+/// Tests checked nominal correspondence without type-address semantic keys.
+import check_env;
+import ownership_api;
+import ownership_depth_env;
+import ownership_raw_facts;
+import ownership_raw_facts_env;
+import ownership_type_work;
+import types;
+
+fn copied_type(types.node* input, types.node mut* out) void {
+    out->kind = input->kind; out->name = input->name; out->decl = input->decl;
+    out->layout = new(types.layout); *out->layout = *input->layout;
+}
+fn nominal_aliases() void {
+    check_env.env mut checked = {};
+    check_env.open(&checked); defer check_env.close(&checked);
+    assert(check_env.check_decls(&checked,
+        "struct Left { u64 value; } struct Right { u64 value; }"));
+    types.node* left = check_env.sym_main(&checked, "Left")->ty;
+    types.node* right = check_env.sym_main(&checked, "Right")->ty;
+    assert(left->decl != right->decl && left->layout->size == right->layout->size);
+    types.node mut duplicate = {};
+    copied_type(left, &duplicate); defer del(duplicate.layout);
+    types.node mut same_name = {};
+    copied_type(right, &same_name); defer del(same_name.layout);
+    same_name.name = left->name;
+    assert(left != cast(&duplicate, types.node*) && left->decl == duplicate.decl);
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.raw_region_view[1] mut regions = {
+        ownership_raw_facts_env.region(&duplicate, 0, 0, 0, 8)};
+    ownership_raw_facts.core_region_view[1] mut core = {ownership_raw_facts.core_region_view{
+        .identity = ownership_raw_facts.core_region_identity{
+            .kind = ownership_raw_facts.region_identity_kind.region,
+            .key = ownership_raw_facts_env.id(ownership_api.entity_kind.region, 0)},
+        .meaning = ownership_raw_facts_env.region(left, 0, 0, 0, 8), .alias_complete = true}};
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut payload = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.regions = regions[..]}, &paid);
+    ownership_raw_facts_env.good(&payload);
+    ownership_raw_facts.union_request mut req = ownership_raw_facts.union_request{
+        .core = ownership_raw_facts.core_fact_view{.regions = core[..]},
+        .proposed = payload.payload};
+    ownership_raw_facts.union_result mut result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.counts(&result, 1, 0);
+    ownership_raw_facts.free_union_result(&result);
+    ownership_raw_facts.free_payload(&payload.payload);
+    regions[0].layout = &same_name;
+    payload = ownership_raw_facts.build_payload(ownership_raw_facts.raw_fact_view{
+        .regions = regions[..]}, &paid);
+    ownership_raw_facts_env.good(&payload); req.proposed = payload.payload;
+    result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.counts(&result, 2, 0);
+    ownership_raw_facts.free_union_result(&result);
+    core[0].alias_complete = false;
+    result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.counts(&result, 2, 0);
+    ownership_raw_facts.free_union_result(&result);
+    ownership_raw_facts.free_payload(&payload.payload);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn nominal_identity_collision() void {
+    check_env.env mut checked = {};
+    check_env.open(&checked); defer check_env.close(&checked);
+    assert(check_env.check_decls(&checked,
+        "struct Left { u64 value; } struct Right { u64 value; }"));
+    types.node* left = check_env.sym_main(&checked, "Left")->ty;
+    types.node* right = check_env.sym_main(&checked, "Right")->ty;
+    ownership_raw_facts.core_region_view[2] mut core = {};
+    core[0] = ownership_raw_facts.core_region_view{
+        .identity = ownership_raw_facts.core_region_identity{
+            .kind = ownership_raw_facts.region_identity_kind.region,
+            .key = ownership_raw_facts_env.id(ownership_api.entity_kind.region, 0)},
+        .meaning = ownership_raw_facts_env.region(left, 0, 0, 0, 8), .alias_complete = true};
+    core[1] = core[0]; core[1].meaning.layout = right;
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_depth_env.begin();
+    ownership_raw_facts.union_request req = ownership_raw_facts.union_request{
+        .core = ownership_raw_facts.core_fact_view{.regions = core[..]}};
+    ownership_raw_facts.union_result mut result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.refused(result.proof,
+            ownership_api.incomplete_reason.invalid_input);
+    assert(result.r == 0 && result.p == 0 && result.choices == null);
+    ownership_raw_facts.free_union_result(&result);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn main() i32 {
+    nominal_aliases(); nominal_identity_collision();
+    println("raw nominal aliases ok"); return 0;
+}
