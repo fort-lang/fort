@@ -538,6 +538,18 @@ set_tests_properties(ownership_audit_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Test ownership selection and report publication through the built compiler.
+add_test(NAME ownership_driver
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_driver_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            --opt "${FORT_OPT_PATH}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(ownership_driver PROPERTIES
+    LABELS "fort;integration"
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.

@@ -1,0 +1,227 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| statuses ok
+//| reasons ok
+//| outcomes ok
+//| rendering ok
+/// Checks report outcomes and supplementary report-rendering boundary controls.
+import diag;
+import ownership_api;
+import ownership_events;
+import ownership_limits;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import std.str;
+import std.strbuf;
+
+fn proof_failure_flag_does_not_mean_internal_failure() void {
+    ownership_api.proof_status mut proof = ownership_api.incomplete(
+        ownership_api.incomplete_reason.source_coverage, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(proof.failed);
+    assert(ownership_report.proof_status(proof) == "incomplete");
+    proof.terminal.reason = ownership_api.incomplete_reason.invalid_input;
+    assert(ownership_report.proof_status(proof) == "failed");
+    assert(ownership_report.proof_status(ownership_api.proof_status{}) == "unexecuted");
+    assert(ownership_report.proof_status(ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete}) == "complete");
+}
+
+fn zero_bodies_retain_missing_producers_and_no_body_meter() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "i32 VALUE = 1;\n"));
+    ownership_source.analyze(&e.source);
+    assert(e.source.bodies.len == 0);
+    assert(ownership_report.verdict(&e.source) == 1);
+    u64 mut stage = 2;
+    while (stage < ownership_report.ANALYSIS_COUNT) {
+        assert(ownership_report.closure_status(&e.source, stage) == "incomplete");
+        stage += 1;
+    }
+    diag.sink mut diagnostics = diag.sink{};
+    defer diag.free(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(diag.count(&diagnostics) == 1);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    assert(str.find(strbuf.view(&out), "\"name\":\"services\"") < 0);
+    assert(str.find(strbuf.view(&out), "\"bodies\":[]") >= 0);
+    assert(str.find(strbuf.view(&out), "\"producer\":\"unavailable\"") >= 0);
+}
+
+fn failure_before_any_body_ledger_keeps_unexecuted_analyses() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(!ownership_source_env.prepare(&e, "fn bad() void { missing(); }\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body* row = &e.source.bodies[0];
+    assert(!row->live.initialized);
+    assert(ownership_report.body_ownership(row) == "failed");
+    u64 mut stage = 0;
+    while (stage < ownership_report.ANALYSIS_COUNT) {
+        assert(ownership_report.analysis_status(row, stage, 0) == "unexecuted");
+        assert(ownership_report.analysis_status(row, stage, 1) == "unexecuted");
+        assert(ownership_report.analysis_status(row, stage, 2) == "unexecuted");
+        stage += 1;
+    }
+    assert(ownership_report.failure(&e.source, 1).code == "source_error");
+    diag.sink mut diagnostics = diag.sink{};
+    defer diag.free(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(diag.count(&diagnostics) == 1);
+    assert(row->live.events.budget.used.v == 0);
+}
+
+fn missing_reason_uses_an_explicit_missing_producer() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void {}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body mut* row = &e.source.bodies[0];
+    row->first_incomplete = ownership_api.proof_status{};
+    ownership_report.reason why = ownership_report.body_reason(row);
+    assert(why.present && why.stage == "local" && why.code == "missing_producer");
+    assert(why.source.filename_present && !why.limit.present);
+}
+
+fn graph_refusal_keeps_the_original_category_counts_and_location() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void {}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body* row = &e.source.bodies[0];
+    ownership_api.operation_position op = ownership_api.operation_position{.function = row->key};
+    ownership_api.proof_status mut refusal = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit, op, row->source);
+    refusal.terminal.limit = ownership_api.exhaustion{
+        .present = true, .category = ownership_api.limit_category.w,
+        .scope = ownership_api.limit_scope.computation,
+        .used = e.source.graph.limits.w, .bound = e.source.graph.limits.w,
+        .operation = op, .source = row->source};
+    e.source.graph_first_refusal = refusal;
+    e.source.graph.work = e.source.graph.limits.w;
+    ownership_report.reason why = ownership_report.first_incomplete(&e.source);
+    assert(why.stage == "graph" && why.code == "work_limit");
+    assert(why.limit.category == ownership_api.limit_category.w);
+    assert(why.limit.used == why.limit.bound);
+    assert(why.source.line == row->source.line && why.source.col == row->source.col);
+}
+
+fn internal_verifier_failure_exits_two() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void {}\n"));
+    e.source.bodies[0].verification = ownership_source.status.failed;
+    ownership_source.analyze(&e.source);
+    assert(ownership_report.verdict(&e.source) == 2);
+    assert(ownership_report.failure(&e.source, 2).stage == "verification");
+    assert(ownership_report.failure(&e.source, 2).code == "verification_failure");
+    assert(ownership_report.body_ownership(&e.source.bodies[0]) == "failed");
+}
+
+fn unsupported_lowering_stays_a_source_rejection() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void { println(1); }\n"));
+    ownership_source.analyze(&e.source);
+    assert(ownership_report.verdict(&e.source) == 1);
+    assert(ownership_report.failure(&e.source, 1).code == "unsupported_lowering");
+}
+
+fn internal_analysis_failure_wins_over_an_earlier_lowering_failure() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn unsupported() void { println(1); }\nfn root() void {}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "root");
+    row->liveness_proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        ownership_api.operation_position{.function = row->key}, row->source);
+    assert(ownership_report.verdict(&e.source) == 2);
+    assert(ownership_report.failure(&e.source, 2).code == "analysis_failure");
+    assert(ownership_report.failure(&e.source, 2).stage == "liveness");
+    assert(e.source.bodies[0].lowering == ownership_source.status.failed);
+    assert(ownership_report.body_ownership(row) == "failed");
+}
+
+fn later_tool_failure_updates_the_final_reason() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void {}\n"));
+    ownership_source.analyze(&e.source);
+    assert(!ownership_report.failure(&e.source, 1).present);
+    assert(ownership_report.failure(&e.source, 2).stage == "tool");
+    assert(ownership_report.failure(&e.source, 2).code == "tool_failure");
+}
+
+fn rendered_diagnostic_charges_the_existing_service_ledger() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void {}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body* row = &e.source.bodies[0];
+    u64 before = row->live.events.budget.used.v;
+    diag.sink mut diagnostics = diag.sink{};
+    defer diag.free(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(row->live.events.budget.used.v == before + 1);
+    assert(row->live.events.rendered == 1);
+    assert(diag.count(&diagnostics) == 1);
+    assert(e.source.graph.work > 0);
+    assert(!e.source.accounting_complete);
+}
+
+fn later_report_refusal_keeps_completed_solver_results() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void {}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body mut* row = &e.source.bodies[0];
+    assert(row->liveness_solver == ownership_source.status.complete);
+    row->live.events.budget.used.v = row->live.events.budget.bounds.v;
+    row->live.events.rendered = row->live.events.budget.bounds.v;
+    diag.sink mut diagnostics = diag.sink{};
+    defer diag.free(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(row->live.first_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(row->live.first_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(row->live.events.budget.used.v == row->live.events.budget.bounds.v);
+    assert(row->liveness_solver == ownership_source.status.complete);
+    assert(ownership_report.body_reason(row).present);
+    assert(ownership_report.verdict(&e.source) == 1);
+    assert(diag.count(&diagnostics) >= 1);
+}
+
+fn main() i32 {
+    proof_failure_flag_does_not_mean_internal_failure();
+    zero_bodies_retain_missing_producers_and_no_body_meter();
+    failure_before_any_body_ledger_keeps_unexecuted_analyses();
+    println("statuses ok");
+    missing_reason_uses_an_explicit_missing_producer();
+    graph_refusal_keeps_the_original_category_counts_and_location();
+    println("reasons ok");
+    internal_verifier_failure_exits_two();
+    unsupported_lowering_stays_a_source_rejection();
+    internal_analysis_failure_wins_over_an_earlier_lowering_failure();
+    later_tool_failure_updates_the_final_reason();
+    println("outcomes ok");
+    rendered_diagnostic_charges_the_existing_service_ledger();
+    later_report_refusal_keeps_completed_solver_results();
+    println("rendering ok");
+    return 0;
+}

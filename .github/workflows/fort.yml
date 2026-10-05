@@ -97,6 +97,60 @@ jobs:
           ulimit -c 0
           ctest --preset release -L '^fort$' --no-tests=error \
             -j "$(getconf _NPROCESSORS_ONLN)"
+      - name: Record the source audit build
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          TESTED_REVISION: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+
+          build = Path("build") / platform.system() / "release"
+          evidence = build / "ownership-source-evidence"
+          evidence.mkdir()
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          digest = hashlib.sha256((build / "fort").read_bytes()).hexdigest()
+          provenance = {"revision": revision, "sha256": digest}
+          (evidence / "compiler-provenance.json").write_text(json.dumps(provenance) + "\n")
+          context = {
+              "pr_head": os.environ["PR_HEAD"],
+              "tested_revision": os.environ["TESTED_REVISION"],
+              "source_revision": revision,
+              "compiler_revision": revision,
+              "compiler_sha256": digest,
+          }
+          (evidence / "ci-context.json").write_text(json.dumps(context) + "\n")
+          PY
+      # Exit 1 ownership verdicts remain visible. Invalid reports fail this gate.
+      - name: Audit actual compiler source reports
+        run: |
+          host="$(uname -s)"
+          target=x86_64-linux-gnu
+          if [ "$host" = Darwin ]; then target=arm64-apple-macosx11.0.0; fi
+          build="build/$host/release"
+          python3 tools/ownership_audit.py run \
+            --checkout "$PWD" --compiler "$build/fort" \
+            --compiler-checkout "$PWD" \
+            --compiler-provenance "$build/ownership-source-evidence/compiler-provenance.json" \
+            --target "$target" --std-dir "$build/std" \
+            --output "$build/ownership-source-evidence/audit"
+          python3 tools/ownership_audit.py validate \
+            --checkout "$PWD" --compiler "$build/fort" \
+            --compiler-checkout "$PWD" \
+            --compiler-provenance "$build/ownership-source-evidence/compiler-provenance.json" \
+            "$build/ownership-source-evidence/audit/audit.json"
+      - name: Keep ownership source evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ownership-source-${{ matrix.os }}
+          path: build/*/release/ownership-source-evidence/
+          if-no-files-found: ignore
       - name: Keep the fixpoint diffs
         if: failure()
         uses: actions/upload-artifact@v7
