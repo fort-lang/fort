@@ -1,0 +1,277 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| selection ok
+//| identity ok
+//| failures ok
+//| empty ok
+/// Checks actual source enumeration, canonical keys, and prerequisite failures.
+import check_env;
+import fir;
+import modules;
+import ownership_api;
+import ownership_keys;
+import ownership_source;
+import ownership_source_env;
+import std.str;
+import std.strbuf;
+
+fn selected_bodies_include_uncalled_imports_and_runtime() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    check_env.add(&e.checked, "other.ft", "fn uncalled() void {}\nfn also_uncalled() void {}\n");
+    check_env.add(&e.checked, "std/rt.ft", "fn runtime_uncalled() void {}\n");
+    assert(ownership_source_env.prepare(&e, "import other;\nfn root() void {}\n"));
+    assert(e.source.enumeration_complete);
+    assert(e.source.bodies.len == 4);
+    assert(e.source.inactive_declarations == 0);
+    ownership_source.body* other = ownership_source_env.find(&e, "other", "uncalled");
+    ownership_source.body* root = ownership_source_env.find(&e, "main", "root");
+    ownership_source.body* runtime = ownership_source_env.find(&e, "std.rt", "runtime_uncalled");
+    assert(other->key.declaration.module < root->key.declaration.module);
+    assert(other->key.declaration.declaration == 0);
+    assert(modules.file_at(&e.checked.m.set, cast(other->source.file, u64)) == other->module->file);
+    assert(modules.file_at(&e.checked.m.set, cast(root->source.file, u64)) == root->module->file);
+    assert(modules.file_at(&e.checked.m.set, cast(runtime->source.file, u64)) ==
+        runtime->module->file);
+    assert(other->source.file != root->source.file && root->source.file != runtime->source.file);
+    assert(other->verification == ownership_source.status.complete);
+    assert(root->verification == ownership_source.status.complete);
+    assert(runtime->verification == ownership_source.status.complete);
+    ownership_source.analyze(&e.source);
+    assert(e.source.graph_built);
+    assert(e.source.graph.bodies.len == 4);
+    assert(e.source.graph.work > 0);
+    assert(!e.source.accounting_complete);
+    assert(root->graph_correspondence == ownership_source.status.complete);
+    assert(root->graph_solver == ownership_source.status.complete);
+    assert(!ownership_api.successful(root->graph_proof));
+    assert(!ownership_api.successful(root->ownership));
+}
+
+fn inactive_ancestors_do_not_require_nested_selection() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "$if ($cfg(target_os) == \"macos\") { fn selected_mac() void {} } ");
+    strbuf.append(&text, "else { fn selected_linux() void {} }\n");
+    strbuf.append(&text, "$if (true) { fn active() void {} } else {\n");
+    strbuf.append(&text, "fn inactive_a() void {}\n");
+    strbuf.append(&text, "$if ($cfg(absent) == \"x\") { fn inactive_b() void {} } ");
+    strbuf.append(&text, "else { fn inactive_c() void {} }\n}\n");
+    strbuf.append(&text, "extern fn external() void;\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    assert(e.source.bodies.len == 2);
+    assert(e.source.inactive_declarations == 4);
+    $if ($cfg(target_os) == "macos") {
+        assert(ownership_source_env.find(&e, "main", "selected_mac")->key.declaration.declaration ==
+            0);
+    } else {
+        ownership_source.body* selected = ownership_source_env.find(&e, "main", "selected_linux");
+        assert(selected->key.declaration.declaration == 0);
+    }
+    assert(ownership_source_env.find(&e, "main", "active")->key.declaration.declaration == 1);
+}
+
+fn declaration_keys_count_selected_nonbody_declarations() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    string source = "struct item { i32 value; }\nextern fn foreign() void;\ni32 count = 2;\n";
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, source);
+    strbuf.append(&text, "$if (false) { fn skipped() void {} }\nfn first() void {}\n");
+    strbuf.append(&text, "enum color { red }\nfn last() void {}\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    assert(e.source.bodies.len == 2);
+    assert(e.source.inactive_declarations == 1);
+    ownership_source.body* first = ownership_source_env.find(&e, "main", "first");
+    ownership_source.body* last = ownership_source_env.find(&e, "main", "last");
+    assert(first->keyed && last->keyed);
+    assert(first->key.declaration.declaration == 3);
+    assert(last->key.declaration.declaration == 5);
+    assert(first->key.instance == 0 && last->key.instance == 0);
+    assert(first->source.line == 5 && first->source.col == 4);
+    assert(first->source.end_line == 5 && first->source.end_col == 9);
+    assert(first->source.filename_present);
+    assert(ownership_keys.function(first->key, last->key) < 0);
+    assert(modules.file_at(&e.checked.m.set, cast(first->source.file, u64)) ==
+        first->declaration->name_loc.file);
+}
+
+fn both_target_configurations_select_only_their_bodies() void {
+    string[2] targets = {"linux", "macos"};
+    u64 mut i = 0;
+    while (i < targets.len) {
+        ownership_source_env.env mut e = ownership_source_env.env{};
+        ownership_source_env.open_target(&e, targets[i]);
+        strbuf.str_buf mut text = strbuf.create();
+        strbuf.append(&text, "$if ($cfg(target_os) == \"linux\") {\n");
+        strbuf.append(&text, "extern fn external() void;\nfn linux_body() void {}\n");
+        strbuf.append(&text, "} else {\nstruct item { i32 value; }\nfn mac_body() void {}\n}\n");
+        strbuf.append(&text, "$if (false) { fn unavailable() void {} }\n");
+        assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+        assert(e.source.enumeration_complete && e.source.bodies.len == 1);
+        assert(e.source.inactive_declarations == 2);
+        string selected = i == 0 ? "linux_body" : "mac_body";
+        ownership_source.body* row = ownership_source_env.find(&e, "main", selected);
+        assert(row->key.declaration.declaration == 1);
+        assert(row->verification == ownership_source.status.complete);
+        ownership_source.analyze(&e.source);
+        assert(row->liveness_solver == ownership_source.status.complete);
+        strbuf.free(&text);
+        ownership_source_env.close(&e);
+        i += 1;
+    }
+}
+
+fn overlapping_closures_keep_context_keys_separate() void {
+    ownership_source_env.env mut left = ownership_source_env.env{};
+    ownership_source_env.open(&left);
+    defer ownership_source_env.close(&left);
+    ownership_source_env.env mut right = ownership_source_env.env{};
+    ownership_source_env.open(&right);
+    defer ownership_source_env.close(&right);
+    check_env.add(&left.checked, "shared.ft", "fn value() void {}\n");
+    check_env.add(&right.checked, "shared.ft", "fn value() void {}\n");
+    check_env.add(&right.checked, "earlier.ft", "fn earlier() void {}\n");
+    assert(ownership_source_env.prepare(&left, "import shared;\nfn root() void {}\n"));
+    assert(ownership_source_env.prepare(&right,
+        "import earlier;\nimport shared;\nfn root() void {}\n"));
+    ownership_source.body* a = ownership_source_env.find(&left, "shared", "value");
+    ownership_source.body* b = ownership_source_env.find(&right, "shared", "value");
+    assert(b->key.declaration.module == a->key.declaration.module + 1);
+    assert(a->declaration->sym != b->declaration->sym);
+    assert(a->source.line == b->source.line && a->source.col == b->source.col);
+    assert(a->declaration->name == b->declaration->name);
+}
+
+fn checking_failure_keeps_discovered_rows_unexecuted() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(!ownership_source_env.prepare(&e, "fn good() void {}\nfn bad() void { missing(); }\n"));
+    assert(!e.source.enumeration_complete);
+    assert(e.source.bodies.len == 2);
+    ownership_source.analyze(&e.source);
+    assert(!e.source.graph_built);
+    u64 mut i = 0;
+    while (i < e.source.bodies.len) {
+        ownership_source.body* row = &e.source.bodies[i];
+        assert(!row->keyed);
+        assert(row->checking == ownership_source.status.failed);
+        assert(row->lowering == ownership_source.status.unexecuted);
+        assert(row->verification == ownership_source.status.unexecuted);
+        assert(row->graph_solver == ownership_source.status.unexecuted);
+        assert(row->liveness_solver == ownership_source.status.unexecuted);
+        assert(row->source.line > 0 && row->source.col > 0);
+        i += 1;
+    }
+}
+
+fn unsupported_lowering_keeps_the_declaration() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn good() void {}\nfn unsupported() void { println(1); }\n"));
+    assert(e.source.enumeration_complete && e.source.bodies.len == 2);
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "unsupported");
+    assert(row->keyed);
+    assert(row->lowering == ownership_source.status.failed);
+    assert(row->lowering_failure.entry == "print_i64");
+    assert(row->lowering_failure.at.line == 2);
+    assert(fir.block_count(&row->function) == 0);
+    assert(row->verification == ownership_source.status.unexecuted);
+    ownership_source.analyze(&e.source);
+    assert(!e.source.graph_built);
+    assert(row->graph_solver == ownership_source.status.unexecuted);
+    assert(row->liveness_solver == ownership_source.status.unexecuted);
+    assert(ownership_source_env.find(&e, "main", "good")->liveness_solver ==
+        ownership_source.status.complete);
+}
+
+fn parse_failure_keeps_an_earlier_discovered_body() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(!ownership_source_env.prepare(&e,
+        "fn discovered() void {}\nfn malformed( void {}\n"));
+    assert(!e.source.enumeration_complete);
+    assert(modules.file_count(&e.checked.m.set) == 2);
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "discovered");
+    assert(row->checking == ownership_source.status.failed);
+    assert(!row->keyed && row->source.line == 1);
+    ownership_source.analyze(&e.source);
+    assert(row->lowering == ownership_source.status.unexecuted);
+    assert(row->liveness_solver == ownership_source.status.unexecuted);
+}
+
+fn selection_failure_does_not_choose_an_unevaluated_else_branch() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn discovered() void {}\n");
+    strbuf.append(&text, "$if (false) { fn known_inactive() void {} } else ");
+    strbuf.append(&text, "$if ($cfg(absent) == \"x\") { fn unknown_then() void {} } ");
+    strbuf.append(&text, "else { fn unknown_else() void {} }\n");
+    assert(!ownership_source_env.prepare(&e, strbuf.view(&text)));
+    assert(!e.source.enumeration_complete);
+    assert(e.source.bodies.len == 1);
+    assert(e.source.inactive_declarations == 0);
+    assert(e.source.bodies[0].declaration->name == "discovered");
+    assert(!e.source.bodies[0].keyed);
+}
+
+fn verifier_failure_blocks_dependent_analyses() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn checked_add(i32 x) i32 { return x + 1; }\n"));
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "checked_add");
+    assert(row->lowering == ownership_source.status.complete);
+    assert(row->verification == ownership_source.status.failed);
+    assert(str.find(strbuf.view(&row->verification_failure), "V7") >= 0);
+    ownership_source.analyze(&e.source);
+    assert(!e.source.graph_built);
+    assert(row->graph_correspondence == ownership_source.status.unexecuted);
+    assert(row->liveness_correspondence == ownership_source.status.unexecuted);
+    assert(row->liveness_solver == ownership_source.status.unexecuted);
+    assert(!row->live.initialized);
+}
+
+fn empty_closure_has_no_placeholder_bodies() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "extern fn foreign() void;\n"));
+    assert(e.source.enumeration_complete && e.source.bodies.len == 0);
+    ownership_source.analyze(&e.source);
+    assert(e.source.graph_built && e.source.graph.bodies.len == 0);
+    assert(!e.source.accounting_complete);
+}
+
+fn main() i32 {
+    selected_bodies_include_uncalled_imports_and_runtime();
+    inactive_ancestors_do_not_require_nested_selection();
+    both_target_configurations_select_only_their_bodies();
+    println("selection ok");
+    declaration_keys_count_selected_nonbody_declarations();
+    overlapping_closures_keep_context_keys_separate();
+    println("identity ok");
+    checking_failure_keeps_discovered_rows_unexecuted();
+    unsupported_lowering_keeps_the_declaration();
+    parse_failure_keeps_an_earlier_discovered_body();
+    selection_failure_does_not_choose_an_unevaluated_else_branch();
+    verifier_failure_blocks_dependent_analyses();
+    println("failures ok");
+    empty_closure_has_no_placeholder_bodies();
+    println("empty ok");
+    return 0;
+}

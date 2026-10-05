@@ -1,0 +1,54 @@
+/// Keeps actual checked source live through source-producer teardown.
+import check_env;
+import lower_env;
+import modules_env;
+import ownership_source;
+import session;
+import std.strbuf;
+
+struct env {
+    check_env.env checked;
+    ownership_source.context source;
+}
+
+fn open_target(env mut* e, string os) void {
+    check_env.open(&e->checked);
+    e->checked.want_main = false;
+    modules_env.std_dir(&e->checked.m, "std");
+    session.config_set(&e->checked.m.s, "target_os", os);
+}
+
+fn open(env mut* e) void {
+    open_target(e, $cfg(target_os));
+}
+
+fn runtime(env mut* e) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    for (string line : lower_env.RUNTIME) {
+        strbuf.append(&text, line);
+        strbuf.push(&text, '\n');
+    }
+    check_env.add(&e->checked, "std/rt.ft", strbuf.view(&text));
+}
+
+fn prepare(env mut* e, string source) bool {
+    bool checked = check_env.check_src(&e->checked, source);
+    ownership_source.prepare(&e->source, &e->checked.ck, &e->checked.m.set, checked);
+    return checked;
+}
+
+fn find(env mut* e, string module, string name) ownership_source.body mut* {
+    u64 mut i = 0;
+    while (i < e->source.bodies.len) {
+        ownership_source.body mut* row = &e->source.bodies[i];
+        if (row->module->path == module && row->declaration->name == name) { return row; }
+        i += 1;
+    }
+    panic("ownership_source_env: body is absent");
+}
+
+fn close(env mut* e) void {
+    ownership_source.free(&e->source);
+    check_env.close(&e->checked);
+}

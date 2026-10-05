@@ -1,0 +1,390 @@
+/// Retains checked source identities and verified FIR for ownership source analyses.
+// Keep the checker, module set, and this context live at stable addresses through free.
+import ast;
+import check;
+import diag;
+import fir;
+import fir_lower;
+import fir_verify;
+import gen;
+import modules;
+import ownership_api;
+import ownership_graph;
+import ownership_keys;
+import ownership_limits;
+import ownership_source_live;
+import std.strbuf;
+
+enum status {
+    unexecuted,
+    complete,
+    incomplete,
+    failed,
+}
+
+enum analysis_stage {
+    graph,
+    liveness,
+}
+
+struct body {
+    ast.node* declaration;
+    modules.module* module;
+    ownership_api.function_id key;
+    bool keyed;
+    ownership_api.source_position source;
+    status checking;
+    status lowering;
+    status verification;
+    fir_lower.report lowering_failure;
+    strbuf.str_buf verification_failure;
+    fir.func function;
+    ownership_source_live.context live;
+    status graph_correspondence;
+    status graph_solver;
+    ownership_api.proof_status graph_proof;
+    status liveness_correspondence;
+    status liveness_solver;
+    ownership_api.proof_status liveness_proof;
+    ownership_api.proof_status ownership;
+    analysis_stage first_incomplete_stage;
+    ownership_api.proof_status first_incomplete;
+}
+
+struct context {
+    check.checker mut* checker;
+    modules.module_set* modules;
+    body mut@ own bodies;
+    ownership_graph.body_input mut@ own graph_inputs;
+    ownership_graph.graph graph;
+    ownership_api.proof_status graph_first_refusal;
+    bool enumeration_complete;
+    u64 inactive_declarations;
+    bool prepared;
+    bool analyzed;
+    bool graph_built;
+    bool accounting_complete;
+}
+
+fn file_id(context* c, string filename) u32 {
+    u64 mut i = 0;
+    while (i < modules.file_count(c->modules)) {
+        if (modules.file_at(c->modules, i) == filename) {
+            if (i > fir.U32_LIMIT) { panic("ownership_source: file key overflow"); }
+            return cast(i, u32);
+        }
+        i += 1;
+    }
+    panic("ownership_source: source file is absent");
+}
+
+fn source(context* c, u32 module, diag.loc at) ownership_api.source_position {
+    if (at.file.len == 0 || at.line == 0 || at.col == 0) {
+        panic("ownership_source: source location is absent");
+    }
+    return ownership_api.source_position{module, file_id(c, at.file), at.line, at.col,
+        at.end_line, at.end_col, true};
+}
+
+fn module_key(context* c, modules.module* m) u32 {
+    u64 mut i = 0;
+    while (i < modules.count(c->modules)) {
+        if (modules.at(c->modules, i) == m) {
+            if (i > fir.U32_LIMIT) { panic("ownership_source: module key overflow"); }
+            return cast(i, u32);
+        }
+        i += 1;
+    }
+    panic("ownership_source: checked module is absent");
+}
+
+fn declaring_module(context* c, ast.node* declaration) modules.module* {
+    u64 mut i = 0;
+    while (i < c->modules->modules.len) {
+        modules.module* m = c->modules->modules.items[i];
+        if (m->file == declaration->name_loc.file) { return m; }
+        i += 1;
+    }
+    panic("ownership_source: declaring module is absent");
+}
+
+// Imports and selector containers do not introduce ownership declarations.
+fn declares(ast.node* declaration) bool {
+    return declaration->kind == ast.ast_kind.k_fn_decl ||
+        declaration->kind == ast.ast_kind.k_struct_decl ||
+        declaration->kind == ast.ast_kind.k_enum_decl ||
+        declaration->kind == ast.ast_kind.k_var_decl;
+}
+
+fn declaration_key(ast.node* list, ast.node* wanted, u64 mut* ordinal, u32 mut* out) bool {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* declaration = ast.ast_child(list, i);
+        if (declaration->kind == ast.ast_kind.k_compile_if) {
+            if (declaration_key(fir_lower.selected_branch(declaration), wanted, ordinal, out)) {
+                return true;
+            }
+        } else if (declares(declaration)) {
+            if (*ordinal > fir.U32_LIMIT) { panic("ownership_source: declaration key overflow"); }
+            if (declaration == wanted) { *out = cast(*ordinal, u32); return true; }
+            *ordinal += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn increment(u64 mut* count) void {
+    if (*count == ownership_api.U64_MAX) { panic("ownership_source: declaration count overflow"); }
+    *count += 1;
+}
+
+// An inactive ancestor makes both branches inactive, including unevaluated nested selectors.
+fn inactive(ast.node* list, bool selected, u64 mut* count) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* declaration = ast.ast_child(list, i);
+        if (declaration->kind == ast.ast_kind.k_compile_if) {
+            bool done = (declaration->flags & ast.FLAG_SELECT_DONE) != 0;
+            bool then = (declaration->flags & ast.FLAG_SELECT_THEN) != 0;
+            inactive(declaration->b, selected && done && then, count);
+            if (declaration->c != null && declaration->c->kind == ast.ast_kind.k_compile_if) {
+                inactive_selector(declaration->c, selected && done && !then, count);
+            } else {
+                inactive(declaration->c, selected && done && !then, count);
+            }
+        } else if (!selected && declaration->kind == ast.ast_kind.k_fn_decl &&
+            declaration->b != null) { increment(count); }
+        i += 1;
+    }
+}
+
+fn inactive_selector(ast.node* selector, bool selected, u64 mut* count) void {
+    bool done = (selector->flags & ast.FLAG_SELECT_DONE) != 0;
+    bool then = (selector->flags & ast.FLAG_SELECT_THEN) != 0;
+    inactive(selector->b, selected && done && then, count);
+    if (selector->c != null && selector->c->kind == ast.ast_kind.k_compile_if) {
+        inactive_selector(selector->c, selected && done && !then, count);
+    } else {
+        inactive(selector->c, selected && done && !then, count);
+    }
+}
+
+fn discover(ast.node* list, gen.node_ref_vec mut* out) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* declaration = ast.ast_child(list, i);
+        if (declaration->kind == ast.ast_kind.k_compile_if) {
+            discover(known_branch(declaration), out);
+        } else if (declaration->kind == ast.ast_kind.k_fn_decl && declaration->b != null) {
+            gen.refs_push(out, declaration);
+        }
+        i += 1;
+    }
+}
+
+fn known_branch(ast.node* selector) ast.node* {
+    ast.node* mut current = selector;
+    while (current != null && current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_SELECT_DONE) == 0) { return null; }
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) { return current->b; }
+        current = current->c;
+    }
+    return current;
+}
+
+/// Discovers rows after front-end failure without claiming a complete denominator.
+fn prepare(context mut* c, check.checker mut* ck, modules.module_set* set,
+    bool checked) void {
+    if (c->prepared) { panic("ownership_source: context is already prepared"); }
+    c->checker = ck;
+    c->modules = set;
+    c->enumeration_complete = checked;
+    c->prepared = true;
+    gen.node_ref_vec mut declarations = gen.node_ref_vec{};
+    defer gen.refs_free(&declarations);
+    if (checked) {
+        fir_lower.program_functions(set, &declarations);
+    } else {
+        u64 mut i = 0;
+        while (i < set->modules.len) {
+            discover(set->modules.items[i]->ast, &declarations);
+            i += 1;
+        }
+    }
+    u64 mut i = 0;
+    while (i < set->modules.len) {
+        modules.module* m = set->modules.items[i];
+        if (m->selected) { inactive(m->ast, true, &c->inactive_declarations); }
+        i += 1;
+    }
+    c->bodies = new(body, declarations.len);
+    fir_verify.runtime rt = fir_verify.runtime_of(ck);
+    i = 0;
+    while (i < declarations.len) {
+        body mut* row = &c->bodies[i];
+        row->declaration = declarations.items[i];
+        row->module = declaring_module(c, row->declaration);
+        row->checking = checked ? status.complete : status.failed;
+        if (!checked) {
+            row->source = source(c, 0, row->declaration->name_loc);
+            i += 1;
+            continue;
+        }
+        u32 key = module_key(c, row->module);
+        u64 mut ordinal = 0;
+        u32 mut declaration = 0;
+        if (!declaration_key(row->module->ast, row->declaration, &ordinal, &declaration)) {
+            panic("ownership_source: declaration key is absent");
+        }
+        row->key = ownership_api.function_id{ownership_api.declaration_id{key, declaration}, 0};
+        row->keyed = true;
+        row->source = source(c, key, row->declaration->name_loc);
+        if (!fir_lower.lower_function(ck, row->declaration, &row->function,
+                &row->lowering_failure)) {
+            row->lowering = status.failed;
+            i += 1;
+            continue;
+        }
+        row->lowering = status.complete;
+        if (!fir_verify.verify_report(&row->function, &rt, &row->verification_failure)) {
+            row->verification = status.failed;
+            i += 1;
+            continue;
+        }
+        row->verification = status.complete;
+        ownership_source_live.prepare(&row->live, &row->function, row->key, row->source.file,
+            row->source);
+        i += 1;
+    }
+}
+
+fn operation_source(context* c, ownership_api.operation_position op)
+    ownership_api.source_position {
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        body* row = &c->bodies[i];
+        if (row->keyed && ownership_keys.function(row->key, op.function) == 0) {
+            if (row->verification == status.complete) {
+                return ownership_source_live.source(&row->live, op);
+            }
+            return row->source;
+        }
+        i += 1;
+    }
+    return ownership_api.source_position{};
+}
+
+fn locate(context* c, ownership_api.proof_status proof) ownership_api.proof_status {
+    ownership_api.proof_status mut out = proof;
+    if (out.terminal.present) {
+        out.terminal.source = operation_source(c, out.terminal.operation);
+        if (out.terminal.limit.present) { out.terminal.limit.source = out.terminal.source; }
+    }
+    return out;
+}
+
+fn graph_query(void mut* opaque, ownership_api.graph_request* request)
+    ownership_api.graph_result {
+    context mut* c = cast(opaque, context mut*);
+    if (c->graph_first_refusal.terminal.present) {
+        return ownership_api.graph_result{.proof = c->graph_first_refusal, .residual_fort = true};
+    }
+    ownership_api.graph_request mut mapped = *request;
+    mapped.source = operation_source(c, mapped.operation);
+    ownership_api.graph_result mut out = ownership_graph.query(cast(&c->graph, void mut*), &mapped);
+    out.proof = locate(c, out.proof);
+    // The target callback uses unknown_effect for hidden foreign effects.
+    if (mapped.query == ownership_api.graph_query_kind.targets && !out.residual_fort &&
+        out.proof.terminal.present && !out.proof.terminal.limit.present &&
+        out.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect) {
+        out.proof = ownership_source_live.complete();
+    }
+    if (out.proof.terminal.limit.present) { c->graph_first_refusal = out.proof; }
+    return out;
+}
+
+/// Runs integrated solvers. Missing producers and accounting remain incomplete.
+fn analyze(context mut* c) void {
+    if (!c->prepared || c->analyzed) { panic("ownership_source: invalid analysis order"); }
+    c->analyzed = true;
+    u64 mut count = 0;
+    u64 mut i = 0;
+    bool mut prerequisites = c->enumeration_complete;
+    while (i < c->bodies.len) {
+        if (c->bodies[i].verification == status.complete) { count += 1; }
+        else { prerequisites = false; }
+        i += 1;
+    }
+    // A partial body inventory cannot establish closure graph correspondence.
+    if (prerequisites) {
+        c->graph_inputs = new(ownership_graph.body_input, count);
+        i = 0;
+        while (i < count) {
+            body* row = &c->bodies[i];
+            c->graph_inputs[i] = ownership_graph.body_input{row->key, &row->function, true};
+            i += 1;
+        }
+        c->graph = ownership_graph.build(c->graph_inputs[..], ownership_limits.production());
+        c->graph_built = true;
+        c->graph.proof = locate(c, c->graph.proof);
+        if (c->graph.proof.terminal.limit.present) { c->graph_first_refusal = c->graph.proof; }
+        i = 0;
+        while (i < c->graph.calls_len) {
+            c->graph.calls[i].source = operation_source(c, c->graph.calls[i].position);
+            i += 1;
+        }
+    }
+    i = 0;
+    while (i < c->bodies.len) {
+        body mut* row = &c->bodies[i];
+        if (row->verification != status.complete) { i += 1; continue; }
+        if (c->graph_built) {
+            row->graph_correspondence = status.complete;
+            row->graph_solver = ownership_api.successful(c->graph.proof) ?
+                status.complete : status.incomplete;
+            row->graph_proof = c->graph.proof;
+            row->live.services.graph = graph_query;
+            row->live.services.graph_context = cast(c, void mut*);
+        }
+        ownership_source_live.solve(&row->live);
+        row->liveness_correspondence = ownership_api.successful(row->live.correspondence) ?
+            status.complete : status.incomplete;
+        row->liveness_solver = ownership_api.successful(row->live.result.proof) ?
+            status.complete : status.incomplete;
+        row->liveness_proof = row->live.result.proof;
+        ownership_api.operation_position op = ownership_api.operation_position{
+            .function = row->key};
+        // The production services do not account for all source-producer work.
+        ownership_api.proof_status gap = ownership_api.incomplete(
+            ownership_api.incomplete_reason.source_coverage, op, row->source);
+        if (ownership_api.successful(row->graph_proof)) { row->graph_proof = gap; }
+        if (ownership_api.successful(row->liveness_proof)) { row->liveness_proof = gap; }
+        if (row->graph_proof.terminal.present) {
+            row->first_incomplete = row->graph_proof;
+            row->first_incomplete_stage = analysis_stage.graph;
+        } else {
+            row->first_incomplete = row->liveness_proof;
+            row->first_incomplete_stage = analysis_stage.liveness;
+        }
+        row->ownership = row->first_incomplete;
+        i += 1;
+    }
+}
+
+fn free(context mut* c) void {
+    // Graph queries retain symbols and FIR. Release them before the bodies.
+    ownership_graph.free(&c->graph);
+    del(c->graph_inputs);
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        body mut* row = &c->bodies[i];
+        ownership_source_live.free_state(&row->live);
+        fir.func_free(&row->function);
+        strbuf.free(&row->verification_failure);
+        ownership_source_live.free(&row->live);
+        i += 1;
+    }
+    del(c->bodies);
+    *c = context{};
+}
