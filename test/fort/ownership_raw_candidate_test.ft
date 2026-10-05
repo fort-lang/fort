@@ -1,0 +1,92 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| raw candidate boundaries ok
+/// Tests candidate membership against the original live list.
+import ownership_api;
+import ownership_depth_env;
+import ownership_raw_facts;
+import ownership_raw_facts_env;
+import ownership_type_work;
+
+fn candidate_present() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.closed_bound_view[1] bounds = {ownership_raw_facts_env.bound(1, 0, 3)};
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut first = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.bounds = bounds[..], .choices_complete = true,
+        .unconditional_proved = true}, &paid);
+    ownership_raw_facts.payload_result mut second = ownership_raw_facts.copy_payload(first.payload,
+        &paid);
+    ownership_raw_facts_env.good(&first); ownership_raw_facts_env.good(&second);
+    ownership_raw_facts.raw_fact_payload*[2] live = {first.payload, second.payload};
+    ownership_raw_facts.union_request mut req = ownership_raw_facts.union_request{
+        .live = live[..], .replaced = first.payload, .replacement_index = 0};
+    u64 mut at = 0;
+    while (at < live.len) {
+        paid = ownership_raw_facts_env.configure(&f, 65536); req.proposed = live[at];
+        ownership_raw_facts.union_result mut result =
+            ownership_raw_facts.measure_union(&req, &paid);
+        ownership_raw_facts_env.refused(result.proof,
+        ownership_api.incomplete_reason.invalid_input);
+        assert(result.r == 0 && result.p == 0 && result.choices == null);
+        ownership_raw_facts.free_union_result(&result); at += 1;
+    }
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    req.live = live[..1]; req.proposed = first.payload;
+    ownership_raw_facts.union_result mut result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.refused(result.proof,
+        ownership_api.incomplete_reason.invalid_input);
+    ownership_raw_facts.free_union_result(&result);
+    assert(first.payload->bounds[0].upper.magnitude == 3);
+    assert(second.payload->bounds[0].upper.magnitude == 3);
+    ownership_raw_facts.free_payload(&first.payload);
+    ownership_raw_facts.free_payload(&second.payload);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn fresh_equal_candidate() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.closed_bound_view[1] bounds = {ownership_raw_facts_env.bound(1, 0, 3)};
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut old = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.bounds = bounds[..]}, &paid);
+    ownership_raw_facts.payload_result mut candidate = ownership_raw_facts.copy_payload(old.payload,
+        &paid);
+    ownership_raw_facts.raw_fact_payload*[2] live = {old.payload, old.payload};
+    ownership_raw_facts.union_request mut req = ownership_raw_facts.union_request{
+        .live = live[..], .replaced = old.payload, .proposed = candidate.payload};
+    u64 mut at = 0;
+    while (at < live.len) {
+        paid = ownership_raw_facts_env.configure(&f, 65536); req.replacement_index = at;
+        ownership_raw_facts.union_result mut result =
+            ownership_raw_facts.measure_union(&req, &paid);
+        ownership_raw_facts_env.counts(&result, 0, 1);
+        ownership_raw_facts.free_union_result(&result); at += 1;
+    }
+    ownership_raw_facts.free_payload(&old.payload);
+    ownership_raw_facts.free_payload(&candidate.payload);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn absent_candidate() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut old = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{}, &paid);
+    ownership_raw_facts.raw_fact_payload*[1] live = {old.payload};
+    ownership_raw_facts.union_request req = ownership_raw_facts.union_request{.live = live[..],
+        .replaced = old.payload};
+    ownership_raw_facts.union_result mut result = ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.refused(result.proof,
+        ownership_api.incomplete_reason.invalid_input);
+    assert(result.choices == null && result.r == 0 && result.p == 0);
+    ownership_raw_facts.free_union_result(&result); ownership_raw_facts.free_payload(&old.payload);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn main() i32 {
+    candidate_present(); fresh_equal_candidate(); absent_candidate();
+    println("raw candidate boundaries ok"); return 0;
+}

@@ -1,0 +1,1002 @@
+/// Normalizes retained raw descriptors and counts their prospective semantic union.
+import ownership_api;
+import ownership_keys;
+import ownership_type_work;
+import types;
+
+u64 U64_MAX = 18446744073709551615;
+
+enum region_identity_kind { region, partition, allocation, graph_node }
+enum decision_kind { path, weak_selection, opaque }
+struct signed_number { u64 magnitude; bool negative; bool valid; }
+struct affine_term { ownership_api.entity_id version; signed_number coefficient; }
+struct affine_view { signed_number constant; affine_term@ terms; bool complete; }
+struct closed_bound_view {
+    ownership_api.entity_id version;
+    signed_number lower;
+    signed_number upper;
+}
+struct ordered_relation_view { affine_view left; affine_view right; }
+struct raw_region_view {
+    ownership_api.entity_id source;
+    ownership_api.place_path place;
+    affine_view begin;
+    affine_view end;
+    types.node* layout;
+    bool owning;
+    bool padding;
+    bool complete;
+}
+struct choice_view {
+    decision_kind kind;
+    ownership_api.entity_id decision;
+    ownership_api.place_path subject;
+    ownership_api.entity_id value_version;
+    ownership_api.entity_id alternative;
+    bool polarity;
+    ownership_api.predicate_atom@ positive;
+    ownership_api.predicate_atom@ negative;
+    u64@ regions;
+    u64@ bounds;
+    u64@ relations;
+    bool complete;
+}
+struct raw_fact_view {
+    raw_region_view@ regions;
+    closed_bound_view@ bounds;
+    ordered_relation_view@ relations;
+    choice_view@ choices;
+    bool choices_complete;
+    bool unconditional_proved;
+}
+struct affine { signed_number constant; affine_term mut@ own terms; u64 len; }
+struct raw_region {
+    ownership_api.entity_id source;
+    ownership_api.entity_id root;
+    ownership_api.projection mut@ own projections;
+    bool residual;
+    affine begin;
+    affine end;
+    types.node* layout;
+    bool owning;
+    bool padding;
+}
+struct choice {
+    choice_view descriptor;
+    ownership_api.projection mut@ own projections;
+    ownership_api.predicate_atom mut@ own positive;
+    ownership_api.predicate_atom mut@ own negative;
+    u64 mut@ own regions;
+    u64 mut@ own bounds;
+    u64 mut@ own relations;
+}
+struct raw_fact_payload {
+    raw_region mut@ own regions;
+    closed_bound_view mut@ own bounds;
+    affine mut@ own relations;
+    choice mut@ own choices;
+    bool choices_complete;
+    bool unconditional_proved;
+}
+struct payload_result { ownership_api.proof_status proof; raw_fact_payload mut* own payload; }
+struct core_region_identity {
+    region_identity_kind kind;
+    ownership_api.entity_id key;
+    ownership_api.entity_id parent;
+}
+struct core_region_view {
+    core_region_identity identity;
+    raw_region_view meaning;
+    bool alias_complete;
+}
+struct core_fact_view { core_region_view@ regions; ownership_api.predicate_atom@ predicates; }
+struct union_request {
+    core_fact_view core;
+    raw_fact_payload*@ live;
+    raw_fact_payload* proposed;
+    raw_fact_payload* replaced;
+    u64 replacement_index;
+}
+struct choice_snapshot {
+    raw_fact_payload mut* own payload;
+    choice_snapshot mut* own next;
+}
+struct union_result {
+    ownership_api.proof_status proof;
+    u64 r;
+    u64 p;
+    bool choices_complete;
+    choice_snapshot mut* own choices;
+}
+struct bound_result { ownership_api.proof_status proof; bool supported; closed_bound_view bound; }
+
+fn natural(u64 value) signed_number { return signed_number{value, false, true}; }
+fn signed(i64 value) signed_number {
+    if (value >= 0) { return natural(cast(value, u64)); }
+    return signed_number{cast(-(value + 1), u64) + 1, true, true};
+}
+fn literal(u64 value) affine_view { return affine_view{natural(value), {}, true}; }
+fn key(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    if (a.kind == ownership_api.entity_kind.none || b.kind == ownership_api.entity_kind.none) {
+        return a.kind == b.kind;
+    }
+    return ownership_keys.entity(a, b) == 0;
+}
+fn valid_key(ownership_api.entity_id value, ownership_api.entity_kind kind) bool {
+    return value.kind == kind && kind != ownership_api.entity_kind.none;
+}
+fn invalid(ownership_type_work.work mut* paid) bool {
+    return ownership_type_work.refuse(paid);
+}
+fn overflow(ownership_type_work.work mut* paid) bool {
+    paid->proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        paid->operation, paid->source);
+    return false;
+}
+fn spend(ownership_type_work.work mut* paid) bool { return ownership_type_work.spend(paid); }
+fn normalize_number(signed_number mut value) signed_number {
+    if (value.magnitude == 0) { value.negative = false; }
+    return value;
+}
+fn negate(signed_number mut value) signed_number {
+    value = normalize_number(value);
+    if (value.magnitude > 0) { value.negative = !value.negative; }
+    return value;
+}
+fn same_number(signed_number mut a, signed_number mut b) bool {
+    a = normalize_number(a);
+    b = normalize_number(b);
+    return a.valid && b.valid && a.magnitude == b.magnitude && a.negative == b.negative;
+}
+fn less_equal(signed_number mut a, signed_number mut b) bool {
+    a = normalize_number(a);
+    b = normalize_number(b);
+    if (!a.valid || !b.valid) { return false; }
+    if (a.negative != b.negative) { return a.negative; }
+    return a.negative ? a.magnitude >= b.magnitude : a.magnitude <= b.magnitude;
+}
+fn plus(signed_number mut a, signed_number mut b) signed_number {
+    if (!a.valid || !b.valid) { return signed_number{}; }
+    a = normalize_number(a);
+    b = normalize_number(b);
+    if (a.negative == b.negative) {
+        if (a.magnitude > U64_MAX - b.magnitude) { return signed_number{}; }
+        return normalize_number(signed_number{a.magnitude + b.magnitude, a.negative, true});
+    }
+    if (a.magnitude >= b.magnitude) {
+        return normalize_number(signed_number{a.magnitude - b.magnitude, a.negative, true});
+    }
+    return normalize_number(signed_number{b.magnitude - a.magnitude, b.negative, true});
+}
+fn free_affine(affine mut* value) void { del(value->terms); value->len = 0; }
+fn affine_input(affine* value) affine_view {
+    return affine_view{value->constant, value->terms[..value->len], true};
+}
+fn allocation(ownership_type_work.work mut* paid, u64 count, u64 size) bool {
+    if (!spend(paid)) { return false; }
+    return count <= types.TYPE_MAX_SIZE / size ? true : overflow(paid);
+}
+fn normalize(ownership_type_work.work mut* paid, affine_view input, affine mut* out) bool {
+    if (!spend(paid)) { return false; }
+    if (!input.complete || !input.constant.valid) { return invalid(paid); }
+    out->constant = normalize_number(input.constant);
+    if (input.terms.len > 0) {
+        if (!allocation(paid, input.terms.len, sizeof(affine_term))) { return false; }
+        out->terms = new(affine_term, input.terms.len);
+    }
+    u64 mut i = 0;
+    while (i < input.terms.len) {
+        if (!spend(paid)) { return false; }
+        affine_term mut item = input.terms[i];
+        if (!valid_key(item.version, ownership_api.entity_kind.value) ||
+            !item.coefficient.valid) { return invalid(paid); }
+        item.coefficient = normalize_number(item.coefficient);
+        if (item.coefficient.magnitude == 0) { i += 1; continue; }
+        u64 mut at = 0;
+        i32 mut comparison = -1;
+        while (at < out->len) {
+            if (!spend(paid)) { return false; }
+            comparison = ownership_keys.entity(item.version, out->terms[at].version);
+            if (comparison <= 0) { break; }
+            at += 1;
+        }
+        if (at < out->len && comparison == 0) {
+            if (!spend(paid)) { return false; }
+            signed_number combined = plus(out->terms[at].coefficient, item.coefficient);
+            if (!combined.valid) { return overflow(paid); }
+            out->terms[at].coefficient = combined;
+            if (combined.magnitude == 0) {
+                u64 mut j = at;
+                while (j + 1 < out->len) {
+                    if (!spend(paid)) { return false; }
+                    out->terms[j] = out->terms[j + 1];
+                    j += 1;
+                }
+                out->len -= 1;
+            }
+        } else {
+            u64 mut j = out->len;
+            while (j > at) {
+                if (!spend(paid)) { return false; }
+                out->terms[j] = out->terms[j - 1];
+                j -= 1;
+            }
+            if (!spend(paid)) { return false; }
+            out->terms[at] = item;
+            out->len += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn gcd(ownership_type_work.work mut* paid, u64 mut a, u64 mut b, u64 mut* out) bool {
+    while (b > 0) {
+        if (!spend(paid)) { return false; }
+        u64 remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    *out = a;
+    return true;
+}
+fn normalize_relation(ownership_type_work.work mut* paid, ordered_relation_view input,
+    affine mut* out) bool {
+    if (!spend(paid)) { return false; }
+    if (!input.left.complete || !input.right.complete ||
+        !input.left.constant.valid || !input.right.constant.valid) { return invalid(paid); }
+    signed_number constant = plus(input.left.constant, negate(input.right.constant));
+    if (!constant.valid || input.left.terms.len > U64_MAX - input.right.terms.len) {
+        return overflow(paid);
+    }
+    u64 count = input.left.terms.len + input.right.terms.len;
+    affine_term mut@ own mut terms = {};
+    defer del(terms);
+    if (count > 0) {
+        if (!allocation(paid, count, sizeof(affine_term))) { return false; }
+        terms = new(affine_term, count);
+    }
+    u64 mut i = 0;
+    while (i < count) {
+        if (!spend(paid)) { return false; }
+        terms[i] = i < input.left.terms.len ? input.left.terms[i] :
+            input.right.terms[i - input.left.terms.len];
+        if (i >= input.left.terms.len) { terms[i].coefficient = negate(terms[i].coefficient); }
+        i += 1;
+    }
+    if (!normalize(paid, affine_view{constant, terms, true}, out)) { return false; }
+    u64 mut factor = out->constant.magnitude;
+    i = 0;
+    while (i < out->len) {
+        if (!spend(paid) || !gcd(paid, factor, out->terms[i].coefficient.magnitude, &factor)) {
+            return false;
+        }
+        i += 1;
+    }
+    if (factor > 1) {
+        if (!spend(paid)) { return false; }
+        out->constant.magnitude /= factor;
+        i = 0;
+        while (i < out->len) {
+            if (!spend(paid)) { return false; }
+            out->terms[i].coefficient.magnitude /= factor;
+            i += 1;
+        }
+    }
+    return true;
+}
+fn same_affine(ownership_type_work.work mut* paid, affine* a, affine* b) bool {
+    if (!spend(paid)) { return false; }
+    if (!same_number(a->constant, b->constant) || a->len != b->len) { return false; }
+    u64 mut i = 0;
+    while (i < a->len) {
+        if (!spend(paid)) { return false; }
+        if (!key(a->terms[i].version, b->terms[i].version) ||
+            !same_number(a->terms[i].coefficient, b->terms[i].coefficient)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn same_scalar(ownership_api.scalar_fact a, ownership_api.scalar_fact b) bool {
+    return a.kind == b.kind && a.value == b.value && key(a.symbol, b.symbol);
+}
+fn same_projection(ownership_api.projection a, ownership_api.projection b) bool {
+    return a.kind == b.kind && a.field == b.field && same_scalar(a.index, b.index) &&
+        key(a.captured_version, b.captured_version);
+}
+fn copy_place(ownership_type_work.work mut* paid, ownership_api.place_path input,
+    ownership_api.projection mut@ own mut* projections) bool {
+    if (!spend(paid)) { return false; }
+    if (!valid_key(input.root, ownership_api.entity_kind.slot)) { return invalid(paid); }
+    if (input.projections.len > 0) {
+        if (!allocation(paid, input.projections.len, sizeof(ownership_api.projection))) {
+            return false;
+        }
+        *projections = new(ownership_api.projection, input.projections.len);
+    }
+    u64 mut i = 0;
+    while (i < input.projections.len) {
+        if (!spend(paid)) { return false; }
+        ownership_api.projection item = input.projections[i];
+        if (cast(item.kind, u32) > cast(ownership_api.projection_kind.residual, u32) ||
+            cast(item.index.kind, u32) > cast(ownership_api.fact_kind.symbolic, u32) ||
+            !valid_operand(item.index.symbol) || !valid_operand(item.captured_version)) {
+            return invalid(paid);
+        }
+        if (item.kind == ownership_api.projection_kind.captured_index &&
+            !valid_key(item.captured_version, ownership_api.entity_kind.value)) {
+            return invalid(paid);
+        }
+        if (item.kind == ownership_api.projection_kind.fixed_index &&
+            (item.index.kind != ownership_api.fact_kind.exact || item.index.value < 0)) {
+            return invalid(paid);
+        }
+        (*projections)[i] = item;
+        i += 1;
+    }
+    return true;
+}
+fn region_input(raw_region* value) raw_region_view {
+    return raw_region_view{value->source,
+        ownership_api.place_path{value->root, value->projections, value->residual},
+        affine_input(&value->begin), affine_input(&value->end), value->layout,
+        value->owning, value->padding, true};
+}
+fn build_region(ownership_type_work.work mut* paid, raw_region_view input,
+    raw_region mut* out) bool {
+    if (!spend(paid)) { return false; }
+    if (!input.complete || !valid_key(input.source, ownership_api.entity_kind.source) ||
+        input.layout == null) { return invalid(paid); }
+    out->source = input.source;
+    out->root = input.place.root;
+    out->residual = input.place.residual;
+    out->layout = input.layout;
+    out->owning = input.owning;
+    out->padding = input.padding;
+    u64 mut nodes = 0;
+    if (!ownership_type_work.validate(paid, input.layout, &nodes) ||
+        !copy_place(paid, input.place, &out->projections) ||
+        !normalize(paid, input.begin, &out->begin) ||
+        !normalize(paid, input.end, &out->end)) { return false; }
+    // Symbolic ordering needs producer proof. A complete descriptor supplies that proof.
+    if ((out->begin.len == 0 && out->begin.constant.negative) ||
+        (out->end.len == 0 && out->end.constant.negative) ||
+        (out->begin.len == 0 && out->end.len == 0 &&
+        !less_equal(out->begin.constant, out->end.constant))) {
+        return invalid(paid);
+    }
+    return true;
+}
+fn free_region(raw_region mut* value) void {
+    del(value->projections);
+    free_affine(&value->begin);
+    free_affine(&value->end);
+}
+fn same_region(ownership_type_work.work mut* paid, raw_region* a, raw_region* b) bool {
+    if (!spend(paid)) { return false; }
+    if (!key(a->source, b->source) || !key(a->root, b->root) ||
+        a->residual != b->residual || a->owning != b->owning || a->padding != b->padding ||
+        a->projections.len != b->projections.len) { return false; }
+    u64 mut i = 0;
+    while (i < a->projections.len) {
+        if (!spend(paid)) { return false; }
+        if (!same_projection(a->projections[i], b->projections[i])) { return false; }
+        i += 1;
+    }
+    if (!same_affine(paid, &a->begin, &b->begin) ||
+        !same_affine(paid, &a->end, &b->end)) { return false; }
+    return ownership_type_work.compare(paid, a->layout, b->layout,
+        ownership_type_work.relation.equal).value;
+}
+fn build_bound(ownership_type_work.work mut* paid, closed_bound_view input,
+    closed_bound_view mut* out) bool {
+    if (!spend(paid)) { return false; }
+    if (!valid_key(input.version, ownership_api.entity_kind.value) ||
+        !input.lower.valid || !input.upper.valid || !less_equal(input.lower, input.upper)) {
+        return invalid(paid);
+    }
+    *out = closed_bound_view{input.version, normalize_number(input.lower),
+        normalize_number(input.upper)};
+    return true;
+}
+fn same_membership(ownership_type_work.work mut* paid, closed_bound_view a,
+    closed_bound_view b) bool {
+    return spend(paid) && key(a.version, b.version) && same_number(a.lower, b.lower) &&
+        same_number(a.upper, b.upper);
+}
+fn same_predicate(ownership_api.predicate_atom a, ownership_api.predicate_atom b) bool {
+    return key(a.key, b.key) && a.kind == b.kind && key(a.left, b.left) &&
+        key(a.right, b.right) && same_scalar(a.lower, b.lower) && same_scalar(a.upper, b.upper);
+}
+fn valid_operand(ownership_api.entity_id value) bool {
+    return cast(value.kind, u32) <= cast(ownership_api.entity_kind.target, u32);
+}
+fn valid_predicate(ownership_api.predicate_atom value) bool {
+    return valid_key(value.key, ownership_api.entity_kind.predicate) &&
+        cast(value.kind, u32) <= cast(ownership_api.predicate_kind.shape, u32) &&
+        valid_operand(value.left) && valid_operand(value.right) &&
+        valid_operand(value.lower.symbol) && valid_operand(value.upper.symbol);
+}
+fn copy_predicates(ownership_type_work.work mut* paid, ownership_api.predicate_atom@ input,
+    ownership_api.predicate_atom mut@ own mut* out) bool {
+    if (input.len > 0) {
+        if (!allocation(paid, input.len, sizeof(ownership_api.predicate_atom))) { return false; }
+        *out = new(ownership_api.predicate_atom, input.len);
+    }
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!spend(paid)) { return false; }
+        if (!valid_predicate(input[i])) { return invalid(paid); }
+        (*out)[i] = input[i];
+        u64 mut j = 0;
+        while (j < i) {
+            if (!spend(paid)) { return false; }
+            if (key(input[i].key, input[j].key) && !same_predicate(input[i], input[j])) {
+                return invalid(paid);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn copy_indices(ownership_type_work.work mut* paid, u64@ input, u64 count,
+    u64 mut@ own mut* out) bool {
+    if (input.len > 0) {
+        if (!allocation(paid, input.len, sizeof(u64))) { return false; }
+        *out = new(u64, input.len);
+    }
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!spend(paid)) { return false; }
+        if (input[i] >= count) { return invalid(paid); }
+        (*out)[i] = input[i];
+        i += 1;
+    }
+    return true;
+}
+fn build_choice(ownership_type_work.work mut* paid, choice_view input,
+    raw_fact_payload* payload, choice mut* out) bool {
+    if (!spend(paid)) { return false; }
+    if (!input.complete || cast(input.kind, u32) > cast(decision_kind.opaque, u32) ||
+        !valid_key(input.decision, ownership_api.entity_kind.guard) ||
+        !valid_key(input.value_version, ownership_api.entity_kind.value) ||
+        !valid_key(input.alternative, ownership_api.entity_kind.relation)) { return invalid(paid); }
+    out->descriptor = input;
+    if (!copy_place(paid, input.subject, &out->projections) ||
+        !copy_predicates(paid, input.positive, &out->positive) ||
+        !copy_predicates(paid, input.negative, &out->negative) ||
+        !copy_indices(paid, input.regions, payload->regions.len, &out->regions) ||
+        !copy_indices(paid, input.bounds, payload->bounds.len, &out->bounds) ||
+        !copy_indices(paid, input.relations, payload->relations.len, &out->relations)) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < out->positive.len) {
+        if (!spend(paid)) { return false; }
+        u64 mut j = 0;
+        while (j < out->negative.len) {
+            if (!spend(paid)) { return false; }
+            if (key(out->positive[i].key, out->negative[j].key) &&
+                !same_predicate(out->positive[i], out->negative[j])) { return invalid(paid); }
+            j += 1;
+        }
+        i += 1;
+    }
+    out->descriptor.subject.projections = out->projections;
+    out->descriptor.positive = out->positive;
+    out->descriptor.negative = out->negative;
+    out->descriptor.regions = out->regions;
+    out->descriptor.bounds = out->bounds;
+    out->descriptor.relations = out->relations;
+    return true;
+}
+fn condition_count(choice_view* value) u64 {
+    return value->positive.len + value->negative.len;
+}
+fn condition_at(choice_view* value, u64 index) ownership_api.predicate_atom {
+    return index < value->positive.len ? value->positive[index] :
+        value->negative[index - value->positive.len];
+}
+fn compatible_choices(ownership_type_work.work mut* paid, choice_view* a, choice_view* b) bool {
+    if (!spend(paid)) { return false; }
+    u64 mut i = 0;
+    while (i < condition_count(a)) {
+        if (!spend(paid)) { return false; }
+        u64 mut j = 0;
+        while (j < condition_count(b)) {
+            if (!spend(paid)) { return false; }
+            ownership_api.predicate_atom left = condition_at(a, i);
+            ownership_api.predicate_atom right = condition_at(b, j);
+            if (key(left.key, right.key) && !same_predicate(left, right)) { return invalid(paid); }
+            j += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn free_choice(choice mut* value) void {
+    del(value->projections);
+    del(value->positive);
+    del(value->negative);
+    del(value->regions);
+    del(value->bounds);
+    del(value->relations);
+    value->descriptor = choice_view{};
+}
+fn clear_payload(raw_fact_payload mut* value) void {
+    u64 mut i = 0;
+    while (i < value->regions.len) { free_region(&value->regions[i]); i += 1; }
+    i = 0;
+    while (i < value->relations.len) { free_affine(&value->relations[i]); i += 1; }
+    i = 0;
+    while (i < value->choices.len) { free_choice(&value->choices[i]); i += 1; }
+    del(value->regions);
+    del(value->bounds);
+    del(value->relations);
+    del(value->choices);
+}
+fn free_payload(raw_fact_payload mut* own mut* value) void {
+    if (*value == null) { return; }
+    clear_payload(*value);
+    del(*value);
+}
+fn build_payload(raw_fact_view input, ownership_type_work.work mut* paid) payload_result {
+    payload_result mut result = {};
+    if (!allocation(paid, 1, sizeof(raw_fact_payload))) {
+        result.proof = paid->proof; return result;
+    }
+    result.payload = new(raw_fact_payload);
+    raw_fact_payload mut* out = result.payload;
+    bool mut okay = true;
+    if (input.regions.len > 0) {
+        okay = allocation(paid, input.regions.len, sizeof(raw_region));
+        if (okay) { out->regions = new(raw_region, input.regions.len); }
+    }
+    u64 mut i = 0;
+    while (okay && i < input.regions.len) {
+        okay = build_region(paid, input.regions[i], &out->regions[i]);
+        i += 1;
+    }
+    if (okay && input.bounds.len > 0) {
+        okay = allocation(paid, input.bounds.len, sizeof(closed_bound_view));
+        if (okay) { out->bounds = new(closed_bound_view, input.bounds.len); }
+    }
+    i = 0;
+    while (okay && i < input.bounds.len) {
+        okay = build_bound(paid, input.bounds[i], &out->bounds[i]);
+        i += 1;
+    }
+    if (okay && input.relations.len > 0) {
+        okay = allocation(paid, input.relations.len, sizeof(affine));
+        if (okay) { out->relations = new(affine, input.relations.len); }
+    }
+    i = 0;
+    while (okay && i < input.relations.len) {
+        okay = normalize_relation(paid, input.relations[i], &out->relations[i]);
+        i += 1;
+    }
+    if (okay && input.choices.len > 0) {
+        okay = allocation(paid, input.choices.len, sizeof(choice));
+        if (okay) { out->choices = new(choice, input.choices.len); }
+    }
+    i = 0;
+    while (okay && i < input.choices.len) {
+        okay = build_choice(paid, input.choices[i], out, &out->choices[i]);
+        u64 mut j = 0;
+        while (okay && j < i) {
+            okay = compatible_choices(paid, &out->choices[i].descriptor,
+                &out->choices[j].descriptor);
+            j += 1;
+        }
+        i += 1;
+    }
+    if (okay) { okay = spend(paid); }
+    if (!okay) { free_payload(&result.payload); }
+    else {
+        out->choices_complete = input.choices_complete &&
+            (input.choices.len > 0 || input.unconditional_proved ||
+            (input.regions.len == 0 && input.bounds.len == 0 && input.relations.len == 0));
+        out->unconditional_proved = input.unconditional_proved;
+    }
+    result.proof = paid->proof;
+    return result;
+}
+fn copy_payload(raw_fact_payload* input, ownership_type_work.work mut* paid) payload_result {
+    raw_region_view mut@ own mut regions = {};
+    ordered_relation_view mut@ own mut relations = {};
+    choice_view mut@ own mut choices = {};
+    defer del(regions);
+    defer del(relations);
+    defer del(choices);
+    payload_result mut refused = {};
+    if (!spend(paid)) { refused.proof = paid->proof; return refused; }
+    if (input == null) { invalid(paid); refused.proof = paid->proof; return refused; }
+    if (input->regions.len > 0) {
+        if (!allocation(paid, input->regions.len, sizeof(raw_region_view))) {
+            refused.proof = paid->proof; return refused;
+        }
+        regions = new(raw_region_view, input->regions.len);
+    }
+    u64 mut i = 0;
+    while (i < regions.len) {
+        if (!spend(paid)) { refused.proof = paid->proof; return refused; }
+        regions[i] = region_input(&input->regions[i]);
+        i += 1;
+    }
+    if (input->relations.len > 0) {
+        if (!allocation(paid, input->relations.len, sizeof(ordered_relation_view))) {
+            refused.proof = paid->proof; return refused;
+        }
+        relations = new(ordered_relation_view, input->relations.len);
+    }
+    i = 0;
+    while (i < relations.len) {
+        if (!spend(paid)) { refused.proof = paid->proof; return refused; }
+        relations[i] = ordered_relation_view{affine_input(&input->relations[i]), literal(0)};
+        i += 1;
+    }
+    if (input->choices.len > 0) {
+        if (!allocation(paid, input->choices.len, sizeof(choice_view))) {
+            refused.proof = paid->proof; return refused;
+        }
+        choices = new(choice_view, input->choices.len);
+    }
+    i = 0;
+    while (i < choices.len) {
+        if (!spend(paid)) { refused.proof = paid->proof; return refused; }
+        choices[i] = input->choices[i].descriptor;
+        i += 1;
+    }
+    return build_payload(raw_fact_view{regions, input->bounds, relations, choices,
+        input->choices_complete, input->unconditional_proved}, paid);
+}
+fn core_membership(ownership_api.predicate_atom input,
+    ownership_type_work.work mut* paid) bound_result {
+    bound_result mut result = {};
+    if (!spend(paid)) { result.proof = paid->proof; return result; }
+    if (!valid_predicate(input)) { invalid(paid); result.proof = paid->proof; return result; }
+    if (input.kind == ownership_api.predicate_kind.membership &&
+        valid_key(input.left, ownership_api.entity_kind.value) &&
+        input.lower.kind == ownership_api.fact_kind.exact &&
+        input.upper.kind == ownership_api.fact_kind.exact && input.lower.value >= 0 &&
+        input.lower.value < input.upper.value) {
+        if (!spend(paid)) { result.proof = paid->proof; return result; }
+        result.bound = closed_bound_view{input.left, signed(input.lower.value),
+            natural(cast(input.upper.value, u64) - 1)};
+        result.supported = true;
+    }
+    result.proof = paid->proof;
+    return result;
+}
+fn same_identity(core_region_identity a, core_region_identity b) bool {
+    bool allocation_a = a.kind == region_identity_kind.allocation ||
+        (a.kind == region_identity_kind.graph_node && a.key.kind ==
+        ownership_api.entity_kind.allocation);
+    bool allocation_b = b.kind == region_identity_kind.allocation ||
+        (b.kind == region_identity_kind.graph_node && b.key.kind ==
+        ownership_api.entity_kind.allocation);
+    return (a.kind == b.kind || (allocation_a && allocation_b)) &&
+        key(a.key, b.key) && (a.kind != region_identity_kind.partition ||
+        key(a.parent, b.parent));
+}
+fn valid_identity(core_region_identity value) bool {
+    if (cast(value.kind, u32) > cast(region_identity_kind.graph_node, u32)) { return false; }
+    if (value.kind == region_identity_kind.region) {
+        return valid_key(value.key, ownership_api.entity_kind.region) &&
+            value.parent.kind == ownership_api.entity_kind.none;
+    }
+    if (value.kind == region_identity_kind.partition) {
+        return valid_key(value.key, ownership_api.entity_kind.region) &&
+            valid_key(value.parent, ownership_api.entity_kind.region);
+    }
+    return (valid_key(value.key, ownership_api.entity_kind.allocation) ||
+        (value.kind == region_identity_kind.graph_node &&
+        valid_key(value.key, ownership_api.entity_kind.graph_node))) &&
+        value.parent.kind == ownership_api.entity_kind.none;
+}
+struct core_inventory {
+    core_region_identity mut@ own identities;
+    raw_region mut@ own meanings;
+    bool mut@ own aliases;
+    u64 len;
+}
+fn free_core(core_inventory mut* value) void {
+    u64 mut i = 0;
+    while (i < value->meanings.len) { free_region(&value->meanings[i]); i += 1; }
+    del(value->identities);
+    del(value->meanings);
+    del(value->aliases);
+    value->len = 0;
+}
+fn build_core(core_region_view@ input, ownership_type_work.work mut* paid,
+    core_inventory mut* out) bool {
+    if (input.len > 0) {
+        if (!allocation(paid, input.len, sizeof(core_region_identity))) { return false; }
+        out->identities = new(core_region_identity, input.len);
+        if (!allocation(paid, input.len, sizeof(raw_region))) { return false; }
+        out->meanings = new(raw_region, input.len);
+        if (!allocation(paid, input.len, sizeof(bool))) { return false; }
+        out->aliases = new(bool, input.len);
+    }
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!spend(paid)) { return false; }
+        core_region_view value = input[i];
+        if (!valid_identity(value.identity)) { return invalid(paid); }
+        raw_region mut meaning = {};
+        if (value.alias_complete && !build_region(paid, value.meaning, &meaning)) {
+            free_region(&meaning); return false;
+        }
+        u64 mut at = 0;
+        while (at < out->len) {
+            if (!spend(paid)) { free_region(&meaning); return false; }
+            if (same_identity(value.identity, out->identities[at])) { break; }
+            at += 1;
+        }
+        if (at < out->len) {
+            if (value.alias_complete && out->aliases[at] &&
+                !same_region(paid, &meaning, &out->meanings[at])) {
+                free_region(&meaning);
+                return ownership_api.successful(paid->proof) ? invalid(paid) : false;
+            }
+            if (!ownership_api.successful(paid->proof)) { free_region(&meaning); return false; }
+            if (value.alias_complete && !out->aliases[at]) {
+                if (!spend(paid)) { free_region(&meaning); return false; }
+                out->meanings[at] = move(meaning);
+                out->aliases[at] = true;
+            }
+            free_region(&meaning);
+        } else {
+            if (!spend(paid)) { free_region(&meaning); return false; }
+            out->identities[at] = value.identity;
+            out->meanings[at] = move(meaning);
+            out->aliases[at] = value.alias_complete;
+            out->len += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+struct union_keys {
+    raw_region* mut@ own regions;
+    closed_bound_view mut@ own bounds;
+    affine* mut@ own relations;
+    u64 regions_len;
+    u64 bounds_len;
+    u64 relations_len;
+}
+fn free_keys(union_keys mut* value) void {
+    del(value->regions); del(value->bounds); del(value->relations);
+}
+fn increment(ownership_type_work.work mut* paid, u64 mut* count) bool {
+    if (!spend(paid)) { return false; }
+    if (*count == U64_MAX) { return overflow(paid); }
+    *count += 1;
+    return true;
+}
+fn grow_regions(union_keys mut* kept, ownership_type_work.work mut* paid) bool {
+    if (kept->regions_len < kept->regions.len) { return true; }
+    u64 ceiling = types.TYPE_MAX_SIZE / sizeof(raw_region*);
+    u64 capacity = kept->regions.len == 0 ? 4 :
+        (kept->regions.len <= ceiling / 2 ? kept->regions.len * 2 : ceiling);
+    if (capacity <= kept->regions_len || !allocation(paid, capacity, sizeof(raw_region*))) {
+        return ownership_api.successful(paid->proof) ? overflow(paid) : false;
+    }
+    raw_region* mut@ own bigger = new(raw_region*, capacity);
+    u64 mut i = 0;
+    while (i < kept->regions_len) {
+        if (!spend(paid)) { del(bigger); return false; }
+        bigger[i] = kept->regions[i]; i += 1;
+    }
+    del(kept->regions); kept->regions = move(bigger); return true;
+}
+fn grow_bounds(union_keys mut* kept, ownership_type_work.work mut* paid) bool {
+    if (kept->bounds_len < kept->bounds.len) { return true; }
+    u64 ceiling = types.TYPE_MAX_SIZE / sizeof(closed_bound_view);
+    u64 capacity = kept->bounds.len == 0 ? 4 :
+        (kept->bounds.len <= ceiling / 2 ? kept->bounds.len * 2 : ceiling);
+    if (capacity <= kept->bounds_len || !allocation(paid, capacity, sizeof(closed_bound_view))) {
+        return ownership_api.successful(paid->proof) ? overflow(paid) : false;
+    }
+    closed_bound_view mut@ own bigger = new(closed_bound_view, capacity);
+    u64 mut i = 0;
+    while (i < kept->bounds_len) {
+        if (!spend(paid)) { del(bigger); return false; }
+        bigger[i] = kept->bounds[i]; i += 1;
+    }
+    del(kept->bounds); kept->bounds = move(bigger); return true;
+}
+fn grow_relations(union_keys mut* kept, ownership_type_work.work mut* paid) bool {
+    if (kept->relations_len < kept->relations.len) { return true; }
+    u64 ceiling = types.TYPE_MAX_SIZE / sizeof(affine*);
+    u64 capacity = kept->relations.len == 0 ? 4 :
+        (kept->relations.len <= ceiling / 2 ? kept->relations.len * 2 : ceiling);
+    if (capacity <= kept->relations_len || !allocation(paid, capacity, sizeof(affine*))) {
+        return ownership_api.successful(paid->proof) ? overflow(paid) : false;
+    }
+    affine* mut@ own bigger = new(affine*, capacity);
+    u64 mut i = 0;
+    while (i < kept->relations_len) {
+        if (!spend(paid)) { del(bigger); return false; }
+        bigger[i] = kept->relations[i]; i += 1;
+    }
+    del(kept->relations); kept->relations = move(bigger); return true;
+}
+fn add_payload(raw_fact_payload* input, core_inventory* core,
+    ownership_api.predicate_atom@ predicates, union_keys mut* kept,
+    union_result mut* out, ownership_type_work.work mut* paid) bool {
+    if (!spend(paid)) { return false; }
+    if (input == null) { return invalid(paid); }
+    u64 mut i = 0;
+    while (i < input->choices.len) {
+        if (!spend(paid)) { return false; }
+        choice_view descriptor = input->choices[i].descriptor;
+        u64 mut j = 0;
+        while (j < condition_count(&descriptor)) {
+            if (!spend(paid)) { return false; }
+            u64 mut k = 0;
+            while (k < predicates.len) {
+                if (!spend(paid)) { return false; }
+                ownership_api.predicate_atom checked = condition_at(&descriptor, j);
+                if (key(checked.key, predicates[k].key) &&
+                    !same_predicate(checked, predicates[k])) { return invalid(paid); }
+                k += 1;
+            }
+            j += 1;
+        }
+        choice_snapshot* mut prior = out->choices;
+        while (prior != null) {
+            if (!spend(paid)) { return false; }
+            j = 0;
+            while (j < prior->payload->choices.len) {
+                if (!compatible_choices(paid, &descriptor,
+                    &prior->payload->choices[j].descriptor)) { return false; }
+                j += 1;
+            }
+            prior = prior->next;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < input->regions.len) {
+        if (!spend(paid)) { return false; }
+        raw_region* value = &input->regions[i];
+        bool mut found = false;
+        u64 mut j = 0;
+        while (j < core->len && !found) {
+            if (!spend(paid)) { return false; }
+            if (core->aliases[j]) { found = same_region(paid, value, &core->meanings[j]); }
+            if (!ownership_api.successful(paid->proof)) { return false; }
+            j += 1;
+        }
+        j = 0;
+        while (j < kept->regions_len && !found) {
+            found = same_region(paid, value, kept->regions[j]);
+            if (!ownership_api.successful(paid->proof)) { return false; }
+            j += 1;
+        }
+        if (!found) {
+            if (!grow_regions(kept, paid) || !increment(paid, &out->r)) { return false; }
+            kept->regions[kept->regions_len] = value; kept->regions_len += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < input->bounds.len) {
+        if (!spend(paid)) { return false; }
+        closed_bound_view value = input->bounds[i];
+        bool mut found = false;
+        u64 mut j = 0;
+        while (j < predicates.len && !found) {
+            bound_result mapped = core_membership(predicates[j], paid);
+            if (!ownership_api.successful(mapped.proof)) { return false; }
+            if (mapped.supported) { found = same_membership(paid, value, mapped.bound); }
+            if (!ownership_api.successful(paid->proof)) { return false; }
+            j += 1;
+        }
+        j = 0;
+        while (j < kept->bounds_len && !found) {
+            found = same_membership(paid, value, kept->bounds[j]);
+            if (!ownership_api.successful(paid->proof)) { return false; }
+            j += 1;
+        }
+        if (!found) {
+            if (!grow_bounds(kept, paid) || !increment(paid, &out->p)) { return false; }
+            kept->bounds[kept->bounds_len] = value; kept->bounds_len += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < input->relations.len) {
+        if (!spend(paid)) { return false; }
+        affine* value = &input->relations[i];
+        bool mut found = false;
+        u64 mut j = 0;
+        while (j < kept->relations_len && !found) {
+            found = same_affine(paid, value, kept->relations[j]);
+            if (!ownership_api.successful(paid->proof)) { return false; }
+            j += 1;
+        }
+        if (!found) {
+            if (!grow_relations(kept, paid) || !increment(paid, &out->p)) { return false; }
+            kept->relations[kept->relations_len] = value; kept->relations_len += 1;
+        }
+        i += 1;
+    }
+    out->choices_complete = out->choices_complete && input->choices_complete;
+    if (input->choices.len > 0 || input->unconditional_proved) {
+        payload_result mut copied = copy_payload(input, paid);
+        if (!ownership_api.successful(copied.proof)) { return false; }
+        if (!allocation(paid, 1, sizeof(choice_snapshot))) {
+            free_payload(&copied.payload); return false;
+        }
+        choice_snapshot mut* own snapshot = new(choice_snapshot);
+        snapshot->payload = move(copied.payload);
+        snapshot->next = move(out->choices);
+        if (!spend(paid)) {
+            out->choices = move(snapshot->next);
+            free_payload(&snapshot->payload); del(snapshot); return false;
+        }
+        out->choices = move(snapshot);
+    }
+    return true;
+}
+fn free_union_result(union_result mut* value) void {
+    while (value->choices != null) {
+        choice_snapshot mut* own first = move(value->choices);
+        value->choices = move(first->next);
+        free_payload(&first->payload);
+        del(first);
+    }
+    value->r = 0; value->p = 0; value->choices_complete = false;
+}
+fn measure_union(union_request* req, ownership_type_work.work mut* paid) union_result {
+    union_result mut out = {};
+    core_inventory mut core = {};
+    union_keys mut kept = {};
+    defer free_core(&core);
+    defer free_keys(&kept);
+    bool mut okay = spend(paid);
+    if (okay && req->replaced != null && (req->proposed == null ||
+        req->replacement_index >= req->live.len)) { okay = invalid(paid); }
+    if (okay && req->replaced != null) {
+        if (!spend(paid)) { okay = false; }
+        else if (req->live[req->replacement_index] != req->replaced) { okay = invalid(paid); }
+    }
+    if (okay) { okay = build_core(req->core.regions, paid, &core); }
+    if (okay) { out.r = core.len; out.choices_complete = true; }
+    u64 mut i = 0;
+    while (okay && i < req->core.predicates.len) {
+        if (!spend(paid)) { okay = false; break; }
+        ownership_api.predicate_atom value = req->core.predicates[i];
+        if (!valid_predicate(value)) { okay = invalid(paid); break; }
+        u64 mut j = 0;
+        while (okay && j < i) {
+            if (!spend(paid)) { okay = false; break; }
+            if (key(value.key, req->core.predicates[j].key)) { okay = invalid(paid); break; }
+            j += 1;
+        }
+        if (okay) { okay = increment(paid, &out.p); }
+        i += 1;
+    }
+    i = 0;
+    while (okay && i < req->live.len) {
+        if (!spend(paid)) { okay = false; break; }
+        raw_fact_payload* input = req->live[i];
+        bool excluded = req->replaced != null && i == req->replacement_index;
+        if (input == null || (req->proposed != null && input == req->proposed)) {
+            okay = invalid(paid); break;
+        }
+        if (!excluded) {
+            okay = add_payload(input, &core, req->core.predicates, &kept, &out, paid);
+        }
+        i += 1;
+    }
+    if (okay && req->proposed != null) {
+        okay = add_payload(req->proposed, &core, req->core.predicates, &kept, &out, paid);
+    }
+    if (okay) { okay = spend(paid); }
+    if (!okay) { free_union_result(&out); }
+    out.proof = paid->proof;
+    return out;
+}

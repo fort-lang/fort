@@ -1,0 +1,385 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! link: support/ownership_depth_alloc.c
+//! stdout:
+//| endpoint prefixes 0 11 14
+//| endpoint prefixes 1 11 14
+//| endpoint prefixes 2 12 16
+//| endpoint prefixes 3 12 16
+//| endpoint prefixes 4 12 16
+//| endpoint prefixes 5 12 16
+//| endpoint prefixes 6 12 16
+//| endpoint prefixes 7 12 16
+//| endpoint prefixes 8 15 19
+//| endpoint prefixes 9 15 19
+//| endpoint prefixes 10 17 20
+//| endpoint prefixes 11 17 20
+//| endpoint prefixes 12 9 13
+//| endpoint prefixes 13 9 13
+//| endpoint prefixes 14 8 11
+//| endpoint prefixes 15 8 11
+//| endpoint prefixes 16 8 11
+//| endpoint prefixes 17 3 6
+//| endpoint prefixes 18 13 16
+//| endpoint prefixes 19 13 16
+//| endpoint prefixes 20 9 13
+//| endpoint prefixes 21 15 19
+//| endpoint prefixes 22 14 17
+//| raw affine facts ok
+/// Tests exact affine values and canonical ordered relations.
+import ownership_api;
+import ownership_depth_env;
+import ownership_raw_facts;
+import ownership_raw_facts_env;
+import ownership_type_work;
+import types;
+
+fn term(u32 ordinal, i64 coefficient) ownership_raw_facts.affine_term {
+    return ownership_raw_facts.affine_term{
+        ownership_raw_facts_env.id(ownership_api.entity_kind.value, ordinal),
+        ownership_raw_facts.signed(coefficient)};
+}
+fn affine_terms() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.affine_term[6] mut terms = {term(2, 3), term(1, 2), term(2, -1),
+        term(3, 0), term(1, -2), term(1, 1)};
+    terms[3].coefficient.negative = true;
+    ownership_depth_env.begin();
+    ownership_raw_facts.affine mut result = {};
+    assert(ownership_raw_facts.normalize(&paid,
+        ownership_raw_facts.affine_view{ownership_raw_facts.signed(0), terms[..], true}, &result));
+    assert(result.len == 2 && result.terms[0].version.ordinal == 1);
+    assert(result.terms[0].coefficient.magnitude == 1 && !result.terms[0].coefficient.negative);
+    assert(result.terms[1].version.ordinal == 2 && result.terms[1].coefficient.magnitude == 2);
+    assert(!result.constant.negative);
+    ownership_raw_facts.affine_term[2] ordered = {term(1, 1), term(2, 2)};
+    ownership_raw_facts.affine mut other = {};
+    assert(ownership_raw_facts.normalize(&paid,
+        ownership_raw_facts.affine_view{ownership_raw_facts.natural(0), ordered[..], true},
+        &other));
+    assert(ownership_raw_facts.same_affine(&paid, &result, &other));
+    ownership_raw_facts.free_affine(&result); ownership_raw_facts.free_affine(&other);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn ordered_relations() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.affine_term[1] x = {term(1, 1)};
+    ownership_raw_facts.affine_term[1] y = {term(2, 1)};
+    ownership_raw_facts.affine_term[2] both = {term(2, 1), term(1, 1)};
+    ownership_raw_facts.affine_term[1] twice_x = {term(1, 2)};
+    ownership_raw_facts.affine_term[1] twice_y = {term(2, 2)};
+    ownership_raw_facts.affine_view left = {ownership_raw_facts.natural(2), x[..], true};
+    ownership_raw_facts.affine_view right = {ownership_raw_facts.natural(4), y[..], true};
+    ownership_raw_facts.ordered_relation_view[6] relations = {
+        ownership_raw_facts.ordered_relation_view{left, right},
+        ownership_raw_facts.ordered_relation_view{
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(4), twice_x[..], true},
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(8), twice_y[..], true}},
+        ownership_raw_facts.ordered_relation_view{
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(2), both[..], true},
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(4), both[..], true}},
+        ownership_raw_facts.ordered_relation_view{right, left},
+        ownership_raw_facts.ordered_relation_view{ownership_raw_facts.literal(0),
+            ownership_raw_facts.literal(1)},
+        ownership_raw_facts.ordered_relation_view{ownership_raw_facts.literal(0),
+            ownership_raw_facts.literal(2)}};
+    ownership_api.predicate_atom[1] core = {ownership_raw_facts_env.atom(1,
+        ownership_api.predicate_kind.inequality, 1, 2, 0, 0)};
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut payload = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.relations = relations[..]}, &paid);
+    ownership_raw_facts_env.good(&payload);
+    assert(ownership_raw_facts.same_affine(&paid, &payload.payload->relations[0],
+        &payload.payload->relations[1]));
+    assert(payload.payload->relations[2].len == 0);
+    assert(payload.payload->relations[2].constant.magnitude == 1);
+    assert(payload.payload->relations[2].constant.negative);
+    assert(!ownership_raw_facts.same_affine(&paid, &payload.payload->relations[0],
+        &payload.payload->relations[3]));
+    ownership_raw_facts.union_request req = ownership_raw_facts.union_request{
+        .core = ownership_raw_facts.core_fact_view{.predicates = core[..]},
+        .proposed = payload.payload};
+    ownership_raw_facts.union_result mut result =
+            ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.counts(&result, 0, 4);
+    ownership_raw_facts.free_union_result(&result);
+    ownership_raw_facts.free_payload(&payload.payload);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn extents_keep_values() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    types.node layout = ownership_raw_facts_env.integer();
+    ownership_raw_facts.affine_term[1] once = {term(1, 1)};
+    ownership_raw_facts.affine_term[1] twice = {term(1, 2)};
+    ownership_raw_facts.raw_region_view[2] mut regions = {
+        ownership_raw_facts_env.region(&layout, 1, 1, 0, 0),
+        ownership_raw_facts_env.region(&layout, 1, 1, 0, 0)};
+    regions[0].end = ownership_raw_facts.affine_view{
+        ownership_raw_facts.natural(1), once[..], true};
+    regions[1].end = ownership_raw_facts.affine_view{
+        ownership_raw_facts.natural(2), twice[..], true};
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut payload = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.regions = regions[..]}, &paid);
+    ownership_raw_facts_env.good(&payload);
+    assert(payload.payload->regions[1].end.constant.magnitude == 2);
+    assert(payload.payload->regions[1].end.terms[0].coefficient.magnitude == 2);
+    ownership_raw_facts.union_request req = ownership_raw_facts.union_request{
+        .proposed = payload.payload};
+    ownership_raw_facts.union_result mut result =
+            ownership_raw_facts.measure_union(&req, &paid);
+    ownership_raw_facts_env.counts(&result, 2, 0);
+    ownership_raw_facts.free_union_result(&result);
+    ownership_raw_facts.free_payload(&payload.payload);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn overflows() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.affine_term[2] mut terms = {term(1, 1), term(1, 1)};
+    terms[0].coefficient = ownership_raw_facts.natural(ownership_raw_facts.U64_MAX);
+    ownership_raw_facts.ordered_relation_view[1] mut relations = {
+        ownership_raw_facts.ordered_relation_view{
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(0), terms[..], true},
+            ownership_raw_facts.literal(0)}};
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut payload = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.relations = relations[..]}, &paid);
+    ownership_raw_facts_env.refused(payload.proof, ownership_api.incomplete_reason.unknown_effect);
+    assert(payload.payload == null);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    relations[0] = ownership_raw_facts.ordered_relation_view{
+        ownership_raw_facts.literal(ownership_raw_facts.U64_MAX),
+        ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), {}, true}};
+    payload = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.relations = relations[..]}, &paid);
+    ownership_raw_facts_env.refused(payload.proof, ownership_api.incomplete_reason.unknown_effect);
+    assert(payload.payload == null);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    u64 mut count = ownership_raw_facts.U64_MAX;
+    assert(!ownership_raw_facts.increment(&paid, &count));
+    ownership_raw_facts_env.refused(paid.proof, ownership_api.incomplete_reason.unknown_effect);
+    assert(count == ownership_raw_facts.U64_MAX);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    assert(!ownership_raw_facts.allocation(&paid, ownership_raw_facts.U64_MAX,
+        sizeof(ownership_raw_facts.affine_term)));
+    ownership_raw_facts_env.refused(paid.proof, ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_depth_env.finish() > 0);
+}
+fn invalid_inputs() void {
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.closed_bound_view[1] mut bounds = {ownership_raw_facts_env.bound(1, 4, 3)};
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut payload = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.bounds = bounds[..]}, &paid);
+    ownership_raw_facts_env.refused(payload.proof, ownership_api.incomplete_reason.invalid_input);
+    assert(payload.payload == null);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    bounds[0] = ownership_raw_facts_env.bound(1, 0, 3); bounds[0].lower.valid = false;
+    payload = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.bounds = bounds[..]}, &paid);
+    ownership_raw_facts_env.refused(payload.proof, ownership_api.incomplete_reason.invalid_input);
+    assert(payload.payload == null);
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_raw_facts.affine_term[1] mut terms = {term(1, 0)};
+    terms[0].version.kind = ownership_api.entity_kind.source;
+    ownership_raw_facts.affine mut normalized = {};
+    assert(!ownership_raw_facts.normalize(&paid,
+        ownership_raw_facts.affine_view{ownership_raw_facts.natural(0), terms[..], true},
+        &normalized));
+    ownership_raw_facts_env.refused(paid.proof, ownership_api.incomplete_reason.invalid_input);
+    ownership_raw_facts.free_affine(&normalized);
+    assert(ownership_depth_env.finish() > 0);
+}
+struct endpoint_expectation {
+    ownership_raw_facts.affine_view begin;
+    ownership_raw_facts.affine_view end;
+    bool complete;
+    bool accepted;
+    u64 begin_terms;
+    u64 end_terms;
+}
+fn endpoint_payload(ownership_raw_facts.payload_result* result, endpoint_expectation expected)
+    void {
+    if (!expected.accepted) {
+        ownership_raw_facts_env.refused(result->proof,
+            ownership_api.incomplete_reason.invalid_input);
+        assert(result->payload == null); return;
+    }
+    ownership_raw_facts_env.good(result);
+    ownership_raw_facts.raw_region* region = &result->payload->regions[0];
+    assert(region->begin.len == expected.begin_terms && region->end.len == expected.end_terms);
+    assert(region->begin.constant.magnitude == expected.begin.constant.magnitude);
+    assert(region->end.constant.magnitude == expected.end.constant.magnitude);
+    assert(region->begin.constant.negative == (expected.begin.constant.negative &&
+        expected.begin.constant.magnitude != 0));
+    assert(region->end.constant.negative == (expected.end.constant.negative &&
+        expected.end.constant.magnitude != 0));
+}
+fn endpoint_case(endpoint_expectation expected, u32 number) void {
+    types.node layout = ownership_raw_facts_env.integer();
+    ownership_raw_facts.raw_region_view[1] mut input = {
+        ownership_raw_facts_env.region(&layout, 1, 1, 0, 0)};
+    input[0].begin = expected.begin; input[0].end = expected.end;
+    input[0].complete = expected.complete;
+    ownership_raw_facts.affine_term[2] mut saved_begin = {};
+    ownership_raw_facts.affine_term[2] mut saved_end = {};
+    assert(expected.begin.terms.len <= 2 && expected.end.terms.len <= 2);
+    u64 mut at = 0;
+    while (at < expected.begin.terms.len) {
+        saved_begin[at] = expected.begin.terms[at]; at += 1;
+    }
+    at = 0;
+    while (at < expected.end.terms.len) { saved_end[at] = expected.end.terms[at]; at += 1; }
+    ownership_depth_env.fixture mut f = {};
+    ownership_type_work.work mut paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_depth_env.begin();
+    ownership_raw_facts.payload_result mut full = ownership_raw_facts.build_payload(
+        ownership_raw_facts.raw_fact_view{.regions = input[..]}, &paid);
+    endpoint_payload(&full, expected);
+    u64 cost = f.meter.used.w;
+    ownership_raw_facts.free_payload(&full.payload);
+    assert(ownership_depth_env.finish() > 0 && cost > 0 && cost < 1024);
+    u64 mut allowance = 0;
+    while (allowance <= cost) {
+        paid = ownership_raw_facts_env.configure(&f, allowance);
+        ownership_depth_env.begin();
+        ownership_raw_facts.payload_result mut result = ownership_raw_facts.build_payload(
+            ownership_raw_facts.raw_fact_view{.regions = input[..]}, &paid);
+        if (allowance < cost) {
+            ownership_raw_facts_env.refused(result.proof,
+                ownership_api.incomplete_reason.work_limit);
+            assert(result.payload == null);
+        } else { endpoint_payload(&result, expected); assert(f.meter.used.w == cost); }
+        ownership_raw_facts.free_payload(&result.payload);
+        ownership_raw_facts.free_payload(&result.payload);
+        ownership_depth_env.finish(); allowance += 1;
+    }
+    ownership_raw_facts.core_region_view[1] core = {ownership_raw_facts.core_region_view{
+        .identity = ownership_raw_facts.core_region_identity{
+            .kind = ownership_raw_facts.region_identity_kind.region,
+            .key = ownership_raw_facts_env.id(ownership_api.entity_kind.region, 1)},
+        .meaning = input[0], .alias_complete = true}};
+    ownership_raw_facts.union_request req = ownership_raw_facts.union_request{
+        .core = ownership_raw_facts.core_fact_view{.regions = core[..]}};
+    paid = ownership_raw_facts_env.configure(&f, 65536);
+    ownership_depth_env.begin();
+    ownership_raw_facts.union_result mut full_union =
+        ownership_raw_facts.measure_union(&req, &paid);
+    if (expected.accepted) { ownership_raw_facts_env.counts(&full_union, 1, 0); }
+    else {
+        ownership_raw_facts_env.refused(full_union.proof,
+            ownership_api.incomplete_reason.invalid_input);
+        assert(full_union.r == 0 && full_union.p == 0 && full_union.choices == null);
+    }
+    u64 core_cost = f.meter.used.w;
+    ownership_raw_facts.free_union_result(&full_union);
+    assert(ownership_depth_env.finish() > 0 && core_cost > 0 && core_cost < 1024);
+    allowance = 0;
+    while (allowance <= core_cost) {
+        paid = ownership_raw_facts_env.configure(&f, allowance);
+        ownership_depth_env.begin();
+        ownership_raw_facts.union_result mut result =
+            ownership_raw_facts.measure_union(&req, &paid);
+        if (allowance < core_cost || !expected.accepted) {
+            ownership_raw_facts_env.refused(result.proof, allowance < core_cost ?
+                ownership_api.incomplete_reason.work_limit :
+                ownership_api.incomplete_reason.invalid_input);
+            assert(result.r == 0 && result.p == 0 && result.choices == null);
+        } else { ownership_raw_facts_env.counts(&result, 1, 0); }
+        ownership_raw_facts.free_union_result(&result);
+        ownership_raw_facts.free_union_result(&result);
+        ownership_depth_env.finish(); allowance += 1;
+    }
+    assert(input[0].complete == expected.complete);
+    at = 0;
+    while (at < expected.begin.terms.len) {
+        assert(ownership_raw_facts.key(expected.begin.terms[at].version, saved_begin[at].version));
+        assert(ownership_raw_facts.same_number(expected.begin.terms[at].coefficient,
+            saved_begin[at].coefficient)); at += 1;
+    }
+    at = 0;
+    while (at < expected.end.terms.len) {
+        assert(ownership_raw_facts.key(expected.end.terms[at].version, saved_end[at].version));
+        assert(ownership_raw_facts.same_number(expected.end.terms[at].coefficient,
+            saved_end[at].coefficient)); at += 1;
+    }
+    println("endpoint prefixes ", number, " ", cost, " ", core_cost);
+}
+fn mixed_negative_begin() void {
+    ownership_raw_facts.affine_term[1] n = {term(1, 1)};
+    endpoint_case(endpoint_expectation{
+        ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), n[..0], true},
+        ownership_raw_facts.affine_view{ownership_raw_facts.natural(0), n[..], true},
+        true, false, 0, 1}, 0);
+}
+fn mixed_negative_end() void {
+    ownership_raw_facts.affine_term[1] n = {term(1, 1)};
+    endpoint_case(endpoint_expectation{
+        ownership_raw_facts.affine_view{ownership_raw_facts.natural(0), n[..], true},
+        ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), n[..0], true},
+        true, false, 1, 0}, 1);
+}
+fn endpoint_paths() void {
+    ownership_raw_facts.affine_term[1] n = {term(1, 1)};
+    ownership_raw_facts.affine_term[1] m = {term(2, 1)};
+    ownership_raw_facts.affine_term[2] cancelled = {term(1, 1), term(1, -1)};
+    ownership_raw_facts.affine_term[1] zero_term = {term(1, 0)};
+    ownership_raw_facts.affine_view symbolic_begin = {ownership_raw_facts.natural(0), n[..], true};
+    ownership_raw_facts.affine_view symbolic_end = {ownership_raw_facts.natural(0), m[..], true};
+    ownership_raw_facts.affine_view mut signed_zero = ownership_raw_facts.literal(0);
+    signed_zero.constant.negative = true;
+    ownership_raw_facts.affine_view negative = {ownership_raw_facts.signed(-1), n[..0], true};
+    endpoint_expectation[21] cases = {
+        endpoint_expectation{ownership_raw_facts.literal(0), symbolic_end, true, true, 0, 1},
+        endpoint_expectation{ownership_raw_facts.literal(2), symbolic_end, true, true, 0, 1},
+        endpoint_expectation{symbolic_begin, ownership_raw_facts.literal(0), true, true, 1, 0},
+        endpoint_expectation{symbolic_begin, ownership_raw_facts.literal(4), true, true, 1, 0},
+        endpoint_expectation{signed_zero, symbolic_end, true, true, 0, 1},
+        endpoint_expectation{symbolic_begin, signed_zero, true, true, 1, 0},
+        endpoint_expectation{symbolic_begin, symbolic_end, true, true, 1, 1},
+        endpoint_expectation{
+            ownership_raw_facts.affine_view{ownership_raw_facts.signed(-2), n[..], true},
+            ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), m[..], true},
+            true, true, 1, 1},
+        endpoint_expectation{
+            ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), cancelled[..], true},
+            symbolic_end, true, false, 0, 1},
+        endpoint_expectation{symbolic_begin,
+            ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), cancelled[..], true},
+            true, false, 1, 0},
+        endpoint_expectation{ownership_raw_facts.literal(0), ownership_raw_facts.literal(0),
+            true, true, 0, 0},
+        endpoint_expectation{ownership_raw_facts.literal(2), ownership_raw_facts.literal(4),
+            true, true, 0, 0},
+        endpoint_expectation{ownership_raw_facts.literal(4), ownership_raw_facts.literal(2),
+            true, false, 0, 0},
+        endpoint_expectation{negative, ownership_raw_facts.literal(4), true, false, 0, 0},
+        endpoint_expectation{ownership_raw_facts.literal(0), negative, true, false, 0, 0},
+        endpoint_expectation{symbolic_begin, symbolic_end, false, false, 1, 1},
+        endpoint_expectation{
+            ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), zero_term[..], true},
+            symbolic_end, true, false, 0, 1},
+        endpoint_expectation{symbolic_begin,
+            ownership_raw_facts.affine_view{ownership_raw_facts.signed(-1), zero_term[..], true},
+            true, false, 1, 0},
+        endpoint_expectation{signed_zero, signed_zero, true, true, 0, 0},
+        endpoint_expectation{
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(3), cancelled[..], true},
+            ownership_raw_facts.literal(4), true, true, 0, 0},
+        endpoint_expectation{
+            ownership_raw_facts.affine_view{ownership_raw_facts.natural(4), cancelled[..], true},
+            ownership_raw_facts.literal(2), true, false, 0, 0}};
+    u64 mut i = 0;
+    while (i < cases.len) { endpoint_case(cases[i], cast(i + 2, u32)); i += 1; }
+}
+fn main() i32 {
+    affine_terms(); ordered_relations(); extents_keep_values(); overflows(); invalid_inputs();
+    mixed_negative_begin(); mixed_negative_end(); endpoint_paths();
+    println("raw affine facts ok");
+    return 0;
+}
