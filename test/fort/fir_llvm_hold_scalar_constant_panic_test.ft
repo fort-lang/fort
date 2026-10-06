@@ -1,0 +1,53 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_llvm.hold: a scalar constant of an aggregate type
+//! stdout:
+//| true
+/// A constant of an aggregate type is a string or a zero. An integer constant read as a pair
+/// breaks that precondition, so hold panics.
+import consts;
+import fir;
+import fir_llvm;
+import llvm_env;
+import types;
+
+string[6] PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    i32 b;",
+    "}",
+    "fn take(pair p) i32 {",
+    "    return p.a;\n}",
+};
+
+string[8] TEXT = {
+    "fn main.f() -> i32 {",
+    "    let _1: pair;",
+    "",
+    "    bb0: {",
+    "        _0 = call fn main.take(const zero pair) #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+};
+
+// A panic ends the program, so the case stands in a file of its own.
+fn main() i32 {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    llvm_env.begin(&e.g);
+    fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
+    defer fir_llvm.close(&t);
+    types.node* i32t = fir.local_at(f, 0)->ty;
+    types.node* pairt = fir.local_at(f, 1)->ty;
+    println(fir.type_aggregate(pairt));
+    fir.operand o = fir.operand{.kind = fir.operand_kind.ok_const,
+                                .value = fir.const_int(i32t, consts.cv_from_i64(1))};
+    fir_llvm.hold(&t, o, pairt, false);
+    return 0;
+}

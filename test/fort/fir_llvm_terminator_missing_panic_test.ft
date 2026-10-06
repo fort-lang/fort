@@ -1,0 +1,33 @@
+//! run
+//! flags: -I ../../src/fort
+//! abort
+//! stderr: panic: fir_llvm.translate_terminator: a block with no terminator
+//! stdout:
+//| false
+/// The verifier holds that each block ends in a terminator (V1) before the translator runs. A
+/// function whose entry block has none breaks that precondition, so the call panics.
+import fir;
+import fir_llvm;
+import gen;
+import prim;
+import session;
+import types;
+
+fn main() i32 {
+    session.session mut s = session.create();
+    defer session.free(&s);
+    gen.emitter mut g = gen.emitter{};
+    gen.gen_init(&g, &s, gen.gen_options{});
+    defer gen.gen_free(&g);
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node*@ params = {};
+    fir.func mut f = fir.func_new(&tt, null, types.type_fn(&tt, i32t, params, false));
+    defer fir.func_free(&f);
+    fir_llvm.translator mut t = fir_llvm.open(&g, &f);
+    defer fir_llvm.close(&t);
+    println(fir.block_at(&f, 0)->terminated);
+    fir_llvm.translate_terminator(&t, 0);
+    return 0;
+}

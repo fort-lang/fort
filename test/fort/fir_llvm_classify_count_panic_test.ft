@@ -1,0 +1,45 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_llvm.classify: one entry for each local
+//! stdout:
+//| 2
+/// classify writes one storage class for each local of the function. An output of one entry for
+/// a function of two locals breaks that precondition, so the call panics.
+import fir;
+import fir_llvm;
+import llvm_env;
+
+string[6] PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    i32 b;",
+    "}",
+    "fn take(pair p) i32 {",
+    "    return p.a;\n}",
+};
+
+string[8] TEXT = {
+    "fn main.f() -> i32 {",
+    "    let _1: pair;",
+    "",
+    "    bb0: {",
+    "        _0 = call fn main.take(const zero pair) #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+};
+
+// A panic ends the program, so the case stands in a file of its own.
+fn main() i32 {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    println(f->locals.len);
+    fir_llvm.storage[1] mut out = {};
+    fir_llvm.classify(f, out[..]);
+    return 0;
+}

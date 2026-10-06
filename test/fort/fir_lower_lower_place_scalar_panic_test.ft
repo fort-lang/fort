@@ -1,0 +1,36 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_lower.lower_place: a scalar that designates no storage
+//! stdout:
+//| true
+/// The checker gives each scalar lvalue a name, a field, `->`, an index or `*`. An integer
+/// literal is none of them, so lower_place panics on it.
+import ast;
+import check_env;
+import fir;
+import fir_lower;
+import lower_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn f() i32 {",
+        "    return 1;",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "f");
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    defer fir_lower.scopes_free(&lw.scopes);
+    fir_lower.prescan(&lw, decl->b);
+    ast.node mut* one = check_env.node_in_main(&e.c, ast.ast_kind.k_int, "");
+    println(!fir.type_aggregate(one->ty));
+    fir.place mut out = fir.place{};
+    fir_lower.lower_place(&lw, one, &out);
+    return 0;
+}

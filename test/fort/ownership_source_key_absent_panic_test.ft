@@ -1,0 +1,28 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: ownership_source: declaration key is absent
+//! stdout:
+//| true
+/// prepare finds each checked function in the syntax tree of the module whose file declares
+/// it. The test moves the location of `main.f` into other.ft, so prepare looks for `f` in the
+/// tree of `other`, finds no key, and panics.
+import ast;
+import check_env;
+import ownership_source;
+import ownership_source_env;
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    check_env.add(&e.checked, "other.ft", "fn g() i32 {\n    return 1;\n}\n");
+    bool checked = check_env.check_src(&e.checked,
+        "import other;\nfn f() i32 {\n    return other.g();\n}\n");
+    println(checked);
+    ast.node mut* f = check_env.node_in_main(&e.checked, ast.ast_kind.k_fn_decl, "f");
+    f->name_loc.file = check_env.module_at(&e.checked, "other")->file;
+    ownership_source.prepare(&e.source, &e.checked.ck, &e.checked.m.set, checked);
+    return 0;
+}

@@ -1,0 +1,32 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_lower.scope_pop: no open scope
+//! stdout:
+//| 0
+/// Each scope_pop closes a scope that scope_push opened. A lowerer with no open scope breaks
+/// that precondition, so the call panics.
+import ast;
+import fir;
+import fir_lower;
+import lower_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[2] source = {
+        "fn f() void {",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "f");
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    defer fir_lower.scopes_free(&lw.scopes);
+    fir_lower.prescan(&lw, decl->b);
+    println(lw.scopes.len);
+    fir_lower.scope_pop(&lw);
+    return 0;
+}

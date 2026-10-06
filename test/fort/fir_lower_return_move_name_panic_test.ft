@@ -1,0 +1,38 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_lower.lower_return: an implicit move of no local
+//! stdout:
+//| true
+/// The checker marks a `return` as an implicit move only when its operand names a local. The
+/// test marks `return 1;`, which names none, so the lowering panics.
+import ast;
+import check;
+import check_env;
+import fir;
+import fir_lower;
+import lower_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn f() i32 {",
+        "    return 1;",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "f");
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    defer fir_lower.scopes_free(&lw.scopes);
+    fir_lower.prescan(&lw, decl->b);
+    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
+    ast.node mut* ret = check_env.node_in_main(&e.c, ast.ast_kind.k_return, "");
+    ret->ann |= check.ANN_MOVE;
+    println(ret->a->kind == ast.ast_kind.k_int);
+    fir_lower.lower_return(&lw, ret);
+    return 0;
+}
