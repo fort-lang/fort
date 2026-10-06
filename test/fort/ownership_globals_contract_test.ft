@@ -1,0 +1,319 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| N01 ok
+//| N02 ok
+//| N03 ok
+//| N04 ok
+//| N05 ok
+//| N06 ok
+//| N07 ok
+//| N08 ok
+//| N09 ok
+//| N10 ok
+//| N11 ok
+//| N12 ok
+//| N13 ok
+//| N14 ok
+//| P01 ok
+//| P02 ok
+//| P03 ok
+//| P04 ok
+//| P05 ok
+//| P06 ok
+/// Checks refused global requests and copied projected storage.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_contract_env;
+import ownership_globals_env;
+import ownership_keys;
+import ownership_limits;
+import ownership_state;
+
+fn null_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_api.global_result previous = ownership_globals_contract_env.warm(&e);
+    ownership_globals_contract_env.saved mut snapshot = ownership_globals_contract_env.capture(&e);
+    ownership_api.global_request req = ownership_globals_contract_env.reuse(&e, previous);
+    ownership_api.services restored_service = e.service;
+    ownership_globals.event_binding restored_first = e.bindings[0];
+    ownership_globals.event_binding restored_last = e.bindings[2];
+    e.events.budget.used = ownership_api.used_counts{};
+    ownership_api.global_result mut out = ownership_api.global_result{};
+    if (mode == 1) { out = ownership_globals.solve(null, &e.service, &req); }
+    else if (mode == 2) { out = ownership_globals.solve(&e.global, null, &req); }
+    else if (mode == 3) { out = ownership_globals.solve(&e.global, &e.service, null); }
+    else if (mode == 4) {
+        e.service.global_context = null;
+        out = ownership_api.globals(&e.service, &req);
+    } else if (mode == 5) {
+        e.global.services = null;
+        out = ownership_globals.callback(cast(&e.global, void mut*), &req);
+    } else if (mode == 6) {
+        e.service.globals = null;
+        out = ownership_globals.solve(&e.global, &e.service, &req);
+    } else if (mode == 7) {
+        e.service.budget = null;
+        out = ownership_globals.solve(&e.global, &e.service, &req);
+    } else if (mode == 8) {
+        e.service.event = null;
+        out = ownership_globals.solve(&e.global, &e.service, &req);
+    } else if (mode == 9) {
+        ownership_api.services mut different = restored_service;
+        out = ownership_globals.solve(&e.global, &different, &req);
+    } else if (mode == 10 || mode == 15) {
+        e.global.work_failure = mode == 10 ? ownership_globals.event_binding{} : e.bindings[0];
+        out = ownership_globals.solve(&e.global, &e.service, &req);
+        e.global.work_failure = e.bindings[1];
+    } else if (mode == 11) {
+        e.global.events = e.bindings[0..0];
+        out = ownership_globals.solve(&e.global, &e.service, &req);
+    } else if (mode == 12) {
+        e.bindings[2] = e.bindings[0];
+        out = ownership_globals.solve(&e.global, &e.service, &req);
+    } else if (mode == 13) {
+        e.bindings[0].key.function.instance += 1;
+        out = ownership_globals.solve(&e.global, &e.service, &req);
+    } else {
+        assert(mode == 14);
+        out = ownership_globals.callback(cast(&e.global, void mut*), null);
+    }
+    ownership_api.incomplete_reason mut reason =
+        ownership_api.incomplete_reason.missing_correspondence;
+    if (mode == 6) { reason = ownership_api.incomplete_reason.missing_globals; }
+    if (mode == 7) { reason = ownership_api.incomplete_reason.missing_budget; }
+    if (mode == 8) { reason = ownership_api.incomplete_reason.missing_events; }
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(out.proof.terminal.present && out.proof.terminal.reason == reason);
+    assert(out.persistent.len == 0 && out.cleanup.len == 0 && !out.boundary_proved);
+    assert(e.events.len == 0);
+    ownership_api.operation_position operation = mode == 3 || mode == 14 ?
+        ownership_api.operation_position{} : req.operation;
+    ownership_api.source_position origin = mode == 3 || mode == 14 ?
+        ownership_api.source_position{} : req.source;
+    assert(ownership_keys.operation(out.proof.terminal.operation, operation) == 0);
+    assert(ownership_keys.source(out.proof.terminal.source, origin) == 0);
+    if (mode == 4 || mode == 11) { assert(e.events.budget.used.w == 1); }
+    else if (mode == 12) { assert(e.events.budget.used.w == 6); }
+    else if (mode == 13) { assert(e.events.budget.used.w == 2); }
+    else { assert(e.events.budget.used.w == 0); }
+    e.service = restored_service;
+    e.global.services = &e.service;
+    e.bindings[0] = restored_first;
+    e.bindings[2] = restored_last;
+    e.global.events = e.bindings[0..3];
+    ownership_globals_contract_env.unchanged(&e, &snapshot);
+    assert(previous.persistent[0].place.projections[0].field == 7);
+    assert(previous.cleanup[0].place.projections[0].field == 7);
+    ownership_globals_contract_env.free(&snapshot);
+    ownership_globals_env.close(&e);
+}
+
+fn case_n01() void { null_case(1); println("N01 ok"); }
+fn case_n02() void { null_case(2); println("N02 ok"); }
+fn case_n03() void { null_case(3); println("N03 ok"); }
+fn case_n04() void { null_case(4); println("N04 ok"); }
+fn case_n05() void { null_case(5); println("N05 ok"); }
+fn case_n06() void { null_case(6); println("N06 ok"); }
+fn case_n07() void { null_case(7); println("N07 ok"); }
+fn case_n08() void { null_case(8); println("N08 ok"); }
+fn case_n09() void { null_case(9); println("N09 ok"); }
+fn case_n10() void { null_case(10); null_case(15); println("N10 ok"); }
+fn case_n11() void { null_case(11); println("N11 ok"); }
+fn case_n12() void { null_case(12); println("N12 ok"); }
+fn case_n13() void { null_case(13); println("N13 ok"); }
+fn case_n14() void { null_case(14); println("N14 ok"); }
+
+fn case_p01() void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_contract_env.projected(&e, 61, ownership_api.source_kind.symbolic_caller);
+    ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read,
+        e.descriptors[0].place, e.descriptors[0].place, 0);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    assert(ownership_api.successful(out.proof) && e.events.len == 0);
+    assert(out.persistent[0].place.projections.ptr !=
+        cast(e.projections.ptr, ownership_api.projection*));
+    assert(out.persistent[0].initial.borrows[0].range.leaves.ptr !=
+        e.input.contents[0].borrows[0].range.leaves.ptr);
+    ownership_globals_env.release_input(&e);
+    ownership_globals_contract_env.copied(&e.global);
+    ownership_globals_env.close(&e);
+    println("P01 ok");
+}
+
+fn reuse_work() u64 {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_api.global_result previous = ownership_globals_contract_env.warm(&e);
+    ownership_api.global_request req = ownership_globals_contract_env.reuse(&e, previous);
+    e.events.budget.used = ownership_api.used_counts{};
+    assert(ownership_api.successful(ownership_globals.solve(&e.global, &e.service, &req).proof));
+    u64 used = e.events.budget.used.w;
+    ownership_globals_env.close(&e);
+    return used;
+}
+
+fn case_p02() void {
+    u64 total = reuse_work();
+    assert(total > 1 && total < ownership_limits.PRODUCTION_W);
+    u64 mut cut = 0;
+    while (cut < total) {
+        ownership_globals_env.env mut e = ownership_globals_env.env{};
+        ownership_api.global_result previous = ownership_globals_contract_env.warm(&e);
+        ownership_globals_contract_env.saved mut snapshot =
+            ownership_globals_contract_env.capture(&e);
+        ownership_api.global_request req = ownership_globals_contract_env.reuse(&e, previous);
+        e.events.budget.used = ownership_api.used_counts{};
+        e.events.budget.bounds.w = cut == 0 ? 1 : cut;
+        e.events.budget.used.w = cut == 0 ? 1 : 0;
+        ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+        assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        u64 bound = cut == 0 ? 1 : cut;
+        assert(out.proof.terminal.limit.used == bound && out.proof.terminal.limit.bound == bound);
+        assert(e.events.len == 1);
+        ownership_api.event_descriptor* event = ownership_events.at(&e.events, 0);
+        assert(event->kind == ownership_api.event_kind.work_failure);
+        assert(ownership_keys.entity(event->key, e.global.work_failure.key) == 0);
+        assert(ownership_keys.operation(event->operation, req.operation) == 0);
+        assert(ownership_keys.source(event->source, req.source) == 0);
+        assert(out.persistent.len == 0 && out.cleanup.len == 0 && !out.boundary_proved);
+        ownership_globals_contract_env.unchanged(&e, &snapshot);
+        ownership_globals_contract_env.free(&snapshot);
+        ownership_globals_env.close(&e);
+        cut += 1;
+    }
+    assert(cut == total);
+    println("P02 ok");
+}
+
+fn case_p03() void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_contract_env.projected(&e, 63, ownership_api.source_kind.stack);
+    ownership_api.place_path cleared = ownership_globals_env.case_place(&e, 1);
+    ownership_globals_env.add_empty(&e, cleared);
+    ownership_globals_env.borrow_effect(&e, cleared, e.descriptors[0].place, 0);
+    e.ordered[0].source = ownership_api.entity_id{};
+    ownership_globals_env.source_end(&e, 40);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    assert(ownership_api.successful(out.proof) && e.events.len == 0);
+    assert(e.global.borrowed.len == 0 && out.persistent[0].initial.owner_empty);
+    assert(e.global.retained.sources[0].validity == ownership_api.validity_kind.ended);
+    ownership_globals_env.close(&e);
+    println("P03 ok");
+}
+
+fn case_p04() void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_contract_env.projected(&e, 64, ownership_api.source_kind.stack);
+    ownership_globals_env.source_end(&e, 40);
+    ownership_state.state mut before = ownership_state.clone(&e.input);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    assert(out.proof.failed && e.events.len == 1);
+    ownership_api.event_descriptor* event = ownership_events.at(&e.events, 0);
+    assert(event->kind == ownership_api.event_kind.invalid_use);
+    assert(event->evidence == ownership_api.evidence_kind.unconditional);
+    assert(ownership_keys.operation(event->operation, e.ordered[0].operation) == 0);
+    assert(ownership_keys.source(event->source, e.transitions[0].source) == 0);
+    assert(ownership_keys.entity(event->relation,
+        ownership_globals_env.case_key(&e, ownership_api.entity_kind.source, 40)) == 0);
+    assert(ownership_state.same_place(event->owner_path, e.descriptors[0].place));
+    assert(ownership_state.equal(&e.input, &before));
+    ownership_globals_env.release_input(&e);
+    assert(event->owner_path.projections.len == 2);
+    assert(event->owner_path.projections[0].field == 7);
+    assert(event->owner_path.projections[1].field == 9);
+    ownership_state.free(&before);
+    ownership_globals_env.close(&e);
+    println("P04 ok");
+}
+
+fn case_p05() void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_contract_env.projected(&e, 65, ownership_api.source_kind.symbolic_caller);
+    e.input.sources[0].allocation =
+        ownership_globals_env.case_key(&e, ownership_api.entity_kind.allocation, 70);
+    ownership_globals_env.select_entry(&e, false, true);
+    ownership_globals_env.caller_input(&e, e.descriptors[0].place, false);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    assert(ownership_api.successful(out.proof) && e.events.len == 0);
+    assert(e.global.retained.allocations_len == 0 && e.global.callbacks.len == 1);
+    assert(!e.global.callbacks[0].owning && e.global.callbacks[0].source.allocation.ordinal == 70);
+    ownership_globals_env.release_input(&e);
+    ownership_globals_contract_env.copied(&e.global);
+    assert(e.global.callbacks[0].input.projections[1].field == 9);
+    ownership_globals_env.close(&e);
+    println("P05 ok");
+}
+
+fn case_p06() void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_contract_env.projected(&e, 66, ownership_api.source_kind.symbolic_caller);
+    ownership_api.place_path local = ownership_globals_env.case_place(&e, 1);
+    ownership_api.contents_fact mut value = e.input.contents[0];
+    ownership_api.borrow_relation[1] mut relation = {value.borrows[0]};
+    relation[0].containing = local;
+    value.place = local;
+    value.borrows = relation[..];
+    ownership_state.append_contents(&e.input, value);
+    ownership_globals_env.borrow_effect(&e, local, e.descriptors[0].place, 40);
+    ownership_api.place_path empty = ownership_globals_env.case_place(&e, 3);
+    ownership_globals_env.add_empty(&e, empty);
+    ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read, empty, empty, 0);
+    ownership_globals_env.select_calls(&e, 1, 2);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    assert(ownership_api.successful(out.proof) && e.events.len == 0);
+    assert(e.global.paths.len == 2);
+    assert(ownership_state.equal(&e.global.paths[0].state, &e.global.paths[1].state));
+    assert(e.global.paths[0].state.contents[0].borrows.ptr !=
+        e.global.paths[1].state.contents[0].borrows.ptr);
+    assert(e.global.paths[0].state.contents[0].borrows[0].range.leaves.ptr !=
+        e.global.paths[1].state.contents[0].borrows[0].range.leaves.ptr);
+    ownership_globals_env.release_input(&e);
+    ownership_globals_contract_env.copied(&e.global);
+    assert(e.global.paths[0].state.contents[0].place.projections[1].field == 9);
+    assert(e.global.paths[1].state.contents[0].borrows[0].range.partitions[0].key.ordinal == 72);
+    ownership_api.global_request mut next = req;
+    next.before = ownership_state.view(&e.global.retained);
+    next.entry.globals = out.persistent;
+    next.entry.cleanup = out.cleanup;
+    // Original effect places borrow the released input projections.
+    ownership_api.ordered_effect[2] effects = {e.global.ordered[0].effect,
+        e.global.ordered[1].effect};
+    next.outcome.effects = effects[..];
+    ownership_api.global_result repeated = ownership_globals.solve(&e.global, &e.service, &next);
+    assert(ownership_api.successful(repeated.proof) && e.events.len == 0);
+    ownership_globals_contract_env.copied(&e.global);
+    assert(e.global.paths[1].state.contents[0].borrows[0].range.partitions[0].key.ordinal == 72);
+    ownership_globals_env.close(&e);
+    println("P06 ok");
+}
+
+fn main() i32 {
+    case_n01();
+    case_n02();
+    case_n03();
+    case_n04();
+    case_n05();
+    case_n06();
+    case_n07();
+    case_n08();
+    case_n09();
+    case_n10();
+    case_n11();
+    case_n12();
+    case_n13();
+    case_n14();
+    case_p01();
+    case_p02();
+    case_p03();
+    case_p04();
+    case_p05();
+    case_p06();
+    return 0;
+}

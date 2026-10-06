@@ -1,0 +1,107 @@
+/// Supplies snapshots and canonical facts for global consumer regressions.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_contract_env;
+import ownership_globals_env;
+import ownership_limits;
+import ownership_state;
+
+fn path(ownership_globals_env.env mut* e, u32 slot, bool index) ownership_api.place_path {
+    e->projections = new(ownership_api.projection, 1);
+    e->projections[0] = ownership_api.projection{
+        .kind = index ? ownership_api.projection_kind.fixed_index :
+            ownership_api.projection_kind.field, .field = 7,
+        .index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 2}};
+    ownership_api.place_path mut out = ownership_globals_env.case_place(e, slot);
+    out.projections = e->projections[..];
+    return out;
+}
+
+fn abort_request(ownership_globals_env.env mut* e) ownership_api.global_request {
+    ownership_api.global_request mut req = ownership_globals_env.request(e);
+    req.outcome.kind = ownership_api.outcome_kind.abort;
+    req.outcome.effects = e->ordered[0..0];
+    ownership_globals_env.select_terminal(e, &req);
+    return req;
+}
+
+fn cursor(ownership_globals_env.env mut* e, ownership_api.global_request* req)
+    ownership_globals.work {
+    return ownership_globals.work{.global = &e->global, .request = req,
+        .proof = ownership_api.proof_status{.kind = ownership_api.proof_kind.complete},
+        .terminal_index = ownership_api.U64_MAX};
+}
+
+fn budget(ownership_globals_env.env mut* e, u64 work) void {
+    e->events.budget.used = ownership_api.used_counts{};
+    e->events.budget.bounds.w = work;
+}
+
+fn copy_borrow(ownership_globals_env.env mut* e, u64 owner, ownership_api.place_path target) void {
+    ownership_api.contents_fact mut value = e->input.contents[owner];
+    ownership_api.borrow_relation mut relation = value.borrows[0];
+    relation.containing = target;
+    ownership_api.borrow_relation[1] relations = {relation};
+    value.place = target;
+    value.borrows = relations[..];
+    ownership_state.append_contents(&e->input, value);
+    ownership_globals_env.set_initial(e, target);
+}
+
+fn add_global(ownership_globals_env.env mut* e, ownership_api.place_path place, u32 id) void {
+    ownership_api.global_input mut@ own records = new(ownership_api.global_input,
+        e->descriptors.len + 1);
+    u64 mut i = 0;
+    while (i < e->descriptors.len) { records[i] = e->descriptors[i]; i += 1; }
+    records[i] = ownership_api.global_input{
+        .declaration = ownership_api.declaration_id{1, id}, .place = place,
+        .persistent = true, .symbolic = true};
+    del(e->descriptors);
+    e->descriptors = move(records);
+}
+
+fn return_event(ownership_globals_env.env mut* e) void {
+    u64 i = e->global.events.len;
+    assert(i < e->bindings.len);
+    e->bindings[i] = ownership_globals.event_binding{
+        e->bindings[0].operation, ownership_api.event_kind.invalid_use,
+        ownership_globals_env.case_key(e, ownership_api.entity_kind.event,
+            e->case_id * 100 + 80)};
+    e->global.events = e->bindings[0..i + 1];
+}
+
+fn solve(ownership_globals_env.env mut* e, ownership_api.global_request* req)
+    ownership_api.global_result {
+    ownership_globals_contract_env.saved mut snapshot = ownership_globals_contract_env.capture(e);
+    ownership_api.global_result out = ownership_globals.solve(&e->global, &e->service, req);
+    assert(ownership_state.equal(&e->input, &snapshot.input));
+    if (!ownership_api.successful(out.proof)) {
+        assert(ownership_state.equal(&e->global.retained, &snapshot.prior));
+        u64 mut i = 0;
+        while (i < snapshot.headers.len) {
+            assert(ownership_globals_contract_env.header(&e->global, i) == snapshot.headers[i]);
+            assert(ownership_globals_contract_env.length(&e->global, i) == snapshot.lengths[i]);
+            i += 1;
+        }
+        assert(out.persistent.len == 0 && out.cleanup.len == 0 && !out.boundary_proved);
+    }
+    ownership_globals_contract_env.free(&snapshot);
+    return out;
+}
+
+fn result(ownership_globals_env.env* e, ownership_api.global_result out,
+    bool accepted, ownership_api.event_kind kind, ownership_api.incomplete_reason reason) void {
+    if (accepted) {
+        assert(ownership_api.successful(out.proof) && e->events.len == 0);
+    } else {
+        assert(out.proof.failed && e->events.len == 1);
+        ownership_api.event_descriptor* event = ownership_events.at(&e->events, 0);
+        assert(event->kind == kind && event->reason == reason);
+        if (kind == ownership_api.event_kind.incomplete_proof ||
+            kind == ownership_api.event_kind.work_failure) {
+            assert(out.proof.kind == ownership_api.proof_kind.incomplete);
+            assert(out.proof.terminal.reason == reason);
+        }
+    }
+}

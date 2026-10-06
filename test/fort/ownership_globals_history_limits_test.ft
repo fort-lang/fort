@@ -1,0 +1,243 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| globals history limits ok
+/// Checks retained history cardinality and transactional refusal.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_contract_env;
+import ownership_globals_env;
+import ownership_globals_review_env;
+import ownership_keys;
+import ownership_state;
+
+fn prepare(ownership_globals_env.env mut* e, bool multiple) void {
+    ownership_globals_env.case_open(e, multiple ? 1102 : 1101);
+    if (multiple) {
+        ownership_api.place_path first = ownership_globals_env.case_place(e, 2);
+        ownership_api.place_path second = ownership_globals_env.case_place(e, 4);
+        ownership_globals_env.add_owner(e, first, 10, 4);
+        ownership_globals_review_env.add_global(e, second, 1103);
+        ownership_globals_env.add_owner(e, second, 20, 8);
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.release, first, first, 10);
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.release, second, second, 20);
+    } else {
+        ownership_api.place_path local = ownership_globals_env.case_place(e, 1);
+        ownership_api.place_path global = ownership_globals_env.case_place(e, 2);
+        ownership_globals_env.add_owner(e, local, 10, 4);
+        ownership_globals_env.add_empty(e, global);
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.transfer, local, global, 10);
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.release, global, global, 10);
+    }
+}
+
+fn accepted(ownership_globals_env.env* e, ownership_api.global_result out,
+    bool multiple) void {
+    ownership_globals_review_env.result(e, out, true, ownership_api.event_kind.work_failure,
+        ownership_api.incomplete_reason.none);
+    assert(e->events.budget.used.e == 2);
+    assert(e->global.retained.allocations_len == (multiple ? 2 : 1));
+    ownership_api.allocation_fact first = e->global.retained.allocations[0];
+    assert(!first.obligation && first.validity == ownership_api.validity_kind.released);
+    assert(first.history.len == (multiple ? 1 : 2));
+    assert(first.history[0].kind == (multiple ? ownership_api.effect_kind.release :
+        ownership_api.effect_kind.transfer));
+    assert(first.history[0].operation.operation == 2);
+    if (multiple) {
+        ownership_api.allocation_fact second = e->global.retained.allocations[1];
+        assert(!second.obligation && second.validity == ownership_api.validity_kind.released);
+        assert(second.history.len == 1 && second.history[0].operation.operation == 3);
+        assert(second.history[0].kind == ownership_api.effect_kind.release);
+    } else {
+        assert(first.history[1].kind == ownership_api.effect_kind.release);
+        assert(first.history[1].operation.operation == 3);
+        assert(first.history[0].before.place.root.ordinal == 1);
+        assert(first.history[0].after.place.root.ordinal == 2);
+        assert(first.history[1].before.place.root.ordinal == 2);
+        assert(first.history[1].after.place.root.kind == ownership_api.entity_kind.none);
+        assert(!first.history[1].after.detached && !first.history[1].after.transfer_pending);
+    }
+}
+
+fn refused(ownership_globals_env.env* e, ownership_api.global_request* req,
+    ownership_api.global_result out, ownership_api.limit_category category,
+    u64 used, u64 bound, u64 attempted) void {
+    ownership_globals_review_env.result(e, out, false, ownership_api.event_kind.work_failure,
+        ownership_api.incomplete_reason.work_limit);
+    ownership_api.event_descriptor* event = ownership_events.at(&e->events, 0);
+    assert(ownership_keys.entity(event->key, e->global.work_failure.key) == 0);
+    assert(ownership_keys.operation(event->operation, req->operation) == 0);
+    assert(ownership_keys.source(event->source, req->source) == 0);
+    assert(event->limit.present && event->limit.category == category);
+    assert(event->limit.used == used && event->limit.bound == bound);
+    assert(event->limit.attempted == attempted);
+    assert(out.proof.terminal.limit.category == category);
+    assert(out.proof.terminal.limit.used == used && out.proof.terminal.limit.bound == bound);
+    assert(out.proof.terminal.limit.attempted == attempted);
+}
+
+fn append_round(bool multiple, u64 limit, u64 work, bool prior) u64 {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    prepare(&e, multiple);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result mut out = ownership_api.global_result{};
+    if (prior) {
+        e.events.budget.bounds.e = 2;
+        out = ownership_globals_review_env.solve(&e, &req);
+        accepted(&e, out, multiple);
+    }
+    ownership_globals_review_env.budget(&e, work);
+    if (work == 0) { e.events.budget.bounds.w = 1; e.events.budget.used.w = 1; }
+    e.events.budget.bounds.e = limit;
+    out = ownership_globals_review_env.solve(&e, &req);
+    u64 used = e.events.budget.used.w;
+    if (ownership_api.successful(out.proof)) {
+        accepted(&e, out, multiple);
+    } else if (out.proof.terminal.limit.category == ownership_api.limit_category.e) {
+        refused(&e, &req, out, ownership_api.limit_category.e, 1, limit, 2);
+        assert(e.events.budget.used.e == 1);
+    } else {
+        u64 bound = work == 0 ? 1 : work;
+        refused(&e, &req, out, ownership_api.limit_category.w, bound, bound, 1);
+        assert(used == bound);
+        if (prior) {
+            assert(e.global.retained.allocations[0].history.len == (multiple ? 1 : 2));
+        }
+    }
+    ownership_globals_env.close(&e);
+    return used;
+}
+
+fn import_request(ownership_globals_env.env* e, ownership_api.global_result prior)
+    ownership_api.global_request {
+    ownership_api.global_request mut req = ownership_globals_env.request(e);
+    req.before = ownership_state.view(&e->global.retained);
+    req.entry.globals = prior.persistent;
+    req.outcome.effects = e->ordered[0..0];
+    return req;
+}
+
+fn import_round(u64 limit, u64 work, bool paths) u64 {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    prepare(&e, true);
+    e.events.budget.bounds.e = 2;
+    ownership_api.global_request mut req = ownership_globals_env.request(&e);
+    ownership_api.global_result mut out = ownership_globals_review_env.solve(&e, &req);
+    accepted(&e, out, true);
+    req = import_request(&e, out);
+    if (paths) {
+        e.effects_len = 0;
+        ownership_api.place_path first = ownership_globals_env.case_place(&e, 2);
+        ownership_api.place_path second = ownership_globals_env.case_place(&e, 4);
+        ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read, first, first, 0);
+        ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read, second, second, 0);
+        ownership_globals_env.select_calls(&e, 1, 2);
+        req.outcome.effects = e.ordered[0..e.effects_len];
+    }
+    ownership_globals_review_env.budget(&e, work);
+    if (work == 0) { e.events.budget.bounds.w = 1; e.events.budget.used.w = 1; }
+    e.events.budget.bounds.e = limit;
+    out = ownership_globals_review_env.solve(&e, &req);
+    u64 used = e.events.budget.used.w;
+    if (ownership_api.successful(out.proof)) {
+        accepted(&e, out, true);
+        if (paths) {
+            assert(e.global.paths.len == 2);
+            assert(e.global.paths[0].state.blocks != e.global.retained.blocks);
+            assert(e.global.paths[1].state.blocks != e.global.paths[0].state.blocks);
+            u64 mut i = 0;
+            while (i < e.global.paths.len) {
+                assert(e.global.paths[i].state.allocations[0].history.len == 1);
+                assert(e.global.paths[i].state.allocations[1].history.len == 1);
+                i += 1;
+            }
+        }
+    } else if (out.proof.terminal.limit.category == ownership_api.limit_category.e) {
+        refused(&e, &req, out, ownership_api.limit_category.e, 0, limit, 2);
+        assert(e.events.budget.used.e == 0);
+    } else {
+        u64 bound = work == 0 ? 1 : work;
+        refused(&e, &req, out, ownership_api.limit_category.w, bound, bound, 1);
+        assert(used == bound);
+        assert(e.global.retained.allocations[0].history.len == 1);
+        assert(e.global.retained.allocations[1].history.len == 1);
+    }
+    ownership_globals_env.close(&e);
+    return used;
+}
+
+fn saturated_sum() void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    prepare(&e, true);
+    ownership_api.global_request mut req = ownership_globals_env.request(&e);
+    ownership_api.global_result mut out = ownership_globals_review_env.solve(&e, &req);
+    accepted(&e, out, true);
+    req = import_request(&e, out);
+    ownership_api.allocation_fact[2] mut records = {
+        e.global.retained.allocations[0], e.global.retained.allocations[1]};
+    ownership_api.history_fact[1] history = {records[0].history[0]};
+    ownership_api.history_fact* raw = &history[0];
+    records[0].history = raw[0..ownership_api.U64_MAX - 1];
+    records[1].history = raw[0..2];
+    req.before.allocations = records[..];
+    ownership_globals_review_env.budget(&e, ownership_api.U64_MAX);
+    e.events.budget.bounds.e = ownership_api.U64_MAX;
+    out = ownership_globals_review_env.solve(&e, &req);
+    refused(&e, &req, out, ownership_api.limit_category.e, 0,
+        ownership_api.U64_MAX, ownership_api.U64_MAX);
+    assert(records[0].history.ptr == raw && records[0].history.len == ownership_api.U64_MAX - 1);
+    assert(records[1].history.ptr == raw && records[1].history.len == 2);
+    assert(e.events.budget.used.e == 0);
+    ownership_globals_env.close(&e);
+}
+
+fn case_h01() void {
+    u64 accepted_work = append_round(false, 2, ownership_api.U64_MAX, false);
+    append_round(false, 1, ownership_api.U64_MAX, true);
+    assert(accepted_work > 0);
+}
+
+fn case_h02() void {
+    append_round(true, 2, ownership_api.U64_MAX, false);
+    append_round(true, 1, ownership_api.U64_MAX, true);
+}
+
+fn case_h03() void {
+    import_round(2, ownership_api.U64_MAX, false);
+    import_round(1, ownership_api.U64_MAX, false);
+}
+
+fn case_h04() void {
+    import_round(2, ownership_api.U64_MAX, true);
+}
+
+fn case_h05() void {
+    u64 append_work = append_round(false, 2, ownership_api.U64_MAX, false);
+    u64 import_work = import_round(2, ownership_api.U64_MAX, false);
+    u64 mut i = 0;
+    while (i < append_work) {
+        append_round(false, 2, i, true);
+        i += 1;
+    }
+    assert(append_round(false, 2, append_work, false) == append_work);
+    assert(append_round(false, 2, append_work + 1, false) == append_work);
+    i = 0;
+    while (i < import_work) {
+        import_round(2, i, false);
+        i += 1;
+    }
+    assert(import_round(2, import_work, false) == import_work);
+    assert(import_round(2, import_work + 1, false) == import_work);
+    saturated_sum();
+}
+
+fn main() i32 {
+    case_h01();
+    case_h02();
+    case_h03();
+    case_h04();
+    case_h05();
+    println("globals history limits ok");
+    return 0;
+}

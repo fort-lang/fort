@@ -1,0 +1,171 @@
+/// Supplies retained-state snapshots and projected global facts.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_env;
+import ownership_keys;
+import ownership_limits;
+import ownership_state;
+
+struct saved {
+    ownership_state.state input;
+    ownership_state.state prior;
+    void*[28] headers;
+    u64[28] lengths;
+}
+
+fn header(ownership_globals.context* c, u64 i) void* {
+    if (i == 0) { return cast(c->globals.ptr, void*); }
+    if (i == 1) { return cast(c->cleanup.ptr, void*); }
+    if (i == 2) { return cast(c->borrowed.ptr, void*); }
+    if (i == 3) { return cast(c->descendants.ptr, void*); }
+    if (i == 4) { return cast(c->symbolic.ptr, void*); }
+    if (i == 5) { return cast(c->callbacks.ptr, void*); }
+    if (i == 6) { return cast(c->ordered.ptr, void*); }
+    if (i == 7) { return cast(c->paths.ptr, void*); }
+    if (i == 8) { return cast(c->startup.ptr, void*); }
+    if (i == 9) { return cast(c->terminals.ptr, void*); }
+    if (i == 10) { return cast(c->terminal_effects.ptr, void*); }
+    if (i == 11) { return cast(c->retained.contents.ptr, void*); }
+    if (i == 12) { return cast(c->retained.sources.ptr, void*); }
+    if (i == 13) { return cast(c->retained.allocations.ptr, void*); }
+    if (i == 14) { return cast(c->retained.regions.ptr, void*); }
+    if (i == 15) { return cast(c->retained.nodes.ptr, void*); }
+    if (i == 16) { return cast(c->retained.edges.ptr, void*); }
+    if (i == 17) { return cast(c->retained.shapes.ptr, void*); }
+    if (i == 18) { return cast(c->retained.predicates.ptr, void*); }
+    if (i == 19) { return cast(c->retained.guards.ptr, void*); }
+    if (i == 20) { return cast(c->retained.correlations.ptr, void*); }
+    if (i == 21) { return cast(c->retained.losses.ptr, void*); }
+    if (i == 22) { return cast(c->retained.blocks, void*); }
+    if (i == 23) { return cast(c->symbolic_bindings.ptr, void*); }
+    if (i == 24) { return cast(c->callback_inputs.ptr, void*); }
+    if (i == 25) { return cast(c->summary_inputs.ptr, void*); }
+    if (i == 26) { return cast(c->path_inputs.ptr, void*); }
+    if (i == 27) { return cast(c->terminal_inputs.ptr, void*); }
+    panic("global contract header index");
+}
+
+fn length(ownership_globals.context* c, u64 i) u64 {
+    if (i == 0) { return c->globals.len; }
+    if (i == 1) { return c->cleanup.len; }
+    if (i == 2) { return c->borrowed.len; }
+    if (i == 3) { return c->descendants.len; }
+    if (i == 4) { return c->symbolic.len; }
+    if (i == 5) { return c->callbacks.len; }
+    if (i == 6) { return c->ordered.len; }
+    if (i == 7) { return c->paths.len; }
+    if (i == 8) { return c->startup.len; }
+    if (i == 9) { return c->terminals.len; }
+    if (i == 10) { return c->terminal_effects.len; }
+    if (i == 11) { return c->retained.contents_len; }
+    if (i == 12) { return c->retained.sources_len; }
+    if (i == 13) { return c->retained.allocations_len; }
+    if (i == 14) { return c->retained.regions_len; }
+    if (i == 15) { return c->retained.nodes_len; }
+    if (i == 16) { return c->retained.edges_len; }
+    if (i == 17) { return c->retained.shapes_len; }
+    if (i == 18) { return c->retained.predicates_len; }
+    if (i == 19) { return c->retained.guards_len; }
+    if (i == 20) { return c->retained.correlations_len; }
+    if (i == 21) { return c->retained.losses_len; }
+    if (i == 22) { return c->retained.blocks == null ? 0 : 1; }
+    if (i == 23) { return c->symbolic_bindings.len; }
+    if (i == 24) { return c->callback_inputs.len; }
+    if (i == 25) { return c->summary_inputs.len; }
+    if (i == 26) { return c->path_inputs.len; }
+    if (i == 27) { return c->terminal_inputs.len; }
+    panic("global contract length index");
+}
+
+fn capture(ownership_globals_env.env* e) saved {
+    saved mut out = saved{};
+    out.input = ownership_state.clone(&e->input);
+    out.prior = ownership_state.clone(&e->global.retained);
+    u64 mut i = 0;
+    while (i < out.headers.len) {
+        out.headers[i] = header(&e->global, i);
+        out.lengths[i] = length(&e->global, i);
+        i += 1;
+    }
+    return out;
+}
+
+fn unchanged(ownership_globals_env.env* e, saved* snapshot) void {
+    assert(ownership_state.equal(&e->input, &snapshot->input));
+    assert(ownership_state.equal(&e->global.retained, &snapshot->prior));
+    u64 mut i = 0;
+    while (i < snapshot->headers.len) {
+        assert(header(&e->global, i) == snapshot->headers[i]);
+        assert(length(&e->global, i) == snapshot->lengths[i]);
+        i += 1;
+    }
+    if (e->global.globals.len > 0) {
+        assert(ownership_state.same_contents(e->global.globals[0].initial,
+            snapshot->prior.contents[0]));
+        assert(ownership_state.same_place(e->descriptors[0].place,
+            snapshot->input.contents[0].place));
+        assert(ownership_state.same_contents(e->descriptors[0].initial,
+            snapshot->input.contents[0]));
+    }
+}
+
+fn free(saved mut* snapshot) void {
+    ownership_state.free(&snapshot->input);
+    ownership_state.free(&snapshot->prior);
+}
+
+fn warm(ownership_globals_env.env mut* e) ownership_api.global_result {
+    ownership_globals_env.open(e, ownership_limits.PRODUCTION_W);
+    ownership_globals_env.seed(e);
+    ownership_api.global_request req = ownership_globals_env.request(e);
+    ownership_api.global_result out = ownership_globals.solve(&e->global, &e->service, &req);
+    assert(ownership_api.successful(out.proof) && e->events.len == 0);
+    return out;
+}
+
+fn reuse(ownership_globals_env.env* e, ownership_api.global_result prior)
+    ownership_api.global_request {
+    ownership_api.global_request mut req = ownership_globals_env.request(e);
+    req.before = ownership_state.view(&e->global.retained);
+    req.entry.globals = prior.persistent;
+    req.entry.cleanup = prior.cleanup;
+    return req;
+}
+
+fn projected(ownership_globals_env.env mut* e, u32 id, ownership_api.source_kind kind) void {
+    ownership_globals_env.case_open(e, id);
+    e->projections = new(ownership_api.projection, 2);
+    e->projections[0] = ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 7};
+    e->projections[1] = ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 9};
+    ownership_api.place_path mut leaf = ownership_globals_env.case_place(e, 2);
+    leaf.projections = e->projections[..];
+    e->descriptors[0].place = leaf;
+    ownership_globals_env.add_borrow(e, leaf, 40, kind, 1);
+    ownership_api.contents_fact mut value = e->input.contents[0];
+    ownership_api.borrow_relation[1] mut relation = {value.borrows[0]};
+    ownership_api.layout_leaf[1] leaves = {ownership_api.layout_leaf{
+        .owning = true}};
+    ownership_api.region_partition[1] partitions = {ownership_api.region_partition{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.region, 72)}};
+    relation[0].range = ownership_api.region{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.region, 70),
+        .alignment = 8, .leaves = leaves[..], .partitions = partitions[..]};
+    value.borrows = relation[..];
+    e->input.contents[0] = ownership_state.copy_contents(&e->input, value);
+    e->descriptors[0].initial = e->input.contents[0];
+}
+
+fn copied(ownership_globals.context* c) void {
+    assert(c->globals.len == 1 && c->borrowed.len == 1);
+    ownership_api.borrow_relation relation = c->borrowed[0];
+    assert(relation.containing.projections.len == 2);
+    assert(relation.containing.projections[0].field == 7);
+    assert(relation.containing.projections[1].field == 9);
+    assert(relation.range.leaves.len == 1 && relation.range.partitions.len == 1);
+    assert(relation.range.leaves[0].owning);
+    assert(relation.range.partitions[0].key.ordinal == 72);
+    assert(relation.source.ordinal == 40 && c->retained.allocations_len == 0);
+}

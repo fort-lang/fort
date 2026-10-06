@@ -1,0 +1,306 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| globals review ok
+/// Checks supplied global consumer boundary rules.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_env;
+import ownership_globals_review_env;
+import ownership_state;
+fn startup_kind(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_env.case_open(&e, 280 + mode);
+    ownership_api.place_path global = ownership_globals_env.case_place(&e, 2);
+    ownership_api.place_path local = ownership_globals_env.case_place(&e, 1);
+    if (mode == 1 || mode == 2 || mode >= 7) {
+        ownership_globals_env.close(&e);
+        ownership_globals_env.generated_setup(&e, 280 + mode, mode != 2, false);
+        if (mode >= 7) {
+            u64 index = mode == 9 ? 1 : 0;
+            e.ordered[index].kind = ownership_api.effect_kind.invalidate;
+            if (mode == 9) { e.startup_len = 2; }
+            if (mode == 8) { e.ordered[0].key = ownership_api.entity_id{}; }
+        }
+    } else {
+        if (mode == 4 || mode == 6) { ownership_globals_env.add_empty(&e, global); }
+        else { ownership_globals_env.add_owner(&e, global, 10, 4); }
+        if (mode == 3) {
+            ownership_globals_env.add_effect(&e, ownership_api.effect_kind.release, global,
+                global, 10);
+        } else if (mode == 4) {
+            ownership_globals_env.add_borrow(&e, local, 40,
+                ownership_api.source_kind.static_storage, 1);
+            ownership_globals_env.borrow_effect(&e, local, global, 40);
+        } else if (mode == 5) {
+            ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read, global,
+                global, 10);
+        } else {
+            ownership_globals_env.add_borrow(&e, local, 40, ownership_api.source_kind.stack, 1);
+            ownership_globals_env.source_end(&e, 40);
+        }
+        e.startup_len = e.effects_len;
+        ownership_globals_env.select_entry(&e, mode != 4, false);
+    }
+    ownership_api.global_request mut req = ownership_globals_review_env.abort_request(&e);
+    if (mode == 10) {
+        req.outcome.guard = ownership_globals_env.case_key(&e, ownership_api.entity_kind.guard, 90);
+        e.terminal_inputs[0].outcome = req.outcome;
+    }
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    ownership_globals_review_env.result(&e, out, mode < 7,
+        ownership_api.event_kind.incomplete_proof, mode < 7 ? ownership_api.incomplete_reason.none :
+            (mode == 8 ? ownership_api.incomplete_reason.invalid_input :
+                ownership_api.incomplete_reason.unknown_effect));
+    ownership_globals_env.close(&e);
+}
+
+fn summary_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_env.generated_setup(&e, 300 + mode, mode != 3, mode != 12);
+    ownership_api.place_path global = ownership_globals_env.case_place(&e, 2);
+    if (mode == 4) {
+        ownership_api.place_path target = ownership_globals_review_env.path(&e, 2, false);
+        e.input.contents[1].place = target;
+        e.descriptors[0].place = target;
+        e.descriptors[0].initial = e.input.contents[1];
+        e.entry_bindings[0].place = target;
+        e.ordered[0].place = target;
+        e.ordered[1].place = target;
+        e.ordered[2].place = target;
+        e.transitions[1].from = target;
+        e.transitions[2].from = target;
+        e.cleanup[0] = e.ordered[1];
+    }
+    if (mode == 5) {
+        ownership_api.place_path view = ownership_globals_env.case_place(&e, 3);
+        ownership_globals_review_env.copy_borrow(&e, 0, view);
+        ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read, view, view, 10);
+        ownership_api.ordered_effect read = e.ordered[3];
+        ownership_globals.effect_binding binding = e.transitions[3];
+        e.ordered[3] = e.ordered[2];
+        e.transitions[3] = e.transitions[2];
+        e.ordered[2] = e.ordered[1];
+        e.transitions[2] = e.transitions[1];
+        e.ordered[1] = read;
+        e.transitions[1] = binding;
+    }
+    if (mode == 6) {
+        ownership_api.place_path other = ownership_globals_env.case_place(&e, 4);
+        ownership_globals_review_env.add_global(&e, other, 490);
+        ownership_globals_env.add_borrow(&e, other, 40,
+            ownership_api.source_kind.static_storage, 1);
+        del(e.entry_bindings);
+        ownership_globals_env.select_entry(&e, true, false);
+        e.entry_bindings[1].owning = false;
+    }
+    if (mode == 7) {
+        ownership_state.append_nodes(&e.input, ownership_api.graph_node{
+            .key = ownership_globals_env.case_key(&e, ownership_api.entity_kind.graph_node, 10),
+            .allocation = e.input.allocations[0].key});
+    }
+    if (mode == 12) {
+        ownership_api.global_request req = ownership_globals_review_env.abort_request(&e);
+        ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+        ownership_globals_review_env.result(&e, out, true, ownership_api.event_kind.invalid_use,
+            ownership_api.incomplete_reason.none);
+        assert(e.global.retained.allocations[0].obligation);
+        ownership_globals_env.close(&e);
+        return;
+    }
+    u64 alternatives = mode == 1 ? 1 : 2;
+    ownership_globals_env.select_calls(&e, 2, alternatives);
+    u64 mut i = 0;
+    while (i < alternatives) {
+        e.paths[i].effects_begin = i * e.effects_len + e.startup_len;
+        e.paths[i].effects_len = e.effects_len - e.startup_len;
+        i += 1;
+    }
+    if (mode == 10) { e.summaries[e.effects_len + 1].binding.source.line += 1; }
+    ownership_api.global_request mut req = ownership_globals_env.generated_request(&e);
+    if (mode == 11) { req.entry.startup = e.ordered[0..0]; }
+    if (mode == 13 || mode == 14) { ownership_globals_review_env.budget(&e,
+        mode == 13 ? 300 : 340); }
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    bool missing = mode == 10 || mode == 11;
+    ownership_globals_review_env.result(&e, out, !missing && mode < 13,
+        mode >= 13 ? ownership_api.event_kind.work_failure :
+            ownership_api.event_kind.incomplete_proof,
+        mode >= 13 ? ownership_api.incomplete_reason.work_limit : (mode == 10 ?
+            ownership_api.incomplete_reason.missing_path : (mode == 11 ?
+                ownership_api.incomplete_reason.missing_correspondence :
+                    ownership_api.incomplete_reason.none)));
+    if (mode == 8 && ownership_api.successful(out.proof)) {
+        assert(e.global.paths[0].state.contents.ptr != e.global.paths[1].state.contents.ptr);
+        assert(e.global.paths[0].state.allocations[0].history.ptr !=
+            e.global.paths[1].state.allocations[0].history.ptr);
+    }
+    if (mode == 9) {
+        ownership_state.state mut* left = &e.global.paths[0].state;
+        ownership_state.state mut* right = &e.global.paths[1].state;
+        assert(left->contents_len == 2 && right->contents_len == 2);
+        ownership_api.contents_fact first = right->contents[0];
+        right->contents[0] = right->contents[1];
+        right->contents[1] = first;
+        assert(left->contents[0].place.root.ordinal != right->contents[0].place.root.ordinal);
+        ownership_globals.work mut cursor = ownership_globals_review_env.cursor(&e, &req);
+        assert(ownership_globals.comparison_charge(&cursor, left));
+        assert(ownership_state.equal(left, right));
+        assert(left->contents.ptr != right->contents.ptr);
+        assert(!left->allocations[0].obligation && !right->allocations[0].obligation);
+    }
+    if (mode == 6 && ownership_api.successful(out.proof)) { assert(e.global.borrowed.len == 1); }
+    ownership_globals_env.close(&e);
+}
+
+fn node(ownership_globals_env.env mut* e, u32 allocation) void {
+    ownership_state.append_nodes(&e->input, ownership_api.graph_node{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, allocation),
+        .allocation = ownership_globals_env.case_key(e, ownership_api.entity_kind.allocation,
+            allocation)});
+}
+
+fn edge(ownership_globals_env.env mut* e, u32 parent, u32 child,
+    ownership_api.place_path place) void {
+    ownership_state.append_edges(&e->input, ownership_api.graph_edge{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.relation, child),
+        .from = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, parent),
+        .to = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, child),
+        .kind = ownership_api.edge_kind.owned, .place = place});
+}
+
+fn release(ownership_globals_env.env mut* e, u32 slot, u32 allocation) void {
+    ownership_api.place_path place = ownership_globals_env.case_place(e, slot);
+    ownership_globals_env.add_effect(e, ownership_api.effect_kind.release, place, place,
+        allocation);
+}
+
+fn scratch_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_env.case_open(&e, 330 + mode);
+    ownership_api.place_path global = ownership_globals_env.case_place(&e, 2);
+    if (mode == 5) { ownership_globals_env.add_empty(&e, global); }
+    else { ownership_globals_env.add_owner(&e, global, 10, mode == 6 ? 0 : 4); node(&e, 10); }
+    if (mode == 2 || mode == 3 || mode == 4 || mode == 7 || mode == 8) {
+        ownership_globals_env.add_owner(&e, ownership_globals_env.case_place(&e, 3), 20, 4);
+        node(&e, 20); edge(&e, 10, 20, ownership_globals_env.case_place(&e, 3));
+        if (mode == 3 || mode == 4) {
+            ownership_globals_env.add_owner(&e, ownership_globals_env.case_place(&e, 4), 30, 4);
+            node(&e, 30); edge(&e, mode == 3 ? 20 : 10, 30,
+                ownership_globals_env.case_place(&e, 4));
+            if (mode == 4) {
+                ownership_globals_env.add_owner(&e, ownership_globals_env.case_place(&e, 5), 40, 4);
+                node(&e, 40); edge(&e, 10, 40, ownership_globals_env.case_place(&e, 5));
+                release(&e, 5, 40);
+            }
+            release(&e, 4, 30);
+        }
+        if (mode == 7) {
+            ownership_globals_review_env.add_global(&e, ownership_globals_env.case_place(&e,
+                4), 499);
+            ownership_globals_env.add_empty(&e, ownership_globals_env.case_place(&e, 4));
+            ownership_globals_env.add_effect(&e, ownership_api.effect_kind.transfer,
+                ownership_globals_env.case_place(&e, 3), ownership_globals_env.case_place(&e,
+                    4), 20);
+        } else if (mode != 8) { release(&e, 3, 20); }
+    }
+    release(&e, 2, mode == 5 ? 0 : 10);
+    e.startup_len = e.effects_len;
+    ownership_globals_env.select_entry(&e, true, false);
+    if (mode == 10) { e.input.nodes[0].residual = true; }
+    ownership_api.global_request req = ownership_globals_review_env.abort_request(&e);
+    e.global.graph_complete_proved = mode != 9;
+    if (mode == 11) { ownership_globals_review_env.budget(&e, 98); }
+    if (mode == 12) {
+        ownership_api.global_result prior = ownership_globals_review_env.solve(&e, &req);
+        assert(ownership_api.successful(prior.proof));
+        u64 total = e.events.budget.used.w;
+        ownership_globals_review_env.budget(&e, total - 1);
+    }
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    ownership_globals_review_env.result(&e, out, mode < 8,
+        mode >= 11 ? ownership_api.event_kind.work_failure : (mode == 8 ?
+            ownership_api.event_kind.lost_ownership : ownership_api.event_kind.incomplete_proof),
+        mode >= 11 ? ownership_api.incomplete_reason.work_limit : (mode == 9 || mode == 10 ?
+            ownership_api.incomplete_reason.missing_graph : ownership_api.incomplete_reason.none));
+    ownership_globals_env.close(&e);
+}
+
+fn case_r03_01() void { startup_kind(1); }
+fn case_r03_02() void { startup_kind(2); }
+fn case_r03_03() void { startup_kind(3); }
+fn case_r03_04() void { startup_kind(4); }
+fn case_r03_05() void { startup_kind(5); }
+fn case_r03_06() void { startup_kind(6); }
+fn case_r03_07() void { startup_kind(7); }
+fn case_r03_08() void { startup_kind(8); }
+fn case_r03_09() void { startup_kind(9); }
+fn case_r03_10() void { startup_kind(10); }
+fn case_r05_01() void { summary_case(1); }
+fn case_r05_02() void { summary_case(2); }
+fn case_r05_03() void { summary_case(3); }
+fn case_r05_04() void { summary_case(4); }
+fn case_r05_05() void { summary_case(5); }
+fn case_r05_06() void { summary_case(6); }
+fn case_r05_07() void { summary_case(7); }
+fn case_r05_08() void { summary_case(8); }
+fn case_r05_09() void { summary_case(9); }
+fn case_r05_10() void { summary_case(10); }
+fn case_r05_11() void { summary_case(11); }
+fn case_r05_12() void { summary_case(12); }
+fn case_r05_13() void { summary_case(13); }
+fn case_r05_14() void { summary_case(14); }
+fn case_r06_01() void { scratch_case(1); }
+fn case_r06_02() void { scratch_case(2); }
+fn case_r06_03() void { scratch_case(3); }
+fn case_r06_04() void { scratch_case(4); }
+fn case_r06_05() void { scratch_case(5); }
+fn case_r06_06() void { scratch_case(6); }
+fn case_r06_07() void { scratch_case(7); }
+fn case_r06_08() void { scratch_case(8); }
+fn case_r06_09() void { scratch_case(9); }
+fn case_r06_10() void { scratch_case(10); }
+fn case_r06_11() void { scratch_case(11); }
+fn case_r06_12() void { scratch_case(12); }
+
+fn main() i32 {
+    case_r03_01();
+    case_r03_02();
+    case_r03_03();
+    case_r03_04();
+    case_r03_05();
+    case_r03_06();
+    case_r03_07();
+    case_r03_08();
+    case_r03_09();
+    case_r03_10();
+    case_r05_01();
+    case_r05_02();
+    case_r05_03();
+    case_r05_04();
+    case_r05_05();
+    case_r05_06();
+    case_r05_07();
+    case_r05_08();
+    case_r05_09();
+    case_r05_10();
+    case_r05_11();
+    case_r05_12();
+    case_r05_13();
+    case_r05_14();
+    case_r06_01();
+    case_r06_02();
+    case_r06_03();
+    case_r06_04();
+    case_r06_05();
+    case_r06_06();
+    case_r06_07();
+    case_r06_08();
+    case_r06_09();
+    case_r06_10();
+    case_r06_11();
+    case_r06_12();
+    println("globals review ok");
+    return 0;
+}

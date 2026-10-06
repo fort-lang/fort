@@ -691,6 +691,71 @@ came here.
   The producer still proves storage, reference-leaf, and source-closure correspondence.
   The module adds no driver selection, lifetime syntax, LLVM instruction, ABI field, or runtime
   field.
+- **Global entry proof uses supplied canonical bindings** (D17.19).
+  `ownership_globals.solve` keeps global obligations across ordinary library and callback returns.
+  Selected entries require complete global leaves and exact valid caller-source maps.
+  Foreign own inputs carry symbolic allocations.
+  Their transfers preserve allocation and source keys.
+  Local owner storage ends separately from the allocation that its value owns.
+  Borrowed caller inputs keep caller-source requirements. Callback-local source ends reject escapes.
+  Explicit callable cleanup empties owning globals.
+  Supplied host and normal-process boundaries check final emptiness.
+  The proof requires supplied cleanup order before those boundaries.
+  Normal exit also requires complete closure and heap correspondence and discharged caller owners.
+  A runtime name or empty global state proves no cleanup coverage.
+  Copied startup and terminal records preserve supplied classifications and cleanup order.
+  Generated boundaries require explicit sequence coverage.
+  Abort permits live owners only after earlier operations pass.
+  Trusted unresolved foreign termination proves no final boundary.
+  Wrapper caller requirements identify the call, callee exit, and substituted live owner.
+  Copied call summaries preserve effect order and exact source keys.
+  Ordinary selected reads check source validity before a function return.
+  Retained global borrows require live sources at that return.
+  Current heap reference edges retain field storage through owned and borrowed paths.
+  Borrowed reachability creates no owner obligation. Empty current fields stop reachability.
+  Missing or residual reachable storage facts give incomplete proof.
+  Source ends and ordinary returns check current retained heap storage.
+  Call entry does not read fields that the body can replace.
+  Ordered reads still reject released sources before a later field replacement.
+  Scalar global reads require exact checked type, canonical layout, contents, and effect facts.
+  A contents tag or nonowning binding alone proves no scalar read.
+  Startup accepts only read, write, transfer, release, and storage-end effects with event keys.
+  An owner move empties its old owned graph edge in place (`spec/memory-model.md` 2.7).
+  The emptied edge keeps its key, parent, place, range, and old target.
+  Empty contents make it a potential edge, so a later access still finds the parent.
+  A move into a potential edge retargets it only after current contents and allocation facts
+  prove the new target. Neither the move out nor the move back adds a graph edge.
+  A supplied state without the emptied edge makes the field a plain place.
+  An owner moved back there has no graph ancestor, so an entry return refuses it.
+  Field reads, writes, transfers, and releases check containing storage before any shortcut.
+  The check reads source storage first, then distinct destination storage.
+  A proved released parent gives invalid use only for an unconditional effect.
+  A conditional effect gives incomplete proof with abstract possibility evidence.
+  Owned graph ancestors can keep descendant allocations at a persistent global owner.
+  Both ancestry and shallow-release walks require current contents and canonical owner
+  correspondence.
+  Empty current fields stop potential owned edges. A potential edge alone proves no current owner.
+  Moves check empty destination correspondence before changing the allocation owner.
+  A potential destination target can retain an unrelated ownership obligation.
+  Supplied graph coverage and canonical global roots precede an empty-edge traversal result.
+  A proved persistent global owner permits an unrelated local source end.
+  That source end still checks current retained heap borrows and rejects an escaped stack source.
+  Residual or missing ancestry proves no persistence.
+  Separate alternative states start after startup and retain their own fact storage.
+  Startup-only releases reserve node traversal storage before an effect runs.
+  State equality reserves the complete all-pairs and nested-loop work bound before comparison.
+  The cost calculation also consumes counted work. An unrepresentable price gives work refusal.
+  Different alternative states need a proved path join before one persistent result represents them.
+  Staged symbolic bindings and callback records survive input release.
+  They support prior-result reuse.
+  Failed copies, charges, and effects preserve input and the prior result.
+  Null consumer context, services, or request pointers give incomplete proof.
+  A null request has zero operation and source keys. It records no event.
+  Missing callbacks or event bindings establish no boundary and preserve retained storage.
+  The API wrappers still require valid services and request pointers.
+  Legacy unselected copies establish no entry or final boundary.
+  This consumer proves no actual source producer, external host call order, or generated cleanup.
+  It changes no program ABI, runtime field, or driver selection.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by

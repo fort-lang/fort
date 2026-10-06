@@ -1,0 +1,114 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| globals scalar reads ok
+/// Checks concrete scalar layout and ordered read correspondence.
+import ownership_api;
+import ownership_globals_env;
+import ownership_globals_review_env;
+import ownership_state;
+import prim;
+import types;
+
+fn scalar_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_env.case_open(&e, 700 + mode);
+    types.table mut tt = types.table{};
+    types.node* mut ty = types.type_prim(&tt, prim.prim_kind.prim_i64);
+    if (mode == 2) { ty = types.type_prim(&tt, prim.prim_kind.prim_bool); }
+    if (mode == 3) { ty = types.type_enum(&tt, "sample", null); }
+    if (mode == 4) { ty = types.type_prim(&tt, prim.prim_kind.prim_f64); }
+    if (mode == 7) { ty = types.type_ptr(&tt, ty, false, false); }
+    ownership_api.place_path mut place = ownership_globals_env.case_place(&e, 2);
+    if (mode == 5) {
+        place = ownership_globals_review_env.path(&e, 2, false);
+        e.descriptors[0].place = place;
+    }
+    if (mode == 14 || mode == 16) {
+        ownership_globals_env.add_borrow(&e, place, 40, ownership_api.source_kind.heap, 1);
+        if (mode == 14) { e.input.sources[0].validity = ownership_api.validity_kind.released; }
+    } else {
+        ownership_state.append_contents(&e.input, ownership_api.contents_fact{
+            .place = place, .kind = ownership_api.contents_kind.scalar});
+        ownership_globals_env.set_initial(&e, place);
+    }
+    ownership_globals_env.select_entry(&e, false, false);
+    ownership_api.scalar_fact begin = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 0};
+    ownership_api.scalar_fact end = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = cast(types.type_sizeof(ty), i64)};
+    e.entry_bindings[0].checked_layout = ownership_api.layout_leaf{
+        .bytes = ownership_api.byte_window{begin, end, true}, .ty = ty};
+    e.entry_bindings[0].layout_proved = mode != 11;
+    if (mode == 8) { e.entry_bindings[0].checked_layout.bytes.end.value += 1; }
+    if (mode == 9) { e.entry_bindings[0].checked_layout.padding = true; }
+    if (mode == 10) { e.entry_bindings[0].checked_layout.owning = true; }
+    ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read, place, place, 0);
+    e.transitions[0].checked_read_type = mode == 15 ? null : ty;
+    if (mode == 6) {
+        e.transitions[0].checked_read_type = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    }
+    if (mode == 12 || mode == 14 || mode == 16) {
+        e.ordered[0].source = ownership_globals_env.case_key(&e,
+            ownership_api.entity_kind.source, 40);
+    }
+    if (mode == 13) {
+        e.ordered[0].allocation = ownership_globals_env.case_key(&e,
+            ownership_api.entity_kind.allocation, 20);
+    }
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    bool invalid = mode == 14;
+    bool accepted = mode <= 5 || mode == 16;
+    ownership_globals_review_env.result(&e, out, accepted, invalid ?
+        ownership_api.event_kind.invalid_use : ownership_api.event_kind.incomplete_proof,
+        invalid || accepted ? ownership_api.incomplete_reason.none :
+            ownership_api.incomplete_reason.missing_correspondence);
+    if (accepted) {
+        assert(e.global.retained.allocations_len == 0 && e.global.retained.sources_len ==
+            (mode == 16 ? 1 : 0));
+        assert(e.global.retained.contents[0].kind == (mode == 16 ?
+            ownership_api.contents_kind.reference : ownership_api.contents_kind.scalar));
+        assert(ownership_state.same_place(e.global.retained.contents[0].place, place));
+    }
+    ownership_globals_env.close(&e);
+    types.type_table_free(&tt);
+}
+
+fn case_s01() void { scalar_case(1); }
+fn case_s02() void { scalar_case(2); }
+fn case_s03() void { scalar_case(3); }
+fn case_s04() void { scalar_case(4); }
+fn case_s05() void { scalar_case(5); }
+fn case_s06() void { scalar_case(6); }
+fn case_s07() void { scalar_case(7); }
+fn case_s08() void { scalar_case(8); }
+fn case_s09() void { scalar_case(9); }
+fn case_s10() void { scalar_case(10); }
+fn case_s11() void { scalar_case(11); }
+fn case_s12() void { scalar_case(12); }
+fn case_s13() void { scalar_case(13); }
+fn case_s14() void { scalar_case(14); }
+fn case_s15() void { scalar_case(15); }
+fn case_s16() void { scalar_case(16); }
+
+fn main() i32 {
+    case_s01();
+    case_s02();
+    case_s03();
+    case_s04();
+    case_s05();
+    case_s06();
+    case_s07();
+    case_s08();
+    case_s09();
+    case_s10();
+    case_s11();
+    case_s12();
+    case_s13();
+    case_s14();
+    case_s15();
+    case_s16();
+    println("globals scalar reads ok");
+    return 0;
+}

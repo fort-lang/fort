@@ -1,0 +1,504 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| globals borrow updates ok
+/// Checks exact current field targets and containing allocation validity.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_contract_env;
+import ownership_globals_env;
+import ownership_globals_review_env;
+import ownership_keys;
+import ownership_limits;
+import ownership_state;
+
+fn node(ownership_globals_env.env mut* e, u32 id) void {
+    ownership_state.append_nodes(&e->input, ownership_api.graph_node{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, id),
+        .allocation = ownership_globals_env.case_key(e, ownership_api.entity_kind.allocation, id)});
+}
+
+fn edge(ownership_globals_env.env mut* e, ownership_api.place_path field,
+    ownership_api.edge_kind kind, u32 target) void {
+    ownership_state.append_edges(&e->input, ownership_api.graph_edge{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.relation, 500),
+        .from = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, 10),
+        .to = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, target),
+        .kind = kind, .place = field});
+    e->global.graph_complete_proved = true;
+}
+
+fn setup(ownership_globals_env.env mut* e, u32 mode) void {
+    ownership_globals_env.case_open(e, 900 + mode);
+    ownership_api.place_path parent = ownership_globals_env.case_place(e, 2);
+    ownership_api.place_path field = ownership_globals_env.case_place(e, 3);
+    ownership_api.place_path b = ownership_globals_env.case_place(e, 4);
+    ownership_globals_env.add_owner(e, parent, 10, 4);
+    ownership_globals_review_env.add_global(e, b, 940 + mode);
+    node(e, 10);
+    node(e, 20);
+    ownership_api.place_path c = ownership_globals_env.case_place(e, 5);
+    ownership_api.place_path supplied = ownership_globals_env.case_place(e, 6);
+    ownership_globals_env.add_owner(e, b, 20, 4);
+    ownership_globals_review_env.add_global(e, c, 960 + mode);
+    ownership_globals_env.add_owner(e, c, 30, 4);
+    ownership_globals_review_env.copy_borrow(e, mode == 3 ? 2 : 1, field);
+    ownership_globals_review_env.copy_borrow(e, mode == 2 ? 1 : 2, supplied);
+    node(e, 30);
+    edge(e, field, ownership_api.edge_kind.borrowed, mode == 3 ? 30 : 20);
+    ownership_globals_env.borrow_effect(e, supplied, field, mode == 2 ? 120 : 130);
+    if (mode == 4) {
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.release, c, c, 30);
+    }
+    ownership_globals_env.select_entry(e, true, false);
+    ownership_globals_review_env.return_event(e);
+}
+
+fn reset_effects(ownership_globals_env.env mut* e) void {
+    e->effects_len = 0;
+    e->global.events = e->bindings[0..2];
+    e->global.effects = e->transitions[0..0];
+}
+
+fn geometry(ownership_globals_env.env mut* e, u32 mode) void {
+    u64 count = mode == 12 || mode == 15 ? 2 : 1;
+    e->projections = new(ownership_api.projection, count);
+    e->projections[0] = ownership_api.projection{
+        .kind = mode == 11 ? ownership_api.projection_kind.fixed_index :
+            ownership_api.projection_kind.field, .field = 7,
+        .index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 2}};
+    if (count == 2) {
+        e->projections[1] = ownership_api.projection{
+            .kind = ownership_api.projection_kind.field, .field = 8};
+    }
+    ownership_api.place_path mut field = ownership_globals_env.case_place(e, 3);
+    field.projections = e->projections[..];
+    ownership_api.contents_fact mut value = e->input.contents[3];
+    ownership_api.borrow_relation[1] mut relations = {value.borrows[0]};
+    relations[0].containing = field;
+    value.place = field;
+    value.borrows = relations[..];
+    e->input.contents[3] = ownership_state.copy_contents(&e->input, value);
+    ownership_api.layout_leaf[2] leaves = {ownership_api.layout_leaf{
+        .bytes = ownership_api.byte_window{.arithmetic_proved = true}}, ownership_api.layout_leaf{
+        .bytes = ownership_api.byte_window{.arithmetic_proved = true}}};
+    ownership_api.region_partition[2] partitions = {ownership_api.region_partition{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.region, 72)},
+        ownership_api.region_partition{
+            .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.region, 73)}};
+    ownership_api.graph_edge mut edge = e->input.edges[0];
+    edge.place = field;
+    edge.range = ownership_api.region{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.region, 70),
+        .offset = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 16},
+        .extent = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 8},
+        .alignment = 8, .leaves = leaves[..], .partitions = partitions[..]};
+    e->input.edges[0] = ownership_state.copy_edge(&e->input, edge);
+    e->ordered[0].place = field;
+}
+
+fn prepare(ownership_globals_env.env mut* e, u32 mode) void {
+    setup(e, mode == 2 || mode == 3 || mode == 4 ? mode : 1);
+    if (mode == 5) { ownership_state.append_edges(&e->input, e->input.edges[0]); }
+    if (mode == 6) { e->input.edges[0].kind = ownership_api.edge_kind.residual; }
+    if (mode == 7) { e->global.graph_complete_proved = false; }
+    if (mode == 8 || mode == 9) {
+        reset_effects(e);
+        ownership_api.place_path owner = ownership_globals_env.case_place(e, mode == 8 ? 2 : 4);
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.release, owner, owner,
+            mode == 8 ? 10 : 20);
+        ownership_globals_env.borrow_effect(e, ownership_globals_env.case_place(e, 6),
+            ownership_globals_env.case_place(e, 3), 130);
+        ownership_globals_review_env.return_event(e);
+    }
+    if ((mode >= 10 && mode <= 12) || mode == 15) { geometry(e, mode); }
+    if (mode == 13 || mode == 14) {
+        reset_effects(e);
+        ownership_globals_review_env.copy_borrow(e, 1, ownership_globals_env.case_place(e, 7));
+        if (mode == 14) {
+            ownership_globals_env.borrow_effect(e, ownership_globals_env.case_place(e, 6),
+                ownership_globals_env.case_place(e, 3), 130);
+        } else {
+            e->input.edges[0].to = ownership_globals_env.case_key(e,
+                ownership_api.entity_kind.graph_node, 30);
+            e->input.contents[3] = ownership_state.copy_contents(&e->input, e->input.contents[4]);
+            e->input.contents[3].place = ownership_globals_env.case_place(e, 3);
+            ownership_api.borrow_relation[1] mut relations = {e->input.contents[3].borrows[0]};
+            relations[0].containing = e->input.contents[3].place;
+            ownership_api.contents_fact mut value = e->input.contents[3];
+            value.borrows = relations[..];
+            e->input.contents[3] = ownership_state.copy_contents(&e->input, value);
+        }
+        ownership_globals_env.borrow_effect(e, ownership_globals_env.case_place(e, 7),
+            ownership_globals_env.case_place(e, 3), 120);
+        ownership_globals_review_env.return_event(e);
+    }
+}
+
+fn expected(ownership_globals_env.env* e, ownership_api.global_request* req,
+    ownership_api.global_result out, u32 mode) void {
+    bool invalid = mode == 4 || mode == 8;
+    bool missing = mode >= 5 && mode <= 7;
+    ownership_globals_review_env.result(e, out, !invalid && !missing, invalid ?
+        ownership_api.event_kind.invalid_use : ownership_api.event_kind.incomplete_proof,
+        missing ? ownership_api.incomplete_reason.missing_graph :
+            ownership_api.incomplete_reason.none);
+    if (invalid || missing) {
+        ownership_api.event_descriptor* event = ownership_events.at(&e->events, 0);
+        ownership_api.operation_position operation = mode == 4 ? req->operation :
+            e->ordered[mode == 8 ? 1 : 0].operation;
+        ownership_api.source_position source = mode == 4 ? req->source :
+            e->transitions[mode == 8 ? 1 : 0].source;
+        assert(ownership_keys.operation(event->operation, operation) == 0);
+        assert(ownership_keys.source(event->source, source) == 0);
+        assert(event->owner_path.root.ordinal == 3);
+        assert(event->kind == (invalid ? ownership_api.event_kind.invalid_use :
+            ownership_api.event_kind.incomplete_proof));
+        assert(event->reason == (missing ? ownership_api.incomplete_reason.missing_graph :
+            ownership_api.incomplete_reason.none));
+        if (invalid) {
+            assert(event->relation.ordinal == (mode == 8 ? 10 : 130));
+            assert(event->evidence == ownership_api.evidence_kind.unconditional);
+            assert(event->text == (mode == 8 ?
+                "heap field access needs a live containing allocation" :
+                "retained global borrow has an invalid source at ordinary return"));
+            assert(event->source.line == (mode == 8 ? 9013 : 21));
+        } else {
+            assert(event->text == "global effect needs a proved identity and destination");
+        }
+        return;
+    }
+    assert(e->global.retained.edges_len == 1);
+    ownership_api.graph_edge edge = e->global.retained.edges[0];
+    ownership_api.graph_edge initial = e->input.edges[0];
+    assert(ownership_keys.entity(edge.key, initial.key) == 0);
+    assert(ownership_keys.entity(edge.from, initial.from) == 0);
+    assert(edge.kind == initial.kind);
+    assert(ownership_state.same_place(edge.place, initial.place));
+    assert(ownership_state.same_region(edge.range, initial.range));
+    u32 target = mode == 2 || mode == 13 || mode == 14 ? 20 : 30;
+    assert(edge.to.ordinal == target);
+    assert(e->global.retained.contents[3].borrows.len == 1);
+    assert(e->global.retained.contents[3].borrows[0].source.ordinal == target + 100);
+    assert(e->global.retained.allocations_len == 3);
+    u64 mut i = 0;
+    while (i < e->global.retained.allocations_len) {
+        assert(ownership_keys.entity(e->global.retained.allocations[i].key,
+            e->input.allocations[i].key) == 0);
+        assert(e->global.retained.allocations[i].obligation == (mode != 9 || i != 1));
+        i += 1;
+    }
+}
+
+fn borrow_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    prepare(&e, mode);
+    defer ownership_globals_env.close(&e);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    expected(&e, &req, out, mode);
+}
+
+fn copied_geometry(ownership_globals.context* c) void {
+    ownership_api.graph_edge edge = c->retained.edges[0];
+    assert(edge.place.projections.len == 2);
+    assert(edge.place.projections[0].field == 7 && edge.place.projections[1].field == 8);
+    assert(edge.range.key.ordinal == 70 && edge.range.offset.value == 16);
+    assert(edge.range.extent.value == 8 && edge.range.alignment == 8);
+    assert(edge.range.leaves.len == 2 && edge.range.partitions.len == 2);
+    assert(edge.range.partitions[0].key.ordinal == 72);
+    assert(edge.range.partitions[1].key.ordinal == 73);
+    assert(c->retained.contents[3].borrows[0].source.ordinal == 130);
+}
+
+fn case_b15() void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    prepare(&e, 15);
+    defer ownership_globals_env.close(&e);
+    ownership_api.global_request mut req = ownership_globals_env.request(&e);
+    ownership_api.global_result prior = ownership_globals_review_env.solve(&e, &req);
+    expected(&e, &req, prior, 15);
+    assert(e.global.retained.edges[0].place.projections.ptr !=
+        e.input.edges[0].place.projections.ptr);
+    assert(e.global.retained.edges[0].range.leaves.ptr != e.input.edges[0].range.leaves.ptr);
+    assert(e.global.retained.edges[0].range.partitions.ptr !=
+        e.input.edges[0].range.partitions.ptr);
+    ownership_globals_env.release_input(&e);
+    copied_geometry(&e.global);
+    req.before = ownership_state.view(&e.global.retained);
+    req.entry.globals = prior.persistent;
+    req.entry.cleanup = prior.cleanup;
+    e.ordered[0].place = e.global.retained.edges[0].place;
+    req.outcome.effects = e.ordered[0..1];
+    ownership_globals_review_env.budget(&e, ownership_limits.PRODUCTION_W);
+    ownership_api.global_result repeated = ownership_globals_review_env.solve(&e, &req);
+    assert(ownership_api.successful(repeated.proof) && e.events.len == 0);
+    u64 cost = e.events.budget.used.w;
+    assert(cost > 1 && cost < ownership_api.U64_MAX);
+    copied_geometry(&e.global);
+    req.before = ownership_state.view(&e.global.retained);
+    req.entry.globals = repeated.persistent;
+    req.entry.cleanup = repeated.cleanup;
+    e.ordered[0].place = e.global.retained.edges[0].place;
+    ownership_globals_review_env.budget(&e, cost - 1);
+    ownership_api.global_result failed = ownership_globals_review_env.solve(&e, &req);
+    ownership_globals_review_env.result(&e, failed, false,
+        ownership_api.event_kind.work_failure, ownership_api.incomplete_reason.work_limit);
+    copied_geometry(&e.global);
+}
+
+fn case_b01() void { borrow_case(1); }
+fn case_b02() void { borrow_case(2); }
+fn case_b03() void { borrow_case(3); }
+fn case_b04() void { borrow_case(4); }
+fn case_b05() void { borrow_case(5); }
+fn case_b06() void { borrow_case(6); }
+fn case_b07() void { borrow_case(7); }
+fn case_b08() void { borrow_case(8); }
+fn case_b09() void { borrow_case(9); }
+fn case_b10() void { borrow_case(10); }
+fn case_b11() void { borrow_case(11); }
+fn case_b12() void { borrow_case(12); }
+fn case_b13() void { borrow_case(13); }
+fn case_b14() void { borrow_case(14); }
+
+// Keep a published state before the refused store changes its input graph.
+fn prepare_review(ownership_globals_env.env mut* e, u32 mode,
+    ownership_api.source_kind kind) void {
+    prepare(e, mode == 16 ? 8 : 1);
+    if (mode == 17 || mode == 18) {
+        u64 removed = mode == 17 ? 0 : 2;
+        u64 mut i = removed;
+        while (i + 1 < e->input.allocations_len) {
+            e->input.allocations[i] = e->input.allocations[i + 1];
+            i += 1;
+        }
+        e->input.allocations_len -= 1;
+        e->input.sources[removed].kind = kind;
+        e->entry_bindings[removed].owning = false;
+        e->foreign_entry = true;
+        e->caller_inputs = new(ownership_globals.callback_source, 1);
+        e->caller_inputs[0] = ownership_globals.callback_source{
+            .input = ownership_globals_env.case_place(e, mode == 17 ? 2 : 6),
+            .source = e->input.sources[removed], .owning = false, .valid_proved = true};
+        e->global.callback_inputs = e->caller_inputs[..];
+    }
+    ownership_api.global_request mut warm = ownership_globals_env.request(e);
+    warm.outcome.effects = e->ordered[0..0];
+    ownership_api.global_result prior = ownership_globals_review_env.solve(e, &warm);
+    assert(ownership_api.successful(prior.proof) && e->events.len == 0);
+    if (mode == 16) {
+        e->projections = new(ownership_api.projection, 1);
+        e->projections[0].kind = ownership_api.projection_kind.residual;
+        ownership_api.graph_edge mut edge = e->input.edges[0];
+        edge.place.projections = e->projections[..];
+        e->input.edges[0] = ownership_state.copy_edge(&e->input, edge);
+    }
+    if (mode == 19) { e->input.nodes[1].key = e->input.nodes[2].key; }
+}
+
+fn expected_review(ownership_globals_env.env* e, ownership_api.global_request* req,
+    ownership_api.global_result out, u32 mode) void {
+    bool accepted = mode == 17 || mode == 18;
+    ownership_globals_review_env.result(e, out, accepted,
+        ownership_api.event_kind.incomplete_proof, ownership_api.incomplete_reason.missing_graph);
+    if (!accepted) {
+        ownership_api.event_descriptor* event = ownership_events.at(&e->events, 0);
+        u64 index = mode == 16 ? 1 : 0;
+        assert(ownership_keys.operation(event->operation, e->ordered[index].operation) == 0);
+        assert(ownership_keys.source(event->source, e->transitions[index].source) == 0);
+        assert(event->owner_path.root.ordinal == 3);
+        assert(event->relation.kind == ownership_api.entity_kind.none);
+        assert(event->text == "global effect needs a proved identity and destination");
+        assert(event->evidence == ownership_api.evidence_kind.abstract_possibility);
+        assert(out.persistent.len == 0 && out.cleanup.len == 0 && !out.boundary_proved);
+        return;
+    }
+    ownership_api.graph_edge edge = e->global.retained.edges[0];
+    assert(ownership_keys.entity(edge.key, e->input.edges[0].key) == 0);
+    assert(ownership_keys.entity(edge.from, e->input.edges[0].from) == 0);
+    assert(ownership_state.same_place(edge.place, e->input.edges[0].place));
+    assert(ownership_state.same_region(edge.range, e->input.edges[0].range));
+    assert(edge.kind == ownership_api.edge_kind.borrowed && edge.to.ordinal == 30);
+    assert(e->global.retained.contents[3].borrows[0].source.ordinal == 130);
+    assert(e->global.retained.allocations_len == 2 && out.cleanup.len == 0);
+    u64 mut i = 0;
+    while (i < e->global.retained.allocations_len) {
+        assert(ownership_keys.entity(e->global.retained.allocations[i].key,
+            e->input.allocations[i].key) == 0);
+        assert(e->global.retained.allocations[i].obligation);
+        assert(e->global.retained.allocations[i].validity == ownership_api.validity_kind.live);
+        i += 1;
+    }
+    assert(e->global.callbacks.len == 1 && !e->global.callbacks[0].owning);
+    assert(ownership_state.same_source(e->global.callbacks[0].source,
+        e->caller_inputs[0].source));
+    assert(e->global.callbacks[0].source.allocation.ordinal == (mode == 17 ? 10 : 30));
+    assert(req->entry.kind == ownership_api.entry_kind.foreign_symbolic);
+}
+
+fn review_case(u32 mode, ownership_api.source_kind kind) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    prepare_review(&e, mode, kind);
+    defer ownership_globals_env.close(&e);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    expected_review(&e, &req, out, mode);
+}
+
+fn case_b16() void { review_case(16, ownership_api.source_kind.heap); }
+fn case_b17() void {
+    review_case(17, ownership_api.source_kind.symbolic_caller);
+    review_case(17, ownership_api.source_kind.trusted_foreign);
+}
+fn case_b18() void {
+    review_case(18, ownership_api.source_kind.symbolic_caller);
+    review_case(18, ownership_api.source_kind.trusted_foreign);
+}
+fn case_b19() void { review_case(19, ownership_api.source_kind.heap); }
+
+fn prepare_scope(ownership_globals_env.env mut* e, u32 mode) void {
+    setup(e, 1);
+    e->input.allocations_len -= 1;
+    e->input.sources[2].kind = mode <= 22 ? ownership_api.source_kind.stack :
+        (mode == 24 ? ownership_api.source_kind.trusted_foreign :
+        ownership_api.source_kind.static_storage);
+    e->input.sources[2].allocation = ownership_api.entity_id{};
+    e->input.nodes[2].allocation = ownership_api.entity_id{};
+    ownership_api.global_input mut@ own globals = new(ownership_api.global_input, 2);
+    globals[0] = e->descriptors[0];
+    globals[1] = e->descriptors[1];
+    del(e->descriptors);
+    e->descriptors = move(globals);
+    del(e->entry_bindings);
+    ownership_globals_env.select_entry(e, true, mode == 24);
+    if (mode == 24) {
+        e->caller_inputs = new(ownership_globals.callback_source, 1);
+        e->caller_inputs[0] = ownership_globals.callback_source{
+            .input = ownership_globals_env.case_place(e, 6), .source = e->input.sources[2],
+            .owning = false, .valid_proved = true};
+        e->global.callback_inputs = e->caller_inputs[..];
+    }
+    ownership_api.place_path field = ownership_globals_env.case_place(e, 3);
+    ownership_api.place_path supplied = ownership_globals_env.case_place(e, 6);
+    if (mode == 20) {
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.read, field, field, 0);
+        e->ordered[1].source = e->input.sources[2].key;
+    }
+    if (mode == 20 || mode == 22) {
+        ownership_api.place_path empty = ownership_globals_env.case_place(e, 7);
+        ownership_globals_env.add_empty(e, empty);
+        ownership_globals_env.borrow_effect(e, empty, field, 0);
+        e->ordered[e->effects_len - 1].source = ownership_api.entity_id{};
+        ownership_globals_env.source_end(e, 130);
+    }
+    if (mode == 22) {
+        ownership_globals_env.add_effect(e, ownership_api.effect_kind.read, supplied, supplied, 0);
+        e->ordered[3].source = e->input.sources[2].key;
+    }
+    ownership_api.global_request mut warm = ownership_globals_env.request(e);
+    warm.outcome.effects = e->ordered[0..0];
+    ownership_api.global_result prior = ownership_globals_review_env.solve(e, &warm);
+    assert(ownership_api.successful(prior.proof) && e->events.len == 0);
+    if (mode == 25) {
+        ownership_state.append_nodes(&e->input, ownership_api.graph_node{
+            .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, 31)});
+    }
+}
+
+fn expected_scope(ownership_globals_env.env* e, ownership_api.global_request* req,
+    ownership_api.global_result out, u32 mode) void {
+    bool accepted = mode == 20 || mode == 23 || mode == 24;
+    ownership_api.incomplete_reason reason = mode == 21 ?
+        ownership_api.incomplete_reason.missing_boundary :
+        (mode == 25 ? ownership_api.incomplete_reason.missing_graph :
+        ownership_api.incomplete_reason.none);
+    ownership_globals_review_env.result(e, out, accepted, mode == 22 ?
+        ownership_api.event_kind.invalid_use : ownership_api.event_kind.incomplete_proof, reason);
+    if (!accepted) {
+        ownership_api.event_descriptor* event = ownership_events.at(&e->events, 0);
+        ownership_api.operation_position operation = mode == 21 ? req->operation :
+            e->ordered[mode == 22 ? 3 : 0].operation;
+        ownership_api.source_position source = mode == 21 ? req->source :
+            e->transitions[mode == 22 ? 3 : 0].source;
+        assert(ownership_keys.operation(event->operation, operation) == 0);
+        assert(ownership_keys.source(event->source, source) == 0);
+        if (mode == 21) {
+            assert(event->text == "entry return needs the retained local source storage boundary");
+        } else {
+            assert(event->owner_path.root.ordinal == (mode == 22 ? 6 : 3));
+            assert(event->relation.ordinal == (mode == 22 ? 130 : 0));
+            assert(event->text == (mode == 22 ? "ordered call uses an invalid source" :
+                "global effect needs a proved identity and destination"));
+        }
+        return;
+    }
+    ownership_api.graph_edge edge = e->global.retained.edges[0];
+    assert(ownership_keys.entity(edge.key, e->input.edges[0].key) == 0);
+    assert(ownership_keys.entity(edge.from, e->input.edges[0].from) == 0);
+    assert(ownership_state.same_place(edge.place, e->input.edges[0].place));
+    assert(ownership_state.same_region(edge.range, e->input.edges[0].range));
+    assert(edge.kind == ownership_api.edge_kind.borrowed && edge.to.ordinal == 30);
+    assert(e->global.retained.allocations_len == 2 && out.cleanup.len == 0);
+    assert(e->global.retained.allocations[0].obligation);
+    assert(e->global.retained.allocations[1].obligation);
+    if (mode == 20) {
+        assert(e->global.retained.contents[3].owner_empty);
+        assert(e->global.retained.contents[3].borrows.len == 0);
+        assert(e->global.retained.sources[2].validity == ownership_api.validity_kind.ended);
+    } else {
+        assert(e->global.retained.contents[3].borrows[0].source.ordinal == 130);
+        assert(e->global.retained.sources[2].validity == ownership_api.validity_kind.live);
+    }
+    if (mode == 24) {
+        assert(e->global.callbacks.len == 1 && !e->global.callbacks[0].owning);
+        assert(e->global.callbacks[0].source.allocation.kind == ownership_api.entity_kind.none);
+    }
+}
+
+fn scope_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    prepare_scope(&e, mode);
+    defer ownership_globals_env.close(&e);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    expected_scope(&e, &req, out, mode);
+}
+
+fn case_b20() void { scope_case(20); }
+fn case_b21() void { scope_case(21); }
+fn case_b22() void { scope_case(22); }
+fn case_b23() void { scope_case(23); }
+fn case_b24() void { scope_case(24); }
+fn case_b25() void { scope_case(25); }
+
+fn main() i32 {
+    case_b01();
+    case_b02();
+    case_b03();
+    case_b04();
+    case_b05();
+    case_b06();
+    case_b07();
+    case_b08();
+    case_b09();
+    case_b10();
+    case_b11();
+    case_b12();
+    case_b13();
+    case_b14();
+    case_b15();
+    case_b16();
+    case_b17();
+    case_b18();
+    case_b19();
+    case_b20();
+    case_b21();
+    case_b22();
+    case_b23();
+    case_b24();
+    case_b25();
+    println("globals borrow updates ok");
+    return 0;
+}

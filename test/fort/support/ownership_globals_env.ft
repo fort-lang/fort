@@ -1,0 +1,815 @@
+/// Supplies global descriptors, event keys, and an owned proof state to tests.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_limits;
+import ownership_state;
+import ownership_transfer;
+import heap;
+import std.libc;
+import std.str;
+
+u64 TRAVERSAL_PROBE_NODES = 8192;
+
+struct env {
+    ownership_state.state input;
+    ownership_events.store events;
+    ownership_api.services service;
+    ownership_globals.context global;
+    ownership_globals.event_binding[32] bindings;
+    ownership_globals.effect_binding[4] transitions;
+    ownership_api.ordered_effect[4] ordered;
+    u64 effects_len;
+    u32 case_id;
+    ownership_api.global_input mut@ own descriptors;
+    ownership_api.ordered_effect mut@ own cleanup;
+    ownership_api.projection mut@ own projections;
+    ownership_api.borrow_relation mut@ own relations;
+    ownership_globals.symbolic_binding mut@ own entry_bindings;
+    ownership_globals.callback_source mut@ own caller_inputs;
+    bool foreign_entry;
+    bool generated_entry;
+    u64 startup_len;
+    ownership_globals.terminal_record mut@ own terminal_inputs;
+    ownership_globals.summary_effect mut@ own summaries;
+    ownership_globals.path_snapshot mut@ own paths;
+}
+
+fn position(u32 gap) ownership_api.operation_position {
+    ownership_api.operation_position mut out = ownership_api.operation_position{};
+    out.function.declaration.module = 1;
+    out.function.declaration.declaration = 1;
+    out.block = 1;
+    out.operation = gap;
+    return out;
+}
+
+fn source(u32 line) ownership_api.source_position {
+    return ownership_api.source_position{1, 1, line, 2, line, 3, false};
+}
+
+fn bind_event(env mut* e, u64 slot, u32 gap, ownership_api.event_kind kind) void {
+    e->bindings[slot].operation = position(gap);
+    e->bindings[slot].kind = kind;
+    e->bindings[slot].key.function = position(gap).function;
+    e->bindings[slot].key.kind = ownership_api.entity_kind.event;
+    e->bindings[slot].key.ordinal = cast(slot + 1, u32);
+}
+
+fn open(env mut* e, u64 work) void {
+    e->input = ownership_state.empty();
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.w = work;
+    assert(ownership_events.bind(&e->events, &limits, &e->service));
+    ownership_globals.bind(&e->global, &e->service);
+    bind_event(e, 0, 1, ownership_api.event_kind.incomplete_proof);
+    bind_event(e, 1, 1, ownership_api.event_kind.work_failure);
+    bind_event(e, 2, 3, ownership_api.event_kind.incomplete_proof);
+    e->global.work_failure = e->bindings[1];
+    e->global.events = e->bindings[0..3];
+    e->global.event_map_complete_proved = true;
+}
+
+fn release_input(env mut* e) void {
+    ownership_state.free(&e->input);
+    del(e->descriptors);
+    del(e->cleanup);
+    del(e->projections);
+    del(e->relations);
+    del(e->entry_bindings);
+    del(e->caller_inputs);
+    del(e->summaries);
+    del(e->terminal_inputs);
+    u64 mut i = 0;
+    while (i < e->paths.len) {
+        ownership_state.free(&e->paths[i].state);
+        i += 1;
+    }
+    del(e->paths);
+}
+
+fn close(env mut* e) void {
+    release_input(e);
+    ownership_globals.free(&e->global);
+    ownership_events.free(&e->events);
+}
+
+fn request(env* e) ownership_api.global_request {
+    ownership_api.global_request mut out = ownership_api.global_request{};
+    out.operation = e->bindings[0].operation;
+    out.source = source(21);
+    out.before = ownership_state.view(&e->input);
+    out.entry.kind = ownership_api.entry_kind.library_symbolic;
+    if (e->foreign_entry) { out.entry.kind = ownership_api.entry_kind.foreign_symbolic; }
+    if (e->global.entry_selected || e->foreign_entry) {
+        out.entry.function = e->bindings[0].operation.function;
+    }
+    if (e->generated_entry) { out.entry.kind = ownership_api.entry_kind.generated_executable; }
+    out.entry.startup = e->ordered[0..e->startup_len];
+    out.entry.globals = e->descriptors[..];
+    out.entry.cleanup = e->cleanup[..];
+    out.outcome.kind = ownership_api.outcome_kind.function_return;
+    out.outcome.effects = e->ordered[0..e->effects_len];
+    return out;
+}
+
+fn key(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{.function = position(1).function,
+        .kind = kind, .ordinal = ordinal};
+}
+
+// Each fact array has a nonempty value. Nested slices have distinct sentinel values.
+fn seed(env mut* e) void {
+    e->projections = new(ownership_api.projection, 1);
+    e->projections[0].kind = ownership_api.projection_kind.field;
+    e->projections[0].field = 7;
+    ownership_api.place_path place = ownership_api.place_path{
+        key(ownership_api.entity_kind.slot, 1), e->projections[..], false};
+    ownership_api.layout_leaf[1] leaves = {
+        ownership_api.layout_leaf{.owning = true}};
+    ownership_api.region_partition[1] partitions = {
+        ownership_api.region_partition{.key = key(ownership_api.entity_kind.region, 4)}};
+    ownership_api.region range = ownership_api.region{
+        .key = key(ownership_api.entity_kind.region, 3), .alignment = 8,
+        .leaves = leaves[..], .partitions = partitions[..]};
+    e->relations = new(ownership_api.borrow_relation, 1);
+    e->relations[0] = ownership_api.borrow_relation{
+        .key = key(ownership_api.entity_kind.relation, 9), .containing = place, .range = range,
+        .representation_complete = true};
+    ownership_api.contents_fact value = ownership_api.contents_fact{
+        .place = place, .kind = ownership_api.contents_kind.reference,
+        .borrows = e->relations[..]};
+    ownership_state.append_contents(&e->input, value);
+    ownership_state.append_sources(&e->input, ownership_api.source_fact{
+        .key = key(ownership_api.entity_kind.source, 2),
+        .kind = ownership_api.source_kind.static_storage});
+    ownership_api.history_fact[1] history = {ownership_api.history_fact{
+        .operation = position(2), .before = ownership_api.owner_location{.place = place},
+        .after = ownership_api.owner_location{.place = place}}};
+    ownership_state.append_allocations(&e->input, ownership_api.allocation_fact{
+        .key = key(ownership_api.entity_kind.allocation, 5),
+        .owner = ownership_api.owner_location{.place = place}, .history = history[..]});
+    ownership_state.append_regions(&e->input, range);
+    ownership_state.append_nodes(&e->input, ownership_api.graph_node{
+        .key = key(ownership_api.entity_kind.graph_node, 6)});
+    ownership_state.append_edges(&e->input, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 7), .place = place, .range = range});
+    ownership_api.entity_id[1] parameters = {key(ownership_api.entity_kind.slot, 8)};
+    ownership_api.entity_id[1] clauses = {key(ownership_api.entity_kind.predicate, 10)};
+    ownership_api.entity_id[1] descendants = {key(ownership_api.entity_kind.allocation, 11)};
+    ownership_state.append_shapes(&e->input, ownership_api.shape_description{
+        .key = key(ownership_api.entity_kind.template, 12), .parameters = parameters[..],
+        .clauses = clauses[..], .descendants = descendants[..]});
+    ownership_state.append_predicates(&e->input, ownership_api.predicate_atom{
+        .key = key(ownership_api.entity_kind.predicate, 13)});
+    ownership_state.append_guards(&e->input, ownership_api.guard_fact{
+        .key = key(ownership_api.entity_kind.guard, 14), .positive = clauses[..],
+        .negative = descendants[..]});
+    ownership_state.append_correlations(&e->input, ownership_api.correlation{
+        .guard = key(ownership_api.entity_kind.guard, 14),
+        .relation = key(ownership_api.entity_kind.relation, 9)});
+    ownership_state.append_losses(&e->input, ownership_api.lost_fact{
+        .bound = 17, .reason = ownership_api.incomplete_reason.missing_path});
+    e->descriptors = new(ownership_api.global_input, 1);
+    e->descriptors[0] = ownership_api.global_input{
+        .declaration = ownership_api.declaration_id{1, 8}, .place = place,
+        .initial = e->input.contents[0], .persistent = true, .symbolic = true};
+    e->cleanup = new(ownership_api.ordered_effect, 1);
+    e->cleanup[0] = ownership_api.ordered_effect{
+        .key = key(ownership_api.entity_kind.event, 15),
+        .kind = ownership_api.effect_kind.storage_end, .operation = position(4), .place = place};
+}
+
+fn same_effect(ownership_api.ordered_effect a, ownership_api.ordered_effect b) bool {
+    return ownership_state.same_entity(a.key, b.key) && a.kind == b.kind &&
+        a.operation.operation == b.operation.operation &&
+        ownership_state.same_place(a.place, b.place) &&
+        ownership_state.same_entity(a.source, b.source) &&
+        ownership_state.same_entity(a.allocation, b.allocation) &&
+        ownership_state.same_entity(a.guard, b.guard);
+}
+
+fn case_position(env* e, u32 gap) ownership_api.operation_position {
+    ownership_api.operation_position mut out = position(gap);
+    out.function.declaration.declaration = e->case_id;
+    return out;
+}
+
+fn case_key(env* e, ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{.function = case_position(e, 1).function,
+        .kind = kind, .ordinal = ordinal};
+}
+
+fn case_place(env* e, u32 slot) ownership_api.place_path {
+    return ownership_api.place_path{.root = case_key(e, ownership_api.entity_kind.slot, slot)};
+}
+
+fn case_open(env mut* e, u32 id) void {
+    open(e, ownership_limits.PRODUCTION_W);
+    e->case_id = id;
+    u64 mut i = 0;
+    while (i < 3) {
+        e->bindings[i].operation.function = case_position(e, 1).function;
+        e->bindings[i].key.function = case_position(e, 1).function;
+        e->bindings[i].key.ordinal += id * 100;
+        i += 1;
+    }
+    e->global.work_failure = e->bindings[1];
+    e->global.effect_map_complete_proved = true;
+    e->global.events = e->bindings[0..2];
+    e->descriptors = new(ownership_api.global_input, 1);
+    e->descriptors[0] = ownership_api.global_input{
+        .declaration = ownership_api.declaration_id{1, id}, .place = case_place(e, 2),
+        .persistent = true, .symbolic = true};
+}
+
+fn set_initial(env mut* e, ownership_api.place_path place) void {
+    u64 mut i = 0;
+    while (i < e->descriptors.len) {
+        if (ownership_state.same_place(e->descriptors[i].place, place)) {
+            e->descriptors[i].initial = e->input.contents[e->input.contents_len - 1];
+        }
+        i += 1;
+    }
+}
+
+fn add_empty(env mut* e, ownership_api.place_path place) void {
+    ownership_state.append_contents(&e->input, ownership_transfer.empty_value(place));
+    set_initial(e, place);
+}
+
+fn add_owner(env mut* e, ownership_api.place_path place, u32 allocation, i64 extent) void {
+    ownership_api.entity_id allocation_key = case_key(e, ownership_api.entity_kind.allocation,
+        allocation);
+    ownership_api.entity_id source_key = case_key(e, ownership_api.entity_kind.source,
+        allocation + 100);
+    ownership_api.entity_id version = case_key(e, ownership_api.entity_kind.value, allocation);
+    ownership_api.borrow_relation[1] borrows = {ownership_api.borrow_relation{
+        .key = case_key(e, ownership_api.entity_kind.relation, allocation),
+        .value_version = version,
+        .containing = place, .source = source_key, .representation_complete = true}};
+    ownership_state.append_contents(&e->input, ownership_api.contents_fact{
+        .place = place, .kind = ownership_api.contents_kind.reference, .value_version = version,
+        .borrows = borrows[..], .span_length = ownership_api.scalar_fact{
+            ownership_api.fact_kind.exact, extent, ownership_api.entity_id{}}});
+    set_initial(e, place);
+    ownership_state.append_sources(&e->input, ownership_api.source_fact{
+        source_key, ownership_api.source_kind.heap, ownership_api.validity_kind.live,
+        allocation_key, ownership_api.operation_position{}});
+    ownership_state.append_allocations(&e->input, ownership_api.allocation_fact{
+        .key = allocation_key, .site = allocation_key, .validity = ownership_api.validity_kind.live,
+        .count = ownership_api.multiplicity{.one = true}, .obligation = true,
+        .owner = ownership_api.owner_location{.place = place},
+        .logical_length = ownership_api.scalar_fact{ownership_api.fact_kind.exact, extent,
+            ownership_api.entity_id{}}});
+}
+
+fn add_effect(env mut* e, ownership_api.effect_kind kind, ownership_api.place_path from,
+    ownership_api.place_path destination, u32 allocation) void {
+    u64 i = e->effects_len;
+    assert(i < 4);
+    u32 gap = cast(i + 2, u32);
+    ownership_api.operation_position operation = case_position(e, gap);
+    ownership_api.entity_id effect_key = case_key(e, ownership_api.entity_kind.event,
+        e->case_id * 100 + gap * 10);
+    e->ordered[i] = ownership_api.ordered_effect{.key = effect_key, .kind = kind,
+        .operation = operation, .place = destination};
+    if (allocation != 0) {
+        e->ordered[i].allocation = case_key(e, ownership_api.entity_kind.allocation, allocation);
+        e->ordered[i].source = case_key(e, ownership_api.entity_kind.source, allocation + 100);
+    }
+    e->transitions[i] = ownership_globals.effect_binding{
+        .key = effect_key, .operation = operation, .source = source(e->case_id * 10 + gap),
+        .from = from, .identity_proved = true, .destination_proved = true,
+        .leaves_empty_proved = true, .unconditional = true};
+    u64 offset = 2 + i * 3;
+    e->bindings[offset] = ownership_globals.event_binding{
+        operation, ownership_api.event_kind.incomplete_proof,
+        case_key(e, ownership_api.entity_kind.event, effect_key.ordinal + 1)};
+    e->bindings[offset + 1] = ownership_globals.event_binding{
+        operation, ownership_api.event_kind.lost_ownership,
+        case_key(e, ownership_api.entity_kind.event, effect_key.ordinal + 2)};
+    e->bindings[offset + 2] = ownership_globals.event_binding{
+        operation, ownership_api.event_kind.invalid_use,
+        case_key(e, ownership_api.entity_kind.event, effect_key.ordinal + 3)};
+    e->effects_len += 1;
+    e->global.events = e->bindings[0..2 + e->effects_len * 3];
+    e->global.effects = e->transitions[0..e->effects_len];
+}
+
+fn add_borrow(env mut* e, ownership_api.place_path place, u32 source_id,
+    ownership_api.source_kind kind, u64 count) void {
+    ownership_api.entity_id source_key = case_key(e, ownership_api.entity_kind.source, source_id);
+    ownership_api.entity_id version = case_key(e, ownership_api.entity_kind.value, source_id);
+    e->relations = new(ownership_api.borrow_relation, count);
+    u64 mut i = 0;
+    while (i < count) {
+        e->relations[i] = ownership_api.borrow_relation{
+            .key = case_key(e, ownership_api.entity_kind.relation, cast(1000 + i, u32)),
+            .value_version = version, .containing = place, .source = source_key,
+            .representation_complete = true};
+        i += 1;
+    }
+    ownership_state.append_contents(&e->input, ownership_api.contents_fact{
+        .place = place, .kind = ownership_api.contents_kind.reference, .value_version = version,
+        .borrows = e->relations[..], .span_length = ownership_api.scalar_fact{
+            ownership_api.fact_kind.exact, 1, ownership_api.entity_id{}}});
+    set_initial(e, place);
+    ownership_state.append_sources(&e->input, ownership_api.source_fact{
+        .key = source_key, .kind = kind, .validity = ownership_api.validity_kind.live});
+}
+
+fn borrow_effect(env mut* e, ownership_api.place_path from, ownership_api.place_path to,
+    u32 source_id) void {
+    add_effect(e, ownership_api.effect_kind.write, from, to, 0);
+    e->ordered[e->effects_len - 1].source = case_key(e, ownership_api.entity_kind.source,
+        source_id);
+}
+
+fn source_end(env mut* e, u32 source_id) void {
+    add_effect(e, ownership_api.effect_kind.storage_end, case_place(e, 1), case_place(e, 1), 0);
+    u64 index = e->effects_len - 1;
+    e->ordered[index].source = case_key(e, ownership_api.entity_kind.source, source_id);
+    e->transitions[index].source_end_proved = true;
+    u64 mut i = 0;
+    while (i < e->input.sources_len) {
+        if (e->input.sources[i].key.ordinal == source_id) {
+            e->input.sources[i].boundary = e->ordered[index].operation;
+        }
+        i += 1;
+    }
+}
+
+fn select_entry(env mut* e, bool owning, bool foreign) void {
+    e->global.entry_selected = true;
+    e->global.entry_map_complete_proved = true;
+    e->global.callback_map_complete_proved = true;
+    e->foreign_entry = foreign;
+    e->entry_bindings = new(ownership_globals.symbolic_binding, e->descriptors.len);
+    u64 mut i = 0;
+    while (i < e->entry_bindings.len) {
+        e->entry_bindings[i] = ownership_globals.symbolic_binding{
+            .declaration = e->descriptors[i].declaration, .place = e->descriptors[i].place,
+            .owning = owning, .canonical_proved = true};
+        i += 1;
+    }
+    e->global.symbolic_bindings = e->entry_bindings[..];
+}
+
+fn caller_input(env mut* e, ownership_api.place_path place, bool owning) void {
+    assert(e->input.sources_len == 1);
+    e->input.sources[0].kind = ownership_api.source_kind.symbolic_caller;
+    e->caller_inputs = new(ownership_globals.callback_source, 1);
+    e->caller_inputs[0] = ownership_globals.callback_source{
+        place, e->input.sources[0], owning, true, owning};
+    e->global.callback_inputs = e->caller_inputs[..];
+}
+
+fn owner_end(env mut* e, ownership_api.place_path place, u32 allocation) void {
+    add_effect(e, ownership_api.effect_kind.storage_end, place, place, allocation);
+    e->transitions[e->effects_len - 1].source_end_proved = true;
+}
+
+fn host_request(env* e) ownership_api.global_request {
+    ownership_api.global_request mut req = request(e);
+    req.entry.host_cleanup_required = true;
+    req.entry.boundary_present = true;
+    req.entry.final_boundary = e->ordered[e->effects_len - 1].operation;
+    req.outcome.cleanup_required = true;
+    req.outcome.cleanup_proved = true;
+    return req;
+}
+
+fn select_calls(env mut* e, u64 split, u64 alternatives) void {
+    assert(split > 0 && split < e->effects_len && alternatives > 0);
+    e->summaries = new(ownership_globals.summary_effect, e->effects_len * alternatives);
+    e->paths = new(ownership_globals.path_snapshot, alternatives);
+    u64 mut p = 0;
+    while (p < alternatives) {
+        e->paths[p].graph_complete_proved = true;
+        e->paths[p].effects_begin = p * e->effects_len;
+        e->paths[p].effects_len = e->effects_len;
+        u64 mut i = 0;
+        while (i < e->effects_len) {
+            u64 call = i < split ? 0 : 1;
+            e->summaries[p * e->effects_len + i] = ownership_globals.summary_effect{
+                .call = case_position(e, cast(20 + call * 10, u32)),
+                .target = ownership_api.function_id{
+                    .declaration = ownership_api.declaration_id{2, cast(100 + call + p * 10, u32)}},
+                .call_index = call, .effect = e->ordered[i], .binding = e->transitions[i],
+                .summary_proved = true};
+            i += 1;
+        }
+        p += 1;
+    }
+    e->global.summary_selected = true;
+    e->global.summary_inputs = e->summaries[..];
+    e->global.path_inputs = e->paths[..];
+}
+
+fn normal_request(env* e) ownership_api.global_request {
+    ownership_api.global_request mut req = request(e);
+    req.entry.boundary_present = true;
+    req.entry.final_boundary = e->ordered[e->effects_len - 1].operation;
+    req.outcome.kind = ownership_api.outcome_kind.normal_process_exit;
+    req.outcome.cleanup_required = true;
+    req.outcome.cleanup_proved = true;
+    return req;
+}
+
+fn select_terminal(env mut* e, ownership_api.global_request* req) void {
+    e->global.terminal_selected = true;
+    e->global.generated_sequence_complete_proved = true;
+    e->global.normal_cleanup_complete_proved = true;
+    e->global.graph_complete_proved = true;
+    e->terminal_inputs = new(ownership_globals.terminal_record, 1);
+    e->terminal_inputs[0] = ownership_globals.terminal_record{
+        .outcome = req->outcome, .class_proved = true, .path_proved = true};
+    e->global.terminal_inputs = e->terminal_inputs[..];
+}
+
+fn generated_setup(env mut* e, u32 id, bool positive, bool cleanup) void {
+    case_open(e, id);
+    if (positive) { add_owner(e, case_place(e, 1), 10, 4); }
+    else { add_empty(e, case_place(e, 1)); }
+    add_empty(e, case_place(e, 2));
+    add_effect(e, ownership_api.effect_kind.transfer, case_place(e, 1), case_place(e, 2),
+        positive ? 10 : 0);
+    e->startup_len = 1;
+    if (cleanup) {
+        add_effect(e, ownership_api.effect_kind.release, case_place(e, 2), case_place(e, 2),
+            positive ? 10 : 0);
+        e->cleanup = new(ownership_api.ordered_effect, 1);
+        e->cleanup[0] = e->ordered[1];
+    }
+    owner_end(e, case_place(e, 2), 0);
+    select_entry(e, true, false);
+    e->generated_entry = true;
+}
+
+fn generated_request(env mut* e) ownership_api.global_request {
+    ownership_api.global_request mut req = normal_request(e);
+    req.outcome.effects = e->ordered[e->startup_len..e->effects_len];
+    select_terminal(e, &req);
+    return req;
+}
+
+fn summary_round(bool fail) void {
+    env mut e = env{};
+    case_open(&e, 93);
+    add_owner(&e, case_place(&e, 1), 10, 4);
+    add_empty(&e, case_place(&e, 2));
+    add_effect(&e, ownership_api.effect_kind.transfer, case_place(&e, 1), case_place(&e, 2), 10);
+    add_effect(&e, ownership_api.effect_kind.release, case_place(&e, 2), case_place(&e, 2), 10);
+    select_entry(&e, true, false);
+    select_calls(&e, 1, 16);
+    ownership_state.append_nodes(&e.input, ownership_api.graph_node{
+        .key = case_key(&e, ownership_api.entity_kind.graph_node, 10),
+        .allocation = case_key(&e, ownership_api.entity_kind.allocation, 10), .residual = fail});
+    e.global.graph_complete_proved = true;
+    // Refuse after path states exist. Their release needs a measured failure path.
+    ownership_api.global_request req = request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    if (fail) {
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_graph);
+        assert(e.events.len == 1 && e.global.ordered.len == 0 && e.global.paths.len == 0);
+    } else {
+        assert(ownership_api.successful(out.proof) && !out.boundary_proved);
+        assert(e.global.ordered.len == 32 && e.global.paths.len == 16);
+        assert(e.global.paths[15].state.allocations[0].validity ==
+            ownership_api.validity_kind.released);
+        assert(e.global.paths[15].state.allocations[0].key.ordinal == 10);
+    }
+    close(&e);
+}
+
+fn child_graph(env mut* e) void {
+    add_empty(e, case_place(e, 6));
+    ownership_api.entity_id parent = case_key(e, ownership_api.entity_kind.graph_node, 10);
+    ownership_api.entity_id child = case_key(e, ownership_api.entity_kind.graph_node, 20);
+    ownership_state.append_nodes(&e->input, ownership_api.graph_node{
+        .key = parent, .allocation = case_key(e, ownership_api.entity_kind.allocation, 10)});
+    ownership_state.append_nodes(&e->input, ownership_api.graph_node{
+        .key = child, .allocation = case_key(e, ownership_api.entity_kind.allocation, 20)});
+    ownership_state.append_edges(&e->input, ownership_api.graph_edge{
+        .key = case_key(e, ownership_api.entity_kind.relation, 500),
+        .from = parent, .to = child, .kind = ownership_api.edge_kind.owned,
+        .place = case_place(e, 3)});
+    e->global.graph_complete_proved = true;
+}
+
+fn retained_round(bool fail) void {
+    env mut e = env{};
+    case_open(&e, 91);
+    add_borrow(&e, case_place(&e, 2), 40, fail ? ownership_api.source_kind.stack :
+        ownership_api.source_kind.symbolic_caller, 256);
+    u64 mut i = 0;
+    while (i < TRAVERSAL_PROBE_NODES) {
+        ownership_state.append_nodes(&e.input, ownership_api.graph_node{
+            .key = case_key(&e, ownership_api.entity_kind.graph_node, cast(1000 + i, u32))});
+        i += 1;
+    }
+    if (fail) { source_end(&e, 40); }
+    else {
+        add_effect(&e, ownership_api.effect_kind.read, case_place(&e, 2), case_place(&e, 2), 0);
+    }
+    ownership_api.global_request mut req = request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    if (fail) {
+        assert(out.proof.failed && e.events.len == 1);
+        assert(ownership_events.at(&e.events, 0)->kind == ownership_api.event_kind.invalid_use);
+    } else {
+        assert(ownership_api.successful(out.proof));
+        assert(e.global.borrowed.len == 256 && e.global.descendants.len == TRAVERSAL_PROBE_NODES);
+        assert(e.global.retained.sources[0].validity == ownership_api.validity_kind.live);
+    }
+    close(&e);
+}
+
+fn semantic_round(bool fail) void {
+    env mut e = env{};
+    case_open(&e, 90);
+    add_owner(&e, case_place(&e, 1), 10, 4);
+    add_empty(&e, case_place(&e, 2));
+    add_effect(&e, ownership_api.effect_kind.transfer, case_place(&e, 1), case_place(&e, 2), 10);
+    if (fail) {
+        add_effect(&e, ownership_api.effect_kind.transfer, case_place(&e, 1),
+            case_place(&e, 2), 0);
+    } else {
+        add_effect(&e, ownership_api.effect_kind.release, case_place(&e, 2),
+            case_place(&e, 2), 10);
+    }
+    ownership_api.global_request mut req = request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    if (fail) { assert(out.proof.failed && e.events.len == 1); }
+    else { assert(ownership_api.successful(out.proof)); }
+    close(&e);
+}
+
+fn entry_round(bool fail) void {
+    env mut e = env{};
+    case_open(&e, 92);
+    del(e.descriptors);
+    e.descriptors = new(ownership_api.global_input, 32);
+    e.caller_inputs = new(ownership_globals.callback_source, 32);
+    u64 mut i = 0;
+    while (i < 32) {
+        ownership_api.place_path global = case_place(&e, cast(2000 + i, u32));
+        ownership_api.contents_fact empty = ownership_transfer.empty_value(global);
+        e.descriptors[i] = ownership_api.global_input{
+            .declaration = ownership_api.declaration_id{1, cast(2000 + i, u32)},
+            .place = global, .initial = empty, .persistent = true, .symbolic = true};
+        ownership_state.append_contents(&e.input, empty);
+        ownership_api.place_path input = case_place(&e, cast(1000 + i, u32));
+        ownership_api.entity_id version = case_key(&e, ownership_api.entity_kind.value,
+            cast(3000 + i, u32));
+        ownership_api.source_fact caller = ownership_api.source_fact{
+            .key = case_key(&e, ownership_api.entity_kind.source, cast(4000 + i, u32)),
+            .kind = ownership_api.source_kind.symbolic_caller,
+            .validity = ownership_api.validity_kind.live};
+        ownership_api.borrow_relation[1] relation = {ownership_api.borrow_relation{
+            .key = case_key(&e, ownership_api.entity_kind.relation, cast(5000 + i, u32)),
+            .value_version = version, .containing = input, .source = caller.key,
+            .representation_complete = true}};
+        ownership_state.append_contents(&e.input, ownership_api.contents_fact{
+            .place = input, .kind = ownership_api.contents_kind.reference,
+            .value_version = version, .borrows = relation[..]});
+        ownership_state.append_sources(&e.input, caller);
+        e.caller_inputs[i] = ownership_globals.callback_source{input, caller, false, true, false};
+        i += 1;
+    }
+    select_entry(&e, false, true);
+    e.global.callback_inputs = e.caller_inputs[..];
+    if (fail) {
+        add_effect(&e, ownership_api.effect_kind.write, case_place(&e, 1), case_place(&e, 2), 0);
+        e.ordered[0].key.kind = ownership_api.entity_kind.none;
+    }
+    ownership_api.global_request req = request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    if (fail) {
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+        assert(e.events.len == 1 && e.global.symbolic.len == 0 && e.global.callbacks.len == 0);
+    } else {
+        assert(ownership_api.successful(out.proof) && !out.boundary_proved);
+        assert(e.global.symbolic.len == 32 && e.global.callbacks.len == 32);
+        assert(e.global.callbacks[31].source.key.ordinal == 4031);
+    }
+    close(&e);
+}
+
+fn terminal_round(bool fail) void {
+    env mut e = env{};
+    generated_setup(&e, 94, false, true);
+    ownership_api.global_request mut req = generated_request(&e);
+    ownership_api.ordered_effect mut@ own startup = new(ownership_api.ordered_effect, 256);
+    u64 mut i = 0;
+    while (i < startup.len) { startup[i] = e.ordered[0]; i += 1; }
+    req.entry.startup = startup[..];
+    req.outcome.guard = case_key(&e, ownership_api.entity_kind.guard, 200);
+    ownership_api.ordered_effect mut@ own effects = new(ownership_api.ordered_effect, 64);
+    i = 0;
+    while (i < effects.len) { effects[i] = e.ordered[1]; i += 1; }
+    ownership_globals.terminal_record mut@ own records = new(ownership_globals.terminal_record, 32);
+    i = 0;
+    while (i < records.len) {
+        records[i] = e.terminal_inputs[0];
+        records[i].outcome.guard = case_key(&e, ownership_api.entity_kind.guard,
+            cast(200 + i, u32));
+        records[i].outcome.effects = effects[..];
+        i += 1;
+    }
+    records[0].outcome = req.outcome;
+    if (fail) { records[0].class_proved = false; }
+    del(e.terminal_inputs);
+    e.terminal_inputs = move(records);
+    e.global.terminal_inputs = e.terminal_inputs[..];
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    if (fail) {
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+        assert(e.events.len == 1 && e.global.terminals.len == 0);
+    } else {
+        assert(ownership_api.successful(out.proof) && out.boundary_proved);
+        assert(e.global.startup.len == 256 && e.global.terminals.len == 32);
+        assert(e.global.terminal_effects.len == 1986);
+    }
+    del(startup);
+    del(effects);
+    close(&e);
+}
+
+fn replacement_round(bool fail) void {
+    env mut e = env{};
+    case_open(&e, 96);
+    e.projections = new(ownership_api.projection, 2);
+    e.projections[0] = ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 7};
+    e.projections[1] = ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 9};
+    ownership_api.place_path mut global = case_place(&e, 2);
+    global.projections = e.projections[..];
+    e.descriptors[0].place = global;
+    add_borrow(&e, global, 40, ownership_api.source_kind.stack, 256);
+    ownership_api.place_path local = case_place(&e, 1);
+    ownership_api.borrow_relation mut@ own copied = new(ownership_api.borrow_relation, 256);
+    u64 mut i = 0;
+    while (i < copied.len) {
+        copied[i] = e.relations[i];
+        copied[i].containing = local;
+        i += 1;
+    }
+    ownership_api.contents_fact mut value = e.input.contents[0];
+    value.place = local;
+    value.borrows = copied[..];
+    ownership_state.append_contents(&e.input, value);
+    del(copied);
+    borrow_effect(&e, local, global, 40);
+    if (fail) { source_end(&e, 40); }
+    ownership_state.state mut before = ownership_state.clone(&e.input);
+    ownership_api.global_request req = request(&e);
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    assert(ownership_state.equal(&e.input, &before));
+    if (fail) {
+        assert(out.proof.failed && e.events.len == 1);
+        assert(ownership_events.at(&e.events, 0)->kind == ownership_api.event_kind.invalid_use);
+        assert(ownership_events.at(&e.events, 0)->operation.operation == 3);
+        assert(out.persistent.len == 0 && e.global.borrowed.len == 0);
+    } else {
+        assert(ownership_api.successful(out.proof) && e.events.len == 0);
+        assert(e.global.borrowed.len == 256);
+        assert(e.global.borrowed[255].containing.projections[1].field == 9);
+    }
+    assert(e.events.budget.used.w < ownership_limits.PRODUCTION_W);
+    ownership_state.free(&before);
+    close(&e);
+}
+
+// Linux allocator metadata excludes free bins from the live-byte measurement.
+$if ($cfg(target_os) == "linux") {
+    extern fn open_memstream(char mut* own mut* buffer, u64 mut* length) void mut*;
+    extern fn malloc_info(i32 options, void mut* stream) i32;
+    extern fn fclose(void mut* stream) i32;
+    fn replacement_metric(string data, string prefix) u64 {
+        i64 mut found = str.find(data, prefix);
+        assert(found >= 0);
+        string mut tail = data[cast(found, u64)..];
+        while (true) {
+            found = str.find(tail[prefix.len..], prefix);
+            if (found < 0) { break; }
+            tail = tail[prefix.len + cast(found, u64)..];
+        }
+        found = str.find(tail, "size=\"");
+        assert(found >= 0);
+        tail = tail[cast(found, u64) + 6..];
+        found = str.index_of(tail, '\"');
+        assert(found >= 0);
+        u64 mut value = 0;
+        assert(str.parse_u64(tail[..cast(found, u64)], 10, &value));
+        return value;
+    }
+    fn replacement_live_bytes() u64 {
+        char mut* own mut buffer = null;
+        u64 mut length = 0;
+        void mut* stream = open_memstream(&buffer, &length);
+        assert(stream != null && malloc_info(0, stream) == 0 && fclose(stream) == 0);
+        string data = cast(buffer[0..length], string);
+        u64 arena = replacement_metric(data, "<system type=\"current\"");
+        u64 fast = replacement_metric(data, "<total type=\"fast\"");
+        u64 rest = replacement_metric(data, "<total type=\"rest\"");
+        u64 mapped = replacement_metric(data, "<total type=\"mmap\"");
+        libc.free(cast(move(buffer), void* own));
+        assert(arena >= fast && arena - fast >= rest);
+        return arena - fast - rest + mapped;
+    }
+} else {
+    fn replacement_live_bytes() u64 { return heap.system_view(); }
+}
+
+fn replacement_measure(bool fail) u64 {
+    u64 mut early = 0;
+    u64 mut best = ownership_api.U64_MAX;
+    u64 mut i = 0;
+    while (i < 24) {
+        replacement_round(fail);
+        if (i == 11) { early = replacement_live_bytes(); }
+        if (i >= 20) {
+            u64 distance = heap.distance(replacement_live_bytes(), early);
+            if (distance < best) { best = distance; }
+        }
+        i += 1;
+    }
+    assert(early != 0);
+    return best;
+}
+
+fn round(bool fail) void {
+    env mut e = env{};
+    open(&e, ownership_limits.PRODUCTION_W);
+    e.projections = new(ownership_api.projection, 1);
+    e.projections[0].kind = ownership_api.projection_kind.field;
+    e.projections[0].field = 5;
+    e.descriptors = new(ownership_api.global_input, 256);
+    u64 mut i = 0;
+    while (i < e.descriptors.len) {
+        e.descriptors[i].declaration.module = 1;
+        e.descriptors[i].declaration.declaration = cast(i + 1, u32);
+        e.descriptors[i].place.root.kind = ownership_api.entity_kind.slot;
+        e.descriptors[i].place.root.ordinal = cast(i + 1, u32);
+        e.descriptors[i].place.projections = e.projections[..];
+        i += 1;
+    }
+    e.cleanup = new(ownership_api.ordered_effect, 256);
+    i = 0;
+    while (i < e.cleanup.len) {
+        e.cleanup[i].kind = ownership_api.effect_kind.storage_end;
+        e.cleanup[i].place = e.descriptors[i].place;
+        i += 1;
+    }
+    ownership_api.contents_fact mut fact = ownership_api.contents_fact{};
+    fact.place.root.kind = ownership_api.entity_kind.slot;
+    fact.place.projections = e.projections[..];
+    i = 0;
+    while (i < 64) {
+        fact.place.root.ordinal = cast(i + 1, u32);
+        ownership_state.append_contents(&e.input, fact);
+        i += 1;
+    }
+    ownership_api.ordered_effect[1] effects = {
+        ownership_api.ordered_effect{.kind = ownership_api.effect_kind.write,
+            .operation = position(3)},
+    };
+    ownership_api.global_request mut req = request(&e);
+    if (fail) { req.outcome.effects = effects[..]; }
+    ownership_api.global_result out = ownership_globals.solve(&e.global, &e.service, &req);
+    if (fail) {
+        assert(out.proof.kind == ownership_api.proof_kind.incomplete && e.events.len == 1);
+    } else {
+        assert(ownership_api.successful(out.proof) && out.persistent.len == 256);
+    }
+    close(&e);
+    semantic_round(fail);
+    retained_round(fail);
+    u64 mut entry = 0;
+    while (entry < 3) { entry_round(fail); entry += 1; }
+    u64 mut summary = 0;
+    while (summary < 3) { summary_round(fail); summary += 1; }
+    terminal_round(fail);
+    replacement_round(fail);
+}
+
+// Measure live bytes after the repeated fixture releases its storage.
+fn measure(bool fail) u64 {
+    u64 mut early = 0;
+    u64 mut best = ownership_api.U64_MAX;
+    u64 mut i = 0;
+    while (i < 24) {
+        round(fail);
+        if (i == 11) { early = replacement_live_bytes(); }
+        if (i >= 20) {
+            u64 distance = heap.distance(replacement_live_bytes(), early);
+            if (distance < best) { best = distance; }
+        }
+        i += 1;
+    }
+    assert(early != 0);
+    return best;
+}
