@@ -407,6 +407,17 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(refusal["limit"]["used"], document["limits"]["w"])
         self.assertEqual(refusal["limit"]["bound"], document["limits"]["w"])
         self.assertIn(b"liveness: work_limit", self.result.stderr)
+        expected = (f"ownership proof is incomplete (liveness: work_limit; category W; "
+                    f"used {refusal['limit']['used']}; bound {refusal['limit']['bound']})")
+        self.assertIn(expected.encode(), self.result.stderr)
+        self.assertEqual(self.invoke("--json").returncode, 1)
+        repeated = self.evidence()
+        self.assertEqual(next(row for row in repeated["meters"] if row["name"] == "services")
+                         ["first_refusal"], refusal)
+        diagnostics = json.loads(self.result.stdout)["diagnostics"]
+        matches = [row for row in diagnostics if row["message"] == expected]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["line"], 2)
 
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")
@@ -440,6 +451,33 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(self.invoke().returncode, 2)
         self.assertEqual(imported.read_text(), "fn uncalled() void {}\n")
 
+    def test_report_import_probe_alias_is_rejected(self):
+        probed = self.write("util.ft", "fn unrelated() void {}\n")
+        self.write("util/helper.ft", "fn help() void {}\n")
+        self.entry.write_text("import util.helper;\nfn main() i32 { return 0; }\n")
+        self.assertEqual(self.invoke().returncode, 1)
+        document = self.evidence()
+        self.assertNotIn("util", [row["module"] for row in document["files"]])
+        self.assertIn("util.helper", [row["module"] for row in document["files"]])
+        alias = self.root / "probe-alias.ft"
+        alias.symlink_to(probed)
+        for selected in (probed, alias):
+            with self.subTest(path=selected.name):
+                self.report = selected
+                self.assertEqual(self.invoke("--json").returncode, 2)
+                self.assertEqual(self.result.stdout, b"")
+                self.assertEqual(probed.read_bytes(), b"fn unrelated() void {}\n")
+                self.assertFalse(list(self.root.rglob("*.tmp.*")))
+
+    def test_failed_import_probe_preserves_its_source(self):
+        probed = self.write("util.ft", "fn malformed( void {}\n")
+        self.write("util/helper.ft", "fn help() void {}\n")
+        self.entry.write_text("import util.helper;\nfn main() i32 { return 0; }\n")
+        self.report = probed
+        self.assertEqual(self.invoke("--json").returncode, 2)
+        self.assertEqual(self.result.stdout, b"")
+        self.assertEqual(probed.read_bytes(), b"fn malformed( void {}\n")
+
     def test_report_runtime_alias_is_rejected(self):
         self.report = self.standard / "rt.ft"
         self.assertEqual(self.invoke().returncode, 2)
@@ -462,6 +500,59 @@ class OwnershipDriverTest(unittest.TestCase):
         result = self.invoke("-S", "-o", str(directory / "new.ll"), check=False)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(list(directory.iterdir()), [])
+
+    def absent_name_comparison(self, output_name, report_name):
+        output = self.write(output_name, b"filesystem name probe\n")
+        selected = self.root / report_name
+        aliases = selected.exists()
+        if aliases:
+            self.assertTrue(selected.samefile(output))
+        output.unlink()
+        self.report = selected
+        result = self.invoke("-S", "-o", str(output), check=False)
+        self.assertEqual(result.returncode, 2 if aliases else 1, result.stderr)
+        self.assertFalse(output.exists())
+        self.assertFalse(list(self.root.rglob("*.tmp.*")))
+        if aliases:
+            self.assertFalse(selected.exists())
+        else:
+            self.evidence()
+            selected.unlink()
+
+    def test_absent_output_comparison_uses_native_case_rules(self):
+        self.absent_name_comparison("case-output.ll", "CASE-OUTPUT.ll")
+
+    def test_absent_output_comparison_uses_native_unicode_normalization(self):
+        self.absent_name_comparison("\u00e9-output.ll", "e\u0301-output.ll")
+
+    def test_absent_output_comparison_uses_native_unicode_case_rules(self):
+        self.absent_name_comparison("\u00e9-output.ll", "\u00c9-output.ll")
+
+    def test_absent_output_comparison_keeps_distinct_names(self):
+        self.absent_name_comparison("output.part.ll", "report.part.json")
+
+    def test_absent_trailing_dots_and_spaces_refuse_uncertain_comparison(self):
+        for output_name, report_name in (("out.ll.", "report.json"),
+                                         ("out.ll ", "report.json"),
+                                         ("out.ll", "report.json."),
+                                         ("out.ll", "report.json ")):
+            with self.subTest(output=output_name, report=report_name):
+                output = self.root / output_name
+                self.report = self.root / report_name
+                self.assertEqual(self.invoke("-S", "-o", str(output), check=False).returncode, 2)
+                self.assertFalse(output.exists())
+                self.assertFalse(self.report.exists())
+                self.assertFalse(list(self.root.rglob("*.tmp.*")))
+
+    def test_absent_probe_lookup_error_is_not_a_missing_alias(self):
+        maximum = os.pathconf(self.root, "PC_NAME_MAX")
+        output = self.root / ("o" * maximum)
+        output.write_bytes(b"valid output name\n")
+        output.unlink()
+        self.assertEqual(self.invoke("-S", "-o", str(output), check=False).returncode, 2)
+        self.assertFalse(output.exists())
+        self.assertFalse(self.report.exists())
+        self.assertFalse(list(self.root.rglob("*.tmp.*")))
 
     def test_report_empty_path_is_rejected(self):
         result = self.invoke("--ownership-report", "")

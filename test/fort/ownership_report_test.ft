@@ -7,6 +7,7 @@
 //| rendering ok
 /// Checks report outcomes and supplementary report-rendering boundary controls.
 import diag;
+import json;
 import ownership_api;
 import ownership_events;
 import ownership_limits;
@@ -114,6 +115,12 @@ fn graph_refusal_keeps_the_original_category_counts_and_location() void {
     assert(why.limit.category == ownership_api.limit_category.w);
     assert(why.limit.used == why.limit.bound);
     assert(why.source.line == row->source.line && why.source.col == row->source.col);
+    diag.sink mut diagnostics = diag.sink{};
+    defer diag.free(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(diag.count(&diagnostics) == 1);
+    assert(diag.record_at(&diagnostics, 0).msg ==
+        "ownership proof is incomplete (graph: work_limit; category W; used 65536; bound 65536)");
 }
 
 fn internal_verifier_failure_exits_two() void {
@@ -204,7 +211,97 @@ fn later_report_refusal_keeps_completed_solver_results() void {
     assert(row->liveness_solver == ownership_source.status.complete);
     assert(ownership_report.body_reason(row).present);
     assert(ownership_report.verdict(&e.source) == 1);
-    assert(diag.count(&diagnostics) >= 1);
+    assert(diag.count(&diagnostics) == 1);
+    assert(row->live.events.rendered == row->live.events.budget.bounds.v);
+    assert(row->live.events.terminal.present);
+    assert(row->live.events.terminal.limit.used == row->live.events.budget.bounds.v);
+    assert(row->live.events.terminal.limit.bound == row->live.events.budget.bounds.v);
+    assert(diag.record_at(&diagnostics, 0).msg ==
+        "ownership proof is incomplete (liveness: report_limit; category V; used 512; bound 512)");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    json.writer mut j = json.writer{};
+    json.json_init(&j, &out);
+    diag.write_json(&diagnostics, &j);
+    assert(str.find(strbuf.view(&out),
+        "liveness: report_limit; category V; used 512; bound 512") >= 0);
+    ownership_api.terminal_failure original = row->live.events.terminal;
+    diag.reset(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(diag.count(&diagnostics) == 1);
+    assert(row->live.events.rendered == row->live.events.budget.bounds.v);
+    assert(row->live.events.terminal.source.line == original.source.line);
+    assert(row->live.events.terminal.source.col == original.source.col);
+    assert(row->live.events.terminal.limit.used == original.limit.used);
+    assert(row->live.events.terminal.limit.bound == original.limit.bound);
+}
+
+fn minimum_report_bound_permits_its_last_normal_record() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn root() void {}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body mut* row = &e.source.bodies[0];
+    assert(row->live.events.budget.used.v == 0);
+    row->live.events.budget.bounds.v = 1;
+    diag.sink mut diagnostics = diag.sink{};
+    defer diag.free(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(diag.count(&diagnostics) == 1);
+    assert(row->live.events.budget.used.v == 1);
+    assert(row->live.events.rendered == 1);
+    assert(!row->live.events.terminal.present);
+    assert(str.find(diag.record_at(&diagnostics, 0).msg, "report_limit") < 0);
+    assert(row->liveness_solver == ownership_source.status.complete);
+}
+
+fn report_refusal_keeps_the_first_work_reason_and_stops_later_rows() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e, "fn first() void {}\nfn second() void {}\n"));
+    ownership_source.analyze(&e.source);
+    u64 mut i = 0;
+    while (i < e.source.bodies.len) {
+        ownership_source.body mut* row = &e.source.bodies[i];
+        ownership_api.operation_position op = ownership_api.operation_position{
+            .function = row->key};
+        row->live.first_refusal = ownership_api.incomplete(
+            ownership_api.incomplete_reason.work_limit, op, row->source);
+        row->live.first_refusal.terminal.limit = ownership_api.exhaustion{
+            .present = true, .category = ownership_api.limit_category.w,
+            .scope = ownership_api.limit_scope.computation,
+            .used = row->live.events.budget.bounds.w, .bound = row->live.events.budget.bounds.w,
+            .operation = op, .source = row->source};
+        row->live.events.budget.used.w = row->live.events.budget.bounds.w;
+        row->live.events.budget.bounds.v = 1;
+        i += 1;
+    }
+    ownership_source.body mut* first = &e.source.bodies[0];
+    ownership_source.body* second = &e.source.bodies[1];
+    diag.sink mut diagnostics = diag.sink{};
+    defer diag.free(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(diag.count(&diagnostics) == 2);
+    assert(str.find(diag.record_at(&diagnostics, 0).msg, "report_limit") < 0);
+    assert(diag.record_at(&diagnostics, 1).msg ==
+        "ownership proof is incomplete (liveness: report_limit; category V; used 1; bound 1)");
+    assert(first->live.events.budget.used.v == 1 && first->live.events.rendered == 1);
+    assert(first->live.events.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(first->live.events.terminal.source.line == first->source.line);
+    assert(first->live.first_refusal.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(first->live.first_refusal.terminal.limit.category == ownership_api.limit_category.w);
+    assert(second->live.events.budget.used.v == 0 && second->live.events.rendered == 0);
+    assert(!second->live.events.terminal.present);
+    assert(first->liveness_solver == ownership_source.status.complete);
+    assert(second->liveness_solver == ownership_source.status.complete);
+    diag.reset(&diagnostics);
+    ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
+    assert(diag.count(&diagnostics) == 1);
+    assert(first->live.first_refusal.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(first->live.events.terminal.source.line == first->source.line);
+    assert(first->live.events.rendered == 1 && second->live.events.rendered == 0);
 }
 
 fn main() i32 {
@@ -222,6 +319,8 @@ fn main() i32 {
     println("outcomes ok");
     rendered_diagnostic_charges_the_existing_service_ledger();
     later_report_refusal_keeps_completed_solver_results();
+    minimum_report_bound_permits_its_last_normal_record();
+    report_refusal_keeps_the_first_work_reason_and_stops_later_rows();
     println("rendering ok");
     return 0;
 }
