@@ -42,11 +42,12 @@ typedef struct {
     uint64_t ntoks;
     uint64_t pos;
     ast_arena_t* arena;
-    uint32_t depth; // open nested constructs
-    uint32_t spec;  // running speculative parses; no diagnostic while > 0
-    bool failed;    // unwinding the construct a syntax error hit
-    loc_t last;     // where the last reported error started, for the dedupe
-    sb_t msg;       // the message under construction
+    uint32_t depth;    // open nested constructs
+    uint32_t spec;     // running speculative parses; no diagnostic while > 0
+    bool failed;       // unwinding the construct a syntax error hit
+    uint64_t fail_pos; // the cursor at the first error of the failed construct
+    loc_t last;        // where the last reported error started, for the dedupe
+    sb_t msg;          // the message under construction
 } parser_t;
 
 // The state a speculative parse restores when it rewinds.
@@ -146,12 +147,17 @@ static bool same_start(loc_t a, loc_t b) {
 // The parser drops a repeated error at the same start position.
 // It also stops after the shared DIAG_MAX_PER_FILE budget is spent.
 // Parsing continues after that limit. A speculative parse reports nothing.
+// The first error of a construct records the cursor. A speculation compares
+// how far two readings of one statement get.
 static void report(parser_t* p, loc_t loc, const char* text) {
     const uint64_t reported = diag_file_count();
     if (p->spec == 0 && !p->failed && reported < DIAG_MAX_PER_FILE &&
         !(reported > 0 && same_start(loc, p->last))) {
         diag_error(loc, text);
         p->last = loc;
+    }
+    if (!p->failed) {
+        p->fail_pos = p->pos;
     }
     p->failed = true;
 }
@@ -355,11 +361,11 @@ static bool prim_of_token(tok_kind_t k, prim_kind_t* out) {
 }
 
 // Whether `k` can open a base_type: a primitive, `string`, `void`, `fn` or a
-// qualified name.
+// qualified name or grouped type.
 static bool starts_base_type(tok_kind_t k) {
     prim_kind_t prim = PRIM_VOID;
     return prim_of_token(k, &prim) || k == TOK_KW_STRING || k == TOK_KW_VOID || k == TOK_KW_FN ||
-           k == TOK_IDENT;
+           k == TOK_IDENT || k == TOK_LPAREN;
 }
 
 // Nothing precedes the base type: every `mut` and `own` follows the type
@@ -464,8 +470,9 @@ static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc) {
     return finish(p, n);
 }
 
-// return_type = type | "void" | "noreturn"; `void` and `noreturn` are base
-// types of their own.
+// return_type = type | "void" | "noreturn" | "(" return_type ")"; `void` and
+// `noreturn` are base types of their own. A group passes the return position
+// to the type inside it, so `(void)` and `(noreturn)` are return types too.
 static ast_node_t* parse_return_type(parser_t* p) {
     return parse_type(p, true);
 }
@@ -480,6 +487,14 @@ static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn) {
         return finish(p, n);
     }
     switch (kind(p)) {
+    case TOK_LPAREN: {
+        bump(p);
+        ast_node_t* inner = parse_type(p, allow_noreturn);
+        if (inner == NULL || !expect(p, TOK_RPAREN, "')'")) {
+            return NULL;
+        }
+        return inner;
+    }
     case TOK_KW_STRING:
         bump(p);
         return finish(p, node_at(p, AST_TYPE_STRING, loc));
@@ -516,19 +531,81 @@ static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn) {
     }
 }
 
-// An `own` marks a reference, so after a base type it is legal only on
-// `string`, the reference with no suffix.
+// Returns the storage position inside a grouped type.
+static const ast_node_t* type_position(const ast_node_t* base) {
+    const ast_node_t* pos = base;
+    while (pos->kind == AST_TYPE) {
+        if (ast_len(pos) != 0) {
+            return ast_child(pos, ast_len(pos) - 1);
+        }
+        if (pos->a->kind != AST_TYPE) {
+            return pos;
+        }
+        pos = pos->a;
+    }
+    return pos;
+}
+
+static uint32_t type_position_flags(const ast_node_t* base) {
+    uint32_t flags = 0;
+    const ast_node_t* pos = base;
+    while (pos->kind == AST_TYPE) {
+        if (ast_len(pos) != 0) {
+            return flags | ast_child(pos, ast_len(pos) - 1)->flags;
+        }
+        flags |= pos->flags;
+        pos = pos->a;
+    }
+    return flags;
+}
+
 static const char* base_own_error(const ast_node_t* base) {
     if (base->kind == AST_TYPE_STRING) {
         return NULL;
     }
+    if (base->kind == AST_TYPE) {
+        const ast_node_t* pos = type_position(base);
+        if ((pos->kind == AST_TYPE_SUFFIX && (suffix_kind_t)pos->op != SUFFIX_ARRAY) ||
+            (pos->kind == AST_TYPE && pos->a->kind == AST_TYPE_STRING)) {
+            return NULL;
+        }
+    }
     return "an own marks a reference: write it after a '*' or an '@', or on a string";
+}
+
+// Groups do not reset the suffix limit of a complete written type.
+static uint64_t type_suffix_count(const ast_node_t* t) {
+    uint64_t count = 0;
+    const ast_node_t* cur = t;
+    while (cur->kind == AST_TYPE) {
+        count += ast_len(cur);
+        cur = cur->a;
+    }
+    return count;
+}
+
+// Parentheses preserve the outer storage position and its existing markers.
+static bool check_group_markers(parser_t* p, const ast_node_t* base) {
+    const uint32_t flags = type_position_flags(base);
+    if (at(p, TOK_KW_MUT) && (flags & AST_FLAG_MUT) != 0) {
+        error_here(p, "a mut appears once in a type position");
+        return false;
+    }
+    if (at(p, TOK_KW_OWN) && (flags & AST_FLAG_OWN) != 0) {
+        error_here(p, "an own appears once in a type position");
+        return false;
+    }
+    if (at(p, TOK_KW_OWN) && (flags & AST_FLAG_MUT) != 0) {
+        error_here(p, "an own precedes the mut of its position: write 'node* own mut p'");
+        return false;
+    }
+    return true;
 }
 
 // Adds one suffix to `t` and counts it against the nesting limit, which covers
 // type suffixes.
 static bool push_suffix(parser_t* p, ast_node_t* t, ast_node_t* suffix) {
-    if (ast_len(t) >= PARSE_MAX_DEPTH) {
+    if (type_suffix_count(t) >= PARSE_MAX_DEPTH) {
         msg_begin(&p->msg);
         msg_str(&p->msg, "nesting deeper than ");
         msg_uint(&p->msg, PARSE_MAX_DEPTH);
@@ -607,35 +684,74 @@ static bool parse_array_suffixes(parser_t* p, ast_node_t* t, bool marked) {
 
 // The C bootstrap accepts at most one array or span level in one written type.
 // Its layout and code generation do not support a second aggregate level.
-static bool check_one_aggregate_level(parser_t* p, const ast_node_t* t) {
-    uint64_t arrays = 0;
-    uint64_t spans = 0;
-    uint64_t first_extra = 0;
+// The walk reads groups first and then each suffix in source order, so the
+// first level it meets is the inner one. `pointers` counts the `*` suffixes
+// between the first level and the second one.
+typedef struct {
+    uint64_t arrays;
+    uint64_t spans;
+    uint64_t pointers;
+    const ast_node_t* first;
+    const ast_node_t* second;
+} aggregate_levels_t;
+
+static void count_aggregate_levels(const ast_node_t* t, aggregate_levels_t* levels) {
+    if (t->a->kind == AST_TYPE) {
+        count_aggregate_levels(t->a, levels);
+    }
     for (uint64_t i = 0; i < ast_len(t); i++) {
         const ast_node_t* s = ast_child(t, i);
         if ((suffix_kind_t)s->op == SUFFIX_ARRAY) {
-            arrays++;
+            levels->arrays++;
         } else if ((suffix_kind_t)s->op == SUFFIX_SPAN) {
-            spans++;
+            levels->spans++;
         } else {
+            if (levels->first != NULL && levels->second == NULL) {
+                levels->pointers++;
+            }
             continue;
         }
-        if (arrays + spans == 2) {
-            first_extra = i;
+        if (levels->first == NULL) {
+            levels->first = s;
+        } else if (levels->second == NULL) {
+            levels->second = s;
         }
     }
-    if (arrays + spans < 2) {
+}
+
+// Names the second level as the outer aggregate of the first. A `*` between
+// them names the pointer: `(i32[4]*)[2]` is an array of pointers to arrays,
+// not a multi-dimensional array.
+static const char* aggregate_feature(const aggregate_levels_t* levels) {
+    const bool inner_span = (suffix_kind_t)levels->first->op == SUFFIX_SPAN;
+    const bool outer_span = (suffix_kind_t)levels->second->op == SUFFIX_SPAN;
+    if (levels->pointers > 0) {
+        if (outer_span) {
+            return inner_span ? "spans of pointers to spans" : "spans of pointers to arrays";
+        }
+        return inner_span ? "arrays of pointers to spans" : "arrays of pointers to arrays";
+    }
+    if (levels->arrays >= 2) {
+        return "multi-dimensional arrays";
+    }
+    if (inner_span && outer_span) {
+        return "spans of spans";
+    }
+    return outer_span ? "spans of arrays" : "arrays of spans";
+}
+
+static bool check_one_aggregate_level(parser_t* p, const ast_node_t* t) {
+    aggregate_levels_t levels;
+    levels.arrays = 0;
+    levels.spans = 0;
+    levels.pointers = 0;
+    levels.first = NULL;
+    levels.second = NULL;
+    count_aggregate_levels(t, &levels);
+    if (levels.second == NULL) {
         return true;
     }
-    const char* feature = "spans of spans";
-    if (arrays >= 2) {
-        feature = "multi-dimensional arrays";
-    } else if (spans == 1 && (suffix_kind_t)ast_child(t, first_extra)->op == SUFFIX_SPAN) {
-        feature = "spans of arrays";
-    } else if (spans == 1) {
-        feature = "arrays of spans";
-    }
-    return !unsupported(p, ast_child(t, first_extra)->loc, feature);
+    return !unsupported(p, levels.second->loc, aggregate_feature(&levels));
 }
 
 // Parses the suffixes of a type after its base type.
@@ -643,10 +759,14 @@ static ast_node_t* parse_type_after_base(parser_t* p, loc_t loc, ast_node_t* bas
     ast_node_t* t = node_at(p, AST_TYPE, loc);
     t->a = base;
     markers_t m;
-    if (!parse_markers(p, &m, base_own_error(base))) {
+    if (!check_group_markers(p, base) || !parse_markers(p, &m, base_own_error(base))) {
         return NULL;
     }
     t->flags = m.flags;
+    if ((type_position_flags(base) & AST_FLAG_MUT) != 0) {
+        m.flags |= AST_FLAG_MUT;
+        m.mut_loc = type_position(base)->loc;
+    }
     if (!check_mut_before_array(p, &m)) {
         return NULL;
     }
@@ -660,7 +780,9 @@ static ast_node_t* parse_type_after_base(parser_t* p, loc_t loc, ast_node_t* bas
         return NULL;
     }
     if (at(p, TOK_LBRACKET)) {
-        error_here(p, "no array suffix follows a reference suffix: wrap the array in a struct");
+        error_here(p,
+                   "no array suffix follows a reference suffix: group the inner type or use a "
+                   "struct");
         return NULL;
     }
     if (!check_one_aggregate_level(p, t)) {
@@ -708,6 +830,9 @@ static ast_node_t* parse_array_type(parser_t* p) {
                 error_expected(p, "'[' of an array type");
             }
             t = NULL;
+        } else if ((type_position_flags(base) & AST_FLAG_MUT) != 0) {
+            error_at(p, base->loc, "mark the array after its length");
+            t = NULL;
         } else if (!parse_array_suffixes(p, t, false) || !check_one_aggregate_level(p, t)) {
             t = NULL;
         }
@@ -748,6 +873,30 @@ static bool check_alloc_mut(parser_t* p, const markers_t* m) {
     return true;
 }
 
+// Groups do not permit spans inside an allocated element type. Inside `new(...)`, an own follows
+// only a `*`, at every group depth. Thus, `(string) own`, `(string own)` and `(i32*) own` do not
+// parse there, while `(i32* own)` does (D10.2).
+static bool check_alloc_group(parser_t* p, const ast_node_t* base) {
+    if (base->kind != AST_TYPE) {
+        return true;
+    }
+    if (ast_is_own(base)) {
+        error_at(p, base->loc, ALLOC_OWN_ERROR);
+        return false;
+    }
+    if (!check_alloc_group(p, base->a)) {
+        return false;
+    }
+    for (uint64_t i = 0; i < ast_len(base); i++) {
+        const ast_node_t* s = ast_child(base, i);
+        if ((suffix_kind_t)s->op == SUFFIX_SPAN) {
+            error_at(p, s->loc, "a span suffix does not parse inside new: write new(T, n)");
+            return false;
+        }
+    }
+    return true;
+}
+
 // alloc_type = base_type [ "mut" ] { "*" [ "own" ] [ "mut" ] }
 // { "[" const_expr "]" }, whose last `mut` position is empty.
 static ast_node_t* parse_alloc_type(parser_t* p) {
@@ -760,15 +909,18 @@ static ast_node_t* parse_alloc_type(parser_t* p) {
     ast_node_t* t = NULL;
     const loc_t loc = here(p);
     ast_node_t* base = parse_base_type(p, false);
-    if (base != NULL) {
+    if (base != NULL && check_alloc_group(p, base)) {
         t = node_at(p, AST_TYPE, loc);
         t->a = base;
         markers_t m;
-        if (!parse_markers(p, &m, ALLOC_OWN_ERROR) || !check_mut_before_array(p, &m) ||
-            !check_alloc_mut(p, &m)) {
+        if (!check_group_markers(p, base) || !parse_markers(p, &m, ALLOC_OWN_ERROR)) {
             t = NULL;
         } else {
             t->flags = m.flags;
+            m.flags |= type_position_flags(base) & AST_FLAG_MUT;
+            if (!check_mut_before_array(p, &m) || !check_alloc_mut(p, &m)) {
+                t = NULL;
+            }
         }
         while (t != NULL && at(p, TOK_STAR)) {
             ast_node_t* s = node_at(p, AST_TYPE_SUFFIX, here(p));
@@ -1019,6 +1171,9 @@ static ast_node_t* parse_primary(parser_t* p) {
         bump(p);
         return finish(p, node_at(p, AST_NULL, loc));
     case TOK_LPAREN:
+        if (speculate_array_literal(p)) {
+            return parse_array_literal(p);
+        }
         return parse_paren_expr(p);
     case TOK_KW_CAST:
         return parse_cast(p);
@@ -1620,6 +1775,23 @@ static ast_node_t* parse_do(parser_t* p) {
     return finish(p, n);
 }
 
+// Whether the expression reading of a statement fails before `type_end`. A
+// failed speculative type parse stopped at `type_end`. When it read further
+// than the expression reading, the declaration branch reports the type error,
+// as a module declaration does: `(i32 mut)[2] a` reports the marker.
+static bool head_fails_before(parser_t* p, uint64_t type_end) {
+    // No reading fails before the first token of the statement. A type reading
+    // that failed there leaves nothing to compare, so `*p = x;` is read once.
+    if (type_end <= p->pos) {
+        return false;
+    }
+    const spec_state_t s = spec_begin(p);
+    (void)parse_simple_head(p);
+    const bool earlier = p->failed && p->fail_pos < type_end;
+    spec_rewind(p, s);
+    return earlier;
+}
+
 // After `for (`, a speculative `type identifier` distinguishes the three loop forms.
 static int speculate_for_form(parser_t* p) {
     if (at(p, TOK_SEMI)) {
@@ -1628,6 +1800,8 @@ static int speculate_for_form(parser_t* p) {
     const spec_state_t s = spec_begin(p);
     int form = FOR_PLAIN;
     const ast_node_t* t = parse_type(p, false);
+    const bool failed = p->failed;
+    const uint64_t type_end = p->fail_pos;
     if (t != NULL && !p->failed && at(p, TOK_IDENT)) {
         bump(p);
         if (at(p, TOK_COLON)) {
@@ -1641,6 +1815,9 @@ static int speculate_for_form(parser_t* p) {
         form = FOR_DECL;
     }
     spec_rewind(p, s);
+    if (failed && form == FOR_PLAIN && head_fails_before(p, type_end)) {
+        form = FOR_DECL;
+    }
     return form;
 }
 
@@ -1835,11 +2012,15 @@ static bool starts_declaration(const parser_t* p) {
 static bool speculate_declaration(parser_t* p) {
     const spec_state_t s = spec_begin(p);
     const ast_node_t* t = parse_type(p, false);
+    const bool failed = p->failed;
+    const uint64_t type_end = p->fail_pos;
     // A type parse that died on a marker leaves no expression reading of the
     // statement, so the declaration branch wins and reports the marker.
-    const bool decl =
-        (t != NULL && !p->failed && at(p, TOK_IDENT)) || (p->failed && read_marker(p, s.pos));
+    bool decl = (t != NULL && !failed && at(p, TOK_IDENT)) || (failed && read_marker(p, s.pos));
     spec_rewind(p, s);
+    if (failed && !decl) {
+        decl = head_fails_before(p, type_end);
+    }
     return decl;
 }
 
@@ -2276,6 +2457,7 @@ ast_node_t* parse_module(const char* file,
     p.depth = 0;
     p.spec = 0;
     p.failed = false;
+    p.fail_pos = 0;
     p.last = loc_make(file, 0, 0);
     sb_init(&p.msg);
 

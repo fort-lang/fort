@@ -433,10 +433,18 @@ static bool is_noreturn(const ast_node_t* t) {
     if (t == NULL) {
         return false;
     }
-    if (t->kind == AST_TYPE) {
-        return t->a != NULL && t->a->kind == AST_TYPE_NORETURN;
+    while (t->kind == AST_TYPE && ast_len(t) == 0 && t->a != NULL) {
+        t = t->a;
     }
     return t->kind == AST_TYPE_NORETURN;
+}
+
+// Whether a group holds a bare `void`, through any parentheses with no suffix.
+static bool is_void_group(const ast_node_t* t) {
+    while (t->kind == AST_TYPE && ast_len(t) == 0 && t->a != NULL) {
+        t = t->a;
+    }
+    return t->kind == AST_TYPE_VOID;
 }
 
 static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos, bool in_storage);
@@ -523,6 +531,16 @@ static bool suffixes_store_base(const ast_node_t* node) {
     return true;
 }
 
+static uint64_t written_suffix_count(const ast_node_t* node) {
+    uint64_t count = 0;
+    const ast_node_t* cur = node;
+    while (cur->kind == AST_TYPE) {
+        count += ast_len(cur);
+        cur = cur->a;
+    }
+    return count;
+}
+
 // Calls `check_type` with whether this type stores a base value. A function
 // type does not store its result or parameters. Their suffixes do not change
 // this answer.
@@ -531,15 +549,34 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
     ast_node_t* base = wrapped ? node->a : node;
     const bool allow_noreturn = pos == TYPE_POS_RETURN;
     const bool stores_base = in_storage && suffixes_store_base(node);
-    const type_t* b = base_type(ck, base, allow_noreturn, stores_base);
-    if (base->kind == AST_TYPE_NORETURN && wrapped && ast_len(node) > 0) {
+    check_type_t grouped = type_result(type_error(&ck->types), false);
+    const bool has_group = base->kind == AST_TYPE;
+    const type_t* b = NULL;
+    if (has_group) {
+        const bool return_group = is_noreturn(base) || is_void_group(base);
+        grouped = check_type_at(ck,
+                                base,
+                                return_group && allow_noreturn ? TYPE_POS_RETURN : TYPE_POS_BINDING,
+                                stores_base);
+        b = grouped.type;
+        // A group of a bare `void` is a complete return type and nothing else, as `void` needs its
+        // `*` inside the same group: `(void)*` is an error and `(void*)` the opaque pointer
+        // (D3.11).
+        if (!check_poisoned(b) && is_void_group(base) && (!allow_noreturn || ast_len(node) > 0)) {
+            check_error(ck, base->loc, "'void' is only a return type or the base of 'void*'");
+            b = type_error(&ck->types);
+        }
+    } else {
+        b = base_type(ck, base, allow_noreturn, stores_base);
+    }
+    if (is_noreturn(base) && wrapped && ast_len(node) > 0) {
         check_error(ck, node->loc, "'noreturn' is a return type");
         b = type_error(&ck->types);
     }
     type_suffix_t suffixes[CHECK_MAX_SUFFIXES];
     const uint64_t count = wrapped ? ast_len(node) : 0;
     bool ok = !check_poisoned(b);
-    if (count > CHECK_MAX_SUFFIXES) {
+    if (ok && written_suffix_count(node) > CHECK_MAX_SUFFIXES) {
         check_error(ck, node->loc, "too many type suffixes");
         ok = false;
     }
@@ -558,7 +595,27 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
         return type_result(node->type, false);
     }
     bool base_own = wrapped && ast_is_own(node);
-    bool base_mut = wrapped && ast_is_mut(node);
+    bool base_mut = (wrapped && ast_is_mut(node)) || grouped.mut0;
+    if (has_group && base_own && type_is_reference(b)) {
+        // The marker owns the grouped reference, rather than a new storage level.
+        switch (b->kind) {
+        case TYPE_PTR:
+            b = type_ptr(&ck->types, b->elem, true, b->mut);
+            break;
+        case TYPE_VOIDPTR:
+            b = type_voidptr(&ck->types, true, b->mut);
+            break;
+        case TYPE_SPAN:
+            b = type_span(&ck->types, b->elem, true, b->mut);
+            break;
+        case TYPE_STRING:
+            b = type_string(&ck->types, true);
+            break;
+        default:
+            fatal_internal("check: not a grouped reference");
+        }
+        base_own = false;
+    }
     if (pos == TYPE_POS_ALLOC) {
         // `new` fills only the outermost position because it allocates that
         // storage. Each inner position describes storage that `new` did not

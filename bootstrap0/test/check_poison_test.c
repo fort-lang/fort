@@ -98,10 +98,60 @@ TEST(a_poisoned_context_of_its_own_stays_silent, {
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
+// A group of a bare `void` is a complete return type and nothing else. `void` needs its `*` inside
+// the same group, so `(void)*` is an error and `(void*)` is the opaque pointer (D3.11). The error
+// is reported once, at the innermost group that holds the `void`.
+TEST(a_group_of_a_bare_void_is_only_a_return_type, {
+    TEST_ASSERT_TRUE(check_src("fn f() (void) { }\n"
+                               "fn g() ((void)) { }\n"
+                               "fn main() i32 {\n"
+                               "    fn () (void) h = f;\n"
+                               "    h();\n"
+                               "    g();\n"
+                               "    (void*) p = null;\n"
+                               "    (void mut*) q = null;\n"
+                               "    ((void*)) mut r = p;\n"
+                               "    r = cast(q, (void*));\n"
+                               "    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_body("(void)* p = null;"));
+    TEST_ASSERT_NONNULL(
+        strstr(diags(), "main.ft:2:2: error: 'void' is only a return type or the base of 'void*'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("((void))* p = null;"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:2:3: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("(void mut)* p = null;"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:2:2: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("u64 n = sizeof((void)*);"));
+    TEST_ASSERT_TRUE(said("'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("void mut* q = null;\n    void* p = cast(q, (void)*);"));
+    TEST_ASSERT_TRUE(said("'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("fn f() (void)* {\n    panic(\"x\");\n}\nfn main() i32 {\n"
+                                "    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:9: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("fn f() (void) mut { }\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:8: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("fn f((void)* p) void { }\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:7: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("struct s { (void)* f; }\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:13: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("(void) v = {};"));
+    TEST_ASSERT_TRUE(said("'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
     TEST_INIT("check_poison", argc, argv);
+    TEST_RUN(a_group_of_a_bare_void_is_only_a_return_type);
     TEST_RUN(a_context_that_meets_a_poisoned_constant_says_nothing_more);
     TEST_RUN(every_position_that_drops_its_operand_reports_once);
     TEST_RUN(the_other_end_of_the_range_is_silenced_as_well);

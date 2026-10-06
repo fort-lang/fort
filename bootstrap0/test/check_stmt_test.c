@@ -538,6 +538,26 @@ TEST(a_body_with_an_error_node_never_reports_missing_return, {
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
+// A grouped `noreturn` is the `noreturn` of a return type through any number of parentheses
+// (D8.5). A call to such a function terminates the statement, and its function type is the
+// ungrouped one.
+TEST(a_grouped_noreturn_is_a_noreturn_return_type, {
+    TEST_ASSERT_TRUE(check_src("fn stop() ((noreturn)) {\n    panic(\"x\");\n}\n"
+                               "fn g() i32 {\n    stop();\n}\n"
+                               "fn main() i32 {\n"
+                               "    fn () noreturn f = stop;\n"
+                               "    (fn () (noreturn)) h = f;\n"
+                               "    return g();\n}\n"));
+    TEST_ASSERT_FALSE(check_src("fn stop() (noreturn) {\n    return;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("'return' in a noreturn function"));
+    TEST_ASSERT_FALSE(check_src("fn stop() (noreturn) { }\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("a noreturn function must end in a terminating statement"));
+    TEST_ASSERT_FALSE(check_src("fn stop() (noreturn) {\n    panic(\"x\");\n}\n"
+                                "fn main() i32 {\n    fn () void v = stop;\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("the initializer expects fn () void, not fn () noreturn"));
+})
+
 // NOLINTEND(readability-magic-numbers)
 
 // The runner is one TEST_RUN for each test of the suite and nothing else.
@@ -547,6 +567,7 @@ TEST(a_body_with_an_error_node_never_reports_missing_return, {
 // NOLINTNEXTLINE(readability-function-size)
 int main(int argc, char** argv) {
     TEST_INIT("check_stmt", argc, argv);
+    TEST_RUN(a_grouped_noreturn_is_a_noreturn_return_type);
     TEST_RUN(a_local_may_not_reuse_a_parameter_name);
     TEST_RUN(a_local_may_not_reuse_an_enclosing_local_name);
     TEST_RUN(sibling_scopes_may_reuse_a_name);

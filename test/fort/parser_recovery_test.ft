@@ -299,6 +299,69 @@ fn deep_blocks_count_towards_the_same_limit() void {
     assert(parse_env.diag_at(&e, 0) == "2:257: error: nesting deeper than 256");
 }
 
+fn grouped_types_count_towards_the_limit() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    u64 mut depth = 255;
+    while (depth <= 256) {
+        strbuf.clear(&src);
+        u64 mut i = 0;
+        while (i < depth) {
+            strbuf.push(&src, '(');
+            i += 1;
+        }
+        strbuf.append(&src, "i32");
+        i = 0;
+        while (i < depth) {
+            strbuf.push(&src, ')');
+            i += 1;
+        }
+        strbuf.append(&src, " x = 0;\n");
+        parse_env.parse(&e, strbuf.view(&src));
+        if (depth == 255) {
+            assert(parse_env.errors(&e) == 0);
+        } else {
+            assert(parse_env.errors(&e) == 1);
+            assert(parse_env.diag_at(&e, 0) == "1:257: error: nesting deeper than 256");
+        }
+        depth += 1;
+    }
+}
+
+fn groups_do_not_reset_the_suffix_limit() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    u64 mut outer = 128;
+    while (outer <= 129) {
+        strbuf.clear(&src);
+        strbuf.append(&src, "(i32");
+        u64 mut i = 0;
+        while (i < 128) {
+            strbuf.push(&src, '*');
+            i += 1;
+        }
+        strbuf.push(&src, ')');
+        i = 0;
+        while (i < outer) {
+            strbuf.push(&src, '*');
+            i += 1;
+        }
+        strbuf.append(&src, " p = null;\n");
+        parse_env.parse(&e, strbuf.view(&src));
+        if (outer == 128) {
+            assert(parse_env.errors(&e) == 0);
+        } else {
+            assert(parse_env.errors(&e) == 1);
+            assert(parse_env.diag_at(&e, 0) == "1:262: error: nesting deeper than 256");
+        }
+        outer += 1;
+    }
+}
+
 fn main() i32 {
     a_skip_stops_before_the_next_statement_keyword();
     a_skip_stops_before_the_next_case_keyword();
@@ -310,6 +373,8 @@ fn main() i32 {
     a_construct_that_stands_at_the_boundary_keeps_its_node();
     a_file_that_is_nothing_but_errors_still_yields_a_module();
     a_recovery_always_consumes_a_token();
+    groups_do_not_reset_the_suffix_limit();
+    grouped_types_count_towards_the_limit();
     nesting_deeper_than_the_limit_is_an_error();
     configuration_parentheses_count_towards_the_limit();
     the_suffixes_of_one_type_have_their_own_arm_of_the_limit();

@@ -111,10 +111,8 @@ TEST(function_types_read_as_a_base_type, {
                        "(type (fn-type (type (noreturn)) (type (string))))");
 })
 
-// Suffixes after a function type apply to the function type. A function type ends at its return
-// type. Every suffix and every marker written after it belongs to that return type and the function
-// type carries none of its own. To suffix or to mark one, wrap it in a struct, the escape the
-// grammar already prescribes for `i32[4]*[2]`.
+// Suffixes after an unparenthesized function type belong to its return type.
+// Parentheses permit suffixes and markers on the complete function type.
 TEST(a_suffix_after_a_function_type_belongs_to_its_return_type, {
     TEST_ASSERT_EQ_STR(dump_type("fn (i32) i32[4]"),
                        "(type (fn-type (type (prim i32) (array (int 4))) (type (prim i32))))");
@@ -124,6 +122,201 @@ TEST(a_suffix_after_a_function_type_belongs_to_its_return_type, {
                        "(type (fn-type (type (prim i32) mut) (type (prim i32))))");
     TEST_ASSERT_EQ_STR(dump_type("fn (node mut*) void"),
                        "(type (fn-type (type (void)) (type (name node) mut (ptr))))");
+})
+
+// Groups keep the complete inner type and start a new suffix sequence.
+TEST(parentheses_group_complete_types, {
+    TEST_ASSERT_EQ_STR(dump_type("(fn (i32) i32)[2]"),
+                       "(type (type (fn-type (type (prim i32)) (type (prim i32))))"
+                       " (array (int 2)))");
+    TEST_ASSERT_EQ_STR(dump_type("((fn (i32) i32)) mut"),
+                       "(type (type (type (fn-type (type (prim i32)) (type (prim i32))))) mut)");
+    TEST_ASSERT_EQ_STR(dump_type("(node*) own mut@"),
+                       "(type (type (name node) (ptr)) own mut (span))");
+    TEST_ASSERT_EQ_STR(dump_type("fn () (fn (i32) i32)[2]"),
+                       "(type (fn-type (type (type (fn-type (type (prim i32))"
+                       " (type (prim i32)))) (array (int 2)))))");
+    TEST_ASSERT_NONNULL(parse_text("fn f() void { (pkg.node) n = {}; (n).call(); (n) = other; }"));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+})
+
+TEST(groups_preserve_marker_restrictions, {
+    TEST_ASSERT_NONNULL(
+        strstr(type_fails("((i32) mut) mut"), "a mut appears once in a type position"));
+    TEST_ASSERT_NONNULL(
+        strstr(type_fails("((node*) own) own"), "an own appears once in a type position"));
+    TEST_ASSERT_NONNULL(
+        strstr(type_fails("(node* mut) own"), "an own precedes the mut of its position"));
+    TEST_ASSERT_NONNULL(
+        strstr(type_fails("(i32 mut)[2]"), "the elements share the array's storage"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("(fn () void) own"), "an own marks a reference"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("(i32[2]) own"), "an own marks a reference"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("(i32[2])[3]"), "multi-dimensional arrays"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("(u8@)@"), "spans of spans"));
+    TEST_ASSERT_NONNULL(strstr(expr_fails("new((i32 mut))"), "remove the outermost 'mut'"));
+    TEST_ASSERT_NONNULL(
+        strstr(expr_fails("new((u8@))"), "a span suffix does not parse inside new"));
+    TEST_ASSERT_NONNULL(strstr(expr_fails("new((string own))"),
+                               "inside new an own follows a '*' of the element type"));
+})
+
+// The position after `)` is the outermost position inside the group, through any number of
+// parentheses with no suffix. A marker there meets the rules of that position.
+TEST(markers_after_nested_parentheses_meet_the_inner_position, {
+    TEST_ASSERT_EQ_STR(dump_type("((node*)) own"), "(type (type (type (name node) (ptr))) own)");
+    TEST_ASSERT_EQ_STR(dump_type("((string)) own"), "(type (type (type (string))) own)");
+    TEST_ASSERT_EQ_STR(dump_type("((u8@)) own mut"),
+                       "(type (type (type (prim u8) (span))) own mut)");
+    TEST_ASSERT_NONNULL(strstr(type_fails("((i32[2])) own"), "an own marks a reference"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("((i32)) own"), "an own marks a reference"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("((fn () void)) own"), "an own marks a reference"));
+    TEST_ASSERT_EQ_STR(type_fails("(((i32) mut)) mut"),
+                       "t.ft:1:15: error: a mut appears once in a type position\n");
+    TEST_ASSERT_EQ_STR(type_fails("(((node*) own)) own"),
+                       "t.ft:1:17: error: an own appears once in a type position\n");
+    TEST_ASSERT_EQ_STR(type_fails("((node* mut)) own"),
+                       "t.ft:1:15: error: an own precedes the mut of its position: write 'node* "
+                       "own mut p'\n");
+    TEST_ASSERT_NONNULL(strstr(type_fails("((i32) mut)[2]"), "the elements share the array's"));
+    TEST_ASSERT_EQ_STR(dump_type("((i32) mut)*"), "(type (type (type (prim i32)) mut) (ptr))");
+})
+
+// An array literal and an allocated type keep the marker rules through a group. The element of an
+// array literal carries no marker, and `new` fills the outermost position itself.
+TEST(an_array_literal_and_new_keep_the_marker_rules_through_a_group, {
+    // A marked element type is no array literal type, so the expression reading reports, as it
+    // does for the flat `i32 mut[2]{1, 2}`.
+    TEST_ASSERT_EQ_STR(expr_fails("i32 mut[2]{1, 2}"),
+                       "t.ft:1:9: error: expected an expression, found 'i32'\n");
+    TEST_ASSERT_EQ_STR(expr_fails("(i32 mut)[2]{1, 2}"),
+                       "t.ft:1:10: error: expected an expression, found 'i32'\n");
+    TEST_ASSERT_EQ_STR(expr_fails("((i32) mut)[2]{1, 2}"),
+                       "t.ft:1:11: error: expected an expression, found 'i32'\n");
+    TEST_ASSERT_EQ_STR(dump_expr("(fn (i32) i32)[2]{f, g}"),
+                       "(array-lit (type (type (fn-type (type (prim i32)) (type (prim i32))))"
+                       " (array (int 2))) (init (ident f) (ident g)))");
+    TEST_ASSERT_NONNULL(
+        strstr(expr_fails("new(((i32) mut) mut)"), "a mut appears once in a type position"));
+    TEST_ASSERT_NONNULL(strstr(expr_fails("new((i32 mut)[2])"), "the elements share the array's"));
+    TEST_ASSERT_EQ_STR(dump_expr("new((i32 mut)*)"),
+                       "(new (type (type (prim i32) mut) (ptr)) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("new((i32 mut)*, 2)"),
+                       "(new (type (type (prim i32) mut) (ptr)) (int 2))");
+    TEST_ASSERT_NONNULL(strstr(expr_fails("(i32)[2]"), "expected an expression, found 'i32'"));
+})
+
+// Inside new(...) an own follows only a `*`, at every group depth (D10.2, D17.2). An own after a
+// `)` does not parse there, even where the group holds a pointer.
+TEST(inside_new_an_own_follows_only_a_star_at_every_group_depth, {
+    TEST_ASSERT_EQ_STR(expr_fails("new((i32*) own)"),
+                       "t.ft:1:20: error: inside new an own follows a '*' of the element type\n");
+    TEST_ASSERT_EQ_STR(expr_fails("new(((i32*) own))"),
+                       "t.ft:1:14: error: inside new an own follows a '*' of the element type\n");
+    TEST_ASSERT_EQ_STR(expr_fails("new(((i32*) own)*)"),
+                       "t.ft:1:14: error: inside new an own follows a '*' of the element type\n");
+    TEST_ASSERT_EQ_STR(expr_fails("new((string) own)"),
+                       "t.ft:1:22: error: inside new an own follows a '*' of the element type\n");
+    TEST_ASSERT_EQ_STR(expr_fails("new(((string) own))"),
+                       "t.ft:1:14: error: inside new an own follows a '*' of the element type\n");
+    TEST_ASSERT_EQ_STR(expr_fails("new((void*) own, 2)"),
+                       "t.ft:1:21: error: inside new an own follows a '*' of the element type\n");
+    TEST_ASSERT_EQ_STR(
+        expr_fails("new(((u8@)*))"),
+        "t.ft:1:17: error: a span suffix does not parse inside new: write new(T, n)\n");
+    TEST_ASSERT_EQ_STR(dump_expr("new((i32* own))"),
+                       "(new (type (type (prim i32) (ptr own))) nil)");
+    TEST_ASSERT_EQ_STR(dump_expr("new((i32* own)*, 2)"),
+                       "(new (type (type (prim i32) (ptr own)) (ptr)) (int 2))");
+    TEST_ASSERT_EQ_STR(dump_expr("new(((i32* own)))"),
+                       "(new (type (type (type (prim i32) (ptr own)))) nil)");
+})
+
+TEST(invalid_type_groups_report_the_type_or_closing_parenthesis, {
+    TEST_ASSERT_NONNULL(strstr(type_fails("()"), "expected a type, found ')'"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("(i32"), "expected ')', found identifier"));
+    TEST_ASSERT_NONNULL(strstr(type_fails("(i32, i32)"), "expected ')', found ','"));
+})
+
+// A body statement that opens with `(` reads as a declaration when its type reading fails further
+// on than its expression reading. The declaration then reports the type error, as a module
+// declaration does. A loop initializer and a range-for element follow the same rule.
+TEST(a_group_error_in_a_body_reports_the_type, {
+    TEST_ASSERT_EQ_STR(stmt_fails("(i32 mut)[2] a = {};"),
+                       "t.ft:2:2: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("(i32* mut)[2] a = {};"),
+                       "t.ft:2:5: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("((i32 mut))[2] a = {};"),
+                       "t.ft:2:3: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("(i32, i32) x = 0;"),
+                       "t.ft:2:5: error: expected ')', found ','\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("(i32 x = 0;"),
+                       "t.ft:2:6: error: expected ')', found identifier 'x'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("(i32*)[2]*[3] a = {};"),
+                       "t.ft:2:11: error: no array suffix follows a reference suffix: group the "
+                       "inner type or use a struct\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("for ((i32 mut)[2] a = {};;) { }"),
+                       "t.ft:2:7: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("for ((i32, i32) a = {};;) { }"),
+                       "t.ft:2:10: error: expected ')', found ','\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("for ((i32 mut)[2] a : xs) { }"),
+                       "t.ft:2:7: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    // The rule holds without a group: the type reading of `node[4]*[2]` fails at its second `[`,
+    // after the expression reading fails at the `*`.
+    TEST_ASSERT_EQ_STR(stmt_fails("node[4]*[2] t = {};"),
+                       "t.ft:2:9: error: no array suffix follows a reference suffix: group the "
+                       "inner type or use a struct\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("for (node[4]*[2] t = {};;) { }"),
+                       "t.ft:2:14: error: no array suffix follows a reference suffix: group the "
+                       "inner type or use a struct\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("a*[x+] = 1;"),
+                       "t.ft:2:6: error: expected an expression, found ']'\n");
+})
+
+// Every statement position takes the same reading: a block, the body of `if`, `else` and `while`,
+// a `case` body and a `defer` block. The statement after a failed one still parses.
+TEST(a_group_error_in_each_statement_position_reports_the_type, {
+    const char* const mut_error = "error: the elements share the array's storage: write the mut "
+                                  "after the length, as 'i32[4] mut'\n";
+    TEST_ASSERT_NONNULL(
+        strstr(stmt_fails("if (x) {\n(i32 mut)[2] a = {};\n}"), "t.ft:3:2: error: the elements"));
+    TEST_ASSERT_NONNULL(strstr(stmt_fails("if (x) {\n(i32 mut)[2] a = {};\n}"), mut_error));
+    TEST_ASSERT_EQ_STR(stmt_fails("while (x) {\n(i32, i32) a = 0;\n}"),
+                       "t.ft:3:5: error: expected ')', found ','\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("switch (x) {\ncase 1:\n(i32 a = 0;\n}"),
+                       "t.ft:4:6: error: expected ')', found identifier 'a'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("if (x) {\n} else {\n((i32) mut) mut a = 0;\n}"),
+                       "t.ft:4:13: error: a mut appears once in a type position\n");
+    TEST_ASSERT_NONNULL(
+        strstr(stmt_fails("defer {\n(i32* mut)[2] a = {};\n}"), "t.ft:3:5: error: the elements"));
+    TEST_ASSERT_NONNULL(strstr(stmt_fails("{\n(i32 mut)[2] a = {};\ni32 b = 0;\n}"),
+                               "t.ft:3:2: error: the elements"));
+    TEST_ASSERT_EQ_UINT64(diag_count(), (uint64_t)1);
+    // A loop initializer whose expression reading parses stays an expression.
+    TEST_ASSERT_EQ_STR(dump_stmt("for ((*p) = 0; *p < 3; *p = *p + 1) { }"),
+                       "(for (assign = (unary * (ident p)) (int 0)) (binary < (unary * (ident p)) "
+                       "(int 3)) (assign = (unary * (ident p)) (binary + (unary * (ident p)) (int "
+                       "1))) (block))");
+})
+
+// The type reading wins only when it reads further. A tie, a later expression error and an
+// expression that parses keep the expression reading.
+TEST(a_statement_that_opens_with_a_parenthesis_stays_an_expression, {
+    TEST_ASSERT_EQ_STR(stmt_fails("() x = 0;"),
+                       "t.ft:2:2: error: expected an expression, found ')'\n");
+    TEST_ASSERT_EQ_STR(type_fails("()"), "t.ft:1:2: error: expected a type, found ')'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("(a +) = 1;"),
+                       "t.ft:2:5: error: expected an expression, found ')'\n");
+    TEST_ASSERT_EQ_STR(stmt_fails("(i32 + 1);"), "t.ft:2:6: error: expected ')', found '+'\n");
+    TEST_ASSERT_EQ_STR(dump_stmt("(*p) = 3;"), "(assign = (unary * (ident p)) (int 3))");
+    TEST_ASSERT_EQ_STR(dump_stmt("(i32[2]{1, 2})[0] = 1;"),
+                       "(assign = (index (array-lit (type (prim i32) (array (int 2)))"
+                       " (init (int 1) (int 2))) (int 0)) (int 1))");
+    TEST_ASSERT_EQ_STR(dump_stmt("((p))->x = 1;"), "(assign = (arrow (ident p) x) (int 1))");
 })
 
 // ---- the out-parameter shape ----------------------------------------------
@@ -201,7 +394,7 @@ TEST(a_mut_between_an_element_type_and_its_length_is_an_error, {
 TEST(an_array_after_a_reference_suffix_is_an_error, {
     TEST_ASSERT_EQ_STR(type_fails("i32[4]*[2]"),
                        "t.ft:1:8: error: no array suffix follows a reference suffix: "
-                       "wrap the array in a struct\n");
+                       "group the inner type or use a struct\n");
 })
 
 TEST(a_type_that_is_not_a_type, {
@@ -228,6 +421,35 @@ TEST(a_second_array_or_span_level_is_not_supported, {
     TEST_ASSERT_EQ_STR(
         type_fails("node@[4]"),
         "t.ft:1:6: error: not supported by the bootstrap compiler: arrays of spans\n");
+})
+
+// A `*` between the two levels names the pointer. A group puts the first level inside it, so
+// `(i32[4]*)[2]` is an array of pointers to arrays and not a multi-dimensional array.
+TEST(a_pointer_between_two_levels_names_the_pointer, {
+    TEST_ASSERT_EQ_STR(type_fails("(i32[4]*)[2]"),
+                       "t.ft:1:10: error: not supported by the bootstrap compiler: arrays of "
+                       "pointers to arrays\n");
+    TEST_ASSERT_EQ_STR(
+        type_fails("(i32@*)[2]"),
+        "t.ft:1:8: error: not supported by the bootstrap compiler: arrays of pointers to spans\n");
+    TEST_ASSERT_EQ_STR(
+        type_fails("(i32[2]*)@"),
+        "t.ft:1:10: error: not supported by the bootstrap compiler: spans of pointers to arrays\n");
+    TEST_ASSERT_EQ_STR(
+        type_fails("(u8@*)@"),
+        "t.ft:1:7: error: not supported by the bootstrap compiler: spans of pointers to spans\n");
+    TEST_ASSERT_EQ_STR(
+        type_fails("i32[4]*@"),
+        "t.ft:1:8: error: not supported by the bootstrap compiler: spans of pointers to arrays\n");
+    TEST_ASSERT_EQ_STR(
+        type_fails("(i32[2])[3]"),
+        "t.ft:1:9: error: not supported by the bootstrap compiler: multi-dimensional arrays\n");
+    TEST_ASSERT_EQ_STR(
+        type_fails("i32@[2]@"),
+        "t.ft:1:5: error: not supported by the bootstrap compiler: arrays of spans\n");
+    TEST_ASSERT_EQ_STR(dump_type("(i32*)[2]"), "(type (type (prim i32) (ptr)) (array (int 2)))");
+    TEST_ASSERT_EQ_STR(dump_type("(i32[2]*)*"),
+                       "(type (type (prim i32) (array (int 2)) (ptr)) (ptr))");
 })
 
 // One level is supported, and a pointer is not a level of its own.
@@ -519,15 +741,15 @@ TEST(a_mut_before_a_length_in_every_group, {
 TEST(an_array_after_any_trailing_reference_suffix, {
     TEST_ASSERT_EQ_STR(type_fails("i32[2]*[2]"),
                        "t.ft:1:8: error: no array suffix follows a reference suffix: "
-                       "wrap the array in a struct\n");
+                       "group the inner type or use a struct\n");
     TEST_ASSERT_EQ_STR(type_fails("i32[2]* mut[2]"),
                        "t.ft:1:12: error: no array suffix follows a reference suffix: "
-                       "wrap the array in a struct\n");
+                       "group the inner type or use a struct\n");
     // The shape is settled before the bootstrap's own limits are: an array
     // after a trailing reference suffix does not parse at all.
     TEST_ASSERT_EQ_STR(type_fails("string@[2]@[2]"),
                        "t.ft:1:12: error: no array suffix follows a reference suffix: "
-                       "wrap the array in a struct\n");
+                       "group the inner type or use a struct\n");
 })
 // NOLINTEND(readability-magic-numbers)
 
@@ -543,6 +765,16 @@ int main(int argc, char** argv) {
     TEST_RUN(d17_2_table_owning_references);
     TEST_RUN(d17_2_own_on_string_and_before_an_array);
     TEST_RUN(function_types_read_as_a_base_type);
+    TEST_RUN(parentheses_group_complete_types);
+    TEST_RUN(groups_preserve_marker_restrictions);
+    TEST_RUN(invalid_type_groups_report_the_type_or_closing_parenthesis);
+    TEST_RUN(inside_new_an_own_follows_only_a_star_at_every_group_depth);
+    TEST_RUN(markers_after_nested_parentheses_meet_the_inner_position);
+    TEST_RUN(an_array_literal_and_new_keep_the_marker_rules_through_a_group);
+    TEST_RUN(a_pointer_between_two_levels_names_the_pointer);
+    TEST_RUN(a_group_error_in_a_body_reports_the_type);
+    TEST_RUN(a_group_error_in_each_statement_position_reports_the_type);
+    TEST_RUN(a_statement_that_opens_with_a_parenthesis_stays_an_expression);
     TEST_RUN(a_suffix_after_a_function_type_belongs_to_its_return_type);
     TEST_RUN(the_out_parameter_shape_of_d3_6);
     TEST_RUN(a_marker_before_the_base_type_is_an_error);

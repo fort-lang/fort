@@ -773,10 +773,20 @@ fn is_noreturn(ast.node* t) bool {
     if (t == null) {
         return false;
     }
-    if (t->kind == ast.ast_kind.k_type) {
-        return t->a != null && t->a->kind == ast.ast_kind.k_type_noreturn;
+    ast.node* mut base = t;
+    while (base->kind == ast.ast_kind.k_type && ast.ast_len(base) == 0 && base->a != null) {
+        base = base->a;
     }
-    return t->kind == ast.ast_kind.k_type_noreturn;
+    return base->kind == ast.ast_kind.k_type_noreturn;
+}
+
+// Whether a group holds a bare `void`, through any parentheses with no suffix.
+fn is_void_group(ast.node* t) bool {
+    ast.node* mut base = t;
+    while (base->kind == ast.ast_kind.k_type && ast.ast_len(base) == 0 && base->a != null) {
+        base = base->a;
+    }
+    return base->kind == ast.ast_kind.k_type_void;
 }
 
 // The base type of a written type: a primitive, `string`, `void`,
@@ -862,6 +872,16 @@ fn suffixes_store_base(ast.node* n) bool {
     return true;
 }
 
+fn written_suffix_count(ast.node* n) u64 {
+    u64 mut count = 0;
+    ast.node* mut cur = n;
+    while (cur->kind == ast.ast_kind.k_type) {
+        count += ast.ast_len(cur);
+        cur = cur->a;
+    }
+    return count;
+}
+
 // Calls `check_type` with whether this type stores a base value. A function
 // type does not store its result or parameters. Their suffixes do not change
 // this answer.
@@ -873,8 +893,27 @@ fn check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bool in_storage
     }
     bool allow_noreturn = pos == type_pos.pos_return;
     bool stores_base = in_storage && suffixes_store_base(n);
-    types.node* mut b = base_type(ck, base, allow_noreturn, stores_base);
-    if (base->kind == ast.ast_kind.k_type_noreturn && wrapped && ast.ast_len(n) > 0) {
+    written_type mut grouped = type_result(types.type_error(&ck->types), false);
+    bool has_group = base->kind == ast.ast_kind.k_type;
+    types.node* mut b = null;
+    if (has_group) {
+        type_pos mut inner_pos = type_pos.pos_binding;
+        if ((is_noreturn(base) || is_void_group(base)) && allow_noreturn) {
+            inner_pos = type_pos.pos_return;
+        }
+        grouped = check_type_at(ck, base, inner_pos, stores_base);
+        b = grouped.ty;
+        // A group of a bare `void` is a complete return type and nothing else, as
+        // `void` needs its `*` inside the same group: `(void)*` is an error and
+        // `(void*)` the opaque pointer (D3.11).
+        if (!check_poisoned(b) && is_void_group(base) && (!allow_noreturn || ast.ast_len(n) > 0)) {
+            check_error(ck, base->loc, "'void' is only a return type or the base of 'void*'");
+            b = types.type_error(&ck->types);
+        }
+    } else {
+        b = base_type(ck, base, allow_noreturn, stores_base);
+    }
+    if (is_noreturn(base) && wrapped && ast.ast_len(n) > 0) {
         check_error(ck, n->loc, "'noreturn' is a return type");
         b = types.type_error(&ck->types);
     }
@@ -884,7 +923,7 @@ fn check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bool in_storage
         count = ast.ast_len(n);
     }
     bool mut ok = !check_poisoned(b);
-    if (count > MAX_SUFFIXES) {
+    if (ok && written_suffix_count(n) > MAX_SUFFIXES) {
         check_error(ck, n->loc, "too many type suffixes");
         ok = false;
     }
@@ -906,7 +945,24 @@ fn check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bool in_storage
         return type_result(n->ty, false);
     }
     bool mut base_own = wrapped && ast.ast_is_own(n);
-    bool mut base_mut = wrapped && ast.ast_is_mut(n);
+    bool mut base_mut = (wrapped && ast.ast_is_mut(n)) || grouped.mut0;
+    if (has_group && base_own && types.type_is_reference(b)) {
+        // The marker owns the grouped reference, rather than a new storage level.
+        switch (b->kind) {
+        case types.type_kind.k_ptr:
+            b = types.type_ptr(&ck->types, b->elem, true, b->is_mut);
+        case types.type_kind.k_voidptr:
+            b = types.type_voidptr(&ck->types, true, b->is_mut);
+        case types.type_kind.k_span:
+            b = types.type_span(&ck->types, b->elem, true, b->is_mut);
+        case types.type_kind.k_string:
+            b = types.type_string(&ck->types, true);
+        default:
+            // panic-coverage: unreachable: read: type_is_reference admits these four kinds only.
+            panic("check: not a grouped reference");
+        }
+        base_own = false;
+    }
     if (pos == type_pos.pos_alloc) {
         // `new` fills only the outermost position because it allocates that
         // storage. Each inner position describes storage that `new` did not

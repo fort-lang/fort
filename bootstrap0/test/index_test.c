@@ -88,6 +88,30 @@ TEST(a_locals_type_carries_its_level_0_mutability, {
     TEST_ASSERT_EQ_STR(text_at(2, 13), "main.ft:2:13-2:14 local n 'i32 mut' decl main.ft:2:13");
 })
 
+// A function-pointer binding spells its level-0 `mut` after a group, since `fn (i32) i32 mut`
+// would mark the return type. Each spelling reads back as the declared type (D3.6, D3.10).
+TEST(a_grouped_locals_type_spells_back_with_its_mutability, {
+    TEST_ASSERT_TRUE(index_src("fn add(i32 n) i32 {\n"
+                               "    return n;\n"
+                               "}\n"
+                               "fn main() i32 {\n"
+                               "    (fn (i32) i32) mut op = add;\n"
+                               "    fn (i32) i32 fixed = add;\n"
+                               "    (fn (i32) i32)[2] mut table = {add, add};\n"
+                               "    (fn (i32) i32)* slot = &fixed;\n"
+                               "    op = table[1];\n"
+                               "    return op(0) + fixed(0) + (*slot)(0);\n"
+                               "}\n"));
+    TEST_ASSERT_EQ_STR(text_at(5, 24),
+                       "main.ft:5:24-5:26 local op '(fn (i32) i32) mut' decl main.ft:5:24");
+    TEST_ASSERT_EQ_STR(text_at(6, 18),
+                       "main.ft:6:18-6:23 local fixed 'fn (i32) i32' decl main.ft:6:18");
+    TEST_ASSERT_EQ_STR(text_at(7, 27),
+                       "main.ft:7:27-7:32 local table '(fn (i32) i32)[2] mut' decl main.ft:7:27");
+    TEST_ASSERT_EQ_STR(text_at(8, 21),
+                       "main.ft:8:21-8:25 local slot '(fn (i32) i32)*' decl main.ft:8:21");
+})
+
 TEST(a_builtin_has_no_declaration_to_jump_to, {
     TEST_ASSERT_TRUE(index_src("fn main() i32 {\n    println(1);\n    return 0;\n}\n"));
     // No source declares a universe function, so its record has no declaration
@@ -561,6 +585,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_use_carries_the_declarations_range);
     TEST_RUN(a_local_is_a_local_and_a_parameter_a_parameter);
     TEST_RUN(a_locals_type_carries_its_level_0_mutability);
+    TEST_RUN(a_grouped_locals_type_spells_back_with_its_mutability);
     TEST_RUN(a_builtin_has_no_declaration_to_jump_to);
     TEST_RUN(a_struct_name_and_an_enum_name_have_no_type);
     TEST_RUN(a_field_and_an_enum_member_carry_their_types);

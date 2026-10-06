@@ -1,0 +1,60 @@
+//! run
+//! exit: 7
+//! stdout:
+//| 3 6 9
+//| sum 18
+//| 1 2 3
+//| first 1 last 9
+import std.sys;
+
+// A grouped array of function pointers is a value (D3.6, D3.10). A call takes
+// it by value, so the callee writes its own copy and the table of the caller
+// stays as it was. Range-for reads each pointer from the first to the last,
+// with the grouped or the plain element type. A function whose return type is
+// the group `(noreturn)` ends the statement that calls it (D8.5), directly or
+// through a pointer, and the deferred statement of `main` does not run.
+fn one(i32 n) i32 {
+    return n;
+}
+
+fn two(i32 n) i32 {
+    return n *% 2;
+}
+
+fn three(i32 n) i32 {
+    return n *% 3;
+}
+
+// The callee writes its copy of the table.
+fn apply_all((fn (i32) i32)[3] mut table, i32 n) i32 {
+    i32 mut sum = 0;
+    for ((fn (i32) i32) f : table) {
+        sum += f(n);
+    }
+    table[0] = three;
+    return sum + table[0](0);
+}
+
+fn quit(i32 code) (noreturn) {
+    sys.exit(code);
+}
+
+fn main() i32 {
+    defer println("deferred, must not run");
+    (fn (i32) i32)[3] table = {one, two, three};
+    for (fn (i32) i32 f : table) {
+        print(f(3));
+        if (f != three) {
+            print(" ");
+        }
+    }
+    println();
+    println("sum ", apply_all(table, 3));
+    println(table[0](1), " ", table[1](1), " ", table[2](1));
+    println("first ", table[0](1), " last ", table[table.len - 1](3));
+    (fn (i32) (noreturn)) stop = quit;
+    if (table.len == 3) {
+        stop(7);
+    }
+    quit(1);
+}

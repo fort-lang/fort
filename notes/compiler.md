@@ -1104,9 +1104,13 @@ library (T-160).
   `f64`, float literals), no second array or span level in one written type (`i32[3][4]`,
   `i32[4]@`, `u8@@`, `node@[4]`, T-043), no `do { } while`, no `?:` and no `$cfg` (T-156).
   The source compiler alone supports configuration expressions. Function pointers are inside
-  the subset (D3.10), and a dispatch table wraps them in a struct, because a
+  the subset (D3.10), and a dispatch table wraps them in a struct, because an unparenthesized
   function type carries no suffix of its own (T-136: `fn (i32) i32[2]` returns an `i32[2]`, so an
-  array of function pointers is `struct slot { fn (i32) i32 f; }` and `slot[2]`). T-153 puts an
+  array of function pointers is `struct slot { fn (i32) i32 f; }` and `slot[2]`). Both current
+  parsers accept the group `(fn (i32) i32)[2]` (D3.6), but `src/fort` and `std` must not use a
+  parenthesized type yet. `tools/bootstrap.ref` pins bootstrap-1 at `0fe521c`, which predates
+  groups and builds working-tree HEAD: it reports `expected a type, found '('` at a group. Use
+  the struct wrapper there until a re-pin moves the chain past the group change. T-153 puts an
   explicit C variable tail inside the subset when its types use no other unsupported form. These
   are the constructs a C file may hold that have no fort spelling, with what replaces each; the
   rules the bootstrap

@@ -1,0 +1,63 @@
+//! run
+//! link: ffi/grouped.c
+//! stdout:
+//| true true true true true
+//| 30 -9 -9
+//| -3 30
+//| 7255
+//| 21 9
+// Parentheses group a complete type and change no layout and no calling
+// convention (D3.6, D3.10). C spells the struct below without them, so every
+// field lands where C's offsetof puts it. C calls the fort functions of a
+// grouped table through its own offsets, and fort calls them after C swaps
+// them. A grouped table also crosses as a pointer to its first element.
+struct dispatch {
+    u8 tag;
+    (fn (i32) i32)[2] table;
+    ((i32 mut*)) slot;
+    ((u8)) last;
+}
+
+extern fn grouped_sizeof_dispatch() u64;
+extern fn grouped_offsetof_dispatch(i32 field) u64;
+extern fn grouped_call(dispatch* d, i32 index, i32 n) i32;
+extern fn grouped_swap(dispatch mut* d) void;
+extern fn grouped_bytes(dispatch* d) i32;
+extern fn grouped_sum((fn (i32) i32)* table, i32 count, i32 n) i32;
+
+fn triple(i32 x) i32 {
+    return x *% 3;
+}
+
+fn negate(i32 x) i32 {
+    return -x;
+}
+
+fn same(i32 x) i32 {
+    return x;
+}
+
+// The distance between two addresses, which is fort's own offset of a field
+// (D3.11: a pointer reaches `u64` through `cast`).
+fn off(void* base, void* field) u64 {
+    return cast(field, u64) - cast(base, u64);
+}
+
+fn main() i32 {
+    i32 mut stored = 0;
+    dispatch mut d = {7, {triple, negate}, &stored, 255};
+    println(sizeof(dispatch) == grouped_sizeof_dispatch(), " ",
+            off(cast(&d, void*), cast(&d.tag, void*)) == grouped_offsetof_dispatch(0), " ",
+            off(cast(&d, void*), cast(&d.table, void*)) == grouped_offsetof_dispatch(1), " ",
+            off(cast(&d, void*), cast(&d.slot, void*)) == grouped_offsetof_dispatch(2), " ",
+            off(cast(&d, void*), cast(&d.last, void*)) == grouped_offsetof_dispatch(3));
+    i32 first = grouped_call(&d, 0, 10);
+    i32 second = grouped_call(&d, 1, 9);
+    println(first, " ", second, " ", stored);
+    grouped_swap(&d);
+    println(d.table[0](3), " ", d.table[1](10));
+    println(grouped_bytes(&d));
+    (fn (i32) i32)[3] table = {triple, same, triple};
+    println(grouped_sum(&table[0], 3, 3), " ", grouped_sum(&table[2], 1, 3));
+    return 0;
+}

@@ -134,8 +134,10 @@ is rebindable); after an `@` it marks the span header (`u8@ mut s`); after a fix
 it marks the array, whose elements share its storage, so `i32[4] mut a` marks both and
 `i32 mut[4]` is an error ("mark the array after its length"). Nothing precedes the base type: a
 leading marker is an error ("write `node mut* p` or `node* mut p`"). Each storage level has
-exactly one position, so every type has one spelling and a doubled marker does not parse. The
-outermost position is the binding's own storage, so the `mut` immediately before the name says
+exactly one position, so a doubled marker does not parse. Parentheses group a complete type and
+keep these positions (D3.6). `(i32) mut x` and `(i32 mut) x` both mark the binding, and
+`((i32) mut) mut x` is a doubled marker. The
+outermost position is the binding's own storage, so the `mut` in that position says
 the binding is assignable, for `i32 mut x`, `node* mut p` and `u8@ mut s` alike.
 
 | Declaration          | rebind `p = ...`  | write through `*p`, `p->f`, `p[i]` |
@@ -161,7 +163,8 @@ the binding is assignable, for `i32 mut x`, `node* mut p` and `u8@ mut s` alike.
 
 This is C's east-const (`int const x`, `node const* p`, `node* const p`) with the default
 inverted, and the same rule places `own` (3.9). Because reference suffixes read inside-out, the
-binding's marker sits next to the name in every declaration, and no combination is unspellable:
+binding's marker occupies the outermost type position in every declaration. Without parentheses
+that position is next to the name. No combination is unspellable:
 "writable target, fixed binding" is `node mut* p`, and "fixed target, rebindable binding" is
 `node* mut p`.
 
@@ -318,8 +321,11 @@ Its staged delivery preserves existing syntax and runtime behavior (`toolchain.m
 introduces as owning its target; `string`, a reference without a suffix, takes it directly
 (`string own name`). It precedes the `mut` of the same position (`node* own mut p`), never
 follows a non-reference base type or a fixed-array suffix (`node own*` and `node*[4] own` are
-errors, while `node* own[4] t` is four owning pointers), and nothing precedes the base type, so
-every type has one spelling and a doubled marker does not parse. The outermost reference is the
+errors, while `node* own[4] t` is four owning pointers), and nothing precedes the base type. An
+`own` can also follow a grouped pointer, span or string: `(node*) own p` is `node* own p` (D3.6).
+Each reference accepts at most one `own`, including across parentheses, so a doubled marker does
+not parse. Inside `new(...)` an `own` follows only a `*`, at every group depth (D10.2). The
+outermost reference is the
 one the binding holds, so the `own` before the name says the binding owns what it refers to:
 `node* own p` and `u8@ own buf` are what `del(p)` and `del(buf)` require. Each `own` marks one
 reference only: in `node* mut@ own items` the span is owned and the pointers in it are borrowed,
@@ -459,8 +465,11 @@ array suffixes form one group that reads outside-in like C (`i32[3][4]` is index
 `i < 3`, `j < 4`); reference suffixes before the group make arrays of references (`node*[16]` is
 sixteen pointers, `node@[4]` four spans) and after it references to the whole array (`i32[4]*`
 points to an `i32[4]`, `i32[4]@` is a span of `i32[4]`); and no array suffix may follow a
-trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct). Suffixes after a
-function type apply to the function type. Any pointer, `void*`, span or `string` type may be
+trailing reference suffix within one group (`i32[4]*[2]` does not parse). Parentheses group a
+complete type, and the markers and suffixes after the `)` apply to it: `(i32[4]*)[2]` is two
+pointers to arrays of four (D3.6). A struct field is the other spelling. Suffixes after an
+unparenthesized function type apply to its return type (D3.10). Any pointer, `void*`, span or
+`string` type may be
 qualified `own` (3.9); the qualified type has the size, zero value and equality of the
 unqualified one and is a distinct type (D17.1). Identity, layout, conversions and the full
 constant rules are in `type-system.md`.
@@ -1262,26 +1271,33 @@ the identity (D17.1): `fn (node* own) void` and `fn (node*) void` are different 
 `fn () node mut* own` and `fn () node mut*`. `own` on a function-pointer type itself is an error.
 A function name, or a qualified name `m.f`, used as a value has its function type; `&f` and `*f`
 are errors. `null` is a valid value, and calling it is undefined behavior. `==` and `!=` compare
-identity. A function type ends at its return type, so every marker and every suffix written after
-it belongs to that return type: `fn (i32) i32[4]` returns an `i32[4]` and `fn (i32) i32*` returns
-an `i32*`. To mark or to suffix a function type, wrap it in a struct. At statement level `fn`
+identity. An unparenthesized function type ends at its return type, so every marker and every
+suffix written after it belongs to that return type: `fn (i32) i32[4]` returns an `i32[4]` and
+`fn (i32) i32*` returns an `i32*`. To mark or to suffix the complete function type, put it in
+parentheses (D3.6, D3.10). `(fn (i32) i32)[2]` is an array of two function pointers, and
+`(fn (i32) i32) mut op` is an assignable function-pointer binding. A struct field is the other
+spelling. Grouping changes no identity, layout or calling convention. At statement level `fn`
 always begins a declaration whose type is a function type.
 
 ```fort
 fn inc(i32 x) i32 { return x + 1; }
 fn dec(i32 mut x) i32 { return x - 1; }
-struct slot { fn (i32) i32 f; }   // the wrapper a marker or a suffix needs
 fn (i32) i32 op = inc;            // ok
 op = dec;                         // error: cannot assign to immutable 'op'
-slot mut op2 = {inc};
-op2.f = dec;                      // ok: the field's storage is the struct's (D5.5)
-slot[2] table = {{inc}, {dec}};
-i32 r = table[1].f(5);            // 4
+(fn (i32) i32) mut op2 = inc;     // the group takes the binding's mut
+op2 = dec;                        // ok
+(fn (i32) i32)[2] table = {inc, dec};
+i32 r = table[1](5);              // 4
+struct slot { fn (i32) i32 f; }   // a field holds one function pointer too
+slot mut op3 = {inc};
+op3.f = dec;                      // ok: the field's storage is the struct's (D5.5)
 fn (i32) i32 w = &inc;            // error: '&' on a function; write 'inc'
 fn (i32) i64 v = inc;             // error: mismatched function types
 fn (node*) void t = take;         // error: fn (node mut* own) void is not fn (node*) void
 fn (i32) i32 own o = inc;         // error: an own marks a reference
+(fn (i32) i32) own g = inc;       // error: an own marks a reference
 fn (i32) i32 mut m = inc;         // error: a return type has no binding
+fn (i32) i32[2] p = inc;          // error: expects fn (i32) i32[2], not fn (i32) i32
 ```
 
 ### 7.3 `noreturn` and terminating statements (D8.5, D8.4, D6.11)

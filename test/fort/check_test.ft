@@ -1305,7 +1305,204 @@ fn a_declaration_that_resolved_is_marked_resolved() void {
     assert(!check_env.has_ann(d, check.ANN_RESOLVING));
 }
 
+fn grouped_types_preserve_identity_and_layout_dependencies() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "struct link { (link)* next; }\n");
+    strbuf.append(&source, "fn add(i32 n) i32 { return n; }\n");
+    strbuf.append(&source, "(fn (i32) i32)[2] TABLE = {add, add};\n");
+    strbuf.append(&source, "fn main() i32 { ((fn (i32) i32)) mut op = add; ");
+    strbuf.append(&source, "op = TABLE[1]; return op(0); }\n");
+    assert(check_env.check_src(&e, strbuf.view(&source)));
+    assert(check_env.type_text(&e, check_env.sym_main(&e, "TABLE")->ty)
+           == "(fn (i32) i32)[2]");
+    assert(types.type_sizeof(check_env.sym_main(&e, "TABLE")->ty) == 16);
+    check_env.reopen(&e);
+    assert(check_env.check_body(&e, "(i32 mut*) own p = new(i32); *p = 1; del(p);"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "(i32****************)***************** p = null;"));
+    assert(check_env.said(&e, "too many type suffixes"));
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, "struct loop { (loop) field; }\n"));
+}
+
+// Whether the first report is the error of a bare `void` at `pos`.
+fn void_report_at(check_env.env mut* e, string pos) bool {
+    string text = check_env.report_text(e, 0);
+    string message = "'void' is only a return type or the base of 'void*'";
+    return text.len == pos.len + 2 + message.len && text[0..pos.len] == pos
+        && text[pos.len..pos.len + 2] == ": " && text[pos.len + 2..text.len] == message;
+}
+
+// A group of a bare `void` is a complete return type and nothing else. `void`
+// needs its `*` inside the same group, so `(void)*` is an error and `(void*)`
+// is the opaque pointer (D3.11). The innermost group reports it, once.
+fn a_group_of_a_bare_void_is_only_a_return_type() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "fn f() (void) { }\nfn g() ((void)) { }\n");
+    strbuf.append(&source, "fn main() i32 {\n    fn () (void) h = f;\n    h();\n    g();\n");
+    strbuf.append(&source, "    (void*) p = null;\n    (void mut*) q = null;\n");
+    strbuf.append(&source, "    ((void*)) mut r = p;\n    r = cast(q, (void*));\n");
+    strbuf.append(&source, "    return 0;\n}\n");
+    assert(check_env.check_src(&e, strbuf.view(&source)));
+    string void_error = "'void' is only a return type or the base of 'void*'";
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "(void)* p = null;"));
+    assert(check_env.errors(&e) == 1);
+    assert(void_report_at(&e, "2:2"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "((void))* p = null;"));
+    assert(check_env.errors(&e) == 1);
+    assert(void_report_at(&e, "2:3"));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "(void mut)* p = null;"));
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, void_error));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "u64 n = sizeof((void)*);"));
+    assert(check_env.said(&e, void_error));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, "fn f() (void)* {\n    panic(\"x\");\n}\n"));
+    assert(void_report_at(&e, "1:9"));
+    assert(check_env.errors(&e) == 1);
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, "fn f() (void) mut { }\n"));
+    assert(check_env.said(&e, void_error));
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, "fn f((void)* p) void { }\n"));
+    assert(void_report_at(&e, "1:7"));
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, "struct s { (void)* f; }\n"));
+    assert(check_env.said(&e, void_error));
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "(void) v = {};"));
+    assert(check_env.said(&e, void_error));
+}
+
+// Whether `body` checks, after a fresh start of the environment.
+fn body_checks(check_env.env mut* e, string body) bool {
+    check_env.reopen(e);
+    return check_env.check_body(e, body);
+}
+
+// A group is the type it groups (D3.6). Its markers keep their storage
+// positions, so a group changes no mutability, no ownership and no function
+// identity.
+fn a_group_is_the_type_it_groups() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(body_checks(&e, "(i32 mut) x = 1;\n    x = 2;"));
+    assert(body_checks(&e, "(i32) mut x = 1;\n    x = 2;"));
+    assert(!body_checks(&e, "(i32) x = 1;\n    x = 2;"));
+    assert(check_env.said(&e, "cannot assign to immutable 'x'"));
+    assert(body_checks(&e, "i32 mut x = 1;\n    (i32 mut)* p = &x;\n    *p = 3;"));
+    assert(!body_checks(&e, "i32 mut x = 1;\n    (i32)* p = &x;\n    *p = 3;"));
+    assert(check_env.said(&e, "cannot assign to immutable i32"));
+    assert(!body_checks(&e, "i32 mut x = 1;\n    (i32 mut*) p = &x;\n    p = &x;"));
+    assert(check_env.said(&e, "cannot assign to immutable 'p'"));
+    assert(body_checks(&e, "i32 mut x = 1;\n    (i32 mut*) mut p = &x;\n    p = &x;"));
+    assert(body_checks(&e, "(i32*) own p = new(i32);\n    del(p);"));
+    assert(body_checks(&e, "(i32* own) p = new(i32);\n    i32* own q = move(p);\n    del(q);"));
+    assert(!body_checks(&e, "(i32*) p = new(i32);"));
+    assert(check_env.said(&e, "owning temporary would leak: the initializer expects i32*"));
+    assert(body_checks(&e, "(u8@) own s = new(u8, 2);\n    del(s);"));
+    assert(body_checks(&e, "(void mut*) own p = cast(new(u8), void mut* own);\n    del(p);"));
+    assert(body_checks(&e,
+        "(void*) own p = cast(new(u8), void* own);\n    void* own q = move(p);\n    del(q);"));
+    assert(body_checks(&e, "(string) own s = {};\n    del(s);"));
+    assert(!body_checks(&e, "(string) s = {};\n    del(s);"));
+    assert(check_env.said(&e, "'del' needs an owning operand, not string"));
+    assert(body_checks(&e,
+        "fn (i32) i32 f = null;\n    (fn ((i32)) (i32)) g = f;\n    fn (i32) i32 h = g;"));
+    assert(!body_checks(&e, "fn (i32) i64 f = null;\n    (fn ((i32)) (i32)) g = f;"));
+    assert(check_env.said(&e, "the initializer expects fn (i32) i32, not fn (i32) i64"));
+}
+
+// A grouped `noreturn` is the `noreturn` of a return type through any number of
+// parentheses (D8.5). A call to such a function terminates the statement, and
+// its function type is the ungrouped one.
+fn a_grouped_noreturn_is_a_noreturn_return_type() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "fn stop() ((noreturn)) {\n    panic(\"x\");\n}\n");
+    strbuf.append(&source, "fn g() i32 {\n    stop();\n}\n");
+    strbuf.append(&source, "fn main() i32 {\n    fn () noreturn f = stop;\n");
+    strbuf.append(&source, "    (fn () (noreturn)) h = f;\n    return g();\n}\n");
+    assert(check_env.check_src(&e, strbuf.view(&source)));
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, "fn stop() (noreturn) {\n    return;\n}\n"));
+    assert(check_env.said(&e, "'return' in a noreturn function"));
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, "fn stop() (noreturn) { }\n"));
+    assert(check_env.said(&e, "a noreturn function must end in a terminating statement"));
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e,
+        "fn stop() (noreturn) {\n    panic(\"x\");\n}\nfn () void V = stop;\n"));
+    assert(check_env.said(&e, "the initializer expects fn () void, not fn () noreturn"));
+}
+
+// Whether the module-level `<spelling> X = <init>;` checks and its type spells
+// as `spelling`.
+fn spells_back(check_env.env mut* e, string spelling, string init) bool {
+    check_env.reopen(e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, spelling);
+    strbuf.append(&source, " X = ");
+    strbuf.append(&source, init);
+    strbuf.append(&source, ";\n");
+    return check_env.check_decls(e, strbuf.view(&source))
+        && check_env.type_text(e, check_env.sym_main(e, "X")->ty) == spelling;
+}
+
+// A diagnostic spells a grouped type in a form that parses back to the same
+// type. A group that only repeats the reading order spells without its
+// parentheses, and an array behind a pointer behind an array keeps them.
+fn a_grouped_type_spells_back_as_written() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(spells_back(&e, "(fn (i32) i32)[2]", "{}"));
+    assert(spells_back(&e, "(fn (i32) i32)*", "null"));
+    assert(spells_back(&e, "(fn (i32) i32) mut*", "null"));
+    assert(spells_back(&e, "(fn (i32) i32)@", "{}"));
+    assert(spells_back(&e, "(fn () void)[2]*", "null"));
+    assert(spells_back(&e, "(fn () noreturn)[2]", "{}"));
+    assert(spells_back(&e, "(fn (i32* own) void)*", "null"));
+    assert(spells_back(&e, "fn () (fn () void)*", "null"));
+    assert(spells_back(&e, "fn (i32) i32[2]", "null"));
+    assert(spells_back(&e, "(fn (i32) i32)[3][2]", "{}"));
+    assert(spells_back(&e, "(i32[4])*[2]", "{}"));
+    assert(spells_back(&e, "(i32[4] mut)*[2]", "{}"));
+    assert(spells_back(&e, "i32[3][4]", "{}"));
+    // The group of an array of arrays only repeats the reading order, so the
+    // spelling drops it: three arrays of two.
+    check_env.reopen(&e);
+    assert(check_env.check_decls(&e, "((i32)[2])[3] X = {};\n"));
+    assert(check_env.type_text(&e, check_env.sym_main(&e, "X")->ty) == "i32[3][2]");
+    check_env.reopen(&e);
+    assert(check_env.check_decls(&e, "(i32[4]*)[2] X = {};\n"));
+    assert(check_env.type_text(&e, check_env.sym_main(&e, "X")->ty) == "(i32[4])*[2]");
+}
+
 fn main() i32 {
+    a_group_is_the_type_it_groups();
+    a_grouped_type_spells_back_as_written();
+    a_grouped_noreturn_is_a_noreturn_return_type();
+    a_group_of_a_bare_void_is_only_a_return_type();
+    grouped_types_preserve_identity_and_layout_dependencies();
     declarations_are_order_independent();
     a_declaration_defined_in_terms_of_itself_is_one_error();
     a_module_level_initializer_is_a_constant_expression();

@@ -1,0 +1,103 @@
+//! run
+//! stdout:
+//| ok
+// Parentheses separate function-pointer suffixes from return-type suffixes.
+struct handler {
+    (fn (i32) i32)[2] table;
+}
+
+fn add(i32 n) i32 {
+    return n +% 1;
+}
+
+fn subtract(i32 n) i32 {
+    return n -% 1;
+}
+
+(fn (i32) i32)[2] TABLE = {add, subtract};
+
+fn callbacks() (fn (i32) i32)[2] {
+    return (fn (i32) i32)[2]{add, subtract};
+}
+
+fn choose() ((fn (i32) i32)) {
+    return add;
+}
+
+fn pair() i32[2] {
+    return i32[2]{3, 4};
+}
+
+fn borrow() ((fn (i32) i32)@) {
+    return TABLE[..];
+}
+
+fn apply((fn (i32) i32) mut op, i32 n) i32 {
+    op = subtract;
+    return op(n);
+}
+
+fn done() (void) { }
+
+fn main() i32 {
+    (fn () (void)) finish = done;
+    finish();
+    assert(sizeof(fn () (noreturn)) == 8);
+    (fn (i32) i32)[2] mut table = {add, subtract};
+    assert(sizeof((fn (i32) i32)[2]) == 16);
+    assert(sizeof(fn (i32) i32[2]) == 8);
+    assert(sizeof((fn () noreturn)) == 8);
+    assert(table[0](5) == 6);
+    assert(table[1](5) == 4);
+    table[0] = subtract;
+    assert(table[0](5) == 4);
+    ((fn ((i32)) (i32))) mut op = choose();
+    op = table[1];
+    assert(op(5) == 4);
+    (fn (i32) i32) mut* slot = &op;
+    *slot = add;
+    assert((*slot)(5) == 6);
+    (fn (i32) i32)@ span = table[..];
+    assert(span.len == 2);
+    assert(span[0](5) == 4);
+    ((fn (i32) i32)@)* header = &span;
+    assert((*header)[1](5) == 4);
+    assert(borrow()[0](5) == 6);
+    assert(callbacks()[1](5) == 4);
+    assert(apply(add, 5) == 4);
+    (op)(0);
+    handler h = {{add, subtract}};
+    (handler) copy = h;
+    assert((copy).table[0](5) == 6);
+    (h).table[0](0);
+    assert(h.table[0](5) == 6);
+    (fn () i32[2])[2] producers = {pair, pair};
+    assert(producers[1]()[1] == 4);
+    (fn (i32) i32) mut* own allocated = new((fn (i32) i32));
+    *allocated = add;
+    assert((*allocated)(5) == 6);
+    del(allocated);
+    (i32 mut*) own owned = new(i32);
+    *owned = 9;
+    assert(*owned == 9);
+    del(owned);
+    (i32 mut@) own storage = new(i32, 2);
+    storage[0] = 11;
+    assert(storage[0] == 11);
+    del(storage);
+    (string) own empty = {};
+    del(empty);
+    (i32* own)[2] mut owners = {new(i32), new(i32)};
+    del(owners[0]);
+    del(owners[1]);
+    (i32[2])[3] rows = {{1, 2}, {3, 4}, {5, 6}};
+    assert(rows.len == 3);
+    assert(rows[1].len == 2);
+    (i32[2]*)[2] pointers = {&rows[0], &rows[2]};
+    assert((*pointers[1])[1] == 6);
+    (i32[2])@ row_span = rows[..];
+    assert(row_span[1][1] == 4);
+    assert(cast(op, (fn (i32) i32)) == add);
+    println("ok");
+    return 0;
+}

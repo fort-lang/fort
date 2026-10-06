@@ -43,6 +43,8 @@ string MUT_BEFORE_ARRAY_ERROR =
     "the elements share the array's storage: write the mut after the length, as 'i32[4] mut'";
 string ARRAY_OWN_ERROR =
     "an own never follows a fixed-array suffix: write it after the '*' or '@' it marks";
+string REF_ARRAY_ERROR =
+    "no array suffix follows a reference suffix: group the inner type or use a struct";
 
 // The two diagnostics of an allocated type, which two sites each report.
 string ALLOC_MUT_ERROR = "new allocates writable storage: remove the outermost 'mut'";
@@ -66,6 +68,7 @@ struct parser {
     u32 depth; // open nested constructs
     u32 spec;  // running speculative parses; no diagnostic while > 0
     bool failed; // unwinding the construct a syntax error hit
+    u64 fail_pos; // the cursor at the first error of the failed construct
     diag.loc last; // where the last reported error started, for the dedupe
     strbuf.str_buf msg; // the message under construction
 }
@@ -160,6 +163,8 @@ fn same_start(diag.loc a, diag.loc b) bool {
 // The parser drops a repeated error at the same start position.
 // It also stops after the shared diag.MAX_PER_FILE budget is spent.
 // Parsing continues after that limit. A speculative parse reports nothing.
+// The first error of a construct records the cursor. A speculation compares
+// how far two readings of one statement get.
 fn report(parser mut* p, diag.loc at_loc, string text) void {
     diag.sink mut* diags = session.diags(p->sess);
     u64 reported = diag.file_count(diags);
@@ -167,6 +172,9 @@ fn report(parser mut* p, diag.loc at_loc, string text) void {
         && !(reported > 0 && same_start(at_loc, p->last))) {
         diag.error(diags, at_loc, text);
         p->last = at_loc;
+    }
+    if (!p->failed) {
+        p->fail_pos = p->pos;
     }
     p->failed = true;
 }
@@ -378,12 +386,12 @@ fn prim_of_token(lexer.tok_kind k, prim.prim_kind mut* out) bool {
 }
 
 // Whether `k` can open a base_type: a primitive, `string`, `void`, `fn` or a
-// qualified name.
+// qualified name or grouped type.
 fn starts_base_type(lexer.tok_kind k) bool {
     prim.prim_kind mut prim0 = prim.prim_kind.prim_void;
     return prim_of_token(k, &prim0) || k == lexer.tok_kind.kw_string
         || k == lexer.tok_kind.kw_void || k == lexer.tok_kind.kw_fn
-        || k == lexer.tok_kind.ident;
+        || k == lexer.tok_kind.ident || k == lexer.tok_kind.lparen;
 }
 
 // Nothing precedes the base type: every `mut` and `own` follows the type
@@ -482,14 +490,23 @@ fn parse_fn_type_params(parser mut* p, diag.loc at_loc) ast.node mut* {
     return finish(p, n);
 }
 
-// return_type = type | "void" | "noreturn"; `void` and `noreturn` are base
-// types of their own.
+// return_type = type | "void" | "noreturn" | "(" return_type ")"; `void` and
+// `noreturn` are base types of their own. A group passes the return position
+// to the type inside it, so `(void)` and `(noreturn)` are return types too.
 fn parse_return_type(parser mut* p) ast.node mut* {
     return parse_type(p, true);
 }
 
 fn parse_base_type(parser mut* p, bool allow_noreturn) ast.node mut* {
     diag.loc at_loc = here(p);
+    if (at(p, lexer.tok_kind.lparen)) {
+        bump(p);
+        ast.node mut* inner = parse_type(p, allow_noreturn);
+        if (inner == null || !expect(p, lexer.tok_kind.rparen, "')'")) {
+            return null;
+        }
+        return inner;
+    }
     prim.prim_kind mut prim0 = prim.prim_kind.prim_void;
     if (prim_of_token(kind(p), &prim0)) {
         ast.node mut* n = node_at(p, ast.ast_kind.k_type_prim, at_loc);
@@ -534,20 +551,82 @@ fn parse_base_type(parser mut* p, bool allow_noreturn) ast.node mut* {
     return null;
 }
 
-// An `own` marks a reference, so after a base type it is legal only on `string`,
-// the reference with no suffix. The empty string is the C's NULL: this position
-// takes an `own`.
+// Returns the storage position inside a grouped type.
+fn type_position(ast.node* base) ast.node* {
+    ast.node* mut pos = base;
+    while (pos->kind == ast.ast_kind.k_type) {
+        if (ast.ast_len(pos) != 0) {
+            return ast.ast_child(pos, ast.ast_len(pos) - 1);
+        }
+        if (pos->a->kind != ast.ast_kind.k_type) {
+            return pos;
+        }
+        pos = pos->a;
+    }
+    return pos;
+}
+
+fn type_position_flags(ast.node* base) u32 {
+    u32 mut flags = 0;
+    ast.node* mut pos = base;
+    while (pos->kind == ast.ast_kind.k_type) {
+        if (ast.ast_len(pos) != 0) {
+            return flags | ast.ast_child(pos, ast.ast_len(pos) - 1)->flags;
+        }
+        flags |= pos->flags;
+        pos = pos->a;
+    }
+    return flags;
+}
+
 fn base_own_error(ast.node* base) string {
     if (base->kind == ast.ast_kind.k_type_string) {
         return "";
     }
+    if (base->kind == ast.ast_kind.k_type) {
+        ast.node* pos = type_position(base);
+        if ((pos->kind == ast.ast_kind.k_type_suffix
+             && cast(pos->op, types.suffix_kind) != types.suffix_kind.s_array)
+            || (pos->kind == ast.ast_kind.k_type && pos->a->kind == ast.ast_kind.k_type_string)) {
+            return "";
+        }
+    }
     return "an own marks a reference: write it after a '*' or an '@', or on a string";
+}
+
+// Groups do not reset the suffix limit of a complete written type.
+fn type_suffix_count(ast.node* t) u64 {
+    u64 mut count = 0;
+    ast.node* mut cur = t;
+    while (cur->kind == ast.ast_kind.k_type) {
+        count += ast.ast_len(cur);
+        cur = cur->a;
+    }
+    return count;
+}
+
+// Parentheses preserve the outer storage position and its existing markers.
+fn check_group_markers(parser mut* p, ast.node* base) bool {
+    u32 flags = type_position_flags(base);
+    if (at(p, lexer.tok_kind.kw_mut) && (flags & ast.FLAG_MUT) != 0) {
+        error_here(p, "a mut appears once in a type position");
+        return false;
+    }
+    if (at(p, lexer.tok_kind.kw_own) && (flags & ast.FLAG_OWN) != 0) {
+        error_here(p, "an own appears once in a type position");
+        return false;
+    }
+    if (at(p, lexer.tok_kind.kw_own) && (flags & ast.FLAG_MUT) != 0) {
+        error_here(p, "an own precedes the mut of its position: write 'node* own mut p'");
+        return false;
+    }
+    return true;
 }
 
 // Adds one suffix to `t` and counts it against the nesting limit, which covers
 // type suffixes.
 fn push_suffix(parser mut* p, ast.node mut* t, ast.node mut* suffix) bool {
-    if (ast.ast_len(t) >= cast(PARSE_MAX_DEPTH, u64)) {
+    if (type_suffix_count(t) >= cast(PARSE_MAX_DEPTH, u64)) {
         msg_begin(p);
         msg_str(p, "nesting deeper than ");
         strbuf.append_u64(&p->msg, cast(PARSE_MAX_DEPTH, u64));
@@ -630,10 +709,14 @@ fn parse_type_after_base(parser mut* p, diag.loc at_loc, ast.node mut* base) ast
     ast.node mut* t = node_at(p, ast.ast_kind.k_type, at_loc);
     t->a = base;
     markers mut m = markers{};
-    if (!parse_markers(p, &m, base_own_error(base))) {
+    if (!check_group_markers(p, base) || !parse_markers(p, &m, base_own_error(base))) {
         return null;
     }
     t->flags = m.flags;
+    if ((type_position_flags(base) & ast.FLAG_MUT) != 0) {
+        m.flags |= ast.FLAG_MUT;
+        m.mut_loc = type_position(base)->loc;
+    }
     if (!check_mut_before_array(p, &m)) {
         return null;
     }
@@ -647,7 +730,7 @@ fn parse_type_after_base(parser mut* p, diag.loc at_loc, ast.node mut* base) ast
         return null;
     }
     if (at(p, lexer.tok_kind.lbracket)) {
-        error_here(p, "no array suffix follows a reference suffix: wrap the array in a struct");
+        error_here(p, REF_ARRAY_ERROR);
         return null;
     }
     return finish(p, t);
@@ -692,6 +775,9 @@ fn parse_array_type(parser mut* p) ast.node mut* {
                 error_expected(p, "'[' of an array type");
             }
             t = null;
+        } else if ((type_position_flags(base) & ast.FLAG_MUT) != 0) {
+            error_at(p, base->loc, "mark the array after its length");
+            t = null;
         } else if (!parse_array_suffixes(p, t, false)) {
             t = null;
         }
@@ -728,6 +814,33 @@ fn check_alloc_mut(parser mut* p, markers* m) bool {
     return true;
 }
 
+// Groups do not permit spans inside an allocated element type. Inside `new(...)`,
+// an own follows only a `*`, at every group depth. Thus, `(string) own`,
+// `(string own)` and `(i32*) own` do not parse there, while `(i32* own)` does
+// (D10.2).
+fn check_alloc_group(parser mut* p, ast.node* base) bool {
+    if (base->kind != ast.ast_kind.k_type) {
+        return true;
+    }
+    if (ast.ast_is_own(base)) {
+        error_at(p, base->loc, ALLOC_OWN_ERROR);
+        return false;
+    }
+    if (!check_alloc_group(p, base->a)) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(base)) {
+        ast.node* s = ast.ast_child(base, i);
+        if (cast(s->op, types.suffix_kind) == types.suffix_kind.s_span) {
+            error_at(p, s->loc, "a span suffix does not parse inside new: write new(T, n)");
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 // alloc_type = base_type [ "mut" ] { "*" [ "own" ] [ "mut" ] }
 // { "[" const_expr "]" }, whose last `mut` position is empty.
 fn parse_alloc_type(parser mut* p) ast.node mut* {
@@ -740,15 +853,18 @@ fn parse_alloc_type(parser mut* p) ast.node mut* {
     ast.node mut* mut t = null;
     diag.loc at_loc = here(p);
     ast.node mut* base = parse_base_type(p, false);
-    if (base != null) {
+    if (base != null && check_alloc_group(p, base)) {
         t = node_at(p, ast.ast_kind.k_type, at_loc);
         t->a = base;
         markers mut m = markers{};
-        if (!parse_markers(p, &m, ALLOC_OWN_ERROR) || !check_mut_before_array(p, &m)
-            || !check_alloc_mut(p, &m)) {
+        if (!check_group_markers(p, base) || !parse_markers(p, &m, ALLOC_OWN_ERROR)) {
             t = null;
         } else {
             t->flags = m.flags;
+            m.flags |= type_position_flags(base) & ast.FLAG_MUT;
+            if (!check_mut_before_array(p, &m) || !check_alloc_mut(p, &m)) {
+                t = null;
+            }
         }
         while (t != null && at(p, lexer.tok_kind.star)) {
             diag.loc star = here(p);
@@ -1007,6 +1123,9 @@ fn parse_primary(parser mut* p) ast.node mut* {
         return finish(p, node_at(p, ast.ast_kind.k_null, at_loc));
     }
     if (at(p, lexer.tok_kind.lparen)) {
+        if (speculate_array_literal(p)) {
+            return parse_array_literal(p);
+        }
         return parse_paren_expr(p);
     }
     if (at(p, lexer.tok_kind.kw_cast)) {
@@ -1780,6 +1899,23 @@ fn parse_do(parser mut* p) ast.node mut* {
     return finish(p, n);
 }
 
+// Whether the expression reading of a statement fails before `type_end`. A
+// failed speculative type parse stopped at `type_end`. When it read further
+// than the expression reading, the declaration branch reports the type error,
+// as a module declaration does: `(i32 mut)[2] a` reports the marker.
+fn head_fails_before(parser mut* p, u64 type_end) bool {
+    // No reading fails before the first token of the statement. A type reading
+    // that failed there leaves nothing to compare, so `*p = x;` is read once.
+    if (type_end <= p->pos) {
+        return false;
+    }
+    spec_state s = spec_begin(p);
+    parse_simple_head(p);
+    bool earlier = p->failed && p->fail_pos < type_end;
+    spec_rewind(p, s);
+    return earlier;
+}
+
 // After `for (`, a speculative `type identifier` distinguishes the three loop forms.
 fn speculate_for_form(parser mut* p) i32 {
     if (at(p, lexer.tok_kind.semi)) {
@@ -1788,6 +1924,8 @@ fn speculate_for_form(parser mut* p) i32 {
     spec_state s = spec_begin(p);
     i32 mut form = FOR_PLAIN;
     ast.node* t = parse_type(p, false);
+    bool failed = p->failed;
+    u64 type_end = p->fail_pos;
     if (t != null && !p->failed && at(p, lexer.tok_kind.ident)) {
         bump(p);
         if (at(p, lexer.tok_kind.colon)) {
@@ -1801,6 +1939,9 @@ fn speculate_for_form(parser mut* p) i32 {
         form = FOR_DECL;
     }
     spec_rewind(p, s);
+    if (failed && form == FOR_PLAIN && head_fails_before(p, type_end)) {
+        form = FOR_DECL;
+    }
     return form;
 }
 
@@ -2022,11 +2163,16 @@ fn starts_declaration(parser* p) bool {
 fn speculate_declaration(parser mut* p) bool {
     spec_state s = spec_begin(p);
     ast.node* t = parse_type(p, false);
+    bool failed = p->failed;
+    u64 type_end = p->fail_pos;
     // A type parse that died on a marker leaves no expression reading of the
     // statement, so the declaration branch wins and reports the marker.
-    bool decl = (t != null && !p->failed && at(p, lexer.tok_kind.ident))
-        || (p->failed && read_marker(p, s.pos));
+    bool mut decl = (t != null && !failed && at(p, lexer.tok_kind.ident))
+        || (failed && read_marker(p, s.pos));
     spec_rewind(p, s);
+    if (failed && !decl) {
+        decl = head_fails_before(p, type_end);
+    }
     return decl;
 }
 
@@ -2504,7 +2650,7 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
     if (ntoks == 0 || lexer.tokvec_at(toks, ntoks - 1).kind != lexer.tok_kind.eof) {
         panic("parser.parse_module: the token vector does not end in end of file");
     }
-    parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false,
+    parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
                           diag.loc_make(file, 0, 0), strbuf.create()};
     defer strbuf.free(&p.msg);
 

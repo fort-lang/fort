@@ -105,11 +105,36 @@ fn find(selector mut* s, string name) entry mut* {
     return null;
 }
 
+// Removes each pair of parentheses that has no suffix after it (D3.6). A
+// marker after the `)` marks the outermost position of the grouped type, and
+// `flags` collects it: `(u8)` is `u8`, and `(i32[3]) mut` is `i32[3] mut`.
+// The four type readers of this selector use this one helper.
+fn unwrap_group(ast.node* t, u32 mut* flags) ast.node* {
+    ast.node* mut cur = t;
+    while (cur != null && cur->kind == ast.ast_kind.k_type && ast.ast_len(cur) == 0
+           && cur->a != null && cur->a->kind == ast.ast_kind.k_type) {
+        *flags |= cur->flags;
+        cur = cur->a;
+    }
+    return cur;
+}
+
+// The markers of the base position of a declared type. A marker after a `)`
+// marks that position only when no suffix follows the base inside the group.
+fn base_flags(ast.node* t) u32 {
+    u32 mut outer = 0;
+    ast.node* inner = unwrap_group(t, &outer);
+    if (ast.ast_len(inner) == 0) {
+        return outer | inner->flags;
+    }
+    return inner->flags;
+}
+
 // Adds one unconditional immutable declaration. A duplicate is left for the
 // ordinary namespace pass, which gives the full redeclaration diagnostic.
 fn add_constant(selector mut* s, ast.node mut* decl) void {
     if (decl->kind != ast.ast_kind.k_var_decl || decl->a == null
-        || (decl->a->flags & ast.FLAG_MUT) != 0 || find(s, decl->name) != null) {
+        || (base_flags(decl->a) & ast.FLAG_MUT) != 0 || find(s, decl->name) != null) {
         return;
     }
     reserve(s);
@@ -143,19 +168,23 @@ fn expression_error(selector mut* s, ast.node* n, string text) bool {
 }
 
 fn target_primitive(ast.node* t, prim.prim_kind mut* out) bool {
-    if (t == null || t->kind != ast.ast_kind.k_type || t->a == null
-        || ast.ast_len(t) != 0 || t->flags != 0
-        || t->a->kind != ast.ast_kind.k_type_prim) {
+    u32 mut flags = 0;
+    ast.node* u = unwrap_group(t, &flags);
+    if (u == null || u->kind != ast.ast_kind.k_type || u->a == null
+        || ast.ast_len(u) != 0 || (flags | u->flags) != 0
+        || u->a->kind != ast.ast_kind.k_type_prim) {
         return false;
     }
-    *out = cast(t->a->op, prim.prim_kind);
+    *out = cast(u->a->op, prim.prim_kind);
     return true;
 }
 
 fn target_string(ast.node* t) bool {
-    return t != null && t->kind == ast.ast_kind.k_type && t->a != null
-        && ast.ast_len(t) == 0 && t->flags == 0
-        && t->a->kind == ast.ast_kind.k_type_string;
+    u32 mut flags = 0;
+    ast.node* u = unwrap_group(t, &flags);
+    return u != null && u->kind == ast.ast_kind.k_type && u->a != null
+        && ast.ast_len(u) == 0 && (flags | u->flags) == 0
+        && u->a->kind == ast.ast_kind.k_type_string;
 }
 
 fn convert_value(value in, prim.prim_kind target, value mut* out) bool {
@@ -1137,15 +1166,17 @@ fn eval_fixed_array_len(selector mut* s, ast.node mut* n, value mut* out) bool {
         return expression_error(
             s, n, "a fixed-array '.len' cannot use an unresolved named element type");
     }
-    ast.node* suffix = fixed_array_suffix(t);
+    u32 mut flags = 0;
+    ast.node* u = unwrap_group(t, &flags);
+    ast.node* suffix = fixed_array_suffix(u);
     if (suffix == null) {
         if (guarded != null) {
             guarded->state = entry_state.state_failed;
         }
         return expression_error(s, n, "only fixed-array '.len' is available in a $if condition");
     }
-    if (t->a->kind == ast.ast_kind.k_type_void
-        && suffix == ast.ast_child(t, 0)) {
+    if (u->a->kind == ast.ast_kind.k_type_void
+        && suffix == ast.ast_child(u, 0)) {
         if (guarded != null) {
             guarded->state = entry_state.state_failed;
         }
@@ -1212,6 +1243,67 @@ fn type_has_unresolved_name(selector* s, ast.node* t) bool {
     return false;
 }
 
+// Whether a group holds a bare `void`. Such a group is only a return type, so
+// `(void)*` is an error and `(void*)` is the opaque pointer (D3.11).
+fn group_is_void(ast.node* group) bool {
+    u32 mut flags = 0;
+    ast.node* u = unwrap_group(group, &flags);
+    return u->kind == ast.ast_kind.k_type && ast.ast_len(u) == 0
+        && u->a->kind == ast.ast_kind.k_type_void;
+}
+
+// Computes the size of one written type into `size`. A group computes its own
+// size first, and the suffixes after its `)` apply to that size. `sized` is
+// false while the type has no size of its own, as for `void` or a name.
+fn type_size(selector mut* s, ast.node mut* n, ast.node* written, u64 mut* size,
+             bool mut* sized) bool {
+    u32 mut flags = 0;
+    ast.node* t = unwrap_group(written, &flags);
+    ast.node* base = t->a;
+    if (base->kind == ast.ast_kind.k_type) {
+        if (group_is_void(base)) {
+            return expression_error(s, base,
+                                    "'void' is only a return type or the base of 'void*'");
+        }
+        if (!type_size(s, n, base, size, sized)) {
+            return false;
+        }
+    } else if (!sizeof_base(s, base, size, sized)) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(t)) {
+        ast.node* suffix = ast.ast_child(t, i);
+        types.suffix_kind kind = cast(suffix->op, types.suffix_kind);
+        if (kind == types.suffix_kind.s_ptr) {
+            *size = types.PTR_SIZE;
+            *sized = true;
+        } else if (kind == types.suffix_kind.s_span) {
+            if (base->kind == ast.ast_kind.k_type_void && i == 0) {
+                return expression_error(s, suffix, "a span cannot have void elements");
+            }
+            *size = types.SPAN_SIZE;
+            *sized = true;
+        } else {
+            if (base->kind == ast.ast_kind.k_type_void && !*sized) {
+                return expression_error(s, suffix, "an array cannot have void elements");
+            }
+            u64 mut len = 0;
+            if (!eval_array_length(s, suffix, &len)) {
+                return false;
+            }
+            if (*sized && *size > types.TYPE_MAX_SIZE / len) {
+                return expression_error(s, n, "type is too large");
+            }
+            if (*sized) {
+                *size *= len;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+
 // Computes a type size without ordinary name collection. Selection resolves
 // an unconditional same-module name. Only an indirection can use that name
 // because selection does not compute a named value layout.
@@ -1225,38 +1317,8 @@ fn eval_sizeof(selector mut* s, ast.node mut* n, value mut* out) bool {
     }
     u64 mut size = 0;
     bool mut sized = false;
-    if (!sizeof_base(s, t->a, &size, &sized)) {
+    if (!type_size(s, n, t, &size, &sized)) {
         return false;
-    }
-    u64 mut i = 0;
-    while (i < ast.ast_len(t)) {
-        ast.node* suffix = ast.ast_child(t, i);
-        types.suffix_kind kind = cast(suffix->op, types.suffix_kind);
-        if (kind == types.suffix_kind.s_ptr) {
-            size = types.PTR_SIZE;
-            sized = true;
-        } else if (kind == types.suffix_kind.s_span) {
-            if (t->a->kind == ast.ast_kind.k_type_void && i == 0) {
-                return expression_error(s, suffix, "a span cannot have void elements");
-            }
-            size = types.SPAN_SIZE;
-            sized = true;
-        } else {
-            if (t->a->kind == ast.ast_kind.k_type_void && !sized) {
-                return expression_error(s, suffix, "an array cannot have void elements");
-            }
-            u64 mut len = 0;
-            if (!eval_array_length(s, suffix, &len)) {
-                return false;
-            }
-            if (sized && size > types.TYPE_MAX_SIZE / len) {
-                return expression_error(s, n, "type is too large");
-            }
-            if (sized) {
-                size *= len;
-            }
-        }
-        i += 1;
     }
     if (!sized) {
         return expression_error(s, n, "'sizeof' needs a sized selection type");

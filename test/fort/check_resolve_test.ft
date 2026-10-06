@@ -55,6 +55,45 @@ fn an_array_of_a_struct_carries_the_base_through() void {
     assert(types.type_sizeof(check_env.sym_main(&e, "o")->ty) == 16);
 }
 
+// The struct the two layout tests below hold, one field to a line.
+string GROUPED_HOLDER =
+    "struct a {\nu8 tag;\n(fn (b) i32)[2] table;\n((b mut*)) link;\n((u8)) last;\n}\n";
+
+// A group stores what it groups (D3.6). A grouped pointer is one word whatever
+// its pointee is, and a grouped array of function pointers holds its pointers
+// by value. The offsets are C's for the same fields without the parentheses.
+fn a_grouped_field_is_laid_out_as_the_type_it_groups() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(decls(&e, GROUPED_HOLDER,
+                 "struct b {\n    a value;\n}\n", "b x = {};\n"));
+    assert(check_env.field_offset(&e, "a", "table") == 8);
+    assert(check_env.field_offset(&e, "a", "link") == 24);
+    assert(check_env.field_offset(&e, "a", "last") == 32);
+    assert(types.type_sizeof(check_env.sym_main(&e, "x")->ty) == 40);
+    check_env.reopen(&e);
+    assert(decls(&e, "struct b {\n    a value;\n}\n", GROUPED_HOLDER, "b x = {};\n"));
+    assert(check_env.field_offset(&e, "a", "last") == 32);
+    assert(types.type_sizeof(check_env.sym_main(&e, "x")->ty) == 40);
+}
+
+// A group around a struct stores the struct by value, so it is a resolution
+// edge as the plain field is, and a group around a pointer to it is not.
+fn a_grouped_struct_field_is_a_resolution_edge() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(decls(&e, "struct a {\n    i32 tag;\n    ((b)) part;\n}\n",
+                 "struct b {\n    i64 v;\n    (a)* back;\n}\n", "a x = {};\n"));
+    assert(check_env.field_offset(&e, "a", "part") == 8);
+    assert(types.type_sizeof(check_env.sym_main(&e, "x")->ty) == 24);
+    check_env.reopen(&e);
+    assert(!decls(&e, "struct a {\n    ((b)) part;\n}\n", "struct b {\n    (a) whole;\n}\n",
+                  ""));
+    assert(check_env.said(&e, "infinite size"));
+}
+
 fn a_struct_behind_a_reference_is_identity_only() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -272,6 +311,8 @@ fn a_use_of_a_name_an_import_failed_to_bind_is_silent() void {
 fn main() i32 {
     a_struct_stored_by_value_is_resolved_before_its_holder();
     an_array_of_a_struct_carries_the_base_through();
+    a_grouped_field_is_laid_out_as_the_type_it_groups();
+    a_grouped_struct_field_is_a_resolution_edge();
     a_struct_behind_a_reference_is_identity_only();
     a_span_of_a_struct_is_identity_only_as_well();
     a_pair_that_reaches_through_a_span_checks_in_either_order();
