@@ -1,0 +1,419 @@
+/// Tests transaction refusal and separately measures owned storage teardown.
+import heap;
+import std.libc;
+import std.str;
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_raw;
+import ownership_raw_bytes;
+import ownership_raw_bytes_env;
+import ownership_state;
+
+fn sequence(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.byte_effect mut@ effects,
+    ownership_raw.request mut* req, u32 line) void {
+    *req = ownership_raw_bytes_env.request(e, line);
+    effects[0] = ownership_raw_bytes_env.effect(e, ownership_raw_bytes.effect_kind.read,
+        ownership_raw_bytes_env.window(e, 1, 0, 16, e->byte));
+    effects[0].snapshot_key = 44;
+    effects[1] = ownership_raw_bytes_env.effect(e, ownership_raw_bytes.effect_kind.write,
+        ownership_raw_bytes_env.window(e, 2, 0, 8, e->byte));
+    effects[1].snapshot_key = 44;
+    effects[1].snapshot_begin = 0;
+    e->bindings_len = 2;
+    e->bindings[1] = e->bindings[0];
+    e->bindings[1].operation.operation += 1;
+    e->bindings[1].key.ordinal += 1;
+    e->next_operation += 1;
+    req->base.event_bindings = e->bindings[..2];
+    effects[0].operation = req->base.operation;
+    effects[0].source_position = req->base.source_position;
+    effects[0].source_position.line = 27;
+    effects[0].source_position.end_line = 27;
+    effects[1].operation = e->bindings[1].operation;
+    effects[1].source_position = req->base.source_position;
+    effects[1].source_position.line = 30;
+    effects[1].source_position.end_line = 30;
+}
+// Places a refusal from one complete control transaction. Mode 1 is early and 2 is late.
+// After the last request-line charge, the clone exists and mode 4 starts the read effect.
+// Mode 3 is the first write charge, after the read effect completes its snapshot.
+fn position(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.byte_effect@ effects,
+    ownership_raw.request* req, u32 mode) u64 {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw_bytes_env.watch(e, req->base.source_position.line, 30);
+    ownership_raw_bytes.result mut control = ownership_raw_bytes.apply_ordered(&e->paired.states[0],
+        &e->service, effects, req);
+    assert(ownership_api.successful(control.proof));
+    ownership_raw_bytes.free_result(&control);
+    u64 total = e->budget.calls;
+    u64 read = e->budget.last_watched[0] + 1;
+    u64 write = e->budget.first_watched[1];
+    assert(10 < read && read < write && write < total);
+    if (mode == 1) { return 10; }
+    if (mode == 2) { return total; }
+    return mode == 3 ? write : read;
+}
+// Mode 1 refuses at the request line, mode 4 in the read effect, and modes 2 and 3 in the write.
+fn refused_line(u32 mode, u32 request_line) u32 {
+    if (mode == 1) { return request_line; }
+    return mode == 4 ? 27 : 30;
+}
+fn refusal(u32 function, u32 mode, string receipt) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, function, 1, false);
+    ownership_raw_bytes_env.initial(&e, 1, 53);
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.byte_effect[2] mut effects = {};
+    ownership_raw.request mut req = {};
+    sequence(&e, effects[..], &req, 58);
+    u64 deny_at = position(&e, effects[..], &req, mode);
+    ownership_raw_bytes_env.reset_budget(&e);
+    e.budget.deny_at = deny_at;
+    u64 events = e.budget.events;
+    ownership_raw_bytes.result mut refused = ownership_raw_bytes.apply_ordered(&e.paired.states[0],
+        &e.service, effects[..], &req);
+    defer ownership_raw_bytes.free_result(&refused);
+    assert(!ownership_api.successful(refused.proof) && refused.states.len == 0);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(e.budget.denied.present && e.budget.denied.category == ownership_api.limit_category.w);
+    assert(e.budget.denied.attempted > 0 && e.budget.denied.used > 0);
+    assert(e.budget.denied.used == e.budget.denied.bound);
+    assert(refused.proof.terminal.limit.used == e.budget.denied.used);
+    assert(refused.proof.terminal.limit.bound == e.budget.denied.bound);
+    assert(refused.proof.terminal.limit.attempted == e.budget.denied.attempted);
+    assert(e.budget.meter.used.w > 0);
+    assert(e.budget.events > events && e.budget.last_event.key.ordinal > 0);
+    assert(ownership_keys.operation(refused.proof.terminal.operation,
+        e.budget.denied.operation) == 0);
+    assert(ownership_keys.source(refused.proof.terminal.source,
+        e.budget.denied.source) == 0);
+    assert(e.budget.calls == deny_at && refused.proof.terminal.source.line ==
+        refused_line(mode, 58));
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println(receipt);
+}
+fn b26_early_write_failure_retains_input() void {
+    refusal(49, 1, "required B26.early_write_failure_retains_input reject");
+}
+fn b26_late_write_failure_retains_input() void {
+    refusal(50, 2, "required B26.late_write_failure_retains_input reject");
+}
+fn b26_snapshot_split_failure_retains_input() void {
+    refusal(51, 3, "required B26.snapshot_split_failure_retains_input reject");
+}
+fn b26_owner_history_failure_retains_input() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_rich(&e, 52);
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw.request req = ownership_raw_bytes_env.move_request(&e, 1, 2, 92);
+    ownership_raw_bytes.window source = ownership_raw_bytes_env.window(&e,
+        1, 0, 32, e.selected_type);
+    ownership_raw_bytes.window destination = ownership_raw_bytes_env.window(&e, 2, 0, 32,
+        e.selected_type);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw_bytes.result mut control = ownership_raw_bytes.semantic_move(&e.paired.states[0],
+        &e.service, source, destination, &req);
+    assert(ownership_api.successful(control.proof));
+    assert(control.states[0].core->allocations[0].history.len == 33);
+    assert(control.states[0].core->allocations[0].owner.place.root.ordinal == 2);
+    u64 cost = e.budget.calls;
+    assert(cost > 20);
+    ownership_raw_bytes.free_result(&control);
+    ownership_raw_bytes_env.reset_budget(&e);
+    e.budget.deny_at = cost;
+    u64 events = e.budget.events;
+    ownership_raw_bytes.result mut refused = ownership_raw_bytes.semantic_move(&e.paired.states[0],
+        &e.service, source, destination, &req);
+    defer ownership_raw_bytes.free_result(&refused);
+    assert(!ownership_api.successful(refused.proof) && refused.states.len == 0);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(e.budget.calls == cost && e.budget.events == events + 1);
+    assert(e.budget.denied.present && e.budget.denied.category == ownership_api.limit_category.w);
+    assert(refused.proof.terminal.limit.used == e.budget.denied.used);
+    assert(refused.proof.terminal.limit.bound == e.budget.denied.bound);
+    assert(refused.proof.terminal.limit.attempted == e.budget.denied.attempted);
+    assert(e.budget.denied.used > 0 && e.budget.denied.used == e.budget.denied.bound);
+    assert(ownership_keys.operation(refused.proof.terminal.operation, req.base.operation) == 0);
+    assert(ownership_keys.source(refused.proof.terminal.source, req.base.source_position) == 0);
+    assert(ownership_keys.operation(e.budget.last_event.operation, req.base.operation) == 0);
+    assert(e.budget.last_event.kind == ownership_api.event_kind.work_failure);
+    assert(e.paired.states[0].core->allocations[0].history.len == 32);
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("required B26.owner_history_failure_retains_input reject");
+}
+fn owner_round(u32 mode, u64 cost) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_rich(&e, 53);
+    ownership_raw.request req = ownership_raw_bytes_env.move_request(&e, 1, 2, 133);
+    ownership_raw_bytes.window source = ownership_raw_bytes_env.window(&e,
+        1, 0, 32, e.selected_type);
+    ownership_raw_bytes.window destination = ownership_raw_bytes_env.window(&e, 2, 0, 32,
+        e.selected_type);
+    ownership_raw_bytes_env.reset_budget(&e);
+    if (mode == 1) { e.budget.deny_at = 10; }
+    if (mode == 2) { e.budget.deny_at = cost - 1; }
+    if (mode == 4) { e.budget.deny_at = cost; }
+    ownership_raw_bytes.result mut out = ownership_raw_bytes.semantic_move(&e.paired.states[0],
+        &e.service, source, destination, &req);
+    if (mode == 1 || mode == 2 || mode == 4) {
+        // A failed transaction owns no successor. Caller cleanup must not hide a kernel leak.
+        assert(!ownership_api.successful(out.proof));
+    } else {
+        assert(ownership_api.successful(out.proof));
+        ownership_raw_bytes.free_result(&out);
+    }
+    assert(e.paired.states[0].core->allocations[0].history.len == 32);
+}
+fn owner_cost() u64 {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_rich(&e, 53);
+    ownership_raw.request req = ownership_raw_bytes_env.move_request(&e, 1, 2, 133);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw_bytes.result mut control = ownership_raw_bytes.semantic_move(&e.paired.states[0],
+        &e.service, ownership_raw_bytes_env.window(&e, 1, 0, 32, e.selected_type),
+        ownership_raw_bytes_env.window(&e, 2, 0, 32, e.selected_type), &req);
+    assert(ownership_api.successful(control.proof));
+    assert(control.states[0].core->allocations[0].history.len == 33);
+    u64 cost = e.budget.calls;
+    ownership_raw_bytes.free_result(&control);
+    assert(e.paired.states[0].core->allocations[0].history.len == 32);
+    return cost;
+}
+
+// Linux reports allocated bytes separately from the program break.
+$if ($cfg(target_os) == "linux") {
+    extern fn open_memstream(char mut* own mut* buffer, u64 mut* length) void mut*;
+    extern fn malloc_info(i32 options, void mut* stream) i32;
+    extern fn fclose(void mut* stream) i32;
+    fn metric(string data, string prefix) u64 {
+        i64 mut found = str.find(data, prefix);
+        assert(found >= 0);
+        string mut tail = data[cast(found, u64)..];
+        while (true) {
+            found = str.find(tail[prefix.len..], prefix);
+            if (found < 0) { break; }
+            tail = tail[prefix.len + cast(found, u64)..];
+        }
+        found = str.find(tail, "size=\"");
+        assert(found >= 0);
+        tail = tail[cast(found, u64) + 6..];
+        found = str.index_of(tail, '\"');
+        assert(found >= 0);
+        u64 mut value = 0;
+        assert(str.parse_u64(tail[..cast(found, u64)], 10, &value));
+        return value;
+    }
+    fn live_bytes() u64 {
+        char mut* own mut buffer = null;
+        u64 mut length = 0;
+        void mut* stream = open_memstream(&buffer, &length);
+        assert(stream != null && malloc_info(0, stream) == 0 && fclose(stream) == 0);
+        string data = cast(buffer[0..length], string);
+        u64 arena = metric(data, "<system type=\"current\"");
+        u64 fast = metric(data, "<total type=\"fast\"");
+        u64 rest = metric(data, "<total type=\"rest\"");
+        u64 mapped = metric(data, "<total type=\"mmap\"");
+        libc.free(cast(move(buffer), void* own));
+        assert(arena >= fast && arena - fast >= rest);
+        return arena - fast - rest + mapped;
+    }
+} else {
+    fn live_bytes() u64 { return heap.system_view(); }
+}
+fn populated(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.byte_effect mut@ effects,
+    ownership_raw.request mut* req) void {
+    ownership_raw_bytes_env.rich(e, 60);
+    ownership_raw_bytes_env.read(e, 1, 0, 16, 1, 152);
+    ownership_raw_bytes_env.write(e, 2, 0, 16, 1, 0, 153);
+    ownership_raw_bytes.reference_result mut value =
+        ownership_raw_bytes_env.reference(e, 2, 0, 16, e->span, 155);
+    assert(ownership_api.successful(value.proof));
+    assert(value.value.borrows.len == 1 && value.facts.blocks != null);
+    assert(e->paired.states[0].bytes.facts.blocks != null);
+    assert(e->paired.states[0].bytes.snapshots[0].facts.blocks != null);
+    ownership_raw_bytes.free_reference(&value);
+    sequence(e, effects, req, 159);
+    effects[0].selected.begin = 24;
+    effects[0].selected.end = 40;
+}
+// Discovers the storage refusal position once before the warm rounds.
+fn storage_position(u32 mode) u64 {
+    if (mode == 0) { return 0; }
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.byte_effect[2] mut effects = {};
+    ownership_raw.request mut req = {};
+    populated(&e, effects[..], &req);
+    return position(&e, effects[..], &req, mode);
+}
+fn populated_round(u32 mode, u64 deny_at) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.byte_effect[2] mut effects = {};
+    ownership_raw.request mut req = {};
+    populated(&e, effects[..], &req);
+    ownership_raw_bytes_env.reset_budget(&e);
+    if (mode != 0) { e.budget.deny_at = deny_at; }
+    ownership_raw_bytes.result mut out = ownership_raw_bytes.apply_ordered(&e.paired.states[0],
+        &e.service, effects[..], &req);
+    if (mode == 0) {
+        assert(ownership_api.successful(out.proof));
+        ownership_raw_bytes.free_result(&out);
+    } else {
+        // A failed transaction owns no successor. Caller cleanup must not hide a kernel leak.
+        assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+        assert(e.budget.calls == deny_at && out.proof.terminal.source.line ==
+            refused_line(mode, 159));
+    }
+    if (mode == 4) {
+        assert(e.paired.states[0].core->allocations[0].history.len == 1);
+        assert(e.paired.states[0].core->allocations[1].history.len == 1);
+    }
+}
+fn allocator_probe(u32 mode) void {
+    u64 deny_at = storage_position(mode);
+    u64 mut warm = 0;
+    while (warm < 64) { populated_round(mode, deny_at); warm += 1; }
+    populated_round(mode, deny_at);
+    u64 before_live = live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_raw_bytes.U64_MAX;
+    u64 mut best_system = ownership_raw_bytes.U64_MAX;
+    u64 mut round = 0;
+    while (round < 256) {
+        populated_round(mode, deny_at);
+        u64 distance_live = heap.distance(before_live, live_bytes());
+        u64 distance_system = heap.distance(before_system, heap.system_view());
+        if (round >= 240 && distance_live < best_live) { best_live = distance_live; }
+        if (round >= 240 && distance_system < best_system) { best_system = distance_system; }
+        round += 1;
+    }
+    if (best_live >= (heap.ADDRESS_IS_A_VIEW ? 2048 : 256) ||
+        best_system >= (heap.ADDRESS_IS_A_VIEW ? 1 : 256)) {
+        println("allocator ", mode, " live ", best_live, " system ", best_system);
+    }
+    assert(best_live < (heap.ADDRESS_IS_A_VIEW ? 2048 : 256));
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+    println("allocator mode ", mode, " released");
+}
+
+fn owner_allocator_probe(u32 mode) void {
+    u64 cost = owner_cost();
+    u64 mut warm = 0;
+    while (warm < 64) { owner_round(mode, cost); warm += 1; }
+    owner_round(mode, cost);
+    u64 before_live = live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_raw_bytes.U64_MAX;
+    u64 mut best_system = ownership_raw_bytes.U64_MAX;
+    u64 mut round = 0;
+    while (round < 256) {
+        owner_round(mode, cost);
+        u64 distance_live = heap.distance(before_live, live_bytes());
+        u64 distance_system = heap.distance(before_system, heap.system_view());
+        if (round >= 240 && distance_live < best_live) { best_live = distance_live; }
+        if (round >= 240 && distance_system < best_system) { best_system = distance_system; }
+        round += 1;
+    }
+    if (best_live >= (heap.ADDRESS_IS_A_VIEW ? 2048 : 256) ||
+        best_system >= (heap.ADDRESS_IS_A_VIEW ? 1 : 256)) {
+        println("owner allocator ", mode, " live ", best_live, " system ", best_system);
+    }
+    assert(best_live < (heap.ADDRESS_IS_A_VIEW ? 2048 : 256));
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+}
+
+fn typed_sequence(ownership_raw_bytes_env.env mut* e,
+    ownership_raw_bytes.byte_effect mut@ effects, ownership_raw.request mut* req) void {
+    sequence(e, effects, req, 3300);
+    effects[0].kind = ownership_raw_bytes.effect_kind.replacement;
+    effects[0].selected = ownership_raw_bytes_env.window(e, 1, 0, 16, e->span);
+    effects[0].checked_value = true;
+    effects[0].value = e->second;
+    effects[1].kind = ownership_raw_bytes.effect_kind.read;
+    effects[1].selected = ownership_raw_bytes_env.window(e, 2, 0, 16, e->byte);
+    effects[1].snapshot_key = 44;
+}
+fn typed_cost() u64 {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.unseeded_rich(&e, 630);
+    ownership_raw_bytes.byte_effect[2] mut effects = {};
+    ownership_raw.request mut req = {};
+    typed_sequence(&e, effects[..], &req);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw_bytes.result mut out = ownership_raw_bytes.apply_ordered(&e.paired.states[0],
+        &e.service, effects[..], &req);
+    assert(ownership_api.successful(out.proof));
+    assert(out.states[0].core->contents[0].borrows[0].source.ordinal == 2);
+    assert(out.states[0].core->allocations[0].history.len == 32);
+    u64 cost = e.budget.calls;
+    ownership_raw_bytes.free_result(&out);
+    return cost;
+}
+fn typed_round(u32 mode, u64 cost) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.unseeded_rich(&e, 630);
+    ownership_raw_bytes.byte_effect[2] mut effects = {};
+    ownership_raw.request mut req = {};
+    typed_sequence(&e, effects[..], &req);
+    ownership_raw_bytes_env.reset_budget(&e);
+    if (mode == 1) { e.budget.deny_at = cost; }
+    ownership_raw_bytes.result mut out = ownership_raw_bytes.apply_ordered(&e.paired.states[0],
+        &e.service, effects[..], &req);
+    if (mode == 0) {
+        assert(ownership_api.successful(out.proof));
+        assert(out.states[0].core->contents[0].borrows[0].source.ordinal == 2);
+        assert(out.states[0].bytes.representations_len == 1);
+        assert(out.states[0].core->allocations[0].history.len == 32);
+        ownership_raw_bytes.free_result(&out);
+    } else {
+        // A failed transaction owns no successor. Caller cleanup must not hide a kernel leak.
+        assert(out.proof.kind == ownership_api.proof_kind.incomplete && out.states.len == 0);
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(e.budget.calls == cost && out.proof.terminal.source.line == 30);
+    }
+    assert(e.paired.states[0].core->contents[0].borrows[0].source.ordinal == 1);
+    assert(e.paired.states[0].bytes.representations_len == 0);
+    assert(e.paired.states[0].core->allocations[0].history.len == 32);
+}
+fn typed_allocator_probe(u32 mode) void {
+    ownership_raw_bytes_env.env mut retained = {};
+    defer ownership_raw_bytes_env.close(&retained);
+    ownership_raw_bytes_env.unseeded_rich(&retained, 631);
+    ownership_raw_bytes.result mut prior = ownership_raw_bytes_env.clone_input(&retained);
+    defer ownership_raw_bytes.free_result(&prior);
+    u64 cost = typed_cost();
+    u64 mut warm = 0;
+    while (warm < 64) { typed_round(mode, cost); warm += 1; }
+    typed_round(mode, cost);
+    u64 before_live = live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_raw_bytes.U64_MAX;
+    u64 mut best_system = ownership_raw_bytes.U64_MAX;
+    u64 mut round = 0;
+    while (round < 256) {
+        typed_round(mode, cost);
+        u64 distance_live = heap.distance(before_live, live_bytes());
+        u64 distance_system = heap.distance(before_system, heap.system_view());
+        if (round >= 240 && distance_live < best_live) { best_live = distance_live; }
+        if (round >= 240 && distance_system < best_system) { best_system = distance_system; }
+        round += 1;
+    }
+    if (best_live >= (heap.ADDRESS_IS_A_VIEW ? 2048 : 256) ||
+        best_system >= (heap.ADDRESS_IS_A_VIEW ? 1 : 256)) {
+        println("typed allocator ", mode, " live ", best_live, " system ", best_system);
+    }
+    assert(best_live < (heap.ADDRESS_IS_A_VIEW ? 2048 : 256));
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+    ownership_raw_bytes_env.same(&retained, &prior.states[0]);
+    println("typed allocator mode ", mode, " released");
+}

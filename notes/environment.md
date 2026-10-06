@@ -32,6 +32,16 @@ without a rewrite.
   subcommands (`configure`, `build`, `test`, `workflow`, the targets below and `gate`) run at
   the top of the host git worktree containing the cwd and default to the `debug` preset. Every
   guest command sources `/etc/profile.d/fort.sh` and disables core dumps.
+  The current SSH wrapper retries only exit status 255 through `vagrant ssh`.
+  It returns guest exit status 1 without retry.
+  Run `FORT_VM_SLOT=2 tools/vm run 'exit 1'` to test the ordinary failure path.
+  Run `FORT_VM_SLOT=2 tools/vm run 'exit 255'` to test the retry path.
+  A measured status-1 command starts one guest process. A status-255 command starts two.
+  Keep attempt receipts and guest PIDs when a command can repeat.
+  An older wrapper also retried ordinary guest failures. Its saved observations remain historical.
+  Stop only a scheduler and child processes that the current agent owns.
+  After a stopped scheduler's child finishes, terminate and resume that scheduler to release it.
+  Give each retry a distinct receipt path. Do not overwrite the first attempt.
 - **A per-ticket VM (`FORT_VM_DIR="$PWD"` inside a worktree) is retired; use a slot instead**
   (T-114, below). It is kept here as history because its measurements still hold: on 2026-09-12,
   on a host with 10 CPUs and 32 GiB, `FORT_VM_DIR="$PWD" FORT_VM_CPUS=4 FORT_VM_MEMORY=8192

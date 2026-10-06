@@ -358,7 +358,77 @@ came here.
   Foreign byte effects remain outside proof under D17.13. Known allocation release still invalidates
   related borrows, even when foreign extent trust remains available.
   The 12 normative traces are design evidence. The two raw suites probe supplied facts.
-  These probes do not establish producer integration or ordered representation writes.
+  The two raw suites establish the supplied raw facts.
+  `src/fort/ownership_raw_bytes.ft` owns a stable core object and its paired raw context.
+  Its ledger keeps containing storage separate from the original reference sources.
+  Ordered interval fragments keep the original byte positions and captured value versions.
+  Snapshots copy nested relations and extend no original source lifetime.
+  Clone preparation charges all copied facts before allocation.
+  Comparisons and later consumers have separate work charges.
+  Byte interpretation checks added ownership at each reference level (D3.14).
+  Equal containing places permit no added ownership mark.
+  Typed publication resolves one captured reference leaf and one canonical core contents row.
+  The actual leaf type accepts the original reference marks without added mutability or ownership.
+  A byte view supplies neither the actual leaf type nor the canonical destination place.
+  Ambiguous mappings supply no reference fact. Existing canonical empty facts remain empty.
+  Complete publication also requires nonresidual captured, leaf, and canonical paths.
+  Byte writes set each reference or aggregate parent fact to unknown when it lies between the
+  captured object and the changed leaf. Repeated origins apply this to the matched element path.
+  Unproved affected paths refuse the transaction and preserve caller input.
+  A pointer variable before a captured dereference lies outside that object.
+  Semantic moves retain those original marks across later moves.
+  Incomplete byte writes set corresponding core contents to unknown, including unseeded leaves.
+  Repeated reference writes match the exact element index between the origin prefix and leaf path.
+  Count-one origins also match index zero before they change core contents.
+  A count other than literal one makes an origin repeated, whatever its repeated flag says.
+  The match needs a finite count, checked stride, and one exact core contents row.
+  Unavailable or residual element correspondence refuses before publication.
+  Disjoint elements retain their original borrow sources and complete contents.
+  Byte translations compute bounded differences before addition near maximum endpoints.
+  Canonical empty facts retain checked obligation absence in the separate ledger fact store.
+  Unknown bytes retain that absence proof. They establish no valid reference or owner.
+  Complete zero writes restore canonical empty bytes only after the overlap guard proves absence.
+  Empty byte intervals overlap no interval and discard no owner obligation.
+  Empty writes still require source validity and snapshot correspondence.
+  Definite nonzero owners can supply unconditional owner-loss witnesses.
+  Possible counts, uncertain owner paths, and malformed facts supply incomplete evidence.
+  The residual owner-path flag also supplies incomplete evidence with no validated witness.
+  A complete typed replacement can recover correspondence without reading old borrowed bytes.
+  An unseeded typed replacement creates complete byte correspondence.
+  It also updates the actual core row.
+  The replacement requires one original reference leaf.
+  Its bytes, path, and reference marks must match.
+  Overlapping wider interpretations become incomplete first.
+  Then the selected core row receives its new source.
+  Unchanged owner bytes keep the original obligation and owner location.
+  Destructive owner effects require empty or transferred original obligations.
+  An obligation whose owner place equals or lies inside the window's place needs an owning leaf
+  there. An owner above the window's place designates that storage. An owner past a dereference
+  below it lies in other storage. Neither holds window bytes.
+  Owner byte checks read only the snapshot bytes that land on an owning leaf.
+  A snapshot of a window over F fragments holds up to 2F + 1 parts and no more parts than bytes.
+  Paired R counts each part as a partition, so a snapshot never holds more than R parts.
+  Shallow release refuses an owner whose place begins with the containing place or is residual.
+  A missing event route refuses at its own effect and reports no other effect's event.
+  Canonical zero preserves a proved empty owner. Unknown bytes supply no canonical-zero fact.
+  Checked semantic moves transfer original obligations before byte-ledger publication.
+  Their borrows retain the original designated sources. Raw copying creates no owner.
+  Paid iterative queries compare reference types and measure layouts.
+  Query refusal keeps the first terminal proof and the mapped operation and source.
+  The paired R request counts the semantic borrowed-region union and current raw leaves.
+  Representation partitions use the full source key and a canonical half-open storage interval.
+  Snapshot partitions use their ledger's snapshot key and a canonical half-open snapshot interval.
+  These two namespaces remain distinct. Duplicate identities count once within one namespace.
+  Empty intervals add no partition. A missing key, a key of another kind, or ordinal zero proves
+  no equality, so each such row counts once.
+  Unknown fragments add no borrowed-source fact. Empty-owner rows add no region by themselves.
+  Counting equality proves no storage, value, permission, or ownership correspondence.
+  Prospective edits count survivors and new facts before fragment storage grows.
+  A clone requests the same absolute R amount. Repeated equal writes do not accumulate R.
+  Each refused edit keeps caller input. These rules implement FIR 14.1 without changing its bounds.
+  Original layout leaves and residual descendants control erased writes and shallow release.
+  The byte suites establish supplied ordered effects and transactional storage cleanup.
+  These suites do not establish producer integration.
   These rules change no layout, ABI, emitted instruction, arithmetic operator, or runtime check.
 - **An emitter that copies a value and then clears its source needs an intermediate.** `move(lv)`
   writes into a destination the emitter cannot prove distinct from the operand (`s = move(s)`,

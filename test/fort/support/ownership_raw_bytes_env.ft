@@ -1,0 +1,969 @@
+/// Supplies checked byte-kernel fixtures and keeps input, failure, and allocator observations
+/// separate.
+import ast;
+import check_env;
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_raw;
+import ownership_raw_bytes;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import types;
+
+struct counts {
+    // The first and last charges at a watched source line place a refusal in one effect.
+    u32[2] watched_lines;
+    u64[2] first_watched;
+    u64[2] last_watched;
+    ownership_limits.meter meter;
+    u64 calls;
+    u64 deny_at;
+    u64 events;
+    ownership_api.charge_request last_charge;
+    ownership_api.charge_item[9] last_items;
+    ownership_api.exhaustion denied;
+    ownership_api.event_descriptor last_event;
+    ownership_api.proof_status last_proof;
+    bool witness_validated;
+}
+struct env {
+    ownership_state.state core;
+    ownership_raw.result raw;
+    ownership_raw_bytes.result paired;
+    types.table table;
+    check_env.env checked;
+    bool checked_open;
+    counts budget;
+    ownership_api.services service;
+    ownership_api.function_id function;
+    ownership_transfer.event_binding[256] bindings;
+    u64 bindings_len;
+    u32 next_operation;
+    ownership_api.limit_table limits;
+    types.node* byte;
+    types.node* pointer;
+    types.node* span;
+    types.node* string_type;
+    types.node* selected_type;
+    types.node* owner_span;
+    bool scalar_destination;
+    bool inline_container;
+    // Captures a repeated origin with its flag clear. Its count alone shows the repetition.
+    bool unflagged_repetition;
+    ownership_api.contents_fact first;
+    ownership_api.contents_fact second;
+    u32 file;
+}
+fn id(env* e, ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{e->function, kind, ordinal};
+}
+fn place(env* e, u32 slot) ownership_api.place_path {
+    ownership_api.place_path mut out = {};
+    out.root = id(e, ownership_api.entity_kind.slot, slot);
+    return out;
+}
+fn exact(i64 value) ownership_api.scalar_fact {
+    ownership_api.scalar_fact mut out = {};
+    out.kind = ownership_api.fact_kind.exact;
+    out.value = value;
+    return out;
+}
+fn budget(void mut* opaque, ownership_api.charge_request* request) ownership_api.charge_result {
+    counts mut* counter = cast(opaque, counts mut*);
+    assert(ownership_keys.canonical_charges(request));
+    counter->calls += 1;
+    u64 mut watched = 0;
+    while (watched < counter->watched_lines.len) {
+        if (counter->watched_lines[watched] != 0 &&
+            request->source.line == counter->watched_lines[watched]) {
+            if (counter->first_watched[watched] == 0) {
+                counter->first_watched[watched] = counter->calls;
+            }
+            counter->last_watched[watched] = counter->calls;
+        }
+        watched += 1;
+    }
+    counter->last_charge = *request;
+    assert(request->items.len <= counter->last_items.len);
+    u64 mut item = 0;
+    while (item < request->items.len) {
+        counter->last_items[item] = request->items[item];
+        item += 1;
+    }
+    counter->last_charge.items = counter->last_items[..request->items.len];
+    if (counter->deny_at != 0 && counter->calls == counter->deny_at) {
+        ownership_api.charge_result mut out = {};
+        ownership_api.limit_category category = request->items[0].category;
+        u64 used = ownership_limits.used(&counter->meter.used, category);
+        counter->denied = ownership_api.exhaustion{true, category, request->items[0].scope,
+            request->work, used, used, request->items[0].amount, request->operation,
+            request->source, false};
+        out.limit = counter->denied;
+        if (category == ownership_api.limit_category.w) {
+            out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+                request->operation, request->source);
+            out.proof.terminal.limit = out.limit;
+        } else { out.proof.kind = ownership_api.proof_kind.complete; }
+        return out;
+    }
+    return ownership_limits.try_charge(&counter->meter, request);
+}
+fn event(void mut* opaque, ownership_api.event_request* request) ownership_api.event_result {
+    counts mut* counter = cast(opaque, counts mut*);
+    assert(request->event.key.kind == ownership_api.entity_kind.event);
+    assert(ownership_keys.function(request->event.key.function,
+        request->event.operation.function) == 0);
+    assert(request->event.source.line > 0 && request->event.source.filename_present);
+    counter->witness_validated = request->event.witnesses.len > 0 &&
+        request->event.witnesses[0].validated;
+    counter->events += 1;
+    counter->last_event = request->event;
+    ownership_api.witness_link@ none = {};
+    counter->last_event.witnesses = none;
+    counter->last_proof = request->current;
+    ownership_api.event_result mut out = {};
+    out.proof = request->current;
+    out.retained = true;
+    return out;
+}
+// Records the first and last charges at two source lines until the next reset.
+fn watch(env mut* e, u32 first, u32 second) void {
+    e->budget.watched_lines[0] = first;
+    e->budget.watched_lines[1] = second;
+}
+fn reset_budget(env mut* e) void {
+    watch(e, 0, 0);
+    e->budget.first_watched[0] = 0;
+    e->budget.first_watched[1] = 0;
+    e->budget.last_watched[0] = 0;
+    e->budget.last_watched[1] = 0;
+    e->budget.witness_validated = false;
+    e->budget.calls = 0;
+    e->budget.deny_at = 0;
+    e->budget.denied = ownership_api.exhaustion{};
+    assert(ownership_limits.configure(&e->budget.meter, &e->limits));
+}
+fn open(env mut* e, u32 function, u32 file) void {
+    e->core = ownership_state.empty();
+    e->function.declaration.module = 1;
+    e->function.declaration.declaration = function;
+    e->file = file;
+    types.type_table_init(&e->table);
+    e->byte = types.type_prim(&e->table, prim.prim_kind.prim_u8);
+    e->pointer = types.type_ptr(&e->table, e->byte, false, false);
+    e->span = types.type_span(&e->table, e->byte, false, false);
+    e->string_type = types.type_string(&e->table, false);
+    e->limits = ownership_limits.production();
+    reset_budget(e);
+    e->service.budget_context = cast(&e->budget, void mut*);
+    e->service.budget = budget;
+    e->service.event_context = cast(&e->budget, void mut*);
+    e->service.event = event;
+}
+fn close(env mut* e) void {
+    ownership_raw_bytes.free_result(&e->paired);
+    ownership_raw.free_result(&e->raw);
+    ownership_state.free(&e->core);
+    types.type_table_free(&e->table);
+    if (e->checked_open) { check_env.close(&e->checked); }
+}
+fn request(env mut* e, u32 line) ownership_raw.request {
+    e->next_operation += 1;
+    ownership_raw.request mut out = {};
+    out.base.kind = ownership_transfer.action.use;
+    out.base.operation.function = e->function;
+    out.base.operation.operation = e->next_operation;
+    out.base.source_position = ownership_api.source_position{1, e->file, line, 1,
+        line, 2, true};
+    out.base.source = place(e, 1);
+    out.base.destination = place(e, 2);
+    out.base.direct_source_proved = true;
+    out.base.direct_destination_proved = true;
+    out.base.source_correspondence_proved = true;
+    out.base.event_map_complete_proved = true;
+    e->bindings[0] = ownership_transfer.event_binding{out.base.operation,
+        id(e, ownership_api.entity_kind.event, e->next_operation)};
+    e->bindings_len = 1;
+    out.base.event_bindings = e->bindings[..1];
+    out.limits = e->limits;
+    out.alternatives_complete = true;
+    out.captured_values = true;
+    return out;
+}
+fn add_source(env mut* e, u32 key, ownership_api.source_kind kind, u32 allocation) void {
+    ownership_api.source_fact mut fact = {};
+    fact.key = id(e, ownership_api.entity_kind.source, key);
+    fact.kind = kind;
+    fact.validity = ownership_api.validity_kind.live;
+    if (allocation != 0) { fact.allocation = id(e, ownership_api.entity_kind.allocation,
+        allocation); }
+    ownership_state.append_sources(&e->core, fact);
+}
+fn add_allocation(env mut* e, u32 key, u32 slot, i64 length) void {
+    ownership_api.allocation_fact mut fact = {};
+    fact.key = id(e, ownership_api.entity_kind.allocation, key);
+    fact.site = id(e, ownership_api.entity_kind.allocation, 100 + key);
+    fact.validity = ownership_api.validity_kind.live;
+    fact.count.one = true;
+    fact.obligation = true;
+    fact.owner.place = place(e, slot);
+    fact.logical_length = exact(length);
+    ownership_api.history_fact[1] mut history = {};
+    history[0].allocation = fact.key;
+    history[0].kind = ownership_api.effect_kind.write;
+    history[0].after = fact.owner;
+    history[0].operation.function = e->function;
+    history[0].operation.operation = 1;
+    history[0].source = ownership_api.source_position{1, e->file, 1, 1, 1, 2, true};
+    fact.history = history[..];
+    ownership_state.append_allocations(&e->core, fact);
+}
+fn value(env mut* e, u32 slot, u32 version, u32 source, i64 begin, i64 end,
+    i64 length) ownership_api.contents_fact {
+    ownership_api.borrow_relation[1] mut borrows = {};
+    borrows[0].key = id(e, ownership_api.entity_kind.relation, version);
+    borrows[0].value_version = id(e, ownership_api.entity_kind.value, version);
+    borrows[0].containing = place(e, slot);
+    borrows[0].source = id(e, ownership_api.entity_kind.source, source);
+    borrows[0].representation_complete = true;
+    borrows[0].range.key = id(e, ownership_api.entity_kind.region, source);
+    borrows[0].range.source = borrows[0].source;
+    borrows[0].range.offset = exact(begin);
+    borrows[0].range.access = ownership_api.byte_window{exact(begin), exact(end), true};
+    borrows[0].range.extent = exact(end - begin);
+    borrows[0].range.alignment = 1;
+    borrows[0].range.layout = e->byte;
+    ownership_api.layout_leaf[1] leaves = {ownership_api.layout_leaf{
+        ownership_api.byte_window{exact(0), exact(1), true}, e->byte, false, false}};
+    ownership_api.region_partition[1] partitions = {ownership_api.region_partition{
+        id(e, ownership_api.entity_kind.region, version + 20),
+        id(e, ownership_api.entity_kind.predicate, version + 20),
+        ownership_api.byte_window{exact(begin), exact(end), true}, false}};
+    borrows[0].range.leaves = leaves[..];
+    borrows[0].range.partitions = partitions[..];
+    ownership_api.contents_fact mut out = {};
+    out.place = place(e, slot);
+    out.kind = ownership_api.contents_kind.reference;
+    out.value_version = borrows[0].value_version;
+    out.borrows = borrows[..];
+    out.span_length = exact(length);
+    return ownership_state.copy_contents(&e->core, out);
+}
+fn origin(env* e, u32 source, u32 slot, types.node* layout, u64 bytes, u32 allocation)
+    ownership_raw.origin {
+    ownership_raw.origin mut out = {};
+    out.source = id(e, ownership_api.entity_kind.source, source);
+    if (allocation != 0) { out.allocation = id(e, ownership_api.entity_kind.allocation,
+        allocation); }
+    out.place = place(e, slot);
+    out.layout = layout;
+    out.count = ownership_raw.literal(allocation == 0 ? 1 : bytes);
+    out.begin = ownership_raw.literal(0);
+    out.end = ownership_raw.literal(bytes);
+    out.alignment = 8;
+    out.correspondence = true;
+    out.repeated = allocation != 0;
+    return out;
+}
+fn capture(env mut* e, types.node* container, u64 bytes) void {
+    e->selected_type = container;
+    ownership_raw.origin[7] mut inputs = {
+        origin(e, 101, 1, container, bytes, 0), origin(e, 102, 2, container, bytes, 0),
+        origin(e, 103, 3, container, bytes, 0), origin(e, 1, 10, e->byte, 12, 1),
+        origin(e, 2, 11, e->byte, 12, 2), origin(e, 4, 4, e->byte, 12, 0),
+        origin(e, 5, 5, e->byte, 1, 0)};
+    if (e->scalar_destination) { inputs[1].layout = types.type_array(&e->table, e->byte, 8); }
+    if (e->core.sources[0].allocation.kind == ownership_api.entity_kind.allocation) {
+        inputs[0].allocation = e->core.sources[0].allocation;
+    }
+    if (e->inline_container) { inputs[6].place = field(e, 1, 2); }
+    u64 mut allocation = 0;
+    while (allocation < 2) {
+        ownership_api.scalar_fact length = e->core.allocations[allocation].logical_length;
+        if (length.kind == ownership_api.fact_kind.exact && length.value >= 0) {
+            inputs[3 + allocation] = origin(e, 1 + cast(allocation, u32),
+                10 + cast(allocation, u32), e->byte, cast(length.value, u64),
+                1 + cast(allocation, u32));
+        }
+        allocation += 1;
+    }
+    if (e->core.sources[5].allocation.kind == ownership_api.entity_kind.allocation) {
+        inputs[5] = origin(e, 4, 4, e->byte, 12, 1);
+    }
+    ownership_raw.request mut req = request(e, 1);
+    ownership_raw.captured_bound[2] mut bounds = {};
+    ownership_raw.term[2] mut terms = {};
+    ownership_raw.relation[1] mut relations = {};
+    ownership_raw.captured_bound@ mut selected_bounds = {};
+    ownership_raw.relation@ mut selected_relations = {};
+    if (e->core.allocations[0].logical_length.kind == ownership_api.fact_kind.symbolic) {
+        u64 mut i = 0;
+        while (i < 2) {
+            terms[i] = ownership_raw.term{e->core.allocations[i].logical_length.symbol,
+                ownership_raw.natural(1)};
+            bounds[i] = ownership_raw.captured_bound{terms[i].version,
+                ownership_raw.natural(12), ownership_raw.natural(12)};
+            inputs[3 + i].count = ownership_raw.expression{ownership_raw.natural(0),
+                terms[i..i + 1], true};
+            inputs[3 + i].end = inputs[3 + i].count;
+            i += 1;
+        }
+        relations[0] = ownership_raw.relation{inputs[3].count, inputs[4].count};
+        selected_bounds = bounds[..];
+        selected_relations = relations[..];
+    }
+    e->raw = ownership_raw.capture_origins(&e->core, &e->service, inputs[..], selected_bounds,
+        selected_relations, &req);
+    if (!ownership_api.successful(e->raw.proof)) { println(e->budget.last_event.text); }
+    assert(ownership_api.successful(e->raw.proof));
+    req = request(e, 1);
+    reset_budget(e);
+    e->paired = ownership_raw_bytes.pair(&e->core, &e->raw.storage, &e->service, &req);
+    assert(ownership_api.successful(e->paired.proof) && e->paired.states.len == 1);
+    assert(e->paired.states[0].raw.core == cast(e->paired.states[0].core, ownership_state.state*));
+    assert(e->paired.states[0].raw.core != cast(&e->core, ownership_state.state*));
+}
+fn setup(env mut* e, u32 function, u32 kind, bool owning) void {
+    open(e, function, 1);
+    add_source(e, 101, ownership_api.source_kind.stack, 0);
+    add_source(e, 102, ownership_api.source_kind.stack, 0);
+    add_source(e, 103, ownership_api.source_kind.stack, 0);
+    add_source(e, 1, ownership_api.source_kind.heap, 1);
+    add_source(e, 2, ownership_api.source_kind.heap, 2);
+    add_source(e, 4, ownership_api.source_kind.trusted_foreign, 0);
+    add_source(e, 5, ownership_api.source_kind.stack, 0);
+    add_allocation(e, 1, owning ? 1 : 10, 12);
+    add_allocation(e, 2, 11, 12);
+    e->first = value(e, 1, 1, 1, owning ? 0 : 2, owning ? 12 : 6,
+        owning ? 12 : (kind == 0 ? 1 : 4));
+    e->second = value(e, 3, 2, 2, 0, 6, kind == 0 ? 1 : 6);
+    ownership_state.append_contents(&e->core, e->first);
+    ownership_state.append_contents(&e->core, e->second);
+    ownership_api.contents_fact mut blank = {};
+    blank.place = place(e, 2);
+    ownership_state.append_contents(&e->core, blank);
+    types.node* mut ty = e->pointer;
+    if (kind == 1) { ty = e->span; }
+    if (kind == 2) { ty = e->string_type; }
+    if (owning) { ty = types.type_ptr(&e->table, e->byte, true, false); }
+    capture(e, ty, kind == 0 ? 8 : 16);
+}
+fn window(env* e, u32 slot, u64 begin, u64 end, types.node* ty) ownership_raw_bytes.window {
+    return ownership_raw_bytes.window{id(e, ownership_api.entity_kind.source, 100 + slot),
+        begin, end, place(e, slot), ty, 8, true};
+}
+fn effect(env* e, ownership_raw_bytes.effect_kind kind, ownership_raw_bytes.window selected)
+    ownership_raw_bytes.byte_effect {
+    ownership_raw_bytes.byte_effect mut out = {};
+    out.kind = kind;
+    out.selected = selected;
+    out.aliases_substituted = true;
+    return out;
+}
+fn try_effect(env mut* e, ownership_raw_bytes.byte_effect mut change, u32 line)
+    ownership_raw_bytes.result {
+    reset_budget(e);
+    ownership_raw.request req = request(e, line);
+    change.operation = req.base.operation;
+    change.source_position = req.base.source_position;
+    ownership_raw_bytes.byte_effect[1] input = {change};
+    return ownership_raw_bytes.apply_ordered(&e->paired.states[0], &e->service, input[..], &req);
+}
+fn take(env mut* e, ownership_raw_bytes.result mut* next) void {
+    if (!ownership_api.successful(next->proof)) { println(e->budget.last_event.text); }
+    assert(ownership_api.successful(next->proof) && next->states.len == 1);
+    assert(next->states[0].core != e->paired.states[0].core);
+    assert(next->states[0].raw.core == cast(next->states[0].core, ownership_state.state*));
+    ownership_raw_bytes.free_result(&e->paired);
+    e->paired = move(*next);
+}
+fn apply(env mut* e, ownership_raw_bytes.byte_effect change, u32 line) void {
+    ownership_raw_bytes.result mut next = try_effect(e, change, line);
+    take(e, &next);
+}
+fn seed(env mut* e, u32 slot, u64 begin, u64 end, types.node* ty,
+    ownership_api.contents_fact value, bool known, u32 line) void {
+    ownership_raw_bytes.byte_effect mut change = effect(e, ownership_raw_bytes.effect_kind.seed,
+        window(e, slot, begin, end, ty));
+    change.value = value;
+    change.checked_value = known;
+    apply(e, change, line);
+}
+fn initial(env mut* e, u32 kind, u32 line) void {
+    types.node* ty = e->selected_type;
+    u64 bytes = kind == 0 ? 8 : 16;
+    seed(e, 1, 0, bytes, ty, e->first, true, line);
+    ownership_api.contents_fact blank = {};
+    seed(e, 2, 0, bytes, ty, blank, false, line);
+    seed(e, 3, 0, bytes, ty, e->second, true, line);
+}
+fn read(env mut* e, u32 slot, u64 begin, u64 end, u64 key, u32 line) void {
+    ownership_raw_bytes.byte_effect mut change = effect(e, ownership_raw_bytes.effect_kind.read,
+        window(e, slot, begin, end, e->byte));
+    change.snapshot_key = key;
+    apply(e, change, line);
+}
+fn write(env mut* e, u32 slot, u64 begin, u64 end, u64 key, u64 source_begin, u32 line) void {
+    ownership_raw_bytes.byte_effect mut change = effect(e, ownership_raw_bytes.effect_kind.write,
+        window(e, slot, begin, end, e->byte));
+    change.snapshot_key = key;
+    change.snapshot_begin = source_begin;
+    apply(e, change, line);
+}
+fn unknown(env mut* e, u32 slot, u64 begin, u64 end, u32 line) void {
+    apply(e, effect(e, ownership_raw_bytes.effect_kind.unknown,
+        window(e, slot, begin, end, e->byte)), line);
+}
+fn reference(env mut* e, u32 slot, u64 begin, u64 end, types.node* ty, u32 line)
+    ownership_raw_bytes.reference_result {
+    reset_budget(e);
+    ownership_raw.request req = request(e, line);
+    return ownership_raw_bytes.read_reference(&e->paired.states[0], &e->service,
+        window(e, slot, begin, end, ty), &req);
+}
+fn accepts(ownership_raw_bytes.reference_result mut* out, env* e, u32 source, u32 version,
+    i64 begin, i64 end) void {
+    assert(ownership_api.successful(out->proof));
+    assert(out->value.kind == ownership_api.contents_kind.reference);
+    assert(out->value.borrows.len == 1 && out->value.value_version.ordinal == version);
+    ownership_api.borrow_relation borrow = out->value.borrows[0];
+    assert(ownership_raw.same_key(borrow.value_version, out->value.value_version));
+    assert(borrow.source.ordinal == source && borrow.representation_complete);
+    assert(borrow.range.offset.value == begin && borrow.range.access.begin.value == begin);
+    assert(borrow.range.access.end.value == end && borrow.range.access.arithmetic_proved);
+    assert(borrow.range.extent.value == end - begin && borrow.range.leaves.len == 1);
+    assert(borrow.range.partitions.len == 1 && borrow.range.alignment == 1);
+    assert(ownership_state.same_place(borrow.containing, out->value.place));
+    assert(e->paired.states[0].core->allocations_len == 2);
+    assert(e->paired.states[0].core->allocations[0].obligation);
+    assert(e->paired.states[0].core->allocations[1].obligation);
+}
+fn rejects(ownership_raw_bytes.reference_result mut* out) void {
+    assert(!ownership_api.successful(out->proof) && out->proof.failed);
+    assert(out->facts.blocks == null && out->value.borrows.len == 0);
+}
+fn same(env mut* e, ownership_raw_bytes.state* before) void {
+    reset_budget(e);
+    ownership_raw.request mut req = request(e, 1);
+    ownership_api.proof_status mut proof = {};
+    assert(ownership_raw_bytes.equal(before, &e->paired.states[0], &e->service, &req, &proof));
+    assert(ownership_api.successful(proof));
+}
+fn clone_input(env mut* e) ownership_raw_bytes.result {
+    reset_budget(e);
+    ownership_raw.request mut req = request(e, 1);
+    return ownership_raw_bytes.clone(&e->paired.states[0], &e->service, &req);
+}
+fn copy_complete(env mut* e, u64 bytes, u32 line) void {
+    read(e, 1, 0, bytes, 1, line);
+    write(e, 2, 0, bytes, 1, 0, line);
+}
+fn recapture(env mut* e, types.node* layout, u64 bytes) void {
+    ownership_raw_bytes.free_result(&e->paired);
+    ownership_raw.free_result(&e->raw);
+    capture(e, layout, bytes);
+}
+fn checked_layout(env mut* e, string source) types.node* {
+    check_env.open(&e->checked);
+    e->checked_open = true;
+    assert(check_env.check_src(&e->checked, source));
+    return check_env.sym_main(&e->checked, "record")->ty;
+}
+fn overlap_layout(env mut* e) void {
+    types.node* layout = checked_layout(e,
+        "struct record { u8@ header; u64 tail; } fn main() i32 { return 0; }\n");
+    recapture(e, layout, 24);
+}
+fn seed_overlap(env mut* e, u32 line) void {
+    seed(e, 1, 0, 16, e->span, e->first, true, line);
+    ownership_api.contents_fact blank = {};
+    seed(e, 1, 8, 24, e->span, blank, false, line);
+}
+fn original_source(env mut* e, u32 source, i64 begin, i64 end) void {
+    e->first = value(e, 1, 1, source, begin, end, 1);
+    e->core.contents[0] = ownership_state.copy_contents(&e->core, e->first);
+    recapture(e, e->selected_type, e->selected_type == e->pointer ? 8 : 16);
+}
+fn track_foreign(env mut* e) void {
+    e->core.sources[5].allocation = id(e, ownership_api.entity_kind.allocation, 1);
+    recapture(e, e->selected_type, 8);
+}
+fn padding_layout(env mut* e) void {
+    types.node* layout = checked_layout(e,
+        "struct record { u8 tag; u8* view; } fn main() i32 { return 0; }\n");
+    e->first = value(e, 1, 1, 5, 0, 1, 1);
+    ownership_api.projection[1] mut field_path = {};
+    field_path[0].kind = ownership_api.projection_kind.field;
+    field_path[0].field = 1;
+    ownership_api.place_path mut field = place(e, 1);
+    field.projections = field_path[..];
+    e->first.place = ownership_state.copy_place(&e->core, field);
+    ownership_api.borrow_relation[1] mut borrows = {e->first.borrows[0]};
+    borrows[0].containing = e->first.place;
+    e->first.borrows = borrows[..];
+    e->first = ownership_state.copy_contents(&e->core, e->first);
+    e->core.contents[0] = ownership_state.copy_contents(&e->core, e->first);
+    recapture(e, layout, 16);
+}
+fn seed_padding(env mut* e, u32 line) void {
+    ownership_raw_bytes.byte_effect mut change = effect(e, ownership_raw_bytes.effect_kind.seed,
+        window(e, 1, 8, 16, e->pointer));
+    change.selected.place = e->first.place;
+    change.value = e->first;
+    change.checked_value = true;
+    apply(e, change, line);
+}
+fn release_original(env mut* e, u32 line) void {
+    ownership_api.contents_fact owner = value(e, 10, 10, 1, 0, 12, 12);
+    ownership_state.append_contents(e->paired.states[0].core, owner);
+    reset_budget(e);
+    ownership_raw.request mut req = request(e, line);
+    req.base.kind = ownership_transfer.action.release;
+    req.base.source = place(e, 10);
+    req.base.leaves_empty_proved = true;
+    ownership_api.proof_status proof = ownership_transfer.apply(e->paired.states[0].core,
+        &e->service, &req.base);
+    assert(ownership_api.successful(proof));
+    assert(!e->paired.states[0].core->allocations[0].obligation);
+}
+fn end_original(env mut* e, u32 source, u32 line) void {
+    reset_budget(e);
+    ownership_raw.request mut req = request(e, line);
+    req.base.kind = ownership_transfer.action.dead;
+    req.base.source = place(e, source);
+    req.base.source_key = id(e, ownership_api.entity_kind.source, source);
+    req.base.liveness_proved = true;
+    ownership_api.proof_status proof = ownership_transfer.apply(e->paired.states[0].core,
+        &e->service, &req.base);
+    assert(ownership_api.successful(proof));
+}
+fn rich(env mut* e, u32 function) void {
+    setup(e, function, 1, false);
+    e->limits.w = 4000000;
+    // A complete populated round retains at most 270 R identities. Production R stays 256.
+    e->limits.r = 270;
+    reset_budget(e);
+    types.node* record = checked_layout(e,
+        "struct record { u8@ header; u64 tail; } fn main() i32 { return 0; }\n");
+    types.node* repeated = types.type_array(&e->table, record, 32);
+    u64 mut i = 0;
+    while (i < 2) {
+        e->core.allocations[i].logical_length.kind = ownership_api.fact_kind.symbolic;
+        e->core.allocations[i].logical_length.symbol = id(e, ownership_api.entity_kind.value,
+            31 + cast(i, u32));
+        i += 1;
+    }
+    i = 0;
+    while (i < 32) {
+        ownership_api.contents_fact mut contents = value(e, 1, 100 + cast(i, u32), 1, 2, 6, 4);
+        ownership_api.projection[2] mut projections = {};
+        projections[0].kind = ownership_api.projection_kind.fixed_index;
+        projections[0].index = exact(cast(i, i64));
+        projections[1].kind = ownership_api.projection_kind.field;
+        projections[1].field = 0;
+        contents.place.projections = projections[..];
+        ownership_api.borrow_relation[1] mut borrows = {contents.borrows[0]};
+        borrows[0].containing = contents.place;
+        contents.borrows = borrows[..];
+        ownership_state.append_contents(&e->core, contents);
+        i += 1;
+    }
+    recapture(e, repeated, 768);
+    assert(e->paired.states[0].core->contents_len == 35);
+    assert(e->paired.states[0].core->allocations[0].history.len == 1);
+    assert(e->paired.states[0].raw.bounds.len == 2 && e->paired.states[0].raw.relations.len == 1);
+    ownership_raw.request mut req = request(e, 537);
+    ownership_raw_bytes.byte_effect[33] mut effects = {};
+    i = 0;
+    while (i < 33) {
+        e->bindings[i] = e->bindings[0];
+        e->bindings[i].operation.operation += cast(i, u32);
+        e->bindings[i].key.ordinal += cast(i, u32);
+        ownership_raw_bytes.byte_effect mut change = effect(e,
+            ownership_raw_bytes.effect_kind.seed, window(e, 2, 0, 16, e->span));
+        if (i < 32) {
+            change.selected = window(e, 1, i * 24, i * 24 + 16, e->span);
+            change.selected.place = e->paired.states[0].core->contents[3 + i].place;
+            change.value = e->paired.states[0].core->contents[3 + i];
+            change.checked_value = true;
+        }
+        change.operation = e->bindings[i].operation;
+        change.source_position = req.base.source_position;
+        effects[i] = change;
+        i += 1;
+    }
+    e->next_operation += 32;
+    req.base.event_bindings = e->bindings[..33];
+    reset_budget(e);
+    ownership_raw_bytes.result mut seeded = ownership_raw_bytes.apply_ordered(&e->paired.states[0],
+        &e->service, effects[..], &req);
+    take(e, &seeded);
+    assert(e->paired.states[0].bytes.representations_len == 33);
+}
+
+fn field(env mut* e, u32 slot, u32 ordinal) ownership_api.place_path {
+    ownership_api.projection[1] mut part = {};
+    part[0].kind = ownership_api.projection_kind.field;
+    part[0].field = ordinal;
+    ownership_api.place_path mut out = place(e, slot);
+    out.projections = part[..];
+    return ownership_state.copy_place(&e->core, out);
+}
+fn at_place(env mut* e, ownership_api.contents_fact value, ownership_api.place_path path)
+    ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = value;
+    ownership_api.borrow_relation[1] mut relations = {};
+    out.place = path;
+    if (value.borrows.len == 1) {
+        relations[0] = value.borrows[0];
+        relations[0].containing = path;
+        out.borrows = relations[..];
+    }
+    return ownership_state.copy_contents(&e->core, out);
+}
+fn repeated_setup(env mut* e, u32 function, u32 kind, bool padding) void {
+    repeated_setup_count(e, function, kind, padding, 2);
+}
+fn repeated_setup_count(env mut* e, u32 function, u32 kind, bool padding, u32 count) void {
+    open(e, function, 1);
+    add_source(e, 101, ownership_api.source_kind.heap, 1);
+    add_source(e, 2, ownership_api.source_kind.heap, 2);
+    add_source(e, 4, ownership_api.source_kind.trusted_foreign, 0);
+    add_allocation(e, 1, 10, cast(count, i64));
+    add_allocation(e, 2, 20, 12);
+    types.node* mut header = kind == 0 ? e->pointer : (kind == 1 ? e->span : e->string_type);
+    u64 mut stride = kind == 0 ? 8 : 16;
+    if (padding) {
+        header = checked_layout(e,
+            "struct record { u8 tag; u8* view; } fn main() i32 { return 0; }\n");
+        stride = 16;
+    }
+    e->selected_type = header;
+    ownership_api.projection[2] mut indices = {};
+    indices[0].kind = ownership_api.projection_kind.fixed_index;
+    indices[1].kind = ownership_api.projection_kind.field;
+    indices[1].field = 1;
+    u64 mut i = 0;
+    while (i < cast(count, u64)) {
+        indices[0].index = exact(cast(i, i64));
+        ownership_api.contents_fact mut contents = value(e, 1, 1 + cast(i, u32), 2, 0, 8, 1);
+        contents.place.projections = indices[..padding ? 2 : 1];
+        contents = at_place(e, contents, contents.place);
+        ownership_state.append_contents(&e->core, contents);
+        if (i == 0) { e->first = contents; } else { e->second = contents; }
+        i += 1;
+    }
+    ownership_raw.origin[3] mut origins = {
+        origin(e, 101, 1, header, cast(count, u64) * stride, 1),
+        origin(e, 2, 20, e->byte, 12, 2), origin(e, 4, 4, e->byte, 32, 0)};
+    origins[0].count = ownership_raw.literal(cast(count, u64));
+    origins[0].repeated = !e->unflagged_repetition;
+    ownership_raw.captured_bound@ bounds = {};
+    ownership_raw.relation@ relations = {};
+    ownership_raw.request mut req = request(e, 3000);
+    e->raw = ownership_raw.capture_origins(&e->core, &e->service, origins[..], bounds,
+        relations, &req);
+    assert(ownership_api.successful(e->raw.proof));
+    req = request(e, 3001);
+    e->paired = ownership_raw_bytes.pair(&e->core, &e->raw.storage, &e->service, &req);
+    assert(ownership_api.successful(e->paired.proof));
+    assert(e->paired.states[0].bytes.representations_len == 0);
+}
+// Captures a record with one reference between two scalars and seeds that reference.
+fn tagged_record(env mut* e, u32 function) void {
+    setup(e, function, 0, false);
+    types.node* layout = checked_layout(e,
+        "struct record { u64 tag; u8* view; u64 tail; } fn main() i32 { return 0; }\n");
+    e->core.contents[0] = at_place(e, e->first, field(e, 1, 1));
+    recapture(e, layout, 24);
+    ownership_raw_bytes.byte_effect mut change = effect(e,
+        ownership_raw_bytes.effect_kind.seed, window(e, 1, 8, 16, e->pointer));
+    change.selected.place = e->core.contents[0].place;
+    change.value = e->core.contents[0];
+    change.checked_value = true;
+    apply(e, change, 3600);
+}
+// Gives the place that the pointer in a slot designates.
+fn pointee(env mut* e, u32 slot) ownership_api.place_path {
+    ownership_api.projection[1] mut through = {};
+    through[0].kind = ownership_api.projection_kind.dereference;
+    ownership_api.place_path mut out = place(e, slot);
+    out.projections = through[..];
+    return ownership_state.copy_place(&e->core, out);
+}
+// Captures heap source 1 behind the owning pointer at slot 10. One reference fills it.
+fn owned_buffer(env mut* e, u32 function) void {
+    open(e, function, 1);
+    add_source(e, 1, ownership_api.source_kind.heap, 1);
+    add_source(e, 5, ownership_api.source_kind.stack, 0);
+    add_allocation(e, 1, 10, 1);
+    ownership_api.place_path buffer = pointee(e, 10);
+    e->first = at_place(e, value(e, 3, 1, 5, 0, 8, 1), buffer);
+    ownership_state.append_contents(&e->core, e->first);
+    e->selected_type = e->pointer;
+    ownership_raw.origin[2] mut origins = {origin(e, 1, 10, e->pointer, 8, 1),
+        origin(e, 5, 5, types.type_array(&e->table, e->byte, 8), 8, 0)};
+    origins[0].place = buffer;
+    origins[0].count = ownership_raw.literal(1);
+    origins[0].repeated = false;
+    ownership_raw.captured_bound@ bounds = {};
+    ownership_raw.relation@ relations = {};
+    ownership_raw.request mut req = request(e, 3610);
+    e->raw = ownership_raw.capture_origins(&e->core, &e->service, origins[..], bounds,
+        relations, &req);
+    assert(ownership_api.successful(e->raw.proof));
+    req = request(e, 3611);
+    e->paired = ownership_raw_bytes.pair(&e->core, &e->raw.storage, &e->service, &req);
+    assert(ownership_api.successful(e->paired.proof));
+}
+// Adds an aggregate fact with one complete borrow to the paired core.
+fn aggregate_row(env mut* e, ownership_api.place_path path) void {
+    ownership_state.state mut* core = e->paired.states[0].core;
+    ownership_api.contents_fact mut row = e->first;
+    row.kind = ownership_api.contents_kind.aggregate;
+    ownership_api.borrow_relation[1] mut borrows = {e->first.borrows[0]};
+    borrows[0].containing = path;
+    row.borrows = borrows[..];
+    row.place = path;
+    ownership_state.append_contents(core, row);
+}
+fn owner_setup(env mut* e, u32 function, bool scalar_destination) void {
+    setup(e, function, 0, true);
+    e->scalar_destination = scalar_destination;
+    e->core.contents[2] = ownership_state.copy_contents(&e->core,
+        ownership_transfer.empty_value(place(e, 2)));
+    recapture(e, e->selected_type, 8);
+    seed(e, 1, 0, 8, e->selected_type, e->first, true, 610);
+    ownership_api.contents_fact blank = e->core.contents[2];
+    seed(e, 2, 0, 8, e->selected_type, blank, true, 612);
+}
+fn view_field(env mut* e, u32 slot, bool array) ownership_api.place_path {
+    if (!array) { return field(e, slot, 1); }
+    ownership_api.projection[2] mut parts = {};
+    parts[0].kind = ownership_api.projection_kind.field;
+    parts[0].field = 1;
+    parts[1].kind = ownership_api.projection_kind.fixed_index;
+    parts[1].index = exact(0);
+    ownership_api.place_path mut out = place(e, slot);
+    out.projections = parts[..];
+    return ownership_state.copy_place(&e->core, out);
+}
+fn aggregate_setup(env mut* e, u32 function, bool inline_view, bool live_destination) void {
+    aggregate_setup_as(e, function, inline_view, live_destination, inline_view ?
+        "struct record { u8@ own owner; u8@ view; u8 tag; } fn main() i32 { return 0; }\n" :
+        "struct record { u8@ own owner; u8@ view; } fn main() i32 { return 0; }\n");
+}
+fn aggregate_setup_as(env mut* e, u32 function, bool inline_view, bool live_destination,
+    string declaration) void {
+    setup(e, function, 0, true);
+    e->limits.w = 8000000;
+    e->inline_container = inline_view;
+    types.node* record = checked_layout(e, declaration);
+    ast.sym* declared = cast(record->decl, ast.sym*);
+    types.node* mut view_type = ast.ast_child(declared->node, 1)->ty;
+    bool array_view = view_type->kind == types.type_kind.k_array;
+    if (array_view) { view_type = view_type->elem; }
+    u64 view_bytes = view_type->kind == types.type_kind.k_ptr ? 8 : 16;
+    e->owner_span = types.type_span(&e->table, e->byte, true, false);
+    ownership_api.place_path owner = field(e, 1, 0);
+    e->first = at_place(e, e->first, owner);
+    e->core.contents[0] = ownership_state.copy_contents(&e->core, e->first);
+    e->core.allocations[0].owner.place = ownership_state.copy_place(&e->core, owner);
+    ownership_api.contents_fact mut view = value(e, 1, 3, inline_view ? 5 : 1,
+        0, inline_view ? 1 : 12, inline_view ? 1 : 12);
+    view = at_place(e, view, view_field(e, 1, array_view));
+    ownership_state.append_contents(&e->core, view);
+    ownership_api.contents_fact mut destination = ownership_transfer.empty_value(field(e, 2, 0));
+    if (live_destination) {
+        destination = value(e, 2, 4, 2, 0, 12, 12);
+        destination = at_place(e, destination, field(e, 2, 0));
+        e->core.allocations[1].owner.place = ownership_state.copy_place(&e->core,
+            destination.place);
+    }
+    ownership_state.append_contents(&e->core, destination);
+    ownership_api.contents_fact blank_view = ownership_transfer.empty_value(
+        view_field(e, 2, array_view));
+    ownership_state.append_contents(&e->core, blank_view);
+    if (inline_view) {
+        ownership_api.contents_fact mut tag = {};
+        tag.place = field(e, 1, 2);
+        tag.kind = ownership_api.contents_kind.scalar;
+        ownership_state.append_contents(&e->core, tag);
+    }
+    recapture(e, record, record->layout->size);
+    u64 mut i = 0;
+    while (i < 4) {
+        u32 slot = i < 2 ? 1 : 2;
+        u32 ordinal = cast(i % 2, u32);
+        ownership_api.place_path path = ordinal == 0 ? field(e, slot, 0) :
+            view_field(e, slot, array_view);
+        u64 found = ownership_transfer.contents_index(&e->core, path);
+        assert(found != ownership_raw_bytes.U64_MAX);
+        ownership_raw_bytes.byte_effect mut change = effect(e,
+            ownership_raw_bytes.effect_kind.seed, window(e, slot,
+                cast(ordinal, u64) * 16, ordinal == 0 ? 16 : 16 + view_bytes,
+                ordinal == 0 ? e->owner_span : view_type));
+        change.selected.place = path;
+        change.value = e->core.contents[found];
+        change.checked_value = true;
+        apply(e, change, 650 + cast(i, u32));
+        i += 1;
+    }
+}
+fn move_request(env mut* e, u32 source, u32 destination, u32 line)
+    ownership_raw.request {
+    ownership_raw.request mut out = request(e, line);
+    out.base.kind = ownership_transfer.action.move_owner;
+    out.base.source = place(e, source);
+    out.base.destination = place(e, destination);
+    return out;
+}
+fn try_move(env mut* e, u32 source, u32 destination, u64 bytes, u32 line)
+    ownership_raw_bytes.result {
+    reset_budget(e);
+    ownership_raw.request req = move_request(e, source, destination, line);
+    return ownership_raw_bytes.semantic_move(&e->paired.states[0], &e->service,
+        window(e, source, 0, bytes, e->selected_type),
+        window(e, destination, 0, bytes, e->selected_type), &req);
+}
+fn zero(env mut* e, u32 slot, u64 begin, u64 end, u32 line) void {
+    apply(e, effect(e, ownership_raw_bytes.effect_kind.zero,
+        window(e, slot, begin, end, e->byte)), line);
+}
+fn zero_change(env* e, u32 slot, u64 begin, u64 end) ownership_raw_bytes.byte_effect {
+    return effect(e, ownership_raw_bytes.effect_kind.zero,
+        window(e, slot, begin, end, e->byte));
+}
+fn transaction(env mut* e, ownership_raw_bytes.byte_effect mut@ effects,
+    ownership_raw.request mut* req, u32 line) void {
+    *req = request(e, line);
+    u64 mut i = 0;
+    while (i < effects.len) {
+        e->bindings[i] = e->bindings[0];
+        e->bindings[i].operation.operation += cast(i, u32);
+        e->bindings[i].key.ordinal += cast(i, u32);
+        effects[i].operation = e->bindings[i].operation;
+        effects[i].source_position = req->base.source_position;
+        effects[i].source_position.line += cast(i, u32);
+        effects[i].source_position.end_line += cast(i, u32);
+        i += 1;
+    }
+    e->next_operation += cast(effects.len - 1, u32);
+    req->base.event_bindings = e->bindings[..effects.len];
+}
+
+fn descendants(env mut* e, bool residual) void {
+    ownership_api.allocation_fact mut outer = {};
+    outer.key = id(e, ownership_api.entity_kind.allocation, 3);
+    outer.site = id(e, ownership_api.entity_kind.allocation, 103);
+    outer.validity = ownership_api.validity_kind.live;
+    outer.count.one = true;
+    outer.obligation = true;
+    outer.owner.place = place(e, 20);
+    outer.logical_length = exact(1);
+    ownership_state.append_allocations(&e->core, outer);
+    e->core.sources[0].kind = ownership_api.source_kind.heap;
+    e->core.sources[0].allocation = outer.key;
+    recapture(e, e->selected_type, 32);
+    if (residual) {
+        ownership_api.projection[1] mut residual_path = {};
+        residual_path[0].kind = ownership_api.projection_kind.residual;
+        ownership_api.place_path mut path = place(e, 1);
+        path.projections = residual_path[..];
+        e->paired.states[0].core->allocations[1].owner.place =
+            ownership_state.copy_place(e->paired.states[0].core, path);
+    }
+}
+
+fn empty_source(env mut* e) void {
+    e->core.allocations[0].owner.place = ownership_state.copy_place(&e->core, place(e, 10));
+    e->first = ownership_state.copy_contents(&e->core,
+        ownership_transfer.empty_value(place(e, 1)));
+    e->core.contents[0] = ownership_state.copy_contents(&e->core, e->first);
+    recapture(e, e->selected_type, 8);
+    seed(e, 1, 0, 8, e->selected_type, e->first, true, 735);
+}
+fn erased_window(env mut* e, u32 line) ownership_raw_bytes.window {
+    ownership_raw.request req = request(e, line);
+    types.node* pointer = types.type_ptr(&e->table, e->selected_type, false, false);
+    types.node* erased = types.type_voidptr(&e->table, false, false);
+    ownership_raw.address[1] addresses = {ownership_raw.address{
+        id(e, ownership_api.entity_kind.source, 101), ownership_raw.literal(0),
+        ownership_raw.literal(0), ownership_raw.literal(32), pointer, 8, true}};
+    reset_budget(e);
+    ownership_raw.result mut out = ownership_raw.cast_reference(&e->paired.states[0].raw,
+        &e->service, addresses[..], pointer, erased, &req);
+    defer ownership_raw.free_result(&out);
+    assert(ownership_api.successful(out.proof));
+    assert(out.addresses.len == 1 && out.addresses[0].source.ordinal == 101);
+    assert(out.addresses[0].ty == erased && out.addresses[0].end.constant.magnitude == 32);
+    return window(e, 1, 0, 32, erased);
+}
+
+fn owner_rich(env mut* e, u32 function) void {
+    aggregate_setup(e, function, false, false);
+    ownership_state.state mut* core = e->paired.states[0].core;
+    ownership_api.history_fact[32] mut history = {};
+    u64 mut allocation = 0;
+    while (allocation < 2) {
+        u64 mut i = 0;
+        while (i < 32) {
+            history[i] = core->allocations[allocation].history[0];
+            history[i].operation.operation += cast(i, u32);
+            history[i].source.line += cast(i, u32);
+            history[i].source.end_line += cast(i, u32);
+            i += 1;
+        }
+        core->allocations[allocation].history = ownership_state.copy_histories(core, history[..]);
+        allocation += 1;
+    }
+    u64 mut i = 0;
+    while (i < 32) {
+        ownership_api.contents_fact extra = value(e, 50 + cast(i, u32),
+            100 + cast(i, u32), 1, 2, 6, 4);
+        ownership_state.append_contents(core, extra);
+        i += 1;
+    }
+    // Populate the separate absent-obligation store before allocator measurements.
+    unknown(e, 2, 3, 4, 778);
+    zero(e, 2, 0, 16, 779);
+    assert(e->paired.states[0].bytes.facts.contents_len == 1);
+    read(e, 1, 0, 32, 200, 780);
+    assert(e->paired.states[0].bytes.snapshots_len == 1);
+    assert(e->paired.states[0].bytes.snapshots[0].facts.blocks != null);
+    assert(e->paired.states[0].core->allocations[0].history.len == 32);
+}
+fn borrowed_record(env mut* e, u32 function, bool header) void {
+    setup(e, function, 0, false);
+    types.node* layout = checked_layout(e, header ?
+        "struct record { u8* data; u64 length; } fn main() i32 { return 0; }\n" :
+        "struct record { u8* first; u8* second; } fn main() i32 { return 0; }\n");
+    e->core.contents[0] = at_place(e, e->first, field(e, 1, 0));
+    if (header) {
+        ownership_state.append_contents(&e->core, at_place(e, e->first, place(e, 1)));
+    } else {
+        e->core.contents[1] = at_place(e, e->second, field(e, 1, 1));
+    }
+    recapture(e, layout, 16);
+}
+fn unseeded_rich(env mut* e, u32 function) void {
+    setup(e, function, 1, false);
+    ownership_state.state mut* core = e->paired.states[0].core;
+    ownership_api.history_fact[32] mut history = {};
+    u64 mut allocation = 0;
+    while (allocation < core->allocations_len) {
+        u64 mut i = 0;
+        while (i < 32) {
+            history[i] = core->allocations[allocation].history[0];
+            history[i].operation.operation += cast(i, u32);
+            history[i].source.line += cast(i, u32);
+            history[i].source.end_line += cast(i, u32);
+            i += 1;
+        }
+        core->allocations[allocation].history = ownership_state.copy_histories(core, history[..]);
+        allocation += 1;
+    }
+    assert(e->paired.states[0].bytes.representations_len == 0);
+}
