@@ -41,8 +41,10 @@ class AnchorError(Exception):
 
 # The summary block of ctest names every test that failed, whatever its label:
 # `        3 - gen_cast_test (Failed)`. The per-test lines above it do not, so
-# read this summary pattern instead of the incomplete per-test lines.
-CTEST_FAILURE = re.compile(r"^\s*\d+ - (\S+) \((Failed|Timeout|Subprocess aborted)\)")
+# read this summary pattern instead of the incomplete per-test lines. A suite
+# that crashed has its signal in the parentheses, `(SEGFAULT)` or `(ILLEGAL)`
+# for example, so the pattern takes any status there.
+CTEST_FAILURE = re.compile(r"^\s*\d+ - (\S+) \(([A-Za-z_ ]+)\)")
 
 
 def failing_tests(text):

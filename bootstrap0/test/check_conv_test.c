@@ -254,6 +254,14 @@ TEST(a_module_without_the_declaration_is_reported, {
     TEST_ASSERT_TRUE(said("module 'util' has no declaration named 'two'"));
 })
 
+TEST(a_qualified_type_name_needs_a_module_on_its_left, {
+    // `k.thing` in type position: `k` is a constant, not a module. The name on the left is
+    // reported, and not a missing declaration of a module that does not exist.
+    TEST_ASSERT_FALSE(check_src("i32 k = 1;\nk.thing t = 2;\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("'k' is not a module"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
 TEST(the_import_bindings_of_a_module_are_not_reachable_through_a_dot, {
     begin();
     add("deep.ft", "enum tone {\n    low,\n    high,\n}\nfn base() i32 {\n    return 1;\n}\n");
@@ -576,6 +584,19 @@ TEST(a_noreturn_function_pointer_keeps_its_type, {
     TEST_ASSERT_TRUE(said("expects fn (string) noreturn, not fn (string) void"));
 })
 
+TEST(noreturn_with_a_suffix_is_refused, {
+    // The parser refuses `noreturn` in every written type except a return type. There it
+    // also accepts a suffix (`noreturn*`), a group (`(noreturn*)`) and a marker
+    // (`noreturn mut`). This test holds the suffix form. Without its refusal, `noreturn*`
+    // would be `void*`.
+    TEST_ASSERT_FALSE(check_src("fn f() noreturn* {\n    return null;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("1:8: error: 'noreturn' is a return type"));
+    TEST_ASSERT_FALSE(check_src("fn f() noreturn[2] {\n    panic(\"stop\");\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("'noreturn' is a return type"));
+})
+
 // ---- imports that failed -------------------------------------------------------------
 
 TEST(an_importer_is_checked_although_its_import_did_not_parse, {
@@ -817,6 +838,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_cast_target_that_is_too_large_is_refused);
     TEST_RUN(a_module_is_not_a_value_and_not_a_type);
     TEST_RUN(a_module_without_the_declaration_is_reported);
+    TEST_RUN(a_qualified_type_name_needs_a_module_on_its_left);
     TEST_RUN(the_import_bindings_of_a_module_are_not_reachable_through_a_dot);
     TEST_RUN(a_re_exported_enum_member_is_refused_at_the_module_binding);
     TEST_RUN(a_symbol_a_module_imported_is_not_one_of_its_declarations);
@@ -840,6 +862,7 @@ int main(int argc, char** argv) {
     TEST_RUN(the_runtime_allocator_hands_the_caller_storage_it_may_write);
     TEST_RUN(a_fort_rt_name_keeps_its_own_signature);
     TEST_RUN(a_noreturn_function_pointer_keeps_its_type);
+    TEST_RUN(noreturn_with_a_suffix_is_refused);
     TEST_RUN(an_importer_is_checked_although_its_import_did_not_parse);
     TEST_RUN(a_failed_import_silences_every_use_of_its_name);
     TEST_RUN(a_multi_segment_import_path_names_its_module);
