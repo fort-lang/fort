@@ -1417,6 +1417,89 @@ fn a_literal_that_reads_its_destination_swaps() void {
     llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "swap", pass_env.CHECKED), want[..]);
 }
 
+// A member of aggregate type that reads the destination goes into a `%tmp` slot before the
+// first store (spec/fir.md 12.1), so `*t = twin{t->y, t->x}` swaps the two halves: an aggregate
+// literal reads every member before the destination changes (D6.3).
+string[14] TWINS = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct twin {",
+    "    pair x;",
+    "    pair y;",
+    "}",
+    "fn turn(twin mut* t) void {",
+    "    *t = twin{t->y, t->x};",
+    "}",
+    "fn flip(i32[2] mut* a) void {",
+    "    *a = i32[2]{(*a)[1], (*a)[0]};",
+    "}",
+};
+
+fn an_aggregate_member_that_reads_its_destination_swaps() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[20] turn = {
+        "entry:",
+        "  %t.0 = alloca ptr, align 8",
+        "  %tmp0 = alloca %struct.main.pair, align 8",
+        "  %tmp1 = alloca %struct.main.pair, align 8",
+        "  store ptr %t.in, ptr %t.0, align 8",
+        "  %t0 = load ptr, ptr %t.0, align 8",
+        "  %t1 = getelementptr inbounds %struct.main.twin, ptr %t0, i32 0, i32 1",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t1, \\",
+        "i64 16, i1 false)",
+        "  %t2 = load ptr, ptr %t.0, align 8",
+        "  %t3 = getelementptr inbounds %struct.main.twin, ptr %t2, i32 0, i32 0",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t3, \\",
+        "i64 16, i1 false)",
+        "  %t4 = load ptr, ptr %t.0, align 8",
+        "  %t5 = getelementptr inbounds %struct.main.twin, ptr %t4, i32 0, i32 0",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t5, ptr align 8 %tmp0, \\",
+        "i64 16, i1 false)",
+        "  %t6 = getelementptr inbounds %struct.main.twin, ptr %t4, i32 0, i32 1",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t6, ptr align 8 %tmp1, \\",
+        "i64 16, i1 false)",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, TWINS[..], "turn", pass_env.CHECKED), turn[..]);
+}
+
+// `*a = i32[2]{(*a)[1], (*a)[0]}`: the two bounds checks, then both loads, then both stores.
+// The right side holds no writer, so target_place (src/fort/fir_lower.ft) holds no address of
+// `*a`, and the later load of `a` reads the pointer that the members read (D6.3).
+fn an_array_literal_that_reads_its_destination_swaps() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[22] flip = {
+        "entry:",
+        "  %a.0 = alloca ptr, align 8",
+        "  store ptr %a.in, ptr %a.0, align 8",
+        "  %t0 = sext i32 1 to i64",
+        "  %t1 = icmp uge i64 %t0, 2",
+        "",
+        "L1:",
+        "  %t2 = sext i32 0 to i64",
+        "  %t3 = icmp uge i64 %t2, 2",
+        "",
+        "L2:",
+        "  %t4 = load ptr, ptr %a.0, align 8",
+        "  %t5 = getelementptr inbounds [2 x i32], ptr %t4, i64 0, i64 %t0",
+        "  %t6 = load i32, ptr %t5, align 4",
+        "  %t7 = load ptr, ptr %a.0, align 8",
+        "  %t8 = getelementptr inbounds [2 x i32], ptr %t7, i64 0, i64 %t2",
+        "  %t9 = load i32, ptr %t8, align 4",
+        "  %t10 = load ptr, ptr %a.0, align 8",
+        "  %t11 = getelementptr inbounds [2 x i32], ptr %t10, i64 0, i64 0",
+        "  store i32 %t6, ptr %t11, align 4",
+        "  %t12 = getelementptr inbounds [2 x i32], ptr %t10, i64 0, i64 1",
+        "  store i32 %t9, ptr %t12, align 4",
+    };
+    llvm_env.expect(&e, llvm_env.lowered(&e, TWINS[..], "flip", pass_env.CHECKED), flip[..]);
+}
+
 fn main() i32 {
     a_checked_add_writes_the_intrinsic_once();
     the_intrinsic_follows_the_signedness_and_the_width();
@@ -1446,6 +1529,8 @@ fn main() i32 {
     a_literal_reads_every_member_first();
     an_aggregate_member_goes_through_a_slot();
     a_literal_that_reads_its_destination_swaps();
+    an_aggregate_member_that_reads_its_destination_swaps();
+    an_array_literal_that_reads_its_destination_swaps();
     println("aggregates ok");
     return 0;
 }

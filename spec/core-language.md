@@ -582,7 +582,7 @@ what they need. For an assignment the target's address, including any index and 
 check, is computed before the right-hand side; a compound assignment computes the target once.
 Temporaries live until the end of the enclosing statement. An aggregate literal reads every member
 before the destination changes, so `s = pair{s.b, s.a}` swaps the two fields (D6.3, amended
-2026-09-28; T-211 holds the test, and the emitter keeps the old behavior until then).
+2026-09-28).
 An index evaluates its base to determine its value or storage, then its index. A span or `string`
 index reads a stored base header after the index. A span expression evaluates its base, then
 evaluates its explicit lower and upper bounds in that order. It reads a stored span or
