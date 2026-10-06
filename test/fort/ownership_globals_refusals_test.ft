@@ -1,0 +1,508 @@
+//! run
+//! flags: -I ../../src/fort -I support -I .
+//! stdout:
+//| globals refusals ok
+/// Checks single refusal rules of global stores, field edges, and moves.
+/// Each case changes one fact of a valid request and expects one event.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_env;
+import ownership_globals_field_map_lifetime_test;
+import ownership_globals_review_env;
+import ownership_keys;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import types;
+
+struct fixture {
+    types.table tt;
+    ownership_globals_env.env e;
+}
+
+// Slot 2 owns allocation 10. Field slot3.f7[2] owns allocation 20 through edge 500.
+// Slots 4 and 5 are empty globals. Slot 7 holds a borrow of allocation 10.
+fn open(fixture mut* f, u32 id) void {
+    types.node* ty = types.type_ptr(&f->tt,
+        types.type_prim(&f->tt, prim.prim_kind.prim_i64), true, false);
+    ownership_globals_field_map_lifetime_test.prepare(&f->e, id, ty);
+    ownership_globals_review_env.copy_borrow(&f->e, 0, place(f, 7));
+}
+
+fn close(fixture mut* f) void {
+    ownership_globals_env.close(&f->e);
+    types.type_table_free(&f->tt);
+}
+
+fn place(fixture* f, u32 slot) ownership_api.place_path {
+    return ownership_globals_env.case_place(&f->e, slot);
+}
+
+fn field(fixture* f) ownership_api.place_path { return f->e.input.edges[0].place; }
+
+fn key(fixture* f, ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_globals_env.case_key(&f->e, kind, ordinal);
+}
+
+fn write(fixture mut* f, ownership_api.place_path from, ownership_api.place_path to,
+    u32 source) void {
+    ownership_globals_env.borrow_effect(&f->e, from, to, source);
+    if (source == 0) { f->e.ordered[f->e.effects_len - 1].source = ownership_api.entity_id{}; }
+}
+
+fn transfer(fixture mut* f, ownership_api.place_path from, ownership_api.place_path to,
+    u32 allocation) void {
+    ownership_globals_env.add_effect(&f->e, ownership_api.effect_kind.transfer, from, to,
+        allocation);
+}
+
+fn release(fixture mut* f, ownership_api.place_path owner, u32 allocation) void {
+    ownership_globals_env.add_effect(&f->e, ownership_api.effect_kind.release, owner, owner,
+        allocation);
+}
+
+fn solve(fixture mut* f) ownership_api.global_result {
+    ownership_api.global_request req = ownership_globals_env.request(&f->e);
+    return ownership_globals_review_env.solve(&f->e, &req);
+}
+
+fn accepted(fixture mut* f) void {
+    ownership_globals_review_env.result(&f->e, solve(f), true,
+        ownership_api.event_kind.invalid_use, ownership_api.incomplete_reason.none);
+}
+
+// The request refuses with one event of `kind` and `reason`.
+fn refusal(fixture mut* f, ownership_api.event_kind kind, ownership_api.incomplete_reason reason)
+    ownership_api.event_descriptor* {
+    ownership_api.global_result out = solve(f);
+    if (f->e.events.len > 0) {
+        ownership_api.event_descriptor* first = ownership_events.at(&f->e.events, 0);
+        if (first->kind != kind || first->reason != reason) {
+            println("case=", f->e.case_id, " kind=", first->kind, " reason=", first->reason,
+                " gap=", first->operation.operation, " relation=", first->relation.ordinal,
+                " text=", first->text);
+        }
+    }
+    ownership_globals_review_env.result(&f->e, out, false, kind, reason);
+    return ownership_events.at(&f->e.events, 0);
+}
+
+// The refusal names effect `index`, its event kind, its reason, and its relation.
+fn refused(fixture mut* f, u64 index, ownership_api.event_kind kind,
+    ownership_api.incomplete_reason reason, u32 relation) void {
+    refusal(f, kind, reason);
+    ownership_api.event_descriptor* event = ownership_events.at(&f->e.events, 0);
+    assert(ownership_keys.operation(event->operation, f->e.ordered[index].operation) == 0);
+    assert(ownership_keys.source(event->source, f->e.transitions[index].source) == 0);
+    assert(event->relation.ordinal == relation);
+    assert(event->evidence == (reason == ownership_api.incomplete_reason.none ?
+        ownership_api.evidence_kind.unconditional :
+        ownership_api.evidence_kind.abstract_possibility));
+    assert(f->e.global.retained.allocations_len == 0);
+}
+
+// A valid borrow store copies the borrow into an empty global.
+fn store_control() void {
+    fixture mut f = fixture{};
+    open(&f, 1101);
+    write(&f, place(&f, 7), place(&f, 5), 110);
+    accepted(&f);
+    ownership_api.contents_fact value = f.e.global.retained.contents[3];
+    assert(value.kind == ownership_api.contents_kind.reference && value.borrows.len == 1);
+    assert(value.borrows[0].source.ordinal == 110 && value.place.root.ordinal == 5);
+    assert(value.borrows[0].containing.root.ordinal == 5);
+    close(&f);
+}
+
+// Mode 0 reads no source contents. Mode 1 stores an owner. Mode 2 names an allocation.
+fn store_correspondence(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1102 + mode);
+    write(&f, place(&f, mode == 0 ? 9 : (mode == 1 ? 2 : 7)), place(&f, 5), 110);
+    if (mode == 2) {
+        f.e.ordered[0].allocation = key(&f, ownership_api.entity_kind.allocation, 10);
+    }
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_correspondence, mode == 2 ? 10 : 0);
+    close(&f);
+}
+
+// A borrow store into a live owner discards the owner.
+fn store_over_owner(bool conditional) void {
+    fixture mut f = fixture{};
+    open(&f, 1106 + (conditional ? 1 : 0));
+    write(&f, place(&f, 7), place(&f, 2), 110);
+    f.e.transitions[0].unconditional = !conditional;
+    refused(&f, 0, conditional ? ownership_api.event_kind.incomplete_proof :
+        ownership_api.event_kind.lost_ownership, conditional ?
+        ownership_api.incomplete_reason.missing_correspondence :
+        ownership_api.incomplete_reason.none, 10);
+    close(&f);
+}
+
+// Mode 0 stores a scalar. Mode 1 stores an empty value that names a source.
+fn store_value(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1108 + mode);
+    if (mode == 0) { f.e.input.contents[4].kind = ownership_api.contents_kind.scalar; }
+    write(&f, place(&f, 6), place(&f, 5), mode == 1 ? 110 : 0);
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_correspondence, 0);
+    close(&f);
+}
+
+// Each mode breaks one fact of the stored borrow relation.
+fn store_relation(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1110 + mode);
+    ownership_api.contents_fact mut value = f.e.input.contents[5];
+    ownership_api.borrow_relation[1] mut relation = {value.borrows[0]};
+    if (mode == 0) { relation[0].representation_complete = false; }
+    if (mode == 1) { relation[0].value_version.ordinal = 99; }
+    if (mode == 3) { relation[0].source.ordinal = 199; }
+    value.borrows = relation[..];
+    f.e.input.contents[5] = ownership_state.copy_contents(&f.e.input, value);
+    // Mode 4 releases the borrowed allocation. Its child goes first.
+    if (mode == 4) {
+        release(&f, field(&f), 20);
+        release(&f, place(&f, 2), 10);
+    }
+    write(&f, place(&f, 7), place(&f, 5), mode == 2 ? 120 : (mode == 3 ? 199 : 110));
+    u64 index = mode == 4 ? 2 : 0;
+    refused(&f, index, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_correspondence, 0);
+    close(&f);
+}
+
+// An owned field takes only an owner or an empty value. A borrow store refuses.
+// A live owner refuses first. A move or a release empties the field.
+fn borrow_into_owned_field(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1115 + mode);
+    if (mode == 1) { transfer(&f, field(&f), place(&f, 4), 20); }
+    if (mode == 2) { release(&f, field(&f), 20); }
+    write(&f, place(&f, 7), field(&f), 110);
+    u64 index = mode == 0 ? 0 : 1;
+    refused(&f, index, mode == 0 ? ownership_api.event_kind.lost_ownership :
+        ownership_api.event_kind.incomplete_proof, mode == 0 ?
+        ownership_api.incomplete_reason.none : ownership_api.incomplete_reason.missing_graph,
+        mode == 0 ? 20 : 0);
+    close(&f);
+}
+
+// An empty store keeps an owned field edge and its old target.
+fn empty_into_owned_field() void {
+    fixture mut f = fixture{};
+    open(&f, 1118);
+    transfer(&f, field(&f), place(&f, 4), 20);
+    write(&f, place(&f, 6), field(&f), 0);
+    accepted(&f);
+    assert(f.e.global.retained.edges_len == 1 && f.e.global.retained.edges[0].to.ordinal == 20);
+    assert(ownership_transfer.empty_owner_proved(f.e.global.retained.contents[1]));
+    close(&f);
+}
+
+// Mode 0: the field edge names another target. Mode 1: the moved node is residual.
+// Mode 2: the potential edge names a residual old target.
+fn move_graph(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1120 + mode);
+    if (mode == 0) { f.e.input.edges[0].to = key(&f, ownership_api.entity_kind.graph_node, 30); }
+    if (mode >= 1) { f.e.input.nodes[1].residual = true; }
+    if (mode == 2) {
+        ownership_globals_env.add_owner(&f.e, place(&f, 8), 30, 4);
+        ownership_state.append_nodes(&f.e.input, ownership_api.graph_node{
+            .key = key(&f, ownership_api.entity_kind.graph_node, 30),
+            .allocation = key(&f, ownership_api.entity_kind.allocation, 30)});
+    }
+    transfer(&f, field(&f), place(&f, 4), 20);
+    if (mode >= 1) {
+        transfer(&f, place(&f, mode == 1 ? 4 : 8), field(&f), mode == 1 ? 20 : 30);
+    }
+    refused(&f, mode == 0 ? 0 : 1, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_graph, mode == 2 ? 30 : 20);
+    close(&f);
+}
+
+// The control moves allocation 30 into the emptied field and retargets the edge.
+fn move_other_control() void {
+    fixture mut f = fixture{};
+    open(&f, 1123);
+    ownership_globals_env.add_owner(&f.e, place(&f, 8), 30, 4);
+    ownership_state.append_nodes(&f.e.input, ownership_api.graph_node{
+        .key = key(&f, ownership_api.entity_kind.graph_node, 30),
+        .allocation = key(&f, ownership_api.entity_kind.allocation, 30)});
+    transfer(&f, field(&f), place(&f, 4), 20);
+    transfer(&f, place(&f, 8), field(&f), 30);
+    accepted(&f);
+    assert(f.e.global.retained.edges_len == 1 && f.e.global.retained.edges[0].to.ordinal == 30);
+    assert(f.e.global.retained.allocations[2].owner.place.root.ordinal == 3);
+    close(&f);
+}
+
+// Two allocation facts name one owner place, which has empty contents.
+fn shared_owner(fixture mut* f, ownership_api.place_path owner) void {
+    ownership_globals_env.add_empty(&f->e, owner);
+    u32 mut id = 40;
+    while (id < 42) {
+        ownership_api.allocation_fact mut item = f->e.input.allocations[1];
+        item.key = key(f, ownership_api.entity_kind.allocation, id);
+        item.site = item.key;
+        item.owner.place = owner;
+        ownership_state.append_allocations(&f->e.input, item);
+        id += 1;
+    }
+}
+
+// Each mode breaks one source fact of a transfer.
+// Mode 0: two owners share the source. Mode 1: the source has no contents.
+// Mode 2: the effect names another source. Mode 3: an empty source names an allocation.
+fn transfer_source(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1130 + mode);
+    if (mode == 0) { shared_owner(&f, place(&f, 9)); }
+    ownership_api.place_path from = mode <= 1 ? place(&f, 9) : place(&f, mode == 2 ? 2 : 6);
+    transfer(&f, from, place(&f, 5), mode == 0 || mode == 1 ? 0 : 10);
+    if (mode == 2) { f.e.ordered[0].source = key(&f, ownership_api.entity_kind.source, 120); }
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof, mode == 1 ?
+        ownership_api.incomplete_reason.missing_path :
+        ownership_api.incomplete_reason.missing_correspondence, mode >= 2 ? 10 : 0);
+    close(&f);
+}
+
+// Each mode breaks one destination fact of a transfer.
+// Mode 0: two owners share the destination. Mode 1: the destination holds a scalar.
+// Mode 2: a conditional transfer would discard a live owner.
+// Mode 3: the destination has no contents.
+fn transfer_destination(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1134 + mode);
+    if (mode == 0) { shared_owner(&f, place(&f, 9)); }
+    if (mode == 1) { f.e.input.contents[4].kind = ownership_api.contents_kind.scalar; }
+    ownership_api.place_path to = mode == 1 ? place(&f, 6) : (mode == 2 ? place(&f, 2) :
+        place(&f, mode == 0 ? 9 : 10));
+    transfer(&f, field(&f), to, 20);
+    f.e.transitions[0].unconditional = mode != 2;
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof, mode == 2 || mode == 3 ?
+        ownership_api.incomplete_reason.missing_path :
+        ownership_api.incomplete_reason.missing_correspondence, 20);
+    close(&f);
+}
+
+// A release names one place. A different destination gives no proved path.
+fn release_path() void {
+    fixture mut f = fixture{};
+    open(&f, 1138);
+    ownership_globals_env.add_effect(&f.e, ownership_api.effect_kind.release, place(&f, 2),
+        place(&f, 4), 10);
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_path, 10);
+    close(&f);
+}
+
+// A read names one place with contents. Mode 0 names two places. Mode 1 has no contents.
+fn read_path(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, mode == 0 ? 1139 : 1142);
+    ownership_globals_env.add_effect(&f.e, ownership_api.effect_kind.read,
+        place(&f, mode == 0 ? 4 : 9), place(&f, mode == 0 ? 5 : 9), 0);
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_path, 0);
+    close(&f);
+}
+
+// A storage end of a persistent global owner proves no boundary.
+fn global_storage_end() void {
+    fixture mut f = fixture{};
+    open(&f, 1140);
+    ownership_globals_env.add_effect(&f.e, ownership_api.effect_kind.storage_end, place(&f, 2),
+        place(&f, 2), 10);
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_boundary, 10);
+    close(&f);
+}
+
+// A field read needs proved parent life. The parent node names an allocation without facts.
+fn unproved_parent() void {
+    fixture mut f = fixture{};
+    open(&f, 1141);
+    f.e.input.nodes[0].allocation = key(&f, ownership_api.entity_kind.allocation, 99);
+    ownership_globals_env.add_effect(&f.e, ownership_api.effect_kind.read, field(&f), field(&f),
+        0);
+    refused(&f, 0, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_graph, 0);
+    close(&f);
+}
+
+fn release_leaves(fixture mut* f, ownership_api.place_path owner, u32 allocation,
+    bool leaves) void {
+    release(f, owner, allocation);
+    f->e.transitions[f->e.effects_len - 1].leaves_empty_proved = leaves;
+}
+
+// A release walks the owned graph below its allocation.
+// Mode 0: a residual shape. Mode 1: an empty release without proved leaves.
+// Mode 2: a graph walk without proved leaves.
+// Mode 3: a child with many members gives no proved owned edge.
+fn release_walk(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1150 + mode);
+    if (mode == 0) {
+        ownership_state.append_shapes(&f.e.input, ownership_api.shape_description{
+            .key = key(&f, ownership_api.entity_kind.template, 12), .residual = true});
+    }
+    if (mode == 3) { f.e.input.allocations[1].count.many = true; }
+    if (mode == 0) { release_leaves(&f, field(&f), 20, true); }
+    if (mode == 1) { release_leaves(&f, place(&f, 4), 0, false); }
+    if (mode == 2) {
+        release_leaves(&f, field(&f), 20, true);
+        release_leaves(&f, place(&f, 2), 10, false);
+    }
+    if (mode == 3) { release_leaves(&f, place(&f, 2), 10, true); }
+    refused(&f, mode == 2 ? 1 : 0, ownership_api.event_kind.incomplete_proof,
+        mode == 1 || mode == 2 ? ownership_api.incomplete_reason.unknown_effect :
+        ownership_api.incomplete_reason.missing_graph, mode == 0 ? 20 :
+        (mode == 1 ? 0 : 10));
+    close(&f);
+}
+
+// An entry return keeps a local owner only through an owned graph ancestor.
+// Slot 8 owns allocation 30. Mode 0 is the control: the owner has no ancestor.
+// Mode 1: many members. Mode 2: a residual node.
+// Mode 3: an incoming edge leaves an unknown parent node, so no global root reaches it.
+fn persistent_walk(u32 mode) void {
+    fixture mut f = fixture{};
+    open(&f, 1154 + mode);
+    ownership_globals_env.add_owner(&f.e, place(&f, 8), 30, 4);
+    ownership_state.append_nodes(&f.e.input, ownership_api.graph_node{
+        .key = key(&f, ownership_api.entity_kind.graph_node, 30),
+        .allocation = key(&f, ownership_api.entity_kind.allocation, 30), .residual = mode == 2});
+    if (mode == 1) { f.e.input.allocations[2].count.many = true; }
+    if (mode == 3) {
+        ownership_api.graph_edge mut edge = f.e.input.edges[0];
+        edge.key.ordinal = 501;
+        edge.from = key(&f, ownership_api.entity_kind.graph_node, 40);
+        edge.place = place(&f, 12);
+        edge.to = key(&f, ownership_api.entity_kind.graph_node, 30);
+        ownership_state.append_edges(&f.e.input, edge);
+    }
+    ownership_api.event_descriptor* event = refusal(&f, ownership_api.event_kind.incomplete_proof,
+        mode == 0 ? ownership_api.incomplete_reason.missing_boundary :
+        ownership_api.incomplete_reason.missing_graph);
+    assert(ownership_keys.operation(event->operation, f.e.bindings[0].operation) == 0);
+    assert(event->source.line == 21);
+    close(&f);
+}
+
+// Edge 501 is a borrowed field of allocation 10 at slot 12, and slot 12 is empty.
+// A borrowed field takes an empty value but no owner.
+fn owner_into_borrowed_field(bool owner) void {
+    fixture mut f = fixture{};
+    open(&f, 1160 + (owner ? 1 : 0));
+    ownership_globals_env.add_empty(&f.e, place(&f, 12));
+    ownership_api.graph_edge mut edge = f.e.input.edges[0];
+    edge.key.ordinal = 501;
+    edge.kind = ownership_api.edge_kind.borrowed;
+    edge.place = place(&f, 12);
+    ownership_state.append_edges(&f.e.input, edge);
+    transfer(&f, owner ? field(&f) : place(&f, 6), place(&f, 12), owner ? 20 : 0);
+    if (owner) {
+        refused(&f, 0, ownership_api.event_kind.incomplete_proof,
+            ownership_api.incomplete_reason.missing_graph, 20);
+    } else {
+        accepted(&f);
+        assert(f.e.global.retained.edges_len == 2);
+        assert(f.e.global.retained.edges[1].kind == ownership_api.edge_kind.borrowed);
+        assert(f.e.global.retained.allocations[1].owner.place.projections.len == 2);
+    }
+    close(&f);
+}
+
+// Allocation 10 moves into its own emptied field, so its owned graph has a cycle.
+// The release walk reaches the released root again and refuses.
+fn owned_cycle() void {
+    fixture mut f = fixture{};
+    open(&f, 1162);
+    transfer(&f, field(&f), place(&f, 4), 20);
+    transfer(&f, place(&f, 2), field(&f), 10);
+    release(&f, field(&f), 10);
+    refused(&f, 2, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_graph, 10);
+    ownership_api.event_descriptor* event = ownership_events.at(&f.e.events, 0);
+    assert(event->operation.operation == 4);
+    close(&f);
+}
+
+fn case_r01() void {
+    store_control();
+    u32 mut mode = 0;
+    while (mode < 3) { store_correspondence(mode); mode += 1; }
+}
+fn case_r02() void {
+    store_over_owner(false);
+    store_over_owner(true);
+}
+fn case_r03() void {
+    store_value(0);
+    store_value(1);
+}
+fn case_r04() void {
+    u32 mut mode = 0;
+    while (mode < 5) { store_relation(mode); mode += 1; }
+}
+fn case_r05() void {
+    u32 mut mode = 0;
+    while (mode < 3) { borrow_into_owned_field(mode); mode += 1; }
+    empty_into_owned_field();
+}
+
+fn case_r06() void {
+    u32 mut mode = 0;
+    while (mode < 3) { move_graph(mode); mode += 1; }
+    move_other_control();
+}
+
+fn case_r07() void {
+    u32 mut mode = 0;
+    while (mode < 4) {
+        transfer_source(mode);
+        transfer_destination(mode);
+        mode += 1;
+    }
+}
+fn case_r08() void {
+    release_path();
+    read_path(0);
+    read_path(1);
+    global_storage_end();
+    unproved_parent();
+}
+
+fn case_r09() void {
+    u32 mut mode = 0;
+    while (mode < 4) { release_walk(mode); mode += 1; }
+    mode = 0;
+    while (mode < 4) { persistent_walk(mode); mode += 1; }
+}
+
+fn case_r10() void {
+    owner_into_borrowed_field(false);
+    owner_into_borrowed_field(true);
+    owned_cycle();
+}
+
+fn main() i32 {
+    case_r01();
+    case_r02();
+    case_r03();
+    case_r04();
+    case_r05();
+    case_r06();
+    case_r07();
+    case_r08();
+    case_r09();
+    case_r10();
+    println("globals refusals ok");
+    return 0;
+}

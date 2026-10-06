@@ -300,6 +300,10 @@ bullet at a time and without a rewrite.
 
 ## 4. fort module tests
 
+- `ownership_api.valid_limits` requires positive bounds.
+  Zero remaining W uses `bounds.w=1` and `used.w=1`.
+  Assert `used=1`, `bound=1`, and `attempted=1`.
+  `ownership_globals_history_limits_test.ft` checks this boundary and preserves caller state.
 - **An exported compiler helper can have test clients outside the focused selection.**
   A range-capture CI run found an old prescan call in `fir_lower_local_panic_test.ft`.
   After changing an exported `fir_lower` helper, search its callers and run the full module
@@ -385,6 +389,11 @@ bullet at a time and without a rewrite.
   (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`, T-032).
   Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
   `types.ft` had no witness at all until that was measured.
+  Clang can replace an emitted LLVM target triple during linking.
+  Cross-target receipts record the host, explicit link target, executable architecture, and runner.
+  An LLVM triple alone proves no executable architecture.
+  Linux x86-64 receipts use explicit x86-64 linking and QEMU execution in an aarch64 guest.
+  Keep native aarch64 execution evidence separate from x86-64 execution evidence.
   **An allocator probe needs two views, because each is blind to what the other sees** (T-034), and
   both of them are blind to a leaked block above 128 KB (section 4 of this file, T-094).
   The address a round is handed catches a leak the allocator serves out of its own free chunks --

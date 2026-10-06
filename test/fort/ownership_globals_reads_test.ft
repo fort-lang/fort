@@ -1,0 +1,88 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| globals review ok
+/// Checks supplied global consumer boundary rules.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_env;
+import ownership_globals_review_env;
+import ownership_state;
+fn read_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_env.case_open(&e, 200 + mode);
+    ownership_api.place_path owner = ownership_globals_env.case_place(&e, 2);
+    ownership_api.place_path mut borrow = ownership_globals_env.case_place(&e, 3);
+    if (mode == 5 || mode == 6) { borrow = ownership_globals_review_env.path(&e, 3, false); }
+    bool source_only = mode == 3 || mode == 7 || mode == 11;
+    if (source_only) {
+        ownership_globals_env.add_empty(&e, owner);
+        ownership_globals_env.add_borrow(&e, borrow, 40,
+            mode == 7 ? ownership_api.source_kind.heap : ownership_api.source_kind.stack, 1);
+    } else {
+        ownership_globals_env.add_owner(&e, owner, 10, 4);
+        ownership_globals_review_env.copy_borrow(&e, 0, borrow);
+    }
+    if (mode == 4) { ownership_globals_env.caller_input(&e, owner, true); }
+    ownership_globals_env.select_entry(&e, true, mode == 4);
+    if (mode == 3) { ownership_globals_env.source_end(&e, 40); }
+    if (mode == 2 || mode == 4 || mode == 6 || mode == 10 || mode == 12) {
+        ownership_globals_env.add_effect(&e, ownership_api.effect_kind.release, owner, owner, 10);
+    }
+    if (mode == 11) {
+        ownership_api.place_path empty = ownership_globals_env.case_place(&e, 4);
+        ownership_globals_env.add_empty(&e, empty);
+        ownership_globals_env.borrow_effect(&e, empty, borrow, 0);
+        e.ordered[e.effects_len - 1].source = ownership_api.entity_id{};
+        ownership_globals_env.source_end(&e, 40);
+    }
+    if (mode == 7) { e.input.sources[0].validity = ownership_api.validity_kind.unknown; }
+    if (mode != 11 && mode != 12) {
+        ownership_api.place_path selected = mode == 10 ? owner : borrow;
+        ownership_globals_env.add_effect(&e, ownership_api.effect_kind.read, selected, selected,
+            source_only || mode == 10 ? 0 : 10);
+        if (source_only) { e.ordered[e.effects_len - 1].source = e.input.sources[0].key; }
+        if (mode == 8) { e.ordered[e.effects_len - 1].source.ordinal += 1; }
+        if (mode == 9) { e.ordered[e.effects_len - 1].allocation.ordinal += 1; }
+    }
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    bool invalid = mode == 2 || mode == 3 || mode == 4 || mode == 6;
+    bool missing = mode == 7 || mode == 8 || mode == 9;
+    ownership_globals_review_env.result(&e, out, !invalid && !missing,
+        invalid ? ownership_api.event_kind.invalid_use : ownership_api.event_kind.incomplete_proof,
+        missing ? ownership_api.incomplete_reason.missing_correspondence :
+            ownership_api.incomplete_reason.none);
+    ownership_globals_env.close(&e);
+}
+
+fn case_r01_01() void { read_case(1); }
+fn case_r01_02() void { read_case(2); }
+fn case_r01_03() void { read_case(3); }
+fn case_r01_04() void { read_case(4); }
+fn case_r01_05() void { read_case(5); }
+fn case_r01_06() void { read_case(6); }
+fn case_r01_07() void { read_case(7); }
+fn case_r01_08() void { read_case(8); }
+fn case_r01_09() void { read_case(9); }
+fn case_r01_10() void { read_case(10); }
+fn case_r01_11() void { read_case(11); }
+fn case_r01_12() void { read_case(12); }
+
+fn main() i32 {
+    case_r01_01();
+    case_r01_02();
+    case_r01_03();
+    case_r01_04();
+    case_r01_05();
+    case_r01_06();
+    case_r01_07();
+    case_r01_08();
+    case_r01_09();
+    case_r01_10();
+    case_r01_11();
+    case_r01_12();
+    println("globals review ok");
+    return 0;
+}

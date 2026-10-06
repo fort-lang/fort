@@ -1,0 +1,112 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| globals review ok
+/// Checks supplied global consumer boundary rules.
+import ownership_api;
+import ownership_events;
+import ownership_globals;
+import ownership_globals_env;
+import ownership_globals_review_env;
+import ownership_state;
+fn retain_case(u32 mode) void {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_globals_env.case_open(&e, 220 + mode);
+    ownership_api.place_path mut global = ownership_globals_env.case_place(&e, 2);
+    ownership_api.place_path local = ownership_globals_env.case_place(&e, 1);
+    bool release = mode == 2 || mode == 8 || mode == 10 || mode == 11;
+    if (mode == 10) {
+        global = ownership_globals_review_env.path(&e, 2, false);
+        e.descriptors[0].place = global;
+    }
+    if (release) {
+        ownership_globals_env.add_owner(&e, local, 10, mode == 11 ? 0 : 4);
+        ownership_globals_review_env.copy_borrow(&e, 0, global);
+    } else {
+        ownership_globals_env.add_borrow(&e, global, 40,
+            mode == 12 || mode == 13 ? ownership_api.source_kind.symbolic_caller :
+                (mode == 14 || mode == 15 ? ownership_api.source_kind.trusted_foreign :
+                    ownership_api.source_kind.heap), 1);
+    }
+    if (mode == 3) { e.input.sources[0].validity = ownership_api.validity_kind.ended; }
+    if (mode == 4 || mode == 15) {
+        e.input.sources[0].validity = ownership_api.validity_kind.unknown;
+    }
+    if (mode == 5) { e.input.sources_len = 0; }
+    if (mode == 6) { ownership_state.append_sources(&e.input, e.input.sources[0]); }
+    if (mode == 13) { e.input.sources[0].validity = ownership_api.validity_kind.released; }
+    if (mode == 7 || mode == 8) {
+        ownership_api.place_path empty = ownership_globals_env.case_place(&e, 3);
+        ownership_globals_env.add_empty(&e, empty);
+        ownership_globals_env.borrow_effect(&e, empty, global, 0);
+        e.ordered[e.effects_len - 1].source = ownership_api.entity_id{};
+    }
+    if (release) {
+        ownership_globals_env.add_effect(&e, ownership_api.effect_kind.release, local, local, 10);
+    }
+    if (mode == 9) {
+        ownership_api.place_path owner = ownership_globals_env.case_place(&e, 4);
+        ownership_globals_review_env.add_global(&e, owner, 390);
+        ownership_globals_env.add_owner(&e, owner, 20, 8);
+        ownership_globals_env.add_owner(&e, local, 30, 4);
+        ownership_globals_env.add_effect(&e, ownership_api.effect_kind.release, local, local, 30);
+    }
+    ownership_globals_env.select_entry(&e, false, false);
+    if (mode == 9) { e.entry_bindings[1].owning = true; }
+    ownership_globals_review_env.return_event(&e);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    if (mode == 16) {
+        ownership_api.global_result prior = ownership_globals_review_env.solve(&e, &req);
+        assert(ownership_api.successful(prior.proof));
+        u64 total = e.events.budget.used.w;
+        ownership_globals_review_env.budget(&e, total - 1);
+    }
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    bool invalid = mode == 2 || mode == 3 || mode == 10 || mode == 11 || mode == 13;
+    bool missing = mode == 4 || mode == 5 || mode == 6 || mode == 15;
+    ownership_globals_review_env.result(&e, out, !invalid && !missing && mode != 16,
+        mode == 16 ? ownership_api.event_kind.work_failure : (invalid ?
+            ownership_api.event_kind.invalid_use : ownership_api.event_kind.incomplete_proof),
+        mode == 16 ? ownership_api.incomplete_reason.work_limit : (missing ?
+            ownership_api.incomplete_reason.missing_correspondence :
+            ownership_api.incomplete_reason.none));
+    ownership_globals_env.close(&e);
+}
+
+fn case_r02_01() void { retain_case(1); }
+fn case_r02_02() void { retain_case(2); }
+fn case_r02_03() void { retain_case(3); }
+fn case_r02_04() void { retain_case(4); }
+fn case_r02_05() void { retain_case(5); }
+fn case_r02_06() void { retain_case(6); }
+fn case_r02_07() void { retain_case(7); }
+fn case_r02_08() void { retain_case(8); }
+fn case_r02_09() void { retain_case(9); }
+fn case_r02_10() void { retain_case(10); }
+fn case_r02_11() void { retain_case(11); }
+fn case_r02_12() void { retain_case(12); }
+fn case_r02_13() void { retain_case(13); }
+fn case_r02_14() void { retain_case(14); }
+fn case_r02_15() void { retain_case(15); }
+fn case_r02_16() void { retain_case(16); }
+
+fn main() i32 {
+    case_r02_01();
+    case_r02_02();
+    case_r02_03();
+    case_r02_04();
+    case_r02_05();
+    case_r02_06();
+    case_r02_07();
+    case_r02_08();
+    case_r02_09();
+    case_r02_10();
+    case_r02_11();
+    case_r02_12();
+    case_r02_13();
+    case_r02_14();
+    case_r02_15();
+    case_r02_16();
+    println("globals review ok");
+    return 0;
+}
