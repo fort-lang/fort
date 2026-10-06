@@ -27,7 +27,7 @@ bullet at a time and without a rewrite.
   server's tests, `lsp-modules` (`test/lsp`) and `lsp-binary`, so a CI job runs them apart from
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules`), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
-  `highlight_selftest` and `extension_selftest`;
+  `highlight_selftest`, `extension_selftest`, `panic_coverage` and `panic_coverage_selftest`;
   the 68 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and
   `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit
   tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
@@ -481,6 +481,19 @@ bullet at a time and without a rewrite.
   **Product compiler scope.** The `lang` test uses `xfail.txt`. It runs the complete product
   corpus with the current standard library (T-160).
 
+- **`tools/panic_coverage.py` holds each panic site against its tests** (ctest `panic_coverage`,
+  D11.4). A site is one `panic(...)` call in `src/fort/*.ft`, `src/lsp/*.ft` or `std/**/*.ft`. A
+  `test/fort` or `test/lsp` panic test answers a site when one `//! stderr:` text holds the whole
+  text of the site and is part of `panic: <text>`. A `test/lang` program that aborts answers a `std`
+  site in the same way, and no other site. The tool fails for a site with no test, a panic test that
+  answers no site or two sites, two sites with one text, and a stale declaration. Above a site,
+  write `// panic-coverage: unreachable: <reason>` when no caller can reach it. Write `//
+  panic-coverage: tests: <stem> ...` when its text comes from a caller, as in `panic(who)`.
+  `test/panic_gaps.txt` lists the sites with no test: 119 of 248 at its first commit. When you add a
+  test of a listed site, remove its line in the same commit; the tool fails until you do. A new site
+  needs a test or a declaration, not a new line. The tool accepts a new line, so review holds that
+  the list only gets shorter, as it does for `test/lang/xfail.txt`. A `test/fir` file is not read,
+  so the `fir_verify.verify` site names its `test/fort` tests only.
 - **`test/fir` holds the FIR tests**, one `.fir` file each, in the format that `test/fir/README.md`
   gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: one or more
   `//! pass: <name>`, an optional `//! prelude:` block of fort declarations, and one outcome,

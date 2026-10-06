@@ -538,6 +538,23 @@ set_tests_properties(ownership_audit_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Hold each panic site of src/fort, src/lsp and std against its panic tests (D11.4).
+# A site with no test needs a declaration or a line in test/panic_gaps.txt.
+add_test(NAME panic_coverage
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/panic_coverage.py"
+            --root "${CMAKE_SOURCE_DIR}")
+set_tests_properties(panic_coverage PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# Seed each class of problem of tools/panic_coverage.py in a small tree.
+add_test(NAME panic_coverage_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/panic_coverage_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(panic_coverage_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Test ownership selection and report publication through the built compiler.
 add_test(NAME ownership_driver
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_driver_test.py"
