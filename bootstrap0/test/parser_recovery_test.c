@@ -357,6 +357,134 @@ TEST(a_brace_inside_an_unclosed_call_goes_with_the_statement, {
                        "(fn (type (void)) h (params) (block)))");
 })
 
+// A `}` that a `;`, `,`, `)` or `]` follows closes a literal, not a block. Inside a group that the
+// failed construct left open, the skip therefore goes on past it to the end of the group. The `;`
+// of a `for` header and the `,` of an argument list are not statement boundaries (D14.2).
+TEST(a_literal_inside_an_open_group_goes_with_the_statement, {
+    const char* const header = "fn main() i32 {\n"
+                               "    for (i32 mut[2] a = {}; a[0] < 3; a[0]++) {\n"
+                               "        f();\n"
+                               "    }\n"
+                               "    return 0;\n"
+                               "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(header),
+                       "t.ft:2:14: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(parse_dump(header),
+                       "(module (fn (type (prim i32)) main (params) (block "
+                       "(error) (return (int 0)))))");
+    const char* const step = "fn main() i32 {\n"
+                             "    for (i32 mut[2] b = {1, 2}; ; b = {3, 4}) {\n"
+                             "        f();\n"
+                             "    }\n"
+                             "    return 0;\n"
+                             "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(step),
+                       "t.ft:2:14: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(parse_dump(step),
+                       "(module (fn (type (prim i32)) main (params) (block "
+                       "(error) (return (int 0)))))");
+    const char* const call = "fn f() void {\n"
+                             "    g(1 2, point{x: 1}, 3);\n"
+                             "    h();\n"
+                             "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(call), "t.ft:2:9: error: expected ')', found integer literal\n");
+    TEST_ASSERT_EQ_STR(parse_dump(call),
+                       "(module (fn (type (void)) f (params) (block (error) "
+                       "(call-stmt (call (ident h))))))");
+    const char* const index = "fn f() void {\n"
+                              "    g(t[1 2, {1}], 3);\n"
+                              "    h();\n"
+                              "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(index),
+                       "t.ft:2:11: error: expected ']', found integer literal\n");
+    TEST_ASSERT_EQ_STR(parse_dump(index),
+                       "(module (fn (type (void)) f (params) (block (error) "
+                       "(call-stmt (call (ident h))))))");
+})
+
+// A block that follows an unclosed `(` still ends the skip: no `;`, `,`, `)` or `]` follows its
+// `}`. The statement after it is parsed and reports on its own.
+TEST(a_block_after_an_unclosed_group_ends_the_skip, {
+    const char* const src = "fn f() void {\n"
+                            "    while (n < 3 {\n"
+                            "        g();\n"
+                            "    }\n"
+                            "    h(;\n"
+                            "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(src),
+                       "t.ft:2:18: error: expected ')', found '{'\n"
+                       "t.ft:5:7: error: expected an expression, found ';'\n");
+})
+
+// Outside a group the rule above does not apply: the `}` of a literal still ends the skip, the `)`
+// after it is a leftover, and the statement on the next line is read.
+TEST(outside_a_group_a_literal_still_ends_the_skip, {
+    const char* const src = "fn f() void {\n"
+                            "    i32 mut[2] a = {1})\n"
+                            "    h();\n"
+                            "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(src),
+                       "t.ft:2:9: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(parse_dump(src),
+                       "(module (fn (type (void)) f (params) (block (error) "
+                       "(call-stmt (call (ident h))))))");
+})
+
+// The two remaining kinds of literal: a `{` after `[` and a struct literal whose name follows `=`.
+TEST(an_index_literal_and_a_struct_literal_go_with_the_statement, {
+    const char* const index = "fn f() void {\n"
+                              "    g(t[{1}], 3);\n"
+                              "    h();\n"
+                              "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(index), "t.ft:2:9: error: expected an expression, found '{'\n");
+    TEST_ASSERT_EQ_STR(parse_dump(index),
+                       "(module (fn (type (void)) f (params) (block (error) "
+                       "(call-stmt (call (ident h))))))");
+    const char* const named = "fn f() void {\n"
+                              "    for (point mut[2] p = point{x: 1}; p < 3; p++) { }\n"
+                              "    h();\n"
+                              "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(named),
+                       "t.ft:2:16: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(parse_dump(named),
+                       "(module (fn (type (void)) f (params) (block (error) "
+                       "(call-stmt (call (ident h))))))");
+})
+
+// A block that a stray `;` follows inside an open `(` still ends the skip. Its `{` follows the
+// last token of the condition, not `=`, `,`, `(` or `[`, so it opens no literal. The error on
+// the next line is reported.
+TEST(a_block_that_a_stray_semicolon_follows_ends_the_skip, {
+    const char* const src = "fn f() void {\n"
+                            "    if (n < 3 {\n"
+                            "        h();\n"
+                            "    };\n"
+                            "    h(;\n"
+                            "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(src),
+                       "t.ft:2:15: error: expected ')', found '{'\n"
+                       "t.ft:5:7: error: expected an expression, found ';'\n");
+})
+
+// A group that the skip opens holds a literal as well: the `(` of the call opens after the
+// failure, and the `,` after `{1, 2}` stays inside it.
+TEST(a_literal_inside_a_group_the_skip_opened_goes_with_the_statement, {
+    const char* const src = "fn f() void {\n"
+                            "    i32 mut[2] a = k({1, 2}, 2);\n"
+                            "    g();\n"
+                            "}\n";
+    TEST_ASSERT_EQ_STR(parse_fails(src),
+                       "t.ft:2:9: error: the elements share the array's storage: write the mut "
+                       "after the length, as 'i32[4] mut'\n");
+    TEST_ASSERT_EQ_STR(parse_dump(src),
+                       "(module (fn (type (void)) f (params) (block (error) "
+                       "(call-stmt (call (ident g))))))");
+})
+
 // A switch body holds clauses and nothing else. A token that is no clause is reported and skipped
 // there rather than handed to the block around it. It would read the clauses after it as
 // statements.
@@ -707,7 +835,7 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 
 // ---- the fail corpus ------------------------------------------------------
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 311 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 313 };
 
 // The files walked, the source of the one being read, and the lines that were
 // reported on without an annotation, one per line.
@@ -919,6 +1047,12 @@ int main(int argc, char** argv) {
     TEST_RUN(a_body_without_its_brace_keeps_every_statement);
     TEST_RUN(a_half_typed_construct_reports_once);
     TEST_RUN(a_brace_inside_an_unclosed_call_goes_with_the_statement);
+    TEST_RUN(a_literal_inside_an_open_group_goes_with_the_statement);
+    TEST_RUN(a_block_after_an_unclosed_group_ends_the_skip);
+    TEST_RUN(outside_a_group_a_literal_still_ends_the_skip);
+    TEST_RUN(an_index_literal_and_a_struct_literal_go_with_the_statement);
+    TEST_RUN(a_block_that_a_stray_semicolon_follows_ends_the_skip);
+    TEST_RUN(a_literal_inside_a_group_the_skip_opened_goes_with_the_statement);
     TEST_RUN(a_switch_body_holds_clauses_only);
     TEST_RUN(an_error_under_a_speculation_is_reported_once);
     TEST_RUN(a_speculation_during_an_unwind_leaves_no_trace);

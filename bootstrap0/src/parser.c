@@ -1503,6 +1503,38 @@ static uint32_t count_open_groups(const parser_t* p, uint64_t start) {
     return groups;
 }
 
+// Whether the `{` at the cursor opens a brace literal. The token before it
+// decides. A `brace_init` follows `=` or `,`, and a broken argument or index
+// puts one after `(` or `[`. A `struct_literal` puts a name before the
+// `{`, and the token before that name is `=` or `,`. A block follows `)`, a
+// keyword, a `;`, a `}` or a type. In a condition that lost its `)`, a block
+// follows the last token of the condition: `if (n < 3 {` and `if (ok {`.
+static bool opens_literal(const parser_t* p) {
+    // The skip has consumed a token, so one stands before the cursor.
+    const tok_kind_t before = p->toks[p->pos - 1].kind;
+    if (before == TOK_ASSIGN || before == TOK_COMMA || before == TOK_LPAREN ||
+        before == TOK_LBRACKET) {
+        return true;
+    }
+    if (before != TOK_IDENT || p->pos < 2) {
+        return false;
+    }
+    const tok_kind_t name_before = p->toks[p->pos - 2].kind;
+    return name_before == TOK_ASSIGN || name_before == TOK_COMMA;
+}
+
+// Whether the `}` just consumed closed a brace literal inside an open group.
+// The group is one that the failed construct left open or one that the skip
+// opened. A `;`, `,`, `)` or `]` follows such a literal. The `;` of a `for`
+// header and the `,` of an argument list stay inside the group, so the skip
+// goes on to the end of the group. Thus, `for (i32 mut[2] a = {}; i < 3; i++)`
+// reports only its type. A block that a stray `;` follows still ends the skip.
+static bool closes_group_literal(const parser_t* p, uint32_t groups, bool literal) {
+    const tok_kind_t next = kind(p);
+    return literal && groups > 0 &&
+           (next == TOK_SEMI || next == TOK_COMMA || next == TOK_RPAREN || next == TOK_RBRACKET);
+}
+
 // Skips a failed construct to the recovery boundary for `level`.
 // Outside open groups, recovery consumes a semicolon and braces that it opened.
 // It leaves other closing braces and valid construct starts for the next parse.
@@ -1520,13 +1552,15 @@ static void skip_to_boundary(parser_t* p, uint64_t start, int level) {
     // A nesting-limit failure leaves the same unmatched closing brace.
     uint32_t braces = p->toks[start].kind == TOK_LBRACE ? 1U : 0U;
     uint32_t groups = count_open_groups(p, start);
+    // Whether the outermost brace pair that the skip opened is a literal.
+    bool literal = false;
     while (!at(p, TOK_EOF)) {
         const tok_kind_t k = kind(p);
         if (k == TOK_RBRACE) {
             if (braces > 0) {
                 braces--;
                 bump(p);
-                if (braces == 0) {
+                if (braces == 0 && !closes_group_literal(p, groups, literal)) {
                     return;
                 }
                 continue;
@@ -1569,6 +1603,9 @@ static void skip_to_boundary(parser_t* p, uint64_t start, int level) {
             }
         }
         if (k == TOK_LBRACE) {
+            if (braces == 0) {
+                literal = opens_literal(p);
+            }
             braces++;
         } else if (k == TOK_LPAREN || k == TOK_LBRACKET) {
             groups++;

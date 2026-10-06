@@ -147,6 +147,39 @@ TEST(a_group_of_a_bare_void_is_only_a_return_type, {
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
+// The return operands whose diagnostic needs the return type. Under a failed
+// return type each one reports nothing more (D14.2).
+static const char* const RETURNS[] = {
+    "fn f() nosuch* {\n    return null;\n}\n",
+    "fn f() nosuch {\n    return g();\n}\n",
+    "fn f() nosuch* own {\n    return new(i32);\n}\n",
+    "fn f() nosuch {\n    return 9223372036854775808;\n}\n",
+};
+
+TEST(a_return_under_a_failed_return_type_says_nothing_more, {
+    for (uint64_t i = 0; i < sizeof RETURNS / sizeof RETURNS[0]; i++) {
+        sb_t src;
+        sb_init(&src);
+        sb_append(&src, "fn g() void {\n}\n");
+        sb_append(&src, RETURNS[i]);
+        sb_append(&src, "fn main() i32 {\n    return 0;\n}\n");
+        TEST_ASSERT_FALSE(check_src(sb_cstr(&src)));
+        TEST_ASSERT_TRUE(said("unknown type 'nosuch'"));
+        TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+        sb_free(&src);
+    }
+})
+
+TEST(a_return_operand_under_a_failed_return_type_reports_its_own_errors, {
+    // The error type silences the context and not the operand: an unknown
+    // name in the operand is an error of its own.
+    TEST_ASSERT_FALSE(check_src("fn f() nosuch* {\n    return missing;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("unknown type 'nosuch'"));
+    TEST_ASSERT_TRUE(said("unknown name 'missing'"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)2);
+})
+
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
@@ -157,6 +190,8 @@ int main(int argc, char** argv) {
     TEST_RUN(the_other_end_of_the_range_is_silenced_as_well);
     TEST_RUN(a_context_with_a_real_type_still_names_itself);
     TEST_RUN(a_poisoned_context_of_its_own_stays_silent);
+    TEST_RUN(a_return_under_a_failed_return_type_says_nothing_more);
+    TEST_RUN(a_return_operand_under_a_failed_return_type_reports_its_own_errors);
     check_reset();
     done();
     TEST_EXIT();
