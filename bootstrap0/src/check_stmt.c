@@ -425,10 +425,13 @@ static void check_return(check_t* ck, ast_node_t* n) {
         return;
     }
     if (check_poisoned(ck->ret)) {
-        // the signature failed, so the error type silences this
+        // The signature failed, so the error type silences this `return`
+        // (D14.2). The operand still reports its own errors. Its context is
+        // the error type, so `null`, a void call and an owning temporary
+        // report nothing that only the return type could settle.
         if (n->a != NULL) {
             expr_t e;
-            check_expr_default(ck, n->a, &e);
+            check_expr_as(ck, n->a, ck->ret, "the return value", &e);
         }
         return;
     }

@@ -1456,6 +1456,39 @@ fn count_open_groups(parser* p, u64 start) u32 {
     return groups;
 }
 
+// Whether the `{` at the cursor opens a brace literal. The token before it
+// decides. A `brace_init` follows `=` or `,`, and a broken argument or index
+// puts one after `(` or `[`. A `struct_literal` puts a name before the
+// `{`, and the token before that name is `=` or `,`. A block follows `)`, a
+// keyword, a `;`, a `}` or a type. In a condition that lost its `)`, a block
+// follows the last token of the condition: `if (n < 3 {` and `if (ok {`.
+fn opens_literal(parser* p) bool {
+    // The skip has consumed a token, so one stands before the cursor.
+    lexer.tok_kind before = lexer.tokvec_at(p->toks, p->pos - 1).kind;
+    if (before == lexer.tok_kind.assign || before == lexer.tok_kind.comma
+        || before == lexer.tok_kind.lparen || before == lexer.tok_kind.lbracket) {
+        return true;
+    }
+    if (before != lexer.tok_kind.ident || p->pos < 2) {
+        return false;
+    }
+    lexer.tok_kind name_before = lexer.tokvec_at(p->toks, p->pos - 2).kind;
+    return name_before == lexer.tok_kind.assign || name_before == lexer.tok_kind.comma;
+}
+
+// Whether the `}` just consumed closed a brace literal inside an open group.
+// The group is one that the failed construct left open or one that the skip
+// opened. A `;`, `,`, `)` or `]` follows such a literal. The `;` of a `for`
+// header and the `,` of an argument list stay inside the group, so the skip
+// goes on to the end of the group. Thus, `for (i32 mut[2] a = {}; i < 3; i++)`
+// reports only its type. A block that a stray `;` follows still ends the skip.
+fn closes_group_literal(parser* p, u32 groups, bool literal) bool {
+    lexer.tok_kind next = kind(p);
+    return literal && groups > 0
+        && (next == lexer.tok_kind.semi || next == lexer.tok_kind.comma
+            || next == lexer.tok_kind.rparen || next == lexer.tok_kind.rbracket);
+}
+
 // Skips a failed construct to the recovery boundary for `level`.
 // Outside open groups, recovery consumes a semicolon and braces that it opened.
 // It leaves other closing braces and valid construct starts for the next parse.
@@ -1477,13 +1510,15 @@ fn skip_to_boundary(parser mut* p, u64 start, i32 level) void {
         braces = 1;
     }
     u32 mut groups = count_open_groups(p, start);
+    // Whether the outermost brace pair that the skip opened is a literal.
+    bool mut literal = false;
     while (!at(p, lexer.tok_kind.eof)) {
         lexer.tok_kind k = kind(p);
         if (k == lexer.tok_kind.rbrace) {
             if (braces > 0) {
                 braces -= 1;
                 bump(p);
-                if (braces == 0) {
+                if (braces == 0 && !closes_group_literal(p, groups, literal)) {
                     return;
                 }
                 continue;
@@ -1530,6 +1565,9 @@ fn skip_to_boundary(parser mut* p, u64 start, i32 level) void {
             }
         }
         if (k == lexer.tok_kind.lbrace) {
+            if (braces == 0) {
+                literal = opens_literal(p);
+            }
             braces += 1;
         } else if (k == lexer.tok_kind.lparen || k == lexer.tok_kind.lbracket) {
             groups += 1;

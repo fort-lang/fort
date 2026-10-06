@@ -730,6 +730,15 @@ Compile-time diagnostics (D14.2) are written to stderr. Each one starts with a h
   consumes the `}` that closes a brace it saw opened; it stops before a `}` it did not see opened
   and before a token that starts an ordinary top-level declaration, the end of the file ending
   every skip.
+  The outermost brace pair that the skip saw opened ends the skip at its `}`, with one
+  exception. Inside an open `(` or `[`, which the construct left open or the skip opened, a
+  brace literal does not end the skip when a `;`, `,`, `)` or `]` follows its `}`. The skip goes
+  on to the end of the group, so the `;` of a `for` header and the `,` of an argument list are
+  not boundaries: `for (i32 mut[2] a = {}; a < 3; a++)` reports once. The token directly before
+  the `{` decides that the pair is a literal: a `=`, `,`, `(` or `[`, or an identifier that a
+  `=` or a `,` comes directly after. Any other `{` opens a block, so a block that a stray `;`
+  follows still ends the skip. A struct literal with a qualified name and a typed array literal
+  count as blocks. A block whose `{` comes directly after a `,`, `(` or `[` counts as a literal.
   Which other tokens stop it depends on the recovery point: a skip that stands where a statement
   or a clause would stops before `case` and `default`, since a switch body holds nothing else,
   and one that stands where a statement would also stops before a statement keyword (`if while

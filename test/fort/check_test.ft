@@ -539,6 +539,49 @@ fn a_poisoned_context_of_its_own_stays_silent() void {
     assert(check_env.errors(&e) == 1);
 }
 
+// The return operands whose diagnostic needs the return type. Under a failed
+// return type each one reports nothing more (D14.2). The C twin is
+// a_return_under_a_failed_return_type_says_nothing_more in
+// bootstrap0/test/check_poison_test.c.
+string[4] FAILED_RETURNS = {
+    "fn f() nosuch* {\n    return null;\n}\n",
+    "fn f() nosuch {\n    return g();\n}\n",
+    "fn f() nosuch* own {\n    return new(i32);\n}\n",
+    "fn f() nosuch {\n    return 9223372036854775808;\n}\n",
+};
+
+fn a_return_under_a_failed_return_type_says_nothing_more() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    u64 mut i = 0;
+    while (i < FAILED_RETURNS.len) {
+        if (i > 0) {
+            check_env.reopen(&e);
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        strbuf.append(&b, "fn g() void {\n}\n");
+        strbuf.append(&b, FAILED_RETURNS[i]);
+        assert(!check_env.check_decls(&e, strbuf.view(&b)));
+        assert(check_env.said(&e, "unknown type 'nosuch'"));
+        assert(check_env.errors(&e) == 1);
+        strbuf.free(&b);
+        i += 1;
+    }
+}
+
+fn a_return_operand_under_a_failed_return_type_reports_its_own_errors() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The error type silences the context and not the operand: an unknown
+    // name in the operand is an error of its own.
+    assert(!check_env.check_decls(&e, "fn f() nosuch* {\n    return missing;\n}\n"));
+    assert(check_env.said(&e, "unknown type 'nosuch'"));
+    assert(check_env.said(&e, "unknown name 'missing'"));
+    assert(check_env.errors(&e) == 2);
+}
+
 fn a_char_alone_in_such_an_expression_asks_for_char() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -1528,6 +1571,8 @@ fn main() i32 {
     every_position_that_drops_its_operand_reports_once();
     a_context_with_a_real_type_still_names_itself();
     a_poisoned_context_of_its_own_stays_silent();
+    a_return_under_a_failed_return_type_says_nothing_more();
+    a_return_operand_under_a_failed_return_type_reports_its_own_errors();
     a_char_alone_in_such_an_expression_asks_for_char();
     a_declared_char_is_no_more_an_integer_than_the_default_char_is();
     a_char_beside_an_integer_takes_the_integer_type();
