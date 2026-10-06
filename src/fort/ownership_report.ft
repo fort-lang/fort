@@ -647,6 +647,14 @@ fn destination(string path, strbuf.str_buf mut* out) bool {
     string name = slash < 0 ? path : path[cast(slash, u64) + 1..];
     if (name.len == 0) { return false; }
     if (os.real_path(path, out)) { return true; }
+    i32 real_error = sys.errno();
+    if (real_error != libc.ENOENT) { return false; }
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    char[1] mut link_prefix = {};
+    // Any link rejects the absent-name fallback. A dangling output can later expose the report.
+    i64 linked = libc.readlink(c_path.ptr, &link_prefix[0], link_prefix.len);
+    if (linked >= 0 || sys.errno() != libc.ENOENT) { return false; }
     if (!os.real_path(parent, out)) { return false; }
     if (strbuf.view(out) != "/") { strbuf.push(out, '/'); }
     strbuf.append(out, name);
