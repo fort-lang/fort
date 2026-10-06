@@ -7,11 +7,14 @@ import ownership_api;
 import ownership_events;
 import ownership_limits;
 import ownership_source;
+import session;
 import std.io;
 import std.libc;
 import std.os;
 import std.str;
 import std.strbuf;
+import std.strmap;
+import std.sys;
 
 // These POSIX functions have the same ABI on both supported targets.
 extern fn mkstemp(char mut* path) i32;
@@ -251,30 +254,52 @@ fn location(ownership_source.context* c, ownership_api.source_position source,
 }
 
 fn diagnostic(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
-    reason why, ownership_source.body mut* charged) void {
+    reason why, ownership_source.body mut* charged) bool {
+    reason mut rendered = why;
+    bool mut normal = true;
     if (charged != null) {
-        ownership_api.operation_position op = ownership_api.operation_position{
-            .function = charged->key};
-        ownership_api.charge_result permission = ownership_events.charge_rendered(
-            &charged->live.events, op, why.source.filename_present ? why.source : charged->source);
-        if (!permission.allowed) {
-            if (!charged->live.first_refusal.terminal.present) {
-                charged->live.first_refusal = permission.proof;
+        if (charged->live.events.terminal.present &&
+            charged->live.events.terminal.limit.present &&
+            charged->live.events.terminal.limit.category == ownership_api.limit_category.v) {
+            rendered = proof_reason("liveness",
+                ownership_events.terminal_status(&charged->live.events));
+            normal = false;
+        } else {
+            ownership_api.operation_position op = ownership_api.operation_position{
+                .function = charged->key};
+            ownership_api.charge_result permission = ownership_events.charge_rendered(
+                &charged->live.events, op,
+                why.source.filename_present ? why.source : charged->source);
+            if (!permission.allowed) {
+                if (!charged->live.first_refusal.terminal.present) {
+                    charged->live.first_refusal = permission.proof;
+                }
+                rendered = proof_reason("liveness", charged->live.events.terminal.present ?
+                    ownership_events.terminal_status(&charged->live.events) : permission.proof);
+                normal = false;
             }
-            // Keep the reserved terminal error even when normal rendering refuses V.
         }
     }
     strbuf.str_buf mut message = strbuf.create();
     defer strbuf.free(&message);
     strbuf.append(&message, "ownership proof is incomplete (");
-    strbuf.append(&message, why.stage);
+    strbuf.append(&message, rendered.stage);
     strbuf.append(&message, ": ");
-    strbuf.append(&message, why.code);
+    strbuf.append(&message, rendered.code);
+    if (rendered.limit.present) {
+        strbuf.append(&message, "; category ");
+        strbuf.append(&message, CATEGORIES[cast(rendered.limit.category, u64)]);
+        strbuf.append(&message, "; used ");
+        strbuf.append_u64(&message, rendered.limit.used);
+        strbuf.append(&message, "; bound ");
+        strbuf.append_u64(&message, rendered.limit.bound);
+    }
     strbuf.push(&message, ')');
-    diag.error(diagnostics, location(c, why.source, entry), strbuf.view(&message));
+    diag.error(diagnostics, location(c, rendered.source, entry), strbuf.view(&message));
+    return normal;
 }
 
-/// Emits one closure error and each separate service work refusal.
+/// Emits closure and service errors. V refusal stops normal errors and keeps one terminal error.
 fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry) void {
     ownership_source.body mut* mut charged = null;
     u64 mut i = 0;
@@ -282,7 +307,7 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
         if (c->bodies[i].live.initialized) { charged = &c->bodies[i]; break; }
         i += 1;
     }
-    diagnostic(c, diagnostics, entry, first_incomplete(c), charged);
+    if (!diagnostic(c, diagnostics, entry, first_incomplete(c), charged)) { return; }
     i = 0;
     while (i < c->bodies.len) {
         ownership_source.body mut* row = &c->bodies[i];
@@ -290,7 +315,7 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
         if (why.present && why.limit.present &&
             (why.limit.category == ownership_api.limit_category.w ||
              why.limit.category == ownership_api.limit_category.v)) {
-            diagnostic(c, diagnostics, entry, why, row);
+            if (!diagnostic(c, diagnostics, entry, why, row)) { return; }
         }
         i += 1;
     }
@@ -628,8 +653,47 @@ fn destination(string path, strbuf.str_buf mut* out) bool {
     return true;
 }
 
-/// Rejects aliases for loaded inputs and the selected compiler output.
-fn path_allowed(string path, string entry, string output, modules.module_set* set) bool {
+// Probe absent names in their actual directory. Its case and Unicode rules apply to both names.
+// An uncertain lookup rejects the destination. The probe never opens either final destination.
+fn absent_alias(string selected, string other) bool {
+    i64 first_slash = str.last_index_of(selected, '/');
+    i64 other_slash = str.last_index_of(other, '/');
+    if (first_slash < 0 || other_slash < 0) { return true; }
+    if (selected[..cast(first_slash, u64)] != other[..cast(other_slash, u64)]) { return false; }
+    strbuf.str_buf mut resolved = strbuf.create();
+    defer strbuf.free(&resolved);
+    if (os.real_path(selected, &resolved)) { return false; }
+    if (sys.errno() != libc.ENOENT) { return true; }
+    if (os.real_path(other, &resolved)) { return false; }
+    if (sys.errno() != libc.ENOENT) { return true; }
+    // A suffix can change trailing-dot or trailing-space comparison on some filesystems.
+    if (selected[selected.len - 1] == '.' || selected[selected.len - 1] == ' ' ||
+        other[other.len - 1] == '.' || other[other.len - 1] == ' ') { return true; }
+    strbuf.str_buf mut temporary = strbuf.create();
+    defer strbuf.free(&temporary);
+    strbuf.append(&temporary, selected);
+    strbuf.append(&temporary, ".tmp.XXXXXX");
+    char mut@ own temp_path = str.to_cstr(strbuf.view(&temporary));
+    defer del(temp_path);
+    i32 fd = mkstemp(temp_path.ptr);
+    if (fd < 0) { return true; }
+    bool closed = io.close(fd);
+    bool mut uncertain = !closed || !os.real_path(str.from_cstr(temp_path.ptr), &resolved);
+    strbuf.str_buf mut candidate = strbuf.create();
+    defer strbuf.free(&candidate);
+    strbuf.append(&candidate, other);
+    strbuf.append(&candidate, str.from_cstr(temp_path.ptr)[selected.len..]);
+    strbuf.str_buf mut alias = strbuf.create();
+    defer strbuf.free(&alias);
+    bool found = os.real_path(strbuf.view(&candidate), &alias);
+    uncertain = uncertain || (!found && sys.errno() != libc.ENOENT);
+    bool removed = libc.unlink(temp_path.ptr) == 0;
+    return uncertain || !removed || (found && strbuf.view(&resolved) == strbuf.view(&alias));
+}
+
+/// Rejects aliases for every source read and the selected compiler output.
+fn path_allowed(string path, string entry, string output, modules.module_set* set,
+    session.session* s) bool {
     strbuf.str_buf mut selected = strbuf.create();
     defer strbuf.free(&selected);
     if (!destination(path, &selected)) { return false; }
@@ -639,7 +703,10 @@ fn path_allowed(string path, string entry, string output, modules.module_set* se
         return false;
     }
     strbuf.clear(&other);
-    if (destination(output, &other) && strbuf.view(&selected) == strbuf.view(&other)) {
+    if (destination(output, &other)) {
+        if (strbuf.view(&selected) == strbuf.view(&other) ||
+            absent_alias(strbuf.view(&selected), strbuf.view(&other))) { return false; }
+    } else {
         return false;
     }
     u64 mut i = 0;
@@ -647,6 +714,15 @@ fn path_allowed(string path, string entry, string output, modules.module_set* se
         strbuf.clear(&other);
         if (destination(modules.file_at(set, i), &other) &&
             strbuf.view(&selected) == strbuf.view(&other)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->sources.entries.len) {
+        if (s->sources.entries[i].state == strmap.SLOT_FULL) {
+            strbuf.clear(&other);
+            if (!destination(s->sources.entries[i].key, &other) ||
+                strbuf.view(&selected) == strbuf.view(&other)) { return false; }
+        }
         i += 1;
     }
     return true;
