@@ -503,6 +503,27 @@ bullet at a time and without a rewrite.
   needs a test or a declaration, not a new line. The tool accepts a new line, so review holds that
   the list only gets shorter, as it does for `test/lang/xfail.txt`. A `test/fir` file is not read,
   so the `fir_verify.verify` site names its `test/fort` tests only.
+  **A site that a test can call is reachable, even when no caller in the compiler breaks the
+  guard.** D9.6 exports every function, so a test calls it with the precondition broken. A count
+  that is a plain `u64` or `u32` field, such as `f.locals.len` beside its `own` span, is a value
+  that a test sets: 6 `fir` and 11 `ownership_state` tests set one to its limit. Three of the
+  first five unreachable declarations were wrong in this way, and a probe of each one exited 134.
+  The other two guarded the length of a span, which the forged length below reaches.
+  A struct value is a value that a test builds, so an argument that needs a well-formed value
+  fails: `flt.round_ratio` assumed trimmed bignums, and a divisor with a zero top limb reached
+  its guard. Begin each unreachable reason with `probed:` (a program ran and stopped before the
+  site) or `read:` (an argument from the code). One argument is sound for a whole class: a panic
+  after a `switch` that names every member of an enum is dead, because D7.7 gives that switch a
+  trapping `default`. `cast(250, types.type_kind)` stopped with `enum value 250 is not a member of
+  type_kind`. **A length can be forged, so a guard on the `.len` of a span is reachable.**
+  `p[lo..hi]` on a pointer makes a view with no runtime check (D6.9). A pointer cast (D3.14) and a
+  same-size reinterpretation (D10.7) can write the pointer or the length of an `own` span:
+  `cast(&tt.nodes, raw mut*)->len = n`, with `raw` a struct of two `u64`, reached
+  `types.reserve`. D6.9 and D10.7 leave the extent to the ownership proof, which runs by default
+  only after the ownership series. No test forges a length or a pointer, so such a site stays
+  listed. A site that needs more memory or time than a test can use stays listed too. The comment
+  lines above an entry or a group give the reason. The list holds 26 of 248 sites after the first
+  sweep: 22 that need a forged length and 4 that need memory or time.
 - **`test/fir` holds the FIR tests**, one `.fir` file each, in the format that `test/fir/README.md`
   gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: one or more
   `//! pass: <name>`, an optional `//! prelude:` block of fort declarations, and one outcome,

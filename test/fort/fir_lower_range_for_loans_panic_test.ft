@@ -1,0 +1,38 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_lower.lower_range_for: too many loans
+//! stdout:
+//| true
+/// A loan number is a u32. The lowerer refuses a loan past U32_LIMIT, so a range `for` over a
+/// string panics when the lowerer has already made that many loans.
+import ast;
+import fir;
+import fir_lower;
+import lower_env;
+import types;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[4] source = {
+        "fn f(string s) void {",
+        "    for (char c : s) {",
+        "    }",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "f");
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    defer fir_lower.scopes_free(&lw.scopes);
+    fir_lower.prescan(&lw, decl->b);
+    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
+    ast.node* loop = ast.ast_child(decl->b, 0);
+    println(loop->b->ty->kind == types.type_kind.k_string);
+    lw.next_loan = 4294967295;
+    fir_lower.lower_range_for(&lw, loop);
+    return 0;
+}

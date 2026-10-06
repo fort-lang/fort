@@ -1,0 +1,42 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_lower.lower_string_eq: a string that owns
+//! stdout:
+//| true
+/// The checker refuses to compare an owning rvalue, which would leave no owner. The test puts
+/// `move(p)` on the left of `s == t`, so lower_string_eq panics.
+import ast;
+import check;
+import check_env;
+import fir;
+import fir_lower;
+import lower_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[5] source = {
+        "fn f(u8 mut@ own p, string s, string t) bool {",
+        "    u8 mut@ own q = move(p);",
+        "    del(q);",
+        "    return s == t;",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "f");
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    defer fir_lower.scopes_free(&lw.scopes);
+    fir_lower.prescan(&lw, decl->b);
+    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
+    ast.node mut* call = check_env.node_in_main(&e.c, ast.ast_kind.k_call, "");
+    ast.node mut* eq = check_env.node_in_main(&e.c, ast.ast_kind.k_binary, "");
+    println((call->ann & check.ANN_MOVE) != 0);
+    eq->a = call;
+    fir.operand mut out = fir.operand{};
+    fir_lower.lower_string_eq(&lw, eq, &out);
+    return 0;
+}

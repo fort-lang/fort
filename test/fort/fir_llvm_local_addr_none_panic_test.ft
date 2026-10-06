@@ -1,0 +1,50 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_llvm.local_addr: a local with no address
+//! stdout:
+//| none
+/// local_addr gives the alloca of a local that has storage. `_1` is named by no item, so it
+/// has no storage and no address, and the call panics.
+import fir;
+import fir_llvm;
+import llvm_env;
+
+string[6] PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    i32 b;",
+    "}",
+    "fn take(pair p) i32 {",
+    "    return p.a;\n}",
+};
+
+string[8] TEXT = {
+    "fn main.f() -> i32 {",
+    "    let _1: pair;",
+    "",
+    "    bb0: {",
+    "        _0 = call fn main.take(const zero pair) #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+};
+
+// A panic ends the program, so the case stands in a file of its own.
+fn main() i32 {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    llvm_env.begin(&e.g);
+    fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
+    defer fir_llvm.close(&t);
+    fir_llvm.write_locals(&t);
+    if (fir_llvm.storage_at(&t, 1) == fir_llvm.storage.sk_none) {
+        println("none");
+    }
+    fir_llvm.local_addr(&t, 1);
+    return 0;
+}
