@@ -1264,8 +1264,8 @@ fn owner_empty(work mut* current, state mut* input, ownership_api.place_path pat
     ownership_state.append_contents(&input->bytes.facts, input->core->contents[content]);
     return true;
 }
-// An owner at or inside the window's place can hold window bytes. An owner above that place
-// designates the window's storage, and a dereference below it leaves the window's storage.
+// An owner at or inside a storage place can hold its bytes. An owner above that place
+// designates the storage, and a dereference below it leaves the storage.
 fn owner_in_window(ownership_api.place_path owner, ownership_api.place_path window) bool {
     if (!ownership_raw.same_key(owner.root, window.root)) { return false; }
     if (ownership_places.begins(owner, window)) {
@@ -1302,13 +1302,16 @@ fn owner_leaf(work mut* current, state* input, ownership_api.entity_id source,
     }
     return false;
 }
+// Owners are found from the captured origin place. A producer's window place cannot hide one.
 fn owner_guard(work mut* current, state mut* input, window selected, bool unchanged) bool {
     if (unchanged) { return spend(current, 1); }
+    u64 mut origin = U64_MAX;
     u64 mut i = 0;
     while (i < input->raw.origins.len) {
         if (!spend(current, 1)) { return false; }
         ownership_raw.origin item = input->raw.origins[i];
         if (ownership_raw.same_key(item.source, selected.source)) {
+            origin = i;
             u64 mut j = 0;
             while (j < item.leaf_count) {
                 if (!spend(current, 1)) { return false; }
@@ -1327,20 +1330,24 @@ fn owner_guard(work mut* current, state mut* input, window selected, bool unchan
         }
         i += 1;
     }
+    if (origin == U64_MAX) {
+        return stop(current, selected.source, false, "owner overlap needs the original layout");
+    }
+    ownership_api.place_path storage = input->raw.origins[origin].place;
     i = 0;
     while (i < input->core->allocations_len) {
         if (!spend(current, 1)) { return false; }
         ownership_api.allocation_fact item = input->core->allocations[i];
         if (item.obligation && ownership_state.has_residual(item.owner.place) &&
-            ownership_raw.same_key(item.owner.place.root, selected.place.root)) {
+            ownership_raw.same_key(item.owner.place.root, storage.root)) {
             return stop(current, item.key, false, "residual owner overlap remains unproved");
         }
         u64 mut price = 1;
         if (!place_price(current, item.owner.place, &price) ||
-            !place_price(current, selected.place, &price) || !spend(current, price)) {
+            !place_price(current, storage, &price) || !spend(current, price)) {
             return false;
         }
-        if (item.obligation && owner_in_window(item.owner.place, selected.place) &&
+        if (item.obligation && owner_in_window(item.owner.place, storage) &&
             !owner_leaf(current, input, selected.source, item.owner.place)) {
             if (ownership_api.successful(current->proof)) {
                 return stop(current, item.key, false, "owner overlap needs an owning leaf");
