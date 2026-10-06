@@ -704,6 +704,9 @@ Sections:
   gave `s.b, s.b`. The user ruled for the swap. The emitter keeps the old behavior until the FIR
   migration replaces it (`fir.md` 12.5). Amended 2026-10-02: the user selected the
   existing order for a stored span or `string` header after the index or explicit bounds.
+  History 2026-10-06: the direct path is gone (`fir.md` 16), and the FIR translator reads every
+  member of a literal before its first store. The rule text did not change.
+  `run/structs/015_literal_reads_destination.ft` holds the swap.
 
 ### D6.4 The cast form
 - owner: `core-language.md` (Expressions).

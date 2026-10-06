@@ -1,0 +1,102 @@
+//! run
+//! stdout:
+//| 2 1
+//| 2 1
+//| 2 1 1
+//| 3 4 1 2
+//| 3 4 1 2
+//| 2 1 1
+//| last first
+//| 2 3 1
+//| 2 1
+//| 2 1
+//| 2 1
+// An aggregate literal reads every member before the destination changes (D6.3), so a literal
+// whose members read the destination swaps them. A struct member, an array element, a nested
+// literal, an aggregate member, a `string` member and a span member each read the old value. A
+// translator that wrote each member as it read it printed `2 2`, `2 2`, `2 1 2`, `3 4 3 4`,
+// `3 4 3 4`, `2 1 2`, `last last`, `2 3 2`, `2 2`, `2 2` and `2 2` here. A translator that read an
+// aggregate member in place, with no `%tmp` slot, printed `3 4 3 4` twice (spec/fir.md 12.1).
+struct pair {
+    i32 a;
+    i32 b;
+}
+
+struct box {
+    pair inner;
+    i32 tag;
+}
+
+struct twin {
+    pair x;
+    pair y;
+}
+
+struct named {
+    string first;
+    string last;
+}
+
+struct cut {
+    i32@ head;
+    i32@ tail;
+}
+
+pair mut G = pair{1, 2};
+
+// The literal writes the result while it reads `p`. For `r = turned(&r)` the caller passes the
+// address of `r` as the result pointer and as `p`, so the literal writes the place it reads.
+fn turned(pair* p) pair {
+    return pair{p->b, p->a};
+}
+
+fn main() i32 {
+    pair mut s = pair{1, 2};
+    s = pair{s.b, s.a};
+    println(s.a, " ", s.b);
+
+    i32[2] mut a = i32[2]{1, 2};
+    a = i32[2]{a[1], a[0]};
+    println(a[0], " ", a[1]);
+
+    // The nested literal reads `b.inner` before the outer literal writes it, and the last
+    // member reads the old `b.inner.a` as well.
+    box mut b = box{pair{1, 2}, 7};
+    b = box{pair{b.inner.b, b.inner.a}, b.inner.a};
+    println(b.inner.a, " ", b.inner.b, " ", b.tag);
+
+    // An aggregate member is read whole before the first field changes.
+    twin mut t = twin{pair{1, 2}, pair{3, 4}};
+    t = twin{t.y, t.x};
+    println(t.x.a, " ", t.x.b, " ", t.y.a, " ", t.y.b);
+
+    pair[2] mut ps = pair[2]{pair{1, 2}, pair{3, 4}};
+    ps = pair[2]{ps[1], ps[0]};
+    println(ps[0].a, " ", ps[0].b, " ", ps[1].a, " ", ps[1].b);
+
+    // The designated form zeroes the destination after it reads its members.
+    box mut d = box{pair{1, 2}, 7};
+    d = box{.tag = d.inner.a, .inner = {.a = d.inner.b, .b = d.inner.a}};
+    println(d.inner.a, " ", d.inner.b, " ", d.tag);
+
+    // A `string` member and a span member are headers, and each reads the old header.
+    named mut n = named{"first", "last"};
+    n = named{n.last, n.first};
+    println(n.first, " ", n.last);
+    i32[3] cells = i32[3]{1, 2, 3};
+    cut mut c = cut{cells[0..1], cells[1..3]};
+    c = cut{c.tail, c.head};
+    println(c.head[0], " ", c.head[1], " ", c.tail[0]);
+
+    // The destination is a pointer target, a global, and the result of a call.
+    pair mut q = pair{1, 2};
+    pair mut* at = &q;
+    *at = pair{at->b, at->a};
+    println(q.a, " ", q.b);
+    G = pair{G.b, G.a};
+    println(G.a, " ", G.b);
+    pair mut r = pair{1, 2};
+    r = turned(&r);
+    println(r.a, " ", r.b);
+    return 0;
+}
