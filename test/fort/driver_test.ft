@@ -1331,6 +1331,98 @@ fn a_check_with_no_runtime_entry_is_a_compile_error() void {
     assert(none == "");
 }
 
+// A program whose `main` prints an `i64`, and one whose `eq` compares two strings.
+string FIR_PRINT = "fn main() i32 {\n    i64 x = 1;\n    println(x);\n    return 0;\n}\n";
+string FIR_EQ =
+    "fn eq(string a, string b) bool {\n    return a == b;\n}\nfn main() i32 {\n    return 0;\n}\n";
+
+// The three runtimes of the review that found the crash, and one more after it. In the first,
+// print_i64 lacks `fd`; in the second, it has a third parameter; in the last, str_eq lacks the
+// second string.
+string[4] SHORT_PRINT_RUNTIME = {
+    "fn print_i64(i64 v) void {",
+    "}",
+    "fn print_char(i32 fd, char c) void {",
+    "}",
+};
+
+string[4] LONG_PRINT_RUNTIME = {
+    "fn print_i64(i32 fd, i64 v, i64 w) void {",
+    "}",
+    "fn print_char(i32 fd, char c) void {",
+    "}",
+};
+
+// A print_i64 that is `noreturn`. The lowering writes no `trap` after a print, so rule V8 ended
+// the compiler with exit 134 before print_fits refused it.
+string[6] NORETURN_PRINT_RUNTIME = {
+    "fn print_i64(i32 fd, i64 v) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn print_char(i32 fd, char c) void {",
+    "}",
+};
+
+string[3] SHORT_STR_EQ_RUNTIME = {
+    "fn str_eq(char* a, u64 n) bool {",
+    "    return true;",
+    "}",
+};
+
+// Writes `runtime` as `<dir>/rt.ft`, builds `entry` over it with `--std-dir <dir>`, and holds
+// that the build is a compile error at `at` for the entry `name` of the function `f`, with no
+// module and no count. Before the lowering tested the signature, each of the four runtimes above
+// ended the compiler with exit 134: an index out of range at the second parameter of print_i64,
+// rule V8 for the `noreturn` print, and rule V7 for the other two.
+fn expect_other_signature(string dir, string@ runtime, string entry, string at, string name,
+                          string f) void {
+    assert(make_directory(dir) || sys.errno() == libc.EEXIST);
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    strbuf.append(&path, dir);
+    strbuf.append(&path, "/rt.ft");
+    write_lines(strbuf.view(&path), runtime);
+    remove_file("fir_params.ll");
+    string[8] mut argv = {"fort", "--std-dir", dir, "--fir-stats", "-S", entry, "-o",
+                          "fir_params.ll"};
+    assert(run(argv[0..8]) == EXIT_COMPILE_ERROR);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, at);
+    strbuf.append(&want, ": error: the runtime `std.rt` has no entry `");
+    strbuf.append(&want, name);
+    strbuf.append(&want, "` with the parameters that `");
+    strbuf.append(&want, f);
+    strbuf.append(&want, "` needs\n");
+    string own err = captured_err();
+    defer del(err);
+    if (str.find(err, strbuf.view(&want)) < 0) {
+        eprintln("driver_test: expected <", strbuf.view(&want), ">, got <", err, ">");
+        panic("driver_test.expect_other_signature: the diagnostic differs");
+    }
+    string own out = captured_out();
+    defer del(out);
+    assert(out == "");
+    assert(!file_exists("fir_params.ll"));
+}
+
+// A print function or str_eq that the runtime declares with another signature than
+// spec/toolchain.md 5.1 gives is a compile error at the construct that needs it, with exit 1 and
+// no module (spec/fir.md 9.8): the argument of the print, and the operator of the equality.
+fn a_runtime_entry_with_other_parameters_is_a_compile_error() void {
+    write_file("fir_print.ft", FIR_PRINT);
+    write_file("fir_eq.ft", FIR_EQ);
+    expect_other_signature("std_short_print", SHORT_PRINT_RUNTIME[..], "fir_print.ft",
+                           "fir_print.ft:3:13", "print_i64", "main");
+    expect_other_signature("std_long_print", LONG_PRINT_RUNTIME[..], "fir_print.ft",
+                           "fir_print.ft:3:13", "print_i64", "main");
+    expect_other_signature("std_noreturn_print", NORETURN_PRINT_RUNTIME[..], "fir_print.ft",
+                           "fir_print.ft:3:13", "print_i64", "main");
+    expect_other_signature("std_short_str_eq", SHORT_STR_EQ_RUNTIME[..], "fir_eq.ft",
+                           "fir_eq.ft:2:14", "str_eq", "eq");
+}
+
 // A runtime with the two print functions that the `println(1)` of FIR_MIXED calls.
 string[4] PRINT_RUNTIME = {
     "fn print_i64(i32 fd, i64 v) void {",
@@ -1955,6 +2047,7 @@ fn main() i32 {
     fir_stats_combines_only_with_a_build();
     fir_stats_counts_the_functions_that_the_translator_wrote();
     a_check_with_no_runtime_entry_is_a_compile_error();
+    a_runtime_entry_with_other_parameters_is_a_compile_error();
     fir_verify_report_writes_one_line_for_each_function();
     fir_verify_report_holds_a_function_built_by_hand();
     no_bounds_check_reaches_the_build_mode_pass();

@@ -29,6 +29,8 @@ import types;
 // The module of the runtime, and its function that compares two strings.
 string RUNTIME_MODULE = "std.rt";
 string STR_EQ = "str_eq";
+// The name of the member record of an enum table in std.rt (spec/toolchain.md 5.1).
+string ENUM_MEMBER = "enum_member";
 
 // The fields of a span or a `string` header (spec/fir.md 5.5).
 u32 PTR_FIELD = 0;
@@ -40,12 +42,15 @@ u64 FD_STDERR = 2;
 u64 NEWLINE = 10;
 
 /// Why the lowering of a function stopped: the kind of the tree node that it does not lower, and
-/// the location of that node. `entry` is the name of the `std.rt` function that the node needs
-/// and the closure lacks, or empty when the lowering does not lower the node at all.
+/// the location of that node. `entry` is the name of the `std.rt` function that the node needs,
+/// or empty when the lowering does not lower the node at all. `signature` is false when the
+/// closure lacks `entry`, and true when the closure declares it with another signature than
+/// print_fits or str_eq_fits accepts (spec/fir.md 9.8).
 struct report {
     ast.ast_kind kind;
     diag.loc at;
     string entry;
+    bool signature;
 }
 
 // The runtime functions of the print family, one for each form of argument (spec/toolchain.md 6
@@ -115,8 +120,8 @@ struct local_list {
 // named locals. `floor` is the depth below which no exit walks while a deferred statement lowers,
 // and `exit_at` is the location of the exit that expands it, the empty range outside every
 // expansion. `str_eq` is the runtime function that a string equality calls, and `prints` holds
-// the print functions of the runtime in the order of print_kind; each is looked up at its first
-// use.
+// the print functions of the runtime in the order of print_kind, with `fits` set for each whose
+// signature print_fits accepts; the first print looks up all of them.
 struct lowerer {
     check.checker mut* ck;
     fir.func mut* f;
@@ -132,6 +137,7 @@ struct lowerer {
     ast.sym* str_eq;
     bool str_eq_known;
     ast.sym*[PRINT_KINDS] prints;
+    bool[PRINT_KINDS] fits;
     bool prints_known;
     report why;
 }
@@ -284,14 +290,21 @@ fn end_of(ast.node* n) diag.loc {
 // Records that the lowering does not lower the node `n`, and returns false, so that a caller
 // returns what this returns.
 fn unsupported(lowerer mut* lw, ast.node* n) bool {
-    lw->why = report{n->kind, n->loc, ""};
+    lw->why = report{n->kind, n->loc, "", false};
     return false;
 }
 
 // Records that the node `n` needs the `std.rt` function `entry`, which the closure lacks, and
 // returns false, as unsupported does.
 fn no_runtime(lowerer mut* lw, ast.node* n, string entry) bool {
-    lw->why = report{n->kind, n->loc, entry};
+    lw->why = report{n->kind, n->loc, entry, false};
+    return false;
+}
+
+// Records that the node `n` needs the `std.rt` function `entry`, which the closure declares with
+// another signature, and returns false, as unsupported does.
+fn other_runtime(lowerer mut* lw, ast.node* n, string entry) bool {
+    lw->why = report{n->kind, n->loc, entry, true};
     return false;
 }
 
@@ -2181,7 +2194,8 @@ fn print_name(print_kind k) string {
 }
 
 // The runtime function of `k`, or null when the closure holds none, as a sandbox of a test may.
-// The first call finds every print function in one pass over the symbols.
+// The first call finds every print function in one pass over the symbols, and tests the
+// signature of each with print_fits.
 fn print_entry(lowerer mut* lw, print_kind k) ast.sym* {
     if (!lw->prints_known) {
         u64 mut i = 0;
@@ -2190,8 +2204,10 @@ fn print_entry(lowerer mut* lw, print_kind k) ast.sym* {
             if (runtime_function(s)) {
                 u64 mut j = 0;
                 while (j < PRINT_KINDS) {
-                    if (s->name == print_name(cast(j, print_kind))) {
+                    print_kind kind = cast(j, print_kind);
+                    if (s->name == print_name(kind)) {
                         lw->prints[j] = s;
+                        lw->fits[j] = print_fits(s->ty, kind);
                     }
                     j += 1;
                 }
@@ -2203,10 +2219,114 @@ fn print_entry(lowerer mut* lw, print_kind k) ast.sym* {
     return lw->prints[cast(k, u64)];
 }
 
+// The print function of `k` that the node `n` calls, in *entry. When the closure lacks it or
+// declares it with another signature than print_fits accepts, the lowering refuses `n`
+// (spec/fir.md 9.8), and the function returns false, as unsupported does.
+fn print_function(lowerer mut* lw, print_kind k, ast.node* n, ast.sym* mut* entry) bool {
+    ast.sym* s = print_entry(lw, k);
+    if (s == null) {
+        return no_runtime(lw, n, print_name(k));
+    }
+    if (!lw->fits[cast(k, u64)]) {
+        return other_runtime(lw, n, print_name(k));
+    }
+    *entry = s;
+    return true;
+}
+
+// The count of the parameters of the print function of `k`: `i32 fd`, the value, and for a
+// `string` and an enum the parts after the value.
+fn print_arity(print_kind k) u64 {
+    switch (k) {
+    case print_kind.pk_str:
+        return 3;
+    case print_kind.pk_enum:
+        return 4;
+    default:
+        return 2;
+    }
+}
+
+// Whether the fort type `ft` of the print function of `k` has the signature of
+// spec/toolchain.md 5.1: `i32 fd`, then the value in the form that lower_print_arg passes. A
+// `string` is `char* ptr, u64 len`, and an enum is `i32 v, enum_member* m, u64 n`. A pointer
+// parameter with `mut` or `own` is another signature: a cast to it adds a mark, which D3.14
+// refuses, and an `own` parameter takes no copy (rule V6). A `noreturn` print is another
+// signature too: call_runtime ends no block after the call, which rule V8 requires. The result
+// of a print that returns does not count, because call_runtime puts it in a temporary of its own
+// type.
+fn print_fits(types.node* ft, print_kind k) bool {
+    if (ft->is_noreturn || ft->params.len != print_arity(k)
+        || !types.is_prim(ft->params[0], prim.prim_kind.prim_i32)) {
+        return false;
+    }
+    types.node* v = ft->params[1];
+    switch (k) {
+    case print_kind.pk_i64:
+        return types.is_prim(v, prim.prim_kind.prim_i64);
+    case print_kind.pk_u64:
+        return types.is_prim(v, prim.prim_kind.prim_u64);
+    case print_kind.pk_bool:
+        return types.is_prim(v, prim.prim_kind.prim_bool);
+    case print_kind.pk_char:
+        return types.is_prim(v, prim.prim_kind.prim_char);
+    case print_kind.pk_ptr:
+        return v->kind == types.type_kind.k_voidptr && unmarked(v);
+    case print_kind.pk_str:
+        return char_pointer(v) && types.is_prim(ft->params[2], prim.prim_kind.prim_u64);
+    case print_kind.pk_enum:
+        return types.is_prim(v, prim.prim_kind.prim_i32) && enum_table(ft->params[2])
+            && types.is_prim(ft->params[3], prim.prim_kind.prim_u64);
+    case print_kind.pk_f32:
+        return types.is_prim(v, prim.prim_kind.prim_f32);
+    case print_kind.pk_f64:
+        return types.is_prim(v, prim.prim_kind.prim_f64);
+    }
+}
+
+// Whether the fort type `ft` of `str_eq` is the one of spec/toolchain.md 5.1: `char* a, u64 a_len,
+// char* b, u64 b_len`, and the result `bool`, which lower_string_eq assigns to a `bool` temporary.
+// A `noreturn` function has the result `void`, so it fails the test. As in print_fits, a pointer
+// parameter with `mut` or `own` is another signature.
+fn str_eq_fits(types.node* ft) bool {
+    if (ft->params.len != 4 || !types.is_prim(ft->elem, prim.prim_kind.prim_bool)) {
+        return false;
+    }
+    return char_pointer(ft->params[0]) && types.is_prim(ft->params[1], prim.prim_kind.prim_u64)
+        && char_pointer(ft->params[2]) && types.is_prim(ft->params[3], prim.prim_kind.prim_u64);
+}
+
+// Whether the pointer type `t` has neither `mut` nor `own`.
+fn unmarked(types.node* t) bool {
+    return !t->is_mut && !t->is_own;
+}
+
+// Whether `t` is `char*`, with neither `mut` nor `own`.
+fn char_pointer(types.node* t) bool {
+    return t->kind == types.type_kind.k_ptr && unmarked(t)
+        && types.is_prim(t->elem, prim.prim_kind.prim_char);
+}
+
+// Whether `t` is a pointer to the `struct enum_member` of std.rt, the member record that the
+// enum table of a print holds, with neither `mut` nor `own`.
+fn enum_table(types.node* t) bool {
+    if (t->kind != types.type_kind.k_ptr || !unmarked(t)
+        || t->elem->kind != types.type_kind.k_struct) {
+        return false;
+    }
+    ast.sym* s = check.nominal_sym(t->elem);
+    return s != null && s->name == ENUM_MEMBER && runtime_member(s);
+}
+
 // Whether `s` is a function of the module std.rt.
 fn runtime_function(ast.sym* s) bool {
-    return s->kind == ast.sym_kind.s_fn && s->owner != null
-        && s->owner->kind == ast.sym_kind.s_module && s->owner->name == RUNTIME_MODULE;
+    return s->kind == ast.sym_kind.s_fn && runtime_member(s);
+}
+
+// Whether the module std.rt declares `s`.
+fn runtime_member(ast.sym* s) bool {
+    return s->owner != null && s->owner->kind == ast.sym_kind.s_module
+        && s->owner->name == RUNTIME_MODULE;
 }
 
 // The type of parameter `i` of the runtime function `s`.
@@ -2237,9 +2357,9 @@ fn lower_print(lowerer mut* lw, ast.node* n, fir.operand fd, u64 first, bool new
     if (!newline) {
         return true;
     }
-    ast.sym* entry = print_entry(lw, print_kind.pk_char);
-    if (entry == null) {
-        return no_runtime(lw, n, print_name(print_kind.pk_char));
+    ast.sym* mut entry = null;
+    if (!print_function(lw, print_kind.pk_char, n, &entry)) {
+        return false;
     }
     fir.constant nl = fir.const_int(param_type(entry, 1), consts.cv_from_char(NEWLINE));
     u32 at = fir.operand_push(lw->f, fd);
@@ -2293,9 +2413,9 @@ fn converted(lowerer mut* lw, fir.operand v, types.node* t, diag.loc at) fir.ope
 // Each call stands at the argument.
 fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
     print_kind k = print_kind_of(a->ty);
-    ast.sym* entry = print_entry(lw, k);
-    if (entry == null) {
-        return no_runtime(lw, a, print_name(k));
+    ast.sym* mut entry = null;
+    if (!print_function(lw, k, a, &entry)) {
+        return false;
     }
     if (k == print_kind.pk_str) {
         fir.operand mut ptr = fir.operand{};
@@ -2631,8 +2751,8 @@ fn lower_logical(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
 
 // `a == b` and `a != b` on strings: `call fn std.rt.str_eq(copy a.0, copy a.1, copy b.0, copy
 // b.1)`, and `not` of it for `!=` (spec/fir.md 9.4). The place of `a` is read before `b` runs when
-// `b` contains a writer. In a closure without std.rt.str_eq, such as a sandbox of a test, the
-// lowering refuses the comparison.
+// `b` contains a writer. The lowering refuses the comparison in a closure that lacks std.rt.str_eq,
+// such as a sandbox of a test, or that declares it with another signature than str_eq_fits accepts.
 fn lower_string_eq(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     if (!lw->str_eq_known) {
         lw->str_eq = runtime_fn(lw->ck, STR_EQ);
@@ -2640,6 +2760,9 @@ fn lower_string_eq(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
     }
     if (lw->str_eq == null) {
         return no_runtime(lw, n, STR_EQ);
+    }
+    if (!str_eq_fits(lw->str_eq->ty)) {
+        return other_runtime(lw, n, STR_EQ);
     }
     fir.operand mut a = fir.operand{};
     if (!aggregate_operand(lw, n->a, &a)) {

@@ -793,8 +793,17 @@ direct path then wrote that function (section 16). Since the migration ended (16
 reports a compile error at that location and writes no module (exit 1, `toolchain.md` 1). The
 error names the function and the kind: ``cannot lower `<f>` to FIR: the lowering does not
 support the node `<kind>` ``. When the construct is a print or a string equality whose `std.rt`
-function the closure lacks, the error names that function instead: ``the runtime `std.rt` has
-no entry `<name>`, which `<f>` needs``.
+function the closure lacks or declares with another signature, the error names that function
+instead. A function that the closure lacks gives ``the runtime `std.rt` has no entry `<name>`,
+which `<f>` needs``. A function with another signature gives ``the runtime `std.rt` has no entry
+`<name>` with the parameters that `<f>` needs``. A print function or `str_eq` has another
+signature in each of these cases:
+- its parameters differ from those of `toolchain.md` 5.1 in count or in type;
+- a pointer parameter has a `mut` or `own` mark that `toolchain.md` 5.1 does not give it;
+- it is `noreturn`;
+- it is `str_eq`, and its result is not `bool`.
+
+The result of a print function that returns does not count.
 
 A function whose `check`, `check(overwrite: p)` or `fail` names a runtime entry that the closure
 lacks, or declares with other parameters than rule V7 requires, is a compile error too, at the

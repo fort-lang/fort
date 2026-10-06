@@ -43,17 +43,20 @@ fn check_fir(gen.emitter* g, fir_verify.runtime* rt, fir.func mut* f) void {
 }
 
 // Writes the definition of `fn_node` through FIR: the lowering, check_fir and the translator
-// (spec/fir.md 3). Three cases write no text, and each is a compile error (spec/fir.md 9.8,
+// (spec/fir.md 3). Four cases write no text, and each is a compile error (spec/fir.md 9.8,
 // spec/toolchain.md 1):
 // - the lowering does not support a construct of the function: at the construct,
 //   `cannot lower `<f>` to FIR: the lowering does not support the node `<kind>``;
 // - a construct needs a print or a string equality that `std.rt` lacks: at the construct,
 //   `the runtime `std.rt` has no entry `<name>`, which `<f>` needs`;
+// - a construct needs a print or a string equality that `std.rt` declares with another signature
+//   than fir_lower.print_fits or str_eq_fits accepts: at the construct,
+//   `the runtime `std.rt` has no entry `<name>` with the parameters that `<f>` needs`;
 // - a `check` that the build-mode pass of the mode keeps, or a `fail`, names an entry that
 //   `std.rt` lacks or declares with other parameters, which rule V7 refuses: at the name of the
 //   function,
 //   `the runtime `std.rt` has no entry `<name>` with the parameters that `<f>` needs`.
-// Only a stub `std.rt` of a test or an old --std-dir meets the last two. A violation of a rule
+// Only a stub `std.rt` of a test or an old --std-dir meets the last three. A violation of a rule
 // of the verifier ends the compiler with a panic.
 fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
     fir.func mut f = fir.func{};
@@ -64,7 +67,11 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
         if (why.entry.len > 0) {
             strbuf.append(&text, "the runtime `std.rt` has no entry `");
             strbuf.append(&text, why.entry);
-            strbuf.append(&text, "`, which `");
+            if (why.signature) {
+                strbuf.append(&text, "` with the parameters that `");
+            } else {
+                strbuf.append(&text, "`, which `");
+            }
             strbuf.append(&text, fn_node->sym->name);
             strbuf.append(&text, "` needs");
         } else {

@@ -239,11 +239,12 @@ The proof adds no runtime ownership checks. It preserves the representations and
 - A build writes each function through FIR: the lowering, the verifier, the build-mode pass and
   the translator (`spec/fir.md` 3). Each of two cases is a compile error with exit 1 and no
   module (`spec/fir.md` 9.8): a function that the lowering does not support, and a function that
-  needs a print function or `str_eq` of `std.rt` that the closure lacks, or the entry of a check
-  kind that the closure lacks or declares with other parameters. A check that the selected mode
-  removes needs no entry. The compiler does not test the parameters of a print function or of
-  `str_eq` (T-310). It assumes the other `std.rt` functions that it calls (`alloc`, `free`,
-  `args_init`, `args`, `flush_all`) and does not test them.
+  needs a print function, `str_eq` or the entry of a check kind of `std.rt` that the closure
+  lacks or declares in another form. For a print function or `str_eq`, another form is another
+  signature (`spec/fir.md` 9.8). For the entry of a check kind, another form is other parameters
+  than rule V7 requires. A check that the selected mode removes needs no entry.
+  The compiler assumes the other `std.rt` functions that it calls (`alloc`, `free`, `args_init`,
+  `args`, `flush_all`) and does not test them.
   `--fir-stats` then writes one line to stdout after the module is written, `lowered N of M`: N
   functions that the translator wrote of M definitions of fort functions in the closure, the
   compiler-emitted `main` not counted. A refusal is a compile error, so in a line that a build
