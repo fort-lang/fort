@@ -10,6 +10,9 @@
 //| owner bytes reference copy reject
 //| owner without leaf reject
 //| owner with leaf reject
+//| owner hidden by pointee place reject
+//| owner hidden by field place reject
+//| owner hidden by other root reject
 //| owned buffer unknown accept
 //| owned buffer zero accept
 //| owned buffer typed accept
@@ -178,6 +181,42 @@ fn owner_without_leaf(bool leaf) void {
         println("owner without leaf reject");
     }
     ownership_raw_bytes_env.same(&e, &before.states[0]);
+}
+// The origin place, not the window place, finds the owner. A u8[8] layout supplies no leaf.
+// Mode 0 names the pointee, mode 1 a field, and mode 2 another root with a residual owner.
+fn owner_hidden_by_window_place(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 3744 + mode, 0, true);
+    ownership_raw_bytes_env.recapture(&e, types_array(&e), 8);
+    assert(e.paired.states[0].raw.origins[0].place.projections.len == 0);
+    ownership_api.place_path mut owner = ownership_raw_bytes_env.place(&e, 1);
+    if (mode == 2) {
+        ownership_api.projection[1] mut tail = {};
+        tail[0].kind = ownership_api.projection_kind.residual;
+        owner.projections = tail[..];
+        e.paired.states[0].core->allocations[0].owner.place =
+            ownership_state.copy_place(e.paired.states[0].core, owner);
+    }
+    assert(ownership_state.same_place(e.paired.states[0].core->allocations[0].owner.place, owner));
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.window mut selected = ownership_raw_bytes_env.window(&e, 1, 0, 8, e.byte);
+    selected.place = ownership_raw_bytes_env.pointee(&e, 1);
+    if (mode == 1) { selected.place = ownership_raw_bytes_env.field(&e, 1, 0); }
+    if (mode == 2) { selected.place = ownership_raw_bytes_env.place(&e, 7); }
+    ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e,
+        ownership_raw_bytes_env.effect(&e, ownership_raw_bytes.effect_kind.unknown, selected),
+        3747);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+    assert(!e.budget.witness_validated);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(e.budget.last_event.text == (mode == 2 ? "residual owner overlap remains unproved" :
+        "owner overlap needs an owning leaf"));
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("owner hidden by ", mode == 0 ? "pointee place" : (mode == 1 ? "field place" :
+        "other root"), " reject");
 }
 // The owning pointer at slot 10 designates the written buffer. It holds none of its bytes.
 fn owned_buffer_write(u32 mode) void {
@@ -424,6 +463,9 @@ fn main() i32 {
     owner_copy(true);
     owner_without_leaf(false);
     owner_without_leaf(true);
+    owner_hidden_by_window_place(0);
+    owner_hidden_by_window_place(1);
+    owner_hidden_by_window_place(2);
     owned_buffer_write(0);
     owned_buffer_write(1);
     owned_buffer_write(2);

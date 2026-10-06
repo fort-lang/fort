@@ -402,9 +402,10 @@ came here.
   Then the selected core row receives its new source.
   Unchanged owner bytes keep the original obligation and owner location.
   Destructive owner effects require empty or transferred original obligations.
-  An obligation whose owner place equals or lies inside the window's place needs an owning leaf
-  there. An owner above the window's place designates that storage. An owner past a dereference
+  An obligation whose owner place equals or lies inside the captured origin place needs an owning
+  leaf there. An owner above the origin place designates that storage. An owner past a dereference
   below it lies in other storage. Neither holds window bytes.
+  The guard reads the origin place, so a producer's window place cannot hide an owner.
   Owner byte checks read only the snapshot bytes that land on an owning leaf.
   A snapshot of a window over F fragments holds up to 2F + 1 parts and no more parts than bytes.
   Paired R counts each part as a partition, so a snapshot never holds more than R parts.
