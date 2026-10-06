@@ -42,6 +42,20 @@ static const char* many_suffixes(uint64_t n) {
     return sb_cstr(&deep);
 }
 
+static const char* grouped_suffixes(uint64_t inner, uint64_t outer) {
+    sb_clear(&deep);
+    sb_append(&deep, "(i32");
+    for (uint64_t i = 0; i < inner; i++) {
+        sb_push(&deep, '*');
+    }
+    sb_push(&deep, ')');
+    for (uint64_t i = 0; i < outer; i++) {
+        sb_push(&deep, '*');
+    }
+    sb_append(&deep, " p = null;");
+    return sb_cstr(&deep);
+}
+
 // NOLINTBEGIN(readability-magic-numbers) the sources and the trees they parse
 // to are the test data.
 
@@ -332,6 +346,10 @@ TEST(parameter_lists_take_no_trailing_comma, {
 // ---- the nesting limit ---------------------------------------------------
 
 TEST(nesting_of_256_is_accepted, {
+    TEST_ASSERT_NONNULL(parse_text(grouped_suffixes(128, 128)));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_NONNULL(parse_text(nested("", '(', 255, "i32", ')', " x = 0;")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
     TEST_ASSERT_NONNULL(parse_text(nested("i32 x = ", '(', 256, "1", ')', ";")));
     TEST_ASSERT_EQ_STR(parse_diags(), "");
     TEST_ASSERT_NONNULL(parse_text(nested("fn f() void ", '{', 256, "", '}', "")));
@@ -341,6 +359,10 @@ TEST(nesting_of_256_is_accepted, {
 })
 
 TEST(nesting_deeper_than_256_is_an_error, {
+    TEST_ASSERT_NONNULL(
+        strstr(parse_fails(grouped_suffixes(128, 129)), "error: nesting deeper than 256\n"));
+    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("", '(', 256, "i32", ')', " x = 0;")),
+                               "error: nesting deeper than 256\n"));
     TEST_ASSERT_NONNULL(strstr(parse_fails(nested("i32 x = ", '(', 257, "1", ')', ";")),
                                "error: nesting deeper than 256\n"));
     TEST_ASSERT_NONNULL(strstr(parse_fails(nested("fn f() void ", '{', 257, "", '}', "")),

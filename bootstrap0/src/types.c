@@ -927,7 +927,7 @@ static void spine_collect(spine_t* sp, const type_t* t) {
     bool seen_array = false;
     bool seen_ref_after_array = false;
     sp->n = 0;
-    // an array behind a reference behind an array has no spelling
+    // an array behind a reference behind an array needs a group: `(i32[4])*[2]`
     while (sp->n < SPINE_MAX) {
         if (is_array_node(t)) {
             if (seen_ref_after_array) {
@@ -1073,7 +1073,14 @@ static void spell(const type_t* t, bool mut0, sb_t* out) {
         spell(sp.base, base_mut, out);
         sb_push(out, ')');
     } else {
+        const bool group_fn = sp.base->kind == TYPE_FN && (sp.n != 0 || base_mut);
+        if (group_fn) {
+            sb_push(out, '(');
+        }
         spell_base(sp.base, out);
+        if (group_fn) {
+            sb_push(out, ')');
+        }
         // `string` takes `own` after the base type
         if (sp.base->kind == TYPE_STRING && sp.base->own) {
             sb_append(out, " own");

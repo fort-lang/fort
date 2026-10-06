@@ -200,15 +200,26 @@ Sections:
   group, making arrays of references (`node*[16]` is sixteen pointers, `node@[4]` four spans), or
   follow it, making references to the whole array (`i32[4]*` points to an `i32[4]`, `i32[4]@` is a
   span of `i32[4]`, and `new(i32[4], n)` returns `i32[4] mut@ own`); no array suffix may follow a
-  trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct). `u8@*` is the usual
+  trailing reference suffix (`i32[4]*[2]` does not parse; group the inner type or use a struct).
+  Parentheses group a complete type. Outer markers and suffixes apply to that type.
+  Each group keeps the suffix order above: `(i32[4]*)[2]` is two pointers to arrays of four.
+  Grouping preserves type identity and storage positions. It does not permit duplicate markers.
+  An outer `own` marks a grouped pointer, span, or string. It cannot mark a function or array.
+  A group does not supply the `*` that `void` needs (D3.11). `(void*)` is the opaque pointer.
+  `(void)*` is an error. A group of a bare `void` is legal only as a complete return type.
+  `u8@*` is the usual
   shape of an out-parameter (`fn read_file(string path, u8 mut@ own mut* out) bool`, D17.2).
-  A suffix after a function type belongs to that function type's return type, which is the last
+  A suffix after an unparenthesized function type belongs to its return type, which is the last
   element of it: `fn (i32) i32[4]` returns an `i32[4]` (D3.10).
 - history: Amended 2026-09-10: spans were called slices and spelled `T[]`, read with the array
   group, so `i32[][4]` was the span of `i32[4]`. Amended 2026-09-14 (T-136): a suffix after a
   function type applied to the function type, so `fn i32(i32)[4]` was an array of four function
   pointers and `fn i32[4](i32)` a function returning an `i32[4]`; with the result last the two
   spellings are one and only the second reading is available.
+  Amended 2026-10-05: parentheses now group a complete type and permit outer markers and suffixes.
+  The unparenthesized function-return reading stays unchanged.
+  Amended 2026-10-06: the rule did not say whether a group supplies the `*` of `void`.
+  Both compilers accepted `(void)*` and refused `(void mut)*`. Both now refuse each of them.
 
 ### D3.7 The string type
 - owner: `type-system.md`.
@@ -255,12 +266,14 @@ Sections:
 ### D3.10 Function types and function pointers
 - owner: `type-system.md`.
 - rule: Function types are written `fn (P1, P2) R` with parameter types only, the result last as in
-  a declaration (D8.1). A function type ends at its return type, so every marker and every suffix
-  written after it belongs to that return type and the function type carries none of its own:
-  `fn (i32) i32[4]` is a function returning `i32[4]` and `fn (i32) i32*` one returning `i32*`. To
-  mark or to suffix a function type -- an array of function pointers, a function-pointer binding
-  that is assigned to -- wrap it in a struct, the escape `grammar.md` 4 prescribes for
-  `i32[4]*[2]`. Identity is structural
+  a declaration (D8.1). An unparenthesized function type ends at its return type.
+  Each marker and suffix after it belongs to that return type.
+  `fn (i32) i32[4]` returns `i32[4]`. `fn (i32) i32*` returns `i32*`.
+  To mark or suffix the complete function type, put it in parentheses (D3.6).
+  `(fn (i32) i32)[2]` is an array of two function pointers.
+  `(fn (i32) i32) mut` permits assignment to the function-pointer binding.
+  Grouping does not change function identity, ownership, or the calling convention.
+  Identity is structural
   over parameter types (including pointee mutability), return type and `noreturn`; binding-level
   `mut` on parameters is ignored. A function name used as a value, including a qualified `m.f`, has
   its function type; `&f` and `*f` are errors. The name must be a fort function.
@@ -281,6 +294,8 @@ Sections:
   wrapper replaces them.
   Amended 2026-09-15 (T-140): direct C extern calls now use the selected target ABI form.
   Function-pointer types stay fixed, and C extern names stay outside value position.
+  Amended 2026-10-05: parentheses now permit function types to take outer markers and suffixes.
+  The former rule required a struct wrapper for these types.
 
 ### D3.11 The void pointer
 - owner: `type-system.md`.
@@ -563,7 +578,8 @@ Sections:
   the array, whose elements share its storage (D5.2), so `i32[4] mut a` marks both and `i32 mut[4]`
   is an error ("mark the array after its length"). Nothing precedes the base type: `mut node* p` is
   an error ("write `node mut* p` or `node* mut p`"). Each storage level has exactly one position, so
-  every type has one spelling, and a doubled marker does not parse. The outermost position is the
+  a doubled marker does not parse. Parentheses preserve these storage positions (D3.6).
+  The outermost position is the
   binding's own storage, so the `mut` immediately before the name says the binding is assignable,
   for `i32 mut x`, `node* mut p` and `u8@ mut s` alike; `string mut s` is rebindable and `string`
   has no element position (D5.2); `void* mut p` marks the binding and `void mut* p` the storage
@@ -594,7 +610,7 @@ Sections:
 
 - rationale: one rule with no exceptions, C's east-const (`int const x`, `node const* p`, `node*
   const p`) with the default inverted, and the same rule places `own` (D17.2); because reference
-  suffixes read inside-out (D3.6), the binding's marker sits next to the name in every declaration,
+  suffixes read inside-out (D3.6), the binding's marker occupies the outermost type position,
   and no combination is unspellable.
 - history: Amended 2026-09-14 (T-086): the rule said "`void* mut p` is legal and `void mut*` is
   not", and the table held neither row. Amended 2026-09-10: until then a `mut` before the base type
@@ -603,6 +619,9 @@ Sections:
   front `mut` mean the variable for scalars and the data for pointers, swapped C's positions, and
   left "writable target, fixed binding" unspellable. Amended 2026-09-10: spans were called slices
   (D3.5).
+
+  Amended 2026-10-05: parentheses permit multiple spellings of one type.
+  Each storage position still accepts at most one `mut`.
 
 ### D5.4 Dropping mutability
 - owner: `core-language.md` (Declarations and mutability), `type-system.md` (Mutability levels).
@@ -1258,7 +1277,9 @@ Sections:
   elements (D17.3), where `n` is any integer type; a negative `n`, a size that overflows, or
   allocation failure is a runtime error; `n == 0` is allowed and yields a non-null pointer (the
   runtime allocates at least one byte). `new(T{...})`, `new(T@)` and `new(void)` are errors. Inside
-  `new(...)` an `own` parses only after a `*` (D17.3), so `new(string own)` does not parse, and a
+  `new(...)` an `own` parses only after a `*` (D17.3), so `new(string own)` does not parse. This
+  holds at every group depth (D3.6): an `own` after a `)` does not parse inside `new(...)`, so
+  `new((i32*) own)` and `new(((i32*) own))` do not parse and `new((i32* own))` does. A
   `mut` parses below the outermost position of `T` but never in it, so `new(T mut)` and `new(T*
   mut)` do not parse while `new(T mut*, n)` does. **The element type of the result is the element
   type written**: `new(void mut*, 16)` is a `void mut* mut@ own` and `new(void*, 16)` is a `void*
@@ -1278,6 +1299,8 @@ Sections:
   they had asked for, and one of them carried a comment naming this rule as the cause. Amended
   2026-09-10: the count was written inside the type (`new(T[n])`), which left no spelling for one
   array object, and a span was called a slice (D3.5).
+  Amended 2026-10-06: the rule did not say whether an `own` after a group parses inside `new`.
+  Both compilers refused `new((i32*) own)` and accepted `new(((i32*) own))`. Both now refuse each.
 
 ### D10.3 The del builtin
 - owner: `memory-model.md`.
@@ -2002,11 +2025,14 @@ says ownership is "by convention", this section supersedes it.
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
 - rule: Placement. An `own` follows a `*` or an `@` and marks the reference that suffix introduces
-  as owning its target; `string`, a reference without a suffix (D3.7), takes it directly (`string
+  as owning its target. It can also follow a grouped pointer, span, or string (D3.6).
+  Inside `new(...)` it follows only a `*`, at every group depth (D10.2).
+  `string`, a reference without a suffix (D3.7), takes it directly (`string
   own name`). It precedes `mut` in the position (`node* own mut p`, D5.3), never follows a
   non-reference base type or a fixed-array suffix (`node own*` and `node*[4] own` are errors; `node*
-  own[4] t` is four owning pointers), and nothing precedes the base type, so every type has one
-  spelling. The outermost reference is the one the binding holds, so the `own` before the name says
+  own[4] t` is four owning pointers), and nothing precedes the base type.
+  Each reference accepts at most one `own`, including across parentheses (D3.6).
+  The outermost reference is the one the binding holds, so the `own` before the name says
   the binding owns what it refers to: `node* own p` and `u8@ own buf` are what `del(p)` and
   `del(buf)` require (D17.9). Each `own` marks one reference only: the safe failure mode for `node*
   mut@ own kids` is that `del(kids[i])` does not compile when the nodes belong to someone else (an
@@ -2027,6 +2053,11 @@ says ownership is "by convention", this section supersedes it.
   outermost reference and `node* own p` was an error. Amended 2026-09-10, separately: spans were
   called slices (D3.5).
 
+  Amended 2026-10-05: parentheses permit multiple spellings and outer markers on grouped references.
+  The former rule required one spelling for each type. Ownership restrictions stay unchanged.
+  Amended 2026-10-06: the grouped clause named a pointer or span and omitted the string of D3.6.
+  The clause for `new(...)` cites the group rule of D10.2.
+
 ### D17.3 What produces an owning value
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
@@ -2037,7 +2068,8 @@ says ownership is "by convention", this section supersedes it.
   `u8[4] mut@ own` and `new(node mut* own, n)` is `node mut* own mut@ own` whose slots are null. The
   result is always `own`, and `new` marks the storage it allocates writable (D5.8). That storage is
   the outermost position of `T`, which is why `T` may not spell a `mut` there: `new` supplies it, so
-  there is one spelling for each type. Below it `T` says what it means, and the element type of the
+  each storage position accepts at most one `mut`. Below it `T` says what it means, and the element
+  type of the
   result is the element type written -- `new(node* own, n)` is a `node* own mut@ own`, `n` owned
   slots whose nodes this span cannot write. `new(void*)` is legal
   and yields `void* mut* own`, one pointer slot, since a pointer to `void` has a size (D3.11); it is
@@ -2064,6 +2096,8 @@ says ownership is "by convention", this section supersedes it.
   Amended 2026-09-29 (T-257): the rule let `cast` add `own` to a pointer or span, "adopting memory
   that came from C (`cast(p, u8 mut* own)` for a `void mut*` from an extern that does not say
   `own`)", and called adoption "the one unsafe mark a cast adds". D3.14 now refuses that cast.
+  Amended 2026-10-05: parentheses permit multiple spellings of one allocated element type.
+  The marker and element restrictions stay unchanged across groups.
 
 ### D17.4 Lending
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

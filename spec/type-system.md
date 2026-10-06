@@ -119,7 +119,8 @@ bool d = b < true;                   // error: bool has no ordering
 ### 2.3 `void`
 
 `void` names the absence of a value. It appears only as the return type of a function and as the
-base of `void*` (D3.1, D3.11).
+base of `void*` (D3.1, D3.11). A group does not supply that `*`: `(void*)` is the opaque pointer
+and `(void)*` is an error. A return type can be the group `(void)` (D3.6).
 
 ```fort
 fn log(string s) void { }
@@ -209,8 +210,11 @@ reference suffix applies to everything to its left, so a sequence of them reads 
 fixed-array suffixes form one group that reads outside-in like C declarators (`i32[3][4]` is
 three arrays of four); reference suffixes before the group make arrays of references
 (`node*[16]`, `node@[4]`) and after it references to the whole array (`i32[4]*`, `i32[4]@`); and
-no array suffix may follow a trailing reference suffix (D3.6). Suffixes after a function type
-apply to the function type. Each `own` and each `mut` marks the element it follows, the last
+no array suffix may follow a trailing reference suffix within one group (D3.6).
+Parentheses group a complete type. Outer markers and suffixes apply to that grouped type.
+Each group keeps its own suffix order. `(i32[4])[2]` is two arrays of four.
+Suffixes after an unparenthesized function type apply to its return type (D3.10).
+Each `own` and each `mut` marks the element it follows, the last
 position being the binding's (sections 7.3 and 8.2).
 
 | Type                     | Reads as                                             | `sizeof` |
@@ -227,6 +231,8 @@ position being the binding's (sections 7.3 and 8.2).
 | `node*@*`                | pointer to a span of `node*`                         | 8        |
 | `fn (i32) i32[4]`        | pointer to a function returning `i32[4]`             | 8        |
 | `fn (i32) i32*`          | pointer to a function returning `i32*`               | 8        |
+| `(fn (i32) i32)[2]`      | array of 2 function pointers                         | 16       |
+| `(i32[4]*)[2]`           | array of 2 pointers to arrays of 4 `i32`             | 16       |
 | `void*[2]`               | array of 2 opaque pointers                           | 16       |
 | `u8 mut@ own`            | owned span of writable bytes                         | 16       |
 | `node mut* own mut@ own` | owned span of owned pointers to mutable nodes        | 16       |
@@ -378,6 +384,11 @@ A function type is written `fn (P1, P2) R` with parameter types only (D3.10, D8.
 name, or a qualified name `m.f` naming a function in module `m`, used as a value has its function
 type. Function-pointer types have no variable tail (D8.3).
 A C extern with `...` is not a pointer value (D3.10).
+An unparenthesized function type ends at its return type.
+Thus, `fn (i32) i32[2]` returns an array of two `i32` values.
+Use `(fn (i32) i32)[2]` for an array of two function pointers.
+Use `(fn (i32) i32) mut` for an assignable function-pointer binding (D3.10).
+Nested parentheses preserve the type and its existing markers (D3.6).
 Identity is structural over the parameter types, including the mutability levels behind their
 indirections and their `own` marks (D17.1), the
 return type, and whether the function is `noreturn`; `mut` at level 0 of a parameter is ignored
@@ -545,8 +556,9 @@ that type; after a `*`, the pointer that suffix introduces, that is, the storage
 after an `@`, the span header; after a fixed-array suffix, the array, whose elements share its
 storage, so `i32[4] mut a` marks both and `i32 mut[4]` is an error ("mark the array after its
 length"). Nothing precedes the base type, so `mut node* p` does not parse. Each storage level
-has exactly one position, therefore every type has exactly one spelling and a doubled marker
-(`node mut mut* p`) does not parse. The last position is the binding's own storage, so the `mut`
+accepts at most one `mut`. Parentheses preserve these storage positions (D3.6).
+A doubled marker (`node mut mut* p`) does not parse, including across parentheses.
+The last position is the binding's own storage, so the `mut`
 immediately before the name is what makes the variable assignable.
 
 In the table, "rebind" is `x = ...` on the binding itself; "level 1" covers writes such as
@@ -836,7 +848,8 @@ it are borrowed, the safe reading when the nodes belong to an arena. Because the
 reference is the one the binding holds, the `own` immediately before the name is what `del(x)`
 requires. An `own` never follows a non-reference base type (`node own*`) nor a fixed-array suffix
 (`node*[4] own`), while `node* own[4] t` is four owning pointers; a doubled marker does not
-parse, so every type has exactly one spelling. Inside `new(...)` an `own` parses only after a `*`
+parse, including across parentheses. An `own` can also mark a grouped pointer, span, or string
+(D3.6). Inside `new(...)` an `own` parses only after a `*`
 of the element type (section 8.3). The mutability of each level is spelled independently by
 section 7.3; `own` and `mut` combine freely, `own` first.
 
@@ -1517,5 +1530,5 @@ named arguments, type aliases, struct, array and span equality, alignment and pa
 The ownership proof belongs to v1 (D17.14, D19.8).
 D15 lists the idioms: a fat struct with a kind field for unions, `bool` plus out-parameters for
 results, and an opaque `u8[N]` field with a C shim for alignment. An array suffix after a trailing
-reference suffix does not parse in v1; wrap the
-reference in a struct (D3.6).
+reference suffix does not parse within one group. Group the complete inner type or use a struct
+(D3.6).

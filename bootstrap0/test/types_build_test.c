@@ -437,15 +437,15 @@ TEST(suffixes_after_a_function_type_apply_to_it, {
     tenv_init(&e);
     const type_t* i32 = type_prim(&e.tt, PRIM_I32);
     const type_t* f = tenv_fn(&e, i32, i32, NULL);
-    // `fn i32(i32)[4]`: an array of four function pointers.
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, f, 4)), "fn (i32) i32[4]");
-    // `fn i32[4](i32)`: a function returning an `i32[4]`.
+    // `(fn (i32) i32)[4]` stores four function pointers.
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, f, 4)), "(fn (i32) i32)[4]");
+    // `fn (i32) i32[4]` returns an array of four.
     TEST_ASSERT_EQ_STR(tenv_str(&e, tenv_fn(&e, type_array(&e.tt, i32, 4), i32, NULL)),
                        "fn (i32) i32[4]");
-    // `fn i32(i32)*`: a pointer to a slot holding a function pointer.
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, false)), "fn (i32) i32*");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, true)), "fn (i32) i32 mut*");
-    TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, f, false, false)), "fn (i32) i32@");
+    // `(fn (i32) i32)*` points to a function-pointer slot.
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, false)), "(fn (i32) i32)*");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_ptr(&e.tt, f, false, true)), "(fn (i32) i32) mut*");
+    TEST_ASSERT_EQ_STR(tenv_str(&e, type_span(&e.tt, f, false, false)), "(fn (i32) i32)@");
     tenv_free(&e);
 })
 
@@ -475,8 +475,8 @@ TEST(every_combination_of_markers_has_a_spelling, {
 TEST(only_an_array_behind_a_reference_needs_parentheses, {
     tenv_t e;
     tenv_init(&e);
-    // No array suffix may follow a trailing reference suffix, so a pointer to an array inside an
-    // array has no spelling. Diagnostics print the inner type in parentheses.
+    // No array suffix may follow a trailing reference suffix in one group, so a pointer to an array
+    // inside an array needs a group. Diagnostics print that group, which parses back (D3.6).
     const type_t* arr_ptr = type_ptr(&e.tt, tenv_type(&e, "i32[4]"), false, false);
     TEST_ASSERT_EQ_STR(tenv_str(&e, type_array(&e.tt, arr_ptr, 2)), "(i32[4])*[2]");
     const type_t* arr_span = type_span(&e.tt, tenv_type(&e, "i32[4]"), false, true);

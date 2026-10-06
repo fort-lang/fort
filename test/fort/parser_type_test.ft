@@ -196,7 +196,8 @@ fn an_array_after_a_trailing_reference_suffix_is_refused_everywhere() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
     // No array suffix follows a trailing reference suffix.
-    string wrap = "no array suffix follows a reference suffix: wrap the array in a struct";
+    string wrap = parse_env.join2(&e, "no array suffix follows a reference suffix: ",
+                                  "group the inner type or use a struct");
     assert(refused_everywhere(&e, "i32[4]*[2]", wrap));
     assert(refused_everywhere(&e, "i32[4]@[2]", wrap));
 }
@@ -347,7 +348,255 @@ fn a_function_type_nests_and_takes_suffixes() void {
            == "(type (fn-type (type (fn-type (type (void))))))");
 }
 
+fn parentheses_group_complete_types() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parses_everywhere(&e, "(fn (i32) i32)[2]"));
+    assert(parses_everywhere(&e, "((fn (i32) i32)) mut"));
+    assert(parses_everywhere(&e, "(node*) own mut@"));
+    assert(parses_everywhere(&e, "(i32[4]*)[2]"));
+    assert(parses_everywhere(&e, "(i32[4])[2]"));
+    assert(parses_everywhere(&e, "fn () (fn (i32) i32)[2]"));
+    string want = parse_env.join2(&e,
+        "(type (type (fn-type (type (prim i32)) (type (prim i32))))",
+        " (array (int 2)))");
+    assert(parse_env.type_dump(&e, "(fn (i32) i32)[2]") == want);
+    assert(parse_env.type_dump(&e, "(i32[4])[2]")
+           == "(type (type (prim i32) (array (int 4))) (array (int 2)))");
+    assert(message_in(&e, DECL_BEFORE, "((i32) mut) mut", DECL_AFTER)
+           == "a mut appears once in a type position");
+    assert(message_in(&e, DECL_BEFORE, "((node*) own) own", DECL_AFTER)
+           == "an own appears once in a type position");
+    assert(message_in(&e, DECL_BEFORE, "(node* mut) own", DECL_AFTER)
+           == "an own precedes the mut of its position: write 'node* own mut p'");
+    string mut_error = parse_env.join2(&e,
+        "the elements share the array's storage: write the mut after the length, ",
+        "as 'i32[4] mut'");
+    assert(message_in(&e, DECL_BEFORE, "(i32 mut)[2]", DECL_AFTER) == mut_error);
+    assert(message_in(&e, DECL_BEFORE, "()", DECL_AFTER) == "expected a type, found ')'");
+    assert(message_in(&e, DECL_BEFORE, "(i32", DECL_AFTER)
+           == "expected ')', found identifier 'x'");
+    assert(message_in(&e, DECL_BEFORE, "(i32, i32)", DECL_AFTER)
+           == "expected ')', found ','");
+    string alloc_before = "fn f() void { g(new(";
+    string alloc_after = ")); }";
+    assert(message_in(&e, alloc_before, "(i32 mut)", alloc_after)
+           == "new allocates writable storage: remove the outermost 'mut'");
+    assert(message_in(&e, alloc_before, "(u8@)", alloc_after)
+           == "a span suffix does not parse inside new: write new(T, n)");
+    assert(message_in(&e, alloc_before, "((string) own)", alloc_after)
+           == "inside new an own follows a '*' of the element type");
+
+    parse_env.parse(&e, "fn f() void { (pkg.node) n = {}; (n).call(); (n) = other; }");
+    assert(parse_env.errors(&e) == 0);
+
+}
+
+// A statement in a body that opens with `(` has two readings. When the type
+// reading fails further on than the expression reading, the declaration branch
+// reports the type error, as a module declaration does.
+string LOCAL_BEFORE = "fn f() void {\n    ";
+string LOCAL_AFTER = " x = 0;\n}\n";
+string FOR_BEFORE = "fn f() void {\n    for (";
+string FOR_AFTER = " x = 0; x < 1; x = 1) {\n    }\n}\n";
+string RANGE_BEFORE = "fn f(i32@ xs) void {\n    for (";
+string RANGE_AFTER = " x : xs) {\n    }\n}\n";
+string MUT_ERROR =
+    "the elements share the array's storage: write the mut after the length, as 'i32[4] mut'";
+string REF_ARRAY_ERROR =
+    "no array suffix follows a reference suffix: group the inner type or use a struct";
+
+// Whether `src` draws `message` at module level, as a local declaration, as a
+// loop initializer and as a range-for element.
+fn refused_in_bodies(parse_env.env mut* e, string src, string message) bool {
+    return message_in(e, DECL_BEFORE, src, DECL_AFTER) == message
+        && message_in(e, LOCAL_BEFORE, src, LOCAL_AFTER) == message
+        && message_in(e, FOR_BEFORE, src, FOR_AFTER) == message
+        && message_in(e, RANGE_BEFORE, src, RANGE_AFTER) == message;
+}
+
+fn a_group_error_in_a_body_reports_the_type() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    string mut_error = MUT_ERROR;
+    assert(refused_in_bodies(&e, "(i32 mut)[2]", mut_error));
+    assert(refused_in_bodies(&e, "(i32* mut)[2]", mut_error));
+    assert(refused_in_bodies(&e, "(i32[4] mut)[2]", mut_error));
+    assert(refused_in_bodies(&e, "((i32 mut))[2]", mut_error));
+    assert(refused_in_bodies(&e, "(i32, i32)", "expected ')', found ','"));
+    assert(refused_in_bodies(&e, "(i32", "expected ')', found identifier 'x'"));
+    assert(refused_in_bodies(&e, "((i32)", "expected ')', found identifier 'x'"));
+    assert(refused_in_bodies(&e, "((i32) mut) mut", "a mut appears once in a type position"));
+    assert(refused_in_bodies(&e, "((node*) own) own", "an own appears once in a type position"));
+    assert(refused_in_bodies(&e, "(i32*)[2]*[3]", REF_ARRAY_ERROR));
+
+    // The first error stands at the same place in each wrapper.
+    assert(message_in(&e, LOCAL_BEFORE, "(i32 mut)[2]", LOCAL_AFTER) == mut_error);
+    parse_env.parse_wrapped(&e, LOCAL_BEFORE, "(i32 mut)[2]", LOCAL_AFTER);
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == parse_env.join2(&e, "2:6: error: ", mut_error));
+    parse_env.parse_wrapped(&e, LOCAL_BEFORE, "(i32, i32)", LOCAL_AFTER);
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "2:9: error: expected ')', found ','");
+    // The rule holds without a group: the type reading of `node[4]*[2]` fails
+    // at its second `[`, after the expression reading fails at the `*`.
+    assert(first_in_body(&e, "node[4]*[2] t = {};")
+           == parse_env.join2(&e, "2:9: error: ", REF_ARRAY_ERROR));
+    assert(first_in_body(&e, "for (node[4]*[2] t = {};;) { }")
+           == parse_env.join2(&e, "2:14: error: ", REF_ARRAY_ERROR));
+    assert(first_in_body(&e, "a*[x+] = 1;") == "2:6: error: expected an expression, found ']'");
+}
+
+// The first diagnostic of `src` read as the body of `fn f() void`.
+fn first_in_body(parse_env.env mut* e, string src) string {
+    parse_env.parse_wrapped(e, "fn f() void {\n", src, "\n}\n");
+    return parse_env.diag_at(e, 0);
+}
+
+// Every statement position takes the same reading: a block, the body of `if`,
+// `else` and `while`, a `case` body and a `defer` block. The statement after
+// a failed one still parses.
+fn a_group_error_in_each_statement_position_reports_the_type() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(first_in_body(&e, "if (x) {\n(i32 mut)[2] a = {};\n}")
+           == parse_env.join2(&e, "3:2: error: ", MUT_ERROR));
+    assert(first_in_body(&e, "while (x) {\n(i32, i32) a = 0;\n}")
+           == "3:5: error: expected ')', found ','");
+    assert(first_in_body(&e, "switch (x) {\ncase 1:\n(i32 a = 0;\n}")
+           == "4:6: error: expected ')', found identifier 'a'");
+    assert(first_in_body(&e, "if (x) {\n} else {\n((i32) mut) mut a = 0;\n}")
+           == "4:13: error: a mut appears once in a type position");
+    assert(first_in_body(&e, "defer {\n(i32* mut)[2] a = {};\n}")
+           == parse_env.join2(&e, "3:5: error: ", MUT_ERROR));
+    assert(first_in_body(&e, "{\n(i32 mut)[2] a = {};\ni32 b = 0;\n}")
+           == parse_env.join2(&e, "3:2: error: ", MUT_ERROR));
+    assert(parse_env.errors(&e) == 1);
+    // A loop initializer whose expression reading parses stays an expression.
+    string loop = parse_env.join3(&e,
+        "(for (assign = (unary * (ident p)) (int 0)) (binary < (unary * (ident p)) (int 3))",
+        " (assign = (unary * (ident p)) (binary + (unary * (ident p)) (int 1)))",
+        " (block))");
+    assert(parse_env.stmt_dump(&e, "for ((*p) = 0; *p < 3; *p = *p + 1) { }") == loop);
+}
+
+// The furthest reading wins only when the type reading gets further. A
+// statement whose expression reading parses, or fails at a later token, keeps
+// the expression reading.
+fn a_statement_that_opens_with_a_parenthesis_stays_an_expression() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse(&e, parse_env.join2(&e,
+        "fn f() void {\n    (*p) = 3;\n    (f)(1);\n    ((p))->x = 1;\n",
+        "    (fn (i32) i32)[2]{f, g}[0](1);\n    (i32[2]{1, 2})[0] = 1;\n}\n"));
+    assert(parse_env.errors(&e) == 0);
+    assert(parse_env.stmt_dump(&e, "(*p) = 3;") == "(assign = (unary * (ident p)) (int 3))");
+    assert(parse_env.stmt_dump(&e, "(i32[2]{1, 2})[0] = 1;")
+           == parse_env.join2(&e, "(assign = (index (array-lit (type (prim i32) (array (int 2)))",
+                              " (init (int 1) (int 2))) (int 0)) (int 1))"));
+    // A tie keeps the expression reading: both readings of `()` stop at `)`.
+    assert(message_in(&e, DECL_BEFORE, "()", DECL_AFTER) == "expected a type, found ')'");
+    assert(message_in(&e, LOCAL_BEFORE, "()", LOCAL_AFTER)
+           == "expected an expression, found ')'");
+    assert(message_in(&e, LOCAL_BEFORE, "(a +)", LOCAL_AFTER)
+           == "expected an expression, found ')'");
+    assert(message_in(&e, LOCAL_BEFORE, "(a b)", LOCAL_AFTER)
+           == "expected ')', found identifier 'b'");
+    assert(message_in(&e, LOCAL_BEFORE, "(i32 + 1)", LOCAL_AFTER)
+           == "expected ')', found '+'");
+}
+
+// The position after `)` is the outermost position inside the group, through
+// any number of parentheses with no suffix. A marker there meets the rules of
+// that position.
+fn markers_after_nested_parentheses_meet_the_inner_position() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    assert(parse_env.type_dump(&e, "((node*)) own")
+           == "(type (type (type (name node) (ptr))) own)");
+    assert(parse_env.type_dump(&e, "((string)) own") == "(type (type (type (string))) own)");
+    assert(parse_env.type_dump(&e, "((u8@)) own mut")
+           == "(type (type (type (prim u8) (span))) own mut)");
+    string own_error = "an own marks a reference: write it after a '*' or an '@', or on a string";
+    assert(message_in(&e, DECL_BEFORE, "((i32[2])) own", DECL_AFTER) == own_error);
+    assert(message_in(&e, DECL_BEFORE, "((i32)) own", DECL_AFTER) == own_error);
+    assert(message_in(&e, DECL_BEFORE, "((fn () void)) own", DECL_AFTER) == own_error);
+    parse_env.parse_wrapped(&e, DECL_BEFORE, "(((i32) mut)) mut", DECL_AFTER);
+    assert(parse_env.diag_at(&e, 0) == "1:15: error: a mut appears once in a type position");
+    parse_env.parse_wrapped(&e, DECL_BEFORE, "(((node*) own)) own", DECL_AFTER);
+    assert(parse_env.diag_at(&e, 0) == "1:17: error: an own appears once in a type position");
+    parse_env.parse_wrapped(&e, DECL_BEFORE, "((node* mut)) own", DECL_AFTER);
+    assert(parse_env.diag_at(&e, 0) == parse_env.join2(&e,
+        "1:15: error: an own precedes the mut of its position: ", "write 'node* own mut p'"));
+    assert(message_in(&e, DECL_BEFORE, "((i32) mut)[2]", DECL_AFTER) == MUT_ERROR);
+    assert(parse_env.type_dump(&e, "((i32) mut)*")
+           == "(type (type (type (prim i32)) mut) (ptr))");
+}
+
+// An array literal and an allocated type keep the marker rules through a group.
+// The element of an array literal carries no marker, and `new` fills the
+// outermost position itself. A marked element type is no array literal type,
+// so the expression reading reports, as it does for the flat `i32 mut[2]{1, 2}`.
+fn an_array_literal_and_new_keep_the_marker_rules_through_a_group() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    string before = "i32 N = ";
+    string after = ";\n";
+    parse_env.parse_wrapped(&e, before, "i32 mut[2]{1, 2}", after);
+    assert(parse_env.diag_at(&e, 0) == "1:9: error: expected an expression, found 'i32'");
+    parse_env.parse_wrapped(&e, before, "(i32 mut)[2]{1, 2}", after);
+    assert(parse_env.diag_at(&e, 0) == "1:10: error: expected an expression, found 'i32'");
+    parse_env.parse_wrapped(&e, before, "((i32) mut)[2]{1, 2}", after);
+    assert(parse_env.diag_at(&e, 0) == "1:11: error: expected an expression, found 'i32'");
+    string literal = parse_env.join2(&e,
+        "(array-lit (type (type (fn-type (type (prim i32)) (type (prim i32)))) (array (int 2)))",
+        " (init (ident f) (ident g)))");
+    assert(parse_env.expr_dump(&e, "(fn (i32) i32)[2]{f, g}") == literal);
+    assert(message_in(&e, before, "new(((i32) mut) mut)", after)
+           == "a mut appears once in a type position");
+    assert(message_in(&e, before, "new((i32 mut)[2])", after) == MUT_ERROR);
+    assert(parse_env.expr_dump(&e, "new((i32 mut)*)")
+           == "(new (type (type (prim i32) mut) (ptr)) nil)");
+    assert(parse_env.expr_dump(&e, "new((i32 mut)*, 2)")
+           == "(new (type (type (prim i32) mut) (ptr)) (int 2))");
+    assert(message_in(&e, before, "(i32)[2]", after) == "expected an expression, found 'i32'");
+}
+
+// Inside new(...) an own follows only a `*`, at every group depth (D10.2,
+// D17.2). An own after a `)` does not parse there, even where the group
+// holds a pointer. The column is the one that position reports.
+fn inside_new_an_own_follows_only_a_star_at_every_group_depth() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    string own_error = "inside new an own follows a '*' of the element type";
+    string before = "i32 N = ";
+    string after = ";\n";
+    assert(message_in(&e, before, "new((i32*) own)", after) == own_error);
+    assert(parse_env.diag_at(&e, 0) == parse_env.join2(&e, "1:20: error: ", own_error));
+    assert(message_in(&e, before, "new(((i32*) own))", after) == own_error);
+    assert(parse_env.diag_at(&e, 0) == parse_env.join2(&e, "1:14: error: ", own_error));
+    assert(message_in(&e, before, "new(((i32*) own)*)", after) == own_error);
+    assert(message_in(&e, before, "new((string) own)", after) == own_error);
+    assert(message_in(&e, before, "new(((string) own))", after) == own_error);
+    assert(message_in(&e, before, "new((void*) own, 2)", after) == own_error);
+    assert(message_in(&e, before, "new(((u8@)*))", after)
+           == "a span suffix does not parse inside new: write new(T, n)");
+    assert(parse_env.expr_dump(&e, "new((i32* own))")
+           == "(new (type (type (prim i32) (ptr own))) nil)");
+    assert(parse_env.expr_dump(&e, "new((i32* own)*, 2)")
+           == "(new (type (type (prim i32) (ptr own)) (ptr)) (int 2))");
+    assert(parse_env.expr_dump(&e, "new(((i32* own)))")
+           == "(new (type (type (type (prim i32) (ptr own)))) nil)");
+}
+
 fn main() i32 {
+    inside_new_an_own_follows_only_a_star_at_every_group_depth();
+    markers_after_nested_parentheses_meet_the_inner_position();
+    an_array_literal_and_new_keep_the_marker_rules_through_a_group();
+    a_group_error_in_a_body_reports_the_type();
+    a_group_error_in_each_statement_position_reports_the_type();
+    a_statement_that_opens_with_a_parenthesis_stays_an_expression();
+    parentheses_group_complete_types();
     the_written_forms_of_d5_3_parse_in_every_position();
     the_owning_forms_of_d17_2_parse_in_every_position();
     a_marker_before_the_base_type_is_refused_everywhere();

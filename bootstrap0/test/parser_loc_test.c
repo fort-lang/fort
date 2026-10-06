@@ -21,6 +21,14 @@ static const ast_node_t* body_stmt(const ast_node_t* mod, uint64_t d, uint64_t i
 // NOLINTBEGIN(readability-magic-numbers) the sources, the positions and the
 // trees they parse to are the test data.
 
+TEST(a_grouped_type_keeps_its_parentheses_and_inner_range, {
+    const ast_node_t* mod = parse_text("(fn (i32) i32)[2] TABLE = {};\n");
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    const ast_node_t* t = pt_decl(mod, 0)->a;
+    TEST_ASSERT_EQ_STR(range_of(t), "1:1-1:18");
+    TEST_ASSERT_EQ_STR(range_of(t->a), "1:2-1:14");
+})
+
 // ---- positions of declarations --------------------------------------------
 
 TEST(a_declaration_starts_at_its_type, {
@@ -584,6 +592,7 @@ TEST(a_control_flow_program_parses, {
 int main(int argc, char** argv) {
     TEST_INIT("parser_loc", argc, argv);
     TEST_RUN(a_declaration_starts_at_its_type);
+    TEST_RUN(a_grouped_type_keeps_its_parentheses_and_inner_range);
     TEST_RUN(a_struct_an_enum_and_an_import_start_at_their_keyword);
     TEST_RUN(an_operator_node_is_at_its_operator);
     TEST_RUN(unary_and_postfix_nodes_are_at_their_own_token);

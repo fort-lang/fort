@@ -112,7 +112,7 @@ Whether the last segment of an `import_path` names a module or a symbol is decid
 fn_decl      = "fn" identifier "(" [ param_list ] ")" return_type block ;   (* D8.1 *)
 extern_decl  = "extern" "fn" identifier "(" [ extern_param_list ] ")" return_type ";" ; (* D9.8 *)
 extern_param_list = param_list [ "," "..." ] ;            (* at least one fixed C parameter *)
-return_type  = type | "void" | "noreturn" ;                                 (* D8.5 *)
+return_type  = type | "void" | "noreturn" | "(" return_type ")" ;           (* D8.5 *)
 param_list   = param { "," param } ;
 param        = type identifier ;
 
@@ -145,7 +145,8 @@ type         = base_type [ "own" ] [ "mut" ] { ref_suffix } { array_suffix } { r
                                                             (* D3.6, D5.3, D17.2 *)
 ref_suffix   = ( "*" | "@" ) [ "own" ] [ "mut" ] ;             (* pointer, span D3.5 *)
 array_suffix = "[" const_expr "]" [ "mut" ] ;                   (* fixed array, D3.4 *)
-base_type    = prim_type | "string" | "void" | fn_type | qualified_name ;
+base_type    = prim_type | "string" | "void" | fn_type | qualified_name | grouped_type ;
+grouped_type = "(" type ")" ;                                     (* D3.6 *)
 prim_type    = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
              | "f32" | "f64" | "bool" | "char" ;
 fn_type      = "fn" "(" [ type { "," type } ] ")" return_type ;      (* D3.10 *)
@@ -159,12 +160,21 @@ Reading rules (D3.6, D5.2, D5.3):
 - Fixed-array suffixes form one group and read outside-in like C: `i32[3][4]` is three arrays of
   four. Reference suffixes before the group make arrays of references (`node*[16]`, `node@[4]`);
   after it, references to the whole array (`i32[4]*`, `i32[4]@` is a span of `i32[4]`). No array
-  suffix may follow a trailing reference suffix (`i32[4]*[2]` does not parse; wrap it in a struct).
+  suffix may follow a trailing reference suffix within one group.
+  `i32[4]*[2]` does not parse. `(i32[4]*)[2]` groups the inner type and parses (D3.6).
+- Parentheses group a complete type. Markers and suffixes after `)` apply to that grouped type.
+  `(i32[4])[2]` is two arrays of four. `i32[4][2]` is four arrays of two.
+  Grouping preserves type identity and storage positions. Duplicate markers remain errors.
+  Groups count toward the nesting limit. They do not reset the type-suffix limit (D2.11).
+  A return position also permits grouped `void` and `noreturn`.
+  `noreturn` remains return-only and accepts no suffix (D8.5).
 - `void` is legal as a `base_type` only when followed by at least one `*` (D3.11).
-- A `fn_type` ends at its return type, so every marker and every suffix written after it belongs
+  That `*` stands inside the same group: `(void*)` is the opaque pointer and `(void)*` is an error.
+  A group of a bare `void` is legal only as a complete return type, as `(void)` (D3.6).
+- An unparenthesized `fn_type` ends at its return type, so each marker and suffix after it belongs
   to that return type and the function type carries none of its own: `fn (i32) i32[4]` is a
   function returning `i32[4]` and `fn (i32) i32*` one returning `i32*`. To mark or to suffix a
-  function type, wrap it in a struct, as `i32[4]*[2]` is wrapped above.
+  complete function type, use parentheses: `(fn (i32) i32)[2]` and `(fn (i32) i32) mut` (D3.10).
 - A `mut` marks the storage of what it follows: after the base type, values of that type; after
   a `*` or `@`, the pointer or span header that suffix introduces (the storage holding it); after
   `[N]`, the array, whose elements share its storage, so a `mut` between an element type and its
@@ -172,7 +182,8 @@ Reading rules (D3.6, D5.2, D5.3):
   `i32 mut x`, `node* mut p`, `u8@ mut s` (D5.3).
 - An `own` follows a `*` or an `@` and marks the reference that suffix introduces as owning its
   target; after the base type it is legal only for `string`, the reference without a suffix
-  (`string own s`). It precedes `mut` in a position (`node* own mut p`), never follows a
+  (`string own s`). It can also follow a grouped pointer, span, or string (D3.6).
+  It precedes `mut` in a position (`node* own mut p`), never follows a
   fixed-array suffix, and inside `new(...)` parses only after a `*` of the element type (D17.2,
   D17.3). A `mut` inside `new(...)` parses in every position but the outermost one, which `new`
   fills (D10.2).
@@ -291,7 +302,9 @@ Notes:
 - `-x` on an unsigned type, and `!`/`~` on the wrong types, are type errors, not parse errors.
 - `new(T)` allocates one `T` and `new(T, n)` allocates `n` of them as a span; the brackets in
   an `alloc_type` are fixed-array dimensions of `T` (`new(i32[4], n)` yields `i32[4] mut@ own`).
-  An `own` parses only after a `*` of the element type (`new(node* own, n)`, D17.3). The last
+  An `own` parses only after a `*` of the element type (`new(node* own, n)`, D17.3). This holds
+  at every group depth: `new((i32* own))` parses, and `new((i32*) own)` and `new(((i32*) own))`
+  do not (D10.2). The last
   `mut` position the production allows is always empty, for one of two reasons. With no dimension
   group it is the outermost position of `T`, which `new` fills with the storage it allocates, so
   `new(node* mut)` and `new(i32 mut)` do not parse. With a dimension group it is the position a
@@ -301,6 +314,8 @@ Notes:
   parse for the first reason. Every `mut` position below the last one does parse:
   `new(node mut*, n)` and `new(node mut*[2])`. The result is owned and writable in the outermost
   position of `T`, and it is the written type below it (D5.8, D10.2, D17.3).
+  Grouping preserves these allocated-element restrictions. It cannot hide an outermost `mut`,
+  an owned string, a span suffix, or an `own` after a `)` inside `new(...)` (D3.6, D10.2, D17.3).
 - An `array_literal` type has only fixed dimensions and no trailing reference suffix:
   `i32[3]@{...}` and `i32[3]*{...}` do not parse.
 

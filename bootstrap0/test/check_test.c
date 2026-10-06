@@ -17,6 +17,22 @@
 
 // ---- one record per kind of sym_kind_t (sym.h) --------------------------------------
 
+TEST(grouped_types_preserve_identity_and_layout_dependencies, {
+    TEST_ASSERT_TRUE(check_src("struct link { (link)* next; }\n"
+                               "fn add(i32 n) i32 { return n; }\n"
+                               "(fn (i32) i32)[2] TABLE = {add, add};\n"
+                               "fn main() i32 {\n"
+                               "    ((fn (i32) i32)) mut op = add;\n"
+                               "    op = TABLE[1];\n"
+                               "    return op(0);\n}\n"));
+    TEST_ASSERT_EQ_STR(type_text(sym_main("TABLE")->type), "(fn (i32) i32)[2]");
+    TEST_ASSERT_EQ_UINT64(type_sizeof(sym_main("TABLE")->type), (uint64_t)16);
+    TEST_ASSERT_TRUE(check_body("(i32 mut*) own p = new(i32); *p = 1; del(p);"));
+    TEST_ASSERT_FALSE(check_body("(i32****************)***************** p = null;"));
+    TEST_ASSERT_TRUE(said("too many type suffixes"));
+    TEST_ASSERT_FALSE(check_src("struct loop { (loop) field; }\nfn main() i32 { return 0; }\n"));
+})
+
 TEST(a_module_carries_its_own_symbol, {
     TEST_ASSERT_TRUE(check_src("fn main() i32 {\n    return 0;\n}\n"));
     const module_t* m = module_at("main");
@@ -675,6 +691,7 @@ TEST(the_mute_flag_counts_without_reporting, {
 
 int main(int argc, char** argv) {
     TEST_INIT("check", argc, argv);
+    TEST_RUN(grouped_types_preserve_identity_and_layout_dependencies);
     TEST_RUN(a_module_carries_its_own_symbol);
     TEST_RUN(a_function_declaration_is_its_own_symbol);
     TEST_RUN(an_extern_declaration_has_its_own_kind);

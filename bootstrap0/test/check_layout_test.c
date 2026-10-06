@@ -96,6 +96,41 @@ TEST(a_pointer_to_an_array_is_laid_out_in_either_order, {
     TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)8);
 })
 
+// A group stores what it groups (D3.6). A grouped pointer is one word whatever its pointee is, and
+// a grouped array of function pointers holds its pointers by value. The offsets are C's for the
+// same fields without the parentheses.
+TEST(a_grouped_field_is_laid_out_as_the_type_it_groups, {
+    const char* holder = "struct a {\n    u8 tag;\n    (fn (b) i32)[2] table;\n"
+                         "    ((b mut*)) link;\n    ((u8)) last;\n}";
+    const char* node = "struct b {\n    a value;\n}";
+    TEST_ASSERT_TRUE(check_src(two_structs(holder, node)));
+    TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)40);
+    TEST_ASSERT_EQ_UINT64(field_offset("table"), (uint64_t)8);
+    TEST_ASSERT_EQ_UINT64(field_offset("link"), (uint64_t)24);
+    TEST_ASSERT_EQ_UINT64(field_offset("last"), (uint64_t)32);
+    TEST_ASSERT_EQ_UINT64(struct_size("b"), (uint64_t)40);
+    TEST_ASSERT_TRUE(check_src(two_structs(node, holder)));
+    TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)40);
+    TEST_ASSERT_EQ_UINT64(field_offset("last"), (uint64_t)32);
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)0);
+})
+
+// A group around a struct stores the struct by value, so it is a layout edge as the plain field
+// is, and a group around a pointer to it is not.
+TEST(a_grouped_struct_field_is_a_layout_edge, {
+    const char* holder = "struct a {\n    i32 tag;\n    ((b)) part;\n}";
+    const char* node = "struct b {\n    i64 v;\n    (a)* back;\n}";
+    TEST_ASSERT_TRUE(check_src(two_structs(holder, node)));
+    TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)24);
+    TEST_ASSERT_EQ_UINT64(field_offset("part"), (uint64_t)8);
+    TEST_ASSERT_TRUE(check_src(two_structs(node, holder)));
+    TEST_ASSERT_EQ_UINT64(struct_size("a"), (uint64_t)24);
+    TEST_ASSERT_EQ_UINT64(struct_size("b"), (uint64_t)16);
+    TEST_ASSERT_FALSE(
+        check_src(two_structs("struct a {\n    ((b)) part;\n}", "struct b {\n    (a) whole;\n}")));
+    TEST_ASSERT_TRUE(said("infinite size"));
+})
+
 TEST(a_function_type_parameter_is_laid_out_in_either_order, {
     // A function pointer is a word and its signature stores nothing, so a
     // struct named in it is not contained by value.
@@ -264,6 +299,8 @@ int main(int argc, char** argv) {
     TEST_INIT("check_layout", argc, argv);
     TEST_RUN(a_span_of_pointers_is_laid_out_in_either_order);
     TEST_RUN(a_pointer_field_is_laid_out_in_either_order);
+    TEST_RUN(a_grouped_field_is_laid_out_as_the_type_it_groups);
+    TEST_RUN(a_grouped_struct_field_is_a_layout_edge);
     TEST_RUN(an_array_of_pointers_is_laid_out_in_either_order);
     TEST_RUN(a_pointer_to_an_array_is_laid_out_in_either_order);
     TEST_RUN(a_function_type_parameter_is_laid_out_in_either_order);

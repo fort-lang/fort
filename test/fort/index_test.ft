@@ -118,6 +118,37 @@ fn a_local_is_a_local_and_a_parameter_a_parameter() void {
     assert(index_env.text_at(&e, 3, 12) == "main.ft:3:12-3:13 local n 'i32' use main.ft:2:9");
 }
 
+// A function-pointer binding spells its level-0 `mut` after a group, since
+// `fn (i32) i32 mut` would mark the return type. Each spelling reads back as
+// the declared type (D3.6, D3.10).
+fn a_grouped_locals_type_spells_back_with_its_mutability() void {
+    index_env.env mut e = index_env.env{};
+    index_env.open(&e);
+    defer index_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    line(&b, "fn add(i32 n) i32 {");
+    line(&b, "    return n;");
+    line(&b, "}");
+    line(&b, "fn main() i32 {");
+    line(&b, "    (fn (i32) i32) mut op = add;");
+    line(&b, "    fn (i32) i32 fixed = add;");
+    line(&b, "    (fn (i32) i32)[2] mut table = {add, add};");
+    line(&b, "    (fn (i32) i32)* slot = &fixed;");
+    line(&b, "    op = table[1];");
+    line(&b, "    return op(0) + fixed(0) + (*slot)(0);");
+    line(&b, "}");
+    assert(index_env.index_src(&e, strbuf.view(&b)));
+    assert(index_env.text_at(&e, 5, 24)
+           == "main.ft:5:24-5:26 local op '(fn (i32) i32) mut' decl main.ft:5:24");
+    assert(index_env.text_at(&e, 6, 18)
+           == "main.ft:6:18-6:23 local fixed 'fn (i32) i32' decl main.ft:6:18");
+    assert(index_env.text_at(&e, 7, 27)
+           == "main.ft:7:27-7:32 local table '(fn (i32) i32)[2] mut' decl main.ft:7:27");
+    assert(index_env.text_at(&e, 8, 21)
+           == "main.ft:8:21-8:25 local slot '(fn (i32) i32)*' decl main.ft:8:21");
+}
+
 fn a_locals_type_carries_its_level_0_mutability() void {
     index_env.env mut e = index_env.env{};
     index_env.open(&e);
@@ -495,6 +526,7 @@ fn main() i32 {
     a_use_carries_the_declarations_range();
     a_local_is_a_local_and_a_parameter_a_parameter();
     a_locals_type_carries_its_level_0_mutability();
+    a_grouped_locals_type_spells_back_with_its_mutability();
     a_builtin_has_no_declaration_to_jump_to();
     a_struct_name_and_an_enum_name_have_no_type();
     a_field_and_an_enum_member_carry_their_types();

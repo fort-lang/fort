@@ -736,10 +736,66 @@ TEST(each_module_reports_its_own_errors, {
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)2);
 })
 
+// Whether the module-level `<spelling> X = <init>;` checks and its type spells as `spelling`.
+static bool spells_back(const char* spelling, const char* init) {
+    char source[512];
+    TEST_UNUSED(snprintf(
+        source, sizeof source, "%s X = %s;\nfn main() i32 {\n    return 0;\n}\n", spelling, init));
+    return check_src(source) && strcmp(type_text(sym_main("X")->type), spelling) == 0;
+}
+
+// A group is the type it groups (D3.6). Its markers keep their storage positions, so a group
+// changes no mutability, no ownership and no function identity.
+TEST(a_group_is_the_type_it_groups, {
+    TEST_ASSERT_TRUE(check_body("(i32 mut) x = 1;\n    x = 2;"));
+    TEST_ASSERT_TRUE(check_body("(i32) mut x = 1;\n    x = 2;"));
+    TEST_ASSERT_FALSE(check_body("(i32) x = 1;\n    x = 2;"));
+    TEST_ASSERT_TRUE(said("cannot assign to immutable 'x'"));
+    TEST_ASSERT_TRUE(check_body("i32 mut x = 1;\n    (i32 mut)* p = &x;\n    *p = 3;"));
+    TEST_ASSERT_FALSE(check_body("i32 mut x = 1;\n    (i32)* p = &x;\n    *p = 3;"));
+    TEST_ASSERT_TRUE(said("cannot assign to immutable i32"));
+    TEST_ASSERT_FALSE(check_body("i32 mut x = 1;\n    (i32 mut*) p = &x;\n    p = &x;"));
+    TEST_ASSERT_TRUE(said("cannot assign to immutable 'p'"));
+    TEST_ASSERT_TRUE(check_body("i32 mut x = 1;\n    (i32 mut*) mut p = &x;\n    p = &x;"));
+    TEST_ASSERT_TRUE(check_body("(i32*) own p = new(i32);\n    del(p);"));
+    TEST_ASSERT_TRUE(
+        check_body("(i32* own) p = new(i32);\n    i32* own q = move(p);\n    del(q);"));
+    TEST_ASSERT_FALSE(check_body("(i32*) p = new(i32);"));
+    TEST_ASSERT_TRUE(said("owning temporary would leak: the initializer expects i32*"));
+    TEST_ASSERT_TRUE(check_body("(u8@) own s = new(u8, 2);\n    del(s);"));
+    TEST_ASSERT_TRUE(check_body("(void mut*) own p = cast(new(u8), void mut* own);\n    del(p);"));
+    TEST_ASSERT_TRUE(check_body("(void*) own p = cast(new(u8), void* own);\n"
+                                "    void* own q = move(p);\n    del(q);"));
+    TEST_ASSERT_TRUE(check_body("(string) own s = {};\n    del(s);"));
+    TEST_ASSERT_FALSE(check_body("(string) s = {};\n    del(s);"));
+    TEST_ASSERT_TRUE(said("'del' needs an owning operand, not string"));
+    TEST_ASSERT_TRUE(check_body("fn (i32) i32 f = null;\n    (fn ((i32)) (i32)) g = f;\n"
+                                "    fn (i32) i32 h = g;"));
+    TEST_ASSERT_FALSE(check_body("fn (i32) i64 f = null;\n    (fn ((i32)) (i32)) g = f;"));
+    TEST_ASSERT_TRUE(said("the initializer expects fn (i32) i32, not fn (i32) i64"));
+})
+
+// A diagnostic spells a grouped type in a form that parses back to the same type. The C bootstrap
+// holds one array or span level, so this list stays inside that subset.
+TEST(a_grouped_type_spells_back_as_written, {
+    TEST_ASSERT_TRUE(spells_back("(fn (i32) i32)[2]", "{}"));
+    TEST_ASSERT_TRUE(spells_back("(fn (i32) i32)*", "null"));
+    TEST_ASSERT_TRUE(spells_back("(fn (i32) i32) mut*", "null"));
+    TEST_ASSERT_TRUE(spells_back("(fn (i32) i32)@", "{}"));
+    TEST_ASSERT_TRUE(spells_back("(fn () void)[2]*", "null"));
+    TEST_ASSERT_TRUE(spells_back("(fn () noreturn)[2]", "{}"));
+    TEST_ASSERT_TRUE(spells_back("(fn (i32* own) void)*", "null"));
+    TEST_ASSERT_TRUE(spells_back("fn () (fn () void)*", "null"));
+    TEST_ASSERT_TRUE(spells_back("fn (i32) i32[2]", "null"));
+    TEST_ASSERT_TRUE(spells_back("fn () i32*", "null"));
+})
+
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
     TEST_INIT("check_conv", argc, argv);
+    TEST_RUN(a_group_is_the_type_it_groups);
+    TEST_RUN(a_grouped_type_spells_back_as_written);
     TEST_RUN(mutability_drops_at_level_one);
     TEST_RUN(mutability_is_never_added_implicitly);
     TEST_RUN(a_drop_behind_a_mutable_level_is_refused);
