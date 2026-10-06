@@ -5,6 +5,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import resource
+import signal
 import subprocess
 import sys
 import tempfile
@@ -37,7 +39,8 @@ class OwnershipDriverTest(unittest.TestCase):
         path.write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
         return path
 
-    def invoke(self, *flags, selected=True, report=True, check=True, standard=None, entry=None):
+    def invoke(self, *flags, selected=True, report=True, check=True, standard=None, entry=None,
+               process_setup=None):
         self.standard_used = standard or self.standard
         self.entry_used = entry or self.entry
         argv = [OPTIONS.fort, "--std-dir", str(self.standard_used)]
@@ -53,7 +56,7 @@ class OwnershipDriverTest(unittest.TestCase):
         self.candidates = audit.snapshot([self.root, self.standard_used])
         self.result = subprocess.run(
             argv, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            timeout=120,
+            timeout=120, preexec_fn=process_setup,
         )
         for name, contents in self.candidates.items():
             self.assertEqual(Path(name).read_bytes(), contents, name)
@@ -434,6 +437,30 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(retained.read_text(), "old bytes")
         self.assertFalse(list(self.root.rglob("*.tmp.*")))
 
+    def test_actual_report_write_failure_preserves_report_and_output(self):
+        self.assertEqual(self.invoke().returncode, 1)
+        self.evidence()
+        previous = self.report.read_bytes()
+        self.assertGreater(len(previous), 512)
+        output = self.write("output.ll", b"previous LLVM output\n")
+
+        def limit_report_write():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            _, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (512, hard))
+
+        for check in (True, False):
+            with self.subTest(check=check):
+                flags = ("--json",) if check else ()
+                result = self.invoke(*flags, "-S", "-o", str(output), check=check,
+                                     process_setup=limit_report_write)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(b"cannot write ownership report", result.stderr)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(self.report.read_bytes(), previous)
+                self.assertEqual(output.read_bytes(), b"previous LLVM output\n")
+                self.assertFalse(list(self.root.rglob("*.tmp.*")))
+
     def test_report_source_alias_is_rejected(self):
         aliases = [self.entry, self.root / "alias.ft"]
         aliases[1].symlink_to(self.entry)
@@ -490,6 +517,70 @@ class OwnershipDriverTest(unittest.TestCase):
         self.report = alias
         self.assertEqual(self.invoke("-S", "-o", str(output), check=False).returncode, 2)
         self.assertEqual(output.read_text(), "retained output\n")
+
+    def unresolved_output_links(self, output, links):
+        original = {str(path): os.readlink(path) for path in links}
+        result = self.invoke("-S", "-o", str(output), check=False)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(b"ownership report path names an input, an output, "
+                      b"or an invalid destination", result.stderr)
+        self.assertEqual(result.stdout, b"")
+        self.assertFalse(self.report.exists())
+        for path in links:
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(os.readlink(path), original[str(path)])
+        self.assertFalse(list(self.root.rglob("*.tmp.*")))
+
+    def test_dangling_output_link_to_report_in_same_directory_is_rejected(self):
+        output = self.root / "output.ll"
+        output.symlink_to(self.report.name)
+        self.unresolved_output_links(output, [output])
+        self.assertFalse(output.exists())
+
+    def test_dangling_output_link_to_report_in_other_directory_is_rejected(self):
+        directory = self.root / "reports"
+        directory.mkdir()
+        self.report = directory / "report.json"
+        output = self.root / "output.ll"
+        output.symlink_to("reports/report.json")
+        self.unresolved_output_links(output, [output])
+        self.assertFalse(output.exists())
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_dangling_output_link_chain_is_rejected(self):
+        directory = self.root / "reports"
+        directory.mkdir()
+        self.report = directory / "report.json"
+        middle = self.root / "middle.ll"
+        middle.symlink_to("reports/report.json")
+        output = self.root / "output.ll"
+        output.symlink_to(middle.name)
+        self.unresolved_output_links(output, [output, middle])
+        self.assertFalse(output.exists())
+        self.assertFalse(middle.exists())
+
+    def test_looped_output_links_are_rejected(self):
+        output = self.root / "output.ll"
+        middle = self.root / "middle.ll"
+        output.symlink_to(middle.name)
+        middle.symlink_to(output.name)
+        self.unresolved_output_links(output, [output, middle])
+
+    def test_dangling_report_link_is_rejected_conservatively(self):
+        output = self.root / "output.ll"
+        self.report.symlink_to(output.name)
+        self.unresolved_output_links(output, [self.report])
+        self.assertFalse(output.exists())
+
+    def test_resolved_output_link_keeps_distinct_report_and_output(self):
+        target = self.write("retained.ll", b"previous LLVM output\n")
+        output = self.root / "output.ll"
+        output.symlink_to(target.name)
+        self.assertEqual(self.invoke("-S", "-o", str(output), check=False).returncode, 1)
+        self.evidence()
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(os.readlink(output), target.name)
+        self.assertEqual(target.read_bytes(), b"previous LLVM output\n")
 
     def test_absent_output_alias_through_parent_is_rejected(self):
         directory = self.root / "out"
