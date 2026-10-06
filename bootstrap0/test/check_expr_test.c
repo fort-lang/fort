@@ -1,6 +1,6 @@
-// Tests checker expressions: operand rules, lvalues and mutability, the
-// postfix forms, the calls and the universe functions. The constants are in check_const_test.c and
-// the statements in check_stmt_test.c.
+// Tests checker expressions: operand rules, lvalues and mutability, field access, the
+// calls and the universe functions. The constants are in check_const_test.c, indexing and
+// span expressions in check_index_test.c and the statements in check_stmt_test.c.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -136,6 +136,15 @@ TEST(address_of_takes_the_mutability_of_its_operand, {
     TEST_ASSERT_EQ_STR(init_type("q"), "i32*");
 })
 
+TEST(a_parameter_without_mut_is_immutable, {
+    TEST_ASSERT_FALSE(check_src("fn f(i32 x) i32 {\n    x = 1;\n    return x;\n}\n"
+                                "fn main() i32 {\n    return f(2);\n}\n"));
+    TEST_ASSERT_TRUE(said("cannot assign to immutable 'x'"));
+    // A parameter written `mut` may be assigned.
+    TEST_ASSERT_TRUE(check_src("fn f(i32 mut x) i32 {\n    x = 1;\n    return x;\n}\n"
+                               "fn main() i32 {\n    return f(2);\n}\n"));
+})
+
 TEST(an_address_of_an_immutable_is_not_a_mut_pointer, {
     TEST_ASSERT_FALSE(check_body("    i32 y = 2;\n    i32 mut* p = &y;\n    println(p);"));
     TEST_ASSERT_TRUE(said("the initializer expects i32 mut*, not i32*"));
@@ -210,78 +219,6 @@ TEST(a_span_ptr_carries_the_element_mutability, {
 TEST(a_fixed_array_has_no_ptr, {
     TEST_ASSERT_FALSE(check_body("    i32[2] a = {1, 2};\n    println(a.ptr);"));
     TEST_ASSERT_TRUE(said("a fixed array has no '.ptr'"));
-})
-
-// ---- indexing and span expressions --------------------------------------------------
-
-TEST(a_constant_index_out_of_range_is_refused, {
-    TEST_ASSERT_FALSE(check_body("    i32[4] a = {};\n    i32 x = a[4];\n    println(x);"));
-    TEST_ASSERT_TRUE(said("index 4 out of range for i32[4]"));
-})
-
-TEST(an_index_of_an_rvalue_array_is_not_an_lvalue, {
-    // `e[i]` is an lvalue where `e` is an lvalue fixed array: the elements of
-    // a returned array live in a temporary.
-    TEST_ASSERT_FALSE(check_src("fn make() i32[3] {\n    return i32[3]{1, 2, 3};\n}\n"
-                                "fn main() i32 {\n    i32* p = &make()[0];\n"
-                                "    return *p;\n}\n"));
-    TEST_ASSERT_TRUE(said("'&' requires an lvalue"));
-    // Reading one is fine, and a span or string expression is an lvalue
-    // whatever its operand.
-    TEST_ASSERT_TRUE(check_src("fn make() i32[3] {\n    return i32[3]{1, 2, 3};\n}\n"
-                               "fn main() i32 {\n    return make()[0];\n}\n"));
-    TEST_ASSERT_TRUE(check_body("    string s = \"ab\";\n    println(&s[0]);"));
-})
-
-TEST(a_negative_constant_index_is_refused, {
-    TEST_ASSERT_FALSE(check_body("    i32[4] a = {};\n    i32 x = a[-1];\n    println(x);"));
-    TEST_ASSERT_TRUE(said("a negative index: -1"));
-})
-
-TEST(a_negative_span_bound_or_count_is_refused, {
-    TEST_ASSERT_FALSE(check_body("    i32[4] a = {};\n    i32@ s = a[-1..];\n    println(s.len);"));
-    TEST_ASSERT_TRUE(said("a negative span bound: -1"));
-    TEST_ASSERT_FALSE(check_body("    del(new(i32, -1));"));
-    TEST_ASSERT_TRUE(said("a negative count: -1"));
-})
-
-TEST(a_pointer_cannot_be_indexed, {
-    TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n    i32* p = &x;\n    i32 v = p[0];\n"
-                                 "    println(v);"));
-    // Pointers cannot be indexed, not even pointers to arrays.
-    TEST_ASSERT_TRUE(said("i32* cannot be indexed: write '(*p)[i]'"));
-})
-
-TEST(a_span_of_a_string_is_a_string, {
-    TEST_ASSERT_TRUE(check_body("    string s = \"hello\";\n    string t = s[1..3];\n"
-                                "    println(t);"));
-    TEST_ASSERT_EQ_STR(init_type("t"), "string");
-})
-
-TEST(a_span_of_an_array_takes_its_element_mutability, {
-    TEST_ASSERT_TRUE(check_body("    i32[4] mut a = {};\n    i32 mut@ s = a[1..3];\n"
-                                "    i32@ t = a[..];\n    println(s.len, t.len);"));
-    TEST_ASSERT_EQ_STR(init_type("s"), "i32 mut@");
-    TEST_ASSERT_FALSE(check_body("    i32[4] a = {};\n    i32 mut@ s = a[1..3];\n"
-                                 "    println(s.len);"));
-    // A span of an immutable array cannot add mutability.
-    TEST_ASSERT_TRUE(said("expects i32 mut@, not i32@"));
-})
-
-TEST(a_span_of_a_pointer_needs_both_bounds, {
-    TEST_ASSERT_TRUE(
-        check_body("    i32 mut x = 1;\n    i32 mut* p = &x;\n    i32 mut@ s = p[0..1];\n"
-                   "    println(s.len);"));
-    TEST_ASSERT_FALSE(check_body("    i32 mut x = 1;\n    i32* p = &x;\n    i32@ s = p[0..];\n"
-                                 "    println(s.len);"));
-    // A pointer has no length, so only the two-bound form exists.
-    TEST_ASSERT_TRUE(said("a pointer has no length"));
-})
-
-TEST(a_span_of_a_void_pointer_is_refused, {
-    TEST_ASSERT_FALSE(check_body("    void* v = null;\n    i32 n = 2;\n    i32@ s = v[0..n];\n"
-                                 "    println(s.len);"));
-    TEST_ASSERT_TRUE(said("cannot take a span of void*"));
 })
 
 // ---- field access -------------------------------------------------------------------
@@ -529,6 +466,7 @@ int main(int argc, char** argv) {
     TEST_RUN(an_enum_compares_but_does_not_order);
     TEST_RUN(strings_compare_by_contents);
     TEST_RUN(address_of_takes_the_mutability_of_its_operand);
+    TEST_RUN(a_parameter_without_mut_is_immutable);
     TEST_RUN(an_address_of_an_immutable_is_not_a_mut_pointer);
     TEST_RUN(address_of_requires_an_lvalue);
     TEST_RUN(address_of_a_function_is_refused);
@@ -540,15 +478,6 @@ int main(int argc, char** argv) {
     TEST_RUN(len_and_ptr_are_not_lvalues);
     TEST_RUN(a_span_ptr_carries_the_element_mutability);
     TEST_RUN(a_fixed_array_has_no_ptr);
-    TEST_RUN(a_constant_index_out_of_range_is_refused);
-    TEST_RUN(an_index_of_an_rvalue_array_is_not_an_lvalue);
-    TEST_RUN(a_negative_constant_index_is_refused);
-    TEST_RUN(a_negative_span_bound_or_count_is_refused);
-    TEST_RUN(a_pointer_cannot_be_indexed);
-    TEST_RUN(a_span_of_a_string_is_a_string);
-    TEST_RUN(a_span_of_an_array_takes_its_element_mutability);
-    TEST_RUN(a_span_of_a_pointer_needs_both_bounds);
-    TEST_RUN(a_span_of_a_void_pointer_is_refused);
     TEST_RUN(a_dot_on_a_pointer_says_to_use_an_arrow);
     TEST_RUN(an_arrow_on_a_value_says_to_use_a_dot);
     TEST_RUN(an_arrow_reaches_the_span_pseudo_fields);

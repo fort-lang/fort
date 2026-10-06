@@ -585,6 +585,14 @@ TEST(a_struct_that_is_too_large_is_reported_at_its_keyword, {
     TEST_ASSERT_TRUE(said("main.ft:1:1: error: type is too large: struct huge"));
 })
 
+TEST(a_float_type_is_outside_the_bootstrap_subset, {
+    // The C bootstrap compiler has no float types. The fort compiler has them.
+    TEST_ASSERT_FALSE(check_src("fn f(f64 x) void {\n}\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("1:6: error: not supported by the bootstrap compiler: floats"));
+    TEST_ASSERT_FALSE(check_body("    f32 x = 1;"));
+    TEST_ASSERT_TRUE(said("not supported by the bootstrap compiler: floats"));
+})
+
 TEST(an_array_length_must_be_a_constant_expression, {
     TEST_ASSERT_FALSE(check_body("    i32 n = 3;\n    i32[n] a = {};\n    println(a[0]);"));
     TEST_ASSERT_TRUE(said("an array length must be a constant expression"));
@@ -739,6 +747,7 @@ int main(int argc, char** argv) {
     TEST_RUN(a_mut_on_a_pointee_or_a_binding_is_kept);
     TEST_RUN(a_type_that_is_too_large_is_refused);
     TEST_RUN(a_struct_that_is_too_large_is_reported_at_its_keyword);
+    TEST_RUN(a_float_type_is_outside_the_bootstrap_subset);
     TEST_RUN(an_array_length_must_be_a_constant_expression);
     TEST_RUN(an_array_length_must_be_greater_than_zero);
     TEST_RUN(sizeof_lays_out_a_struct_on_demand);

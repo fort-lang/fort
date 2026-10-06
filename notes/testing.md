@@ -28,7 +28,7 @@ bullet at a time and without a rewrite.
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules`), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
   `highlight_selftest`, `extension_selftest`, `panic_coverage` and `panic_coverage_selftest`;
-  the 68 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and
+  the 69 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and
   `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit
   tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
   On linux each target runs as `tools/vm <target>`.
@@ -91,9 +91,9 @@ bullet at a time and without a rewrite.
 
 ## 2. Unit tests in C
 
-- The Linux C-started build registers 68 C unit suites. Each suite has the labels `unit` and
-  `bootstrap`. These suites test the C implementation. Darwin and external-stage1 builds register
-  none of these suites (T-160).
+- The C-started build registers 69 C unit suites on linux and on darwin. Each suite has the labels
+  `unit` and `bootstrap0`. These suites test the C implementation. An external-stage1 build
+  registers none of these suites, because it does not add `bootstrap0/CMakeLists.txt`.
 - New C unit suites use inline source or local sandbox fixtures. Only a bootstrap-library contract
   can read the bootstrap-1 standard library. `runtime_sig_test` and `check_conv_test` are the two
   contract suites. They also have the label `bootstrap-contract`.
@@ -849,12 +849,34 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
-  **One table exists today**, and it covers 4 files:
-  `ls tools/mutations/*.json | wc -l` prints 1, and
+  **Two tables exist today**, and they cover 6 files:
+  `ls tools/mutations/*.json | wc -l` prints 2.
   `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
-  the four files of the C emitter, which is the `"sources"` list the runner saves. T-126 mutated
-  `src/fort/check.ft` by hand and T-127 mutated both compilers by hand, because no table covers
-  either.
+  the four files of the C emitter, and the same command over
+  `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`. Each list is the
+  `"sources"` list the runner saves. Two earlier changes mutated `src/fort/check.ft`, and then
+  both compilers, by hand, because no table covered either file. No table covers `src/fort`
+  today.
+  **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
+  citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
+  row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6
+  spec sections they cited with a rule that no decision row breaks (`grammar.md 4`,
+  `module-system.md 8.1`, `module-system.md 8.3`, `toolchain.md 7.3`, `toolchain.md 9.2`,
+  `toolchain.md 6 item 3`), and three second-facet rows: 87 rows.
+  `grep -cE 'D[0-9]+\.[0-9]+' bootstrap0/src/*.c` prints 0 for each file, so the coupling rule
+  above has no citation to read in `bootstrap0/src`. A bug fix that moves a rule edits the row's
+  anchor, and `--check` finds the row that it breaks. No gate runs `--check`: run it by hand
+  after a change to either file.
+  **The checker table runs on a darwin host, without the VM.** Run
+  `python3 tools/mutate.py tools/mutations/checker_bootstrap.json --runner 'bash -c'` after
+  `cmake --preset debug`. A round costs a median of 6.9 s (3.6 s to 60 s), and 85 rounds of one
+  run cost 735 s. Its `build` command sets `ZERO_AR_DATE=1`, because the darwin linker
+  writes the modification time of each object into the binary. Without it two builds of one
+  source gave two md5 values, so the last line of the runner would read `MISMATCH`. With it,
+  two builds gave one value.
+  A mutant must still compile under `-Werror`. A replacement that makes a static function, a
+  parameter or a variable unused stops the build (`build-failed`, 8 of the first 81 mutants).
+  Keep the name in the expression: `if (!cv_fits(v, underlying) && false)`, not `if (false)`.
   Where no table covers the file, apply and restore in **one** shell command, from a pristine copy
   that same command made.
   Prove the restore with `md5 -q <file>` against the value it read before the mutation, and with

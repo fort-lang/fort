@@ -179,6 +179,13 @@ TEST(an_else_if_chain_is_checked, {
     TEST_ASSERT_TRUE(check_body("    i32 n = 1;\n    if (n < 0) {\n        println(0);\n"
                                 "    } else if (n > 0) {\n        println(1);\n    } else {\n"
                                 "        println(2);\n    }"));
+    // An error in the last `else` and in an `else if` is reported.
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    if (n < 0) {\n        println(0);\n"
+                                 "    } else {\n        bool b = 1;\n    }"));
+    TEST_ASSERT_TRUE(said("an integer constant does not become bool"));
+    TEST_ASSERT_FALSE(check_body("    i32 n = 1;\n    if (n < 0) {\n        println(0);\n"
+                                 "    } else if (n) {\n        println(1);\n    }"));
+    TEST_ASSERT_TRUE(said("a condition must be bool, not i32"));
 })
 
 TEST(a_for_init_variable_is_scoped_to_the_loop, {
