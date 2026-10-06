@@ -817,13 +817,19 @@ came here.
   `gen_fir.emit_function` counts the definition in `g->functions`, lowers the function, runs the
   verifier, the build-mode pass and the verifier again (`gen_fir.check_fir`), and translates a FIR
   module of that one function, whose extern list gives its `declare` lines; it counts
-  `g->lowered`, which `--fir-stats` prints. Three cases write no text, and each is a compile
+  `g->lowered`, which `--fir-stats` prints. Four cases write no text, and each is a compile
   error (`gen.gen_error`) that fails the compilation (spec/fir.md 9.8). The first is a
   construct that the lowering does not lower, at that node: `cannot lower `<f>` to FIR: the
   lowering does not support the node `<kind>``; no checked program meets it, so
   `gen_fir_test.ft` makes a statement a struct declaration by hand. The second is a print or a
   string equality whose `std.rt` function the closure lacks (`fir_lower.report.entry`, T-244), at
   that node: `the runtime `std.rt` has no entry `<name>`, which `<f>` needs`. The third is a
+  print or a string equality whose `std.rt` function the closure declares with another
+  signature, at that node: `the runtime `std.rt` has no entry `<name>` with the parameters that
+  `<f>` needs`. `fir_lower.print_fits` and `str_eq_fits` hold the signature of `spec/toolchain.md`
+  5.1, and they also refuse a `mut` or `own` mark on a pointer parameter and a `noreturn`
+  function, which V4, V6 or V8 would refuse with a panic; `fir_lower.report.signature` tells the
+  third case from the second. The fourth is a
   `check` or `fail` that the build-mode pass of the mode keeps and whose entry the closure lacks
   or declares with other parameters (`fir_verify.runtime_holds`, `entry_fits`), at the name of
   the function. `fir_verify.excuse_mode` marks the kinds that the mode removes, so that V7 and
@@ -832,8 +838,8 @@ came here.
   translator runs. The verifier after the pass reads `fir_verify.unexcused`, so a check that the
   pass keeps needs its entry (review round 2 of T-255: a pass that kept shift checks under
   `--release` passed the verifier and called a missing `fail_shift`). Only a test with a stub
-  `std.rt`, or an old `--std-dir`, meets the second or the third. The compiler tests no other
-  `std.rt` function: `alloc`, `free`, `args_init`, `args` and `flush_all` are assumed, so
+  `std.rt`, or an old `--std-dir`, meets the second, the third or the fourth. The compiler tests
+  no other `std.rt` function: `alloc`, `free`, `args_init`, `args` and `flush_all` are assumed, so
   `del(p)` under `--release` with an empty `std.rt` writes a call to an undefined `std.rt.free`.
   Until T-255 the direct path (`gen_stmt.ft`, `gen_expr.ft`) wrote both. On T-253's tree and on
   414d8b7c, `--fir-stats` gave `lowered N of N` over `test/lang`, `src/fort`, `src/lsp` and `std`

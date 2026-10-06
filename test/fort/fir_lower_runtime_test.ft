@@ -1,0 +1,325 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| other parameters ok
+//| fitting entries ok
+//| missing entries ok
+/// Checks how src/fort/fir_lower.ft finds the print functions and `str_eq` of `std.rt`
+/// (spec/fir.md 9.8). The closure must declare each one with the parameters of
+/// spec/toolchain.md 5.1, and `str_eq` with the result `bool` as well. The lowering refuses a
+/// print or a string equality whose entry the closure lacks or declares with another signature,
+/// and the report names the entry and tells the two cases apart. A pointer parameter with `mut`
+/// or `own` and a `noreturn` entry are another signature, and the result of a print that returns
+/// does not count.
+import fir;
+import fir_lower;
+import fir_verify;
+import check_env;
+import lower_env;
+import modules_env;
+import std.str;
+import std.strbuf;
+
+u64 SOURCE_LINES = 17;
+
+// One function for each print function, one for the newline of `println`, one for a descriptor
+// of `fprintln`, one for each of `==` and `!=` on strings, and one that prints a function, which
+// print_ptr takes. Each needs one entry of the runtime.
+string[SOURCE_LINES] SOURCE = {
+    "enum color {",
+    "    red,",
+    "}",
+    "fn p_i64(i32 x) void { print(x); }",
+    "fn p_u64(u32 x) void { print(x); }",
+    "fn p_bool(bool x) void { print(x); }",
+    "fn p_char(char x) void { print(x); }",
+    "fn p_ptr(i32* x) void { print(x); }",
+    "fn p_str(string x) void { print(x); }",
+    "fn p_enum(color x) void { print(x); }",
+    "fn p_f32(f32 x) void { print(x); }",
+    "fn p_f64(f64 x) void { print(x); }",
+    "fn p_line(bool x) void { println(x); }",
+    "fn p_fd(i64 x) void { fprintln(2, x); }",
+    "fn same(string a, string b) bool { return a == b; }",
+    "fn differ(string a, string b) bool { return a != b; }",
+    "fn p_fn(fn (i32) void x) void { print(x); }",
+};
+
+// One runtime entry with other parameters: the entry `name`, its declaration `decl` with its
+// body, which replaces the declaration of `name` in lower_env.RUNTIME, the function `fn_name` of
+// SOURCE that needs it, and the line that `--fir` prints for that function.
+struct bad_entry {
+    string name;
+    string decl;
+    string fn_name;
+    string report;
+}
+
+u64 BAD_ENTRIES = 34;
+
+// Each entry differs from spec/toolchain.md 5.1 in one place: the count of the parameters, the
+// type or the `mut` or `own` mark of one parameter, `noreturn`, or the result of `str_eq`. The
+// first two and `str_eq(char* a, u64 n)` are the three runtimes of the review that found the
+// crash. The location of a print is its argument, the location of the newline is the `(` of the
+// call, and the location of a string equality is its operator. A column counts the characters of
+// SOURCE before that token, plus one.
+bad_entry[BAD_ENTRIES] BAD = {
+    bad_entry{"print_i64", "fn print_i64(i64 v) void {\n}", "p_i64",
+              "// not supported: ident at 4:30"},
+    bad_entry{"print_i64", "fn print_i64(i32 fd, i64 v, i64 w) void {\n}", "p_i64",
+              "// not supported: ident at 4:30"},
+    bad_entry{"print_i64", "fn print_i64(i64 fd, i64 v) void {\n}", "p_i64",
+              "// not supported: ident at 4:30"},
+    bad_entry{"print_i64", "fn print_i64(i32 fd, u64 v) void {\n}", "p_i64",
+              "// not supported: ident at 4:30"},
+    bad_entry{"print_u64", "fn print_u64(i32 fd, i64 v) void {\n}", "p_u64",
+              "// not supported: ident at 5:30"},
+    bad_entry{"print_bool", "fn print_bool(i32 fd, u8 v) void {\n}", "p_bool",
+              "// not supported: ident at 6:32"},
+    bad_entry{"print_char", "fn print_char(i32 fd, u8 c) void {\n}", "p_char",
+              "// not supported: ident at 7:32"},
+    bad_entry{"print_ptr", "fn print_ptr(i32 fd, u8* p) void {\n}", "p_ptr",
+              "// not supported: ident at 8:31"},
+    bad_entry{"print_str", "fn print_str(i32 fd, u8* ptr, u64 len) void {\n}", "p_str",
+              "// not supported: ident at 9:33"},
+    bad_entry{"print_str", "fn print_str(i32 fd, char* ptr, u32 len) void {\n}", "p_str",
+              "// not supported: ident at 9:33"},
+    bad_entry{"print_str", "fn print_str(i32 fd, char* ptr) void {\n}", "p_str",
+              "// not supported: ident at 9:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i64 v, enum_member* m, u64 n) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, void* m, u64 n) void {\n}", "p_enum",
+              "// not supported: ident at 10:33"},
+    bad_entry{"print_enum",
+              "struct rec {\n    i32 a;\n}\nfn print_enum(i32 fd, i32 v, rec* m, u64 n) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, enum_member* m, u32 n) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_ptr", "fn print_ptr(i32 fd, void mut* p) void {\n}", "p_ptr",
+              "// not supported: ident at 8:31"},
+    bad_entry{"print_ptr", "fn print_ptr(i32 fd, void* own p) void {\n}", "p_ptr",
+              "// not supported: ident at 8:31"},
+    bad_entry{"print_str", "fn print_str(i32 fd, char mut* ptr, u64 len) void {\n}", "p_str",
+              "// not supported: ident at 9:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, enum_member mut* m, u64 n) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_f32", "fn print_f32(i32 fd, f64 v) void {\n}", "p_f32",
+              "// not supported: ident at 11:30"},
+    bad_entry{"print_f64", "fn print_f64(i32 fd, f32 v) void {\n}", "p_f64",
+              "// not supported: ident at 12:30"},
+    bad_entry{"print_char", "fn print_char(i32 fd, u8 c) void {\n}", "p_line",
+              "// not supported: call at 13:33"},
+    bad_entry{"print_i64", "fn print_i64(u8 fd, i64 v) void {\n}", "p_fd",
+              "// not supported: ident at 14:35"},
+    bad_entry{"print_i64", "fn print_i64(i32 fd, i64 v) noreturn {\n    while (true) {\n    }\n}",
+              "p_i64", "// not supported: ident at 4:30"},
+    bad_entry{"print_char",
+              "fn print_char(i32 fd, char c) noreturn {\n    while (true) {\n    }\n}", "p_line",
+              "// not supported: call at 13:33"},
+    bad_entry{"print_ptr", "fn print_ptr(i32 fd, u8* p) void {\n}", "p_fn",
+              "// not supported: ident at 17:39"},
+    bad_entry{"str_eq", "fn str_eq(char* a, u64 n) bool {\n    return false;\n}", "same",
+              "// not supported: binary at 15:45"},
+    bad_entry{"str_eq",
+              "fn str_eq(char* a, u64 a_len, char* b, u32 b_len) bool {\n    return false;\n}",
+              "same", "// not supported: binary at 15:45"},
+    bad_entry{"str_eq",
+              "fn str_eq(u8* a, u64 a_len, char* b, u64 b_len) bool {\n    return false;\n}",
+              "same", "// not supported: binary at 15:45"},
+    bad_entry{"str_eq",
+              "fn str_eq(char* a, u64 a_len, char* b, u64 b_len) u8 {\n    return 0;\n}",
+              "same", "// not supported: binary at 15:45"},
+    bad_entry{"str_eq",
+              "fn str_eq(char* a, u64 a_len, char* own b, u64 b_len) bool {\n    return false;\n}",
+              "same", "// not supported: binary at 15:45"},
+    bad_entry{"str_eq",
+              "fn str_eq(char mut* a, u64 a_len, char* b, u64 b_len) bool {\n    return false;\n}",
+              "same", "// not supported: binary at 15:45"},
+    bad_entry{"str_eq", "fn str_eq(char* a, u64 n) bool {\n    return false;\n}", "differ",
+              "// not supported: binary at 16:47"},
+    bad_entry{"str_eq",
+              "fn str_eq(char* a, u64 n, char* b, u64 m) noreturn {\n    while (true) {\n    }\n}",
+              "same", "// not supported: binary at 15:45"},
+};
+
+// The text of lower_env.RUNTIME with the declaration of `name`, from its `fn` line to its first
+// `}` line, left out and `decl` added at the end, in *out. An empty `decl` leaves `name` out.
+fn runtime_with(string name, string decl, strbuf.str_buf mut* out) void {
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.append(&head, "fn ");
+    strbuf.append(&head, name);
+    strbuf.push(&head, '(');
+    bool mut skip = false;
+    for (string line : lower_env.RUNTIME) {
+        if (str.starts_with(line, strbuf.view(&head))) {
+            skip = true;
+        }
+        if (!skip) {
+            strbuf.append(out, line);
+            strbuf.push(out, '\n');
+        }
+        if (skip && line == "}") {
+            skip = false;
+        }
+    }
+    strbuf.append(out, decl);
+    strbuf.push(out, '\n');
+}
+
+// Checks SOURCE in a fresh sandbox whose std/rt.ft is `runtime`, and whose std/em.ft is `em`
+// when `em` is not empty. The source must check with no diagnostic.
+fn check_over(lower_env.env mut* e, string runtime, string em) void {
+    check_env.reopen(&e->c);
+    check_env.add(&e->c, "std/rt.ft", runtime);
+    if (em.len > 0) {
+        check_env.add(&e->c, "std/em.ft", em);
+    }
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : SOURCE) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    e->c.want_main = false;
+    if (!check_env.check_src(&e->c, strbuf.view(&b))) {
+        eprintln(check_env.report_text(&e->c, 0));
+        panic("fir_lower_runtime_test.check_over: the source does not check");
+    }
+    e->rt = fir_verify.runtime_of(&e->c.ck);
+}
+
+// Lowers the function `name` of the checked source, holds that the lowering refuses it and
+// leaves the function empty, and gives the report in *why.
+fn refusal(lower_env.env mut* e, string name, fir_lower.report mut* why) void {
+    fir.func mut f = fir.func{};
+    if (fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), &f, why)) {
+        fir.func_free(&f);
+        eprintln("fir_lower_runtime_test: ", name, " lowers");
+        panic("fir_lower_runtime_test.refusal: the lowering lowers the function");
+    }
+    assert(f.locals.len == 0 && f.blocks.len == 0 && f.ops.len == 0 && f.projs.len == 0);
+}
+
+// Holds the report `why` against the entry `name`, whether the entry has another signature
+// rather than none, and the line `want` that `--fir` prints.
+fn expect_report(fir_lower.report* why, string name, bool signature, string want) void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    fir_lower.write_report(why, &got);
+    string text = strbuf.view(&got);
+    bool line = text.len == want.len + 1 && text[0..want.len] == want && text[want.len] == '\n';
+    if (why->entry != name || why->signature != signature || !line) {
+        eprintln("fir_lower_runtime_test: expected ", name, " <", want, ">, got ", why->entry,
+                 " <", text, ">");
+        panic("fir_lower_runtime_test: a report differs");
+    }
+}
+
+// An entry with other parameters, as an old --std-dir or a stub of a test may hold, stops the
+// lowering of the function that needs it, which spec/fir.md 9.8 makes a compile error. The
+// review of the old behaviour measured a panic with exit 134 for the first two and for
+// `str_eq(char* a, u64 n)`: an index out of range at the second parameter, and rule V7.
+fn an_entry_with_other_parameters_stops_the_lowering() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    for (bad_entry c : BAD) {
+        strbuf.str_buf mut rt = strbuf.create();
+        defer strbuf.free(&rt);
+        runtime_with(c.name, c.decl, &rt);
+        check_over(&e, strbuf.view(&rt), "");
+        fir_lower.report mut why = fir_lower.report{};
+        refusal(&e, c.fn_name, &why);
+        expect_report(&why, c.name, true, c.report);
+    }
+}
+
+// The struct `enum_member` of another module is not the member record of std.rt: std/em.ft
+// declares one with the same fields, and a print_enum that takes it has other parameters.
+fn the_member_record_of_another_module_is_another_parameter() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut rt = strbuf.create();
+    defer strbuf.free(&rt);
+    strbuf.append(&rt, "import std.em;\n");
+    runtime_with("print_enum", "fn print_enum(i32 fd, i32 v, em.enum_member* m, u64 n) void {\n}",
+                 &rt);
+    check_over(&e, strbuf.view(&rt), "struct enum_member {\n    i32 value;\n    char* name;\n}\n");
+    fir_lower.report mut why = fir_lower.report{};
+    refusal(&e, "p_enum", &why);
+    expect_report(&why, "print_enum", true, "// not supported: ident at 10:33");
+}
+
+u64 FITTING = 2;
+
+// Declarations that differ from spec/toolchain.md 5.1 only in the result of a print, which
+// call_runtime puts in a temporary of its own type: the lowering lowers the function that calls
+// each, and the verifier accepts it.
+bad_entry[FITTING] FIT = {
+    bad_entry{"print_i64", "fn print_i64(i32 fd, i64 v) i32 {\n    return 0;\n}", "p_i64", ""},
+    bad_entry{"print_char", "fn print_char(i32 fd, char c) bool {\n    return true;\n}", "p_line",
+              ""},
+};
+
+// The lowering accepts the result of a print that differs from `void`. With the runtime of
+// lower_env, which declares each entry as std/rt.ft does, it lowers every function of SOURCE.
+fn the_result_of_a_print_does_not_count() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    for (bad_entry c : FIT) {
+        strbuf.str_buf mut rt = strbuf.create();
+        defer strbuf.free(&rt);
+        runtime_with(c.name, c.decl, &rt);
+        check_over(&e, strbuf.view(&rt), "");
+        strbuf.str_buf mut call = strbuf.create();
+        defer strbuf.free(&call);
+        strbuf.append(&call, "call fn std.rt.");
+        strbuf.append(&call, c.name);
+        strbuf.push(&call, '(');
+        string text = lower_env.lower_checked(&e, c.fn_name);
+        assert(str.find(text, strbuf.view(&call)) >= 0);
+    }
+    lower_env.check_lines(&e, SOURCE[..], true);
+    // `!=` is `not` of the call of str_eq, and a function prints through print_ptr
+    assert(str.find(lower_env.lower_checked(&e, "differ"), " = not(copy ") >= 0);
+    assert(str.find(lower_env.lower_checked(&e, "p_fn"), "call fn std.rt.print_ptr(") >= 0);
+    u64 mut i = 3;
+    while (i < SOURCE_LINES) {
+        string line = SOURCE[i];
+        i64 paren = str.find(line, "(");
+        lower_env.lower_checked(&e, line[3..cast(paren, u64)]);
+        i += 1;
+    }
+}
+
+// A runtime that lacks the entry gives a report with `signature` false, so the compile error says
+// that the runtime has no entry at all.
+fn a_missing_entry_is_no_entry_with_other_parameters() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    for (bad_entry c : BAD) {
+        strbuf.str_buf mut rt = strbuf.create();
+        defer strbuf.free(&rt);
+        runtime_with(c.name, "", &rt);
+        check_over(&e, strbuf.view(&rt), "");
+        fir_lower.report mut why = fir_lower.report{};
+        refusal(&e, c.fn_name, &why);
+        expect_report(&why, c.name, false, c.report);
+    }
+}
+
+fn main() i32 {
+    an_entry_with_other_parameters_stops_the_lowering();
+    the_member_record_of_another_module_is_another_parameter();
+    println("other parameters ok");
+    the_result_of_a_print_does_not_count();
+    println("fitting entries ok");
+    a_missing_entry_is_no_entry_with_other_parameters();
+    println("missing entries ok");
+    return 0;
+}
