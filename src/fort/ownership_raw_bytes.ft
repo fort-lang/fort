@@ -1,0 +1,2646 @@
+/// Proves reference correspondence from ordered byte effects in paired ownership states.
+// The producer supplies checked layouts and substituted aliases. The driver stays unchanged.
+import ast;
+import ownership_api;
+import ownership_keys;
+import ownership_places;
+import ownership_raw;
+import ownership_state;
+import ownership_transfer;
+import ownership_type_work;
+import types;
+u64 U64_MAX = 18446744073709551615;
+struct window {
+    ownership_api.entity_id source;
+    u64 begin;
+    u64 end;
+    ownership_api.place_path place;
+    types.node* ty;
+    u64 alignment;
+    bool correspondence;
+}
+struct fragment {
+    u64 begin;
+    u64 end;
+    u64 original_begin;
+    types.node* original_type;
+    ownership_api.contents_fact value;
+    bool known;
+}
+struct representation { window selected; fragment mut@ own fragments; u64 fragments_len; }
+struct snapshot {
+    u64 key;
+    u64 bytes;
+    fragment mut@ own fragments;
+    u64 fragments_len;
+    ownership_state.state facts;
+}
+struct ledger {
+    representation mut@ own representations;
+    u64 representations_len;
+    snapshot mut@ own snapshots;
+    u64 snapshots_len;
+    // Canonical empty rows retain checked absence independently from byte fragments.
+    ownership_state.state facts;
+}
+// Raw context keeps the stable core address when this state returns or moves.
+struct state { ownership_state.state mut* own core; ownership_raw.context raw; ledger bytes; }
+struct result { ownership_api.proof_status proof; state mut@ own states; }
+struct reference_result {
+    ownership_api.proof_status proof;
+    ownership_api.contents_fact value;
+    ownership_state.state facts;
+}
+enum effect_kind { seed, read, write, unknown, unchanged, replacement, zero }
+enum retained_edit_kind { none, seed, capture, replacement }
+struct retained_edit {
+    retained_edit_kind kind;
+    representation* target;
+    window selected;
+    fragment@ incoming;
+    u64 source_begin;
+    u64 snapshot_key;
+    ownership_api.contents_fact value;
+    bool known;
+    bool add_value;
+    bool replace_core;
+    u64 core_row;
+}
+struct byte_partition {
+    ownership_api.entity_id source;
+    u64 snapshot_key;
+    u64 begin;
+    u64 end;
+    bool snapshot_namespace;
+}
+struct partition_counter {
+    byte_partition[8] local;
+    byte_partition mut@ own items;
+    u64 len;
+    u64 unknown;
+}
+struct byte_effect {
+    effect_kind kind;
+    window selected;
+    u64 snapshot_key;
+    u64 snapshot_begin;
+    ownership_api.contents_fact value;
+    bool checked_value;
+    bool aliases_substituted;
+    bool unchanged_proved;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source_position;
+}
+struct work {
+    ownership_api.services* service;
+    ownership_raw.request* selected;
+    ownership_api.proof_status proof;
+    u32 phase;
+}
+fn free_snapshot(snapshot mut* saved) void {
+    del(saved->fragments);
+    ownership_state.free(&saved->facts);
+    *saved = snapshot{};
+}
+fn free_ledger(ledger mut* saved) void {
+    u64 mut i = 0;
+    while (i < saved->representations_len) {
+        del(saved->representations[i].fragments);
+        i += 1;
+    }
+    i = 0;
+    while (i < saved->snapshots_len) { free_snapshot(&saved->snapshots[i]); i += 1; }
+    del(saved->representations);
+    del(saved->snapshots);
+    ownership_state.free(&saved->facts);
+    *saved = ledger{};
+}
+fn free(state mut* paired) void {
+    free_ledger(&paired->bytes);
+    ownership_raw.free(&paired->raw);
+    if (paired->core != null) {
+        ownership_state.free(paired->core);
+        del(paired->core);
+    }
+    *paired = state{};
+}
+fn free_result(result mut* out) void {
+    u64 mut i = 0;
+    while (i < out->states.len) { free(&out->states[i]); i += 1; }
+    del(out->states);
+    out->proof = ownership_api.proof_status{};
+}
+fn free_reference(reference_result mut* out) void {
+    ownership_state.free(&out->facts);
+    *out = reference_result{};
+}
+fn stop(work mut* current, ownership_api.entity_id relation, bool invalid, string text) bool {
+    if (ownership_api.successful(current->proof)) {
+        current->proof = ownership_raw.fail(current->service, current->selected, relation,
+            invalid, text);
+    }
+    return false;
+}
+fn spend(work mut* current, u64 amount) bool {
+    if (!ownership_api.successful(current->proof)) { return false; }
+    current->proof = ownership_raw.charge(current->service, current->selected,
+        ownership_api.limit_category.w, amount);
+    return ownership_api.successful(current->proof);
+}
+fn compare_type(work mut* current, types.node* destination, types.node* source,
+    ownership_type_work.relation query, bool mut* value) bool {
+    *value = false;
+    if (!ownership_api.successful(current->proof)) { return false; }
+    ownership_type_work.work mut paid = ownership_type_work.create(current->service,
+        ownership_api.work_kind.transfer, current->selected->base.operation,
+        current->selected->base.source_position);
+    ownership_type_work.result measured = ownership_type_work.compare(&paid, destination,
+        source, query);
+    if (!ownership_api.successful(measured.proof)) {
+        if (paid.problem != ownership_type_work.problem_kind.none) {
+            return stop(current, ownership_api.entity_id{}, false,
+                "raw type layout remains unresolved");
+        }
+        current->proof = ownership_raw.type_failure(current->service, current->selected,
+            measured.proof);
+        return false;
+    }
+    *value = measured.value;
+    return true;
+}
+fn retain(work mut* current, u64 count) bool {
+    if (!spend(current, 1)) { return false; }
+    if (count == 0) { return true; }
+    ownership_api.charge_item[2] items = {
+        ownership_api.charge_item{ownership_api.limit_category.r,
+            ownership_api.limit_scope.state, count},
+        ownership_api.charge_item{ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, 1}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, current->selected->base.operation,
+        current->selected->base.source_position, items[..]};
+    ownership_api.charge_result charged = ownership_api.charge(current->service, &request);
+    if (!charged.allowed) {
+        ownership_raw.raw_event_route mut route = ownership_raw.raw_event_route{
+            current->selected, *current->service};
+        ownership_api.services mut mapped = *current->service;
+        mapped.event_context = cast(&route, void mut*);
+        mapped.event = ownership_raw.cached_event;
+        current->proof = ownership_state.report_failure(&mapped, charged.proof,
+            request.operation, request.source);
+        return false;
+    }
+    return true;
+}
+fn partition_entries(partition_counter mut* counter) byte_partition mut@ {
+    return counter->items.len == 0 ? counter->local[..] : counter->items[..];
+}
+fn partition_order(byte_partition left, byte_partition right) i32 {
+    if (left.snapshot_namespace != right.snapshot_namespace) {
+        return left.snapshot_namespace ? 1 : -1;
+    }
+    if (left.snapshot_namespace) {
+        if (left.snapshot_key != right.snapshot_key) {
+            return left.snapshot_key < right.snapshot_key ? -1 : 1;
+        }
+    } else {
+        i32 order = ownership_keys.entity(left.source, right.source);
+        if (order != 0) { return order; }
+    }
+    if (left.begin != right.begin) { return left.begin < right.begin ? -1 : 1; }
+    if (left.end != right.end) { return left.end < right.end ? -1 : 1; }
+    return 0;
+}
+fn partition_insert(work mut* current, partition_counter mut* counter,
+    byte_partition item) bool {
+    if (!spend(current, 1)) { return false; }
+    if (item.begin > item.end) {
+        return stop(current, item.source, false, "byte partition interval remains unproved");
+    }
+    if (item.begin == item.end) { return true; }
+    if (!item.snapshot_namespace && (item.source.kind != ownership_api.entity_kind.source ||
+        item.source.ordinal == 0)) {
+        if (counter->unknown == U64_MAX) {
+            return stop(current, item.source, false, "byte partition count overflows");
+        }
+        counter->unknown += 1;
+        return true;
+    }
+    u64 mut index = 0;
+    while (index < counter->len) {
+        if (!spend(current, 1)) { return false; }
+        i32 order = partition_order(item, partition_entries(counter)[index]);
+        if (order == 0) { return true; }
+        if (order < 0) { break; }
+        index += 1;
+    }
+    u64 ceiling = types.TYPE_MAX_SIZE / sizeof(byte_partition);
+    if (counter->len >= ceiling) {
+        return stop(current, item.source, false, "byte partition storage overflows");
+    }
+    u64 capacity = counter->items.len == 0 ? counter->local.len : counter->items.len;
+    if (counter->len == capacity) {
+        if (!spend(current, 1)) { return false; }
+        u64 next = capacity <= ceiling / 2 ? capacity * 2 : ceiling;
+        if (next <= counter->len || next > ceiling) {
+            return stop(current, item.source, false, "byte partition storage overflows");
+        }
+        byte_partition mut@ own bigger = new(byte_partition, next);
+        u64 mut i = 0;
+        while (i < counter->len) {
+            if (!spend(current, 1)) { del(bigger); return false; }
+            bigger[i] = partition_entries(counter)[i];
+            i += 1;
+        }
+        del(counter->items);
+        counter->items = move(bigger);
+    }
+    u64 mut i = counter->len;
+    while (i > index) {
+        if (!spend(current, 1)) { return false; }
+        partition_entries(counter)[i] = partition_entries(counter)[i - 1];
+        i -= 1;
+    }
+    if (!spend(current, 1)) { return false; }
+    partition_entries(counter)[index] = item;
+    counter->len += 1;
+    return true;
+}
+fn borrowed_result(work mut* current, ownership_state.region_counter* counter,
+    bool valid) bool {
+    if (valid) { return true; }
+    if (!ownership_api.successful(counter->proof)) {
+        if (counter->proof.terminal.reason == ownership_api.incomplete_reason.invalid_input) {
+            return stop(current, ownership_api.entity_id{}, false,
+                "paired retained region storage remains unproved");
+        }
+        current->proof = ownership_raw.type_failure(current->service, current->selected,
+            counter->proof);
+    }
+    return false;
+}
+fn borrowed_value(work mut* current, ownership_state.region_counter mut* counter,
+    ownership_api.contents_fact value) bool {
+    u64 mut price = 0;
+    if (!value_price(current, value, &price)) { return false; }
+    return borrowed_result(current, counter, ownership_state.region_contents(counter, value));
+}
+fn borrowed_core(work mut* current, ownership_state.region_counter mut* counter,
+    ownership_state.state* core, retained_edit edit) bool {
+    u64 mut price = 0;
+    if (!core_price(current, core, &price)) { return false; }
+    if (edit.replace_core && edit.core_row >= core->contents_len) {
+        return stop(current, ownership_api.entity_id{}, false,
+            "paired contents replacement remains unproved");
+    }
+    u64 mut i = 0;
+    while (i < core->contents_len) {
+        if (!spend(current, 1)) { return false; }
+        if ((!edit.replace_core || i != edit.core_row) &&
+            !borrowed_value(current, counter, core->contents[i])) { return false; }
+        i += 1;
+    }
+    if (edit.add_value && !borrowed_value(current, counter, edit.value)) { return false; }
+    i = 0;
+    while (i < core->allocations_len) {
+        if (!spend(current, 1) || !borrowed_result(current, counter,
+            ownership_state.region_insert(counter, ownership_state.region_identity{
+                .region = core->allocations[i].key}))) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->regions_len) {
+        if (!spend(current, 1) || !borrowed_result(current, counter,
+            ownership_state.region_range(counter, core->regions[i], true))) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->nodes_len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_api.graph_node node = core->nodes[i];
+        ownership_api.entity_id key = node.allocation.kind != ownership_api.entity_kind.none ?
+            node.allocation : node.key;
+        if (!borrowed_result(current, counter, ownership_state.region_insert(counter,
+            ownership_state.region_identity{.region = key}))) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->edges_len) {
+        if (!spend(current, 1) || !borrowed_result(current, counter,
+            ownership_state.region_range(counter, core->edges[i].range, false))) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn retained_fragment(work mut* current, ownership_state.region_counter mut* borrowed,
+    partition_counter mut* partitions, fragment value, byte_partition mut identity) bool {
+    identity.begin = value.begin;
+    identity.end = value.end;
+    if (!partition_insert(current, partitions, identity)) { return false; }
+    if (value.begin == value.end || !value.known) { return true; }
+    return borrowed_value(current, borrowed, value.value);
+}
+fn retained_replacement(work mut* current, ownership_state.region_counter mut* borrowed,
+    partition_counter mut* partitions, representation* target, retained_edit edit) bool {
+    if (edit.selected.begin > edit.selected.end ||
+        edit.source_begin > U64_MAX - (edit.selected.end - edit.selected.begin) ||
+        edit.incoming.len > types.TYPE_MAX_SIZE / sizeof(fragment)) {
+        return stop(current, edit.selected.source, false,
+            "prospective byte interval remains unproved");
+    }
+    byte_partition identity = byte_partition{.source = target->selected.source};
+    u64 mut i = 0;
+    while (i < target->fragments_len) {
+        if (!spend(current, 1)) { return false; }
+        fragment value = target->fragments[i];
+        if (value.begin > value.end ||
+            value.original_begin > U64_MAX - (value.end - value.begin)) {
+            return stop(current, target->selected.source, false,
+                "prospective fragment interval remains unproved");
+        }
+        if (!overlaps(value.begin, value.end, edit.selected.begin, edit.selected.end)) {
+            if (!retained_fragment(current, borrowed, partitions, value, identity)) {
+                return false;
+            }
+        } else {
+            if (value.begin < edit.selected.begin && !retained_fragment(current, borrowed,
+                partitions, clipped(value, value.begin, edit.selected.begin), identity)) {
+                return false;
+            }
+            if (edit.selected.end < value.end && !retained_fragment(current, borrowed,
+                partitions, clipped(value, edit.selected.end, value.end), identity)) {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < edit.incoming.len) {
+        if (!spend(current, 1)) { return false; }
+        fragment source = edit.incoming[i];
+        if (source.begin > source.end ||
+            source.original_begin > U64_MAX - (source.end - source.begin)) {
+            return stop(current, edit.selected.source, false,
+                "prospective fragment interval remains unproved");
+        }
+        u64 mut end = edit.source_begin + (edit.selected.end - edit.selected.begin);
+        u64 begin = source.begin > edit.source_begin ? source.begin : edit.source_begin;
+        if (source.end < end) { end = source.end; }
+        if (begin < end) {
+            fragment mut part = clipped(source, begin, end);
+            part.begin = edit.selected.begin + (begin - edit.source_begin);
+            part.end = edit.selected.begin + (end - edit.source_begin);
+            if (part.end > target->selected.begin && part.begin < target->selected.end) {
+                if (part.begin < target->selected.begin) {
+                    part = clipped(part, target->selected.begin, part.end);
+                }
+                if (part.end > target->selected.end) { part.end = target->selected.end; }
+                if (!retained_fragment(current, borrowed, partitions, part, identity)) {
+                    return false;
+                }
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+fn captured_part(work mut* current, ledger* saved, window selected, u64 cursor,
+    fragment mut* part) bool {
+    fragment mut chosen = {};
+    bool mut found = false;
+    u64 mut next = selected.end;
+    u64 mut i = 0;
+    while (i < saved->representations_len) {
+        if (!spend(current, 1)) { return false; }
+        representation* item = &saved->representations[i];
+        if (same_storage(item->selected, selected)) {
+            u64 mut j = 0;
+            while (j < item->fragments_len) {
+                if (!spend(current, 1)) { return false; }
+                fragment candidate = item->fragments[j];
+                if (candidate.begin > cursor && candidate.begin < next) { next = candidate.begin; }
+                if (!found && candidate.begin <= cursor && cursor < candidate.end) {
+                    chosen = candidate;
+                    found = true;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    u64 end = found && chosen.end < selected.end ? chosen.end : next;
+    if (cursor < selected.begin || end <= cursor || end > selected.end ||
+        (found && cursor - chosen.begin > U64_MAX - chosen.original_begin)) {
+        return stop(current, selected.source, false, "byte snapshot coverage is invalid");
+    }
+    *part = chosen;
+    part->begin = cursor - selected.begin;
+    part->end = end - selected.begin;
+    if (found) { part->original_begin = chosen.original_begin + (cursor - chosen.begin); }
+    else { part->known = false; }
+    return true;
+}
+fn paired_regions(work mut* current, ownership_state.state* core, ownership_raw.context* raw,
+    ledger* saved, retained_edit edit, u64 mut* amount) bool {
+    *amount = 0;
+    if (!spend(current, 1)) { return false; }
+    if (core == null || raw->leaves_len > raw->leaves.len ||
+        saved->representations_len > saved->representations.len ||
+        saved->snapshots_len > saved->snapshots.len ||
+        saved->representations_len > types.TYPE_MAX_SIZE / sizeof(representation) ||
+        saved->snapshots_len > types.TYPE_MAX_SIZE / sizeof(snapshot)) {
+        return stop(current, ownership_api.entity_id{}, false,
+            "paired retained vectors remain unproved");
+    }
+    ownership_state.region_counter mut borrowed = ownership_state.region_counter{
+        .service = current->service, .kind = ownership_api.work_kind.transfer,
+        .operation = current->selected->base.operation,
+        .source = current->selected->base.source_position, .proof = current->proof};
+    partition_counter mut partitions = {};
+    defer del(borrowed.identities);
+    defer del(partitions.items);
+    if (!borrowed_core(current, &borrowed, core, edit) ||
+        !borrowed_core(current, &borrowed, &saved->facts, retained_edit{})) { return false; }
+    bool mut replaced = false;
+    u64 mut i = 0;
+    while (i < saved->representations_len) {
+        if (!spend(current, 1)) { return false; }
+        representation* item = &saved->representations[i];
+        if (item->fragments_len > item->fragments.len ||
+            item->fragments_len > types.TYPE_MAX_SIZE / sizeof(fragment)) {
+            return stop(current, item->selected.source, false,
+                "paired representation count remains unproved");
+        }
+        if (edit.kind == retained_edit_kind.replacement && item == edit.target) {
+            replaced = true;
+            if (!retained_replacement(current, &borrowed, &partitions, item, edit)) {
+                return false;
+            }
+        } else {
+            u64 mut j = 0;
+            while (j < item->fragments_len) {
+                if (!spend(current, 1) || !retained_fragment(current, &borrowed, &partitions,
+                    item->fragments[j], byte_partition{.source = item->selected.source})) {
+                    return false;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    if (edit.kind == retained_edit_kind.replacement && !replaced) {
+        return stop(current, edit.selected.source, false,
+            "prospective representation remains unproved");
+    }
+    i = 0;
+    while (i < saved->snapshots_len) {
+        if (!spend(current, 1)) { return false; }
+        snapshot* item = &saved->snapshots[i];
+        if (item->fragments_len > item->fragments.len ||
+            item->fragments_len > types.TYPE_MAX_SIZE / sizeof(fragment)) {
+            return stop(current, ownership_api.entity_id{}, false,
+                "paired snapshot count remains unproved");
+        }
+        if (!borrowed_core(current, &borrowed, &item->facts, retained_edit{})) { return false; }
+        u64 mut j = 0;
+        while (j < item->fragments_len) {
+            if (!spend(current, 1) || !retained_fragment(current, &borrowed, &partitions,
+                item->fragments[j], byte_partition{.snapshot_key = item->key,
+                    .snapshot_namespace = true})) { return false; }
+            j += 1;
+        }
+        i += 1;
+    }
+    if (edit.kind == retained_edit_kind.seed && edit.known) {
+        fragment value = fragment{edit.selected.begin, edit.selected.end, 0,
+            edit.selected.ty, edit.value, true};
+        if (!retained_fragment(current, &borrowed, &partitions, value,
+            byte_partition{.source = edit.selected.source})) { return false; }
+    }
+    if (edit.kind == retained_edit_kind.capture) {
+        if (edit.selected.begin > edit.selected.end) {
+            return stop(current, edit.selected.source, false,
+                "prospective snapshot interval remains unproved");
+        }
+        u64 mut cursor = edit.selected.begin;
+        while (cursor < edit.selected.end) {
+            fragment mut part = {};
+            if (!captured_part(current, saved, edit.selected, cursor, &part) ||
+                !retained_fragment(current, &borrowed, &partitions, part,
+                    byte_partition{.snapshot_key = edit.snapshot_key,
+                        .snapshot_namespace = true})) { return false; }
+            cursor = edit.selected.begin + part.end;
+        }
+    }
+    u64 mut total = borrowed.len;
+    if (!add_price(current, &total, borrowed.unknown) ||
+        !add_price(current, &total, raw->leaves_len) ||
+        !add_price(current, &total, partitions.len) ||
+        !add_price(current, &total, partitions.unknown)) { return false; }
+    *amount = total;
+    return true;
+}
+fn require_paired(work mut* current, state* input, retained_edit edit) bool {
+    u64 mut amount = 0;
+    return paired_regions(current, input->core, &input->raw, &input->bytes, edit, &amount) &&
+        retain(current, amount);
+}
+fn add_price(work mut* current, u64 mut* price, u64 amount) bool {
+    if (!spend(current, 1)) { return false; }
+    if (amount > U64_MAX - *price) {
+        return stop(current, ownership_api.entity_id{}, false, "byte copy work overflows");
+    }
+    *price += amount;
+    return true;
+}
+fn place_price(work mut* current, ownership_api.place_path path, u64 mut* price) bool {
+    if (!spend(current, 1)) { return false; }
+    if (path.projections.len > current->selected->limits.d ||
+        path.projections.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.projection)) {
+        return stop(current, path.root, false, "byte place depth remains unproved");
+    }
+    return add_price(current, price, ownership_raw.place_copy_price(path));
+}
+fn region_price(work mut* current, ownership_api.region range, u64 mut* price) bool {
+    if (!spend(current, 1)) { return false; }
+    if (range.leaves.len > current->selected->limits.r ||
+        range.partitions.len > current->selected->limits.r ||
+        range.leaves.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.layout_leaf) ||
+        range.partitions.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.region_partition)) {
+        return stop(current, range.source, false, "byte region facts exceed their bound");
+    }
+    return add_price(current, price, 7) && add_price(current, price, range.leaves.len) &&
+        add_price(current, price, range.partitions.len);
+}
+fn value_price(work mut* current, ownership_api.contents_fact value, u64 mut* price) bool {
+    if (!place_price(current, value.place, price) || !add_price(current, price, 5)) {
+        return false;
+    }
+    if (value.borrows.len > current->selected->limits.g ||
+        value.borrows.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.borrow_relation)) {
+        return stop(current, value.place.root, false,
+            "byte source alternatives exceed their bound");
+    }
+    u64 mut i = 0;
+    while (i < value.borrows.len) {
+        if (!spend(current, 1) || !add_price(current, price, 1) ||
+            !place_price(current, value.borrows[i].containing, price) ||
+            !region_price(current, value.borrows[i].range, price)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn core_price(work mut* current, ownership_state.state* core, u64 mut* price) bool {
+    if (!spend(current, 22)) { return false; }
+    if (core->contents_len > core->contents.len ||
+        core->contents_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.contents_fact) / 2 ||
+        core->sources_len > core->sources.len ||
+        core->sources_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.source_fact) / 2 ||
+        core->allocations_len > core->allocations.len ||
+        core->allocations_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.allocation_fact) / 2 ||
+        core->regions_len > core->regions.len ||
+        core->regions_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.region) / 2 ||
+        core->nodes_len > core->nodes.len ||
+        core->nodes_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.graph_node) / 2 ||
+        core->edges_len > core->edges.len ||
+        core->edges_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.graph_edge) / 2 ||
+        core->shapes_len > core->shapes.len ||
+        core->shapes_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.shape_description) / 2 ||
+        core->predicates_len > core->predicates.len ||
+        core->predicates_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.predicate_atom) / 2 ||
+        core->guards_len > core->guards.len ||
+        core->guards_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.guard_fact) / 2 ||
+        core->correlations_len > core->correlations.len ||
+        core->correlations_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.correlation) / 2 ||
+        core->losses_len > core->losses.len ||
+        core->losses_len > types.TYPE_MAX_SIZE / sizeof(ownership_api.lost_fact) / 2) {
+        return stop(current, ownership_api.entity_id{}, false,
+            "ownership core vector counts remain unproved");
+    }
+    u64 mut total = 16;
+    u64 mut i = 0;
+    while (i < core->contents_len) {
+        if (!spend(current, 1) || !add_price(current, &total, 4) ||
+            !value_price(current, core->contents[i], &total)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->allocations_len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_api.allocation_fact item = core->allocations[i];
+        if (item.history.len > current->selected->limits.e ||
+            item.history.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.history_fact)) {
+            return stop(current, item.key, false, "ownership history storage exceeds its bound");
+        }
+        if (!add_price(current, &total, 7) || !place_price(current, item.owner.place, &total)) {
+            return false;
+        }
+        u64 mut j = 0;
+        while (j < item.history.len) {
+            if (!spend(current, 1) || !add_price(current, &total, 1) ||
+                !place_price(current, item.history[j].before.place, &total) ||
+                !place_price(current, item.history[j].after.place, &total)) { return false; }
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->regions_len) {
+        if (!spend(current, 1) || !add_price(current, &total, 4) ||
+            !region_price(current, core->regions[i], &total)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->edges_len) {
+        if (!spend(current, 1) || !add_price(current, &total, 4) ||
+            !place_price(current, core->edges[i].place, &total) ||
+            !region_price(current, core->edges[i].range, &total)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->shapes_len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_api.shape_description item = core->shapes[i];
+        if (item.parameters.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id) ||
+            item.clauses.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id) ||
+            item.descendants.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id)) {
+            return stop(current, item.key, false, "ownership shape storage exceeds its bound");
+        }
+        if (!add_price(current, &total, 12) || !add_price(current, &total, item.parameters.len) ||
+            !add_price(current, &total, item.clauses.len) ||
+            !add_price(current, &total, item.descendants.len)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < core->guards_len) {
+        if (!spend(current, 1)) { return false; }
+        if (core->guards[i].positive.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id) ||
+            core->guards[i].negative.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id)) {
+            return stop(current, core->guards[i].key, false,
+                "ownership guard storage exceeds its bound");
+        }
+        if (!add_price(current, &total, 10) ||
+            !add_price(current, &total, core->guards[i].positive.len) ||
+            !add_price(current, &total, core->guards[i].negative.len)) { return false; }
+        i += 1;
+    }
+    if (!add_price(current, &total, core->sources_len) ||
+        !add_price(current, &total, core->sources_len) ||
+        !add_price(current, &total, core->sources_len) ||
+        !add_price(current, &total, core->nodes_len) ||
+        !add_price(current, &total, core->nodes_len) ||
+        !add_price(current, &total, core->nodes_len) ||
+        !add_price(current, &total, core->predicates_len) ||
+        !add_price(current, &total, core->predicates_len) ||
+        !add_price(current, &total, core->predicates_len) ||
+        !add_price(current, &total, core->correlations_len) ||
+        !add_price(current, &total, core->correlations_len) ||
+        !add_price(current, &total, core->correlations_len) ||
+        !add_price(current, &total, core->losses_len) ||
+        !add_price(current, &total, core->losses_len) ||
+        !add_price(current, &total, core->losses_len)) { return false; }
+    return add_price(current, price, total);
+}
+fn fragment_price(work mut* current, fragment@ values, u64 mut* price) bool {
+    if (values.len > current->selected->limits.r ||
+        values.len > types.TYPE_MAX_SIZE / sizeof(fragment)) {
+        return stop(current, ownership_api.entity_id{}, false,
+            "byte fragment storage exceeds its bound");
+    }
+    u64 mut i = 0;
+    while (i < values.len) {
+        if (!spend(current, 1)) { return false; }
+        if (values[i].begin > values[i].end ||
+            values[i].original_begin > U64_MAX - (values[i].end - values[i].begin)) {
+            return stop(current, values[i].value.place.root, false,
+                "original fragment byte positions overflow");
+        }
+        if (!add_price(current, price, 2) ||
+            !value_price(current, values[i].value, price)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn clone_price(work mut* current, state* input, u64 extra_representations, u64 extra_snapshots,
+    u64 mut* price) bool {
+    if (!spend(current, 1)) { return false; }
+    if (input->core == null || input->raw.core != cast(input->core, ownership_state.state*) ||
+        input->bytes.representations_len > input->bytes.representations.len ||
+        input->bytes.snapshots_len > input->bytes.snapshots.len ||
+        input->bytes.facts.contents_len > current->selected->limits.r ||
+        input->raw.leaves_len > input->raw.leaves.len ||
+        extra_representations > current->selected->limits.r ||
+        input->bytes.representations_len > current->selected->limits.r - extra_representations ||
+        extra_snapshots > current->selected->limits.r ||
+        input->bytes.snapshots_len > current->selected->limits.r - extra_snapshots ||
+        input->bytes.representations_len + extra_representations >
+            types.TYPE_MAX_SIZE / sizeof(representation) ||
+        input->bytes.snapshots_len + extra_snapshots > types.TYPE_MAX_SIZE / sizeof(snapshot)) {
+        return stop(current, ownership_api.entity_id{}, false, "paired byte storage is invalid");
+    }
+    u64 mut total = 8;
+    if (!core_price(current, input->core, &total) ||
+        !core_price(current, &input->bytes.facts, &total)) { return false; }
+    ownership_raw.calculation mut raw_work = ownership_raw.calculation{
+        &input->raw, current->service, current->selected, current->proof};
+    ownership_raw.address@ none = {};
+    u64 mut raw_price = 0;
+    bool measured = ownership_raw.measure_context_work(&raw_work, none, 0, &raw_price);
+    current->proof = raw_work.proof;
+    if (!measured || !add_price(current, &total, raw_price)) { return false; }
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.origin item = input->raw.origins[i];
+        if (item.first_leaf > input->raw.leaves_len ||
+            item.leaf_count > input->raw.leaves_len - item.first_leaf) {
+            return stop(current, item.source, false, "raw origin leaf range remains unproved");
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < input->bytes.representations_len) {
+        representation* item = &input->bytes.representations[i];
+        if (!spend(current, 1)) { return false; }
+        if (item->fragments_len > item->fragments.len) {
+            return stop(current, item->selected.source, false,
+                "representation fragment count remains unproved");
+        }
+        if (!place_price(current, item->selected.place, &total) ||
+            !fragment_price(current, item->fragments[..item->fragments_len], &total)) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < input->bytes.snapshots_len) {
+        snapshot* item = &input->bytes.snapshots[i];
+        if (!spend(current, 1)) { return false; }
+        if (item->fragments_len > item->fragments.len) {
+            return stop(current, ownership_api.entity_id{}, false,
+                "snapshot fragment count remains unproved");
+        }
+        if (!add_price(current, &total, 2) ||
+            !fragment_price(current, item->fragments[..item->fragments_len], &total)) {
+            return false;
+        }
+        i += 1;
+    }
+    *price = total;
+    return require_paired(current, input, retained_edit{});
+}
+fn copy_fragment(ownership_state.state mut* facts, fragment input) fragment {
+    fragment mut out = input;
+    out.value = ownership_state.copy_contents(facts, input.value);
+    return out;
+}
+fn copy_snapshot(snapshot* input) snapshot {
+    snapshot mut out = {};
+    out.key = input->key;
+    out.bytes = input->bytes;
+    out.facts = ownership_state.empty();
+    out.fragments = new(fragment, input->fragments_len);
+    out.fragments_len = input->fragments_len;
+    u64 mut i = 0;
+    while (i < input->fragments_len) {
+        out.fragments[i] = copy_fragment(&out.facts, input->fragments[i]);
+        i += 1;
+    }
+    return out;
+}
+fn copy_pair(state* input, u64 extra_representations, u64 extra_snapshots) state {
+    state mut out = {};
+    out.core = new(ownership_state.state);
+    *out.core = ownership_state.clone(input->core);
+    out.raw = ownership_raw.clone(&input->raw, out.core);
+    out.bytes.facts = ownership_state.empty();
+    u64 mut empty_i = 0;
+    while (empty_i < input->bytes.facts.contents_len) {
+        ownership_state.append_contents(&out.bytes.facts,
+            input->bytes.facts.contents[empty_i]);
+        empty_i += 1;
+    }
+    out.bytes.representations = new(representation,
+        input->bytes.representations_len + extra_representations);
+    out.bytes.representations_len = input->bytes.representations_len;
+    out.bytes.snapshots = new(snapshot, input->bytes.snapshots_len + extra_snapshots);
+    out.bytes.snapshots_len = input->bytes.snapshots_len;
+    u64 mut i = 0;
+    while (i < input->bytes.representations_len) {
+        representation* original = &input->bytes.representations[i];
+        representation mut next = {};
+        next.selected = original->selected;
+        next.selected.place = ownership_state.copy_place(&out.bytes.facts,
+            original->selected.place);
+        next.fragments = new(fragment, original->fragments_len);
+        next.fragments_len = original->fragments_len;
+        u64 mut j = 0;
+        while (j < original->fragments_len) {
+            next.fragments[j] = copy_fragment(&out.bytes.facts, original->fragments[j]);
+            j += 1;
+        }
+        out.bytes.representations[i] = move(next);
+        i += 1;
+    }
+    i = 0;
+    while (i < input->bytes.snapshots_len) {
+        out.bytes.snapshots[i] = copy_snapshot(&input->bytes.snapshots[i]);
+        i += 1;
+    }
+    return out;
+}
+fn clone(state* input, ownership_api.services* service, ownership_raw.request* supplied) result {
+    result mut out = {};
+    if (input->core == null) { return out; }
+    ownership_raw.work_cursor mut cursor = {};
+    out.proof = ownership_raw.begin_work(input->core, service, supplied, &cursor);
+    work mut current = work{service, &cursor.selected, out.proof, 0};
+    u64 mut price = 0;
+    if (!ownership_api.successful(out.proof) || !clone_price(&current, input, 0, 0, &price) ||
+        !spend(&current, price)) { out.proof = current.proof; return out; }
+    out.states = new(state, 1);
+    out.states[0] = copy_pair(input, 0, 0);
+    out.proof = current.proof;
+    return out;
+}
+fn pair(ownership_state.state* core, ownership_raw.context* raw,
+    ownership_api.services* service, ownership_raw.request* supplied) result {
+    result mut out = {};
+    ownership_raw.work_cursor mut cursor = {};
+    out.proof = ownership_raw.begin_work(core, service, supplied, &cursor);
+    work mut current = work{service, &cursor.selected, out.proof, 0};
+    if (!ownership_api.successful(out.proof)) { return out; }
+    if (raw->core != core) {
+        stop(&current, ownership_api.entity_id{}, false, "raw context has another core");
+        out.proof = current.proof;
+        return out;
+    }
+    u64 mut price = 8;
+    if (!core_price(&current, core, &price)) { out.proof = current.proof; return out; }
+    ownership_raw.calculation mut raw_work = ownership_raw.calculation{
+        raw, service, &cursor.selected, current.proof};
+    ownership_raw.address@ none = {};
+    u64 mut raw_price = 0;
+    bool measured = ownership_raw.measure_context_work(&raw_work, none, 0, &raw_price);
+    current.proof = raw_work.proof;
+    ledger empty_ledger = ledger{.facts = ownership_state.empty()};
+    u64 mut regions = 0;
+    if (!measured || !add_price(&current, &price, raw_price) ||
+        !paired_regions(&current, core, raw, &empty_ledger, retained_edit{}, &regions) ||
+        !retain(&current, regions) || !spend(&current, price)) {
+        out.proof = current.proof;
+        return out;
+    }
+    out.states = new(state, 1);
+    out.states[0].core = new(ownership_state.state);
+    *out.states[0].core = ownership_state.clone(core);
+    out.states[0].raw = ownership_raw.clone(raw, out.states[0].core);
+    out.states[0].bytes.facts = ownership_state.empty();
+    out.proof = current.proof;
+    return out;
+}
+fn same_place(work mut* current, ownership_api.place_path left,
+    ownership_api.place_path right) bool {
+    u64 mut price = 3;
+    if (!place_price(current, left, &price) || !place_price(current, right, &price) ||
+        !spend(current, price)) { return false; }
+    return ownership_state.same_place(left, right);
+}
+fn same_value(work mut* current, ownership_api.contents_fact left,
+    ownership_api.contents_fact right) bool {
+    u64 mut price = 4;
+    if (!value_price(current, left, &price) || !value_price(current, right, &price) ||
+        !spend(current, price)) { return false; }
+    return ownership_state.same_contents(left, right);
+}
+fn same_storage(window left, window right) bool {
+    return ownership_raw.same_key(left.source, right.source);
+}
+// Reads a complete nonnegative constant. A symbolic or invalid expression gives false.
+fn constant(ownership_raw.expression value, u64 mut* out) bool {
+    *out = 0;
+    if (!value.complete || value.terms.len != 0 || !value.constant.valid ||
+        value.constant.negative) { return false; }
+    *out = value.constant.magnitude;
+    return true;
+}
+// A count other than literal one repeats the captured layout, whatever the flag says.
+fn repeats(ownership_raw.origin captured) bool {
+    u64 mut count = 0;
+    return captured.repeated || !constant(captured.count, &count) || count != 1;
+}
+// Gives the element count of a repeated origin that starts at zero and ends at count * stride.
+fn element_count(ownership_raw.origin captured, u64 stride, u64 mut* count) bool {
+    u64 mut first = 0;
+    u64 mut end = 0;
+    return constant(captured.count, count) && constant(captured.begin, &first) &&
+        constant(captured.end, &end) && *count != 0 && stride != 0 &&
+        *count <= U64_MAX / stride && first == 0 && end == *count * stride;
+}
+fn overlaps(u64 a, u64 b, u64 c, u64 d) bool {
+    return a < b && c < d && a < d && c < b;
+}
+fn valid_window(work mut* current, state* input, window selected) bool {
+    if (!spend(current, 1)) { return false; }
+    if (!selected.correspondence || selected.begin > selected.end ||
+        selected.source.kind != ownership_api.entity_kind.source || selected.ty == null ||
+        selected.alignment == 0) {
+        return stop(current, selected.source, false, "byte window correspondence remains unproved");
+    }
+    ownership_raw.address value = ownership_raw.address{selected.source,
+        ownership_raw.literal(selected.begin), ownership_raw.literal(selected.begin),
+        ownership_raw.literal(selected.end), selected.ty, selected.alignment, true};
+    current->proof = ownership_raw.live(&input->raw, current->service, value, current->selected);
+    return ownership_api.successful(current->proof);
+}
+fn reference_size(work mut* current, window selected, u64 mut* bytes) bool {
+    if (!spend(current, 1)) { return false; }
+    if (selected.ty == null || !types.type_is_reference(selected.ty)) {
+        return stop(current, selected.source, false, "byte interpretation needs a reference type");
+    }
+    current->proof = ownership_raw.size(selected.ty, current->service, current->selected, bytes);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    if (*bytes != selected.end - selected.begin || selected.alignment < 8 ||
+        selected.begin % 8 != 0) {
+        return stop(current, selected.source, false,
+            "reference window size or alignment remains unproved");
+    }
+    return true;
+}
+fn representation_index(work mut* current, ledger* saved, window selected) u64 {
+    u64 mut i = 0;
+    while (i < saved->representations_len) {
+        if (!spend(current, 1)) { return U64_MAX; }
+        window candidate = saved->representations[i].selected;
+        if (same_storage(candidate, selected) && candidate.begin == selected.begin &&
+            candidate.end == selected.end) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+fn snapshot_index(work mut* current, ledger* saved, u64 key) u64 {
+    u64 mut i = 0;
+    while (i < saved->snapshots_len) {
+        if (!spend(current, 1)) { return U64_MAX; }
+        if (saved->snapshots[i].key == key) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+fn seed_effect(work mut* current, state mut* input, byte_effect* effect) bool {
+    if (!valid_window(current, input, effect->selected)) { return false; }
+    u64 mut size = 0;
+    if (!reference_size(current, effect->selected, &size)) { return false; }
+    u64 index = representation_index(current, &input->bytes, effect->selected);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    if (index != U64_MAX || input->bytes.representations_len == input->bytes.representations.len) {
+        return stop(current, effect->selected.source, false, "byte representation already exists");
+    }
+    u64 mut price = 4;
+    if (!place_price(current, effect->selected.place, &price) ||
+        !value_price(current, effect->value, &price) || !spend(current, price) ||
+        !require_paired(current, input, retained_edit{.kind = retained_edit_kind.seed,
+            .selected = effect->selected, .value = effect->value,
+            .known = effect->checked_value})) { return false; }
+    representation mut item = {};
+    item.selected = effect->selected;
+    item.selected.place = ownership_state.copy_place(&input->bytes.facts, item.selected.place);
+    item.fragments = new(fragment, 1);
+    if (effect->checked_value) {
+        if (!ownership_transfer.empty_owner_proved(effect->value) &&
+            (effect->value.kind != ownership_api.contents_kind.reference ||
+            effect->value.value_version.kind != ownership_api.entity_kind.value ||
+            effect->value.borrows.len == 0)) {
+            input->bytes.representations[input->bytes.representations_len] = move(item);
+            input->bytes.representations_len += 1;
+            return stop(current, effect->selected.source, false,
+                "initial reference metadata is incomplete");
+        }
+        item.fragments[0] = fragment{item.selected.begin, item.selected.end, 0,
+            item.selected.ty, ownership_state.copy_contents(&input->bytes.facts, effect->value),
+                true};
+        item.fragments_len = 1;
+    }
+    input->bytes.representations[input->bytes.representations_len] = move(item);
+    input->bytes.representations_len += 1;
+    return true;
+}
+fn collect(work mut* current, state mut* input, window selected, u64 key) bool {
+    if (!valid_window(current, input, selected)) { return false; }
+    u64 existing = snapshot_index(current, &input->bytes, key);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    if (key == 0 || existing != U64_MAX ||
+        input->bytes.snapshots_len == input->bytes.snapshots.len) {
+        return stop(current, selected.source, false, "byte snapshot identity is invalid");
+    }
+    u64 mut known = 0;
+    u64 mut i = 0;
+    while (i < input->bytes.representations_len) {
+        if (!spend(current, 1)) { return false; }
+        representation* item = &input->bytes.representations[i];
+        if (same_storage(item->selected, selected)) {
+            if (item->fragments_len > current->selected->limits.r - known) {
+                return stop(current, selected.source, false,
+                    "byte snapshot fragments exceed their bound");
+            }
+            known += item->fragments_len;
+        }
+        i += 1;
+    }
+    // A gap can precede each fragment and follow the last one. Each part holds one byte or more.
+    if (known > (U64_MAX - 1) / 2) {
+        return stop(current, selected.source, false, "byte snapshot fragments exceed their bound");
+    }
+    u64 mut capacity = known * 2 + 1;
+    if (capacity > selected.end - selected.begin) { capacity = selected.end - selected.begin; }
+    // Paired R already bounds the parts. This bound also keeps the vector within R.
+    if (capacity > current->selected->limits.r) { capacity = current->selected->limits.r; }
+    if (capacity > types.TYPE_MAX_SIZE / sizeof(fragment) ||
+        !require_paired(current, input, retained_edit{.kind = retained_edit_kind.capture,
+            .selected = selected, .snapshot_key = key}) || !spend(current, 3)) { return false; }
+    u64 index = input->bytes.snapshots_len;
+    input->bytes.snapshots_len += 1;
+    snapshot mut* saved = &input->bytes.snapshots[index];
+    saved->key = key;
+    saved->bytes = selected.end - selected.begin;
+    saved->facts = ownership_state.empty();
+    saved->fragments = new(fragment, capacity);
+    current->phase = 3;
+    u64 mut cursor = selected.begin;
+    while (cursor < selected.end) {
+        fragment mut part = {};
+        if (!captured_part(current, &input->bytes, selected, cursor, &part)) { return false; }
+        if (saved->fragments_len == saved->fragments.len) {
+            return stop(current, selected.source, false, "byte snapshot coverage is invalid");
+        }
+        u64 mut price = 2;
+        if (!value_price(current, part.value, &price) || !spend(current, price)) { return false; }
+        saved->fragments[saved->fragments_len] = copy_fragment(&saved->facts, part);
+        saved->fragments_len += 1;
+        if (!spend(current, 1)) { return false; }
+        cursor = selected.begin + part.end;
+    }
+    return true;
+}
+fn unchanged_bytes(work mut* current, representation* target, snapshot* saved,
+    window selected, u64 source_begin) bool {
+    u64 mut cursor = selected.begin;
+    while (cursor < selected.end) {
+        if (!spend(current, 1)) { return false; }
+        bool mut found = false;
+        u64 mut i = 0;
+        while (i < target->fragments_len && !found) {
+            if (!spend(current, 1)) { return false; }
+            fragment left = target->fragments[i];
+            u64 offset = source_begin + (cursor - selected.begin);
+            u64 mut j = 0;
+            while (j < saved->fragments_len && !found) {
+                if (!spend(current, 1)) { return false; }
+                fragment right = saved->fragments[j];
+                if (left.known && right.known && left.begin <= cursor && cursor < left.end &&
+                    right.begin <= offset && offset < right.end &&
+                    left.original_type == right.original_type &&
+                    left.original_begin + (cursor - left.begin) ==
+                    right.original_begin + (offset - right.begin) && same_value(current,
+                    left.value, right.value)) {
+                    u64 mut end = left.end < selected.end ? left.end : selected.end;
+                    u64 available = right.end - offset;
+                    if (end - cursor > available) { end = cursor + available; }
+                    cursor = end;
+                    found = true;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        if (!found) { return false; }
+    }
+    return true;
+}
+fn definite_owner(ownership_api.allocation_fact item) bool {
+    if (item.owner.place.residual || item.validity != ownership_api.validity_kind.live ||
+        item.count.zero ||
+        (!item.count.one && !item.count.many)) { return false; }
+    u64 mut i = 0;
+    while (i < item.owner.place.projections.len) {
+        ownership_api.projection part = item.owner.place.projections[i];
+        if (part.kind != ownership_api.projection_kind.field &&
+            (part.kind != ownership_api.projection_kind.fixed_index ||
+            part.index.kind != ownership_api.fact_kind.exact || part.index.value < 0)) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn owner_empty(work mut* current, state mut* input, ownership_api.place_path path) bool {
+    u64 mut price = 1;
+    if (!core_price(current, input->core, &price) || !place_price(current, path, &price) ||
+        !add_price(current, &price, input->core->allocations_len) ||
+        input->core->allocations_len == U64_MAX ||
+        price > U64_MAX / (input->core->allocations_len + 1) ||
+        !spend(current, price * (input->core->allocations_len + 1))) { return false; }
+    u64 mut i = 0;
+    while (i < input->core->allocations_len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_api.allocation_fact item = input->core->allocations[i];
+        if (item.obligation) {
+            ownership_places.overlap relation = ownership_places.compare(item.owner.place,
+                path, true);
+            if (relation == ownership_places.overlap.possible) {
+                return stop(current, item.key, false, "owner overlap remains unproved");
+            }
+            if (relation != ownership_places.overlap.disjoint) {
+                return stop(current, item.key, definite_owner(item),
+                    "byte write would discard a live owner");
+            }
+        }
+        i += 1;
+    }
+    u64 mut proof_price = 1;
+    if (!core_price(current, &input->bytes.facts, &proof_price) ||
+        !place_price(current, path, &proof_price) || !spend(current, proof_price)) {
+        return false;
+    }
+    u64 saved = ownership_transfer.contents_index(&input->bytes.facts, path);
+    if (saved != U64_MAX &&
+        ownership_transfer.empty_owner_proved(input->bytes.facts.contents[saved])) {
+        return true;
+    }
+    u64 content = ownership_transfer.contents_index(input->core, path);
+    if (content == U64_MAX ||
+        !ownership_transfer.empty_owner_proved(input->core->contents[content])) {
+        return stop(current, path.root, false, "overlapping owner emptiness remains unproved");
+    }
+    if (input->bytes.facts.contents_len >= current->selected->limits.r ||
+        input->bytes.facts.contents_len >=
+            types.TYPE_MAX_SIZE / sizeof(ownership_api.contents_fact) / 2) {
+        return stop(current, path.root, false, "empty owner proof storage exceeds its bound");
+    }
+    u64 mut copy_price = 4;
+    if (!value_price(current, input->core->contents[content], &copy_price) ||
+        !spend(current, copy_price) || !require_paired(current, input,
+            retained_edit{.value = input->core->contents[content], .add_value = true})) {
+        return false;
+    }
+    ownership_state.append_contents(&input->bytes.facts, input->core->contents[content]);
+    return true;
+}
+// An owner at or inside the window's place can hold window bytes. An owner above that place
+// designates the window's storage, and a dereference below it leaves the window's storage.
+fn owner_in_window(ownership_api.place_path owner, ownership_api.place_path window) bool {
+    if (!ownership_raw.same_key(owner.root, window.root)) { return false; }
+    if (ownership_places.begins(owner, window)) {
+        u64 mut i = window.projections.len;
+        while (i < owner.projections.len) {
+            if (owner.projections[i].kind == ownership_api.projection_kind.dereference) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    if (ownership_places.begins(window, owner)) { return false; }
+    return ownership_places.compare(owner, window, true) != ownership_places.overlap.disjoint;
+}
+// Finds an owning leaf of the window's origin at the owner place.
+fn owner_leaf(work mut* current, state* input, ownership_api.entity_id source,
+    ownership_api.place_path owner) bool {
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.origin item = input->raw.origins[i];
+        u64 mut j = 0;
+        while (ownership_raw.same_key(item.source, source) && j < item.leaf_count) {
+            ownership_raw.storage_leaf leaf = input->raw.leaves[item.first_leaf + j];
+            u64 mut price = 1;
+            if (!place_price(current, leaf.place, &price) || !spend(current, price)) {
+                return false;
+            }
+            if (leaf.owning && ownership_state.same_place(leaf.place, owner)) { return true; }
+            j += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+fn owner_guard(work mut* current, state mut* input, window selected, bool unchanged) bool {
+    if (unchanged) { return spend(current, 1); }
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.origin item = input->raw.origins[i];
+        if (ownership_raw.same_key(item.source, selected.source)) {
+            u64 mut j = 0;
+            while (j < item.leaf_count) {
+                if (!spend(current, 1)) { return false; }
+                ownership_raw.storage_leaf leaf = input->raw.leaves[item.first_leaf + j];
+                u64 mut count = 0;
+                if (leaf.owning) {
+                    if (!constant(item.count, &count) || count != 1) {
+                        return stop(current, selected.source, false,
+                            "owner overlap needs a resolved element window");
+                    }
+                    if (overlaps(selected.begin, selected.end, leaf.begin, leaf.end) &&
+                        !owner_empty(current, input, leaf.place)) { return false; }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < input->core->allocations_len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_api.allocation_fact item = input->core->allocations[i];
+        if (item.obligation && ownership_state.has_residual(item.owner.place) &&
+            ownership_raw.same_key(item.owner.place.root, selected.place.root)) {
+            return stop(current, item.key, false, "residual owner overlap remains unproved");
+        }
+        u64 mut price = 1;
+        if (!place_price(current, item.owner.place, &price) ||
+            !place_price(current, selected.place, &price) || !spend(current, price)) {
+            return false;
+        }
+        if (item.obligation && owner_in_window(item.owner.place, selected.place) &&
+            !owner_leaf(current, input, selected.source, item.owner.place)) {
+            if (ownership_api.successful(current->proof)) {
+                return stop(current, item.key, false, "owner overlap needs an owning leaf");
+            }
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+// Checks the snapshot bytes that land on each owning leaf. Other copied bytes land elsewhere.
+fn owner_bytes(work mut* current, state* input, window selected, snapshot* saved,
+    u64 source_begin) bool {
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.origin original = input->raw.origins[i];
+        if (ownership_raw.same_key(original.source, selected.source)) {
+            u64 mut j = 0;
+            while (j < original.leaf_count) {
+                if (!spend(current, 1)) { return false; }
+                ownership_raw.storage_leaf leaf = input->raw.leaves[original.first_leaf + j];
+                if (leaf.owning && overlaps(selected.begin, selected.end, leaf.begin, leaf.end)) {
+                    // The write range lies inside the snapshot, so these offsets cannot overflow.
+                    u64 low = selected.begin > leaf.begin ? selected.begin : leaf.begin;
+                    u64 high = selected.end < leaf.end ? selected.end : leaf.end;
+                    u64 from = source_begin + (low - selected.begin);
+                    u64 to = source_begin + (high - selected.begin);
+                    u64 mut k = 0;
+                    while (k < saved->fragments_len) {
+                        if (!spend(current, 1)) { return false; }
+                        fragment part = saved->fragments[k];
+                        if (overlaps(part.begin, part.end, from, to) && (!part.known ||
+                            !ownership_transfer.empty_owner_proved(part.value))) {
+                            return stop(current, leaf.place.root, part.known,
+                                "raw bytes cannot create an owner or semantic move");
+                        }
+                        k += 1;
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+fn append_fragment(work mut* current, ledger mut* store, representation mut* target,
+    fragment value) bool {
+    if (value.begin == value.end) { return true; }
+    if (value.begin > value.end ||
+        value.original_begin > U64_MAX - (value.end - value.begin) ||
+        target->fragments_len == target->fragments.len) {
+        return stop(current, target->selected.source, false, "byte fragment interval is invalid");
+    }
+    u64 mut price = 2;
+    if (!value_price(current, value.value, &price) || !spend(current, price)) { return false; }
+    target->fragments[target->fragments_len] = copy_fragment(&store->facts, value);
+    target->fragments_len += 1;
+    current->phase = 2;
+    return spend(current, 1);
+}
+fn clipped(fragment input, u64 begin, u64 end) fragment {
+    fragment mut out = input;
+    out.original_begin += begin - input.begin;
+    out.begin = begin;
+    out.end = end;
+    return out;
+}
+fn replacement_storage(work mut* current, representation* target, window selected,
+    fragment@ fragments, u64 source_begin, u64 mut* count) bool {
+    *count = 0;
+    if (!spend(current, 1)) { return false; }
+    if (selected.begin > selected.end ||
+        source_begin > U64_MAX - (selected.end - selected.begin) ||
+        target->fragments_len > target->fragments.len ||
+        target->fragments_len > types.TYPE_MAX_SIZE / sizeof(fragment) ||
+        fragments.len > types.TYPE_MAX_SIZE / sizeof(fragment)) {
+        return stop(current, selected.source, false, "split byte storage remains unproved");
+    }
+    u64 mut i = 0;
+    while (i < target->fragments_len) {
+        if (!spend(current, 1)) { return false; }
+        fragment value = target->fragments[i];
+        if (value.begin > value.end ||
+            value.original_begin > U64_MAX - (value.end - value.begin)) {
+            return stop(current, selected.source, false, "split byte interval remains unproved");
+        }
+        u64 additions = !overlaps(value.begin, value.end, selected.begin, selected.end) ?
+            (value.begin < value.end ? 1 : 0) :
+            (value.begin < selected.begin ? 1 : 0) + (selected.end < value.end ? 1 : 0);
+        if (!add_price(current, count, additions)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < fragments.len) {
+        if (!spend(current, 1)) { return false; }
+        fragment value = fragments[i];
+        if (value.begin > value.end ||
+            value.original_begin > U64_MAX - (value.end - value.begin)) {
+            return stop(current, selected.source, false, "split byte interval remains unproved");
+        }
+        u64 mut end = source_begin + (selected.end - selected.begin);
+        u64 begin = value.begin > source_begin ? value.begin : source_begin;
+        if (value.end < end) { end = value.end; }
+        if (begin < end) {
+            u64 mapped_begin = selected.begin + (begin - source_begin);
+            u64 mapped_end = selected.begin + (end - source_begin);
+            if (mapped_begin < target->selected.end && target->selected.begin < mapped_end &&
+                !add_price(current, count, 1)) { return false; }
+        }
+        i += 1;
+    }
+    if (*count > current->selected->limits.r ||
+        *count > types.TYPE_MAX_SIZE / sizeof(fragment)) {
+        return stop(current, selected.source, false, "split byte fragments exceed their bound");
+    }
+    return true;
+}
+fn replace_fragments(work mut* current, state mut* input, representation mut* target,
+    window selected, fragment@ fragments, u64 source_begin) bool {
+    u64 mut capacity = 0;
+    if (!require_paired(current, input, retained_edit{.kind = retained_edit_kind.replacement,
+            .target = target, .selected = selected, .incoming = fragments,
+            .source_begin = source_begin}) ||
+        !replacement_storage(current, target, selected, fragments, source_begin, &capacity) ||
+        !spend(current, 2)) { return false; }
+    fragment mut@ own previous = move(target->fragments);
+    u64 previous_len = target->fragments_len;
+    target->fragments = new(fragment, capacity);
+    target->fragments_len = 0;
+    current->phase = 4;
+    bool mut valid = spend(current, 1);
+    u64 mut i = 0;
+    while (i < previous_len && valid) {
+        valid = spend(current, 1);
+        if (!valid) { break; }
+        fragment value = previous[i];
+        if (!overlaps(value.begin, value.end, selected.begin, selected.end)) {
+            valid = append_fragment(current, &input->bytes, target, value);
+        } else {
+            if (value.begin < selected.begin) {
+                valid = append_fragment(current, &input->bytes, target,
+                    clipped(value, value.begin, selected.begin));
+            }
+            if (valid && selected.end < value.end) {
+                valid = append_fragment(current, &input->bytes, target,
+                    clipped(value, selected.end, value.end));
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < fragments.len && valid) {
+        valid = spend(current, 1);
+        if (!valid) { break; }
+        fragment source = fragments[i];
+        u64 mut end = source_begin + (selected.end - selected.begin);
+        u64 begin = source.begin > source_begin ? source.begin : source_begin;
+        if (source.end < end) { end = source.end; }
+        if (begin < end) {
+            fragment mut part = clipped(source, begin, end);
+            part.begin = selected.begin + (begin - source_begin);
+            part.end = selected.begin + (end - source_begin);
+            if (part.end > target->selected.begin && part.begin < target->selected.end) {
+                if (part.begin < target->selected.begin) {
+                    part = clipped(part, target->selected.begin, part.end);
+                }
+                if (part.end > target->selected.end) { part.end = target->selected.end; }
+            } else { part.end = part.begin; }
+            if (part.begin < part.end) {
+                valid = append_fragment(current, &input->bytes, target, part);
+            }
+        }
+        i += 1;
+    }
+    del(previous);
+    return valid;
+}
+fn copy_value(ownership_state.state mut* store, ownership_api.contents_fact input,
+    ownership_api.place_path destination) ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = input;
+    out.place = ownership_state.copy_place(store, destination);
+    if (input.borrows.len == 0) { return out; }
+    ownership_state.slice_block mut* own block = new(ownership_state.slice_block);
+    block->borrows = new(ownership_api.borrow_relation, input.borrows.len);
+    u64 mut i = 0;
+    while (i < input.borrows.len) {
+        block->borrows[i] = ownership_state.copy_borrow(store, input.borrows[i]);
+        block->borrows[i].containing = ownership_state.copy_place(store, destination);
+        i += 1;
+    }
+    out.borrows = block->borrows[..];
+    ownership_state.keep(store, move(block));
+    return out;
+}
+fn reconstruct(work mut* current, representation* item, ownership_api.contents_fact mut* value,
+    types.node* mut* original_type) bool {
+    u64 mut cursor = item->selected.begin;
+    bool mut first = true;
+    while (cursor < item->selected.end) {
+        bool mut found = false;
+        u64 mut i = 0;
+        while (i < item->fragments_len && !found) {
+            if (!spend(current, 1)) { return false; }
+            fragment part = item->fragments[i];
+            if (part.begin > part.end ||
+                part.original_begin > U64_MAX - (part.end - part.begin)) {
+                return stop(current, item->selected.source, false,
+                    "reference fragment byte positions overflow");
+            }
+            if (part.begin <= cursor && cursor < part.end) {
+                if (!part.known || part.original_begin + (cursor - part.begin) !=
+                    cursor - item->selected.begin) { return false; }
+                if (first) {
+                    *value = part.value;
+                    *original_type = part.original_type;
+                    first = false;
+                } else if (part.original_type != *original_type ||
+                    !same_value(current, *value, part.value)) { return false; }
+                cursor = part.end < item->selected.end ? part.end : item->selected.end;
+                found = true;
+            }
+            i += 1;
+        }
+        if (!found) { return false; }
+    }
+    return !first;
+}
+fn publication_path(work mut* current, ownership_api.place_path path) bool {
+    u64 mut price = 0;
+    if (!place_price(current, path, &price) || !spend(current, price)) { return false; }
+    return !ownership_state.has_residual(path);
+}
+fn publication_leaf(work mut* current, state mut* input, window selected,
+    u64 mut* found, types.node* mut* actual) bool {
+    *found = U64_MAX;
+    *actual = null;
+    if (input->raw.leaves_len > input->raw.leaves.len || selected.begin >= selected.end) {
+        return true;
+    }
+    u64 mut origin = U64_MAX;
+    bool mut duplicate = false;
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        if (ownership_raw.same_key(input->raw.origins[i].source, selected.source)) {
+            if (origin != U64_MAX) { duplicate = true; }
+            origin = i;
+        }
+        i += 1;
+    }
+    if (origin == U64_MAX || duplicate) { return true; }
+    ownership_raw.origin captured = input->raw.origins[origin];
+    if (!captured.correspondence || captured.residual || captured.place.residual ||
+        captured.layout == null || captured.first_leaf > input->raw.leaves_len ||
+        captured.leaf_count > input->raw.leaves_len - captured.first_leaf) { return true; }
+    if (!publication_path(current, captured.place)) {
+        return ownership_api.successful(current->proof);
+    }
+    u64 mut stride = 0;
+    current->proof = ownership_raw.size(captured.layout, current->service, current->selected,
+        &stride);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    u64 mut index = 0;
+    u64 mut base = 0;
+    if (repeats(captured)) {
+        u64 mut count = 0;
+        if (!element_count(captured, stride, &count)) { return true; }
+        index = selected.begin / stride;
+        if (index >= count || index > 9223372036854775807) {
+            return true;
+        }
+        base = index * stride;
+    }
+    bool mut ambiguous = false;
+    i = 0;
+    while (i < captured.leaf_count) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.storage_leaf leaf = input->raw.leaves[captured.first_leaf + i];
+        if (!leaf.padding && leaf.ty != null && types.type_is_reference(leaf.ty) &&
+            leaf.begin < leaf.end && leaf.end <= stride && base <= U64_MAX - leaf.end &&
+            selected.begin == base + leaf.begin && selected.end == base + leaf.end) {
+            if (!publication_path(current, leaf.place)) {
+                *found = U64_MAX;
+                *actual = null;
+                return ownership_api.successful(current->proof);
+            }
+            u64 mut row = 0;
+            while (row < input->core->contents_len) {
+                if (!spend(current, 1)) { return false; }
+                window mut canonical = selected;
+                canonical.place = input->core->contents[row].place;
+                if (publication_path(current, canonical.place) &&
+                    typed_path(current, captured, leaf, canonical, index)) {
+                    if (*found == U64_MAX && !ambiguous) {
+                        *found = row;
+                        *actual = leaf.ty;
+                    } else {
+                        if (*found != U64_MAX && input->core->contents[*found].kind !=
+                            ownership_api.contents_kind.empty_owner) {
+                            input->core->contents[*found].kind =
+                                ownership_api.contents_kind.unknown;
+                        }
+                        if (input->core->contents[row].kind !=
+                            ownership_api.contents_kind.empty_owner) {
+                            input->core->contents[row].kind = ownership_api.contents_kind.unknown;
+                        }
+                        *found = U64_MAX;
+                        *actual = null;
+                        ambiguous = true;
+                    }
+                }
+                if (!ownership_api.successful(current->proof)) { return false; }
+                row += 1;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+fn publish_contents(work mut* current, state mut* input, representation* item) bool {
+    ownership_api.contents_fact mut value = {};
+    types.node* mut original = null;
+    bool complete = reconstruct(current, item, &value, &original);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    u64 mut row = U64_MAX;
+    types.node* mut actual = null;
+    if (!publication_leaf(current, input, item->selected, &row, &actual)) { return false; }
+    if (!complete || original == null || row == U64_MAX || actual == null) { return true; }
+    bool mut allowed = false;
+    bool mut adds_own = false;
+    if (!compare_type(current, actual, original, ownership_type_work.relation.cast_allowed,
+        &allowed) || (allowed && !compare_type(current, actual, original,
+        ownership_type_work.relation.adds_own, &adds_own))) { return false; }
+    if (!allowed || adds_own) {
+        if (input->core->contents[row].kind != ownership_api.contents_kind.empty_owner) {
+            input->core->contents[row].kind = ownership_api.contents_kind.unknown;
+        }
+        return true;
+    }
+    ownership_api.place_path canonical = input->core->contents[row].place;
+    u64 mut price = 4;
+    if (!mapped_price(current, value, canonical, &price) || !spend(current, price)) {
+        return false;
+    }
+    if (!require_paired(current, input, retained_edit{.value = value, .add_value = true,
+        .replace_core = true, .core_row = row})) { return false; }
+    input->core->contents[row] = copy_value(input->core, value, canonical);
+    return ownership_api.successful(current->proof);
+}
+fn write_effect(work mut* current, state mut* input, byte_effect* effect) bool {
+    window selected = effect->selected;
+    if (!valid_window(current, input, selected)) { return false; }
+    if (effect->kind == effect_kind.unchanged) {
+        return effect->unchanged_proved ? spend(current, 1) :
+            stop(current, selected.source, false, "unchanged bytes need correspondence proof");
+    }
+    snapshot* mut saved = null;
+    if (effect->kind == effect_kind.write) {
+        u64 index = snapshot_index(current, &input->bytes, effect->snapshot_key);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        if (index == U64_MAX) { return stop(current, selected.source, false,
+            "byte snapshot is missing"); }
+        saved = &input->bytes.snapshots[index];
+        if (effect->snapshot_begin > saved->bytes ||
+            selected.end - selected.begin > saved->bytes - effect->snapshot_begin) {
+            return stop(current, selected.source, false, "byte snapshot range exceeds its read");
+        }
+    }
+    if (selected.begin == selected.end) { return spend(current, 1); }
+    bool mut unchanged = false;
+    u64 mut i = 0;
+    while (saved != null && i < input->bytes.representations_len && !unchanged) {
+        if (!spend(current, 1)) { return false; }
+        representation* target = &input->bytes.representations[i];
+        if (same_storage(target->selected, selected) &&
+            target->selected.begin <= selected.begin && selected.end <= target->selected.end) {
+            unchanged = unchanged_bytes(current, target, saved, selected, effect->snapshot_begin);
+        }
+        i += 1;
+    }
+    if (!ownership_api.successful(current->proof) || !owner_guard(current, input, selected,
+        unchanged)) {
+        return false;
+    }
+    if (unchanged) { return spend(current, 1); }
+    if (saved != null && !owner_bytes(current, input, selected, saved, effect->snapshot_begin)) {
+        return false;
+    }
+    if (!invalidate_leaves(current, input, selected, effect->kind == effect_kind.zero)) {
+        return false;
+    }
+    i = 0;
+    while (i < input->bytes.representations_len) {
+        if (!spend(current, 1)) { return false; }
+        representation mut* target = &input->bytes.representations[i];
+        if (same_storage(target->selected, selected) &&
+            overlaps(target->selected.begin, target->selected.end, selected.begin, selected.end)) {
+            fragment[1] mut zero = {};
+            fragment@ mut incoming = {};
+            u64 mut source_begin = effect->snapshot_begin;
+            if (saved != null) { incoming = saved->fragments[..saved->fragments_len]; }
+            if (effect->kind == effect_kind.zero && target->selected.ty->is_own &&
+                selected.begin <= target->selected.begin && target->selected.end <= selected.end) {
+                ownership_api.contents_fact empty = ownership_transfer.empty_value(
+                    target->selected.place);
+                zero[0] = fragment{target->selected.begin - selected.begin,
+                    target->selected.end - selected.begin, 0, target->selected.ty, empty, true};
+                incoming = zero[..];
+                source_begin = 0;
+            }
+            if (!replace_fragments(current, input, target, selected, incoming,
+                source_begin) || !publish_contents(current, input, target)) { return false; }
+        }
+        i += 1;
+    }
+    return true;
+}
+// Sets each reference or aggregate parent between the captured object and the changed leaf to
+// unknown, as a typed write removes its aggregate parents. A prepaid caller spends nothing here.
+fn invalidate_parents(work mut* current, state mut* input, ownership_raw.origin captured,
+    ownership_api.place_path changed, bool prepaid, ownership_api.entity_id source) bool {
+    u64 mut row = 0;
+    while (row < input->core->contents_len) {
+        ownership_api.contents_fact mut* parent = &input->core->contents[row];
+        u64 mut price = 1;
+        if (!prepaid && (!place_price(current, parent->place, &price) ||
+            !spend(current, price))) { return false; }
+        if ((parent->kind == ownership_api.contents_kind.reference ||
+            parent->kind == ownership_api.contents_kind.aggregate) &&
+            ownership_raw.same_key(parent->place.root, captured.place.root)) {
+            if (ownership_state.has_residual(parent->place)) {
+                return stop(current, source, false,
+                    "reference write needs resolved leaf correspondence");
+            }
+            if (parent->place.projections.len < changed.projections.len &&
+                ownership_places.begins(parent->place, captured.place) &&
+                ownership_places.begins(changed, parent->place)) {
+                parent->kind = ownership_api.contents_kind.unknown;
+            }
+        }
+        row += 1;
+    }
+    return true;
+}
+fn repeated_mapping_refused(work mut* current, ownership_api.entity_id source) bool {
+    return stop(current, source, false,
+        "repeated reference window needs resolved element correspondence");
+}
+fn repeated_leaf(work mut* current, state mut* input, ownership_raw.origin captured,
+    ownership_raw.storage_leaf leaf, window selected) bool {
+    if (!captured.correspondence || captured.residual || captured.place.residual ||
+        leaf.place.residual || leaf.place.projections.len < captured.place.projections.len ||
+        !ownership_raw.same_key(leaf.place.root, captured.place.root)) {
+        return repeated_mapping_refused(current, captured.source);
+    }
+    u64 mut stride = 0;
+    current->proof = ownership_raw.size(captured.layout, current->service, current->selected,
+        &stride);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    u64 mut count = 0;
+    if (!element_count(captured, stride, &count) || leaf.begin > leaf.end ||
+        leaf.end > stride || selected.end > count * stride ||
+        leaf.place.projections.len >= current->selected->limits.d) {
+        return repeated_mapping_refused(current, captured.source);
+    }
+    u64 prefix = captured.place.projections.len;
+    u64 mut part = 0;
+    while (part < prefix) {
+        if (!spend(current, 1)) { return false; }
+        if (!ownership_state.same_projection(captured.place.projections[part],
+            leaf.place.projections[part])) {
+            return repeated_mapping_refused(current, captured.source);
+        }
+        part += 1;
+    }
+    u64 mut index = selected.begin / stride;
+    u64 last = (selected.end - 1) / stride;
+    while (index <= last) {
+        if (!spend(current, 1)) { return false; }
+        u64 base = index * stride;
+        if (overlaps(base + leaf.begin, base + leaf.end, selected.begin, selected.end)) {
+            if (index > 9223372036854775807) {
+                return repeated_mapping_refused(current, captured.source);
+            }
+            ownership_api.projection mut element = {};
+            element.kind = ownership_api.projection_kind.fixed_index;
+            element.index.kind = ownership_api.fact_kind.exact;
+            element.index.value = cast(index, i64);
+            u64 mut found = U64_MAX;
+            u64 mut row = 0;
+            while (row < input->core->contents_len) {
+                ownership_api.place_path path = input->core->contents[row].place;
+                u64 mut price = 2;
+                if (!place_price(current, path, &price) ||
+                    !place_price(current, leaf.place, &price) || !spend(current, price)) {
+                    return false;
+                }
+                if (ownership_raw.same_key(path.root, leaf.place.root)) {
+                    if (path.residual) {
+                        return repeated_mapping_refused(current, captured.source);
+                    }
+                    part = 0;
+                    while (part < path.projections.len) {
+                        ownership_api.projection projected = path.projections[part];
+                        if (projected.kind != ownership_api.projection_kind.field &&
+                            (projected.kind != ownership_api.projection_kind.fixed_index ||
+                            projected.index.kind != ownership_api.fact_kind.exact ||
+                            projected.index.value < 0)) {
+                            return repeated_mapping_refused(current, captured.source);
+                        }
+                        part += 1;
+                    }
+                    bool mut matches = path.projections.len == leaf.place.projections.len + 1;
+                    part = 0;
+                    while (part < path.projections.len && matches) {
+                        ownership_api.projection mut expected = element;
+                        if (part < prefix) { expected = leaf.place.projections[part]; }
+                        if (part > prefix) { expected = leaf.place.projections[part - 1]; }
+                        matches = ownership_state.same_projection(path.projections[part],
+                            expected);
+                        part += 1;
+                    }
+                    if (matches) {
+                        if (found != U64_MAX) {
+                            return repeated_mapping_refused(current, captured.source);
+                        }
+                        found = row;
+                    }
+                }
+                row += 1;
+            }
+            if (found == U64_MAX) {
+                return repeated_mapping_refused(current, captured.source);
+            }
+            input->core->contents[found].kind = ownership_api.contents_kind.unknown;
+            if (!invalidate_parents(current, input, captured, input->core->contents[found].place,
+                false, captured.source)) { return false; }
+        }
+        // Count and stride bound the last index below the unsigned maximum.
+        index += 1;
+    }
+    return true;
+}
+fn invalidate_leaves(work mut* current, state mut* input, window selected, bool zero) bool {
+    u64 mut price = 1;
+    if (!add_price(current, &price, input->core->contents_len)) { return false; }
+    u64 mut row = 0;
+    while (row < input->core->contents_len) {
+        if (!place_price(current, input->core->contents[row].place, &price)) { return false; }
+        row += 1;
+    }
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.origin captured = input->raw.origins[i];
+        u64 mut j = 0;
+        while (ownership_raw.same_key(captured.source, selected.source) &&
+            j < captured.leaf_count) {
+            if (!spend(current, 1)) { return false; }
+            ownership_raw.storage_leaf leaf = input->raw.leaves[captured.first_leaf + j];
+            if (!leaf.padding && types.type_is_reference(leaf.ty) && repeats(captured)) {
+                if (!repeated_leaf(current, input, captured, leaf, selected)) { return false; }
+            } else if (!leaf.padding && types.type_is_reference(leaf.ty) &&
+                overlaps(leaf.begin, leaf.end, selected.begin, selected.end)) {
+                u64 mut leaf_price = 0;
+                if (!place_price(current, leaf.place, &leaf_price)) { return false; }
+                if (input->core->contents_len > U64_MAX / leaf_price) {
+                    return stop(current, selected.source, false, "byte copy work overflows");
+                }
+                u64 mut lookup = price;
+                if (!add_price(current, &lookup, leaf_price * input->core->contents_len) ||
+                    !add_price(current, &lookup, leaf_price)) { return false; }
+                u64 mut captured_price = 0;
+                if (!place_price(current, captured.place, &captured_price)) { return false; }
+                if (input->core->contents_len > U64_MAX / captured_price) {
+                    return stop(current, selected.source, false, "byte copy work overflows");
+                }
+                if (!add_price(current, &lookup, captured_price) ||
+                    !add_price(current, &lookup, captured_price * input->core->contents_len)) {
+                    return false;
+                }
+                if (lookup > U64_MAX / 4) {
+                    return stop(current, selected.source, false, "byte copy work overflows");
+                }
+                if (!spend(current, lookup * 4)) { return false; }
+                if (!captured.correspondence || captured.residual ||
+                    ownership_state.has_residual(captured.place) ||
+                    ownership_state.has_residual(leaf.place) ||
+                    !ownership_places.begins(leaf.place, captured.place)) {
+                    return stop(current, selected.source, false,
+                        "reference write needs resolved leaf correspondence");
+                }
+                u64 found = ownership_transfer.contents_index(input->core, leaf.place);
+                if (found != U64_MAX) {
+                    if (zero && leaf.owning && selected.begin <= leaf.begin &&
+                        leaf.end <= selected.end) {
+                        input->core->contents[found] = ownership_transfer.empty_value(leaf.place);
+                    } else {
+                        input->core->contents[found].kind = ownership_api.contents_kind.unknown;
+                    }
+                }
+                if (!invalidate_parents(current, input, captured, leaf.place, true,
+                    selected.source)) { return false; }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn mapped_price(work mut* current, ownership_api.contents_fact value,
+    ownership_api.place_path destination, u64 mut* price) bool {
+    if (!value_price(current, value, price) || !place_price(current, destination, price)) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < value.borrows.len) {
+        if (!spend(current, 1) || !place_price(current, destination, price)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn valid_sources(work mut* current, state* input, ownership_api.contents_fact value) bool {
+    if (value.kind != ownership_api.contents_kind.reference || value.borrows.len == 0 ||
+        value.value_version.kind != ownership_api.entity_kind.value ||
+        value.borrows.len > current->selected->limits.g) {
+        return stop(current, value.place.root, false,
+            "reference source correspondence is incomplete");
+    }
+    u64 mut i = 0;
+    while (i < value.borrows.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_api.borrow_relation relation = value.borrows[i];
+        if (!relation.representation_complete ||
+            !ownership_raw.same_key(relation.value_version, value.value_version) ||
+            !relation.range.access.arithmetic_proved ||
+            relation.range.offset.kind != ownership_api.fact_kind.exact ||
+            relation.range.access.begin.kind != ownership_api.fact_kind.exact ||
+            relation.range.access.end.kind != ownership_api.fact_kind.exact ||
+            relation.range.offset.value < 0 || relation.range.access.begin.value < 0 ||
+            relation.range.access.end.value < relation.range.access.begin.value ||
+            relation.range.offset.value < relation.range.access.begin.value ||
+            relation.range.offset.value > relation.range.access.end.value) {
+            return stop(current, relation.source, false,
+                "reference byte relations remain unproved");
+        }
+        ownership_raw.address access_address = ownership_raw.address{relation.source,
+            ownership_raw.literal(cast(relation.range.offset.value, u64)),
+            ownership_raw.literal(cast(relation.range.access.begin.value, u64)),
+            ownership_raw.literal(cast(relation.range.access.end.value, u64)),
+            relation.range.layout, relation.range.alignment, true};
+        current->proof = ownership_raw.live(&input->raw, current->service, access_address,
+            current->selected);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn typed_path(work mut* current, ownership_raw.origin captured,
+    ownership_raw.storage_leaf leaf, window selected, u64 index) bool {
+    if (leaf.place.residual || leaf.place.projections.len < captured.place.projections.len ||
+        !ownership_raw.same_key(leaf.place.root, captured.place.root)) { return false; }
+    u64 mut part = 0;
+    while (part < captured.place.projections.len) {
+        if (!spend(current, 1)) { return false; }
+        if (!ownership_state.same_projection(captured.place.projections[part],
+            leaf.place.projections[part])) { return false; }
+        part += 1;
+    }
+    if (!repeats(captured)) { return same_place(current, leaf.place, selected.place); }
+    u64 prefix = captured.place.projections.len;
+    if (leaf.place.projections.len < prefix || selected.place.residual || leaf.place.residual ||
+        selected.place.projections.len != leaf.place.projections.len + 1 ||
+        !ownership_raw.same_key(leaf.place.root, selected.place.root) ||
+        index > 9223372036854775807) { return false; }
+    ownership_api.projection mut element = {};
+    element.kind = ownership_api.projection_kind.fixed_index;
+    element.index.kind = ownership_api.fact_kind.exact;
+    element.index.value = cast(index, i64);
+    u64 mut i = 0;
+    while (i < selected.place.projections.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_api.projection mut expected = element;
+        if (i < prefix) { expected = leaf.place.projections[i]; }
+        if (i > prefix) { expected = leaf.place.projections[i - 1]; }
+        if (!ownership_state.same_projection(selected.place.projections[i], expected)) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn typed_leaf(work mut* current, state* input, window selected, u64 mut* found) bool {
+    *found = U64_MAX;
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.origin captured = input->raw.origins[i];
+        if (ownership_raw.same_key(captured.source, selected.source)) {
+            if (!captured.correspondence || captured.residual || captured.place.residual ||
+                selected.place.residual) { break; }
+            u64 mut stride = 0;
+            current->proof = ownership_raw.size(captured.layout, current->service,
+                current->selected, &stride);
+            if (!ownership_api.successful(current->proof)) { return false; }
+            u64 mut index = 0;
+            u64 mut base = 0;
+            if (repeats(captured)) {
+                u64 mut count = 0;
+                if (!element_count(captured, stride, &count)) { break; }
+                index = selected.begin / stride;
+                if (index >= count) { break; }
+                base = index * stride;
+            }
+            u64 mut j = 0;
+            while (j < captured.leaf_count) {
+                if (!spend(current, 1)) { return false; }
+                ownership_raw.storage_leaf leaf = input->raw.leaves[captured.first_leaf + j];
+                if (!leaf.padding && types.type_is_reference(leaf.ty) &&
+                    leaf.begin <= leaf.end && leaf.end <= stride &&
+                    selected.begin == base + leaf.begin && selected.end == base + leaf.end &&
+                    typed_path(current, captured, leaf, selected, index)) {
+                    bool mut value = false;
+                    if (!compare_type(current, selected.ty, leaf.ty,
+                        ownership_type_work.relation.cast_allowed, &value)) { return false; }
+                    if (!value) { break; }
+                    if (!compare_type(current, leaf.ty, selected.ty,
+                        ownership_type_work.relation.cast_allowed, &value)) { return false; }
+                    if (!value) { break; }
+                    if (!compare_type(current, selected.ty, leaf.ty,
+                        ownership_type_work.relation.adds_own, &value)) { return false; }
+                    if (value) { break; }
+                    if (!compare_type(current, leaf.ty, selected.ty,
+                        ownership_type_work.relation.adds_own, &value)) { return false; }
+                    if (value) { break; }
+                    u64 mut row = 0;
+                    while (row < input->core->contents_len) {
+                        if (!spend(current, 1)) { return false; }
+                        if (same_place(current, input->core->contents[row].place,
+                            selected.place)) {
+                            if (*found != U64_MAX) {
+                                return stop(current, selected.source, false,
+                                    "typed replacement needs resolved leaf correspondence");
+                            }
+                            *found = row;
+                        }
+                        if (!ownership_api.successful(current->proof)) { return false; }
+                        row += 1;
+                    }
+                }
+                if (!ownership_api.successful(current->proof)) { return false; }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    if (*found == U64_MAX) {
+        return stop(current, selected.source, false,
+            "typed replacement needs resolved leaf correspondence");
+    }
+    return true;
+}
+fn replace_typed_effect(work mut* current, state mut* input, byte_effect* effect) bool {
+    if (!valid_window(current, input, effect->selected)) { return false; }
+    u64 mut size = 0;
+    if (!reference_size(current, effect->selected, &size) || !effect->checked_value ||
+        !owner_guard(current, input, effect->selected, false) ||
+        !valid_sources(current, input, effect->value)) { return false; }
+    u64 mut destination = U64_MAX;
+    if (!typed_leaf(current, input, effect->selected, &destination) ||
+        !invalidate_leaves(current, input, effect->selected, false)) { return false; }
+    u64 mut selected = representation_index(current, &input->bytes, effect->selected);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    if (selected == U64_MAX) {
+        if (!seed_effect(current, input, effect)) { return false; }
+        selected = input->bytes.representations_len - 1;
+    }
+    fragment[1] incoming = {fragment{0, size, 0, effect->selected.ty, effect->value, true}};
+    u64 mut i = 0;
+    while (i < input->bytes.representations_len) {
+        if (!spend(current, 1)) { return false; }
+        representation mut* target = &input->bytes.representations[i];
+        if (same_storage(target->selected, effect->selected) && overlaps(target->selected.begin,
+            target->selected.end, effect->selected.begin, effect->selected.end)) {
+            if (!replace_fragments(current, input, target, effect->selected,
+                incoming[..], 0)) { return false; }
+            bool actual = i == selected && same_place(current, target->selected.place,
+                effect->selected.place);
+            if (!ownership_api.successful(current->proof) ||
+                (!actual && !publish_contents(current, input, target))) { return false; }
+        }
+        i += 1;
+    }
+    u64 mut price = 4;
+    if (!mapped_price(current, effect->value, effect->selected.place, &price) ||
+        !spend(current, price)) { return false; }
+    if (!require_paired(current, input, retained_edit{.value = effect->value, .add_value = true,
+        .replace_core = true, .core_row = destination})) { return false; }
+    input->core->contents[destination] = copy_value(input->core, effect->value,
+        effect->selected.place);
+    return true;
+}
+fn map_effect(work mut* current, ownership_raw.work_cursor mut* cursor,
+    ownership_raw.request* supplied, byte_effect* effect) bool {
+    ownership_api.operation_position operation = effect->operation;
+    if (operation.operation == 0) {
+        return stop(current, effect->selected.source, false,
+            "byte effect needs its actual operation");
+    }
+    u64 mut i = 0;
+    while (i < supplied->base.event_bindings.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_transfer.event_binding entry = supplied->base.event_bindings[i];
+        if (ownership_keys.operation(entry.operation, operation) == 0) {
+            cursor->binding[0] = entry;
+            cursor->selected.base.operation = operation;
+            cursor->selected.base.source_position = effect->source_position;
+            return true;
+        }
+        i += 1;
+    }
+    // A missing route belongs to this effect. No other effect's event may report it.
+    cursor->selected.base.operation = operation;
+    cursor->selected.base.source_position = effect->source_position;
+    return stop(current, effect->selected.source, false, "byte effect event route is missing");
+}
+fn replacement_reserve(work mut* current, state* input, byte_effect@ effects, u64 position,
+    bool mut* needed) bool {
+    *needed = true;
+    if (input->bytes.representations_len > input->bytes.representations.len) {
+        return stop(current, effects[position].selected.source, false,
+            "byte representation count exceeds storage");
+    }
+    window selected = effects[position].selected;
+    u64 mut i = 0;
+    while (i < input->bytes.representations_len && *needed) {
+        if (!spend(current, 1)) { return false; }
+        window prior = input->bytes.representations[i].selected;
+        if (same_storage(prior, selected) && prior.begin == selected.begin &&
+            prior.end == selected.end) { *needed = false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < position && *needed) {
+        if (!spend(current, 1)) { return false; }
+        byte_effect prior = effects[i];
+        if ((prior.kind == effect_kind.seed || prior.kind == effect_kind.replacement) &&
+            same_storage(prior.selected, selected) && prior.selected.begin == selected.begin &&
+            prior.selected.end == selected.end) { *needed = false; }
+        i += 1;
+    }
+    return true;
+}
+fn apply_ordered(state* input, ownership_api.services* service, byte_effect@ effects,
+    ownership_raw.request* supplied) result {
+    result mut out = {};
+    if (input->core == null) { return out; }
+    ownership_raw.work_cursor mut cursor = {};
+    out.proof = ownership_raw.begin_work(input->core, service, supplied, &cursor);
+    work mut current = work{service, &cursor.selected, out.proof, 0};
+    if (!ownership_api.successful(out.proof)) { return out; }
+    if (effects.len > supplied->limits.e) {
+        stop(&current, ownership_api.entity_id{}, false, "ordered byte effects exceed their bound");
+        out.proof = current.proof;
+        return out;
+    }
+    ownership_transfer.event_binding initial = cursor.binding[0];
+    u64 mut representations = 0;
+    u64 mut snapshots = 0;
+    u64 mut i = 0;
+    while (i < effects.len) {
+        if (!spend(&current, 1) || !map_effect(&current, &cursor, supplied, &effects[i])) {
+            out.proof = current.proof;
+            return out;
+        }
+        if (!effects[i].aliases_substituted) {
+            stop(&current, effects[i].selected.source, false, "byte aliases remain unproved");
+            out.proof = current.proof;
+            return out;
+        }
+        if (effects[i].kind == effect_kind.seed) { representations += 1; }
+        if (effects[i].kind == effect_kind.replacement) {
+            bool mut needed = false;
+            if (!replacement_reserve(&current, input, effects, i, &needed)) {
+                out.proof = current.proof;
+                return out;
+            }
+            if (needed) { representations += 1; }
+        }
+        if (effects[i].kind == effect_kind.read) { snapshots += 1; }
+        i += 1;
+    }
+    // Clone failures use the transaction's mapped position. Effect failures use their own
+    // positions.
+    cursor.selected.base.operation = supplied->base.operation;
+    cursor.selected.base.source_position = supplied->base.source_position;
+    cursor.binding[0] = initial;
+    current.phase = 5;
+    u64 mut price = 0;
+    if (!clone_price(&current, input, representations, snapshots, &price) || !spend(&current,
+        price)) {
+        out.proof = current.proof;
+        return out;
+    }
+    out.states = new(state, 1);
+    out.states[0] = copy_pair(input, representations, snapshots);
+    current.phase = 1;
+    i = 0;
+    while (i < effects.len && ownership_api.successful(current.proof)) {
+        byte_effect item = effects[i];
+        if (!map_effect(&current, &cursor, supplied, &item)) { break; }
+        bool mut valid = false;
+        switch (item.kind) {
+        case effect_kind.seed: valid = seed_effect(&current, &out.states[0], &item); break;
+        case effect_kind.read:
+            valid = collect(&current, &out.states[0], item.selected, item.snapshot_key); break;
+        case effect_kind.write:
+            valid = write_effect(&current, &out.states[0], &item); break;
+        case effect_kind.zero:
+            valid = write_effect(&current, &out.states[0], &item); break;
+        case effect_kind.unknown:
+            valid = write_effect(&current, &out.states[0], &item); break;
+        case effect_kind.unchanged:
+            valid = write_effect(&current, &out.states[0], &item); break;
+        case effect_kind.replacement:
+            valid = replace_typed_effect(&current, &out.states[0], &item); break;
+        }
+        if (!valid) {
+            if (ownership_api.successful(current.proof)) {
+                stop(&current, item.selected.source, false, "ordered byte effect remains unproved");
+            }
+            break;
+        }
+        i += 1;
+    }
+    ownership_api.proof_status proof = current.proof;
+    if (!ownership_api.successful(proof)) { free_result(&out); }
+    out.proof = proof;
+    return out;
+}
+fn read_reference(state* input, ownership_api.services* service, window selected,
+    ownership_raw.request* supplied) reference_result {
+    reference_result mut out = {};
+    if (input->core == null) { return out; }
+    ownership_raw.work_cursor mut cursor = {};
+    out.proof = ownership_raw.begin_work(input->core, service, supplied, &cursor);
+    work mut current = work{service, &cursor.selected, out.proof, 0};
+    u64 mut size = 0;
+    if (!ownership_api.successful(out.proof) || !valid_window(&current, input, selected) ||
+        !reference_size(&current, selected, &size)) { out.proof = current.proof; return out; }
+    u64 index = representation_index(&current, &input->bytes, selected);
+    if (!ownership_api.successful(current.proof)) { out.proof = current.proof; return out; }
+    ownership_api.contents_fact mut value = {};
+    types.node* mut original = null;
+    if (index == U64_MAX || !reconstruct(&current, &input->bytes.representations[index],
+        &value, &original)) {
+        stop(&current, selected.source, false,
+            "reference representation correspondence is incomplete");
+        out.proof = current.proof;
+        return out;
+    }
+    bool mut allowed = false;
+    bool mut adds_own = false;
+    if (!compare_type(&current, selected.ty, original,
+        ownership_type_work.relation.cast_allowed, &allowed) ||
+        (allowed && !compare_type(&current, selected.ty, original,
+        ownership_type_work.relation.adds_own, &adds_own))) {
+        out.proof = current.proof; return out;
+    }
+    if (!allowed || adds_own ||
+        (selected.ty->is_own && !ownership_transfer.empty_owner_proved(value) &&
+        !same_place(&current, value.place, selected.place))) {
+        stop(&current, selected.source, false,
+            "byte interpretation cannot add reference marks or ownership");
+        out.proof = current.proof;
+        return out;
+    }
+    u64 mut price = 0;
+    if (selected.ty->is_own) {
+        price = 1;
+        if (!core_price(&current, input->core, &price) || !spend(&current, price)) {
+            out.proof = current.proof; return out;
+        }
+        u64 owner = ownership_transfer.owner_index(input->core, selected.place);
+        bool empty = ownership_transfer.empty_owner_proved(value) &&
+            ownership_transfer.owner_count(input->core, selected.place) == 0;
+        if (!empty && (owner == U64_MAX || !ownership_transfer.owner_reference_proved(
+            input->core, value, input->core->allocations[owner]))) {
+            stop(&current, selected.place.root, false,
+                "owning interpretation needs its original transferable obligation");
+            out.proof = current.proof; return out;
+        }
+    }
+    if (!ownership_transfer.empty_owner_proved(value) && !valid_sources(&current, input, value)) {
+        out.proof = current.proof; return out;
+    }
+    price = 4;
+    if (!mapped_price(&current, value, selected.place, &price) || !spend(&current, price)) {
+        out.proof = current.proof;
+        return out;
+    }
+    ownership_state.state empty_core = ownership_state.empty();
+    ownership_raw.context empty_raw = {};
+    ledger empty_ledger = ledger{.facts = ownership_state.empty()};
+    u64 mut regions = 0;
+    if (!paired_regions(&current, &empty_core, &empty_raw, &empty_ledger,
+        retained_edit{.value = value, .add_value = true}, &regions) ||
+        !retain(&current, regions)) { out.proof = current.proof; return out; }
+    out.facts = ownership_state.empty();
+    out.value = copy_value(&out.facts, value, selected.place);
+    out.proof = current.proof;
+    return out;
+}
+fn move_type(work mut* current, types.node* ty, u64 depth, u64 mut* leaves,
+    u64 mut* price) bool {
+    if (!spend(current, 1)) { return false; }
+    if (ty == null || depth >= ownership_places.MAX_DEPTH ||
+        depth >= current->selected->limits.d) {
+        return stop(current, ownership_api.entity_id{}, false, "move layout remains unproved");
+    }
+    if (!add_price(current, price, 1)) { return false; }
+    if (ty->kind == types.type_kind.k_array) {
+        u64 mut child = 0;
+        if (!move_type(current, ty->elem, depth + 1, &child, price)) { return false; }
+        if (child != 0 && ty->len > ownership_places.MAX_LEAVES / child) {
+            return stop(current, ownership_api.entity_id{}, false,
+                "move leaf count exceeds its bound");
+        }
+        if (child * ty->len > ownership_places.MAX_LEAVES - *leaves) {
+            return stop(current, ownership_api.entity_id{}, false,
+                "move leaf count exceeds its bound");
+        }
+        *leaves += child * ty->len;
+        return true;
+    }
+    if (ty->kind == types.type_kind.k_struct) {
+        ast.sym* record = cast(ty->decl, ast.sym*);
+        if (record == null || record->node == null) {
+            return stop(current, ownership_api.entity_id{}, false, "move fields remain unproved");
+        }
+        u64 mut i = 0;
+        while (i < ast.ast_len(record->node)) {
+            if (!spend(current, 1)) { return false; }
+            ast.node* member = ast.ast_child(record->node, i);
+            if (member->kind == ast.ast_kind.k_field_decl &&
+                !move_type(current, member->ty, depth + 1, leaves, price)) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+    if (*leaves == ownership_places.MAX_LEAVES) {
+        return stop(current, ownership_api.entity_id{}, false, "move leaf count exceeds its bound");
+    }
+    *leaves += 1;
+    return true;
+}
+fn move_window(work mut* current, state* input, window selected) bool {
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.origin original = input->raw.origins[i];
+        if (ownership_raw.same_key(original.source, selected.source)) {
+            u64 mut bytes = 0;
+            current->proof = ownership_raw.size(original.layout, current->service,
+                current->selected, &bytes);
+            if (!ownership_api.successful(current->proof)) { return false; }
+            if (original.layout == selected.ty && selected.begin == 0 && selected.end == bytes &&
+                same_place(current, original.place, selected.place)) { return true; }
+            u64 mut j = 0;
+            while (j < original.leaf_count) {
+                if (!spend(current, 1)) { return false; }
+                ownership_raw.storage_leaf leaf = input->raw.leaves[original.first_leaf + j];
+                if (!leaf.padding && leaf.ty == selected.ty && leaf.begin == selected.begin &&
+                    leaf.end == selected.end && same_place(current, leaf.place, selected.place)) {
+                    return true;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    return stop(current, selected.source, false, "semantic move needs its original typed window");
+}
+fn move_representations(work mut* current, state* input, state mut* next, window source,
+    window destination) bool {
+    u64 mut i = 0;
+    while (i < next->bytes.representations_len) {
+        if (!spend(current, 1)) { return false; }
+        representation mut* target = &next->bytes.representations[i];
+        bool source_hit = same_storage(target->selected, source) &&
+            overlaps(target->selected.begin, target->selected.end, source.begin, source.end);
+        bool destination_hit = same_storage(target->selected, destination) &&
+            overlaps(target->selected.begin, target->selected.end,
+                destination.begin, destination.end);
+        if (source_hit || destination_hit) {
+            window whole = source_hit ? source : destination;
+            if (target->selected.begin < whole.begin || whole.end < target->selected.end) {
+                return stop(current, target->selected.source, false,
+                    "move overlaps a partial reference representation");
+            }
+            u64 mut price = 1;
+            if (!core_price(current, next->core, &price) ||
+                !place_price(current, target->selected.place, &price) ||
+                !spend(current, price)) { return false; }
+            u64 found = ownership_transfer.contents_index(next->core, target->selected.place);
+            if (found == U64_MAX) {
+                return stop(current, target->selected.source, false,
+                    "moved reference correspondence remains unproved");
+            }
+            ownership_api.contents_fact value = next->core->contents[found];
+            if (!value.owner_empty && !valid_sources(current, next, value)) { return false; }
+            types.node* mut original = target->selected.ty;
+            if (destination_hit) {
+                window mut prior = target->selected;
+                prior.source = source.source;
+                prior.begin = source.begin + (target->selected.begin - destination.begin);
+                prior.end = prior.begin + (target->selected.end - target->selected.begin);
+                u64 previous = representation_index(current, &input->bytes, prior);
+                if (!ownership_api.successful(current->proof)) { return false; }
+                if (previous != U64_MAX) {
+                    ownership_api.contents_fact mut retained = {};
+                    if (!reconstruct(current, &input->bytes.representations[previous],
+                        &retained, &original)) {
+                        return stop(current, target->selected.source, false,
+                            "moved reference correspondence remains unproved");
+                    }
+                }
+            }
+            fragment[1] incoming = {fragment{0,
+                target->selected.end - target->selected.begin, 0, original, value, true}};
+            if (!replace_fragments(current, next, target, target->selected,
+                incoming[..], 0)) { return false; }
+        }
+        i += 1;
+    }
+    return true;
+}
+// A checked typed operand supplies transfer. Raw writes cannot call this operation implicitly.
+fn semantic_move(state* input, ownership_api.services* service, window source,
+    window destination, ownership_raw.request* supplied) result {
+    result mut out = {};
+    if (input->core == null) { return out; }
+    ownership_raw.work_cursor mut cursor = {};
+    out.proof = ownership_raw.begin_work(input->core, service, supplied, &cursor);
+    work mut current = work{service, &cursor.selected, out.proof, 0};
+    u64 mut bytes = 0;
+    u64 mut leaves = 0;
+    u64 mut price = 0;
+    if (!ownership_api.successful(current.proof) ||
+        !clone_price(&current, input, 0, 0, &price) ||
+        !supplied->base.source_correspondence_proved ||
+        !valid_window(&current, input, source) || !valid_window(&current, input, destination) ||
+        !move_window(&current, input, source) || !move_window(&current, input, destination) ||
+        source.ty != destination.ty || !move_type(&current, source.ty, 0, &leaves, &price)) {
+        if (ownership_api.successful(current.proof)) {
+            stop(&current, source.source, false, "semantic move needs checked matching operands");
+        }
+        out.proof = current.proof; return out;
+    }
+    current.proof = ownership_raw.size(source.ty, service, &cursor.selected, &bytes);
+    if (!ownership_api.successful(current.proof) || bytes != source.end - source.begin ||
+        bytes != destination.end - destination.begin) {
+        if (ownership_api.successful(current.proof)) {
+            stop(&current, source.source, false, "semantic move needs complete operand windows");
+        }
+        out.proof = current.proof; return out;
+    }
+    if (!place_price(&current, source.place, &price) ||
+        !place_price(&current, destination.place, &price)) {
+        out.proof = current.proof; return out;
+    }
+    u64 mut rows = leaves + 1;
+    if (!add_price(&current, &rows, input->core->contents_len) ||
+        !add_price(&current, &rows, input->core->allocations_len) ||
+        rows > U64_MAX / 8 || price > U64_MAX / (rows * 8) ||
+        !spend(&current, price * rows * 8)) {
+        if (ownership_api.successful(current.proof)) {
+            stop(&current, source.source, false, "semantic move work overflows");
+        }
+        out.proof = current.proof; return out;
+    }
+    out.states = new(state, 1);
+    out.states[0] = copy_pair(input, 0, 0);
+    ownership_places.request mut transfer = {};
+    transfer.base = cursor.selected.base;
+    transfer.base.kind = ownership_transfer.action.move_owner;
+    transfer.base.source = source.place;
+    transfer.base.destination = destination.place;
+    transfer.kind = ownership_places.action.move_value;
+    transfer.ty = source.ty;
+    transfer.source_region_proved = true;
+    transfer.destination_region_proved = true;
+    transfer.alias_substituted_proved = true;
+    current.proof = ownership_places.apply(out.states[0].core, service, &transfer);
+    current.phase = 6;
+    if (ownership_api.successful(current.proof) &&
+        !move_representations(&current, input, &out.states[0], source, destination)) {
+        if (ownership_api.successful(current.proof)) {
+            stop(&current, source.source, false, "semantic move representation remains unproved");
+        }
+    }
+    ownership_api.proof_status proof = current.proof;
+    if (!ownership_api.successful(proof)) { free_result(&out); }
+    out.proof = proof;
+    return out;
+}
+fn check_shallow_release(state* input, ownership_api.services* service, window selected,
+    ownership_raw.request* supplied) ownership_api.proof_status {
+    if (input->core == null) { return ownership_api.proof_status{}; }
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_api.proof_status prepared = ownership_raw.begin_work(input->core, service,
+        supplied, &cursor);
+    work mut current = work{service, &cursor.selected, prepared, 0};
+    u64 mut price = 1;
+    if (!ownership_api.successful(current.proof) ||
+        !clone_price(&current, input, 0, 0, &price) ||
+        !valid_window(&current, input, selected)) { return current.proof; }
+    if (!spend(&current, price)) {
+        return current.proof;
+    }
+    if (!spend(&current, input->raw.origins.len + 1)) { return current.proof; }
+    u64 origin = ownership_raw.origin_index(&input->raw, selected.source);
+    if (origin == U64_MAX) {
+        stop(&current, selected.source, false, "shallow release needs the original layout");
+        return current.proof;
+    }
+    ownership_raw.origin containing = input->raw.origins[origin];
+    if (containing.allocation.kind != ownership_api.entity_kind.allocation) {
+        stop(&current, selected.source, false, "shallow release needs its original allocation");
+        return current.proof;
+    }
+    u64 mut i = 0;
+    while (i < input->core->allocations_len) {
+        if (!spend(&current, 1)) { return current.proof; }
+        ownership_api.allocation_fact owner = input->core->allocations[i];
+        u64 mut place_cost = 1;
+        if (!place_price(&current, owner.owner.place, &place_cost) ||
+            !place_price(&current, containing.place, &place_cost) ||
+            !spend(&current, place_cost)) { return current.proof; }
+        // A residual path proves no disjoint place, so it counts as a possible descendant.
+        if (owner.obligation && !ownership_raw.same_key(owner.key, containing.allocation) &&
+            ownership_raw.same_key(owner.owner.place.root, containing.place.root) &&
+            (ownership_state.has_residual(owner.owner.place) ||
+            ownership_state.has_residual(containing.place) ||
+            ownership_places.begins(owner.owner.place, containing.place))) {
+            stop(&current, owner.key, definite_owner(owner),
+                "shallow release retains an owned descendant");
+            return current.proof;
+        }
+        i += 1;
+    }
+    return current.proof;
+}
+fn same_fragment(work mut* current, fragment left, fragment right) bool {
+    return spend(current, 1) && left.begin == right.begin && left.end == right.end &&
+        left.original_begin == right.original_begin && left.original_type == right.original_type &&
+        left.known == right.known && same_value(current, left.value, right.value);
+}
+fn same_expression(work mut* current, ownership_raw.context* raw,
+    ownership_raw.expression left, ownership_raw.expression right) bool {
+    ownership_raw.calculation mut expression_work = ownership_raw.calculation{
+        raw, current->service, current->selected, current->proof};
+    bool same = ownership_raw.same_expression_work(&expression_work, left, right);
+    current->proof = expression_work.proof;
+    return same;
+}
+fn equal(state* left, state* right, ownership_api.services* service,
+    ownership_raw.request* supplied, ownership_api.proof_status mut* proof) bool {
+    if (left->core == null || right->core == null) {
+        *proof = ownership_api.proof_status{};
+        return false;
+    }
+    ownership_raw.work_cursor mut cursor = {};
+    *proof = ownership_raw.begin_work(left->core, service, supplied, &cursor);
+    work mut current = work{service, &cursor.selected, *proof, 0};
+    u64 mut price = 0;
+    if (!ownership_api.successful(*proof) || !clone_price(&current, left, 0, 0, &price) ||
+        !clone_price(&current, right, 0, 0, &price)) { *proof = current.proof; return false; }
+    u64 mut rows = 1;
+    ownership_api.state_view a = ownership_state.view(left->core);
+    if (!add_price(&current, &rows, a.contents.len) || !add_price(&current, &rows, a.sources.len) ||
+        !add_price(&current, &rows, a.allocations.len) || !add_price(&current, &rows,
+            a.regions.len) ||
+        !add_price(&current, &rows, a.nodes.len) || !add_price(&current, &rows, a.edges.len) ||
+        !add_price(&current, &rows, a.shapes.len) || !add_price(&current, &rows,
+            a.predicates.len) ||
+        !add_price(&current, &rows, a.guards.len) || !add_price(&current, &rows,
+            a.correlations.len) ||
+        !add_price(&current, &rows, a.losses.len)) { *proof = current.proof; return false; }
+    if (price > U64_MAX / rows / 2 || !spend(&current, price * rows * 2)) {
+        if (ownership_api.successful(current.proof)) {
+            stop(&current, ownership_api.entity_id{}, false, "paired equality work overflows");
+        }
+        *proof = current.proof;
+        return false;
+    }
+    bool mut same = ownership_state.equal(left->core, right->core) &&
+        ownership_state.equal(&left->bytes.facts, &right->bytes.facts) &&
+        ownership_state.same_proof(left->raw.proof, right->raw.proof) &&
+        left->raw.origins.len == right->raw.origins.len &&
+        left->raw.leaves_len == right->raw.leaves_len &&
+        left->raw.bounds.len == right->raw.bounds.len &&
+        left->raw.relations.len == right->raw.relations.len;
+    u64 mut i = 0;
+    while (i < left->raw.origins.len && same) {
+        if (!spend(&current, 1)) { same = false; break; }
+        ownership_raw.origin x = left->raw.origins[i];
+        ownership_raw.origin y = right->raw.origins[i];
+        same = ownership_raw.same_key(x.source, y.source) &&
+            ownership_raw.same_key(x.allocation, y.allocation) && same_place(&current, x.place,
+                y.place) &&
+            x.layout == y.layout && x.alignment == y.alignment && x.repeated == y.repeated &&
+            x.correspondence == y.correspondence && x.residual == y.residual &&
+            x.first_leaf == y.first_leaf && x.leaf_count == y.leaf_count &&
+            same_expression(&current, &left->raw, x.count, y.count) &&
+            same_expression(&current, &left->raw, x.begin, y.begin) &&
+            same_expression(&current, &left->raw, x.end, y.end);
+        i += 1;
+    }
+    i = 0;
+    while (i < left->raw.leaves_len && same) {
+        if (!spend(&current, 1)) { same = false; break; }
+        ownership_raw.storage_leaf x = left->raw.leaves[i];
+        ownership_raw.storage_leaf y = right->raw.leaves[i];
+        same = same_place(&current, x.place, y.place) && x.begin == y.begin && x.end == y.end &&
+            x.ty == y.ty && x.owning == y.owning && x.padding == y.padding;
+        i += 1;
+    }
+    i = 0;
+    while (i < left->raw.bounds.len && same) {
+        if (!spend(&current, 1)) { same = false; break; }
+        ownership_raw.captured_bound x = left->raw.bounds[i];
+        ownership_raw.captured_bound y = right->raw.bounds[i];
+        same = ownership_raw.same_key(x.version, y.version) &&
+            ownership_raw.same_number(x.lower, y.lower) && ownership_raw.same_number(x.upper,
+                y.upper);
+        i += 1;
+    }
+    i = 0;
+    while (i < left->raw.relations.len && same) {
+        same = same_expression(&current, &left->raw, left->raw.relations[i].left,
+            right->raw.relations[i].left) && same_expression(&current, &left->raw,
+            left->raw.relations[i].right, right->raw.relations[i].right);
+        i += 1;
+    }
+    same = same && left->bytes.representations_len == right->bytes.representations_len &&
+        left->bytes.snapshots_len == right->bytes.snapshots_len;
+    i = 0;
+    while (i < left->bytes.representations_len && same) {
+        if (!spend(&current, 1)) { same = false; break; }
+        representation* x = &left->bytes.representations[i];
+        representation* y = &right->bytes.representations[i];
+        same = same_storage(x->selected, y->selected) && x->selected.begin == y->selected.begin &&
+            x->selected.end == y->selected.end && x->selected.ty == y->selected.ty &&
+            x->selected.alignment == y->selected.alignment &&
+            x->selected.correspondence == y->selected.correspondence &&
+            same_place(&current, x->selected.place, y->selected.place) &&
+            x->fragments_len == y->fragments_len;
+        u64 mut j = 0;
+        while (j < x->fragments_len && same) {
+            same = same_fragment(&current, x->fragments[j], y->fragments[j]); j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < left->bytes.snapshots_len && same) {
+        if (!spend(&current, 1)) { same = false; break; }
+        snapshot* x = &left->bytes.snapshots[i];
+        snapshot* y = &right->bytes.snapshots[i];
+        same = x->key == y->key && x->bytes == y->bytes && x->fragments_len == y->fragments_len;
+        u64 mut j = 0;
+        while (j < x->fragments_len && same) {
+            same = same_fragment(&current, x->fragments[j], y->fragments[j]); j += 1;
+        }
+        i += 1;
+    }
+    *proof = current.proof;
+    return same && ownership_api.successful(*proof);
+}

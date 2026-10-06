@@ -1,0 +1,404 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| count repetition unknown 0
+//| count repetition unknown 1
+//| count repetition typed 0
+//| count repetition typed 1
+//| count repetition publication
+//| owner bytes identity copy accept
+//| owner bytes reference copy reject
+//| owner without leaf reject
+//| owner with leaf reject
+//| owned buffer unknown accept
+//| owned buffer zero accept
+//| owned buffer typed accept
+//| owner place rule
+//| snapshot gaps 0 24
+//| snapshot gaps 4 20
+//| snapshot parts within R
+//| aggregate parent single
+//| aggregate parent repeated
+//| shallow release sibling accept
+//| shallow release descendant reject
+//| missing route at its effect
+/// Tests byte layout boundaries: count repetition, owner leaves, snapshot gaps, parents,
+/// shallow release descendants, and missing event routes.
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_raw;
+import ownership_raw_bytes;
+import ownership_raw_bytes_cleanup_env;
+import ownership_raw_bytes_env;
+import ownership_state;
+import ownership_transfer;
+import types;
+
+// A count of two repeats the origin even when its repeated flag is clear.
+fn unflagged(ownership_raw_bytes_env.env mut* e, u32 function) void {
+    e->unflagged_repetition = true;
+    ownership_raw_bytes_env.repeated_setup_count(e, function, 0, false, 2);
+    assert(!e->paired.states[0].raw.origins[0].repeated);
+    assert(e->paired.states[0].raw.origins[0].count.constant.magnitude == 2);
+}
+fn unknown_element(u64 index) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    unflagged(&e, 3700 + cast(index, u32));
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e,
+        ownership_raw_bytes_env.effect(&e, ownership_raw_bytes.effect_kind.unknown,
+        ownership_raw_bytes_env.window(&e, 1, index * 8, index * 8 + 8, e.byte)), 3702);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(ownership_api.successful(out.proof));
+    ownership_api.contents_fact altered = out.states[0].core->contents[index];
+    assert(altered.kind == ownership_api.contents_kind.unknown);
+    assert(ownership_state.same_contents(out.states[0].core->contents[1 - index],
+        before.states[0].core->contents[1 - index]));
+    ownership_raw.request mut req = ownership_raw_bytes_env.request(&e, 3703);
+    req.base.source = altered.place;
+    req.base.source_key = altered.borrows[0].source;
+    ownership_api.proof_status read = ownership_transfer.check_read(out.states[0].core,
+        &e.service, &req.base, altered, true);
+    assert(read.kind == ownership_api.proof_kind.incomplete);
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("count repetition unknown ", index);
+}
+fn typed_element(u64 index) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    unflagged(&e, 3710 + cast(index, u32));
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.byte_effect mut change = ownership_raw_bytes_env.effect(&e,
+        ownership_raw_bytes.effect_kind.replacement,
+        ownership_raw_bytes_env.window(&e, 1, index * 8, index * 8 + 8, e.pointer));
+    change.selected.place = e.paired.states[0].core->contents[index].place;
+    change.checked_value = true;
+    change.value = ownership_raw_bytes_env.value(&e, 3, 99, 4, 0, 8, 1);
+    ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e, change, 3712);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(ownership_api.successful(out.proof));
+    assert(out.states[0].core->contents[index].kind == ownership_api.contents_kind.reference);
+    assert(out.states[0].core->contents[index].borrows[0].source.ordinal == 4);
+    assert(ownership_state.same_contents(out.states[0].core->contents[1 - index],
+        before.states[0].core->contents[1 - index]));
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("count repetition typed ", index);
+}
+fn seed_element(ownership_raw_bytes_env.env mut* e, u64 index, u32 line) void {
+    ownership_raw_bytes.byte_effect mut change = ownership_raw_bytes_env.effect(e,
+        ownership_raw_bytes.effect_kind.seed,
+        ownership_raw_bytes_env.window(e, 1, index * 8, index * 8 + 8, e->pointer));
+    change.selected.place = e->paired.states[0].core->contents[index].place;
+    change.value = e->paired.states[0].core->contents[index];
+    change.checked_value = true;
+    ownership_raw_bytes_env.apply(e, change, line);
+}
+// A copy of element 0 into element 1 publishes element 0's reference at row 1.
+fn published_element() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    unflagged(&e, 3720);
+    seed_element(&e, 0, 3721);
+    seed_element(&e, 1, 3722);
+    ownership_raw_bytes_env.read(&e, 1, 0, 8, 60, 3723);
+    ownership_raw_bytes_env.write(&e, 1, 8, 16, 60, 0, 3724);
+    ownership_state.state* core = e.paired.states[0].core;
+    assert(core->contents[1].kind == ownership_api.contents_kind.reference);
+    assert(core->contents[1].borrows.len == 1);
+    assert(ownership_raw.same_key(core->contents[1].borrows[0].source,
+        core->contents[0].borrows[0].source));
+    assert(ownership_state.same_place(core->contents[1].borrows[0].containing,
+        core->contents[1].place));
+    println("count repetition publication");
+}
+// Bytes that land beside an owner leaf cannot create that owner.
+fn owner_copy(bool owner_bytes) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.aggregate_setup(&e, owner_bytes ? 3731 : 3730, false, false);
+    ownership_raw_bytes_env.read(&e, 1, 16, 32, 81, 3732);
+    if (owner_bytes) {
+        ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+        defer ownership_raw_bytes.free_result(&before);
+        ownership_raw_bytes.byte_effect mut change = ownership_raw_bytes_env.effect(&e,
+            ownership_raw_bytes.effect_kind.write,
+            ownership_raw_bytes_env.window(&e, 2, 0, 16, e.byte));
+        change.snapshot_key = 81;
+        ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e, change,
+            3733);
+        defer ownership_raw_bytes.free_result(&out);
+        assert(!ownership_api.successful(out.proof) && e.budget.witness_validated);
+        assert(e.budget.last_event.text == "raw bytes cannot create an owner or semantic move");
+        ownership_raw_bytes_env.same(&e, &before.states[0]);
+        println("owner bytes reference copy reject");
+        return;
+    }
+    ownership_raw_bytes_env.write(&e, 2, 16, 32, 81, 0, 3733);
+    ownership_raw_bytes_env.read(&e, 2, 0, 32, 82, 3734);
+    ownership_raw_bytes_env.write(&e, 2, 0, 32, 82, 0, 3735);
+    ownership_state.state* core = e.paired.states[0].core;
+    u64 owner = ownership_transfer.contents_index(core,
+        ownership_raw_bytes_env.field(&e, 2, 0));
+    assert(owner != ownership_raw_bytes.U64_MAX);
+    assert(ownership_transfer.empty_owner_proved(core->contents[owner]));
+    assert(core->allocations[0].obligation && core->allocations[0].owner.place.root.ordinal == 1);
+    println("owner bytes identity copy accept");
+}
+// An owner at the window's place needs an owning leaf. A byte layout supplies none.
+fn owner_without_leaf(bool leaf) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, leaf ? 3741 : 3740, 0, true);
+    if (!leaf) {
+        ownership_raw_bytes_env.recapture(&e, types_array(&e), 8);
+    }
+    assert(e.paired.states[0].core->allocations[0].owner.place.root.ordinal == 1);
+    assert(e.paired.states[0].core->allocations[0].owner.place.projections.len == 0);
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e,
+        ownership_raw_bytes_env.effect(&e, ownership_raw_bytes.effect_kind.unknown,
+        ownership_raw_bytes_env.window(&e, 1, 0, 8, e.byte)), 3742);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+    if (leaf) {
+        assert(e.budget.witness_validated);
+        assert(e.budget.last_event.text == "byte write would discard a live owner");
+        println("owner with leaf reject");
+    } else {
+        assert(!e.budget.witness_validated);
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+        assert(e.budget.last_event.text == "owner overlap needs an owning leaf");
+        println("owner without leaf reject");
+    }
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+}
+// The owning pointer at slot 10 designates the written buffer. It holds none of its bytes.
+fn owned_buffer_write(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owned_buffer(&e, 3790 + mode);
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_api.place_path buffer = ownership_raw_bytes_env.pointee(&e, 10);
+    ownership_raw_bytes.window selected = ownership_raw_bytes.window{
+        ownership_raw_bytes_env.id(&e, ownership_api.entity_kind.source, 1), 0,
+        mode == 2 ? 8 : 4, buffer, mode == 2 ? e.pointer : e.byte, 8, true};
+    ownership_raw_bytes.byte_effect mut change = ownership_raw_bytes_env.effect(&e,
+        mode == 0 ? ownership_raw_bytes.effect_kind.unknown : (mode == 1 ?
+        ownership_raw_bytes.effect_kind.zero : ownership_raw_bytes.effect_kind.replacement),
+        selected);
+    if (mode == 2) {
+        change.value = ownership_raw_bytes_env.value(&e, 3, 99, 5, 0, 8, 1);
+        change.checked_value = true;
+    }
+    ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e, change, 3793);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(ownership_api.successful(out.proof));
+    ownership_state.state* core = out.states[0].core;
+    u64 row = ownership_transfer.contents_index(core, buffer);
+    assert(row != ownership_raw_bytes.U64_MAX);
+    if (mode < 2) {
+        assert(core->contents[row].kind == ownership_api.contents_kind.unknown);
+    } else {
+        assert(core->contents[row].kind == ownership_api.contents_kind.reference);
+        assert(core->contents[row].value_version.ordinal == 99);
+    }
+    assert(core->allocations[0].obligation);
+    assert(core->allocations[0].owner.place.root.ordinal == 10);
+    assert(core->allocations[0].owner.place.projections.len == 0);
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("owned buffer ", mode == 0 ? "unknown" : (mode == 1 ? "zero" : "typed"), " accept");
+}
+// An owner at or inside the window's place counts. Above it or past a dereference, it does not.
+fn owner_places() void {
+    ownership_raw_bytes_env.env mut e = {};
+    ownership_raw_bytes_env.open(&e, 3795, 1);
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_api.place_path slot = ownership_raw_bytes_env.place(&e, 1);
+    ownership_api.place_path first = ownership_raw_bytes_env.field(&e, 1, 0);
+    ownership_api.place_path second = ownership_raw_bytes_env.field(&e, 1, 1);
+    ownership_api.projection[2] mut parts = {};
+    parts[0].kind = ownership_api.projection_kind.dereference;
+    parts[1].kind = ownership_api.projection_kind.field;
+    ownership_api.place_path mut behind = slot;
+    behind.projections = parts[..];
+    assert(ownership_raw_bytes.owner_in_window(slot, slot));
+    assert(ownership_raw_bytes.owner_in_window(first, slot));
+    assert(!ownership_raw_bytes.owner_in_window(ownership_raw_bytes_env.place(&e, 10),
+        ownership_raw_bytes_env.pointee(&e, 10)));
+    assert(!ownership_raw_bytes.owner_in_window(behind, slot));
+    assert(!ownership_raw_bytes.owner_in_window(first, second));
+    assert(!ownership_raw_bytes.owner_in_window(ownership_raw_bytes_env.place(&e, 2), slot));
+    println("owner place rule");
+}
+// Each snapshot part is its own R partition, so a read past R refuses before any snapshot.
+fn snapshot_parts_within_r() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.tagged_record(&e, 3797);
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.byte_effect mut change = ownership_raw_bytes_env.effect(&e,
+        ownership_raw_bytes.effect_kind.read,
+        ownership_raw_bytes_env.window(&e, 1, 0, 24, e.byte));
+    change.snapshot_key = 90;
+    ownership_raw_bytes.result mut read = ownership_raw_bytes_env.try_effect(&e, change, 3798);
+    assert(ownership_api.successful(read.proof));
+    ownership_raw_bytes.snapshot* saved = &read.states[0].bytes.snapshots[0];
+    assert(saved->fragments_len == 3 && saved->fragments.len == 3);
+    u64 needed = e.budget.meter.used.r;
+    assert(needed > saved->fragments_len);
+    ownership_raw_bytes.free_result(&read);
+    e.limits.r = needed - 1;
+    ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e, change, 3799);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+    assert(out.proof.terminal.limit.category == ownership_api.limit_category.r);
+    assert(out.proof.terminal.limit.attempted == needed);
+    e.limits.r = ownership_limits.PRODUCTION_R;
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("snapshot parts within R");
+}
+fn types_array(ownership_raw_bytes_env.env mut* e) types.node* {
+    return types.type_array(&e->table, e->byte, 8);
+}
+// A window around one reference needs a gap before it and a gap after it.
+fn snapshot_gaps(u64 begin, u64 end) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.tagged_record(&e, 3750 + cast(begin, u32));
+    ownership_raw_bytes_env.read(&e, 1, begin, end, 90, 3751);
+    ownership_raw_bytes.snapshot* saved = &e.paired.states[0].bytes.snapshots[0];
+    assert(saved->fragments_len == 3);
+    assert(!saved->fragments[0].known && saved->fragments[0].begin == 0);
+    assert(saved->fragments[0].end == 8 - begin);
+    assert(saved->fragments[1].known && saved->fragments[1].begin == 8 - begin);
+    assert(saved->fragments[1].end == 16 - begin && saved->fragments[1].original_begin == 0);
+    assert(!saved->fragments[2].known && saved->fragments[2].begin == 16 - begin);
+    assert(saved->fragments[2].end == end - begin);
+    println("snapshot gaps ", begin, " ", end);
+}
+// A byte write sets each complete parent between the captured object and the leaf to unknown.
+fn aggregate_parent(bool repeated) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    if (repeated) {
+        ownership_raw_bytes_env.repeated_setup(&e, 3761, 0, true);
+    } else {
+        ownership_raw_bytes_env.borrowed_record(&e, 3760, false);
+    }
+    ownership_api.place_path whole = ownership_raw_bytes_env.place(&e, 1);
+    ownership_raw_bytes_env.aggregate_row(&e, whole);
+    u64 rows = e.paired.states[0].core->contents_len;
+    if (repeated) {
+        u64 mut i = 0;
+        while (i < 2) {
+            ownership_api.place_path mut element = e.paired.states[0].core->contents[i].place;
+            element.projections = element.projections[..1];
+            ownership_raw_bytes_env.aggregate_row(&e, element);
+            i += 1;
+        }
+    }
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.result mut out = ownership_raw_bytes_env.try_effect(&e,
+        ownership_raw_bytes_env.effect(&e, ownership_raw_bytes.effect_kind.unknown,
+        ownership_raw_bytes_env.window(&e, 1, repeated ? 8 : 0, repeated ? 16 : 8, e.byte)),
+        3762);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(ownership_api.successful(out.proof));
+    ownership_state.state* core = out.states[0].core;
+    assert(core->contents[0].kind == ownership_api.contents_kind.unknown);
+    assert(ownership_state.same_contents(core->contents[1], before.states[0].core->contents[1]));
+    assert(core->contents[rows - 1].kind == ownership_api.contents_kind.unknown);
+    if (repeated) {
+        assert(core->contents[rows].kind == ownership_api.contents_kind.unknown);
+        assert(core->contents[rows + 1].kind == ownership_api.contents_kind.aggregate);
+    }
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("aggregate parent ", repeated ? "repeated" : "single");
+}
+// Shallow release refuses an owner inside the containing place, not every owner on its root.
+fn shallow_sibling(bool descendant) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.aggregate_setup(&e, descendant ? 3771 : 3770, false, false);
+    ownership_raw_bytes_env.descendants(&e, false);
+    ownership_raw_bytes.window erased = ownership_raw_bytes_env.erased_window(&e, 3772);
+    ownership_raw_bytes.state mut* input = &e.paired.states[0];
+    ownership_api.place_path view = ownership_state.copy_place(input->core,
+        ownership_raw_bytes_env.view_field(&e, 1, false));
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (input->raw.origins[i].source.ordinal == 101) { input->raw.origins[i].place = view; }
+        i += 1;
+    }
+    if (descendant) { input->core->allocations[0].owner.place = view; }
+    assert(input->core->allocations[0].obligation);
+    ownership_raw.request req = ownership_raw_bytes_env.request(&e, 3773);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_api.proof_status proof = ownership_raw_bytes.check_shallow_release(input,
+        &e.service, erased, &req);
+    if (descendant) {
+        assert(!ownership_api.successful(proof) && e.budget.witness_validated);
+        assert(e.budget.last_event.text == "shallow release retains an owned descendant");
+        println("shallow release descendant reject");
+    } else {
+        assert(ownership_api.successful(proof));
+        println("shallow release sibling accept");
+    }
+}
+// A missing event route refuses at its own effect and reports no other effect's event.
+fn missing_route() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 3780, 1, false);
+    ownership_raw_bytes_env.initial(&e, 1, 3781);
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw_bytes.byte_effect[2] mut effects = {};
+    ownership_raw.request mut req = {};
+    ownership_raw_bytes_cleanup_env.sequence(&e, effects[..], &req, 3782);
+    req.base.event_bindings = e.bindings[..1];
+    ownership_raw_bytes_env.reset_budget(&e);
+    u64 events = e.budget.events;
+    ownership_raw_bytes.result mut out = ownership_raw_bytes.apply_ordered(&e.paired.states[0],
+        &e.service, effects[..], &req);
+    defer ownership_raw_bytes.free_result(&out);
+    assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_events);
+    assert(ownership_keys.operation(out.proof.terminal.operation, effects[1].operation) == 0);
+    assert(out.proof.terminal.source.line == 30);
+    assert(e.budget.events == events);
+    ownership_raw_bytes_env.same(&e, &before.states[0]);
+    println("missing route at its effect");
+}
+fn main() i32 {
+    unknown_element(0);
+    unknown_element(1);
+    typed_element(0);
+    typed_element(1);
+    published_element();
+    owner_copy(false);
+    owner_copy(true);
+    owner_without_leaf(false);
+    owner_without_leaf(true);
+    owned_buffer_write(0);
+    owned_buffer_write(1);
+    owned_buffer_write(2);
+    owner_places();
+    snapshot_gaps(0, 24);
+    snapshot_gaps(4, 20);
+    snapshot_parts_within_r();
+    aggregate_parent(false);
+    aggregate_parent(true);
+    shallow_sibling(false);
+    shallow_sibling(true);
+    missing_route();
+    return 0;
+}

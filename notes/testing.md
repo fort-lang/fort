@@ -452,6 +452,27 @@ bullet at a time and without a rewrite.
   longest program run went from 16.7 s to 6.7 s, the six programs together cost 15 s more CPU,
   because the harness compiles six programs and not one, and each mode gets a heap that no earlier
   mode fragmented (T-094).
+  The production harness gives each subprocess a separate 60-second limit.
+  Compilation includes the compiler's clang compile and link.
+  IR emission, LLVM verification, helper linking, and execution each have separate limits.
+  The harness kills the subprocess group when its limit expires.
+  The release preset builds the product compiler with `--release`.
+  Module fixtures without that flag use LLVM O1.
+  Byte cleanup programs use one allocator mode per entry.
+  Each mode keeps 64 warm rounds, one baseline round, and 256 measured rounds.
+  Each mode retains the last-sixteen sample window and both allocator bounds.
+  Owner modes discover move cost once before warm rounds.
+  They retain populated source history and tentative destination history in each transaction.
+  **A fixed refusal position drifts when the kernel adds work before it.** Paired R counting moved
+  the end of clone pricing to charge 9157 of 21428 in the populated round and 687 of 1610 in the
+  basic round. The storage positions 5068, 5468 and 6806 and the B26 positions 519 and 622 then
+  refused before the clone. A deleted failure-path release stayed green in all four suites.
+  Derive each position from one control run with `ownership_raw_bytes_env.watch`. Assert the
+  terminal source line of each refusal.
+  **Linux `malloc_info` counts tcache chunks as live.** The metric's own `open_memstream` buffer
+  fills one tcache bin of seven chunks. A round that never uses that chunk size then reads 848
+  bytes more in each of the first seven measured rounds, 5936 in all, with no leak. The partition
+  counter probe failed CI that way on both Linux jobs. Call the metric in every warm round too.
   **Neither view sees a leak of a block above 128 KB while the round frees no other block of that
   size.** glibc serves an allocation above `M_MMAP_THRESHOLD`, 131072 by default, by mmap, so the
   program break does not move; and a round large enough to ask for one is a round whose block view
