@@ -863,14 +863,16 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
-  **Two tables exist today**, and they cover 6 files:
-  `ls tools/mutations/*.json | wc -l` prints 2.
+  **Three tables exist today**, and they cover 12 files:
+  `ls tools/mutations/*.json | wc -l` prints 3.
   `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
   the four files of the C emitter, and the same command over
-  `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`. Each list is the
-  `"sources"` list the runner saves. Two earlier changes mutated `src/fort/check.ft`, and then
-  both compilers, by hand, because no table covered either file. No table covers `src/fort`
-  today.
+  `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`.
+  `grep -o 'src/fort/[a-z_]*\.ft' tools/mutations/emitter_fort.json | sort -u` prints the six
+  files of the fort emitter: `fir.ft`, `fir_llvm.ft`, `fir_lower.ft`, `gen.ft`, `gen_data.ft`
+  and `gen_fir.ft`. Each list is the `"sources"` list the runner saves. Two earlier changes
+  mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
+  file. No table covers the fort checker today.
   **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
   citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6
@@ -888,6 +890,29 @@ bullet at a time and without a rewrite.
   writes the modification time of each object into the binary. Without it two builds of one
   source gave two md5 values, so the last line of the runner would read `MISMATCH`. With it,
   two builds gave one value.
+  **The fort emitter table reads its citations from history and its lines from today.** Commit
+  c9b834a7 deleted the citations of `src/fort/gen.ft`, `gen_expr.ft`, `gen_stmt.ft` and
+  `gen_data.ft`, and b0606efa then replaced the direct path by FIR. At `a3e0c95d` those files
+  cited 86 decisions, the bare `D16` (5 times), 19 `item N` and 2 sections of `toolchain.md`;
+  `gen_fir.ft` cites `toolchain.md 1` today. The table has a row for each at the current line
+  that decides the rule, two for D16, and 8 further rows: 116 rows. Four rules have no
+  mutation-measured verdict. D2.4 has no emitter line: the lexer refuses a reserved word
+  (`fail/lexical/002_reserved_word`). D9.5 has no emitter line either: `modules.ft` refuses an
+  import cycle before the checker runs (`fail/modules/001_circular`). The D4.4 row is a probe of
+  a dead guard: `consts.cv_to_float` reaches it only for an integer constant, and an integer of
+  at most 2^64 in magnitude is finite in `f32` and `f64`. The D17.8 row is a probe of a dead
+  guard too: `lower_builtin` meets no builtin but `move` there, and the checker refuses a
+  discarded `move` (`fail/ownership/018_discard_own_rvalue`).
+  **A mutant of `src/fort` reaches two places.** bootstrap-1 builds the product compiler from it,
+  and each `test/fort` suite compiles the mutated module itself. So a row that turns every suite
+  red usually means that the compiler stopped on `std.rt`, often with a panic of `fir_verify`.
+  It does not mean that every suite names the rule.
+  **Its stages are `run_tests.py` runs, so the runner names no test.** `failing_tests` reads the
+  summary of ctest. Read the `FAIL` and `ERROR` lines of the round's log under `--log-dir`.
+  Keep the stages targeted: the FIR corpus, the `gen_` and `fir_` suites, the `driver_` suites
+  and four areas of the language corpus. PR CI runs the full suites. Run it with
+  `--runner 'bash -c'` after `cmake --build --preset debug`. A round cost a median of 70 s (5 s to
+  205 s) over 31 rounds of the final run.
   A mutant must still compile under `-Werror`. A replacement that makes a static function, a
   parameter or a variable unused stops the build (`build-failed`, 8 of the first 81 mutants).
   Keep the name in the expression: `if (!cv_fits(v, underlying) && false)`, not `if (false)`.
