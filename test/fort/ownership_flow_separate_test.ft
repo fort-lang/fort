@@ -1,0 +1,1080 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| continued paths
+//| stopped paths
+//| related slots
+//| step kinds
+//| joined paths
+//| result slots
+//| work bounds
+//| unmapped facts
+//| preconditions
+/// Checks how the flow solver continues after a definite failure of a local step (toolchain
+/// 4.2: do not silence a separate owner). The path settles the slots that the failure
+/// relates to, skips each later step on them and checks the other owners.
+import fir;
+import fir_env;
+import fir_flow;
+import fir_parse;
+import fir_verify;
+import ownership_api;
+import ownership_flow;
+import ownership_limits;
+import ownership_local_env;
+import ownership_state;
+import ownership_transfer;
+import std.strbuf;
+
+// One function, its local proof environment and its limits. A test keeps it in place.
+struct case_run {
+    fir_env.env environment;
+    fir.module parsed;
+    fir.func* function;
+    ownership_local_env.env e;
+    ownership_limits.meter m;
+    ownership_api.limit_table limits;
+    ownership_flow.source_file_binding[1] files;
+}
+
+fn open(fir_env.env mut* environment, fir.module mut* parsed, string@ lets, string@ blocks)
+    fir.func* {
+    fir_env.open(environment);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn main.f(_1 (c): bool) -> i32 {\n");
+    u64 mut l = 0;
+    while (l < lets.len) {
+        strbuf.append(&text, lets[l]);
+        strbuf.push(&text, '\n');
+        l += 1;
+    }
+    u64 mut i = 0;
+    while (i < blocks.len) {
+        strbuf.append(&text, blocks[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    strbuf.append(&text, "}\n");
+    u64 before = fir_env.errors(environment);
+    *parsed = fir_parse.parse_module(&environment->c.m.s, "separate.fir", strbuf.view(&text),
+        fir_env.prelude(environment));
+    assert(fir_env.errors(environment) == before);
+    fir.func* function = fir.module_function_at(parsed, 0);
+    fir_verify.runtime rt = fir_verify.runtime_of(&environment->c.ck);
+    strbuf.str_buf mut report = strbuf.create();
+    defer strbuf.free(&report);
+    assert(fir_verify.verify_report(function, &rt, &report));
+    return function;
+}
+
+fn start(case_run mut* r, string@ lets, string@ blocks) void {
+    r->function = open(&r->environment, &r->parsed, lets, blocks);
+    ownership_local_env.init(&r->e);
+}
+
+fn finish(case_run mut* r) void {
+    ownership_local_env.free(&r->e);
+    fir.module_free(&r->parsed);
+    fir_env.close(&r->environment);
+}
+
+fn slot(u32 ordinal) ownership_api.place_path { return ownership_local_env.place(ordinal); }
+
+fn step_at(ownership_local_env.env mut* e, ownership_transfer.action kind, u32 slot_number,
+    u32 block, u32 gap) ownership_flow.step {
+    ownership_flow.step mut out = ownership_flow.step{};
+    out.kind = ownership_flow.step_kind.local_effect;
+    out.block = block;
+    out.gap = gap;
+    out.local = ownership_local_env.req(e, kind, slot_number, slot_number);
+    out.local.operation.block = block;
+    e->event_bindings[e->event_bindings_len - 1].operation = out.local.operation;
+    out.operation = out.local.operation;
+    out.source = out.local.source_position;
+    return out;
+}
+
+// A step from `from` to `to`, such as a copy or a move.
+fn pair_at(ownership_local_env.env mut* e, ownership_transfer.action kind, u32 from, u32 to,
+    u32 block, u32 gap) ownership_flow.step {
+    ownership_flow.step mut out = step_at(e, kind, from, block, gap);
+    out.local.destination = slot(to);
+    return out;
+}
+
+fn allocation_at(ownership_local_env.env mut* e, u32 slot_number, u32 block, u32 gap,
+    u32 key, ownership_api.borrow_relation mut@ borrow) ownership_flow.step {
+    ownership_flow.step mut out = step_at(e, ownership_transfer.action.allocation, slot_number,
+        block, gap);
+    out.local.allocation = ownership_local_env.allocation(key, 100 + key, slot_number, 1);
+    out.local.fresh_source = ownership_local_env.source(key + 1000,
+        ownership_api.source_kind.heap, out.local.allocation.key);
+    out.local.source_key = out.local.fresh_source.key;
+    borrow[0] = ownership_local_env.borrow(out.local.fresh_source.key, key, slot(slot_number));
+    out.local.value = ownership_local_env.reference(key, out.local.fresh_source.key, borrow);
+    return out;
+}
+
+fn release_at(ownership_local_env.env mut* e, u32 slot_number, u32 block, u32 gap)
+    ownership_flow.step {
+    ownership_flow.step mut out = step_at(e, ownership_transfer.action.release, slot_number,
+        block, gap);
+    out.local.leaves_empty_proved = true;
+    return out;
+}
+
+// The storage end of a slot that no address names, as the local producer gives it.
+fn end_at(ownership_local_env.env mut* e, u32 slot_number, u32 block, u32 gap)
+    ownership_flow.step {
+    ownership_flow.step mut out = step_at(e, ownership_transfer.action.dead, slot_number, block,
+        gap);
+    out.local.private_slot_proved = true;
+    out.local.liveness_proved = true;
+    return out;
+}
+
+fn empty_slot(ownership_local_env.env mut* e, u32 n) void {
+    ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+    empty.place = slot(n);
+    ownership_state.append_contents(&e->state, empty);
+}
+
+fn input_of(case_run mut* r, ownership_flow.step@ steps, bool separate)
+    ownership_flow.program {
+    r->limits = ownership_limits.production();
+    assert(ownership_limits.configure(&r->m, &r->limits));
+    ownership_flow.program mut input = ownership_flow.program{};
+    input.function = r->function;
+    input.entry = &r->e.state;
+    input.services = &r->e.service;
+    input.limits = &r->limits;
+    input.source_files = r->files[0..0];
+    input.supplied_complete = true;
+    input.verified_fir = true;
+    input.steps = steps;
+    input.continue_separate = separate;
+    return input;
+}
+
+fn holds(ownership_flow.path* p, u32 local) bool {
+    return local < p->settled.count && fir_flow.bits_get(&p->settled, local);
+}
+
+// The one path at the entry of `block` settles exactly the locals of `expected`.
+fn settled_exactly(ownership_flow.analysis* result, u32 block, u32@ expected) void {
+    ownership_flow.bucket* at = &result->blocks[cast(block, u64)];
+    assert(at->len == 1);
+    ownership_flow.path* p = &at->paths[0];
+    u32 mut local = 0;
+    while (local < p->settled.count) {
+        bool mut wanted = false;
+        u64 mut i = 0;
+        while (i < expected.len) {
+            if (expected[i] == local) { wanted = true; }
+            i += 1;
+        }
+        if (holds(p, local) != wanted) {
+            eprintln("local ", local, " settled ", holds(p, local));
+            assert(false);
+        }
+        local += 1;
+    }
+}
+
+fn definite(ownership_api.proof_status p) bool {
+    return p.kind == ownership_api.proof_kind.complete && p.failed && !p.terminal.present;
+}
+
+// bb0 reads the empty a twice and ends b with its allocation: two separate failures. The two
+// reads write value versions 8 and 9, which hold null facts at the entry.
+fn continued(bool separate) void {
+    case_run mut r = case_run{};
+    string[3] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; _0 = const i32 2;",
+        "_0 = const i32 3; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[2] lets = {"let _2 (a): i32 mut* own;", "let _3 (b): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    ownership_flow.step[4] mut steps = {};
+    steps[0] = allocation_at(&r.e, 3, 0, 0, 1, borrow[..]);
+    steps[1] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 1);
+    steps[2] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 2);
+    ownership_api.entity_id failed = ownership_local_env.id(ownership_api.entity_kind.value,
+        8);
+    ownership_api.entity_id version = ownership_local_env.id(ownership_api.entity_kind.value,
+        9);
+    steps[1].invalidates = failed;
+    steps[2].invalidates = version;
+    steps[3] = end_at(&r.e, 3, 0, 3);
+    ownership_api.predicate_atom mut known = ownership_api.predicate_atom{};
+    known.kind = ownership_api.predicate_kind.nullness;
+    known.left = version;
+    known.lower.kind = ownership_api.fact_kind.exact;
+    ownership_state.append_predicates(&r.e.state, known);
+    known.left = failed;
+    ownership_state.append_predicates(&r.e.state, known);
+    ownership_flow.program mut input = input_of(&r, steps[..], separate);
+    u64[4] mut attempts = {};
+    u64[4] mut uncertain = {};
+    u64[2] mut returns = {};
+    u64[2] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    // The read of the empty a fails first, with a definite failure.
+    assert(definite(result.first_failure));
+    if (!separate) {
+        // Without the option the path stops at the read, as it did before.
+        assert(result.failures == 1 && result.normal_returns == 0);
+        assert(result.stops_len == 1 && result.stops[0].block == 0 &&
+            result.stops[0].gap == 1 && result.stops[0].rank == 1);
+        assert(attempts[0] == 1 && attempts[1] == 1 && attempts[2] == 0 && attempts[3] == 0);
+        assert(result.cycles.len == 0 && result.blocks[1].len == 0);
+        assert(r.e.counts.events == 1);
+        return;
+    }
+    // The path continues: the second read of a is skipped, and the end of b fails alone.
+    assert(result.failures == 2 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(attempts[0] == 1 && attempts[1] == 1 && attempts[2] == 1 && attempts[3] == 1);
+    assert(returns[1] == 1 && return_uncertain[1] == 0);
+    assert(r.e.counts.events == 2);
+    assert(r.e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    // Each failed block is read once for a cycle. bb0 leads to no cycle.
+    assert(result.cycles.len == 2 && result.cycles[0] == 1 && result.cycles[1] == 0);
+    u32[2] expected = {2, 3};
+    settled_exactly(&result, 1, expected[..]);
+    // The failed write and the skipped write each end the null fact of their value version.
+    assert(result.blocks[1].paths[0].facts.predicates_len == 0);
+    assert(r.e.state.predicates_len == 2);
+}
+
+// An incomplete failure has no effect that the path can apply, so the path stops.
+fn incomplete_stops() void {
+    case_run mut r = case_run{};
+    string[2] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[2] lets = {"let _2 (a): i32 mut* own;", "let _3 (b): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    ownership_flow.step[2] mut steps = {};
+    // No contents fact names a, so the inspection cannot be proved.
+    steps[0] = step_at(&r.e, ownership_transfer.action.inspect, 2, 0, 0);
+    steps[1] = step_at(&r.e, ownership_transfer.action.inspect, 3, 0, 1);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 1 && result.normal_returns == 0);
+    assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
+    assert(result.stops_len == 1 && result.stops[0].gap == 0 && result.stops[0].rank == 1);
+    assert(result.blocks[1].len == 0);
+}
+
+// A failure in a loop body stops its path: a settled path that came back would skip the
+// failed step and hide its failure. The zero-iteration path still reaches the end of b.
+fn cycle_stops() void {
+    case_run mut r = case_run{};
+    string[4] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { _0 = const i32 0; goto bb1; }",
+        "bb3: { _0 = const i32 1; _0 = const i32 2; return; }",
+    };
+    string[2] lets = {"let _2 (a): i32 mut* own;", "let _3 (b): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    ownership_flow.step[3] mut steps = {};
+    steps[0] = allocation_at(&r.e, 3, 0, 0, 1, borrow[..]);
+    steps[1] = step_at(&r.e, ownership_transfer.action.use, 2, 2, 0);
+    steps[2] = end_at(&r.e, 3, 3, 1);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    u64[3] mut attempts = {};
+    u64[3] mut uncertain = {};
+    u64[4] mut returns = {};
+    u64[4] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    // The loop read stops at bb2. The end of b in bb3 is on no cycle, so its path continues.
+    assert(result.failures == 2 && result.normal_returns == 1);
+    assert(result.stops_len == 1 && result.stops[0].block == 2 && result.stops[0].gap == 0);
+    assert(attempts[1] == 1 && attempts[2] == 1);
+    assert(result.cycles[2] == 2 && result.cycles[3] == 1);
+    assert(result.cycles[0] == 0 && result.cycles[1] == 0);
+}
+
+// The loop body bb2 ends in a constant switch. Its first arm is never taken, and the other
+// target leads back to the loop head. So bb2 is on a cycle, and its failure stops the path.
+fn cycle_through_a_constant_switch() void {
+    case_run mut r = case_run{};
+    string[5] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb4]; }",
+        "bb2: { _0 = const i32 0; switch(const false) -> [true: bb3, otherwise: bb1]; }",
+        "bb3: { goto bb1; }",
+        "bb4: { _0 = const i32 1; return; }",
+    };
+    string[1] lets = {"let _2 (a): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_flow.step[1] mut steps = {};
+    steps[0] = step_at(&r.e, ownership_transfer.action.use, 2, 2, 0);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 1 && result.normal_returns == 1);
+    assert(result.stops_len == 1 && result.stops[0].block == 2 && result.stops[0].gap == 0);
+    assert(result.cycles[2] == 2 && result.blocks[3].len == 0);
+}
+
+fn stopped_paths() void {
+    incomplete_stops();
+    cycle_stops();
+    cycle_through_a_constant_switch();
+    println("stopped paths");
+}
+
+// q and r view the allocation of p. After del(p) the read of q fails. The source relates r,
+// so the read of r is skipped. The released allocation has no owner obligation, so p stays
+// unrelated, and b keeps its own check.
+fn through_a_borrow() void {
+    case_run mut r = case_run{};
+    string[4] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; _0 = const i32 2; _0 = const i32 3;",
+        "_0 = const i32 4; _0 = const i32 5; _0 = const i32 6; _0 = const i32 7;",
+        "_0 = const i32 8; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[4] lets = {"let _2 (p): i32 mut* own;", "let _3 (q): i32*;", "let _4 (r): i32*;",
+        "let _5 (b): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 3);
+    empty_slot(&r.e, 4);
+    ownership_api.borrow_relation[1] mut first = {};
+    ownership_api.borrow_relation[1] mut second = {};
+    ownership_flow.step[9] mut steps = {};
+    steps[0] = allocation_at(&r.e, 2, 0, 0, 1, first[..]);
+    steps[1] = pair_at(&r.e, ownership_transfer.action.copy, 2, 3, 0, 1);
+    steps[2] = pair_at(&r.e, ownership_transfer.action.copy, 2, 4, 0, 2);
+    steps[3] = release_at(&r.e, 2, 0, 3);
+    steps[4] = step_at(&r.e, ownership_transfer.action.use, 3, 0, 4);
+    steps[5] = step_at(&r.e, ownership_transfer.action.use, 4, 0, 5);
+    steps[6] = allocation_at(&r.e, 5, 0, 6, 2, second[..]);
+    steps[7] = end_at(&r.e, 5, 0, 7);
+    steps[8] = end_at(&r.e, 2, 0, 8);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    u64[9] mut attempts = {};
+    u64[9] mut uncertain = {};
+    u64[2] mut returns = {};
+    u64[2] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 2 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(definite(result.first_failure));
+    assert(attempts[5] == 1 && attempts[8] == 1);
+    u32[3] expected = {3, 4, 5};
+    settled_exactly(&result, 1, expected[..]);
+}
+
+// d is an owning copy of the view u: a second owner of the allocation of o. The failure
+// relates u, d and, through the borrowed source and its allocation, the owner o. The end of
+// o is skipped, so no false leak follows. The end of the unrelated w still fails.
+fn second_owner() void {
+    case_run mut r = case_run{};
+    string[3] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; _0 = const i32 2; _0 = const i32 3;",
+        "_0 = const i32 4; _0 = const i32 5; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[4] lets = {"let _2 (o): i32 mut* own;", "let _3 (u): i32*;",
+        "let _4 (d): i32 mut* own;", "let _5 (w): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 3);
+    empty_slot(&r.e, 4);
+    ownership_api.borrow_relation[1] mut first = {};
+    ownership_api.borrow_relation[1] mut second = {};
+    ownership_flow.step[6] mut steps = {};
+    steps[0] = allocation_at(&r.e, 2, 0, 0, 1, first[..]);
+    steps[1] = pair_at(&r.e, ownership_transfer.action.copy, 2, 3, 0, 1);
+    steps[2] = pair_at(&r.e, ownership_transfer.action.copy, 3, 4, 0, 2);
+    steps[2].local.destination_owns = true;
+    steps[3] = allocation_at(&r.e, 5, 0, 3, 2, second[..]);
+    steps[4] = end_at(&r.e, 2, 0, 4);
+    steps[5] = end_at(&r.e, 5, 0, 5);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 2 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(definite(result.first_failure));
+    assert(r.e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    u32[4] expected = {2, 3, 4, 5};
+    settled_exactly(&result, 1, expected[..]);
+}
+
+// A copy or a move that names the settled a is skipped. Its other slot then holds a value
+// that the path does not know, or a holds its storage now, so it is settled with each slot
+// that it relates to. With `copy` the step copies w into the owning a; otherwise it moves u
+// into a.
+fn skipped_pair(bool copy) void {
+    case_run mut r = case_run{};
+    string[3] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; _0 = const i32 2; _0 = const i32 3;",
+        "_0 = const i32 4; _0 = const i32 5; _0 = const i32 6; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[3] lets = {"let _2 (a): i32 mut* own;", "let _3 (u): i32 mut* own;",
+        "let _4 (w): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_api.borrow_relation[1] mut first = {};
+    ownership_api.borrow_relation[1] mut second = {};
+    ownership_flow.step[7] mut steps = {};
+    steps[0] = allocation_at(&r.e, 3, 0, 0, 1, first[..]);
+    steps[1] = allocation_at(&r.e, 4, 0, 1, 2, second[..]);
+    steps[2] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 2);
+    if (copy) {
+        steps[3] = pair_at(&r.e, ownership_transfer.action.copy, 4, 2, 0, 3);
+        steps[3].local.destination_owns = true;
+    } else {
+        steps[3] = pair_at(&r.e, ownership_transfer.action.move_owner, 3, 2, 0, 3);
+    }
+    steps[4] = end_at(&r.e, 3, 0, 4);
+    steps[5] = end_at(&r.e, 4, 0, 5);
+    steps[6] = end_at(&r.e, 2, 0, 6);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    u64[7] mut attempts = {};
+    u64[7] mut uncertain = {};
+    u64[2] mut returns = {};
+    u64[2] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    // The read of a fails, and then the end of the one slot that stays unrelated: u after
+    // the copy, w after the move. That failure settles its slot too.
+    assert(result.failures == 2 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(attempts[3] == 1 && attempts[4] == 1 && attempts[5] == 1 && attempts[6] == 1);
+    assert(r.e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    assert(r.e.counts.last_relation.ordinal == (copy ? 3 : 4));
+    u32[3] expected = {2, 3, 4};
+    settled_exactly(&result, 1, expected[..]);
+}
+
+// The owner o holds contents that name no source, as after a widening join, and u views the
+// allocation of o. With `from_owner` the end of o fails: o owns the allocation, so its source
+// relates u, and the owning copy of u into d is skipped. Otherwise that copy fails first: u
+// views the allocation, so its owner o is related, and the end of o is skipped.
+fn owner_without_view(bool from_owner) void {
+    case_run mut r = case_run{};
+    string[2] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[3] lets = {"let _2 (o): i32 mut* own;", "let _3 (u): i32*;",
+        "let _4 (d): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    ownership_api.allocation_fact held = ownership_local_env.allocation(1, 101, 2, 1);
+    ownership_api.source_fact fresh = ownership_local_env.source(1001,
+        ownership_api.source_kind.heap, held.key);
+    ownership_state.append_allocations(&r.e.state, held);
+    ownership_state.append_sources(&r.e.state, fresh);
+    ownership_api.contents_fact mut unknown = ownership_api.contents_fact{};
+    unknown.place = slot(2);
+    unknown.kind = ownership_api.contents_kind.unknown;
+    ownership_state.append_contents(&r.e.state, unknown);
+    ownership_api.borrow_relation[1] mut borrow = {
+        ownership_local_env.borrow(fresh.key, 1, slot(3)),
+    };
+    ownership_api.contents_fact mut view = ownership_local_env.reference(1, fresh.key,
+        borrow[..]);
+    view.place = slot(3);
+    ownership_state.append_contents(&r.e.state, view);
+    empty_slot(&r.e, 4);
+    ownership_flow.step[2] mut steps = {};
+    ownership_flow.step copy = pair_at(&r.e, ownership_transfer.action.copy, 3, 4, 0,
+        from_owner ? 1 : 0);
+    ownership_flow.step end = end_at(&r.e, 2, 0, from_owner ? 0 : 1);
+    steps[0] = from_owner ? end : copy;
+    steps[1] = from_owner ? copy : end;
+    steps[from_owner ? 1 : 0].local.destination_owns = true;
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 1 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(definite(result.first_failure));
+    assert(r.e.counts.events == 1);
+    // The one failure is the end of o, or the owning copy that reads u.
+    assert(r.e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    assert(r.e.counts.last_relation.ordinal == (from_owner ? 2 : 3));
+    u32[3] expected = {2, 3, 4};
+    settled_exactly(&result, 1, expected[..]);
+}
+
+// v views the allocation of u. After the failed read of a, the copy of a into v is skipped.
+// It writes over v, so v is settled with unknown contents, and its old view relates nothing:
+// u stays separate, and its end fails on its own.
+fn overwritten_view() void {
+    case_run mut r = case_run{};
+    string[3] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; _0 = const i32 2; _0 = const i32 3;",
+        "_0 = const i32 4; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[3] lets = {"let _2 (a): i32 mut* own;", "let _3 (v): i32*;",
+        "let _4 (u): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    empty_slot(&r.e, 3);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    ownership_flow.step[5] mut steps = {};
+    steps[0] = allocation_at(&r.e, 4, 0, 0, 1, borrow[..]);
+    steps[1] = pair_at(&r.e, ownership_transfer.action.copy, 4, 3, 0, 1);
+    steps[2] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 2);
+    steps[3] = pair_at(&r.e, ownership_transfer.action.copy, 2, 3, 0, 3);
+    steps[4] = end_at(&r.e, 4, 0, 4);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 2 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(r.e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    assert(r.e.counts.last_relation.ordinal == 4);
+    u32[3] expected = {2, 3, 4};
+    settled_exactly(&result, 1, expected[..]);
+    ownership_state.state* facts = &result.blocks[1].paths[0].facts;
+    u64 mut i = 0;
+    while (i < facts->contents_len) {
+        if (facts->contents[i].place.root.ordinal == 3) {
+            assert(facts->contents[i].kind == ownership_api.contents_kind.unknown);
+            assert(facts->contents[i].borrows.len == 0);
+        }
+        i += 1;
+    }
+}
+
+// After the failed read of a, the skipped copy of a into the view v settles v. The copy of
+// the unrelated o into v runs: it writes a known value over v and changes neither o nor its
+// allocation, so v is no longer settled. After del(o) the read through v fails on its own.
+fn copied_into_a_settled_view() void {
+    case_run mut r = case_run{};
+    string[3] blocks = {
+        "bb0: { _0 = const i32 0; _0 = const i32 1; _0 = const i32 2; _0 = const i32 3;",
+        "_0 = const i32 4; _0 = const i32 5; _0 = const i32 6; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[3] lets = {"let _2 (a): i32 mut* own;", "let _3 (v): i32*;",
+        "let _4 (o): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    empty_slot(&r.e, 3);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    ownership_flow.step[7] mut steps = {};
+    steps[0] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 0);
+    steps[1] = pair_at(&r.e, ownership_transfer.action.copy, 2, 3, 0, 1);
+    steps[2] = allocation_at(&r.e, 4, 0, 2, 1, borrow[..]);
+    steps[3] = pair_at(&r.e, ownership_transfer.action.copy, 4, 3, 0, 3);
+    steps[4] = release_at(&r.e, 4, 0, 4);
+    steps[5] = step_at(&r.e, ownership_transfer.action.use, 3, 0, 5);
+    steps[6] = end_at(&r.e, 4, 0, 6);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    u64[7] mut attempts = {};
+    u64[7] mut uncertain = {};
+    u64[2] mut returns = {};
+    u64[2] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 2 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(r.e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    assert(attempts[3] == 1 && attempts[4] == 1 && attempts[5] == 1 && attempts[6] == 1);
+    // The failed read through v settles v again. o stays unrelated: its allocation is released.
+    u32[2] expected = {2, 3};
+    settled_exactly(&result, 1, expected[..]);
+}
+
+// settle_overwritten makes unknown only the contents of the slot of this function. A slot of
+// another function with the same number keeps its contents.
+fn overwritten_slot_of_this_function() void {
+    ownership_flow.program input = ownership_flow.program{};
+    ownership_flow.path mut p = ownership_flow.path{};
+    p.settled = fir_flow.bits_new(4);
+    p.facts = ownership_state.empty();
+    ownership_api.contents_fact mut own_slot = ownership_local_env.empty_value();
+    own_slot.place = slot(3);
+    ownership_state.append_contents(&p.facts, own_slot);
+    ownership_api.contents_fact mut other = ownership_local_env.empty_value();
+    other.place = slot(3);
+    other.place.root.function = ownership_api.function_id{.instance = 7};
+    ownership_state.append_contents(&p.facts, other);
+    ownership_flow.settle_overwritten(&input, &p, 3);
+    assert(fir_flow.bits_get(&p.settled, 3));
+    assert(p.facts.contents_len == 2);
+    assert(p.facts.contents[0].kind == ownership_api.contents_kind.unknown);
+    assert(p.facts.contents[1].kind == ownership_api.contents_kind.empty_owner);
+    ownership_flow.free_path(&p);
+}
+
+fn related_slots() void {
+    through_a_borrow();
+    overwritten_view();
+    copied_into_a_settled_view();
+    overwritten_slot_of_this_function();
+    second_owner();
+    owner_without_view(true);
+    owner_without_view(false);
+    skipped_pair(false);
+    skipped_pair(true);
+    println("related slots");
+}
+
+// After the failed read of a, a settled path meets a direct call (variant 0), a trusted call
+// outcome (1), a value invalidation (2), a flag step that tests the settled a for null (3)
+// or one that tests the unrelated h for null (4). A direct call can read a settled slot
+// through its summary, so it stops the path and records no second failure. The others
+// continue. The null test of a would read the stale contents of a, so its flag f takes no
+// value; the null test of h gives f the value "not null".
+fn settled_kind(u32 variant) void {
+    case_run mut r = case_run{};
+    string[3] blocks = {
+        "bb0: { _0 = const i32 0; _3 = call fn main.add(const i32 1, const i64 2);",
+        "_0 = const i32 1; goto bb1; }",
+        "bb1: { return; }",
+    };
+    string[4] lets = {"let _2 (a): i32 mut* own;", "let _3: u64;", "let _4 (f): bool;",
+        "let _5 (h): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_api.allocation_fact held = ownership_local_env.allocation(1, 101, 5, 1);
+    ownership_api.source_fact fresh = ownership_local_env.source(1001,
+        ownership_api.source_kind.heap, held.key);
+    ownership_state.append_allocations(&r.e.state, held);
+    ownership_state.append_sources(&r.e.state, fresh);
+    ownership_api.borrow_relation[1] mut borrow = {
+        ownership_local_env.borrow(fresh.key, 1, slot(5)),
+    };
+    ownership_api.contents_fact mut view = ownership_local_env.reference(1, fresh.key,
+        borrow[..]);
+    view.place = slot(5);
+    ownership_state.append_contents(&r.e.state, view);
+    ownership_api.entity_id flag = ownership_local_env.id(ownership_api.entity_kind.slot, 4);
+    ownership_api.entity_id version = ownership_local_env.id(ownership_api.entity_kind.value,
+        9);
+    ownership_api.predicate_atom mut known = ownership_api.predicate_atom{};
+    known.kind = ownership_api.predicate_kind.nullness;
+    known.left = version;
+    known.lower.kind = ownership_api.fact_kind.exact;
+    ownership_state.append_predicates(&r.e.state, known);
+    ownership_api.outcome_fact[1] trusted = {ownership_api.outcome_fact{
+        .kind = ownership_api.outcome_kind.function_return, .possible_caller_return = true}};
+    ownership_flow.step[2] mut steps = {};
+    steps[0] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 0);
+    steps[1].block = 0;
+    steps[1].gap = variant == 2 ? 2 : 1;
+    steps[1].operation = ownership_api.operation_position{.block = 0, .operation = 1};
+    if (variant == 0) { steps[1].kind = ownership_flow.step_kind.direct_call; }
+    if (variant == 1) {
+        steps[1].kind = ownership_flow.step_kind.call_outcome;
+        steps[1].outcomes = trusted[..];
+        steps[1].outcomes_complete = true;
+    }
+    if (variant == 2) {
+        steps[1].kind = ownership_flow.step_kind.invalidate_value;
+        steps[1].invalidates = version;
+    }
+    if (variant >= 3) {
+        steps[1].kind = ownership_flow.step_kind.flag;
+        steps[1].flag = ownership_flow.flag_effect{.kind = ownership_flow.flag_kind.null_test,
+            .flag = flag, .from = ownership_local_env.id(ownership_api.entity_kind.slot,
+            variant == 3 ? 2 : 5), .value = true};
+    }
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 1 && definite(result.first_failure));
+    if (variant == 0) {
+        assert(result.normal_returns == 0 && result.stops_len == 1);
+        assert(result.stops[0].block == 0 && result.stops[0].gap == 1 &&
+            result.stops[0].rank == 1);
+        return;
+    }
+    assert(result.normal_returns == 1 && result.stops_len == 0);
+    u32[1] expected = {2};
+    settled_exactly(&result, 1, expected[..]);
+    // Only the invalidation ends the null fact of version 9. Only the null test of h gives f
+    // a value: f == false, because h holds a heap reference.
+    ownership_state.state* facts = &result.blocks[1].paths[0].facts;
+    u64 mut versions = 0;
+    u64 mut flags = 0;
+    u64 mut i = 0;
+    while (i < facts->predicates_len) {
+        ownership_api.predicate_atom atom = facts->predicates[i];
+        if (definite_entity(atom.left, version)) { versions += 1; }
+        if (definite_entity(atom.left, flag)) {
+            assert(atom.lower.value == 0);
+            flags += 1;
+        }
+        i += 1;
+    }
+    assert(versions == (variant == 2 ? 0 : 1));
+    assert(flags == (variant == 4 ? 1 : 0));
+}
+
+fn definite_entity(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    return a.kind == b.kind && a.ordinal == b.ordinal;
+}
+
+fn step_kinds() void {
+    settled_kind(0);
+    settled_kind(1);
+    settled_kind(2);
+    settled_kind(3);
+    settled_kind(4);
+    println("step kinds");
+}
+
+// One branch reads the empty a and settles it. Both paths read a again in bb3 and end b.
+// With the production G both paths reach bb3 apart: the settled path skips the read, and
+// the other path fails it. With G = 1 the paths join at bb3. The joined path settles a, so
+// it skips the read, and it still checks the end of b.
+fn joined(u64 g) void {
+    case_run mut r = case_run{};
+    string[5] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 0; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 1; _0 = const i32 2; goto bb4; }",
+        "bb4: { return; }",
+    };
+    string[2] lets = {"let _2 (a): i32 mut* own;", "let _3 (b): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    ownership_flow.step[4] mut steps = {};
+    steps[0] = allocation_at(&r.e, 3, 0, 0, 1, borrow[..]);
+    steps[1] = step_at(&r.e, ownership_transfer.action.use, 2, 1, 0);
+    steps[2] = step_at(&r.e, ownership_transfer.action.use, 2, 3, 0);
+    steps[3] = end_at(&r.e, 3, 3, 1);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    r.limits.g = g;
+    assert(ownership_limits.configure(&r.m, &r.limits));
+    u64[4] mut attempts = {};
+    u64[4] mut uncertain = {};
+    u64[5] mut returns = {};
+    u64[5] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.stops_len == 0);
+    if (g == 1) {
+        assert(result.blocks[3].widened);
+        assert(result.failures == 2 && result.normal_returns == 1);
+        assert(attempts[2] == 1 && attempts[3] == 1);
+        u32[2] expected = {2, 3};
+        settled_exactly(&result, 4, expected[..]);
+        return;
+    }
+    assert(!result.blocks[3].widened && result.blocks[3].len == 2);
+    assert(result.failures == 4 && result.normal_returns == 1);
+    assert(attempts[2] == 2 && attempts[3] == 2);
+    // Both paths reach bb4 with equal facts and one settled set, so bb4 keeps one path.
+    u32[2] expected = {2, 3};
+    settled_exactly(&result, 4, expected[..]);
+}
+
+// Two branches each settle one slot: bb1 a, bb4 d. Four paths reach bb6 with the settled
+// sets {a, d}, {d}, {a} and {}. With the production G they stay apart, and each fails what it
+// has not settled. With G = 2 the third path widens the bucket of bb6, and the joined path
+// settles the union {a, d}: it skips both reads and still checks the end of b.
+fn joined_three(u64 g) void {
+    case_run mut r = case_run{};
+    string[8] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 0; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { switch(copy _1) -> [true: bb4, otherwise: bb5]; }",
+        "bb4: { _0 = const i32 1; goto bb6; }",
+        "bb5: { goto bb6; }",
+        "bb6: { _0 = const i32 2; _0 = const i32 3; _0 = const i32 4; goto bb7; }",
+        "bb7: { return; }",
+    };
+    string[3] lets = {"let _2 (a): i32 mut* own;", "let _3 (b): i32 mut* own;",
+        "let _4 (d): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    empty_slot(&r.e, 4);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    ownership_flow.step[6] mut steps = {};
+    steps[0] = allocation_at(&r.e, 3, 0, 0, 1, borrow[..]);
+    steps[1] = step_at(&r.e, ownership_transfer.action.use, 2, 1, 0);
+    steps[2] = step_at(&r.e, ownership_transfer.action.use, 4, 4, 0);
+    steps[3] = step_at(&r.e, ownership_transfer.action.use, 2, 6, 0);
+    steps[4] = step_at(&r.e, ownership_transfer.action.use, 4, 6, 1);
+    steps[5] = end_at(&r.e, 3, 6, 2);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    r.limits.g = g;
+    assert(ownership_limits.configure(&r.m, &r.limits));
+    u64[6] mut attempts = {};
+    u64[6] mut uncertain = {};
+    u64[8] mut returns = {};
+    u64[8] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.stops_len == 0 && result.normal_returns == 1);
+    u32[3] expected = {2, 3, 4};
+    settled_exactly(&result, 7, expected[..]);
+    if (g == 2) {
+        assert(result.blocks[6].widened && result.blocks[6].len == 1);
+        // bb1 fails once, bb4 twice and the joined bb6 once: only at the end of b.
+        assert(result.failures == 4);
+        assert(attempts[3] == 1 && attempts[4] == 1 && attempts[5] == 1);
+        return;
+    }
+    assert(!result.blocks[6].widened && result.blocks[6].len == 4);
+    // At bb6 the four paths fail 0 + 1 + 1 + 2 reads and four ends of b.
+    assert(result.failures == 11);
+    assert(attempts[3] == 4 && attempts[4] == 4 && attempts[5] == 4);
+}
+
+fn joined_paths() void {
+    joined(ownership_limits.production().g);
+    joined(1);
+    joined_three(ownership_limits.production().g);
+    joined_three(2);
+    println("joined paths");
+}
+
+// The result slot copies the settled a, so the return checks no returned borrow there. With
+// no failure the result slot holds no contents fact, and the return check fails on it.
+fn result_slot(bool failed) void {
+    case_run mut r = case_run{};
+    string[1] blocks = {"bb0: { _0 = const i32 0; _0 = const i32 1; return; }"};
+    string[1] lets = {"let _2 (a): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_flow.step[2] mut steps = {};
+    steps[0] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 0);
+    steps[1] = pair_at(&r.e, ownership_transfer.action.copy, 2, 0, 0, 1);
+    ownership_flow.program mut input = input_of(&r, failed ? steps[..] : steps[0..0], true);
+    input.result_slot = ownership_local_env.id(ownership_api.entity_kind.slot, 0);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.normal_returns == 1 && result.stops_len == 0 && result.failures == 1);
+    if (failed) {
+        assert(definite(result.first_failure));
+        return;
+    }
+    assert(result.first_failure.terminal.reason ==
+        ownership_api.incomplete_reason.missing_correspondence);
+}
+
+fn result_slots() void {
+    result_slot(true);
+    result_slot(false);
+    println("result slots");
+}
+
+ownership_api.services mut budgeted = ownership_api.services{};
+
+// The relation charges one W unit for each round. The read charges one unit. With W = 1
+// the first round is refused: the path records the refusal and stops. With W = 2 the one
+// round fits, and the path continues to the return.
+fn work_bound(u64 w) void {
+    case_run mut r = case_run{};
+    string[1] blocks = {"bb0: { _0 = const i32 0; return; }"};
+    string[1] lets = {"let _2 (a): i32 mut* own;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_flow.step[1] mut steps = {};
+    steps[0] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 0);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    r.limits.w = w;
+    assert(ownership_limits.configure(&r.m, &r.limits));
+    budgeted.budget_context = cast(&r.m, void mut*);
+    budgeted.budget = ownership_limits.callback;
+    budgeted.event_context = r.e.service.event_context;
+    budgeted.event = r.e.service.event;
+    input.services = &budgeted;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(definite(result.first_failure));
+    if (w == 1) {
+        assert(result.failures == 2 && result.normal_returns == 0);
+        assert(result.stops_len == 1 && result.stops[0].gap == 0 && result.stops[0].rank == 1);
+        assert(r.m.used.w == 1);
+        return;
+    }
+    assert(result.failures == 1 && result.normal_returns == 1 && result.stops_len == 0);
+    assert(r.m.used.w == 2);
+}
+
+fn work_bounds() void {
+    work_bound(1);
+    work_bound(2);
+    println("work bounds");
+}
+
+// The relation needs each fact to name a whole slot of this function. Variant 0 holds a
+// contents fact past the last local, 1 an owner obligation on a residual place, 2 a region,
+// and 3 a borrow of a source that the facts lack. Each of them stops the path. Variant 4
+// holds a detached owner, which leaves local proof and relates no slot: the path continues.
+fn unmapped(u32 variant) void {
+    case_run mut r = case_run{};
+    string[2] blocks = {"bb0: { _0 = const i32 0; goto bb1; }", "bb1: { return; }"};
+    string[2] lets = {"let _2 (a): i32 mut* own;", "let _3 (b): i32*;"};
+    start(&r, lets[..], blocks[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_api.borrow_relation[1] mut missing = {
+        ownership_local_env.borrow(ownership_local_env.id(ownership_api.entity_kind.source,
+            77), 7, slot(3)),
+    };
+    if (variant == 0) { empty_slot(&r.e, 40); }
+    if (variant == 1 || variant == 4) {
+        ownership_api.allocation_fact mut held = ownership_local_env.allocation(5, 105, 3, 1);
+        if (variant == 1) { held.owner.place.residual = true; }
+        else { held.owner.detached = true; }
+        ownership_state.append_allocations(&r.e.state, held);
+    }
+    if (variant == 2) { ownership_state.append_regions(&r.e.state, ownership_api.region{}); }
+    if (variant == 3) {
+        ownership_api.contents_fact mut view = ownership_local_env.reference(7,
+            missing[0].source, missing[..]);
+        view.place = slot(3);
+        ownership_state.append_contents(&r.e.state, view);
+    }
+    ownership_flow.step[1] mut steps = {};
+    steps[0] = step_at(&r.e, ownership_transfer.action.use, 2, 0, 0);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 1 && definite(result.first_failure));
+    if (variant == 4) {
+        assert(result.normal_returns == 1 && result.stops_len == 0);
+        u32[1] expected = {2};
+        settled_exactly(&result, 1, expected[..]);
+        return;
+    }
+    assert(result.normal_returns == 0 && result.stops_len == 1);
+    assert(result.blocks[1].len == 0);
+}
+
+fn unmapped_facts() void {
+    u32 mut variant = 0;
+    while (variant < 5) {
+        unmapped(variant);
+        variant += 1;
+    }
+    println("unmapped facts");
+}
+
+fn unused_call(void mut* context, ownership_flow.step* s, ownership_state.state mut* facts)
+    ownership_flow.call_verdict {
+    return ownership_flow.call_verdict{};
+}
+
+fn unused_exit(void mut* context, ownership_api.state_view* facts,
+    ownership_api.outcome_fact outcome, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+// A loan (variant 0), a null edge (1), a value edge (2), a parameter (3), a call handler (4)
+// and an exit observer (5) each read facts that a settled slot can make stale, so each keeps
+// the stop. Variant 6 has none of them, and its path continues to both returns.
+fn precondition(u32 variant) void {
+    case_run mut r = case_run{};
+    string[3] branches = {
+        "bb0: { _0 = const i32 0; switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { return; }",
+        "bb2: { return; }",
+    };
+    string[2] loaned = {
+        "bb0: { _3 = const zero i32@; loan_begin 1 _3; _0 = const i32 0; loan_end 1;",
+        "return; }",
+    };
+    string[2] lets = {"let _2 (a): i32 mut* own;", "let _3: i32@;"};
+    start(&r, lets[..], variant == 0 ? loaned[..] : branches[..]);
+    defer finish(&r);
+    empty_slot(&r.e, 2);
+    ownership_flow.step[1] mut steps = {};
+    steps[0] = step_at(&r.e, ownership_transfer.action.use, 2, 0, variant == 0 ? 2 : 0);
+    ownership_flow.program mut input = input_of(&r, steps[..], true);
+    ownership_api.entity_id version = ownership_local_env.id(ownership_api.entity_kind.value,
+        9);
+    ownership_flow.edge_fact[1] edges = {ownership_flow.edge_fact{0, 0, version, false}};
+    ownership_flow.value_edge[1] values = {ownership_flow.value_edge{0, 0, version, 1}};
+    ownership_flow.parameter[1] parameters = {ownership_flow.parameter{
+        ownership_local_env.id(ownership_api.entity_kind.slot, 1),
+        ownership_local_env.id(ownership_api.entity_kind.source, 9)}};
+    if (variant == 1) { input.edges = edges[..]; }
+    if (variant == 2) { input.values = values[..]; }
+    if (variant == 3) { input.parameters = parameters[..]; }
+    if (variant == 4) { input.call_handler = unused_call; }
+    if (variant == 5) { input.exit_observer = unused_exit; }
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(definite(result.first_failure));
+    if (variant == 6) {
+        assert(result.failures == 1 && result.normal_returns == 2 && result.stops_len == 0);
+        return;
+    }
+    assert(result.failures == 1 && result.normal_returns == 0 && result.stops_len == 1);
+}
+
+fn preconditions() void {
+    u32 mut variant = 0;
+    while (variant < 7) {
+        precondition(variant);
+        variant += 1;
+    }
+    println("preconditions");
+}
+
+fn main() i32 {
+    continued(false);
+    continued(true);
+    println("continued paths");
+    stopped_paths();
+    related_slots();
+    step_kinds();
+    joined_paths();
+    result_slots();
+    work_bounds();
+    unmapped_facts();
+    preconditions();
+    return 0;
+}

@@ -976,6 +976,34 @@ came here.
   A named zero pair can coexist with an unnamed source without a false filename.
   The renderer does not call a filename resolver when the source has no filename.
   This pass does not construct source effects.
+  With `continue_separate`, a definite failure of a local step does not stop its path
+  (toolchain 4.2: do not silence a separate owner). The path settles the two slots of the
+  step and each slot that they relate to: the owner of an owned or viewed allocation and each
+  other view of a viewed source. Static and trusted foreign sources relate nothing. A failed
+  transfer leaves the facts unchanged, so each other slot keeps the facts of the program.
+  The path skips each later local step on a settled slot, so it reports no related owner
+  twice, and the step still counts as an attempt. A copy of an unsettled slot into a settled
+  view runs, and the view is no longer settled: the copy writes a known value and changes
+  neither the source nor its allocation, and a view releases no storage
+  (`leak_after_a_copy_into_a_related_view`). A skipped move or a skipped copy into a settled
+  owner settles its source with its relations: a settled slot now holds that value or storage. A
+  skipped copy or move out of a settled slot writes over its destination, so the destination
+  is settled alone with unknown contents: its old value relates nothing
+  (`leak_after_an_overwritten_view`). A skipped write and a continued failure invalidate their
+  value version. Joined paths unite their settled sets, and a return checks no settled result
+  slot. A flag step runs on a settled path, but a null test of a settled slot leaves its flag
+  without a value: the stale contents would refute the branch that the program takes
+  (`null_test_of_a_related_owner`). Other flag forms read only flags, which no skipped step
+  writes. A direct call stops a settled path, because its summary can read settled facts.
+  These keep the stop: an incomplete failure, a failure on a cycle (a settled path that came
+  back would skip the step and hide its failure), a loan, a null or value edge, a parameter
+  check, a call handler, an exit observer, a W refusal of the relation (one unit for each
+  round), and a fact that names no whole slot of the function. The cycle search and `reaches`
+  in `ownership_source_local` skip the unselected arm of a constant switch through
+  `fir_flow.next_reachable_target`; a loop that stopped at that arm missed the other target.
+  Only the main local run sets the option; the classification run and the summaries keep the
+  stop.
+  `test/fort/ownership_flow_separate_test.ft` holds each case.
 - **Local ownership effects come from verified FIR** (D17.14, D17.18, D19.8).
   `ownership_source_local` reads each verified body and feeds `ownership_flow`.
   A tracked local slot (TL) is a reference local whose storage no `addr` or array `slice`
@@ -1050,9 +1078,13 @@ came here.
   site whose allocations of two earlier iterations stay in the facts at once, or whose released
   earlier allocation a view keeps, has no third identity (D17.16). A loop that exhausts the
   transfer history E (256 of 256) stays a limit. So does a path that needs a back edge, a
-  short-circuit condition or a second choice of one parameter. The flow also stops a path at its
-  first failure, so a later independent obligation on that path is not examined: the corpus file
-  `fail/ownership/054` expects line 12, and local proof reports line 11 only. Null tests of a
+  short-circuit condition or a second choice of one parameter. After a definite failure the path
+  checks the unrelated owners, so `fail/ownership/054` examines its line-12 leak. Its line-11
+  print calls are fort calls, so no witness reaches line 12: local proof reports line 11 as a
+  violation and line 12 as incomplete. A witness walk crosses an earlier failed operation as an
+  ordinary statement, so a later violation holds when that operation is repaired without an
+  effect on the later owner. `test/fort/ownership_source_local_separate_test.ft` holds the
+  source shapes. Null tests of a
   TL whose contents decide them, one flag tested twice, and a loop site with one earlier
   allocation are no longer limits (`_refine_test.ft`).
   `bind_fresh_source` in `ownership_calls.ft` had a loop shape: it allocated a borrows array

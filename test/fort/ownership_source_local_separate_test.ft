@@ -1,0 +1,502 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| separate owners ok
+//| related owners ok
+//| stopped paths ok
+/// Holds the local outcome after a failure on a path (toolchain 4.2: do not silence a separate
+/// owner). The flow keeps checking the owners that the failure does not relate to. It does not
+/// examine the related owners again, so it reports each related failure once. Each program
+/// keeps its line numbers: a line here is the line of its `lines` entry, counted from 1.
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+fn analyze(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(text, lines[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+fn row_of(ownership_source_env.env mut* e, string name, string correspondence, string proof)
+    ownership_source.body* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    string got_correspondence = ownership_report.analysis_status(row, ownership_report.LOCAL,
+        0);
+    string got_proof = ownership_report.analysis_status(row, ownership_report.LOCAL, 2);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln(name, ": correspondence ", got_correspondence, ", proof ", got_proof);
+        assert(false);
+    }
+    return row;
+}
+
+// Violation `k` of `row` has this kind, slot name and line.
+fn has(ownership_source.body* row, u64 k, ownership_api.event_kind kind, string slot,
+    u32 line) void {
+    assert(k < row->local.violations_len);
+    ownership_source_local.violation v = row->local.violations[k];
+    if (v.kind != kind || v.name != slot || v.source.line != line) {
+        eprintln("violation ", k, ": ", v.name, " at line ", v.source.line);
+        assert(false);
+    }
+}
+
+// The leak of b does not depend on the invalid read of a, so both are reported.
+fn leak_after_use() void {
+    string[6] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 x = *a;",
+        "    return x;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 2 && row->local.unvalidated == 0);
+    has(row, 0, ownership_api.event_kind.invalid_use, "a", 4);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "b", 5);
+}
+
+// Two owners end at one return. The first leak does not hide the second.
+fn two_leaks_at_one_return() void {
+    string[5] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = new(i32);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 2 && row->local.unvalidated == 0);
+    has(row, 0, ownership_api.event_kind.lost_ownership, "a", 4);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "b", 4);
+}
+
+// The first failure holds on one path only, so it stays unvalidated. The leak of b holds on
+// both paths, and no stopped path hides it now.
+fn leak_after_a_path_failure() void {
+    string[9] lines = {
+        "fn demo(bool c) i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    if (c) {",
+        "        del(a);",
+        "    }",
+        "    i32 x = *a;",
+        "    i32 mut* own b = new(i32);",
+        "    return x;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 1);
+    has(row, 0, ownership_api.event_kind.lost_ownership, "b", 8);
+    // The read on line 6 and the leak of a on line 8 fail on one of two paths.
+    assert(row->local.unvalidated == 2);
+    assert(row->local.first_incomplete.terminal.source.line == 6);
+}
+
+// Analyzes `lines` and holds that demo reports exactly two violations: the first at
+// `first_line` with `first_kind` on `first_slot`, the second likewise.
+fn two_reports(string@ lines, ownership_api.event_kind first_kind, string first_slot,
+    u32 first_line, ownership_api.event_kind second_kind, string second_slot,
+    u32 second_line) ownership_source.body {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 2);
+    has(row, 0, first_kind, first_slot, first_line);
+    has(row, 1, second_kind, second_slot, second_line);
+    ownership_source.body mut copy = ownership_source.body{};
+    copy.local.unvalidated = row->local.unvalidated;
+    copy.local.first_incomplete = row->local.first_incomplete;
+    return copy;
+}
+
+// The skipped copy of a into v writes over v. v loses its old view of u, so u stays a
+// separate owner, and its leak is reported.
+fn leak_after_an_overwritten_view() void {
+    string[10] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own u = new(i32);",
+        "    i32* mut v = u;",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 x = *a;",
+        "    v = a;",
+        "    del(b);",
+        "    return x;",
+        "}",
+    };
+    ownership_source.body row = two_reports(lines[..],
+        ownership_api.event_kind.invalid_use, "a", 6,
+        ownership_api.event_kind.lost_ownership, "u", 9);
+    assert(row.local.unvalidated == 0);
+}
+
+// A branch on a computed bool after the failure does not stop the path.
+fn leak_after_a_computed_branch() void {
+    string[7] lines = {
+        "fn demo(i32 n) i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 mut x = *a;",
+        "    if (n > 0) { x = 1; }",
+        "    return x;",
+        "}",
+    };
+    ownership_source.body row = two_reports(lines[..],
+        ownership_api.event_kind.invalid_use, "a", 4,
+        ownership_api.event_kind.lost_ownership, "b", 6);
+    assert(row.local.unvalidated == 0);
+}
+
+// A null test of the unrelated u reads facts that the path knows, so its flag keeps a value.
+fn leak_after_an_unrelated_null_test() void {
+    string[9] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 mut* own u = new(i32);",
+        "    i32 mut x = *a;",
+        "    if (u == null) { x = 1; }",
+        "    del(u);",
+        "    return x;",
+        "}",
+    };
+    ownership_source.body row = two_reports(lines[..],
+        ownership_api.event_kind.invalid_use, "a", 5,
+        ownership_api.event_kind.lost_ownership, "b", 8);
+    assert(row.local.unvalidated == 0);
+}
+
+// The second report is an invalid use: v views the allocation that r releases, and the read
+// of the empty p relates neither. The leak of q follows an overflow check of x + y that no
+// witness decides, so it stays unvalidated.
+fn second_invalid_use() void {
+    string[10] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32 mut* own q = new(i32);",
+        "    i32* v = p;",
+        "    i32 mut* own r = move(p);",
+        "    i32 x = *p;",
+        "    del(r);",
+        "    i32 y = *v;",
+        "    return x + y;",
+        "}",
+    };
+    ownership_source.body row = two_reports(lines[..],
+        ownership_api.event_kind.invalid_use, "p", 6,
+        ownership_api.event_kind.invalid_use, "v", 8);
+    assert(row.local.unvalidated == 1);
+    assert(row.local.first_incomplete.terminal.source.line == 9);
+}
+
+// The copy of the unrelated o into the view v runs: v loses its related value, and o stays a
+// separate owner. Its leak is reported.
+fn leak_after_a_copy_into_a_related_view() void {
+    string[10] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 x = *a;",
+        "    i32* mut v = a;",
+        "    i32 mut* own o = new(i32);",
+        "    v = o;",
+        "    del(b);",
+        "    return x;",
+        "}",
+    };
+    ownership_source.body row = two_reports(lines[..],
+        ownership_api.event_kind.invalid_use, "a", 4,
+        ownership_api.event_kind.lost_ownership, "o", 9);
+    assert(row.local.unvalidated == 0);
+}
+
+// After the copy of o into v, v views the allocation of o. The read through v after del(o)
+// is a separate invalid use.
+fn use_after_a_copy_into_a_related_view() void {
+    string[12] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 x = *a;",
+        "    i32* mut v = a;",
+        "    i32 mut* own o = new(i32);",
+        "    v = o;",
+        "    del(o);",
+        "    i32 y = *v;",
+        "    del(b);",
+        "    return x;",
+        "}",
+    };
+    ownership_source.body row = two_reports(lines[..],
+        ownership_api.event_kind.invalid_use, "a", 4,
+        ownership_api.event_kind.invalid_use, "v", 9);
+    assert(row.local.unvalidated == 0);
+}
+
+fn separate_owners() void {
+    leak_after_use();
+    two_leaks_at_one_return();
+    leak_after_a_path_failure();
+    leak_after_an_overwritten_view();
+    leak_after_a_computed_branch();
+    leak_after_an_unrelated_null_test();
+    second_invalid_use();
+    leak_after_a_copy_into_a_related_view();
+    use_after_a_copy_into_a_related_view();
+    println("separate owners ok");
+}
+
+// A second read of the same owner is related: it gives no second report.
+fn same_owner_once() void {
+    string[7] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 x = *a;",
+        "    i32 y = *a;",
+        "    return y;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 2 && row->local.unvalidated == 0);
+    has(row, 0, ownership_api.event_kind.invalid_use, "a", 4);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "b", 6);
+}
+
+// q and r borrow one released allocation. The failed read of q relates r, so the read of r
+// gives no second report. The leak of b stays separate.
+fn alias_once() void {
+    string[10] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    i32* r = p;",
+        "    del(p);",
+        "    i32 x = *q;",
+        "    i32 y = *r;",
+        "    i32 mut* own b = new(i32);",
+        "    return y;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 2 && row->local.unvalidated == 0);
+    has(row, 0, ownership_api.event_kind.invalid_use, "q", 6);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "b", 9);
+}
+
+// The move of u into a is skipped, because a is related. So u is related too: its facts
+// still show the allocation that a holds now, and its end gives no false leak.
+fn moved_into_a_related_owner() void {
+    string[9] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own mut a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 x = *a;",
+        "    i32 mut* own u = new(i32);",
+        "    a = move(u);",
+        "    del(b);",
+        "    return x;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 1 && row->local.unvalidated == 0);
+    has(row, 0, ownership_api.event_kind.invalid_use, "a", 4);
+}
+
+// The returned view is a copy of the related q. The return checks no related view, so the
+// failed read is the only record.
+fn related_result() void {
+    string[7] lines = {
+        "fn demo() i32* {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    del(p);",
+        "    i32 x = *q;",
+        "    return q;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 1 && row->local.unvalidated == 0);
+    has(row, 0, ownership_api.event_kind.invalid_use, "q", 5);
+}
+
+// The null test reads the related a after a skipped write: its facts still say empty, but a
+// holds an allocation. The real path takes the else branch and releases c. So no path state
+// may refute that branch, and the leak of c, which the then branch keeps, never validates.
+fn null_test_of_a_related_owner() void {
+    string[15] lines = {
+        "fn demo() i32 {",
+        "    i32 mut* own mut a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 mut x = *a;",
+        "    a = new(i32);",
+        "    i32 mut* own c = new(i32);",
+        "    if (a == null) {",
+        "        x = 1;",
+        "    } else {",
+        "        del(c);",
+        "    }",
+        "    del(a);",
+        "    del(b);",
+        "    return x;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 1);
+    has(row, 0, ownership_api.event_kind.invalid_use, "a", 4);
+}
+
+fn related_owners() void {
+    same_owner_once();
+    alias_once();
+    moved_into_a_related_owner();
+    related_result();
+    null_test_of_a_related_owner();
+    println("related owners ok");
+}
+
+// A failure inside a loop still stops its path: a path that came back to the failed read
+// would hide that read. The leak after the loop stays unvalidated.
+fn failure_in_a_loop() void {
+    string[10] lines = {
+        "fn demo(i32 n) i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 mut i = 0;",
+        "    while (i < n) {",
+        "        i32 x = *a;",
+        "        i += 1;",
+        "    }",
+        "    return i;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 1 && row->local.unvalidated == 1);
+    has(row, 0, ownership_api.event_kind.invalid_use, "a", 6);
+    assert(row->local.first_incomplete.terminal.source.line == 9);
+}
+
+// An incomplete failure still stops its path: the copy of an unknown pointer on line 3 has
+// no effect that the flow can apply. The leak of b is not examined.
+fn incomplete_first() void {
+    string[6] lines = {
+        "fn demo(u64 bits) i32 {",
+        "    i32 mut* own b = new(i32);",
+        "    i32* p = cast(bits, i32*);",
+        "    i32 x = *p;",
+        "    return x;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "incomplete", "incomplete");
+    assert(row->local.gap == ownership_source_local.missing.unknown_source);
+    assert(row->local.violations_len == 0 && row->local.unvalidated == 0);
+    assert(row->local.first_incomplete.terminal.source.line == 3);
+}
+
+// The loop body ends in a branch on a constant: the flow takes only its selected arm. The
+// body is still on a cycle, so the read stops its path as in failure_in_a_loop, and the stop
+// comes before the leak of b, which stays unvalidated.
+fn failure_in_a_loop_with_a_constant_branch() void {
+    string[11] lines = {
+        "fn demo(i32 n) i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 mut i = 0;",
+        "    while (i < n) {",
+        "        i32 x = *a;",
+        "        if (false) { i = 0; }",
+        "        i += 1;",
+        "    }",
+        "    return i;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
+    assert(row->local.violations_len == 1 && row->local.unvalidated == 1);
+    has(row, 0, ownership_api.event_kind.invalid_use, "a", 6);
+    assert(row->local.first_incomplete.terminal.source.line == 10);
+}
+
+fn stopped_paths() void {
+    failure_in_a_loop();
+    failure_in_a_loop_with_a_constant_branch();
+    incomplete_first();
+    println("stopped paths ok");
+}
+
+fn main() i32 {
+    separate_owners();
+    related_owners();
+    stopped_paths();
+    return 0;
+}
