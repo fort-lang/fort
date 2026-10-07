@@ -677,6 +677,15 @@ came here.
   A counted multi-unit mutation pays earlier W units before its final mixed request.
   The final mixed request checks all items before any counter changes.
   A refusal keeps earlier paid work. It changes no input state.
+  `ownership_state.require_content` pays W, measures content, then sends one precision request.
+  The caller commits at once after it. `test/fort/ownership_content_limits_test.ft` holds this.
+  `ownership_state.guard_units` and `shape_units` count one prospective state for insertion, join,
+  and widening. The meter keeps the greatest D, R, P, G, H, T, and E amounts.
+  A count pays one W unit for each 64 rows it reads and sorts by place or key, so it compares
+  O(n log n) pairs. A unit per compared pair cost 348650 W to fill a state with 100 scalars;
+  now 5386.
+  The H cover drops templates, which hold only proofs, and merges edges into one residual edge
+  when edges alone pass H. The G cover blurs contents. Both leave content within the bound.
   The call-graph build keeps one fact chain for each body. Its whole-closure scans took 52 s on
   `src/fort/main.ft` once W scaled, and the chains take 1.1 s for the same W units.
   Keep proof events independent of rendered diagnostic limits. Suppression cannot change a verdict.

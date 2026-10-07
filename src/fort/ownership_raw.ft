@@ -2,6 +2,7 @@
 // The caller supplies checked facts. This module changes no emitted program.
 import ast;
 import ownership_api;
+import ownership_combinations;
 import ownership_keys;
 import ownership_state;
 import ownership_transfer;
@@ -318,6 +319,141 @@ fn charge(ownership_api.services* svc, request* req, ownership_api.limit_categor
         round += 1;
     }
     return complete();
+}
+
+// Content of one raw context in the R, P, and G categories of its paired core state.
+struct units { u64 r; u64 p; u64 g; }
+
+/// Counts each captured bound and each distinct relation as one predicate atom.
+fn captured_predicates(captured_bound@ bounds, relation@ relations) u64 {
+    u64 mut out = bounds.len;
+    u64 mut i = 0;
+    while (i < relations.len) {
+        bool mut repeated = false;
+        u64 mut j = 0;
+        while (j < i && !repeated) {
+            repeated = same_expression(relations[j].left, relations[i].left) &&
+                same_expression(relations[j].right, relations[i].right);
+            j += 1;
+        }
+        if (!repeated) { out = add_work(out, 1); }
+        i += 1;
+    }
+    return out;
+}
+
+/// Returns the retained content of a raw context. Each layout leaf is one distinct region.
+/// The context holds facts: each origin is one unconditional source and layout, so it adds no
+/// guarded alternative. The alternatives of a reference are its addresses, which only its
+/// result holds; result_content counts them.
+fn content(context* ctx) units {
+    return units{ctx->leaves_len, captured_predicates(ctx->bounds[..], ctx->relations[..]), 0};
+}
+
+/// Returns the content of a raw result. Its addresses are the exclusive alternatives of one
+/// reference, so two or more give one G unit each.
+fn result_content(result* value) units {
+    units mut out = content(&value->storage);
+    out.g = ownership_state.alternative_units(value->addresses.len);
+    return out;
+}
+
+// The binding family of one raw address alternative.
+u32 ADDRESS_FAMILY = 1;
+
+fn key_number(u64 value) ownership_combinations.key_component {
+    return ownership_combinations.key_component{
+        .kind = ownership_combinations.component_kind.unsigned_number, .unsigned_value = value};
+}
+
+fn key_entity(ownership_api.entity_id value) ownership_combinations.key_component {
+    return ownership_combinations.key_component{
+        .kind = ownership_combinations.component_kind.entity, .entity_value = value};
+}
+
+fn address_parts(address value) u64 {
+    u64 terms = add_work(value.offset.terms.len,
+        add_work(value.begin.terms.len, value.end.terms.len));
+    return add_work(11, add_work(terms, add_work(terms, terms)));
+}
+
+fn append_number(ownership_combinations.key_component mut@ parts, u64 mut* used, number value)
+    void {
+    parts[*used] = key_number(value.magnitude);
+    parts[*used + 1] = key_number(value.negative ? 1 : 0);
+    *used += 2;
+}
+
+// Terms enter the key in canonical version order, so equal expressions give equal keys.
+fn append_expression(ownership_combinations.key_component mut@ parts, u64 mut* used,
+    expression value) void {
+    append_number(parts, used, value.constant);
+    parts[*used] = key_number(value.terms.len);
+    *used += 1;
+    u64 first = *used;
+    u64 mut i = 0;
+    while (i < value.terms.len) {
+        term item = value.terms[i];
+        u64 mut at = i;
+        while (at > 0 && ownership_keys.entity(item.version,
+            parts[first + (at - 1) * 3].entity_value) < 0) {
+            parts[first + at * 3] = parts[first + (at - 1) * 3];
+            parts[first + at * 3 + 1] = parts[first + (at - 1) * 3 + 1];
+            parts[first + at * 3 + 2] = parts[first + (at - 1) * 3 + 2];
+            at -= 1;
+        }
+        parts[first + at * 3] = key_entity(item.version);
+        parts[first + at * 3 + 1] = key_number(item.coefficient.magnitude);
+        parts[first + at * 3 + 2] = key_number(item.coefficient.negative ? 1 : 0);
+        i += 1;
+    }
+    *used += value.terms.len * 3;
+}
+
+/// Builds the rows of one raw context: one row for each address under its condition.
+/// Equal addresses merge their conditions by disjunction. The caller keeps the result live.
+fn alternatives(result* raw, ownership_combinations.condition@ conditions, u64 context,
+    ownership_combinations.query* req) ownership_combinations.candidate {
+    ownership_combinations.candidate mut out = ownership_combinations.candidate{};
+    out.prospective = ownership_combinations.start(req);
+    ownership_combinations.map mut* rows = &out.prospective;
+    if (!ownership_api.successful(raw->proof) || raw->addresses.len == 0 ||
+        conditions.len != raw->addresses.len) {
+        ownership_combinations.invalid(rows, req);
+    }
+    ownership_combinations.key_component[1] subject = {key_number(context)};
+    u64 mut i = 0;
+    while (i < raw->addresses.len && ownership_combinations.successful(rows)) {
+        address value = raw->addresses[i];
+        if (value.source.kind == ownership_api.entity_kind.none || !value.offset.complete ||
+            !value.begin.complete || !value.end.complete) {
+            ownership_combinations.invalid(rows, req);
+            break;
+        }
+        if (!ownership_combinations.include_input(rows, &conditions[i].store, req)) { break; }
+        u64 root = ownership_combinations.import_root(rows, &conditions[i].store,
+            conditions[i].root, req);
+        u64 count = address_parts(value);
+        if (!ownership_combinations.allocate(rows, count,
+            sizeof(ownership_combinations.key_component), req)) { break; }
+        ownership_combinations.key_component mut@ own parts =
+            new(ownership_combinations.key_component, count);
+        parts[0] = key_entity(value.source);
+        parts[1] = key_number(value.alignment);
+        u64 mut used = 2;
+        append_expression(parts[..], &used, value.offset);
+        append_expression(parts[..], &used, value.begin);
+        append_expression(parts[..], &used, value.end);
+        ownership_combinations.binding[1] item = {ownership_combinations.binding{ADDRESS_FAMILY,
+            ownership_combinations.semantic_key{subject[..]},
+            ownership_combinations.semantic_key{parts[0..used]}}};
+        ownership_combinations.insert_row(rows, item[..], root, req);
+        rows->bytes -= count * sizeof(ownership_combinations.key_component);
+        del(parts);
+        i += 1;
+    }
+    ownership_combinations.finish(&out, req);
+    return out;
 }
 
 fn free(context mut* ctx) void {
@@ -1241,7 +1377,8 @@ fn start(context* ctx, ownership_api.services* svc, address@ values, request* su
     out.proof = prepared;
     if (!ownership_api.successful(out.proof)) { return out; }
     calculation mut work = calculation{ctx, svc, req, complete()};
-    if (!ownership_api.successful(ctx->proof) || values.len == 0 || values.len > req->limits.g ||
+    if (!ownership_api.successful(ctx->proof) || values.len == 0 ||
+        ownership_state.alternative_units(values.len) > req->limits.g ||
         !validate_addresses_work(&work, values)) {
         if (!ownership_api.successful(work.proof)) { out.proof = work.proof; return out; }
         out.proof = fail(svc, req, ownership_api.entity_id{}, false,
@@ -1292,19 +1429,40 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
     result mut out = result{};
     out.proof = prepared;
     if (!ownership_api.successful(out.proof)) { return out; }
-    if (inputs.len == 0 || inputs.len > req->limits.g || bounds.len > req->limits.p ||
-        relations.len > req->limits.p || inputs.len > types.TYPE_MAX_SIZE / sizeof(origin) ||
+    if (inputs.len == 0 || inputs.len > types.TYPE_MAX_SIZE / sizeof(origin) ||
         bounds.len > types.TYPE_MAX_SIZE / sizeof(captured_bound) ||
         relations.len > types.TYPE_MAX_SIZE / sizeof(relation)) {
         out.proof = fail(svc, req, ownership_api.entity_id{}, false,
             "raw capture exceeds its limits");
         return out;
     }
-    u64 predicates = add_work(core->predicates_len,
-        add_work(1, add_work(bounds.len, relations.len)));
-    out.proof = charge(svc, req, ownership_api.limit_category.p, predicates);
-    if (!ownership_api.successful(out.proof)) { return out; }
     calculation mut work = calculation{&out.storage, svc, req, complete()};
+    // The pair of core and context counts its atoms and guarded alternatives together.
+    if (!spend(&work, add_work(1, square_work(relations.len)))) {
+        out.proof = work.proof;
+        return out;
+    }
+    u64 predicates = add_work(core->predicates_len, captured_predicates(bounds, relations));
+    // Each origin gives one address of the result, so the origins are its alternatives.
+    u64 alternatives = ownership_state.alternative_units(inputs.len);
+    if (alternatives > req->limits.g || predicates > req->limits.p) {
+        out.proof = fail(svc, req, ownership_api.entity_id{}, false,
+            "raw capture exceeds its limits");
+        return out;
+    }
+    if (predicates > 0) {
+        out.proof = charge(svc, req, ownership_api.limit_category.p, predicates);
+        if (!ownership_api.successful(out.proof)) { return out; }
+    }
+    ownership_state.region_measurement guarded = ownership_state.guard_units(core, svc,
+        ownership_state.guard_candidate{}, ownership_api.work_kind.transfer,
+        req->base.operation, req->base.source_position);
+    if (!ownership_api.successful(guarded.proof)) { out.proof = guarded.proof; return out; }
+    u64 pair = add_work(guarded.amount, alternatives);
+    if (pair > 0) {
+        out.proof = charge(svc, req, ownership_api.limit_category.g, pair);
+        if (!ownership_api.successful(out.proof)) { return out; }
+    }
     if (!spend(&work, 4)) { out.proof = work.proof; return out; }
     out.storage.core = core;
     out.storage.paths = ownership_state.empty();
@@ -1388,8 +1546,6 @@ fn capture_origins(ownership_state.state* core, ownership_api.services* svc, ori
             }
             j += 1;
         }
-        out.proof = charge(svc, req, ownership_api.limit_category.g, 1);
-        if (!ownership_api.successful(out.proof)) { discard(&out, out.proof); return out; }
         item.count = copy_expression_work(&work, &out.storage, item.count);
         item.begin = copy_expression_work(&work, &out.storage, item.begin);
         item.end = copy_expression_work(&work, &out.storage, item.end);
@@ -1722,7 +1878,8 @@ fn access(context* ctx, ownership_api.services* svc, address@ values,
     ownership_api.proof_status mut proof = prepared;
     if (!ownership_api.successful(proof)) { return proof; }
     calculation mut work = calculation{ctx, svc, req, complete()};
-    if (!ownership_api.successful(ctx->proof) || values.len == 0 || values.len > req->limits.g ||
+    if (!ownership_api.successful(ctx->proof) || values.len == 0 ||
+        ownership_state.alternative_units(values.len) > req->limits.g ||
         !validate_addresses_work(&work, values)) {
         if (!ownership_api.successful(work.proof)) { return work.proof; }
         return fail(svc, req, ownership_api.entity_id{}, false, "raw alternatives are incomplete");

@@ -84,40 +84,8 @@ fn number(u64 a, u64 b) i32 {
     return 0;
 }
 
-fn scalar_order(ownership_api.scalar_fact a, ownership_api.scalar_fact b) i32 {
-    i32 mut c = number(cast(a.kind, u64), cast(b.kind, u64));
-    if (c != 0) { return c; }
-    if (a.value < b.value) { return -1; }
-    if (a.value > b.value) { return 1; }
-    return ownership_keys.entity(a.symbol, b.symbol);
-}
-
-fn projection_order(ownership_api.projection a, ownership_api.projection b) i32 {
-    i32 mut c = number(cast(a.kind, u64), cast(b.kind, u64));
-    if (c != 0) { return c; }
-    c = number(cast(a.field, u64), cast(b.field, u64));
-    if (c != 0) { return c; }
-    c = scalar_order(a.index, b.index);
-    if (c != 0) { return c; }
-    return ownership_keys.entity(a.captured_version, b.captured_version);
-}
-
-fn place_order(ownership_api.place_path a, ownership_api.place_path b) i32 {
-    i32 mut c = ownership_keys.entity(a.root, b.root);
-    if (c != 0) { return c; }
-    u64 mut i = 0;
-    while (i < a.projections.len && i < b.projections.len) {
-        c = projection_order(a.projections[i], b.projections[i]);
-        if (c != 0) { return c; }
-        i += 1;
-    }
-    c = number(a.projections.len, b.projections.len);
-    if (c != 0) { return c; }
-    return number(cast(a.residual, u64), cast(b.residual, u64));
-}
-
 fn owner_order(ownership_api.owner_location a, ownership_api.owner_location b) i32 {
-    i32 mut c = place_order(a.place, b.place);
+    i32 mut c = ownership_state.place_order(a.place, b.place);
     if (c != 0) { return c; }
     c = number(cast(a.detached, u64), cast(b.detached, u64));
     if (c != 0) { return c; }
@@ -1054,10 +1022,8 @@ fn cover_predicates(ownership_state.state mut* s, ownership_api.limit_table* lim
     s->correlations_len = 0;
 }
 
-fn cover_guards(ownership_state.state mut* s, ownership_api.limit_table* limits,
+fn cover_guards(ownership_state.state mut* s, ownership_api.limit_table* limits, u64 used,
     ownership_api.source_position at) void {
-    u64 mut used = plus_count(s->guards_len, s->correlations_len);
-    used = plus_count(used, s->contents_len);
     if (used <= limits->g && !has_bound_loss(s, ownership_api.limit_category.g)) {
         return;
     }
@@ -1100,29 +1066,47 @@ fn cover_guards(ownership_state.state mut* s, ownership_api.limit_table* limits,
     dedup_contents(s);
 }
 
-fn cover_shapes(ownership_state.state mut* s, ownership_api.limit_table* limits,
+// Content above H drops every template, which holds only structural proofs, and node references
+// to it. No obligation, source, release, or order lives in a template. If the edges alone still
+// pass H, one residual edge with unknown endpoints, place, and region covers them all, and every
+// node becomes residual: no walk can then read owned descendants from the lost edges. Contents
+// keep each borrow source, and allocations keep each obligation.
+fn cover_shapes(ownership_state.state mut* s, ownership_api.limit_table* limits, u64 used,
     ownership_api.source_position at) void {
-    u64 mut used = 0;
-    u64 mut i = 0;
-    while (i < s->shapes_len) {
-        ownership_api.shape_description shape = s->shapes[i];
-        used = plus_count(used, 1);
-        used = plus_count(used, shape.parameters.len);
-        used = plus_count(used, shape.clauses.len);
-        used = plus_count(used, shape.descendants.len);
-        i += 1;
-    }
     if (used <= limits->h && !has_bound_loss(s, ownership_api.limit_category.h)) {
         return;
     }
-    i = 0;
+    u64 mut i = 0;
     while (i < s->shapes_len) {
         remember_loss(s, ownership_api.limit_category.h, limits->h, at, s->shapes[i].key);
-        s->shapes[i].residual = true;
-        s->shapes[i].acyclic_proved = false;
-        s->shapes[i].separation_proved = false;
         i += 1;
     }
+    s->shapes_len = 0;
+    i = 0;
+    while (i < s->nodes_len) {
+        s->nodes[i].structural_template = ownership_api.entity_id{};
+        i += 1;
+    }
+    if (s->edges_len <= limits->h) { return; }
+    u64 mut least = 0;
+    i = 0;
+    while (i < s->edges_len) {
+        remember_loss(s, ownership_api.limit_category.h, limits->h, at, s->edges[i].key);
+        if (ownership_keys.entity(s->edges[i].key, s->edges[least].key) < 0) { least = i; }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->nodes_len) {
+        s->nodes[i].residual = true;
+        i += 1;
+    }
+    ownership_api.graph_edge mut cover = ownership_api.graph_edge{};
+    cover.key = s->edges[least].key;
+    cover.kind = ownership_api.edge_kind.residual;
+    cover.place.residual = true;
+    cover.range.residual = true;
+    s->edges[0] = cover;
+    s->edges_len = 1;
 }
 
 // A join preserves history when its complete retained cardinality exceeds E.
@@ -1167,7 +1151,7 @@ fn cover_histories(ownership_state.state mut* s, ownership_api.services* svc,
 fn cover_bounds(ownership_state.state mut* s, ownership_api.services* svc,
     ownership_api.limit_table* limits, ownership_api.work_kind kind,
     ownership_api.operation_position op, ownership_api.source_position at) void {
-    ownership_state.region_measurement measured = ownership_state.measure_regions(s, svc,
+    ownership_state.region_measurement mut measured = ownership_state.measure_regions(s, svc,
         ownership_state.region_candidate{}, kind, op, at);
     if (!ownership_api.successful(measured.proof)) {
         if (ownership_api.successful(s->proof)) {
@@ -1177,8 +1161,23 @@ fn cover_bounds(ownership_state.state mut* s, ownership_api.services* svc,
     }
     cover_regions(s, limits, measured.amount, at);
     cover_predicates(s, limits, at);
-    cover_guards(s, limits, at);
-    cover_shapes(s, limits, at);
+    // Insertion counts guarded alternatives and shapes with these same functions.
+    measured = ownership_state.guard_units(s, svc, ownership_state.guard_candidate{}, kind, op, at);
+    if (!ownership_api.successful(measured.proof)) {
+        if (ownership_api.successful(s->proof)) {
+            s->proof = record_failure(svc, measured.proof, op, at);
+        }
+        return;
+    }
+    cover_guards(s, limits, measured.amount, at);
+    measured = ownership_state.shape_units(s, svc, ownership_state.shape_candidate{}, kind, op, at);
+    if (!ownership_api.successful(measured.proof)) {
+        if (ownership_api.successful(s->proof)) {
+            s->proof = record_failure(svc, measured.proof, op, at);
+        }
+        return;
+    }
+    cover_shapes(s, limits, measured.amount, at);
     cover_histories(s, svc, limits, kind, op, at);
 }
 

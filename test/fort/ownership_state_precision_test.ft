@@ -255,8 +255,16 @@ fn raw_scope() void {
         .key = key(ownership_api.entity_kind.predicate, 3)});
     limits.p = 1;
     assert(ownership_limits.configure(&e.budget.meter, &limits));
+    // The capture adds no atom of its own: the core atom alone fits P = 1.
     captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
         ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+    assert(ownership_api.successful(captured.proof) && e.budget.meter.used.p == 1);
+    ownership_raw.free_result(&captured);
+    ownership_raw.captured_bound[1] bound = {ownership_raw.captured_bound{
+        key(ownership_api.entity_kind.value, 9), ownership_raw.natural(0),
+        ownership_raw.natural(4)}};
+    captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        bound[..], ownership_raw_env.NO_RELATIONS, &req);
     assert(!ownership_api.successful(captured.proof));
     assert(captured.proof.terminal.limit.category == ownership_api.limit_category.p);
     assert(captured.proof.terminal.limit.attempted == 2 && e.local.state.predicates_len == 1);
@@ -264,7 +272,7 @@ fn raw_scope() void {
     limits.p = 2;
     assert(ownership_limits.configure(&e.budget.meter, &limits));
     captured = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
-        ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &req);
+        bound[..], ownership_raw_env.NO_RELATIONS, &req);
     assert(ownership_api.successful(captured.proof) && e.budget.meter.used.p == 2);
     ownership_raw.free_result(&captured);
 }
@@ -317,15 +325,23 @@ fn weak_region_union() void {
     borrow[0].range.key.ordinal = 21;
     ownership_state.state mut before = ownership_state.clone(&s);
     defer ownership_state.free(&before);
-    ownership_api.mutation_result denied = ownership_state.weak_contents(&s, &f.service,
+    ownership_api.mutation_result mut denied = ownership_state.weak_contents(&s, &f.service,
         incoming, selected[..], guard, ownership_api.operation_position{},
         ownership_api.source_position{});
     assert(!denied.applied && denied.precision_lost);
     assert(denied.loss.category == ownership_api.limit_category.r);
     assert(denied.proof.terminal.limit.attempted == 2 && ownership_state.equal(&s, &before));
     configure(&f, 2, 1);
+    // The old and the guarded new contents are two alternatives. G = 1 refuses them.
+    denied = ownership_state.weak_contents(&s, &f.service, incoming, selected[..], guard,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!denied.applied && denied.precision_lost && ownership_state.equal(&s, &before));
+    assert(denied.loss.category == ownership_api.limit_category.g);
+    assert(denied.proof.terminal.limit.attempted == 2);
+    f.meter.bounds.g = 2;
     assert(ownership_state.weak_contents(&s, &f.service, incoming, selected[..], guard,
         ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(f.meter.used.g == 2);
     assert(s.contents_len == 2 && measure(&s, &f) == 2);
     assert(s.contents[0].borrows[0].range.key.ordinal == 20);
     assert(s.contents[1].borrows[0].range.key.ordinal == 21 && s.correlations_len == 1);

@@ -714,12 +714,27 @@ fn global_place(work mut* cursor, ownership_api.place_path path) bool {
     return false;
 }
 
+// A joined state that lost guarded alternatives or structure has no complete graph, whatever the
+// supplied flag says: its edges and contents no longer name each owned descendant.
+fn graph_complete(context* c) bool {
+    if (!c->graph_complete_proved) { return false; }
+    u64 mut i = 0;
+    while (i < c->retained.losses_len) {
+        ownership_api.limit_category lost = c->retained.losses[i].category;
+        if (lost == ownership_api.limit_category.g || lost == ownership_api.limit_category.h) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 // Reference edges retain storage. Only owned edges establish persistent owner ancestry.
 fn retained_reachability(work mut* cursor) bool {
     context mut* c = cursor->global;
     if (!c->entry_selected || !cursor->retention_query) { return true; }
     if (c->retained.nodes_len == 0 && c->retained.edges_len == 0) { return true; }
-    if (!c->graph_complete_proved) {
+    if (!graph_complete(c)) {
         return entry_failure(cursor, ownership_api.incomplete_reason.missing_graph,
             "retained heap storage needs complete supplied graph coverage");
     }
@@ -977,7 +992,7 @@ fn global_borrows_known(work mut* cursor) bool {
                     u64 owner = owner_at(cursor, item.owner.place);
                     if (!ownership_api.successful(cursor->proof)) { return false; }
                     if (!cursor->global->entry_selected ||
-                        !cursor->global->graph_complete_proved ||
+                        !graph_complete(cursor->global) ||
                         value == ownership_api.U64_MAX || owner == ownership_api.U64_MAX ||
                         owner == AMBIGUOUS_OWNER ||
                         ownership_keys.entity(cursor->global->retained.allocations[owner].key,
@@ -1285,7 +1300,7 @@ fn current_owned_edge(work mut* cursor, ownership_api.graph_edge edge, u64 targe
     u64 value = contents_at(cursor, edge.place);
     u64 owner = owner_at(cursor, edge.place);
     if (!ownership_api.successful(cursor->proof)) { return false; }
-    if (!c->graph_complete_proved || !exact || edge.range.residual ||
+    if (!graph_complete(c) || !exact || edge.range.residual ||
         edge.kind != ownership_api.edge_kind.owned || parent == ownership_api.U64_MAX ||
         target >= c->retained.nodes_len || value == ownership_api.U64_MAX ||
         c->retained.nodes[parent].residual || c->retained.nodes[target].residual ||
@@ -1360,7 +1375,7 @@ fn children_empty(work mut* cursor, effect_binding binding,
     }
     u64 root = node_at(cursor, c->retained.allocations[owner].key, true);
     if (!ownership_api.successful(cursor->proof)) { return false; }
-    if (!c->graph_complete_proved || root == ownership_api.U64_MAX) {
+    if (!graph_complete(c) || root == ownership_api.U64_MAX) {
         unproved_effect(cursor, binding, effect, ownership_api.incomplete_reason.missing_graph);
         return false;
     }
@@ -2061,7 +2076,7 @@ fn field_place_live(work mut* cursor, effect_binding binding,
         bool matches = same_path(cursor, edge.place, place);
         if (!ownership_api.successful(cursor->proof)) { return false; }
         bool possible = !exact && ownership_keys.entity(edge.place.root, place.root) == 0;
-        if (possible || (matches && (!c->graph_complete_proved || !exact ||
+        if (possible || (matches && (!graph_complete(c) || !exact ||
             edge.range.residual || edge.from.kind != ownership_api.entity_kind.graph_node ||
             (edge.kind != ownership_api.edge_kind.owned &&
             edge.kind != ownership_api.edge_kind.borrowed) ||
@@ -2255,7 +2270,7 @@ fn persistent_owner(work mut* cursor, ownership_api.allocation_fact item) bool {
         return true;
     }
     if (!ownership_api.successful(cursor->proof) || item.owner.detached ||
-        !c->graph_complete_proved || c->retained.nodes_len == 0) { return false; }
+        !graph_complete(c) || c->retained.nodes_len == 0) { return false; }
     if (item.validity != ownership_api.validity_kind.live || !item.count.one ||
         item.count.zero || item.count.many) {
         return entry_failure(cursor, ownership_api.incomplete_reason.missing_graph,

@@ -898,6 +898,88 @@ fn join(map* left, map* right, query* req) candidate {
     finish(&result, req);
     return result;
 }
+/// Conjoins each row of `left` with each row of `right`. Rows with equal payloads merge by
+/// disjunction, and a proved contradiction removes a row, when each product row is inserted.
+fn conjoin(map* left, map* right, query* req) candidate {
+    candidate mut result = candidate{};
+    result.prospective = start(req);
+    map mut* output = &result.prospective;
+    if (include_input(output, left, req) && (left == right || include_input(output, right, req))) {
+        u64 mut i = 0;
+        while (i < left->rows_len && successful(output)) {
+            if (!step(output, req)) { break; }
+            row first = left->rows[i];
+            u64 a = import_root(output, left, first.condition, req);
+            u64 mut j = 0;
+            while (j < right->rows_len && successful(output)) {
+                if (!step(output, req)) { break; }
+                row second = right->rows[j];
+                u64 b = import_root(output, right, second.condition, req);
+                u64 both = apply(output, boolean_operation.both, a, b, req);
+                u64 count = first.bindings.len + second.bindings.len;
+                if (!allocate(output, count, sizeof(binding), req)) { break; }
+                binding mut@ own merged = new(binding, count);
+                u64 mut k = 0;
+                while (k < first.bindings.len) { merged[k] = first.bindings[k]; k += 1; }
+                while (k < count) { merged[k] = second.bindings[k - first.bindings.len]; k += 1; }
+                insert_row(output, merged[..], both, req);
+                output->bytes -= count == 0 ? 1 : count * sizeof(binding);
+                del(merged);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    finish(&result, req);
+    return result;
+}
+
+struct joint {
+    candidate rows;
+    ownership_api.proof_status proof;
+    u64 peak;
+}
+
+fn free_joint(joint mut* input) void {
+    free_candidate(&input->rows);
+    input->peak = 0;
+}
+
+/// Builds the joint rows of simultaneous contexts one context at a time.
+/// After each conjunction the budget service checks the filtered G count of the rows.
+/// A refusal stops the construction with incomplete proof. The largest intermediate is
+/// the G bound times the alternatives of one context.
+fn joint_rows(map@ contexts, query* req) joint {
+    joint mut out = joint{};
+    binding@ none = {};
+    out.rows = unconditional(none, req);
+    out.proof = out.rows.prospective.proof;
+    u64 mut i = 0;
+    while (i < contexts.len && ownership_api.successful(out.proof)) {
+        candidate mut next = conjoin(&out.rows.prospective, &contexts[i], req);
+        free_candidate(&out.rows);
+        out.rows = move(next);
+        out.proof = out.rows.prospective.proof;
+        if (!ownership_api.successful(out.proof) || !out.rows.exact) {
+            if (ownership_api.successful(out.proof)) { invalid(&out.rows.prospective, req); }
+            out.proof = out.rows.prospective.proof;
+            break;
+        }
+        if (out.rows.prospective.rows_len > out.peak) { out.peak = out.rows.prospective.rows_len; }
+        if (out.rows.g > 0) {
+            ownership_api.charge_item[1] item = {ownership_api.charge_item{
+                ownership_api.limit_category.g, ownership_api.limit_scope.state, out.rows.g}};
+            ownership_api.charge_request change = ownership_api.charge_request{req->work,
+                req->operation, req->source, item[..]};
+            ownership_api.charge_result charged = ownership_api.charge(req->services, &change);
+            if (!charged.allowed) { out.proof = charged.proof; }
+        }
+        i += 1;
+    }
+    if (!ownership_api.successful(out.proof)) { free_candidate(&out.rows); }
+    return out;
+}
+
 fn restrict(map* input, condition* selected, query* req) candidate {
     candidate mut result = candidate{};
     result.prospective = start(req);

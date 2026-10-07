@@ -414,6 +414,11 @@ bullet at a time and without a rewrite.
   early one whatever the period, while a leak moves all of them. Two late samples were the rule
   until T-038 measured a period of **eight** over the emitter's round and read 26512 with nothing
   leaking; the window has to cover the cycle, and sixteen covers every period seen so far.
+  A scratch block that each mutation of the round allocates and frees can stretch the cycle past
+  sixteen: when the sorted G and H counts took their index arrays from the heap, the Linux break
+  stayed still over 400 rounds, and 8 of the 18 addresses of `ownership_state_cleanup_test.ft`
+  never came back within sixteen rounds. Keep a small scratch array in fixed storage in code that
+  an address probe measures; the counts now sort up to 64 rows in a fixed array.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
   per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` is false there,
   `fir_env.address_moved` answers 0, and each probe that samples an address asserts on it only

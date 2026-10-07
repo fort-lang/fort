@@ -1,0 +1,115 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| exact graph refuses the lost child
+//| merged edges leave the child unproved
+//| a dropped template leaves the child unproved
+/// Tests that a join which loses graph structure cannot prove an owner's descendants empty.
+import ownership_api;
+import ownership_globals_env;
+import ownership_globals_review_env;
+import ownership_join;
+import ownership_limits;
+import ownership_state;
+
+struct fixture { ownership_limits.meter meter; ownership_api.services service; u64 events; }
+
+fn event(void mut* opaque, ownership_api.event_request* request) ownership_api.event_result {
+    u64 mut* count = cast(opaque, u64 mut*);
+    *count += 1;
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+
+fn node(ownership_globals_env.env mut* e, u32 allocation) void {
+    ownership_state.append_nodes(&e->input, ownership_api.graph_node{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, allocation),
+        .allocation = ownership_globals_env.case_key(e, ownership_api.entity_kind.allocation,
+            allocation)});
+}
+
+fn edge(ownership_globals_env.env mut* e, u32 key, u32 from, u32 to,
+    ownership_api.place_path field, bool owned) void {
+    ownership_state.append_edges(&e->input, ownership_api.graph_edge{
+        .key = ownership_globals_env.case_key(e, ownership_api.entity_kind.relation, key),
+        .from = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, from),
+        .to = ownership_globals_env.case_key(e, ownership_api.entity_kind.graph_node, to),
+        .kind = owned ? ownership_api.edge_kind.owned : ownership_api.edge_kind.borrowed,
+        .place = field});
+}
+
+// Node 10 owns node 20 through an owned edge; a borrowed edge points back. Releasing the owner
+// at slot 2 while child 20 is live must not succeed. With `bound` > 0 a join under H = `bound`
+// replaces the input first. A template adds one more H unit.
+fn release(u64 bound, bool template) ownership_api.global_result {
+    ownership_globals_env.env mut e = ownership_globals_env.env{};
+    ownership_state.state mut old = ownership_state.empty();
+    ownership_globals_env.case_open(&e, 804);
+    ownership_api.place_path a = ownership_globals_env.case_place(&e, 2);
+    ownership_api.place_path field = ownership_globals_env.case_place(&e, 3);
+    ownership_globals_env.add_owner(&e, a, 10, 4);
+    ownership_globals_env.add_owner(&e, field, 20, 4);
+    node(&e, 10);
+    node(&e, 20);
+    edge(&e, 810, 10, 20, field, true);
+    edge(&e, 820, 20, 10, a, false);
+    if (template) {
+        ownership_state.append_shapes(&e.input, ownership_api.shape_description{
+            .key = ownership_globals_env.case_key(&e, ownership_api.entity_kind.template, 830),
+            .acyclic_proved = true});
+    }
+    e.global.graph_complete_proved = true;
+    if (bound > 0) {
+        fixture mut f = fixture{};
+        ownership_api.limit_table mut limits = ownership_limits.production();
+        assert(ownership_limits.configure(&f.meter, &limits));
+        f.service.budget_context = cast(&f.meter, void mut*);
+        f.service.budget = ownership_limits.callback;
+        f.service.event_context = cast(&f.events, void mut*);
+        f.service.event = event;
+        limits.h = bound;
+        ownership_state.state mut joined = ownership_join.join(&e.input, &e.input, &f.service,
+            &limits, ownership_api.operation_position{}, ownership_api.source_position{});
+        assert(ownership_api.successful(joined.proof) && joined.allocations_len == 2);
+        assert(joined.allocations[0].obligation && joined.allocations[1].obligation);
+        assert(joined.losses_len > 0 && joined.shapes_len == 0);
+        old = move(e.input);
+        e.input = move(joined);
+        u64 mut d = 0;
+        while (d < e.descriptors.len) {
+            u64 mut c = 0;
+            while (c < e.input.contents_len) {
+                if (ownership_state.same_place(e.input.contents[c].place, e.descriptors[d].place)) {
+                    e.descriptors[d].initial = e.input.contents[c];
+                }
+                c += 1;
+            }
+            d += 1;
+        }
+    }
+    ownership_globals_env.add_effect(&e, ownership_api.effect_kind.release, a, a, 10);
+    ownership_api.global_request req = ownership_globals_env.request(&e);
+    ownership_api.global_result out = ownership_globals_review_env.solve(&e, &req);
+    ownership_globals_env.close(&e);
+    ownership_state.free(&old);
+    return out;
+}
+
+fn main() i32 {
+    // The exact graph shows the live child: the release loses ownership.
+    ownership_api.global_result exact = release(0, false);
+    assert(!ownership_api.successful(exact.proof) && exact.proof.failed);
+    assert(exact.proof.terminal.reason != ownership_api.incomplete_reason.missing_graph);
+    println("exact graph refuses the lost child");
+    // Two edges above H = 1 merge into one residual edge, and every node becomes residual.
+    ownership_api.global_result merged = release(1, false);
+    assert(!ownership_api.successful(merged.proof));
+    assert(merged.proof.terminal.reason == ownership_api.incomplete_reason.missing_graph);
+    println("merged edges leave the child unproved");
+    // Under H = 2 the cover drops only the template; the edges stay exact. The H loss still
+    // means that the supplied complete-graph flag no longer holds.
+    ownership_api.global_result dropped = release(2, true);
+    assert(!ownership_api.successful(dropped.proof));
+    assert(dropped.proof.terminal.reason == ownership_api.incomplete_reason.missing_graph);
+    println("a dropped template leaves the child unproved");
+    return 0;
+}
