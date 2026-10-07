@@ -1135,6 +1135,110 @@ came here.
   (`old_pattern` in `_refine_test.ft`) leaves the declared scope too: its view slices a span
   that the block holds, which has no known source (D17.17).
   `test/fort/ownership_source_local_review_test.ft` pins the probes of each shape.
+- **Raw-storage effects come from verified FIR** (D17.17, D17.18, D19.8).
+  `ownership_source_raw` reads each verified body and proves its raw obligations with
+  `ownership_raw`. A reference local that no FIR address names has definitions: writes, moves,
+  `del`s, and one entry definition for a parameter. Each use reads the definitions that reach
+  it over the edges that a constant switch can take. A block that no path reaches holds no
+  obligation.
+  The obligations are a typed access through a dereference, an `addr` or `slice` through a
+  dereference, `slice_ptr`, and an index of a span local. A variable index of a fixed array
+  selects the whole array. A span index needs a coherent header and an aligned part; its
+  bounds check stays.
+  A value is a set of windows of storage objects, plus `foreign` (an `extern` result, D17.13),
+  `reconstructed` (an integer cast, D17.17), `none`, and the gap classes `caller`, `stored`,
+  `call` and `unknown`. An object is the subobject that a direct `addr` names, an allocation,
+  a string or `bytes` constant, or a checked slice of a fixed array. A cast keeps the window,
+  and a derivation narrows it, so a field window never grows.
+  An integer cast gives `reconstructed` wherever the body keeps the bits: a local, a field, an
+  element, a global or a loaded value. A cast of a function address gives `unknown`: D17.17
+  names no source for it, so an access through it stays incomplete proof.
+  A write through a reference, into a span element or through the pointer field of a span
+  leaves the local as it is; only a write of one header field makes it `unknown`.
+  A value key names one value of a body. A parameter that the body writes has none: a use
+  before the write reads the caller's value. A bound of a range in a CFG cycle has none either,
+  because a window of an earlier pass would meet the bound of a later pass under one name.
+  Such a range stays unproved, and its result is `unknown`. An allocation count keeps its key in
+  a cycle: it names only the extent of its own object and the windows in it, never a bound.
+  Each window of a value gets a kernel check of its own. The fact that a window lies in its
+  object holds only on the path that made the window. One check for each joined value once let
+  a checked slice on one path prove the whole allocation that the other path keeps, and let the
+  slice of pass 0 prove the allocation of pass 1 (`_flow_test.ft`, `joined_windows`).
+  A variable index selects the whole array as its region, but the access reads one element, so
+  a region past the window is no exact failure there: the access stays unproved. When the
+  variable index is the last projection and element 0 already ends past the window, each
+  element does, and that failure is exact. A field or an index after it reads a part of an
+  element, which can fit when element 0 does not, so an extent failure there is no exact
+  failure.
+  Each alignment test of an access, through a pointer or into a span element, asks
+  `part_alignment` for the alignment of `part_type`: the type of the part that the place reads
+  in its region, which is the type of that prefix of the place. A typed access needs this
+  alignment and no more (memory model 2.8.2). Its offset in an element and the element size are
+  multiples of it, so the part has the residue of the region start in each element: a
+  misaligned part is an exact failure, and an aligned part makes no misalignment exact
+  (`_access_test.ft`, `misaligned_parts` and `part_notes`; `_boundaries_test.ft`,
+  `element_parts`). The kernel still checks the whole region type of a variable index, whose
+  alignment is that of the element, so an aligned part after a variable index stays unproved:
+  a completeness limit. The note of a validated violation names each reason that holds on
+  some path (`cause_text`), so it names the reason of the witness path, not the first reason
+  of the kernel; a record of a failure names the reasons of its failing values. `decide`
+  clears the note first, so no record keeps the note of the obligation before it
+  (`_validation_test.ft`, `mixed_notes` and `own_notes`). A note names its reasons as certain
+  only for a validated violation ("invalid use"). Any other record names them as possible:
+  a mixed set as "unproved: ...", and a single kernel reason that states a failure as "typed
+  access window remains unproved" or "raw range storage remains unproved"
+  (`conditional_notes`, `possible_notes`). A window bound comes from a program value and can
+  be near 2^64 - 1, so `past_end` and `byte_write` add bounds, offsets and sizes without a
+  u64 sum that wraps (`_ranges_test.ft`, `huge_bounds`). A sum of two values inside one
+  sized type stays below 2^64, because TYPE_MAX_SIZE is 2^63 - 1. The checker refuses an
+  array above TYPE_MAX_SIZE behind a pointer, a span or a function type ("type is too large",
+  since b172e3e9), so each pointed-to type has a size, each offset in it fits, and no region
+  without a size is reachable from checked source. The producer keeps its guards as defence
+  in depth: `select` gives a region no size when an element on its path has none or an offset
+  needs more than a u64 (`offset_plus`), and such an obligation stays unproved. No test
+  reaches these guards, so the raw mutation table has no row for them. A constant allocation
+  above I64_MAX bytes never succeeds, so a bounded key stands for its length (`huge_types`).
+  Two review rounds each found an alignment test that measured the whole region type, so a
+  new test goes through `part_alignment`.
+  A typed access or a span element through `none` is the local analysis's obligation ("empty
+  reference has no element"). A derivation or a raw range through `none` needs a source window
+  that null does not have, so the raw analysis fails it as it fails a reconstructed value
+  (memory model 2.8.1, 2.8.2, 2.8.5). Before that rule, `&p->b` and `p[0..8]` through a null,
+  moved or released `p` passed both analyses.
+  The kernel sees each object as bytes with its alignment, and a check captures one leaf.
+  Before that change, a check captured the whole layout of a struct, and the raw computation of
+  `ownership_raw.capture_origins` refused W at 147776. The producer walks the typed layout for
+  byte writes: over an owning leaf a byte write is the gap `owner_overlap`, because no fact
+  proves the old owner empty; over a borrowed leaf it is counted, and a later read of that leaf
+  is a stored load. Thus no analysis rejects memory model R04 (a partial owner write) now: the
+  gap only takes its body out of the declared raw scope, and that gap is an interim state. The
+  raw analysis proves spatial facts only: each source in a kernel check is live, because the
+  local and stored-borrow analyses prove liveness.
+  A failure is a validated violation only when each value of the pointer fails exactly (a
+  reconstructed value, a constant region past a constant window, or a residue that no aligned
+  base repairs) and the witness walk of the local analysis reaches the operation. Any other
+  failure is incomplete proof, and the compiler renders it as "cannot prove". A body with a gap
+  leaves the declared raw scope. `tools/ownership_audit.py enforce --scope raw` rejects each raw
+  violation and each declared body without complete raw proof.
+  A trace over the 65 compiler roots found 3773 unique bodies with 37434 raw obligations:
+  32220 typed accesses and derivations, 5205 span elements and 9 raw ranges. The bodies hold
+  6619 address origins, 105 reference casts, 0 byte writes and 0 integer reconstructions.
+  1009 bodies declare raw obligations, but only 3 of them hold an obligation, and each proves
+  it. The first gap of the other bodies is `caller_origin` in 2605, `call_origin` in 140 and
+  `stored_origin` in 19. No body has a raw violation or a failure without a witness. The
+  largest raw computation uses 6078 W. Thus the raw scope rejects little until call
+  summaries supply the windows of parameters.
+  Over the 512 legal programs of `test/lang/run`, `programs` and `ffi`, 907 of the 1233
+  bodies outside `std` declare raw obligations. 905 prove them. The other 2 read through a
+  pointer that a `u64` round trip made, which D17.17 rejects.
+  These legal shapes give incomplete proof in the declared scope, so scoped CI rejects them: a
+  typed access through `.ptr` of a span of symbolic length; a raw range whose bound its type
+  range does not prove; a null value on one path to a failing access.
+  `test/fort/ownership_source_raw_*_test.ft` hold these rules. The three `_matrix_test.ft`
+  files hold the verdict of each value class alone and of each pair of classes that two paths
+  join, for a typed access, a field address and a raw range. A check keeps one kernel value
+  for each window, one for the foreign values and one for the sourceless values; the pair of a
+  foreign and a reconstructed value needs the last two.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
   Captured index versions stay separate from local slot names.

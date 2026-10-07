@@ -547,6 +547,9 @@ Exit 2 or a missing valid report fails the gate. No coverage-regression baseline
 The local scope declares a body when that body's `local` correspondence is complete.
 Scoped local enforcement rejects each local violation in any body.
 It also rejects each declared body whose `local` proof is not complete.
+The raw scope declares a body when that body's `raw` correspondence is complete.
+Scoped raw enforcement rejects each raw violation in any body.
+It also rejects each declared body whose `raw` proof is not complete.
 Later scoped enforcement reads the same reports and requires complete proof within its declared
 scope.
 It never converts exit 1 into accepted complete compiler proof.

@@ -300,6 +300,11 @@ without a rewrite.
   command that reads git, rebuild the index in the guest: `rm` the file that
   `git rev-parse --git-path index` names, then `git reset -q`. Do this only when nothing is
   staged: `git reset -q` unstages each staged change.
+  A second symptom showed no error from git. Twice, after a host rebase and a guest test run,
+  the first guest `tools/ownership_audit.py run` exited 1 with "provenance: tracked source
+  changes" (2026-10-07). The host and the guest `git status --porcelain --untracked-files=no`
+  were both empty then. A second run in a new `tools/vm run` passed. Rebuild the index as
+  above, or run the audit again once, before you look for a change.
   `tools/mutate.py` writes each source in place (`open(path, "wb")`): a round first restores the
   source and then writes the mutant over it. Run in the guest, one round failed to build 3 times
   in a row with `unknown type name 'turn'` in `<built-in>`, and the build of the next round
