@@ -1,0 +1,430 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| owner scan work ok
+//| paired region work ok
+//| paired region identities ok
+//| batch sort boundaries ok
+//| batch counts match sorted counts
+//| batch count work ok
+//| batch settle refusals ok
+/// Tests that the byte owner scan and the paired region count pay W in linear amounts.
+import ownership_api;
+import ownership_raw;
+import ownership_raw_bytes;
+import ownership_raw_bytes_env;
+import ownership_state;
+
+struct work_sample {
+    u64 write;
+    u64 owner;
+    u64 paired;
+    bool completed;
+}
+
+// The B13 state: an empty owner at slot 1 that a zero write may overwrite. The extra
+// allocations own separate slots, and the extra rows hold scalars at separate places.
+fn build(ownership_raw_bytes_env.env mut* e, u64 allocations, u64 rows) void {
+    ownership_raw_bytes_env.owner_setup(e, 23, false);
+    u64 mut i = 0;
+    while (i < allocations) {
+        ownership_raw_bytes_env.add_allocation(e, 200 + cast(i, u32), 200 + cast(i, u32), 12);
+        i += 1;
+    }
+    i = 0;
+    while (i < rows) {
+        ownership_api.contents_fact mut row = {};
+        row.place = ownership_raw_bytes_env.place(e, 1000 + cast(i, u32));
+        row.kind = ownership_api.contents_kind.scalar;
+        ownership_state.append_contents(&e->core, row);
+        i += 1;
+    }
+    ownership_raw_bytes_env.empty_source(e);
+}
+
+fn begin(ownership_raw_bytes_env.env mut* e, ownership_raw.request* req,
+    ownership_raw.work_cursor mut* cursor) ownership_raw_bytes.work {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_api.proof_status begun = ownership_raw.begin_work(e->paired.states[0].core,
+        &e->service, req, cursor);
+    assert(ownership_api.successful(begun));
+    return ownership_raw_bytes.work{&e->service, &cursor->selected, begun, 0};
+}
+
+// Measures one zero write over the owner, then owner_empty and require_paired alone. Each
+// amount after the write includes the one unit that begin_work pays.
+fn sample(u64 allocations, u64 rows) work_sample {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    build(&e, allocations, rows);
+    work_sample mut out = {};
+    ownership_raw_bytes.result mut written = ownership_raw_bytes_env.try_effect(&e,
+        ownership_raw_bytes_env.zero_change(&e, 1, 0, 8), 2200);
+    defer ownership_raw_bytes.free_result(&written);
+    out.completed = ownership_api.successful(written.proof);
+    out.write = e.budget.meter.used.w;
+    ownership_raw.request req = ownership_raw_bytes_env.request(&e, 2300);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_bytes.work mut current = begin(&e, &req, &cursor);
+    assert(ownership_raw_bytes.owner_empty(&current, &e.paired.states[0],
+        ownership_raw_bytes_env.place(&e, 1)));
+    out.owner = e.budget.meter.used.w;
+    current = begin(&e, &req, &cursor);
+    assert(ownership_raw_bytes.require_paired(&current, &e.paired.states[0],
+        ownership_raw_bytes.retained_edit{}));
+    out.paired = e.budget.meter.used.w;
+    return out;
+}
+
+// An amount is additive when the cost of both additions is the sum of the two costs. A product
+// term, such as the core price times the allocation count, breaks this.
+fn additive(u64 base, u64 first, u64 second, u64 both) bool {
+    return both - base == (first - base) + (second - base);
+}
+
+fn owner_scan_work() void {
+    work_sample base = sample(0, 0);
+    work_sample allocations = sample(50, 0);
+    work_sample rows = sample(0, 500);
+    work_sample both = sample(50, 500);
+    // Each zero write completes within the production W of 65536.
+    assert(base.completed && allocations.completed && rows.completed && both.completed);
+    assert(base.write == 1550 && allocations.write == 7036);
+    assert(rows.write == 50050 && both.write == 55536);
+    assert(additive(base.write, allocations.write, rows.write, both.write));
+    // owner_empty pays the core price once and the path price once for each allocation.
+    assert(base.owner == 436 && allocations.owner == 2345);
+    assert(rows.owner == 12436 && both.owner == 14345);
+    assert(additive(base.owner, allocations.owner, rows.owner, both.owner));
+    // Twice the allocations cost twice the increment, plus the growth of the region storage.
+    work_sample doubled = sample(100, 0);
+    assert(doubled.owner == 4261 && doubled.owner - base.owner ==
+        2 * (allocations.owner - base.owner) + 7);
+    println("owner scan work ok");
+}
+
+fn paired_region_work() void {
+    work_sample base = sample(0, 0);
+    work_sample allocations = sample(50, 0);
+    work_sample rows = sample(0, 500);
+    work_sample both = sample(50, 500);
+    assert(base.paired == 178 && allocations.paired == 887);
+    assert(rows.paired == 4678 && both.paired == 5387);
+    assert(additive(base.paired, allocations.paired, rows.paired, both.paired));
+    work_sample doubled = sample(100, 0);
+    assert(doubled.paired == 1603 && doubled.paired - base.paired ==
+        2 * (allocations.paired - base.paired) + 7);
+    println("paired region work ok");
+}
+
+// Counts the paired regions of the current pair: distinct identities plus unknown ones.
+fn paired_amount(ownership_raw_bytes_env.env mut* e) u64 {
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, 2400);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_bytes.work mut current = begin(e, &req, &cursor);
+    ownership_raw_bytes.state* paired = &e->paired.states[0];
+    u64 mut amount = 0;
+    assert(ownership_raw_bytes.paired_regions(&current, paired->core, &paired->raw,
+        &paired->bytes, ownership_raw_bytes.retained_edit{}, &amount));
+    return amount;
+}
+
+// The batch count sorts its identities and keeps one of each equal run. Rows that repeat a
+// borrowed region add no identity; rows with new partitions add one each. Seventy rows take the
+// count past 64 identities, so the merge sort runs.
+fn paired_region_identities() void {
+    u64[3] extra = {0, 70, 70};
+    u64 mut before = 0;
+    u64 mut kind = 0;
+    while (kind < extra.len) {
+        ownership_raw_bytes_env.env mut e = {};
+        ownership_raw_bytes_env.owner_setup(&e, 25, false);
+        u64 mut i = 0;
+        while (i < extra[kind]) {
+            // Kind 1 repeats region 1 and partition 21 of slot 1. Kind 2 gives new partitions.
+            u32 version = kind == 1 ? 1 : 300 + cast(i, u32);
+            ownership_state.append_contents(&e.core, ownership_raw_bytes_env.value(&e,
+                400 + cast(i, u32), version, 1, 2, 6, 4));
+            i += 1;
+        }
+        ownership_raw_bytes_env.recapture(&e, e.selected_type, 8);
+        u64 amount = paired_amount(&e);
+        if (kind == 0) { before = amount; }
+        assert(amount == before + (kind == 2 ? extra[kind] : 0));
+        ownership_raw_bytes_env.close(&e);
+        kind += 1;
+    }
+    println("paired region identities ok");
+}
+
+// A batch count sorts up to 64 rows by insertion and more rows by a merge. Each size puts its
+// rows in reverse key order, and the last row repeats the key of the first row, so the sort must
+// move the last row past every other row before the equal rows meet.
+fn batch_sort_boundaries() void {
+    u32[6] sizes = {3, 63, 64, 65, 66, 129};
+    u64 mut i = 0;
+    while (i < sizes.len) {
+        ownership_raw_bytes_env.env mut e = {};
+        ownership_raw_bytes_env.owner_setup(&e, 26, false);
+        ownership_raw.request req = ownership_raw_bytes_env.request(&e, 2500);
+        ownership_raw.work_cursor mut cursor = {};
+        ownership_raw_bytes.work mut current = begin(&e, &req, &cursor);
+        ownership_state.region_counter mut regions = ownership_state.region_counter{
+            .service = &e.service, .kind = ownership_api.work_kind.transfer,
+            .proof = current.proof, .batch = true};
+        ownership_raw_bytes.partition_counter mut partitions =
+            ownership_raw_bytes.partition_counter{.batch = true};
+        u32 n = sizes[i];
+        u32 mut k = 0;
+        while (k < n) {
+            u32 ordinal = k == n - 1 ? n : n - k;
+            assert(ownership_state.region_insert(&regions, ownership_state.region_identity{
+                .region = ownership_raw_bytes_env.id(&e, ownership_api.entity_kind.region,
+                    ordinal)}));
+            assert(ownership_raw_bytes.partition_insert(&current, &partitions,
+                ownership_raw_bytes.byte_partition{.source = ownership_raw_bytes_env.id(&e,
+                    ownership_api.entity_kind.source, ordinal), .begin = 0, .end = 8}));
+            k += 1;
+        }
+        assert(regions.len == cast(n, u64) && partitions.len == cast(n, u64));
+        assert(ownership_state.region_settle(&regions));
+        assert(ownership_raw_bytes.partition_settle(&current, &partitions));
+        assert(regions.len == cast(n, u64) - 1 && partitions.len == cast(n, u64) - 1);
+        // A settled count stays settled and pays nothing more. Its later inserts search, so an
+        // equal identity adds nothing. Its entries stand in increasing order.
+        u64 paid = e.budget.meter.used.w;
+        assert(ownership_state.region_settle(&regions) && regions.len == cast(n, u64) - 1);
+        assert(ownership_raw_bytes.partition_settle(&current, &partitions));
+        assert(e.budget.meter.used.w == paid && partitions.len == cast(n, u64) - 1);
+        assert(ownership_state.region_insert(&regions, ownership_state.region_identity{
+            .region = ownership_raw_bytes_env.id(&e, ownership_api.entity_kind.region, n)}));
+        assert(ownership_raw_bytes.partition_insert(&current, &partitions,
+            ownership_raw_bytes.byte_partition{.source = ownership_raw_bytes_env.id(&e,
+                ownership_api.entity_kind.source, n), .begin = 0, .end = 8}));
+        assert(regions.len == cast(n, u64) - 1 && partitions.len == cast(n, u64) - 1);
+        u64 mut j = 1;
+        while (j < regions.len) {
+            assert(ownership_state.region_order(ownership_state.region_entries(&regions)[j - 1],
+                ownership_state.region_entries(&regions)[j]) < 0);
+            assert(ownership_raw_bytes.partition_order(
+                ownership_raw_bytes.partition_entries(&partitions)[j - 1],
+                ownership_raw_bytes.partition_entries(&partitions)[j]) < 0);
+            j += 1;
+        }
+        del(regions.identities);
+        del(partitions.items);
+        ownership_raw_bytes_env.close(&e);
+        i += 1;
+    }
+    println("batch sort boundaries ok");
+}
+
+// Park-Miller, as in ownership_content_counts_test.ft: each product stays below 2^47.
+struct generator { u64 seed; }
+
+fn next(generator mut* g, u64 range) u64 {
+    g->seed = g->seed * 48271 % 2147483647;
+    return g->seed % range;
+}
+
+// Gives repeated regions and partitions, and sometimes a missing key, which proves no equality.
+fn identity(ownership_raw_bytes_env.env* e, generator mut* g) ownership_state.region_identity {
+    ownership_state.region_identity mut out = {};
+    if (next(g, 10) != 0) {
+        out.region = ownership_raw_bytes_env.id(e, ownership_api.entity_kind.region,
+            1 + cast(next(g, 40), u32));
+    }
+    if (next(g, 3) == 0) {
+        out.partitioned = true;
+        if (next(g, 8) != 0) {
+            out.partition = ownership_raw_bytes_env.id(e, ownership_api.entity_kind.region,
+                100 + cast(next(g, 6), u32));
+        }
+    }
+    return out;
+}
+
+// Gives both namespaces, empty intervals, repeated intervals, and sources without a key.
+fn partition(ownership_raw_bytes_env.env* e, generator mut* g)
+    ownership_raw_bytes.byte_partition {
+    ownership_raw_bytes.byte_partition mut out = {};
+    out.snapshot_namespace = next(g, 4) == 0;
+    out.snapshot_key = 1 + next(g, 5);
+    out.source = ownership_raw_bytes_env.id(e, ownership_api.entity_kind.source,
+        cast(next(g, 21), u32));
+    if (next(g, 12) == 0) { out.source.kind = ownership_api.entity_kind.region; }
+    out.begin = next(g, 8);
+    out.end = out.begin + next(g, 4);
+    return out;
+}
+
+fn counter(ownership_raw_bytes_env.env* e, ownership_api.proof_status proof, bool batch)
+    ownership_state.region_counter {
+    return ownership_state.region_counter{.service = &e->service,
+        .kind = ownership_api.work_kind.transfer, .proof = proof, .batch = batch};
+}
+
+// A batch count and a count by sorted insertion see the same rows. After the settle both hold
+// the same distinct entries in the same order and the same unknown count. Each fourth round
+// holds more than 64 rows, so its settle runs the merge sort.
+fn batch_matches_sorted() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_setup(&e, 27, false);
+    ownership_raw.request req = ownership_raw_bytes_env.request(&e, 2700);
+    generator mut g = generator{4242};
+    u64 mut round = 0;
+    while (round < 120) {
+        ownership_raw.work_cursor mut cursor = {};
+        ownership_raw_bytes.work mut current = begin(&e, &req, &cursor);
+        ownership_state.region_counter mut sorted = counter(&e, current.proof, false);
+        ownership_state.region_counter mut batch = counter(&e, current.proof, true);
+        ownership_raw_bytes.partition_counter mut ordered = {};
+        ownership_raw_bytes.partition_counter mut appended =
+            ownership_raw_bytes.partition_counter{.batch = true};
+        u64 rows = round % 4 == 3 ? 65 + next(&g, 100) : next(&g, 64);
+        u64 mut k = 0;
+        while (k < rows) {
+            ownership_state.region_identity item = identity(&e, &g);
+            assert(ownership_state.region_insert(&sorted, item));
+            assert(ownership_state.region_insert(&batch, item));
+            ownership_raw_bytes.byte_partition part = partition(&e, &g);
+            assert(ownership_raw_bytes.partition_insert(&current, &ordered, part));
+            assert(ownership_raw_bytes.partition_insert(&current, &appended, part));
+            k += 1;
+        }
+        assert(ownership_state.region_settle(&batch));
+        assert(ownership_raw_bytes.partition_settle(&current, &appended));
+        assert(sorted.len == batch.len && sorted.unknown == batch.unknown);
+        assert(ordered.len == appended.len && ordered.unknown == appended.unknown);
+        k = 0;
+        while (k < sorted.len) {
+            assert(ownership_state.region_order(ownership_state.region_entries(&sorted)[k],
+                ownership_state.region_entries(&batch)[k]) == 0);
+            k += 1;
+        }
+        k = 0;
+        while (k < ordered.len) {
+            assert(ownership_raw_bytes.partition_order(
+                ownership_raw_bytes.partition_entries(&ordered)[k],
+                ownership_raw_bytes.partition_entries(&appended)[k]) == 0);
+            k += 1;
+        }
+        del(sorted.identities);
+        del(batch.identities);
+        del(ordered.items);
+        del(appended.items);
+        round += 1;
+    }
+    println("batch counts match sorted counts");
+}
+
+// A batch insert pays two W units. Growth from capacity c pays 1 + c, and the settle pays one
+// unit for each 64 rows. Sorted insertion pays one more unit for each row it compares or moves.
+fn batch_cost(u64 rows) u64 {
+    u64 mut cost = 2 * rows;
+    u64 mut capacity = 8;
+    while (capacity < rows) {
+        cost += 1 + capacity;
+        capacity *= 2;
+    }
+    return cost + rows / 64 + (rows % 64 == 0 ? 0 : 1);
+}
+
+fn batch_count_work() void {
+    u64[6] sizes = {0, 1, 8, 64, 65, 200};
+    u64 mut i = 0;
+    while (i < sizes.len) {
+        ownership_raw_bytes_env.env mut e = {};
+        ownership_raw_bytes_env.owner_setup(&e, 28, false);
+        ownership_raw.request req = ownership_raw_bytes_env.request(&e, 2800);
+        ownership_raw.work_cursor mut cursor = {};
+        ownership_raw_bytes.work mut current = begin(&e, &req, &cursor);
+        ownership_state.region_counter mut regions = counter(&e, current.proof, true);
+        u64 start = e.budget.meter.used.w;
+        u64 mut k = 0;
+        while (k < sizes[i]) {
+            // Distinct rows in reverse order: sorted insertion would move every row.
+            assert(ownership_state.region_insert(&regions, ownership_state.region_identity{
+                .region = ownership_raw_bytes_env.id(&e, ownership_api.entity_kind.region,
+                    cast(sizes[i] - k, u32))}));
+            k += 1;
+        }
+        assert(ownership_state.region_settle(&regions) && regions.len == sizes[i]);
+        u64 middle = e.budget.meter.used.w;
+        assert(middle - start == batch_cost(sizes[i]));
+        ownership_raw_bytes.partition_counter mut partitions =
+            ownership_raw_bytes.partition_counter{.batch = true};
+        k = 0;
+        while (k < sizes[i]) {
+            assert(ownership_raw_bytes.partition_insert(&current, &partitions,
+                ownership_raw_bytes.byte_partition{.source = ownership_raw_bytes_env.id(&e,
+                    ownership_api.entity_kind.source, cast(sizes[i] - k, u32)), .end = 1}));
+            k += 1;
+        }
+        assert(ownership_raw_bytes.partition_settle(&current, &partitions));
+        assert(partitions.len == sizes[i]);
+        assert(e.budget.meter.used.w - middle == batch_cost(sizes[i]));
+        del(regions.identities);
+        del(partitions.items);
+        ownership_raw_bytes_env.close(&e);
+        i += 1;
+    }
+    println("batch count work ok");
+}
+
+// A settle that cannot pay its units stops with a work limit and counts nothing more.
+fn batch_settle_refusals() void {
+    u64 mut kind = 0;
+    while (kind < 2) {
+        ownership_raw_bytes_env.env mut e = {};
+        ownership_raw_bytes_env.owner_setup(&e, 29, false);
+        e.limits.w = 1000;
+        ownership_raw.request req = ownership_raw_bytes_env.request(&e, 2900);
+        ownership_raw.work_cursor mut cursor = {};
+        ownership_raw_bytes.work mut current = begin(&e, &req, &cursor);
+        ownership_state.region_counter mut regions = counter(&e, current.proof, true);
+        ownership_raw_bytes.partition_counter mut partitions =
+            ownership_raw_bytes.partition_counter{.batch = true};
+        u64 mut k = 0;
+        while (k < 65) {
+            u32 ordinal = 65 - cast(k, u32);
+            if (kind == 0) {
+                assert(ownership_state.region_insert(&regions, ownership_state.region_identity{
+                    .region = ownership_raw_bytes_env.id(&e, ownership_api.entity_kind.region,
+                        ordinal)}));
+            } else {
+                assert(ownership_raw_bytes.partition_insert(&current, &partitions,
+                    ownership_raw_bytes.byte_partition{.source = ownership_raw_bytes_env.id(&e,
+                        ownership_api.entity_kind.source, ordinal), .end = 1}));
+            }
+            k += 1;
+        }
+        // Leave one unit of the two that 65 rows need.
+        e.budget.meter.used.w = e.limits.w - 1;
+        if (kind == 0) {
+            assert(!ownership_state.region_settle(&regions));
+            assert(regions.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        } else {
+            assert(!ownership_raw_bytes.partition_settle(&current, &partitions));
+            assert(current.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        }
+        assert(e.budget.meter.used.w == e.limits.w);
+        del(regions.identities);
+        del(partitions.items);
+        ownership_raw_bytes_env.close(&e);
+        kind += 1;
+    }
+    println("batch settle refusals ok");
+}
+
+fn main() i32 {
+    owner_scan_work();
+    paired_region_work();
+    paired_region_identities();
+    batch_sort_boundaries();
+    batch_matches_sorted();
+    batch_count_work();
+    batch_settle_refusals();
+    return 0;
+}

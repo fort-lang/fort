@@ -492,6 +492,8 @@ struct region_counter {
     region_identity mut@ own identities;
     u64 len;
     u64 unknown;
+    // A batch counter appends each identity and merges equal identities in region_settle.
+    bool batch;
 }
 
 fn region_spend(region_counter mut* paid) bool {
@@ -520,6 +522,7 @@ fn region_order(region_identity a, region_identity b) i32 {
 }
 
 // Missing keys prove no equality. Keyed entries use canonical order, never addresses.
+// A batch counter appends without a search, so each identity costs a fixed amount of work.
 fn region_insert(region_counter mut* paid, region_identity item) bool {
     if (!region_spend(paid)) { return false; }
     if (item.region.kind == ownership_api.entity_kind.none ||
@@ -528,13 +531,16 @@ fn region_insert(region_counter mut* paid, region_identity item) bool {
         paid->unknown += 1;
         return true;
     }
-    u64 mut index = 0;
-    while (index < paid->len) {
-        if (!region_spend(paid)) { return false; }
-        i32 order = region_order(item, region_entries(paid)[index]);
-        if (order == 0) { return true; }
-        if (order < 0) { break; }
-        index += 1;
+    u64 mut index = paid->len;
+    if (!paid->batch) {
+        index = 0;
+        while (index < paid->len) {
+            if (!region_spend(paid)) { return false; }
+            i32 order = region_order(item, region_entries(paid)[index]);
+            if (order == 0) { return true; }
+            if (order < 0) { break; }
+            index += 1;
+        }
     }
     u64 ceiling = (U64_MAX / 2) / sizeof(region_identity);
     if (paid->len >= ceiling) { return region_refuse(paid); }
@@ -613,6 +619,76 @@ fn region_contents(region_counter mut* paid, ownership_api.contents_fact fact) b
         if (!region_range(paid, fact.borrows[i].range, true)) { return false; }
         i += 1;
     }
+    return true;
+}
+
+// Sorts identities in place: by insertion up to 64 items, by a bottom-up merge sort above.
+fn sort_identities(region_identity mut@ items) void {
+    if (items.len < 2) { return; }
+    if (items.len <= LOCAL_INDICES) {
+        u64 mut k = 1;
+        while (k < items.len) {
+            region_identity item = items[k];
+            u64 mut at = k;
+            while (at > 0 && region_order(item, items[at - 1]) < 0) {
+                items[at] = items[at - 1];
+                at -= 1;
+            }
+            items[at] = item;
+            k += 1;
+        }
+        return;
+    }
+    region_identity mut@ own scratch = new(region_identity, items.len);
+    u64 mut width = 1;
+    while (width < items.len) {
+        u64 mut low = 0;
+        while (low < items.len) {
+            u64 middle = items.len - low < width ? items.len : low + width;
+            u64 high = items.len - middle < width ? items.len : middle + width;
+            u64 mut left = low;
+            u64 mut right = middle;
+            u64 mut out = low;
+            while (out < high) {
+                bool take_left = right >= high ||
+                    (left < middle && region_order(items[left], items[right]) <= 0);
+                if (take_left) { scratch[out] = items[left]; left += 1; }
+                else { scratch[out] = items[right]; right += 1; }
+                out += 1;
+            }
+            low = high;
+        }
+        u64 mut i = 0;
+        while (i < items.len) { items[i] = scratch[i]; i += 1; }
+        width = width > items.len / 2 ? items.len : width * 2;
+    }
+    del(scratch);
+}
+
+/// Ends the batch of a counter: it sorts the identities and keeps one of each equal run, so
+/// len counts distinct identities as region_insert counts them. It pays one W unit for each
+/// 64 identities it sorts. A counter without a batch is already settled.
+fn region_settle(region_counter mut* paid) bool {
+    if (!paid->batch) { return true; }
+    paid->batch = false;
+    u64 units = paid->len / ROWS_PER_UNIT + (paid->len % ROWS_PER_UNIT == 0 ? 0 : 1);
+    u64 mut k = 0;
+    while (k < units) {
+        if (!region_spend(paid)) { return false; }
+        k += 1;
+    }
+    region_identity mut@ items = region_entries(paid)[0..paid->len];
+    sort_identities(items);
+    u64 mut kept = 0;
+    k = 0;
+    while (k < items.len) {
+        if (kept == 0 || region_order(items[kept - 1], items[k]) != 0) {
+            items[kept] = items[k];
+            kept += 1;
+        }
+        k += 1;
+    }
+    paid->len = kept;
     return true;
 }
 

@@ -78,6 +78,8 @@ struct partition_counter {
     byte_partition mut@ own items;
     u64 len;
     u64 unknown;
+    // A batch counter appends each partition and merges equal partitions in partition_settle.
+    bool batch;
 }
 struct byte_effect {
     effect_kind kind;
@@ -226,13 +228,16 @@ fn partition_insert(work mut* current, partition_counter mut* counter,
         counter->unknown += 1;
         return true;
     }
-    u64 mut index = 0;
-    while (index < counter->len) {
-        if (!spend(current, 1)) { return false; }
-        i32 order = partition_order(item, partition_entries(counter)[index]);
-        if (order == 0) { return true; }
-        if (order < 0) { break; }
-        index += 1;
+    u64 mut index = counter->len;
+    if (!counter->batch) {
+        index = 0;
+        while (index < counter->len) {
+            if (!spend(current, 1)) { return false; }
+            i32 order = partition_order(item, partition_entries(counter)[index]);
+            if (order == 0) { return true; }
+            if (order < 0) { break; }
+            index += 1;
+        }
     }
     u64 ceiling = types.TYPE_MAX_SIZE / sizeof(byte_partition);
     if (counter->len >= ceiling) {
@@ -264,6 +269,71 @@ fn partition_insert(work mut* current, partition_counter mut* counter,
     if (!spend(current, 1)) { return false; }
     partition_entries(counter)[index] = item;
     counter->len += 1;
+    return true;
+}
+// Sorts partitions in place: by insertion up to 64 items, by a bottom-up merge sort above.
+fn sort_partitions(byte_partition mut@ items) void {
+    if (items.len < 2) { return; }
+    if (items.len <= ownership_state.LOCAL_INDICES) {
+        u64 mut k = 1;
+        while (k < items.len) {
+            byte_partition item = items[k];
+            u64 mut at = k;
+            while (at > 0 && partition_order(item, items[at - 1]) < 0) {
+                items[at] = items[at - 1];
+                at -= 1;
+            }
+            items[at] = item;
+            k += 1;
+        }
+        return;
+    }
+    byte_partition mut@ own scratch = new(byte_partition, items.len);
+    u64 mut width = 1;
+    while (width < items.len) {
+        u64 mut low = 0;
+        while (low < items.len) {
+            u64 middle = items.len - low < width ? items.len : low + width;
+            u64 high = items.len - middle < width ? items.len : middle + width;
+            u64 mut left = low;
+            u64 mut right = middle;
+            u64 mut out = low;
+            while (out < high) {
+                bool take_left = right >= high ||
+                    (left < middle && partition_order(items[left], items[right]) <= 0);
+                if (take_left) { scratch[out] = items[left]; left += 1; }
+                else { scratch[out] = items[right]; right += 1; }
+                out += 1;
+            }
+            low = high;
+        }
+        u64 mut i = 0;
+        while (i < items.len) { items[i] = scratch[i]; i += 1; }
+        width = width > items.len / 2 ? items.len : width * 2;
+    }
+    del(scratch);
+}
+/// Ends the batch of a counter: it sorts the partitions and keeps one of each equal run. It pays
+/// one W unit for each 64 partitions it sorts, as the G and H counts do.
+fn partition_settle(work mut* current, partition_counter mut* counter) bool {
+    if (!counter->batch) { return true; }
+    counter->batch = false;
+    u64 rows = ownership_state.ROWS_PER_UNIT;
+    if (!spend(current, counter->len / rows + (counter->len % rows == 0 ? 0 : 1))) {
+        return false;
+    }
+    byte_partition mut@ items = partition_entries(counter)[0..counter->len];
+    sort_partitions(items);
+    u64 mut kept = 0;
+    u64 mut k = 0;
+    while (k < items.len) {
+        if (kept == 0 || partition_order(items[kept - 1], items[k]) != 0) {
+            items[kept] = items[k];
+            kept += 1;
+        }
+        k += 1;
+    }
+    counter->len = kept;
     return true;
 }
 fn borrowed_result(work mut* current, ownership_state.region_counter* counter,
@@ -452,11 +522,13 @@ fn paired_regions(work mut* current, ownership_state.state* core, ownership_raw.
         return stop(current, ownership_api.entity_id{}, false,
             "paired retained vectors remain unproved");
     }
+    // Both counters append and merge equal entries once at the end, so the count is linear.
     ownership_state.region_counter mut borrowed = ownership_state.region_counter{
         .service = current->service, .kind = ownership_api.work_kind.transfer,
         .operation = current->selected->base.operation,
-        .source = current->selected->base.source_position, .proof = current->proof};
-    partition_counter mut partitions = {};
+        .source = current->selected->base.source_position, .proof = current->proof,
+        .batch = true};
+    partition_counter mut partitions = partition_counter{.batch = true};
     defer del(borrowed.identities);
     defer del(partitions.items);
     if (!borrowed_core(current, &borrowed, core, edit) ||
@@ -532,6 +604,8 @@ fn paired_regions(work mut* current, ownership_state.state* core, ownership_raw.
             cursor = edit.selected.begin + part.end;
         }
     }
+    if (!borrowed_result(current, &borrowed, ownership_state.region_settle(&borrowed)) ||
+        !partition_settle(current, &partitions)) { return false; }
     u64 mut total = borrowed.len;
     if (!add_price(current, &total, borrowed.unknown) ||
         !add_price(current, &total, raw->leaves_len) ||
@@ -576,7 +650,8 @@ fn value_price(work mut* current, ownership_api.contents_fact value, u64 mut* pr
     if (!place_price(current, value.place, price) || !add_price(current, price, 5)) {
         return false;
     }
-    if (value.borrows.len > current->selected->limits.g ||
+    // The borrows of one value are exclusive source alternatives, counted as the G count does.
+    if (ownership_state.alternative_units(value.borrows.len) > current->selected->limits.g ||
         value.borrows.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.borrow_relation)) {
         return stop(current, value.place.root, false,
             "byte source alternatives exceed their bound");
@@ -1133,13 +1208,16 @@ fn definite_owner(ownership_api.allocation_fact item) bool {
     }
     return true;
 }
+// The scan compares each allocation owner with the path once, and contents_index reads the core
+// contents once. So it pays the core price once and the path price once for each allocation.
 fn owner_empty(work mut* current, state mut* input, ownership_api.place_path path) bool {
     u64 mut price = 1;
-    if (!core_price(current, input->core, &price) || !place_price(current, path, &price) ||
-        !add_price(current, &price, input->core->allocations_len) ||
+    u64 mut path_price = 1;
+    if (!core_price(current, input->core, &price) || !place_price(current, path, &path_price) ||
         input->core->allocations_len == U64_MAX ||
-        price > U64_MAX / (input->core->allocations_len + 1) ||
-        !spend(current, price * (input->core->allocations_len + 1))) { return false; }
+        path_price > U64_MAX / (input->core->allocations_len + 1) ||
+        !add_price(current, &price, path_price * (input->core->allocations_len + 1)) ||
+        !spend(current, price)) { return false; }
     u64 mut i = 0;
     while (i < input->core->allocations_len) {
         if (!spend(current, 1)) { return false; }
@@ -1890,7 +1968,7 @@ fn mapped_price(work mut* current, ownership_api.contents_fact value,
 fn valid_sources(work mut* current, state* input, ownership_api.contents_fact value) bool {
     if (value.kind != ownership_api.contents_kind.reference || value.borrows.len == 0 ||
         value.value_version.kind != ownership_api.entity_kind.value ||
-        value.borrows.len > current->selected->limits.g) {
+        ownership_state.alternative_units(value.borrows.len) > current->selected->limits.g) {
         return stop(current, value.place.root, false,
             "reference source correspondence is incomplete");
     }
