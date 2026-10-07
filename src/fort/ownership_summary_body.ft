@@ -612,20 +612,43 @@ fn basic(body_input* in, u32 src, u32 dst, ownership_transfer.action effect_acti
         .destination_owns = fir.local_at(in->function.body, dst)->ty->is_own};
 }
 
-// A bool constant is the exact value 1 or 0. `cv_to_i64` takes only an integer.
+// Whether the zero value of `ty` is the integer 0: an integer, a `char`, a bool or an enum
+// (D6.5). A zeroed enum holds 0 even when 0 is not a member (D3.9).
+fn zero_integer(types.node* ty) bool {
+    return ty != null && (types.type_is_int(ty) || ty->kind == types.type_kind.k_enum ||
+        (ty->kind == types.type_kind.k_prim && (ty->prim == prim.prim_kind.prim_char ||
+        ty->prim == prim.prim_kind.prim_bool)));
+}
+
+// The scalar fact of an operand. A constant has an exact fact only when its integer value is
+// known: a bool is 1 or 0, an integer or a `char` its value when an i64 holds it, and the
+// zero of an integer, `char`, bool or enum type is 0. Every other constant is unknown.
+// `fir.operand_const` keeps the zero place `_0`, and `direct` is true for it, so only an
+// operand that is not a constant reads the fact of a local.
 fn constant(body_input* in, body_program* out, fir.operand input_operand)
     ownership_api.scalar_fact {
-    if (input_operand.kind == fir.operand_kind.ok_const &&
-        input_operand.value.kind == fir.const_kind.ck_bool) {
-        return integer(consts.cv_eq(input_operand.value.value, consts.cv_from_bool(true)) ?
-            1 : 0);
-    } else if (input_operand.kind == fir.operand_kind.ok_const &&
-        input_operand.value.kind == fir.const_kind.ck_int) {
+    if (input_operand.kind != fir.operand_kind.ok_const) {
+        if (direct(input_operand.place) && cast(input_operand.place.local,
+            u64) < out->scalars.len) {
+            return out->scalars[input_operand.place.local];
+        }
+        return ownership_api.scalar_fact{};
+    }
+    fir.constant k = input_operand.value;
+    switch (k.kind) {
+    case fir.const_kind.ck_bool:
+        return integer(consts.cv_eq(k.value, consts.cv_from_bool(true)) ? 1 : 0);
+    case fir.const_kind.ck_int:
+        // A `char` constant holds its code point, which cv_as_int makes an integer.
         i64 mut n = 0;
-        if (consts.cv_to_i64(input_operand.value.value, &n)) { return integer(n); }
-    } else if (direct(input_operand.place) && cast(input_operand.place.local,
-        u64) < out->scalars.len) {
-        return out->scalars[input_operand.place.local];
+        if (consts.cv_is_int_like(k.value) && consts.cv_to_i64(consts.cv_as_int(k.value), &n)) {
+            return integer(n);
+        }
+    case fir.const_kind.ck_zero:
+        if (zero_integer(k.ty)) { return integer(0); }
+    case fir.const_kind.ck_float, fir.const_kind.ck_null, fir.const_kind.ck_string,
+        fir.const_kind.ck_bytes, fir.const_kind.ck_enum_table, fir.const_kind.ck_fn:
+        return ownership_api.scalar_fact{};
     }
     return ownership_api.scalar_fact{};
 }

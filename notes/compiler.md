@@ -1252,6 +1252,12 @@ came here.
   It separates by-value storage from the parameter's designated source.
   A local whose address the body takes keeps no scalar fact, so a store through that address
   leaves no stale index. A cast keeps an exact value only when its type holds the value (D17.17).
+  A constant operand has an exact fact only when its integer value is known: a bool, an integer
+  or a `char` that an i64 holds, and the zero of an integer, `char`, bool or enum type (D3.9,
+  D6.5). **`fir.operand_const` keeps the zero place `_0`, and `direct` is true for it**, so a
+  FIR consumer tests the operand kind before it reads a place. A float constant that read the
+  fact of `_0` proved the window of `s[1]` for a read of `s[2]`
+  (`test/fort/ownership_summary_values_test.ft`, `float_index`).
   It keeps unsupported calls and control flow incomplete.
   Owning aggregate values and aggregate ownership returns also stay incomplete.
   Each reference load has one internal source, allocation, and value-version token.
