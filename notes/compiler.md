@@ -1374,14 +1374,14 @@ came here.
   the copy, a second lookup of a substituted key found a formal of the same function: a call
   `sw(q, p, true)` mapped the argument `q` back to `p`. Operation positions keep the callee
   function, so diagnostics name the callee body.
-  Measured: a recursive pair of 9 FIR units uses 17194 W in 4 rounds. Six captured values
-  over 14 cases use 81945 W, above their bound of 65536 + 64 S
-  (`test/fort/ownership_recursive_limits_test.ft`). Each round infers each member again, and
-  the bound does not grow with the rounds. A self call `walk` after k scalar declarations
-  uses 15990, 30519 and 48070 W for k = 1, 2 and 3, in 3 rounds and one publication round.
-  That is 4.7 to 5.7 times the 3384, 5708 and 8486 W of the same body that calls another
-  body. At k = 4 the self call reaches its bound of 67520 and publishes `work_limit`; the
-  plain body uses 11683.
+  Measured: a recursive pair of 9 FIR units uses 17224 W in 3 rounds and one publication
+  round. Six captured values over 14 cases use 84116 W in 3 rounds and one publication round,
+  above their bound of 65536 + 64 S (`test/fort/ownership_recursive_limits_test.ft`). Each
+  round infers each member again, and the bound does not grow with the rounds. A self call
+  `walk` after k scalar declarations uses 15990, 30519 and 48070 W for k = 1, 2 and 3, in 3
+  rounds and one publication round. That is 4.7 to 5.7 times the 3384, 5708 and 8486 W of
+  the same body that calls another body. At k = 4 the self call reaches its bound of 67520
+  and publishes `work_limit`; the plain body uses 11683.
 - **A branch on a captured formal gives guarded cases** (D17.18).
   Extraction walks each reached block of a forward tree and keeps the origins and scalars at each
   block entry. A back edge or a second parent keeps the body unsupported, so an `if` whose
@@ -1395,6 +1395,24 @@ came here.
   the call unresolved. Each guard is decided before any case runs. When each guard fails, the
   call also stays unresolved. A formal whose address the body takes has no symbol, so its branch
   adds no value edge and its argument gives no capture.
+  `ownership_calls.contradicts` is the one refutation rule: an exact fact of the formal of an
+  equality atom refutes the atom when its value differs. Extraction applies it to the call
+  operand (`ownership_calls.refuted`) and removes each refuted case from the origin of a
+  reference call result (`ownership_summary_body.call_origin`). `bind_call` copies the same
+  operand into the capture of the formal through `scalar_formal` and `formal_value`, and
+  `case_answer` applies the rule to that capture in its atom loop. So extraction never removes
+  a case that flow applies, and flow reads no guard twice. The normal cases that stay must
+  give one argument source over each target. A caller atom, a negative atom, or a guard
+  without a record removes no case there, so two sources keep the origin unknown and a later
+  read incomplete. When the operands refute each normal case, flow applies no normal case at
+  the call: it ends the path at an abort case, it ends the path for the round at a
+  provisional target, or it keeps a published call unresolved with an unknown result, whose
+  read is incomplete proof. The origin then reads each normal case, so the read does not stop
+  extraction with `missing_path`. Before, each case stayed, so `second(r, a, false)` with two
+  different views left its caller with `missing_path`. `ownership_calls_guards_test.ft`
+  (`guarded_origins`, `abort_origins`, `refuted_origin`, `unread_guard`),
+  `ownership_recursive_test.ft` (`refuted_round`), `ownership_indirect_test.ft` (R06) and
+  `ownership_calls_coverage_test.ft` (`refuted_operands`) hold these rules.
   An abort case records an abort exit. Normal cases join into one continuation. When the normal
   cases of a target cover each captured value (`ownership_calls.covered`), their case atoms leave
   the continuations before the join, so the join loses no atom. Result rows that differ only in

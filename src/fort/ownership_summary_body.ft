@@ -5,6 +5,7 @@ import diag;
 import fir;
 import fir_flow;
 import ownership_api;
+import ownership_calls;
 import ownership_flow;
 import ownership_graph;
 import ownership_keys;
@@ -1277,35 +1278,46 @@ fn call_capacity(body_input* in, body_program mut* out, fir.statement* stmt, u32
     return total;
 }
 
-// The callee result designates the source of one argument in each normal case of each
-// target. Any other result keeps an unknown origin, so a later read cannot export a
-// requirement.
-fn call_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target@ targets)
-    ownership_api.entity_id {
-    ownership_api.entity_id mut found = ownership_api.entity_id{};
+// The origin of the results of the normal cases of each target, and the count of the normal
+// cases that it reads. `guarded` skips each case that an exact argument refutes, as flow does
+// at the call (`ownership_calls.refuted`).
+struct origin_scan {
+    ownership_api.entity_id origin;
+    u64 normals;
+}
+
+fn scan_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target@ targets,
+    ownership_api.scalar_fact@ args, bool guarded) origin_scan {
+    origin_scan mut scan = origin_scan{};
     u64 mut t = 0;
     while (t < targets.len) {
         ownership_summary_model.summary_view* summary = targets[t].binding.summary;
-        if (summary == null) { return ownership_api.entity_id{}; }
+        if (summary == null) { return origin_scan{}; }
         u64 mut c = 0;
         while (c < summary->cases.len) {
             ownership_summary_model.case_record row = summary->cases[c];
+            bool possible = !guarded ||
+                !ownership_calls.refuted(summary, &out->context, &out->proof, c, args);
+            if (!ownership_api.successful(out->proof)) { return origin_scan{}; }
+            bool normal = possible &&
+                row.outcome.kind == ownership_api.outcome_kind.function_return;
+            if (normal) { scan.normals += 1; }
             u64 mut k = 0;
-            while (row.outcome.kind == ownership_api.outcome_kind.function_return &&
-                k < row.results.len) {
+            while (normal && k < row.results.len) {
                 u64 mut r = 0;
                 while (r < summary->results.len) {
-                    if (!work(out, 1)) { return ownership_api.entity_id{}; }
+                    if (!work(out, 1)) { return origin_scan{}; }
                     ownership_summary_model.relation result = summary->results[r];
                     if (ownership_summary_model.same(result.key, row.results[k])) {
                         ownership_api.entity_id origin = argument_origin(in, out, rv, summary,
                             result.borrow.source);
                         if (origin.kind == ownership_api.entity_kind.none ||
-                            (found.kind != ownership_api.entity_kind.none &&
-                                !ownership_summary_model.same(found, origin))) {
-                            return ownership_api.entity_id{};
+                            (scan.origin.kind != ownership_api.entity_kind.none &&
+                                !ownership_summary_model.same(scan.origin, origin))) {
+                            scan.origin = ownership_api.entity_id{};
+                            return scan;
                         }
-                        found = origin;
+                        scan.origin = origin;
                     }
                     r += 1;
                 }
@@ -1315,7 +1327,24 @@ fn call_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target
         }
         t += 1;
     }
-    return found;
+    return scan;
+}
+
+// The callee result designates the source of one argument in each normal case of each
+// target that the call can run. Any other result keeps an unknown origin, so a later read
+// cannot export a requirement. A refuted case does not run (D17.18). When the exact
+// arguments refute each normal case, flow applies no normal case at the call. Then it ends
+// the path at an abort case, it ends the path for the round at a provisional target, or it
+// keeps an unresolved call with an unknown result. A read after the call proves nothing from
+// its origin there, so the origin reads each normal case, and the read does not stop the
+// extraction of the body.
+fn call_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target@ targets,
+    ownership_api.scalar_fact@ args) ownership_api.entity_id {
+    origin_scan scan = scan_origin(in, out, rv, targets, args, true);
+    if (scan.normals == 0 && ownership_api.successful(out->proof)) {
+        return scan_origin(in, out, rv, targets, args, false).origin;
+    }
+    return scan.origin;
 }
 
 fn argument_origin(body_input* in, body_program mut* out, fir.rvalue rv,
@@ -1618,7 +1647,8 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
     out->steps_len += 1;
     out->scalars[dst] = ownership_api.scalar_fact{};
     out->origins[dst] = reference(dst_ty) && count > 0 ?
-        call_origin(in, out, rv, out->targets[first_target..first_target + count]) :
+        call_origin(in, out, rv, out->targets[first_target..first_target + count],
+            out->call_args[args_first..args_first + cast(rv.ops_len, u64)]) :
         ownership_api.entity_id{};
 }
 

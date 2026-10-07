@@ -281,12 +281,74 @@ fn bound() void {
     assert(!chain(8));
 }
 
+// `ownership_calls.refuted` reads operand `formal - 1` for the scalar formal of a guard atom.
+// Formal 0 binds no operand, and a formal after the last operand reads none. A symbolic
+// operand, or an empty operand list, refutes nothing. `ownership_summary.bind_call` copies
+// the operand into the capture of `formal_value`, and `case_answer` then fails each case that
+// `refuted` refutes, by the same rule `contradicts` (D17.18).
+fn refuted_operands() void {
+    fixture mut f = fixture{};
+    open(&f, 3, NO_INTEGER);
+    defer close(&f);
+    u32[1] formal_zero = {0};
+    u32[1] formal_one = {1};
+    u32[1] formal_two = {2};
+    i64[1] one = {1};
+    i64[1] zero = {0};
+    add_case(&f, formal_one[..], one[..], returns());
+    add_case(&f, formal_one[..], zero[..], aborts());
+    add_case(&f, formal_zero[..], one[..], returns());
+    add_case(&f, formal_two[..], one[..], returns());
+    f.view = ownership_summary_model.summary_view{.roots = f.roots[..3],
+        .predicates = f.atoms[..f.atoms_len], .guards = f.guards[..f.cases_len],
+        .cases = f.cases[..f.cases_len], .proof = ownership_summary_model.complete()};
+    ownership_summary_model.context ctx = ownership_summary_model.context{
+        &f.services.services, ownership_api.operation_position{}, ownership_api.source_position{},
+        ownership_api.entity_id{}, ownership_api.source_position{}};
+    ownership_api.proof_status mut proof = ownership_summary_model.complete();
+    ownership_api.scalar_fact[1] operands = {ownership_calls_env.integer(0)};
+    assert(ownership_calls.refuted(&f.view, &ctx, &proof, 0, operands[..]));
+    assert(!ownership_calls.refuted(&f.view, &ctx, &proof, 1, operands[..]));
+    assert(!ownership_calls.refuted(&f.view, &ctx, &proof, 2, operands[..]));
+    assert(!ownership_calls.refuted(&f.view, &ctx, &proof, 3, operands[..]));
+    assert(ownership_calls.scalar_formal(f.roots[1], 1));
+    assert(!ownership_calls.scalar_formal(f.roots[0], 1));
+    assert(!ownership_calls.scalar_formal(f.roots[2], 1));
+    f.captures[0] = ownership_calls.capture_binding{ownership_calls.formal_value(f.roots[1]),
+        actual(1), operands[0]};
+    f.captures_len = 1;
+    ownership_calls.request mut req = ownership_calls.request{.summary = &f.view,
+        .captures = f.captures[..1], .services = &f.services.services,
+        .limits = f.services.limits};
+    req.before.proof = ownership_summary_model.complete();
+    u64 mut i = 0;
+    while (i < f.cases_len) {
+        if (ownership_calls.refuted(&f.view, &ctx, &proof, i, operands[..])) {
+            assert(ownership_calls.case_answer(&req, &ctx, &proof, i) ==
+                ownership_calls.guard_answer.fails);
+        }
+        i += 1;
+    }
+    assert(ownership_calls.case_answer(&req, &ctx, &proof, 1) ==
+        ownership_calls.guard_answer.holds);
+    ownership_api.scalar_fact[1] open_operand = {ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.symbolic, .symbol = actual(1)}};
+    assert(!ownership_calls.refuted(&f.view, &ctx, &proof, 0, open_operand[..]));
+    f.captures[0].value = open_operand[0];
+    assert(ownership_calls.case_answer(&req, &ctx, &proof, 0) ==
+        ownership_calls.guard_answer.unknown);
+    ownership_api.scalar_fact@ no_operands = {};
+    assert(!ownership_calls.refuted(&f.view, &ctx, &proof, 0, no_operands));
+    assert(ownership_api.successful(proof));
+}
+
 fn main() i32 {
     decided();
     one_value();
     two_values();
     integer_value();
     bound();
+    refuted_operands();
     println("call coverage ok");
     return 0;
 }

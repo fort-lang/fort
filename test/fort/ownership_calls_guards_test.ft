@@ -189,6 +189,102 @@ string[4] ABORT_AFTER = {
     "    h(&v, t, b); del(t); i32 z = *v; del(a); return z; }",
 };
 
+// Each case of `second` returns another formal. An exact argument refutes one case, so the
+// call result designates the source of one argument (D17.18). `top` passes two different
+// views; `false` selects `q` and `true` selects `p`.
+string[3] SECOND_A_FALSE = {
+    "fn second(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    i32* v = second(r, a, false); del(a); return *v; }",
+};
+
+string[3] SECOND_A_TRUE = {
+    "fn second(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    i32* v = second(a, r, true); del(a); return *v; }",
+};
+
+string[3] SECOND_R_FALSE = {
+    "fn second(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    i32* v = second(a, r, false); del(a); return *v; }",
+};
+
+string[3] SECOND_R_TRUE = {
+    "fn second(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    i32* v = second(r, a, true); del(a); return *v; }",
+};
+
+// A symbolic choice keeps both cases possible. The result has two origins, so no proof
+// exists and no path is a witness.
+string[3] SECOND_SYMBOLIC = {
+    "fn second(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32 mut* own a, i32* r, bool b) i32 {",
+    "    i32* v = second(r, a, b); del(a); return *v; }",
+};
+
+// Three cases with guards of two atoms and one atom: `b == 1, c == 1` returns `p`,
+// `b == 1, c == 0` returns `q`, and `b == 0` returns `p`.
+string[4] PICK_A = {
+    "fn pick(i32* p, i32* q, bool b, bool c) i32* {",
+    "    if (b) { if (c) { return p; } return q; } return p; }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    i32* v = pick(r, a, true, false); del(a); return *v; }",
+};
+
+// `false` refutes both cases of `b == 1`. The symbolic `c` decides nothing more.
+string[4] PICK_R = {
+    "fn pick(i32* p, i32* q, bool b, bool c) i32* {",
+    "    if (b) { if (c) { return p; } return q; } return p; }",
+    "fn top(i32 mut* own a, i32* r, bool c) i32 {",
+    "    i32* v = pick(r, a, false, c); del(a); return *v; }",
+};
+
+// `true` keeps both cases of `b == 1`, and they return two formals.
+string[4] PICK_OPEN = {
+    "fn pick(i32* p, i32* q, bool b, bool c) i32* {",
+    "    if (b) { if (c) { return p; } return q; } return p; }",
+    "fn top(i32 mut* own a, i32* r, bool c) i32 {",
+    "    i32* v = pick(r, a, true, c); del(a); return *v; }",
+};
+
+// `false` refutes the only normal case of `must`, so the call aborts and the read after it
+// cannot run. `true` selects the normal case, which returns `a`.
+string[3] MUST_LIVE = {
+    "fn must(i32* p, bool ok) i32* { if (ok) { return p; } panic(\"no\"); }",
+    "fn top(i32* r) i32 {",
+    "    i32* v = must(r, false); return *v; }",
+};
+
+string[3] MUST_RELEASED = {
+    "fn must(i32* p, bool ok) i32* { if (ok) { return p; } panic(\"no\"); }",
+    "fn top(i32 mut* own a) i32 {",
+    "    i32* v = must(a, false); del(a); return *v; }",
+};
+
+string[3] MUST_TRUE = {
+    "fn must(i32* p, bool ok) i32* { if (ok) { return p; } panic(\"no\"); }",
+    "fn top(i32 mut* own a) i32 {",
+    "    i32* v = must(a, true); del(a); return *v; }",
+};
+
+// `false` refutes the normal case. No capture decides `z`, so flow keeps the call unresolved
+// and its result unknown.
+string[4] MUST_UNBOUND = {
+    "fn must(i32* p, bool ok, bool z) i32* {",
+    "    if (ok) { return p; } if (z) { panic(\"a\"); } panic(\"b\"); }",
+    "fn top(i32 mut* own a, i32 n) i32 {",
+    "    i32* v = must(a, false, n > 0); del(a); return *v; }",
+};
+
+// Both cases return `q`. `refuted_origin` refutes each guard for `false`.
+string[3] SAME_FORMAL = {
+    "fn same2(i32* p, i32* q, bool b) i32* { if (b) { return q; } return q; }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    i32* v = same2(r, a, false); del(a); return *v; }",
+};
+
 string[6] BRANCH_LOAD = {
     "struct owner_box { i32 mut* own item; i32 tag; }",
     "fn callee(owner_box mut* a, owner_box* b, bool read) i32 {",
@@ -597,6 +693,171 @@ fn joined_stores() void {
     shared_store(ABORT_AFTER[..], 2);
 }
 
+// The exact arguments select the case that returns `a`. The read of `*v` after `del(a)` is
+// then a definite invalid use (D17.18). `top` has one reaching path, so its validated witness
+// holds on each path and the evidence is unconditional (`spec/toolchain.md` 4.2).
+fn released_origin(string@ text, string callee, u64 cases) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {callee, "top"};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(s->proof) && s->cases.len == cases);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 1);
+    assert(top->proof.kind == ownership_api.proof_kind.complete && top->proof.failed);
+    assert(top->cases.len == 0 && b.services.counts.events == 1);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.evidence == ownership_api.evidence_kind.unconditional);
+}
+
+// The exact arguments select a case that returns `r`. It stays live, so `top` proves its read
+// and needs `r` live at the call.
+fn live_origin(string@ text, string callee) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {callee, "top"};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 1);
+    assert(ownership_api.successful(top->proof) && top->cases.len == 1);
+    assert(top->requirements.len != 0 && b.services.counts.events == 0);
+}
+
+// Two possible cases return two formals, so the call result has no one origin. The read
+// stays incomplete, and no event claims a definite error (D17.18).
+fn open_origin(string@ text, string callee) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {callee, "top"};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 1);
+    assert(top->proof.kind == ownership_api.proof_kind.incomplete && top->cases.len == 0);
+    assert(top->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(b.services.counts.events == 0);
+}
+
+// The origin of a call result comes only from the cases that its exact arguments do not
+// refute (`ownership_calls.refuted`), as flow applies them. Each caller passes two different
+// views, so one refuted case changes the origin.
+fn guarded_origins() void {
+    released_origin(SECOND_A_FALSE[..], "second", 2);
+    released_origin(SECOND_A_TRUE[..], "second", 2);
+    released_origin(PICK_A[..], "pick", 3);
+    live_origin(SECOND_R_FALSE[..], "second");
+    live_origin(SECOND_R_TRUE[..], "second");
+    live_origin(PICK_R[..], "pick");
+    open_origin(SECOND_SYMBOLIC[..], "second");
+    open_origin(PICK_OPEN[..], "pick");
+}
+
+// The unchanged callee gives `top` a definite error: both cases return `a`. The test then
+// refutes each guard of `same2` for `false`. No case covers the call, so flow keeps the
+// published call unresolved with an unknown result. The origin reads each normal case, and
+// the read after the call is incomplete proof with abstract evidence, not a definite error.
+fn refuted_origin() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"same2", "top"};
+    ownership_call_bodies.open(&b, SAME_FORMAL[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_call_bodies.infer(&b, 1);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 1);
+    assert(top->proof.failed && !ownership_api.successful(top->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 0);
+    assert(callee->cases.len == 2 && callee->predicates.len == 2);
+    u64 mut k = 0;
+    while (k < callee->predicates.len) {
+        if (callee->predicates[k].lower.value == 0) {
+            callee->predicates[k].lower.value = 2;
+            callee->predicates[k].upper.value = 2;
+        }
+        k += 1;
+    }
+    ownership_call_bodies.infer(&b, 1);
+    ownership_summary_model.summary* refuted = ownership_call_bodies.summary(&b, 1);
+    assert(refuted->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(refuted->cases.len == 0 && b.services.counts.events == 1);
+    assert(refuted->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+    assert(b.services.counts.last.evidence ==
+        ownership_api.evidence_kind.abstract_possibility);
+}
+
+// The exact arguments leave only the abort case of `must`, so flow ends the path at the call
+// (D17.18). The read after the call does not run, and `top` proves its one abort case. The
+// origin of the call result reads each normal case here, so extraction does not stop at the
+// read with `missing_path`.
+fn abort_only(string@ text) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"must", "top"};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(ownership_call_bodies.summary(&b, 0)->cases.len == 2);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, 1);
+    assert(row.outcome.kind == ownership_api.outcome_kind.abort);
+    assert(b.services.counts.events == 0);
+}
+
+// The read after an unresolved call proves nothing from the origin of the call result. It is
+// incomplete proof with abstract evidence, and no definite error.
+fn unresolved_abort() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"must", "top"};
+    bodies(&b, MUST_UNBOUND[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(ownership_call_bodies.summary(&b, 0)->cases.len == 3);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 1);
+    assert(top->proof.kind == ownership_api.proof_kind.incomplete && top->cases.len == 0);
+    assert(b.services.counts.events == 1);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+    assert(b.services.counts.last.evidence ==
+        ownership_api.evidence_kind.abstract_possibility);
+}
+
+fn abort_origins() void {
+    abort_only(MUST_LIVE[..]);
+    abort_only(MUST_RELEASED[..]);
+    released_origin(MUST_TRUE[..], "must", 2);
+    unresolved_abort();
+}
+
+// Inference writes no negative atom, and each case guard names a record. The test edits the
+// guard of the case of `b == 1` in `second`: first it adds a negative atom, then it names a
+// guard without a record. `ownership_calls.refuted` reads neither guard, and flow keeps the
+// call unresolved (`ownership_calls.case_answer`). The origin keeps that case too, so both
+// cases stay and the read of `top` stays incomplete without an event, not a definite error.
+fn unread_guard(bool negative) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"second", "top"};
+    ownership_call_bodies.open(&b, SECOND_A_FALSE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 0);
+    assert(callee->cases.len == 2 && callee->guards.len == 2);
+    u64 mut edited = 0;
+    u64 mut i = 0;
+    while (i < 2) {
+        if (guard_value(callee, callee->cases[i]).lower.value == 1) {
+            u64 mut g = 0;
+            while (g < 2) {
+                if (ownership_summary_model.same(callee->guards[g].key, callee->cases[i].guard)) {
+                    if (negative) { callee->guards[g].negative = callee->guards[g].positive; }
+                    else { callee->guards[g].key.ordinal += 1000; }
+                    edited += 1;
+                }
+                g += 1;
+            }
+        }
+        i += 1;
+    }
+    assert(edited == 1);
+    ownership_call_bodies.infer(&b, 1);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 1);
+    assert(top->proof.kind == ownership_api.proof_kind.incomplete && top->cases.len == 0);
+    assert(top->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(b.services.counts.events == 0);
+}
+
 // The view of `b->item` is loaded only on the read branch. The other case does not use it, so
 // it needs no load of that root, and both cases publish.
 fn branch_load() void {
@@ -734,6 +995,11 @@ fn main() i32 {
     repeated_guard();
     joined_result();
     joined_stores();
+    guarded_origins();
+    refuted_origin();
+    abort_origins();
+    unread_guard(true);
+    unread_guard(false);
     branch_load();
     stored_scalars();
     addressed_formal();
