@@ -27,14 +27,24 @@ The passes run in the order of their `pass:` directives, each on every function 
 - `verify` runs the verifier of `spec/fir.md` 10. A module whose functions keep every rule is
   written as `none` writes it. The first violation ends the compiler with a panic that names the
   rule, the function, the block and the statement.
+- `ownership-local` runs the local ownership analysis of `--ownership-check` on each function
+  (`spec/toolchain.md` 1). It tests each function with the verifier first, and a broken rule
+  makes the compiler exit 2 with no panic. A validated violation is an error and a note at its
+  location, and an incomplete local proof is one `ownership proof is incomplete` error. After
+  an error the compiler exits 1 and writes no FIR, so a test of a violation uses `error:`. A
+  function whose local proof is complete is written as `none` writes it. The pass must come
+  before every `build-mode` pass. **It gives no closure proof.** It runs the local analysis
+  alone: no call summary, no global, no process exit. A function that stores an owner in a
+  global and returns passes it with exit 0 (`ownership_local/006_global_store.fir`). Only
+  `--ownership-check` on a program holds the obligation of that global (D17.19).
 - `build-mode` runs the build-mode pass of `spec/fir.md` 11. Its arguments select the mode:
   `--release`, `--no-bounds-check`, both in either order, or none for the default mode. Spaces
   separate the arguments. The pass does not run the verifier, so a test of it names `verify`
   in a second `pass:` directive.
 
-A pass that the compiler does not know, an argument of `none` or `verify`, and an argument of
-`build-mode` that is not a mode make the compiler exit 2 before any pass runs, and the harness
-reports an `ERROR`.
+A pass that the compiler does not know, an argument of `none`, `verify` or `ownership-local`,
+an `ownership-local` pass after a `build-mode` pass, and an argument of `build-mode` that is not
+a mode make the compiler exit 2 before any pass runs, and the harness reports an `ERROR`.
 
 The prelude keeps the lines and the columns of the file. The compiler replaces the `//|` of each
 prelude line with three spaces and blanks every other line, so a diagnostic of the prelude names
