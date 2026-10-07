@@ -1,0 +1,396 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| update keys ok
+//| update route ok
+//| call event keys ok
+//| exhausted call ok
+//| aligned join ok
+/// Checks that a failed join or state update of a call takes a key that no body key takes.
+// `ownership_join` and `ownership_state` name a failure by its statement index. A body key from
+// `ownership_summary_body.next` can take the same ordinal, and the event store keeps one event
+// for each key. The summary call layer gives these failures the update key of the call.
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_diag;
+import ownership_events;
+import ownership_limits;
+import ownership_recursive;
+import ownership_recursive_env;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string JOIN_TEXT = "ownership join cannot complete the requested work";
+string STATE_TEXT = "ownership state cannot prove the requested update";
+
+// Each body key ordinal is at most BODY_LIMIT. The update keys lie above it and below the stop
+// key U32_MAX.
+fn update_keys() void {
+    assert(ownership_summary_model.BODY_LIMIT < ownership_summary_model.UPDATE_BASE);
+    ownership_api.function_id f = ownership_api.function_id{
+        ownership_api.declaration_id{4, 5}, 0};
+    ownership_api.entity_id lowest = ownership_summary_model.update_key(
+        ownership_api.entity_id{f, ownership_api.entity_kind.event, 0});
+    assert(lowest.kind == ownership_api.entity_kind.event);
+    assert(lowest.ordinal == ownership_summary_model.UPDATE_BASE);
+    assert(lowest.function.declaration.module == 4 && lowest.function.declaration.declaration == 5);
+    ownership_api.entity_id first = ownership_summary_model.update_key(
+        ownership_api.entity_id{f, ownership_api.entity_kind.event, 1});
+    assert(first.ordinal == ownership_summary_model.UPDATE_BASE + 1);
+    ownership_api.entity_id highest = ownership_summary_model.update_key(
+        ownership_api.entity_id{f, ownership_api.entity_kind.event,
+            ownership_summary_model.BODY_LIMIT});
+    assert(highest.kind == ownership_api.entity_kind.event);
+    assert(highest.ordinal == ownership_summary_body.U32_MAX - 1);
+    // An ordinal above BODY_LIMIT is no body key, so it has no update key.
+    ownership_api.entity_id above = ownership_summary_model.update_key(
+        ownership_api.entity_id{f, ownership_api.entity_kind.event,
+            ownership_summary_model.BODY_LIMIT + 1});
+    assert(above.kind == ownership_api.entity_kind.none && above.ordinal == 0);
+    ownership_api.entity_id stop = ownership_summary_model.update_key(
+        ownership_api.entity_id{f, ownership_api.entity_kind.event,
+            ownership_summary_body.U32_MAX});
+    assert(stop.kind == ownership_api.entity_kind.none);
+    ownership_api.entity_id relation = ownership_summary_model.update_key(
+        ownership_api.entity_id{f, ownership_api.entity_kind.relation, 3});
+    assert(relation.kind == ownership_api.entity_kind.none);
+    println("update keys ok");
+}
+
+fn failure(ownership_api.entity_id key, u32 operation, string text)
+    ownership_api.event_request {
+    ownership_api.event_request mut req = ownership_api.event_request{};
+    req.event.key = key;
+    req.event.operation = ownership_api.operation_position{.function = key.function,
+        .block = 2, .operation = operation};
+    req.event.kind = ownership_api.event_kind.incomplete_proof;
+    req.event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    req.event.reason = ownership_api.incomplete_reason.unknown_effect;
+    req.event.text = text;
+    req.current = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        req.event.operation, req.event.source);
+    return req;
+}
+
+// The route stores an event under the update key and changes nothing else. A route without an
+// update key stores nothing.
+fn update_route() void {
+    ownership_events.store mut events = ownership_events.store{};
+    defer ownership_events.free(&events);
+    ownership_api.services mut svc = ownership_api.services{};
+    ownership_api.limit_table table = ownership_limits.production();
+    assert(ownership_events.bind(&events, &table, &svc));
+    ownership_api.function_id f = ownership_api.function_id{
+        ownership_api.declaration_id{1, 2}, 0};
+    // A body event takes ordinal 9. A state failure at statement 9 names ordinal 9 too.
+    ownership_api.entity_id body = ownership_api.entity_id{f, ownership_api.entity_kind.event, 9};
+    ownership_api.event_request first = failure(body, 4, "a body failure");
+    assert(ownership_api.record_event(&svc, &first).retained);
+    ownership_summary_model.update_route mut route = ownership_summary_model.update_route{};
+    ownership_api.services keyed = ownership_summary_model.update_services(&route, &svc,
+        ownership_api.entity_id{f, ownership_api.entity_kind.event, 30});
+    assert(keyed.budget == svc.budget && keyed.budget_context == svc.budget_context);
+    ownership_api.event_request second = failure(body, 9, STATE_TEXT);
+    ownership_api.event_result stored = ownership_api.record_event(&keyed, &second);
+    assert(stored.retained && !events.terminal.present && events.len == 2);
+    assert(stored.stored_key.ordinal == ownership_summary_model.UPDATE_BASE + 30);
+    ownership_api.event_descriptor* update = ownership_events.at(&events, 1);
+    assert(update->key.ordinal == ownership_summary_model.UPDATE_BASE + 30);
+    assert(update->key.kind == ownership_api.entity_kind.event);
+    assert(update->operation.operation == 9 && update->text == STATE_TEXT);
+    assert(ownership_events.at(&events, 0)->key.ordinal == 9);
+    // The same failure again is one event.
+    assert(ownership_api.record_event(&keyed, &second).retained && events.len == 2);
+    ownership_summary_model.update_route mut none = ownership_summary_model.update_route{};
+    ownership_api.services unkeyed = ownership_summary_model.update_services(&none, &svc,
+        ownership_api.entity_id{f, ownership_api.entity_kind.event,
+            ownership_summary_model.BODY_LIMIT + 1});
+    ownership_api.event_request third = failure(body, 11, JOIN_TEXT);
+    ownership_api.event_result lost = ownership_api.record_event(&unkeyed, &third);
+    assert(!lost.retained && events.len == 2 && !events.terminal.present);
+    assert(lost.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(lost.proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    // A work failure takes the exhausted bound of its terminal failure into the event.
+    ownership_api.event_request mut work = failure(body, 12, JOIN_TEXT);
+    work.event.kind = ownership_api.event_kind.work_failure;
+    work.event.reason = ownership_api.incomplete_reason.work_limit;
+    work.current = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+        work.event.operation, work.event.source);
+    work.current.terminal.limit = ownership_api.exhaustion{true, ownership_api.limit_category.w,
+        ownership_api.limit_scope.computation, ownership_api.work_kind.join, 5, 5, 1,
+        work.event.operation, work.event.source, false};
+    ownership_summary_model.update_route mut other = ownership_summary_model.update_route{};
+    ownership_api.services joined = ownership_summary_model.update_services(&other, &svc,
+        ownership_api.entity_id{f, ownership_api.entity_kind.event, 40});
+    assert(ownership_api.record_event(&joined, &work).retained && events.len == 3);
+    ownership_api.event_descriptor* limited = ownership_events.at(&events, 2);
+    assert(limited->key.ordinal == ownership_summary_model.UPDATE_BASE + 40);
+    assert(limited->limit.present && limited->limit.category == ownership_api.limit_category.w);
+    assert(limited->limit.used == 5 && limited->limit.bound == 5);
+    assert(ownership_diag.represents_terminal(limited, work.current.terminal));
+    // Without an event service the route adds nothing: the update reports as the raw services
+    // do, and keeps the reason of its terminal failure.
+    ownership_api.services mut silent = svc;
+    silent.event = null;
+    ownership_summary_model.update_route mut idle = ownership_summary_model.update_route{};
+    ownership_api.services quiet = ownership_summary_model.update_services(&idle, &silent,
+        ownership_api.entity_id{f, ownership_api.entity_kind.event, 50});
+    assert(quiet.event == null && quiet.event_context == silent.event_context);
+    ownership_api.event_result raw = ownership_api.record_event(&silent, &work);
+    ownership_api.event_result routed = ownership_api.record_event(&quiet, &work);
+    assert(raw.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(routed.proof.terminal.reason == raw.proof.terminal.reason);
+    assert(routed.proof.kind == raw.proof.kind && events.len == 3);
+    println("update route ok");
+}
+
+// The event key of a call application must be a body key, so its update key exists.
+fn call_event_keys() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.events[0].key.ordinal = ownership_summary_model.BODY_LIMIT + 1;
+    ownership_calls.request mut req = ownership_calls_env.request(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.rejected(out.proof, ownership_api.incomplete_reason.missing_correspondence);
+    ownership_calls.free_frame(&out);
+    ownership_calls_env.reset(&e);
+    e.events[0].key.ordinal = ownership_summary_model.BODY_LIMIT;
+    req = ownership_calls_env.request(&e);
+    out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    ownership_calls.free_frame(&out);
+    println("call event keys ok");
+}
+
+// The meter of each computation. From W charge `from` on it refuses each W charge, as a meter
+// does at its bound. `from` 0 refuses from the first widening charge on. It also notes the
+// transfer and widening W charges at the operation of the call: a join or state update makes
+// only these two kinds of charge.
+struct exhaustion {
+    ownership_recursive_env.counters mut* counts;
+    bool live;
+    bool spent;
+    u64 from;
+    u64 seen;
+    bool found;
+    ownership_api.operation_position call;
+    u64[4096] at_call;
+    u64 at_call_len;
+}
+
+fn exhausted(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    exhaustion mut* e = cast(opaque, exhaustion mut*);
+    bool mut w = false;
+    u64 mut i = 0;
+    while (i < req->items.len) {
+        if (req->items[i].category == ownership_api.limit_category.w) { w = true; }
+        i += 1;
+    }
+    if (w) { e->seen += 1; }
+    // Only the join of the call cases widens in these bodies.
+    if (w && req->work == ownership_api.work_kind.widening && !e->found) {
+        e->found = true;
+        e->call = req->operation;
+    }
+    bool update = req->work == ownership_api.work_kind.transfer ||
+        req->work == ownership_api.work_kind.widening;
+    if (w && update && e->found && req->operation.block == e->call.block &&
+        req->operation.operation == e->call.operation && e->at_call_len < e->at_call.len) {
+        e->at_call[e->at_call_len] = e->seen;
+        e->at_call_len += 1;
+    }
+    if (e->from == 0 && req->work == ownership_api.work_kind.widening) { e->spent = true; }
+    if (e->from != 0 && w && e->seen >= e->from) { e->spent = true; }
+    if (e->live && e->spent && w) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.limit = ownership_api.exhaustion{true, ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, req->work, 7, 7, 1, req->operation,
+            req->source, false};
+        return out;
+    }
+    return ownership_recursive_env.budget(cast(e->counts, void mut*), req);
+}
+
+// Each computation gets the production table with a larger E bound, so a long block of
+// scalar stores keeps its history.
+fn wide_begin(void mut* opaque, u64 size, ownership_api.limit_table mut* limits) bool {
+    if (!ownership_recursive_env.begin(opaque, size, limits)) { return false; }
+    limits->e = 4096;
+    ownership_recursive_env.counters mut* counts = cast(opaque,
+        ownership_recursive_env.counters mut*);
+    return ownership_limits.configure(&counts->meter, limits);
+}
+
+// `x` true passes a released view to `reader`: flow records that failure before it reaches the
+// block after the `if`. There `pad` scalar stores come before a call of `callee`, whose two
+// normal cases join.
+struct program {
+    string[1000] lines;
+    u64 len;
+}
+
+fn text(u64 pad) program {
+    program mut out = program{};
+    out.lines[0] = "fn reader(i32* p) i32 { return *p; }";
+    out.lines[1] = "fn callee(i32* p, bool b) i32* { if (b) { return p; } return p; }";
+    out.lines[2] = "fn caller(i32 mut* own q, i32* p, bool x, bool b) i32* { i32 mut t = 0;";
+    out.lines[3] = "    if (x) { i32* v = q; del(q); t = reader(v); return p; }";
+    u64 mut n = 4;
+    assert(pad < out.lines.len - 5);
+    while (n < pad + 4) {
+        out.lines[n] = "    t = 1;";
+        n += 1;
+    }
+    out.lines[n] = "    i32* r = callee(p, b); del(q); return r; }";
+    out.len = n + 1;
+    return out;
+}
+
+// Solves the three bodies into a real event store with the meter `e` and returns the summary
+// proof of `caller`. A `call` that is not null takes the event key of the call at `e->call`.
+fn solve(program* source, exhaustion mut* e, ownership_events.store mut* events,
+    ownership_api.entity_id mut* call) ownership_api.proof_status {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"reader", "callee", "caller"};
+    ownership_recursive_env.open(&c, source->lines[..source->len], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_api.services mut bound = ownership_api.services{};
+    ownership_api.limit_table table = ownership_limits.production();
+    assert(ownership_events.bind(events, &table, &bound));
+    e->counts = &c.counts;
+    c.services.event_context = bound.event_context;
+    c.services.event = bound.event;
+    c.services.budget_context = cast(e, void mut*);
+    c.services.budget = exhausted;
+    c.solution = ownership_recursive.solve(&c.graph, c.inputs[..c.count], &c.services,
+        ownership_recursive.computation_hook{cast(&c.counts, void mut*), wide_begin});
+    ownership_api.proof_status out = c.solution.summaries[2].proof;
+    if (call == null) { return out; }
+    // The solver set the call targets and limits of each input, so a second extraction of
+    // `caller` gives the keys of its inference.
+    e->live = false;
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    assert(wide_begin(cast(&c.counts, void mut*), ownership_limits.fir_size(&c.functions[2]),
+        &limits));
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&c.inputs[2]);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    *call = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < p.calls_len) {
+        if (p.calls[i].block == e->call.block && p.calls[i].gap == e->call.operation) {
+            *call = p.calls[i].event;
+        }
+        i += 1;
+    }
+    assert(call->kind == ownership_api.entity_kind.event);
+    return out;
+}
+
+// An update key lies above BODY_LIMIT and below the stop key U32_MAX.
+fn update(ownership_api.event_descriptor* d) bool {
+    return d->key.ordinal > ownership_summary_model.BODY_LIMIT &&
+        d->key.ordinal < ownership_summary_body.U32_MAX;
+}
+
+// For each transfer or widening W charge at the call, the meter runs out from that charge on.
+// The store records no conflict. A failed join of the cases and a failed end of a callee slot
+// take one update key. Other failures of the call keep a body key or the stop key.
+fn exhausted_call() void {
+    program source = text(0);
+    exhaustion mut probe = exhaustion{};
+    ownership_events.store mut first = ownership_events.store{};
+    solve(&source, &probe, &first, null);
+    ownership_events.free(&first);
+    assert(probe.found);
+    // The second run knows the call, so it also notes the charges before the join.
+    exhaustion mut plain = exhaustion{.found = true, .call = probe.call};
+    ownership_events.store mut second = ownership_events.store{};
+    ownership_api.entity_id mut call = ownership_api.entity_id{};
+    solve(&source, &plain, &second, &call);
+    ownership_events.free(&second);
+    assert(plain.at_call_len > probe.at_call_len && plain.at_call_len < plain.at_call.len);
+    // The update key comes from the call's event key, not from its statement index.
+    u32 key = ownership_summary_model.UPDATE_BASE + call.ordinal;
+    assert(call.ordinal != plain.call.operation);
+    u64 mut joins = 0;
+    u64 mut states = 0;
+    u64 mut k = 0;
+    while (k < plain.at_call_len) {
+        exhaustion mut e = exhaustion{.live = true, .from = plain.at_call[k], .found = true,
+            .call = plain.call};
+        ownership_events.store mut events = ownership_events.store{};
+        defer ownership_events.free(&events);
+        ownership_api.proof_status proof = solve(&source, &e, &events, null);
+        assert(!events.terminal.present);
+        u64 mut i = 0;
+        while (i < events.len) {
+            ownership_api.event_descriptor* d = ownership_events.at(&events, i);
+            if (update(d)) {
+                assert(d->key.kind == ownership_api.entity_kind.event);
+                assert(d->operation.block == plain.call.block);
+                assert(d->operation.operation == plain.call.operation);
+                assert(d->key.ordinal == key);
+                assert(d->text == JOIN_TEXT || d->text == STATE_TEXT);
+                // The event names the exhausted bound, so it stands for the terminal failure.
+                assert(d->kind == ownership_api.event_kind.work_failure);
+                assert(d->limit.present && d->limit.category == ownership_api.limit_category.w);
+                assert(ownership_diag.represents_terminal(d, proof.terminal));
+                if (d->text == JOIN_TEXT) { joins += 1; } else { states += 1; }
+            } else {
+                assert(d->text != JOIN_TEXT);
+            }
+            i += 1;
+        }
+        k += 1;
+    }
+    assert(joins > 0 && states > 0);
+    println("exhausted call ok");
+}
+
+// The call stands at a statement index equal to the ordinal of the recorded body event. The
+// meter runs out at the join. The store keeps both events and records no conflict.
+fn aligned_join() void {
+    program short = text(0);
+    exhaustion mut plain = exhaustion{};
+    ownership_events.store mut body = ownership_events.store{};
+    defer ownership_events.free(&body);
+    solve(&short, &plain, &body, null);
+    assert(!body.terminal.present && body.len == 1 && plain.found);
+    ownership_api.event_descriptor* failed = ownership_events.at(&body, 0);
+    assert(failed->key.kind == ownership_api.entity_kind.event);
+    // Each scalar store moves the call one statement and adds no body key before the failure.
+    u32 target = failed->key.ordinal;
+    assert(target > plain.call.operation);
+    program long = text(cast(target - plain.call.operation, u64));
+    exhaustion mut e = exhaustion{.live = true};
+    ownership_events.store mut events = ownership_events.store{};
+    defer ownership_events.free(&events);
+    ownership_api.entity_id mut call = ownership_api.entity_id{};
+    ownership_api.proof_status proof = solve(&long, &e, &events, &call);
+    assert(e.found && e.call.operation == target && call.ordinal != target);
+    assert(!events.terminal.present && events.len == 2);
+    ownership_api.event_descriptor* kept = ownership_events.at(&events, 0);
+    assert(kept->key.ordinal == target && kept->operation.block == failed->operation.block);
+    assert(kept->operation.operation == failed->operation.operation);
+    ownership_api.event_descriptor* join = ownership_events.at(&events, 1);
+    assert(join->text == JOIN_TEXT && join->key.kind == ownership_api.entity_kind.event);
+    assert(join->operation.operation == target);
+    assert(join->key.ordinal == ownership_summary_model.UPDATE_BASE + call.ordinal);
+    // One event stands for the terminal failure of `caller`, so the renderer adds none.
+    assert(proof.terminal.present && proof.terminal.limit.present);
+    assert(ownership_diag.represents_terminal(join, proof.terminal));
+    assert(!ownership_diag.represents_terminal(kept, proof.terminal));
+    println("aligned join ok");
+}
+
+fn main() i32 {
+    update_keys();
+    update_route();
+    call_event_keys();
+    exhausted_call();
+    aligned_join();
+    return 0;
+}

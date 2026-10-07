@@ -248,6 +248,63 @@ fn report(context* ctx, ownership_api.proof_status proof) ownership_api.proof_st
     return proof;
 }
 
+// The event ordinals of one body (D17.18). A body key takes an ordinal from 1 to BODY_LIMIT
+// (`ownership_summary_body.next`). A failed join or state update of a call takes the ordinal
+// of the call's event key plus UPDATE_BASE, so its ordinal is from UPDATE_BASE to U32_MAX - 1.
+// The stop of a computation takes U32_MAX (`ownership_recursive.stop`).
+u32 BODY_LIMIT = 2147483646;
+u32 UPDATE_BASE = 2147483648;
+
+/// The key of a failed join or state update at the operation whose event key is `event`. An
+/// event key that is not a body key gives no update key.
+fn update_key(ownership_api.entity_id event) ownership_api.entity_id {
+    if (event.kind != ownership_api.entity_kind.event || event.ordinal > BODY_LIMIT) {
+        return ownership_api.entity_id{};
+    }
+    return ownership_api.entity_id{event.function, ownership_api.entity_kind.event,
+        event.ordinal + UPDATE_BASE};
+}
+
+// `ownership_join` and `ownership_state` name a failure by its statement index, and a body key
+// can take the same ordinal. The event store keeps one event for each key, so this route gives
+// each event of one update the update key of its operation.
+struct update_route {
+    ownership_api.services* inner;
+    ownership_api.entity_id key;
+}
+
+fn update_event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    update_route* route = cast(opaque, update_route*);
+    if (route->key.kind != ownership_api.entity_kind.event) {
+        return ownership_api.event_result{.proof = ownership_api.incomplete(
+            ownership_api.incomplete_reason.missing_correspondence, req->event.operation,
+            req->event.source)};
+    }
+    ownership_api.event_request mut keyed = *req;
+    keyed.event.key = route->key;
+    // A work failure names its exhausted bound, so the event stands for the terminal failure
+    // and the renderer adds no second event for it.
+    if (keyed.event.kind == ownership_api.event_kind.work_failure &&
+        req->current.terminal.limit.present) {
+        keyed.event.limit = req->current.terminal.limit;
+    }
+    return ownership_api.record_event(route->inner, &keyed);
+}
+
+/// The services of one join or state update at the operation whose event key is `event`.
+/// `route` holds `inner` and must stay at one address while the update runs. Without an event
+/// service the update reports as `inner` does.
+fn update_services(update_route mut* route, ownership_api.services* inner,
+    ownership_api.entity_id event) ownership_api.services {
+    route->inner = inner;
+    route->key = update_key(event);
+    ownership_api.services mut out = *inner;
+    if (inner->event == null) { return out; }
+    out.event_context = cast(route, void mut*);
+    out.event = update_event;
+    return out;
+}
+
 fn path_charge(context* ctx, ownership_api.proof_status mut* proof,
     ownership_api.place_path path) bool {
     if (path.projections.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.projection)) {

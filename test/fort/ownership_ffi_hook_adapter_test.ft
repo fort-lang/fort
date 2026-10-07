@@ -8,12 +8,16 @@
 //| accept P23
 //| reject stale public view
 //| accept taken choice facts
+//| accept update keys at the statement ordinal
+//| accept update keys at another ordinal
+//| reject event key above the body keys
 /// Tests the public foreign callback and the lifetime of its retained result.
 import ownership_api;
 import ownership_ffi;
 import ownership_ffi_hook_env as env;
 import ownership_ffi_storage_env;
 import ownership_state;
+import ownership_summary_model;
 import std.str;
 
 ownership_api.entity_id NO_GUARD = {};
@@ -191,6 +195,74 @@ fn taken_choice_facts() void {
     del(taken);
     println("accept taken choice facts");
 }
+// A failed state update in the hook takes the update key of the boundary event, not its
+// statement index. Each refusal gives at most one event. An `ordinal` of 0 keeps the event key
+// of the environment, whose ordinal is the statement index, so a raw key would equal the
+// boundary event key. Another ordinal tells the event key and the statement index apart.
+fn update_keys(u32 ordinal, string done) void {
+    env.env mut e = {};
+    take_make(&e, 8);
+    defer env.close(&e);
+    u32 statement = e.b.request.call.operation.operation;
+    if (ordinal != 0) {
+        assert(ordinal != statement);
+        e.b.events[0].key.ordinal = ordinal;
+    }
+    ownership_api.entity_id event = e.b.events[0].key;
+    assert(ordinal != 0 || event.ordinal == statement);
+    ownership_ffi.adapter mut a = {};
+    defer ownership_ffi.clear(&a.storage);
+    connect(&e, &a);
+    assert(ownership_api.successful(dispatch(&e).proof));
+    u64 total = e.b.raw.budget.calls;
+    u64 mut updates = 0;
+    u64 mut deny = 1;
+    while (deny <= total) {
+        env.reset(&e, deny);
+        ownership_api.ffi_result out = dispatch(&e);
+        assert(!ownership_api.successful(out.proof) && e.b.events_seen <= 1);
+        if (e.b.events_seen == 1 &&
+            e.b.observed.text == "ownership state cannot prove the requested update") {
+            assert(e.b.observed.key.kind == ownership_api.entity_kind.event);
+            assert(e.b.observed.key.ordinal == ownership_summary_model.UPDATE_BASE + event.ordinal);
+            assert(e.b.observed.kind == ownership_api.event_kind.work_failure);
+            assert(e.b.observed.limit.present && out.proof.terminal.limit.present);
+            updates += 1;
+        } else if (e.b.events_seen == 1) {
+            assert(e.b.observed.key.ordinal == event.ordinal);
+        }
+        deny += 1;
+    }
+    assert(updates > 0);
+    println(done);
+}
+// A failed state update needs an update key, so the boundary event key must be a body key.
+fn event_key_above() void {
+    env.env mut e = {};
+    take_make(&e, 9);
+    defer env.close(&e);
+    ownership_ffi.adapter mut a = {};
+    defer ownership_ffi.clear(&a.storage);
+    connect(&e, &a);
+    // The refused key could equal an update key or the stop key in a shared store, so the
+    // refusal records no event, as `ownership_calls.bind` does.
+    e.b.events[0].key.ordinal = ownership_summary_model.BODY_LIMIT + 1;
+    ownership_api.ffi_result mut out = dispatch(&e);
+    assert(!ownership_api.successful(out.proof) && e.b.events_seen == 0);
+    assert(out.proof.kind == ownership_api.proof_kind.incomplete && out.proof.terminal.present);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(out.proof.terminal.relation.ordinal == ownership_summary_model.BODY_LIMIT + 1);
+    assert(ownership_ffi_storage_env.same_result(e.b.prior_baseline, a.storage.retained));
+    // The stop key U32_MAX lies one above the highest update key.
+    e.b.events[0].key.ordinal = ownership_summary_model.UPDATE_BASE +
+        ownership_summary_model.BODY_LIMIT + 1;
+    out = dispatch(&e);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(e.b.events_seen == 0);
+    e.b.events[0].key.ordinal = ownership_summary_model.BODY_LIMIT;
+    assert(ownership_api.successful(dispatch(&e).proof));
+    println("reject event key above the body keys");
+}
 fn main() i32 {
     missing_hook();
     public_callback();
@@ -199,5 +271,8 @@ fn main() i32 {
     successful_replacement();
     stale_view();
     taken_choice_facts();
+    update_keys(0, "accept update keys at the statement ordinal");
+    update_keys(300, "accept update keys at another ordinal");
+    event_key_above();
     return 0;
 }
