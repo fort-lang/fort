@@ -94,6 +94,7 @@ fn work(frame mut* out, ownership_summary_model.context* ctx, u64 amount) bool {
 
 fn key(frame mut* out, ownership_summary_model.context* ctx,
     ownership_api.entity_id input) ownership_api.entity_id {
+    if (input.kind == ownership_api.entity_kind.none) { return input; }
     {
         source_binding@ rows_0 = out->sources[..];
         u64 mut row_index_0 = 0;
@@ -101,7 +102,27 @@ fn key(frame mut* out, ownership_summary_model.context* ctx,
             source_binding mut row = rows_0[row_index_0];
             row_index_0 += 1;
             if (!work(out, ctx, 1)) { return input; }
-            if (ownership_summary_model.same(row.formal, input)) { return row.actual.key; }
+            if (ownership_summary_model.same(row.formal, input)) {
+                return row.actual.key.kind == ownership_api.entity_kind.none ?
+                    input : row.actual.key;
+            }
+            u64 mut r = 0;
+            while ((input.kind == ownership_api.entity_kind.allocation ||
+                input.kind == ownership_api.entity_kind.value) && r < out->model.roots.len) {
+                if (!work(out, ctx, 1)) { return input; }
+                ownership_summary_model.symbolic_root root = out->model.roots[r];
+                if (root.kind == ownership_summary_model.root_kind.loaded_source &&
+                    ownership_summary_model.same(root.source, row.formal) &&
+                    row.actual.key.kind != ownership_api.entity_kind.none) {
+                    if (ownership_summary_model.same(root.allocation, input)) {
+                        return row.actual.allocation;
+                    }
+                    if (ownership_summary_model.same(root.value_version, input)) {
+                        return row.value_version;
+                    }
+                }
+                r += 1;
+            }
 
         }
     }
@@ -211,7 +232,8 @@ fn range(frame mut* out, ownership_summary_model.context* ctx,
     while (binding_index < out->sources.len) {
         if (!work(out, ctx, 1)) { return input; }
         source_binding row = out->sources[binding_index];
-        if (ownership_summary_model.same(input.key, row.formal_range)) {
+        if (row.formal_range.kind != ownership_api.entity_kind.none &&
+            ownership_summary_model.same(input.key, row.formal_range)) {
             if (!ownership_summary_model.same(input.source, row.formal)) {
                 out->proof = ownership_summary_model.fail(ctx,
                     ownership_api.incomplete_reason.invalid_input, input.key);
@@ -286,6 +308,10 @@ fn required_bindings(frame mut* out, ownership_summary_model.context* ctx) bool 
         if (!work(out, ctx, 1)) { return false; }
         ownership_summary_model.symbolic_root root = out->model.roots[i];
         if (root.kind != ownership_summary_model.root_kind.by_value_slot) {
+            if (root.kind == ownership_summary_model.root_kind.loaded_source) {
+                i += 1;
+                continue;
+            }
             bool mut slot_found = root.kind
                 == ownership_summary_model.root_kind.allocation_template;
             u64 mut j = 0;
@@ -416,6 +442,7 @@ fn copy_bindings(request* req, frame mut* out, ownership_summary_model.context* 
         req->captures.len > types.TYPE_MAX_SIZE / sizeof(capture_binding)) { return false; }
     u64 mut count = req->aliases.len + req->globals.len + req->result.aliases.len;
     u64 mut result_count = 0;
+    u64 mut loaded_count = 0;
     {
         ownership_summary_model.symbolic_root@ rows_7 = out->model.roots[..];
         u64 mut row_index_7 = 0;
@@ -424,6 +451,7 @@ fn copy_bindings(request* req, frame mut* out, ownership_summary_model.context* 
             row_index_7 += 1;
             if (!work(out, ctx, 1)) { return false; }
             if (root.kind == ownership_summary_model.root_kind.result) { result_count += 1; }
+            if (root.kind == ownership_summary_model.root_kind.loaded_source) { loaded_count += 1; }
 
         }
     }
@@ -482,8 +510,9 @@ fn copy_bindings(request* req, frame mut* out, ownership_summary_model.context* 
 
         }
     }
-    if (!work(out, ctx, 1) || !work(out, ctx, req->sources.len)) { return false; }
-    out->sources = new(source_binding, req->sources.len);
+    if (loaded_count > types.TYPE_MAX_SIZE / sizeof(source_binding) - req->sources.len ||
+        !work(out, ctx, 1) || !work(out, ctx, req->sources.len + loaded_count)) { return false; }
+    out->sources = new(source_binding, req->sources.len + loaded_count);
     index = 0;
     {
         source_binding@ rows_12 = req->sources[..];
@@ -506,6 +535,24 @@ fn copy_bindings(request* req, frame mut* out, ownership_summary_model.context* 
             index += 1;
 
         }
+    }
+    u64 mut loaded = 0;
+    while (loaded < out->model.roots.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        ownership_summary_model.symbolic_root root = out->model.roots[loaded];
+        if (root.kind == ownership_summary_model.root_kind.loaded_source) {
+            u64 mut prior = 0;
+            while (prior < index) {
+                if (!work(out, ctx, 1) ||
+                    ownership_summary_model.same(root.source, out->sources[prior].formal)) {
+                    return false;
+                }
+                prior += 1;
+            }
+            out->sources[index] = source_binding{.formal = root.source};
+            index += 1;
+        }
+        loaded += 1;
     }
     if (!work(out, ctx, 1) || !work(out, ctx, req->allocations.len)) { return false; }
     out->allocations = new(allocation_binding, req->allocations.len);
@@ -629,9 +676,11 @@ fn substitute(request* req, frame mut* out, ownership_summary_model.context* ctx
         } else if (root->kind != ownership_summary_model.root_kind.by_value_slot) {
             root->slot = path(out, ctx, original).root;
         }
-        root->source = key(out, ctx, root->source);
-        root->allocation = key(out, ctx, root->allocation);
-        root->value_version = key(out, ctx, root->value_version);
+        if (root->kind != ownership_summary_model.root_kind.loaded_source) {
+            root->source = key(out, ctx, root->source);
+            root->allocation = key(out, ctx, root->allocation);
+            root->value_version = key(out, ctx, root->value_version);
+        }
         i += 1;
     }
     i = 0;
@@ -903,9 +952,40 @@ fn copy_caller(request* req, application mut* out, ownership_summary_model.conte
         ownership_state.append_allocations(&out->state, item);
         i += 1;
     }
-    if (req->before.regions.len != 0 || req->before.nodes.len != 0 || req->before.edges.len != 0 ||
-        req->before.shapes.len != 0 || req->before.predicates.len != 0
-            || req->before.guards.len != 0 ||
+    i = 0;
+    while (i < req->before.regions.len) {
+        if (!ownership_summary_model.region_charge(ctx, &out->proof, req->before.regions[i])) {
+            return false;
+        }
+        ownership_state.append_regions(&out->state, req->before.regions[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < req->before.nodes.len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_state.append_nodes(&out->state, req->before.nodes[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < req->before.edges.len) {
+        ownership_api.graph_edge edge = req->before.edges[i];
+        if (!ownership_summary_model.path_charge(ctx, &out->proof, edge.place) ||
+            !ownership_summary_model.region_charge(ctx, &out->proof, edge.range)) { return false; }
+        ownership_state.append_edges(&out->state, edge);
+        i += 1;
+    }
+    i = 0;
+    while (i < req->before.shapes.len) {
+        ownership_api.shape_description shape = req->before.shapes[i];
+        if (!ownership_summary_model.keys_charge(ctx, &out->proof, shape.parameters) ||
+            !ownership_summary_model.keys_charge(ctx, &out->proof, shape.clauses) ||
+            !ownership_summary_model.keys_charge(ctx, &out->proof, shape.descendants)) {
+            return false;
+        }
+        ownership_state.append_shapes(&out->state, shape);
+        i += 1;
+    }
+    if (req->before.predicates.len != 0 || req->before.guards.len != 0 ||
         req->before.correlations.len != 0 || req->before.losses.len != 0) {
         out->proof = caller_failure(req, out, ownership_api.entity_id{}, req->operation,
             ownership_api.incomplete_reason.unknown_effect,
@@ -932,7 +1012,16 @@ fn output_root(ownership_summary_model.summary_view* summary,
         ownership_summary_model.requirement row = summary->requirements[i];
         if (ownership_summary_model.same(row.path.root, root) &&
             (row.kind == ownership_summary_model.requirement_kind.empty_output ||
-                row.kind == ownership_summary_model.requirement_kind.valid_owner)) { return true; }
+                row.kind == ownership_summary_model.requirement_kind.valid_owner ||
+                row.kind == ownership_summary_model.requirement_kind.empty_children)) {
+                return true;
+            }
+        i += 1;
+    }
+    i = 0;
+    while (i < summary->effects.len) {
+        if (summary->effects[i].payload == ownership_summary_model.payload_kind.reference_load &&
+            ownership_summary_model.same(summary->effects[i].operand.root, root)) { return true; }
         i += 1;
     }
     return false;
@@ -954,9 +1043,9 @@ fn argument_place(request* req, application mut* out, ownership_summary_model.co
         if (ownership_summary_model.same(binding.formal, formal.source)) {
             ownership_api.place_path mut selected = ownership_api.place_path{.residual = true};
             u64 mut i = 0;
-            while (i < out->state.contents_len) {
+            while (i < req->before.contents.len) {
                 if (!ownership_summary_model.work(ctx, &out->proof, 1)) { break; }
-                ownership_api.contents_fact value = out->state.contents[i];
+                ownership_api.contents_fact value = req->before.contents[i];
                 if (value.borrows.len == 1 &&
                     ownership_summary_model.same(value.value_version, binding.value_version) &&
                     ownership_summary_model.same(value.borrows[0].source, binding.actual.key)) {
@@ -1039,7 +1128,8 @@ fn selected_storage(request* req, application mut* out,
     return false;
 }
 
-// Select the caller value through its original formal source.
+// A parameter keeps its call-entry value. A loaded source keeps its ordered captured value.
+// Both uses check current source and allocation validity.
 fn caller_reference(request* req, application mut* out, ownership_summary_model.context* ctx,
     ownership_summary_model.requirement required, ownership_api.entity_id formal_source,
     u64 source, ownership_api.region mut* supplied) bool {
@@ -1048,16 +1138,26 @@ fn caller_reference(request* req, application mut* out, ownership_summary_model.
     while (root < out->bound.model.roots.len) {
         if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
         ownership_summary_model.symbolic_root row = out->bound.model.roots[root];
-        if (row.kind == ownership_summary_model.root_kind.caller_source &&
+        if ((row.kind == ownership_summary_model.root_kind.caller_source ||
+            row.kind == ownership_summary_model.root_kind.loaded_source) &&
             ownership_summary_model.same(req->summary->roots[root].source, formal_source)) {
-            ownership_api.place_path place = argument_place(req, out, ctx, root);
+            ownership_api.place_path place = row.kind ==
+                ownership_summary_model.root_kind.loaded_source ?
+                ownership_api.place_path{.root = row.slot} : argument_place(req, out, ctx, root);
             if (place.residual || !ownership_api.successful(out->proof)) { break; }
-            if (!ownership_summary_model.work(ctx, &out->proof, out->state.contents_len)) {
-                return false;
+            ownership_api.contents_fact@ current = out->state.contents[..out->state.contents_len];
+            ownership_api.contents_fact@ values = row.kind ==
+                ownership_summary_model.root_kind.loaded_source ? current : req->before.contents;
+            u64 mut at = 0;
+            while (at < values.len) {
+                if (!ownership_summary_model.work(ctx, &out->proof, 1) ||
+                    !ownership_summary_model.path_charge(ctx, &out->proof, values[at].place) ||
+                    !ownership_summary_model.path_charge(ctx, &out->proof, place)) { return false; }
+                if (ownership_state.same_place(values[at].place, place)) { break; }
+                at += 1;
             }
-            u64 at = ownership_transfer.contents_index(&out->state, place);
-            if (at == ownership_api.U64_MAX || found) { break; }
-            ownership_api.contents_fact value = out->state.contents[at];
+            if (at == values.len || found) { break; }
+            ownership_api.contents_fact value = values[at];
             if (value.kind != ownership_api.contents_kind.reference || value.owner_empty ||
                 value.borrows.len != 1 || !value.borrows[0].representation_complete ||
                 !ownership_summary_model.same(value.borrows[0].value_version,
@@ -1191,13 +1291,416 @@ fn extent_proved(request* req, application mut* out, ownership_summary_model.con
     return true;
 }
 
+// A load copies reference metadata before later operations can change storage.
+fn reference_load(request* req, application mut* out, ownership_summary_model.context* ctx,
+    ownership_summary_model.effect_node node) bool {
+    if (!ownership_summary_model.work(ctx, &out->proof, out->state.contents_len) ||
+        !ownership_summary_model.path_charge(ctx, &out->proof, node.operand)) { return false; }
+    u64 at = ownership_transfer.contents_index(&out->state, node.operand);
+    if (at == ownership_api.U64_MAX || ownership_state.has_residual(node.operand)) {
+        out->proof = caller_failure(req, out, node.effect.source, node.effect.operation,
+            ownership_api.incomplete_reason.missing_correspondence,
+            "reference load needs its current containing storage");
+        return false;
+    }
+    ownership_api.contents_fact mut value = out->state.contents[at];
+    bool vacant = ownership_transfer.empty_owner_proved(value);
+    if (!vacant && (value.kind != ownership_api.contents_kind.reference ||
+        value.borrows.len != 1 || !value.borrows[0].representation_complete ||
+        !ownership_summary_model.same(value.value_version, value.borrows[0].value_version))) {
+        out->proof = caller_failure(req, out, node.effect.source, node.effect.operation,
+            ownership_api.incomplete_reason.missing_correspondence,
+            "reference load needs one complete reference representation");
+        return false;
+    }
+    if (!ownership_summary_model.contents_charge(ctx, &out->proof, value)) { return false; }
+    value = ownership_state.copy_contents(&out->bound.metadata, value);
+    u64 mut root = 0;
+    bool mut found = false;
+    while (root < out->bound.model.roots.len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_summary_model.symbolic_root symbolic = out->bound.model.roots[root];
+        if (symbolic.kind == ownership_summary_model.root_kind.loaded_source &&
+            ownership_summary_model.same(symbolic.slot, node.effect.place.root)) {
+            u64 mut binding = 0;
+            while (binding < out->bound.sources.len) {
+                if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+                source_binding mut* row = &out->bound.sources[binding];
+                if (ownership_summary_model.same(row->formal, symbolic.source)) {
+                    if (found || row->actual.key.kind != ownership_api.entity_kind.none) {
+                        out->proof = caller_failure(req, out, symbolic.source,
+                            node.effect.operation,
+                                ownership_api.incomplete_reason.missing_correspondence,
+                            "loaded source needs one ordered definition");
+                        return false;
+                    }
+                    if (!vacant) {
+                        if (!ownership_summary_model.work(ctx, &out->proof,
+                            out->state.sources_len)) { return false; }
+                        u64 source = ownership_state.source_index(&out->state,
+                            value.borrows[0].source);
+                        if (source == ownership_api.U64_MAX) {
+                            out->proof = caller_failure(req, out, symbolic.source,
+                                node.effect.operation,
+                                ownership_api.incomplete_reason.missing_correspondence,
+                                "reference load needs its original source fact");
+                            return false;
+                        }
+                        row->actual = out->state.sources[source];
+                        row->range = value.borrows[0].range;
+                    }
+                    row->value_version = value.value_version;
+                    row->formal_range = symbolic.source;
+                    row->formal_range.kind = ownership_api.entity_kind.region;
+                    found = true;
+                }
+                binding += 1;
+            }
+        }
+        root += 1;
+    }
+    if (!found) {
+        out->proof = caller_failure(req, out, node.effect.key, node.effect.operation,
+            ownership_api.incomplete_reason.missing_correspondence,
+            "reference load needs its reserved source binding");
+        return false;
+    }
+    value.place = node.effect.place;
+    if (!ownership_summary_model.work(ctx, &out->proof, out->state.contents_len) ||
+        !ownership_summary_model.contents_charge(ctx, &out->proof, value)) { return false; }
+    u64 destination = ownership_transfer.contents_index(&out->state, value.place);
+    if (destination == ownership_api.U64_MAX) { ownership_state.append_contents(&out->state,
+        value); }
+    else { out->state.contents[destination] = ownership_state.copy_contents(&out->state, value); }
+    return true;
+}
+
+// The bounded type walk visits inline owned leaves. It never follows a child pointer.
+fn empty_typed_children(request* req, application mut* out, ownership_summary_model.context* ctx,
+    ownership_summary_model.requirement row, types.node* ty, ownership_api.place_path place,
+    ownership_api.projection mut@ parts, u64 depth) bool {
+    if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+    if (ty == null || depth >= parts.len || depth >= req->limits.d) {
+        out->proof = caller_failure(req, out, row.key, row.operation,
+            ownership_api.incomplete_reason.missing_path, "cannot prove bounded child layout");
+        return false;
+    }
+    if (!fir.type_owning(ty)) { return true; }
+    if (types.type_is_reference(ty)) {
+        if (!ty->is_own) { return true; }
+        if (!ownership_summary_model.path_charge(ctx, &out->proof, place) ||
+            !ownership_summary_model.work(ctx, &out->proof, out->state.contents_len) ||
+            !ownership_summary_model.work(ctx, &out->proof, out->state.allocations_len)) {
+            return false;
+        }
+        u64 at = ownership_transfer.contents_index(&out->state, place);
+        if (at == ownership_api.U64_MAX) {
+            out->proof = caller_failure(req, out, row.key, row.operation,
+                ownership_api.incomplete_reason.missing_path, "cannot prove current owned child");
+            return false;
+        }
+        u64 owner = ownership_transfer.owner_index(&out->state, place);
+        if (owner != ownership_api.U64_MAX) {
+            out->proof = caller_failure(req, out, out->state.allocations[owner].key, row.operation,
+                ownership_api.incomplete_reason.none, "call requires empty owned children");
+            return false;
+        }
+        if (!ownership_transfer.empty_owner_proved(out->state.contents[at]) ||
+            ownership_transfer.owner_count(&out->state, place) != 0) {
+            out->proof = caller_failure(req, out, row.key, row.operation,
+                ownership_api.incomplete_reason.missing_path, "cannot prove empty owned child");
+            return false;
+        }
+        return true;
+    }
+    if (!types.type_size_fits(ty)) {
+        out->proof = caller_failure(req, out, row.key, row.operation,
+            ownership_api.incomplete_reason.missing_path, "cannot prove checked child layout");
+        return false;
+    }
+    if (ty->kind == types.type_kind.k_array) {
+        u64 mut i = 0;
+        while (i < ty->len) {
+            if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+            if (i > 9223372036854775807) {
+                out->proof = caller_failure(req, out, row.key, row.operation,
+                    ownership_api.incomplete_reason.missing_path, "cannot prove child index");
+                return false;
+            }
+            parts[depth] = ownership_api.projection{
+                .kind = ownership_api.projection_kind.fixed_index,
+                .index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+                    .value = cast(i, i64)}};
+            ownership_api.place_path child = ownership_api.place_path{.root = place.root,
+                .projections = parts[..depth + 1]};
+            if (!empty_typed_children(req, out, ctx, row, ty->elem, child, parts, depth + 1)) {
+                return false;
+            }
+            i += 1;
+        }
+    } else if (ty->kind == types.type_kind.k_struct) {
+        if (ty->decl == null || ty->layout == null ||
+            ty->layout->state != types.layout_state.l_resolved) {
+            out->proof = caller_failure(req, out, row.key, row.operation,
+                ownership_api.incomplete_reason.missing_path, "cannot prove resolved child layout");
+            return false;
+        }
+        ast.sym* declaration = cast(ty->decl, ast.sym*);
+        if (declaration->node == null) {
+            out->proof = caller_failure(req, out, row.key, row.operation,
+                ownership_api.incomplete_reason.missing_path, "cannot prove child declaration");
+            return false;
+        }
+        u64 mut i = 0;
+        u32 mut field = 0;
+        while (i < ast.ast_len(declaration->node)) {
+            if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+            ast.node* member = ast.ast_child(declaration->node, i);
+            if (member->kind == ast.ast_kind.k_field_decl) {
+                parts[depth] = ownership_api.projection{.kind = ownership_api.projection_kind.field,
+                    .field = field};
+                ownership_api.place_path child = ownership_api.place_path{.root = place.root,
+                    .projections = parts[..depth + 1]};
+                if (!empty_typed_children(req, out, ctx, row, member->ty, child, parts,
+                    depth + 1)) {
+                    return false;
+                }
+                field += 1;
+            }
+            i += 1;
+        }
+    }
+    return true;
+}
+
+fn child_query(request* req, application mut* out, ownership_summary_model.context* ctx,
+    ownership_summary_model.requirement row, ownership_api.entity_id allocation) bool {
+    if (req->services->graph == null) { return true; }
+    ownership_api.entity_id[1] candidates = {allocation};
+    ownership_api.graph_request query = ownership_api.graph_request{
+        ownership_api.graph_query_kind.targets, row.operation, req->source,
+        ownership_state.view(&out->state), candidates[..]};
+    ownership_api.graph_result first = ownership_api.graph(req->services, &query);
+    if (!ownership_api.successful(first.proof)) { out->proof = first.proof; return false; }
+    if (first.residual_fort || !ownership_summary_model.keys_charge(ctx, &out->proof,
+        first.targets)) {
+        if (first.residual_fort) {
+            out->proof = caller_failure(req, out, row.key, row.operation,
+                ownership_api.incomplete_reason.missing_path,
+                    "cannot prove complete child targets");
+        }
+        return false;
+    }
+    ownership_api.entity_id@ targets = ownership_state.copy_entities(&out->bound.metadata,
+        first.targets);
+    u64 mut i = 0;
+    u64 start = out->bound.metadata.shapes_len;
+    while (i < first.shapes.len) {
+        ownership_api.shape_description shape = first.shapes[i];
+        if (!ownership_summary_model.keys_charge(ctx, &out->proof, shape.parameters) ||
+            !ownership_summary_model.keys_charge(ctx, &out->proof, shape.clauses) ||
+            !ownership_summary_model.keys_charge(ctx, &out->proof, shape.descendants)) {
+            return false;
+        }
+        ownership_state.append_shapes(&out->bound.metadata, shape);
+        i += 1;
+    }
+    ownership_api.graph_request second_query = ownership_api.graph_request{
+        ownership_api.graph_query_kind.shape, row.operation, req->source,
+        ownership_state.view(&out->state), candidates[..]};
+    ownership_api.graph_result second = ownership_api.graph(req->services, &second_query);
+    if (!ownership_api.successful(second.proof)) { out->proof = second.proof; return false; }
+    if (second.residual_fort) {
+        out->proof = caller_failure(req, out, row.key, row.operation,
+            ownership_api.incomplete_reason.missing_path, "cannot prove complete child shape");
+        return false;
+    }
+    i = 0;
+    while (i < second.shapes.len) {
+        ownership_api.shape_description shape = second.shapes[i];
+        if (!ownership_summary_model.keys_charge(ctx, &out->proof, shape.parameters) ||
+            !ownership_summary_model.keys_charge(ctx, &out->proof, shape.clauses) ||
+            !ownership_summary_model.keys_charge(ctx, &out->proof, shape.descendants)) {
+            return false;
+        }
+        ownership_state.append_shapes(&out->bound.metadata, shape);
+        i += 1;
+    }
+    i = 0;
+    while (i < targets.len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        if (!ownership_summary_model.same(targets[i], allocation)) {
+            out->proof = caller_failure(req, out, targets[i], row.operation,
+                ownership_api.incomplete_reason.missing_path, "cannot prove empty child target");
+            return false;
+        }
+        i += 1;
+    }
+    i = start;
+    while (i < out->bound.metadata.shapes_len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_api.shape_description shape = out->bound.metadata.shapes[i];
+        if (shape.residual || !shape.acyclic_proved || !shape.separation_proved ||
+            shape.descendants.len != 0) {
+            out->proof = caller_failure(req, out, shape.key, row.operation,
+                ownership_api.incomplete_reason.missing_path,
+                    "cannot prove empty copied child shape");
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn children_empty(request* req, application mut* out, ownership_summary_model.context* ctx,
+    ownership_summary_model.requirement row) bool {
+    u64 mut r = 0;
+    types.node* mut ty = null;
+    while (r < out->bound.model.roots.len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_summary_model.symbolic_root root = out->bound.model.roots[r];
+        if (root.kind == ownership_summary_model.root_kind.caller_source &&
+            ownership_summary_model.same(root.source, row.source) && root.ty != null) {
+            ty = root.ty->elem;
+        }
+        r += 1;
+    }
+    ownership_api.projection[16] mut parts = {};
+    if (row.path.projections.len >= parts.len) {
+        out->proof = caller_failure(req, out, row.key, row.operation,
+            ownership_api.incomplete_reason.missing_path, "cannot prove bounded parent path");
+        return false;
+    }
+    if (!ownership_summary_model.work(ctx, &out->proof, row.path.projections.len)) { return false; }
+    r = 0;
+    while (r < row.path.projections.len) { parts[r] = row.path.projections[r]; r += 1; }
+    if (!empty_typed_children(req, out, ctx, row, ty, row.path, parts[..], r)) { return false; }
+    r = 0;
+    while (r < out->state.allocations_len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_api.allocation_fact item = out->state.allocations[r];
+        if (!ownership_summary_model.path_charge(ctx, &out->proof,
+            item.owner.place)) { return false; }
+        if (item.obligation && ownership_places.compare(item.owner.place, row.path, true) !=
+            ownership_places.overlap.disjoint) {
+            out->proof = caller_failure(req, out, item.key, row.operation,
+                ownership_api.incomplete_reason.missing_path,
+                    "cannot prove residual child obligation");
+            return false;
+        }
+        r += 1;
+    }
+    if (!ownership_summary_model.work(ctx, &out->proof, out->state.sources_len)) { return false; }
+    u64 source = ownership_state.source_index(&out->state, row.source);
+    if (source == ownership_api.U64_MAX) {
+        out->proof = caller_failure(req, out, row.key, row.operation,
+            ownership_api.incomplete_reason.missing_correspondence, "cannot prove parent source");
+        return false;
+    }
+    ownership_api.entity_id allocation = out->state.sources[source].allocation;
+    if (!child_query(req, out, ctx, row, allocation)) { return false; }
+    r = 0;
+    while (r < out->state.nodes_len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_api.graph_node parent = out->state.nodes[r];
+        if (ownership_summary_model.same(parent.allocation, allocation)) {
+            if (parent.residual) {
+                out->proof = caller_failure(req, out, parent.key, row.operation,
+                    ownership_api.incomplete_reason.missing_path,
+                        "cannot prove complete child graph");
+                return false;
+            }
+            u64 mut e = 0;
+            while (e < out->state.edges_len) {
+                if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+                ownership_api.graph_edge edge = out->state.edges[e];
+                if (ownership_summary_model.same(edge.from, parent.key) &&
+                    edge.kind == ownership_api.edge_kind.owned) {
+                    if (!ownership_summary_model.path_charge(ctx, &out->proof, edge.place) ||
+                        !ownership_summary_model.work(ctx, &out->proof, out->state.contents_len) ||
+                        !ownership_summary_model.work(ctx, &out->proof,
+                            out->state.allocations_len)) {
+                        return false;
+                    }
+                    u64 at = ownership_transfer.contents_index(&out->state, edge.place);
+                    if (at == ownership_api.U64_MAX || ownership_state.has_residual(edge.place) ||
+                        !ownership_transfer.empty_owner_proved(out->state.contents[at]) ||
+                        ownership_transfer.owner_count(&out->state, edge.place) != 0) {
+                        out->proof = caller_failure(req, out, edge.key, row.operation,
+                            ownership_api.incomplete_reason.missing_path,
+                            "cannot prove empty owned graph edge");
+                        return false;
+                    }
+                }
+                e += 1;
+            }
+        }
+        r += 1;
+    }
+    r = 0;
+    while (r < out->state.shapes_len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_api.shape_description shape = out->state.shapes[r];
+        if (shape.residual || !shape.acyclic_proved || !shape.separation_proved ||
+            shape.descendants.len != 0) {
+            out->proof = caller_failure(req, out, shape.key, row.operation,
+                ownership_api.incomplete_reason.missing_path, "cannot prove empty child shape");
+            return false;
+        }
+        r += 1;
+    }
+    return true;
+}
+
+
 fn requirements_proved(request* req, application mut* out,
-    ownership_summary_model.context* ctx) bool {
+    ownership_summary_model.context* ctx, ownership_summary_model.effect_node node,
+        bool initial) bool {
     u64 mut i = 0;
     while (i < out->bound.model.requirements.len) {
         if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
-        ownership_summary_model.requirement row = out->bound.model.requirements[i];
+        ownership_summary_model.requirement mut row = out->bound.model.requirements[i];
         ownership_api.entity_id formal_source = req->summary->requirements[i].source;
+        if (initial && row.kind != ownership_summary_model.requirement_kind.live_source &&
+            row.kind != ownership_summary_model.requirement_kind.extent) {
+            i += 1;
+            continue;
+        }
+        if (ownership_keys.operation(row.operation, node.effect.operation) != 0) {
+            i += 1;
+            continue;
+        }
+        bool mut pending = false;
+        bool mut captured = false;
+        u64 mut loaded = 0;
+        while (loaded < out->bound.model.roots.len) {
+            if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+            ownership_summary_model.symbolic_root root = out->bound.model.roots[loaded];
+            if (root.kind == ownership_summary_model.root_kind.loaded_source &&
+                ownership_summary_model.same(root.source, formal_source)) {
+                captured = true;
+                if (!ownership_summary_model.work(ctx, &out->proof, out->state.contents_len)) {
+                    return false;
+                }
+                u64 at = ownership_transfer.contents_index(&out->state,
+                    ownership_api.place_path{.root = root.slot});
+                pending = at == ownership_api.U64_MAX;
+                if (!pending && ownership_transfer.empty_owner_proved(out->state.contents[at])) {
+                    out->proof = caller_failure(req, out, row.key, row.operation,
+                        ownership_api.incomplete_reason.none, "call requires a nonnull reference");
+                    return false;
+                }
+            }
+            loaded += 1;
+        }
+        if (pending) { i += 1; continue; }
+        row.source = key(&out->bound, ctx, row.source);
+        row.range = range(&out->bound, ctx, row.range);
+        ownership_api.entity_id relation = captured ? row.source : row.key;
+        if (!ownership_api.successful(out->bound.proof)) {
+            out->proof = out->bound.proof;
+            return false;
+        }
         if (row.guard.kind != ownership_api.entity_kind.none) {
             out->proof = caller_failure(req, out, row.key, row.operation,
                 ownership_api.incomplete_reason.unknown_effect,
@@ -1212,13 +1715,13 @@ fn requirements_proved(request* req, application mut* out,
             u64 source = ownership_state.source_index(&out->state, row.source);
             if (source == ownership_api.U64_MAX ||
                 out->state.sources[source].validity == ownership_api.validity_kind.unknown) {
-                out->proof = caller_failure(req, out, row.key, row.operation,
+                out->proof = caller_failure(req, out, relation, row.operation,
                     ownership_api.incomplete_reason.missing_path,
                         "cannot prove caller source live");
                 return false;
             }
             if (out->state.sources[source].validity != ownership_api.validity_kind.live) {
-                out->proof = caller_failure(req, out, row.key, row.operation,
+                out->proof = caller_failure(req, out, relation, row.operation,
                     ownership_api.incomplete_reason.none, "call requires a live source");
                 return false;
             }
@@ -1227,6 +1730,8 @@ fn requirements_proved(request* req, application mut* out,
                 !extent_proved(req, out, ctx, row, supplied,
                     out->state.sources[source].kind ==
                         ownership_api.source_kind.trusted_foreign)) { return false; }
+        } else if (row.kind == ownership_summary_model.requirement_kind.empty_children) {
+            if (!children_empty(req, out, ctx, row)) { return false; }
         } else if (row.kind == ownership_summary_model.requirement_kind.empty_output ||
             row.kind == ownership_summary_model.requirement_kind.valid_owner) {
             if (!selected_storage(req, out, ctx, row)) { return false; }
@@ -1558,8 +2063,9 @@ fn selected_transfer(request* req, application mut* out,
     return ownership_places.apply(&out->state, req->services, &projected_request);
 }
 
-fn apply_node(request* req, application mut* out, ownership_summary_model.context* ctx,
-    ownership_summary_model.effect_node node, ownership_transfer.event_binding@ events) bool {
+fn apply_node(request* req, application mut* out, ownership_summary_model.context mut* ctx,
+    ownership_summary_model.effect_node mut node, ownership_transfer.event_binding@ events) bool {
+    ctx->operation = node.effect.operation;
     if (!ownership_summary_model.work(ctx, &out->proof, 2) ||
         !ownership_summary_model.effect_charge(ctx, &out->proof, &out->bound.relations)) {
         return false;
@@ -1569,6 +2075,32 @@ fn apply_node(request* req, application mut* out, ownership_summary_model.contex
         out->proof = caller_failure(req, out, node.effect.key, node.effect.operation,
             ownership_api.incomplete_reason.unknown_effect, "linear call effect is incomplete");
         return false;
+    }
+    node.effect.source = key(&out->bound, ctx, node.effect.source);
+    node.effect.allocation = key(&out->bound, ctx, node.effect.allocation);
+    node.value.value_version = key(&out->bound, ctx, node.value.value_version);
+    node.value.borrows = borrow_list(&out->bound, ctx, node.value.borrows);
+    node.range = range(&out->bound, ctx, node.range);
+    out->proof = out->bound.proof;
+    if (!ownership_api.successful(out->proof) || !requirements_proved(req, out, ctx, node, false)) {
+        return false;
+    }
+    if (node.payload == ownership_summary_model.payload_kind.reference_load) {
+        return reference_load(req, out, ctx, node);
+    }
+    if (node.payload == ownership_summary_model.payload_kind.read) {
+        u64 mut r = 0;
+        while (r < req->summary->requirements.len) {
+            if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+            ownership_summary_model.requirement row = req->summary->requirements[r];
+            if ((row.kind == ownership_summary_model.requirement_kind.extent ||
+                (node.range.key.kind == ownership_api.entity_kind.none &&
+                row.kind == ownership_summary_model.requirement_kind.live_source)) &&
+                ownership_keys.operation(row.operation, node.effect.operation) == 0 &&
+                ownership_summary_model.same(key(&out->bound, ctx, row.source),
+                    node.effect.source)) { return ownership_api.successful(out->bound.proof); }
+            r += 1;
+        }
     }
     ownership_transfer.action mut effect_action = ownership_transfer.action.assignment;
     if (node.payload == ownership_summary_model.payload_kind.read) {
@@ -1615,7 +2147,20 @@ fn apply_node(request* req, application mut* out, ownership_summary_model.contex
     transfer.leaves_empty_proved = destination != null &&
         (destination->kind == types.type_kind.k_ptr ||
             destination->kind == types.type_kind.k_span) && destination->elem != null &&
-        !fir.type_owning(destination->elem) && !fir.type_aggregate(destination->elem);
+        !fir.type_owning(destination->elem);
+    if (effect_action == ownership_transfer.action.release && destination != null &&
+        destination->elem != null && fir.type_owning(destination->elem)) {
+        u64 mut r = 0;
+        while (r < out->bound.model.requirements.len) {
+            if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+            ownership_summary_model.requirement row = out->bound.model.requirements[r];
+            if (row.kind == ownership_summary_model.requirement_kind.empty_children &&
+                ownership_keys.operation(row.operation, node.effect.operation) == 0 &&
+                ownership_summary_model.same(key(&out->bound, ctx, row.source),
+                    node.effect.source)) { transfer.leaves_empty_proved = true; }
+            r += 1;
+        }
+    }
     if (effect_action == ownership_transfer.action.allocation) {
         u64 mut i = 0;
         bool mut found = false;
@@ -1712,7 +2257,7 @@ fn apply(request* req) application {
     out.bound = bind(req);
     out.proof = out.bound.proof;
     if (!ownership_api.successful(out.proof)) { return out; }
-    ownership_summary_model.context ctx = ownership_summary_model.context{req->services,
+    ownership_summary_model.context mut ctx = ownership_summary_model.context{req->services,
         req->operation, req->source, out.bound.model.event, req->summary->source};
     if (out.bound.model.residual_effects || out.bound.model.cases.len != 1 ||
         out.bound.model.cases[0].guard.kind != ownership_api.entity_kind.none ||
@@ -1742,9 +2287,16 @@ fn apply(request* req) application {
         }
         alias += 1;
     }
-    if (!requirements_proved(req, &out, &ctx)) { return out; }
     ownership_transfer.event_binding[1] events = {ownership_transfer.event_binding{
         req->operation, out.bound.model.event}};
+    u64 mut preflight = 0;
+    while (preflight < out.bound.model.effects.len) {
+        if (!ownership_summary_model.work(&ctx, &out.proof, 1) ||
+            !requirements_proved(req, &out, &ctx, out.bound.model.effects[preflight], true)) {
+            return out;
+        }
+        preflight += 1;
+    }
     if (!seed_locals(req, &out, &ctx, events[..])) { return out; }
     ownership_api.entity_id@ sequence = out.bound.model.cases[0].effects;
     u64 mut i = 0;

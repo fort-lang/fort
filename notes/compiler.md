@@ -1198,8 +1198,23 @@ came here.
   It separates by-value storage from the parameter's designated source.
   A local whose address the body takes keeps no scalar fact, so a store through that address
   leaves no stale index. A cast keeps an exact value only when its type holds the value (D17.17).
-  It keeps unsupported calls, loaded references, owning aggregates, and control flow incomplete.
-  A read with multiple projections stays incomplete until the producer tracks each loaded reference.
+  It keeps unsupported calls and control flow incomplete.
+  Owning aggregate values and aggregate ownership returns also stay incomplete.
+  Each reference load has one internal source, allocation, and value-version token.
+  Model validation requires its outer extent check and ordered definition before use.
+  A parameter requirement retains its call-entry value.
+  It checks current source and allocation validity.
+  The consumer loads the current complete reference from canonical caller storage at that operation.
+  It keeps the inner source, allocation, value version, byte window, and alignment.
+  Outer storage liveness cannot prove inner source liveness.
+  A load from storage of the body, and a nested read through a loaded reference, stay
+  unsupported.
+  A prior replacement changes a later load. A prior load keeps its old source.
+  Loaded bindings use reserved frame capacity. They consume no argument index.
+  Shallow parent release requires each inline owned child empty at that operation.
+  A bounded checked-type walk does not follow a child pointer.
+  Residual child obligations, graph edges, or unproved shapes keep the result incomplete.
+  The consumer copies borrowed graph answers before the next callback.
   A selected address keeps its designated source and checked byte window.
   The producer retains a generated address temporary's field path.
   Each selected owner leaf has one private direct flow slot.

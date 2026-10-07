@@ -221,6 +221,23 @@ fn location(fixture* f, diag.loc where) ownership_api.source_position {
     return ownership_api.source_position{};
 }
 
+// Match checked address provenance. Entity ordinals do not prove storage identity.
+fn designated_storage(fixture* f, ownership_api.contents_fact value) ownership_api.place_path {
+    assert(value.borrows.len == 1);
+    ownership_api.entity_id source = value.borrows[0].source;
+    u64 mut r = 0;
+    while (r < f->caller_program.roots_len) {
+        ownership_summary_model.symbolic_root root = f->caller_program.roots[r];
+        if ((root.kind == ownership_summary_model.root_kind.by_value_slot ||
+            root.kind == ownership_summary_model.root_kind.caller_source) &&
+            ownership_summary_model.same(root.source, source)) {
+            return ownership_api.place_path{.root = root.slot};
+        }
+        r += 1;
+    }
+    return ownership_api.place_path{.residual = true};
+}
+
 fn call_request(fixture mut* f, ownership_summary_model.summary_view* summary, u32 instance)
     ownership_calls.request {
     fir.statement* call = fir.block_statement(&f->functions[1], f->call_block, f->call_gap);
@@ -240,8 +257,7 @@ fn call_request(fixture mut* f, ownership_summary_model.summary_view* summary, u
             ownership_api.contents_fact input = contents(f, input_operand.place.local);
             assert(input.borrows.len == 1);
             ownership_api.place_path actual = ownership_calls.output_root(summary, row.slot) ?
-                ownership_summary_body.caller_slot(&f->inputs[1], input_operand.place.local) :
-                input.place;
+                designated_storage(f, input) : input.place;
             f->aliases[f->aliases_len] = ownership_api.alias_binding{row.slot, actual,
                 input.value_version};
             f->aliases_len += 1;
@@ -299,6 +315,8 @@ fn apply(fixture mut* f, u32 instance) void {
     ownership_state.free(&f->before);
     f->before = ownership_state.clone(&f->caller);
     ownership_calls.request req = call_request(f, &summary, instance);
+    f->call_request.operation = req.operation;
+    f->call_request.source = req.source;
     f->application = ownership_calls.apply(&req);
     assert(ownership_state.equal(&f->before, &f->caller));
     assert(!f->application.bound.coverage.actual_source_complete);

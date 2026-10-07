@@ -4,10 +4,13 @@ import ownership_keys;
 import ownership_state;
 import types;
 
-enum root_kind { by_value_slot, caller_source, allocation_template, global, result }
+enum root_kind { by_value_slot, caller_source, allocation_template, global, result, loaded_source }
 enum owner_class { unknown, borrowed, owning }
-enum requirement_kind { live_source, extent, empty_output, valid_owner, alias_relation }
-enum payload_kind { read, replacement, copy, move, allocation, release, storage_end, unknown }
+enum requirement_kind { live_source, extent, empty_output, valid_owner, alias_relation,
+    empty_children }
+enum payload_kind {
+    read, replacement, copy, move, allocation, release, storage_end, unknown, reference_load
+}
 
 // The summary keeps the structural validity and completeness of its inputs.
 // No body inference here qualifies its source, so actual_source_complete stays false.
@@ -740,8 +743,104 @@ fn validate_sequences(summary mut* out, context* ctx) bool {
     return true;
 }
 
+fn validate_loaded(summary mut* out, context* ctx) bool {
+    u64 mut r = 0;
+    while (r < out->roots.len) {
+        if (!work(ctx, &out->proof, 1)) { return false; }
+        symbolic_root root = out->roots[r];
+        if (root.kind == root_kind.loaded_source) {
+            if (root.formal != 0 || root.ty == null || !types.type_is_reference(root.ty) ||
+                root.source.kind != ownership_api.entity_kind.source ||
+                root.allocation.kind != ownership_api.entity_kind.allocation ||
+                root.value_version.kind != ownership_api.entity_kind.value) { return false; }
+            u64 mut definitions = 0;
+            u64 mut e = 0;
+            while (e < out->effects.len) {
+                if (!work(ctx, &out->proof, 1)) { return false; }
+                effect_node node = out->effects[e];
+                if (node.payload == payload_kind.reference_load &&
+                    same(node.effect.place.root, root.slot)) {
+                    if (node.value.borrows.len != 1 ||
+                        !same(node.value.borrows[0].source, root.source) ||
+                        !same(node.value.value_version, root.value_version) ||
+                        !node.value.borrows[0].representation_complete || node.residual) {
+                        return false;
+                    }
+                    bool mut guarded = false;
+                    u64 mut q = 0;
+                    while (q < out->requirements.len) {
+                        if (!work(ctx, &out->proof, 1) ||
+                            !path_charge(ctx, &out->proof, node.operand) ||
+                            !path_charge(ctx, &out->proof, out->requirements[q].path)) {
+                            return false;
+                        }
+                        requirement needed = out->requirements[q];
+                        if (needed.kind == requirement_kind.extent &&
+                            same(needed.source, node.effect.source) &&
+                            ownership_keys.operation(needed.operation,
+                                node.effect.operation) == 0 &&
+                            ownership_state.same_place(needed.path, node.operand) &&
+                            needed.range.extent.kind == ownership_api.fact_kind.exact &&
+                            needed.range.extent.value >= 0 &&
+                            cast(needed.range.extent.value, u64) >= types.type_sizeof(root.ty) &&
+                            needed.range.alignment >= types.type_alignof(root.ty)) {
+                            guarded = true;
+                        }
+                        q += 1;
+                    }
+                    if (!guarded) { return false; }
+                    definitions += 1;
+                }
+                e += 1;
+            }
+            if (definitions != 1) {
+                out->proof = fail(ctx, ownership_api.incomplete_reason.missing_correspondence,
+                    root.source);
+                return false;
+            }
+            u64 mut c = 0;
+            while (c < out->cases.len) {
+                if (!work(ctx, &out->proof, 1)) { return false; }
+                bool mut defined = false;
+                e = 0;
+                while (e < out->cases[c].effects.len) {
+                    u64 at = effect_index(out, ctx, &out->proof, out->cases[c].effects[e]);
+                    if (at == ownership_api.U64_MAX) { return false; }
+                    effect_node node = out->effects[at];
+                    if (node.payload == payload_kind.reference_load &&
+                        same(node.effect.place.root, root.slot)) {
+                        if (defined) { return false; }
+                        defined = true;
+                    } else {
+                        bool mut use = same(node.effect.source, root.source) ||
+                            same(node.effect.allocation, root.allocation) ||
+                            same(node.range.source, root.source);
+                        u64 mut b = 0;
+                        while (b < node.value.borrows.len) {
+                            if (!work(ctx, &out->proof, 1)) { return false; }
+                            use = use || same(node.value.borrows[b].source, root.source);
+                            b += 1;
+                        }
+                        if (use && !defined) {
+                            out->proof = fail(ctx,
+                                ownership_api.incomplete_reason.missing_correspondence,
+                                    root.source);
+                            return false;
+                        }
+                    }
+                    e += 1;
+                }
+                if (!defined) { return false; }
+                c += 1;
+            }
+        }
+        r += 1;
+    }
+    return true;
+}
+
 fn validate(summary mut* out, context* ctx) bool {
-    if (!validate_sequences(out, ctx)) { return false; }
+    if (!validate_sequences(out, ctx) || !validate_loaded(out, ctx)) { return false; }
     {
         symbolic_root@ rows_9 = out->roots[..];
         u64 mut row_index_9 = 0;
