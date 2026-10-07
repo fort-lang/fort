@@ -1,0 +1,318 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary equality ok
+/// Checks the record comparison that ends a recursive fixed point and the copy that renames
+/// the keys of a callee frame (D17.15, D17.18).
+import ownership_api;
+import ownership_calls_env;
+import ownership_summary_model;
+
+fn equal(ownership_calls_env.env* e, ownership_summary_model.summary_view* a,
+    ownership_summary_model.summary_view* b) bool {
+    ownership_summary_model.context ctx = ownership_summary_model.context{&e->services,
+        ownership_api.operation_position{}, ownership_api.source_position{},
+        ownership_api.entity_id{}, ownership_api.source_position{}};
+    ownership_api.proof_status mut proof = ownership_summary_model.complete();
+    bool result = ownership_summary_model.equal(a, b, &ctx, &proof);
+    assert(ownership_api.successful(proof));
+    return result;
+}
+
+fn other() ownership_api.entity_id {
+    return ownership_calls_env.actual(ownership_api.entity_kind.value, 77);
+}
+
+fn moved(ownership_api.operation_position at) ownership_api.operation_position {
+    ownership_api.operation_position mut out = at;
+    out.operation += 1;
+    return out;
+}
+
+// The whole summary: proof, flags, positions, and lengths.
+fn header(ownership_calls_env.env* e, ownership_summary_model.summary_view* a) void {
+    ownership_summary_model.summary_view mut b = *a;
+    assert(equal(e, a, &b));
+    b.proof.failed = true;
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.proof.terminal.reason = ownership_api.incomplete_reason.unknown_effect;
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.residual_effects = !a->residual_effects;
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.coverage.structural_valid = !a->coverage.structural_valid;
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.operation = moved(a->operation);
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.source.line += 1;
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.event = other();
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.callee_source.col += 1;
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.roots = a->roots[..a->roots.len - 1];
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.cases = a->cases[..0];
+    assert(!equal(e, a, &b));
+    b = *a;
+    b.witnesses = a->witnesses[..0];
+    assert(!equal(e, a, &b));
+}
+
+// One changed field of one root, requirement, or effect makes the summaries differ.
+fn records(ownership_calls_env.env* e, ownership_summary_model.summary_view* a) void {
+    u64 mut field = 0;
+    while (field < 9) {
+        ownership_summary_model.symbolic_root[6] mut roots = {};
+        u64 mut i = 0;
+        while (i < 6) { roots[i] = a->roots[i]; i += 1; }
+        if (field == 0) { roots[1].key = other(); }
+        if (field == 1) { roots[1].kind = ownership_summary_model.root_kind.global; }
+        if (field == 2) { roots[1].formal += 1; }
+        if (field == 3) { roots[1].slot = other(); }
+        if (field == 4) { roots[1].source = other(); }
+        if (field == 5) { roots[1].allocation = other(); }
+        if (field == 6) { roots[1].value_version = other(); }
+        if (field == 7) { roots[1].ownership = ownership_summary_model.owner_class.owning; }
+        if (field == 8) { roots[1].ty = null; }
+        ownership_summary_model.summary_view mut b = *a;
+        b.roots = roots[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+    field = 0;
+    while (field < 8) {
+        ownership_summary_model.requirement[2] mut rows = {a->requirements[0], a->requirements[1]};
+        if (field == 0) { rows[1].key = other(); }
+        if (field == 1) { rows[1].kind = ownership_summary_model.requirement_kind.extent; }
+        if (field == 2) { rows[1].guard = other(); }
+        if (field == 3) { rows[1].path.root = other(); }
+        if (field == 4) { rows[1].source = other(); }
+        if (field == 5) { rows[1].range.alignment += 1; }
+        if (field == 6) { rows[1].operation = moved(rows[1].operation); }
+        if (field == 7) { rows[1].provenance = other(); }
+        ownership_summary_model.summary_view mut b = *a;
+        b.requirements = rows[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+    field = 0;
+    while (field < 14) {
+        ownership_summary_model.effect_node[2] mut rows = {a->effects[0], a->effects[1]};
+        if (field == 0) { rows[1].effect.key = other(); }
+        if (field == 1) { rows[1].effect.kind = ownership_api.effect_kind.read; }
+        if (field == 2) { rows[1].effect.operation = moved(rows[1].effect.operation); }
+        if (field == 3) { rows[1].effect.place.root = other(); }
+        if (field == 4) { rows[1].effect.source = other(); }
+        if (field == 5) { rows[1].effect.allocation = other(); }
+        if (field == 6) { rows[1].effect.guard = other(); }
+        if (field == 7) { rows[1].payload = ownership_summary_model.payload_kind.copy; }
+        if (field == 8) { rows[1].operand.root = other(); }
+        if (field == 9) { rows[1].value.value_version = other(); }
+        if (field == 10) { rows[1].range.key = other(); }
+        if (field == 11) { rows[1].provenance = other(); }
+        if (field == 12) { rows[1].deferred.context += 1; }
+        if (field == 13) { rows[1].residual = true; }
+        ownership_summary_model.summary_view mut b = *a;
+        b.effects = rows[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+}
+
+// One changed field of an order, predicate, guard, correlation, or relation record.
+fn relations(ownership_calls_env.env* e, ownership_summary_model.summary_view* a) void {
+    u64 mut field = 0;
+    while (field < 3) {
+        ownership_api.ordering_constraint[1] mut order = {a->order[0]};
+        if (field == 0) { order[0].before = other(); }
+        if (field == 1) { order[0].after = other(); }
+        if (field == 2) { order[0].proved = !order[0].proved; }
+        ownership_summary_model.summary_view mut b = *a;
+        b.order = order[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+    ownership_api.predicate_atom[1] mut atoms = {a->predicates[0]};
+    atoms[0].left = other();
+    ownership_summary_model.summary_view mut b = *a;
+    b.predicates = atoms[..];
+    assert(!equal(e, a, &b));
+    ownership_api.entity_id[1] none = {};
+    ownership_api.guard_fact[1] mut guards = {a->guards[0]};
+    guards[0].positive = none[..0];
+    b = *a;
+    b.guards = guards[..];
+    assert(!equal(e, a, &b));
+    ownership_api.correlation[1] mut correlations = {a->correlations[0]};
+    correlations[0].relation = other();
+    b = *a;
+    b.correlations = correlations[..];
+    assert(!equal(e, a, &b));
+    field = 0;
+    while (field < 5) {
+        ownership_summary_model.relation[1] mut results = {a->results[0]};
+        if (field == 0) { results[0].key = other(); }
+        if (field == 1) { results[0].borrow.source = other(); }
+        if (field == 2) { results[0].guard = other(); }
+        if (field == 3) { results[0].provenance = other(); }
+        if (field == 4) { results[0].residual = true; }
+        b = *a;
+        b.results = results[..];
+        assert(!equal(e, a, &b));
+        b = *a;
+        b.retained = results[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+}
+
+// One changed field of a case, provenance, or witness record.
+fn cases(ownership_calls_env.env* e, ownership_summary_model.summary_view* a) void {
+    u64 mut field = 0;
+    while (field < 12) {
+        ownership_summary_model.case_record[1] mut rows = {a->cases[0]};
+        ownership_api.entity_id@ none = {};
+        if (field == 0) { rows[0].key = other(); }
+        if (field == 1) { rows[0].guard = other(); }
+        if (field == 2) { rows[0].requirements = none; }
+        if (field == 3) { rows[0].effects = none; }
+        if (field == 4) { rows[0].results = none; }
+        if (field == 5) { rows[0].retained = none; }
+        if (field == 6) { rows[0].outcome.kind = ownership_api.outcome_kind.function_return; }
+        if (field == 7) { rows[0].outcome.guard = other(); }
+        if (field == 8) {
+            rows[0].outcome.possible_caller_return = !rows[0].outcome.possible_caller_return;
+        }
+        if (field == 9) { rows[0].outcome.cleanup_required = !rows[0].outcome.cleanup_required; }
+        if (field == 10) { rows[0].outcome.effects = rows[0].outcome.effects[..1]; }
+        if (field == 11) { rows[0].coverage.supplied_complete = true; }
+        ownership_summary_model.summary_view mut b = *a;
+        b.cases = rows[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+    field = 0;
+    while (field < 8) {
+        ownership_summary_model.provenance[1] mut rows = {a->provenance_records[0]};
+        ownership_api.entity_id@ none = {};
+        if (field == 0) { rows[0].key = other(); }
+        if (field == 1) { rows[0].operation = moved(rows[0].operation); }
+        if (field == 2) { rows[0].source.end_col += 1; }
+        if (field == 3) { rows[0].deferred.exit_occurrence += 1; }
+        if (field == 4) { rows[0].callee = ownership_calls_env.function(3, 3); }
+        if (field == 5) { rows[0].substitutions = none; }
+        if (field == 6) { rows[0].witnesses = none; }
+        if (field == 7) { rows[0].filename = "b.ft"; }
+        ownership_summary_model.summary_view mut b = *a;
+        b.provenance_records = rows[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+    field = 0;
+    while (field < 6) {
+        ownership_api.witness_link[1] mut rows = {a->witnesses[0]};
+        if (field == 0) { rows[0].key = other(); }
+        if (field == 1) { rows[0].event = other(); }
+        if (field == 2) { rows[0].predecessor = other(); }
+        if (field == 3) { rows[0].summary = ownership_calls_env.function(3, 3); }
+        if (field == 4) { rows[0].condition = other(); }
+        if (field == 5) { rows[0].validated = !rows[0].validated; }
+        ownership_summary_model.summary_view mut b = *a;
+        b.witnesses = rows[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+}
+
+fn framed(ownership_api.entity_id key, u32 instance) bool {
+    return key.kind == ownership_api.entity_kind.none || key.function.instance == instance;
+}
+
+// Each key of the callee function moves to the frame. Positions and other functions stay.
+// A second renaming back to the callee function gives the original records.
+fn renamed(ownership_calls_env.env mut* e, ownership_summary_model.summary_view* a) void {
+    ownership_api.function_id callee = ownership_calls_env.function(1, 1);
+    ownership_api.function_id frame = ownership_api.function_id{callee.declaration, 9};
+    ownership_api.predicate_atom[1] mut atoms = {a->predicates[0]};
+    atoms[0].right = other();
+    ownership_summary_model.summary_view mut input = *a;
+    input.predicates = atoms[..];
+    ownership_summary_model.summary mut copy = ownership_summary_model.rename(&input, callee,
+        frame, &e->services);
+    defer ownership_summary_model.free(&copy);
+    ownership_calls_env.accepted(copy.proof);
+    ownership_summary_model.summary_view b = ownership_summary_model.view(&copy);
+    assert(!equal(e, &input, &b));
+    u64 mut i = 0;
+    while (i < b.roots.len) {
+        assert(framed(b.roots[i].key, 9) && framed(b.roots[i].slot, 9));
+        assert(framed(b.roots[i].source, 9) && framed(b.roots[i].allocation, 9));
+        i += 1;
+    }
+    assert(framed(b.requirements[1].source, 9) && framed(b.requirements[1].path.root, 9));
+    assert(framed(b.requirements[1].range.key, 9) && framed(b.requirements[1].range.source, 9));
+    assert(framed(b.requirements[1].path.projections[1].captured_version, 9));
+    assert(b.requirements[1].operation.function.instance ==
+        input.requirements[1].operation.function.instance);
+    assert(framed(b.effects[1].effect.key, 9) && framed(b.effects[1].effect.place.root, 9));
+    assert(framed(b.effects[1].value.borrows[0].source, 9));
+    assert(framed(b.effects[1].value.borrows[0].range.partitions[0].membership, 9));
+    assert(b.effects[1].effect.operation.function.instance == 1);
+    assert(framed(b.predicates[0].key, 9) && framed(b.predicates[0].left, 9));
+    assert(b.predicates[0].right.function.instance == other().function.instance);
+    assert(framed(b.guards[0].positive[0], 9) && framed(b.cases[0].effects[0], 9));
+    assert(framed(b.cases[0].outcome.effects[0].key, 9) && framed(b.witnesses[0].key, 9));
+    assert(framed(b.provenance_records[0].substitutions[0], 9));
+    assert(b.event.function.instance == 1);
+    ownership_summary_model.summary mut back = ownership_summary_model.rename(&b, frame,
+        callee, &e->services);
+    defer ownership_summary_model.free(&back);
+    ownership_summary_model.summary_view restored = ownership_summary_model.view(&back);
+    assert(equal(e, &input, &restored));
+    // A refused charge leaves a summary without a proof.
+    e->counts.deny_at = e->counts.calls + 1;
+    ownership_summary_model.summary mut refused = ownership_summary_model.rename(&input,
+        callee, frame, &e->services);
+    defer ownership_summary_model.free(&refused);
+    assert(!ownership_api.successful(refused.proof) && refused.residual_effects);
+    e->counts.deny_at = 0;
+    // A copy without services has no proof either.
+    ownership_summary_model.summary mut alone = ownership_summary_model.rename(&input, callee,
+        frame, null);
+    defer ownership_summary_model.free(&alone);
+    assert(!ownership_api.successful(alone.proof) && alone.residual_effects);
+    assert(alone.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(alone.cases.len == 0 && alone.roots.len == 0);
+}
+
+fn main() i32 {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_summary_model.summary mut first = ownership_summary_model.clone(&e.input,
+        &e.services);
+    defer ownership_summary_model.free(&first);
+    ownership_calls_env.accepted(first.proof);
+    ownership_summary_model.summary mut second = ownership_summary_model.clone(&e.input,
+        &e.services);
+    defer ownership_summary_model.free(&second);
+    ownership_summary_model.summary_view a = ownership_summary_model.view(&first);
+    ownership_summary_model.summary_view twin = ownership_summary_model.view(&second);
+    assert(equal(&e, &a, &twin));
+    header(&e, &a);
+    records(&e, &a);
+    relations(&e, &a);
+    cases(&e, &a);
+    renamed(&e, &a);
+    println("summary equality ok");
+    return 0;
+}

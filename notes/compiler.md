@@ -1326,7 +1326,7 @@ came here.
   The handler checks no collection loan, so a direct call inside an open loan fails before it.
   A callee summary without a proof keeps the call unknown. Its body reported its own error, so
   the call does not fail the caller for it. A direct fort call without a summary, such as a
-  recursive call or a missing body, is an unresolved step with the same continuation. An extern
+  call of a missing body, is an unresolved step with the same continuation. An extern
   call keeps the body unsupported with the reason `missing_ffi`. An indirect call without graph
   targets keeps it unsupported with `unknown_effect`.
 - **A call of a function value applies the summary of each fort target** (D17.13, D17.18).
@@ -1343,8 +1343,45 @@ came here.
   keeps the body unsupported with `missing_ffi`. A residual fort target at the same call keeps
   `unknown_effect`, so foreign trust never covers an unknown fort target.
   Each possible abort case gives one abort exit at the call, and two abort exits with one guard
-  give one case. The solver solves the components callee first, one computation each. A call
-  between two members of one recursive component stays unresolved.
+  give one case. The solver solves the components callee first, one computation each.
+- **A recursive component publishes its summaries at a covered fixed point** (D17.18).
+  Each member starts at bottom: a complete summary with no case and no residual effect. A
+  member call applies the possible cases of the provisional summary. A provisional target
+  without a possible case ends its path in that round and records no exit. Rounds infer the
+  members in key order with the latest summaries and record no event. A round that changes no
+  summary, compared record by record (`ownership_summary_model.equal`), is a fixed point,
+  because inference is deterministic. One publication round then infers each member with the
+  real event service.
+  In that round each member call needs possible cases that cover each captured symbolic bool
+  value (`ownership_calls.covered`, at most 6 values). A vacuous or uncovered member call, or a
+  publication that differs from the fixed point, withdraws the proof of each member that has
+  one. So no complete summary misses an input, and each prefix of a divergent recursion is a
+  prefix of a covered case. All rounds of one component are one computation with the W bound
+  of the component FIR size. A refused W charge stops it for each member. The stop records one
+  `work_failure` event when no event of the computation names the W exhaustion, as in a round
+  that records no event (`spec/fir.md` 14.1). An event store keeps one event for each key, so
+  the stop event names the first member and the ordinal U32_MAX; a body key stops before that
+  ordinal (`ownership_summary_body.next`). Each inference gets the services of its round
+  through a copy of its input, so no input names the services of an ended computation.
+  A withdrawal records no event. A divergent prefix that reads a released view (`PREFIX` in
+  `test/fort/ownership_recursive_test.ft`) gets no error of its own: the published summary
+  names the uncovered call with `unknown_effect`, and a client that reads it must render it.
+  A guard with two atoms that need two values of one caller value fails at the call. Two abort
+  exits with one guard at one call are one case, so the cases at one position stop growing.
+  A call of a body to itself applies a copy of its summary whose keys name the function
+  instance `FRAME_INSTANCE` (`ownership_summary_model.rename`). Its formals, locals, values,
+  and relations then stay apart from the caller keys, as for a call of another body. Without
+  the copy, a second lookup of a substituted key found a formal of the same function: a call
+  `sw(q, p, true)` mapped the argument `q` back to `p`. Operation positions keep the callee
+  function, so diagnostics name the callee body.
+  Measured: a recursive pair of 9 FIR units uses 17194 W in 4 rounds. Six captured values
+  over 14 cases use 81945 W, above their bound of 65536 + 64 S
+  (`test/fort/ownership_recursive_limits_test.ft`). Each round infers each member again, and
+  the bound does not grow with the rounds. A self call `walk` after k scalar declarations
+  uses 15990, 30519 and 48070 W for k = 1, 2 and 3, in 3 rounds and one publication round.
+  That is 4.7 to 5.7 times the 3384, 5708 and 8486 W of the same body that calls another
+  body. At k = 4 the self call reaches its bound of 67520 and publishes `work_limit`; the
+  plain body uses 11683.
 - **A branch on a captured formal gives guarded cases** (D17.18).
   Extraction walks each reached block of a forward tree and keeps the origins and scalars at each
   block entry. A back edge or a second parent keeps the body unsupported, so an `if` whose

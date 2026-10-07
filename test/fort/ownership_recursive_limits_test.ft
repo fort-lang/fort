@@ -1,0 +1,317 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| recursive limits ok
+/// Checks the computations, limits, and coverage of recursive components (D17.18).
+import ownership_api;
+import ownership_events;
+import ownership_keys;
+import ownership_limits;
+import ownership_recursive_env;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[3] MUTUAL = {
+    "fn f(i32* p, bool b) i32* { if (b) { return p; } return g(p); }",
+    "fn g(i32* p) i32* { return f(p, true); }",
+    "fn user(i32* p) i32 { return *f(p, false); }",
+};
+
+// The self call applies a renamed copy of the summary in each round.
+string[3] GROW = {
+    "fn grow(bool keep) void {",
+    "    i32 mut* own p = new(i32); if (keep) { grow(false); del(p); return; } del(p); }",
+    "fn caller(i32 mut* own q) void { grow(true); del(q); }",
+};
+
+// `m(c, true)` covers each value of `c`: true takes the first case, false the second.
+string[2] COVERED = {
+    "fn m(bool b, bool c) void { if (b) { panic(\"x\"); } m(c, true); }",
+    "fn user(i32 mut* own p, bool c) void { m(c, c); }",
+};
+
+// `h(c, c)` with c false needs `b == 0` and `c == 1` at once, so no case takes it.
+string[2] UNCOVERED = {
+    "fn h(bool b, bool c) void { if (b) { panic(\"x\"); } h(c, c); }",
+    "fn user(i32 mut* own p, bool c) void { h(c, c); }",
+};
+
+// Six captured values give 64 assignments, the most that coverage tries. Seven give none.
+string[9] WIDE = {
+    "fn six(bool a, bool b, bool c, bool d, bool e, bool f, bool s) void {",
+    "    if (s) { if (a) { panic(\"a\"); } if (b) { panic(\"b\"); } if (c) { panic(\"c\"); }",
+    "        if (d) { panic(\"d\"); } if (e) { panic(\"e\"); } if (f) { panic(\"f\"); }",
+    "        panic(\"z\"); }",
+    "    six(a, b, c, d, e, f, true); }",
+    "fn seven(bool a, bool b, bool c, bool d, bool e, bool f, bool g, bool s) void {",
+    "    if (s) { if (a) { panic(\"a\"); } if (b) { panic(\"b\"); } if (c) { panic(\"c\"); }",
+    "        if (d) { panic(\"d\"); } if (e) { panic(\"e\"); } if (f) { panic(\"f\"); }",
+    "        if (g) { panic(\"g\"); } panic(\"z\"); } seven(a, b, c, d, e, f, g, true); }",
+};
+
+// The recursive pair is one computation and the caller is another. Each refused W charge
+// stops its computation: each member of that component publishes the refusal, and no later
+// budget gives it a proof. The stop records one budget event, also in a round that records
+// no other event. A refused content charge never gives a definite error. No input keeps the
+// services of a computation that ended.
+fn work_sweep() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"f", "g", "user"};
+    ownership_recursive_env.open(&c, MUTUAL[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "f", 2);
+    ownership_recursive_env.complete(&c, "user", 1);
+    assert(c.counts.computations == 2);
+    u64 total = c.counts.total_calls;
+    assert(total > 1000);
+    u64 mut refused = 0;
+    u64 mut at = 1;
+    while (at <= total) {
+        c.counts.deny_at = at;
+        ownership_recursive_env.solve(&c);
+        u64 mut i = 0;
+        while (i < 3) {
+            ownership_summary_model.summary* s = &c.solution.summaries[i];
+            assert(!(s->proof.kind == ownership_api.proof_kind.complete && s->proof.failed));
+            i += 1;
+        }
+        ownership_recursive_env.services_kept(&c);
+        if (c.counts.denied_category == ownership_api.limit_category.w) {
+            refused += 1;
+            assert(ownership_recursive_env.budget_events(&c) == 1);
+            if (c.counts.denied_computation == 0) {
+                ownership_recursive_env.incomplete(&c, "f",
+                    ownership_api.incomplete_reason.work_limit);
+                ownership_recursive_env.incomplete(&c, "g",
+                    ownership_api.incomplete_reason.work_limit);
+                assert(c.solution.summaries[0].proof.terminal.limit.category ==
+                    ownership_api.limit_category.w);
+                assert(!ownership_api.successful(c.solution.summaries[2].proof));
+            } else {
+                ownership_recursive_env.complete(&c, "f", 2);
+                ownership_recursive_env.incomplete(&c, "user",
+                    ownership_api.incomplete_reason.work_limit);
+            }
+        }
+        at += at < 64 || at + 64 > total ? 1 : 97;
+    }
+    assert(refused > 100);
+    c.counts.deny_at = 0;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "f", 2);
+}
+
+// The same sweep over a self call: a refused charge in the copy of the renamed summary, in a
+// round, or in the publication round stops the component.
+fn self_sweep() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[2] names = {"grow", "caller"};
+    ownership_recursive_env.open(&c, GROW[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "grow", 2);
+    ownership_recursive_env.complete(&c, "caller", 1);
+    u64 total = c.counts.total_calls;
+    u64 mut refused = 0;
+    u64 mut at = 1;
+    while (at <= total) {
+        c.counts.deny_at = at;
+        ownership_recursive_env.solve(&c);
+        assert(!(c.solution.summaries[0].proof.kind == ownership_api.proof_kind.complete &&
+            c.solution.summaries[0].proof.failed));
+        ownership_recursive_env.services_kept(&c);
+        if (c.counts.denied_category == ownership_api.limit_category.w) {
+            refused += 1;
+            assert(ownership_recursive_env.budget_events(&c) == 1);
+            if (c.counts.denied_computation == 0) {
+                ownership_recursive_env.incomplete(&c, "grow",
+                    ownership_api.incomplete_reason.work_limit);
+                assert(!ownership_api.successful(c.solution.summaries[1].proof));
+            } else {
+                ownership_recursive_env.complete(&c, "grow", 2);
+                ownership_recursive_env.incomplete(&c, "caller",
+                    ownership_api.incomplete_reason.work_limit);
+            }
+        }
+        at += at < 64 || at + 64 > total ? 1 : 89;
+    }
+    assert(refused > 100);
+}
+
+// A W bound below the need of the recursive pair refuses it with used and bound recorded.
+// The production bound of its FIR size completes it.
+fn small_bound() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"f", "g", "user"};
+    ownership_recursive_env.open(&c, MUTUAL[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    c.counts.work = 4000;
+    ownership_recursive_env.solve(&c);
+    assert(ownership_recursive_env.budget_events(&c) == 1);
+    ownership_recursive_env.incomplete(&c, "f", ownership_api.incomplete_reason.work_limit);
+    ownership_recursive_env.incomplete(&c, "g", ownership_api.incomplete_reason.work_limit);
+    ownership_summary_model.summary* f = ownership_recursive_env.summary(&c, "f");
+    assert(f->proof.terminal.limit.bound == 4000 && f->proof.terminal.limit.used <= 4000);
+    assert(c.counts.used[0] <= 4000);
+    // The caller fits its own bound, and its call of the refused pair stays unresolved.
+    assert(c.counts.used[1] < 4000);
+    assert(!ownership_api.successful(ownership_recursive_env.summary(&c, "user")->proof));
+    c.counts.work = 0;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "g", 1);
+    assert(ownership_recursive_env.within_limits(&c) < c.counts.bounds[0]);
+}
+
+// One refused content charge in the publication round changes that member, so the
+// publication differs from the fixed point. Each member that published a proof withdraws it.
+fn publication_differs() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"f", "g", "user"};
+    ownership_recursive_env.open(&c, MUTUAL[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    c.counts.deny_at = c.counts.last_content[0];
+    ownership_recursive_env.solve(&c);
+    assert(c.counts.denied_category != ownership_api.limit_category.w);
+    ownership_summary_model.summary* f = ownership_recursive_env.summary(&c, "f");
+    ownership_summary_model.summary* g = ownership_recursive_env.summary(&c, "g");
+    assert(!ownership_api.successful(f->proof) && f->cases.len == 0 && f->residual_effects);
+    // The refused member keeps its own partial records, which callers never read.
+    assert(!ownership_api.successful(g->proof) && g->residual_effects);
+    assert(f->proof.terminal.reason == ownership_api.incomplete_reason.work_limit &&
+        f->proof.terminal.limit.category == ownership_api.limit_category.e);
+    assert(g->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(!ownership_api.successful(ownership_recursive_env.summary(&c, "user")->proof));
+}
+
+// A refused content charge in the publication round records its own event, and the next W
+// charge stops the computation. That event names no W exhaustion, so the stop still records
+// one budget event.
+fn content_then_work() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"f", "g", "user"};
+    ownership_recursive_env.open(&c, MUTUAL[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    c.counts.deny_at = c.counts.last_content[0];
+    c.counts.then_w = true;
+    ownership_recursive_env.solve(&c);
+    assert(!c.counts.then_w && c.counts.denied_computation == 0);
+    assert(c.counts.denied_category == ownership_api.limit_category.w);
+    ownership_recursive_env.incomplete(&c, "f", ownership_api.incomplete_reason.work_limit);
+    ownership_summary_model.summary* f = ownership_recursive_env.summary(&c, "f");
+    assert(f->proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(c.counts.events >= 2 && ownership_recursive_env.budget_events(&c) == 1);
+}
+
+// Two components that call only themselves: two computations, and each stops at a small W
+// bound. The event store compares events by key, so each stop event needs its own key. The
+// store keeps both budget events and no conflict.
+string[2] TWO_STOPS = {
+    "fn f(i32* p, bool b) i32* { if (b) { return p; } return f(p, true); }",
+    "fn g(i32* p, bool b) i32* { if (b) { return p; } return g(p, true); }",
+};
+
+fn stored_stops() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[2] names = {"f", "g"};
+    ownership_recursive_env.open(&c, TWO_STOPS[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_events.store mut events = ownership_events.store{};
+    defer ownership_events.free(&events);
+    ownership_api.services mut bound = ownership_api.services{};
+    ownership_api.limit_table table = ownership_limits.production();
+    assert(ownership_events.bind(&events, &table, &bound));
+    c.services.event_context = bound.event_context;
+    c.services.event = bound.event;
+    c.counts.work = 3000;
+    ownership_recursive_env.solve(&c);
+    assert(c.counts.computations == 2);
+    ownership_recursive_env.incomplete(&c, "f", ownership_api.incomplete_reason.work_limit);
+    ownership_recursive_env.incomplete(&c, "g", ownership_api.incomplete_reason.work_limit);
+    assert(!events.terminal.present && events.len == 2);
+    ownership_api.event_descriptor* first = ownership_events.at(&events, 0);
+    ownership_api.event_descriptor* second = ownership_events.at(&events, 1);
+    assert(first->kind == ownership_api.event_kind.work_failure &&
+        second->kind == ownership_api.event_kind.work_failure);
+    assert(first->key.kind == ownership_api.entity_kind.event &&
+        second->key.kind == ownership_api.entity_kind.event);
+    assert(first->key.ordinal == ownership_summary_body.U32_MAX &&
+        second->key.ordinal == ownership_summary_body.U32_MAX);
+    assert(ownership_keys.entity(first->key, second->key) != 0);
+    assert(ownership_keys.function(first->key.function, second->key.function) != 0);
+}
+
+// A body key stops before the ordinal U32_MAX, so no body key can take the key of a stop.
+fn reserved_ordinal() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[2] names = {"f", "g"};
+    ownership_recursive_env.open(&c, TWO_STOPS[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_api.limit_table mut table = ownership_api.limit_table{};
+    assert(ownership_recursive_env.begin(cast(&c.counts, void mut*), 100, &table));
+    ownership_summary_body.body_program mut p = ownership_summary_body.body_program{};
+    defer ownership_summary_body.free(&p);
+    p.context = ownership_summary_model.context{&c.services,
+        ownership_api.operation_position{.function = c.graph_inputs[0].key},
+        ownership_api.source_position{}, ownership_api.entity_id{},
+        ownership_api.source_position{}};
+    p.proof = ownership_summary_model.complete();
+    p.next_key = ownership_summary_body.U32_MAX - 2;
+    ownership_api.entity_id last = ownership_summary_body.next(&p,
+        ownership_api.entity_kind.event);
+    assert(ownership_api.successful(p.proof));
+    assert(last.ordinal == ownership_summary_body.U32_MAX - 1);
+    ownership_api.entity_id refused = ownership_summary_body.next(&p,
+        ownership_api.entity_kind.event);
+    assert(refused.kind == ownership_api.entity_kind.none && !ownership_api.successful(p.proof));
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+}
+
+fn coverage() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[2] names = {"m", "user"};
+    ownership_recursive_env.open(&c, COVERED[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "m", 3);
+    assert(ownership_recursive_env.outcomes(&c, "m", ownership_api.outcome_kind.abort) == 3);
+    // For `m(c, c)` the case of `b == 0` and `c == 1` needs two values of `c`, so it fails.
+    // The other two cases give two abort exits at the call, one for each value of `c`. Each
+    // aborts, so the owner needs no cleanup.
+    ownership_recursive_env.complete(&c, "user", 2);
+    assert(ownership_recursive_env.outcomes(&c, "user", ownership_api.outcome_kind.abort) == 2);
+    ownership_recursive_env.closure mut u = ownership_recursive_env.closure{};
+    string[2] uncovered_names = {"h", "user"};
+    ownership_recursive_env.open(&u, UNCOVERED[..], uncovered_names[..]);
+    defer ownership_recursive_env.close(&u);
+    ownership_recursive_env.solve(&u);
+    ownership_recursive_env.incomplete(&u, "h", ownership_api.incomplete_reason.unknown_effect);
+    assert(!ownership_api.successful(ownership_recursive_env.summary(&u, "user")->proof));
+    ownership_recursive_env.closure mut w = ownership_recursive_env.closure{};
+    string[2] wide_names = {"six", "seven"};
+    ownership_recursive_env.open(&w, WIDE[..], wide_names[..]);
+    defer ownership_recursive_env.close(&w);
+    // Fourteen cases over four rounds need 81945 W units, above the production bound of this
+    // size, so this case raises W to test the coverage bound alone.
+    w.counts.work = 1000000;
+    ownership_recursive_env.solve(&w);
+    ownership_recursive_env.complete(&w, "six", 14);
+    ownership_recursive_env.incomplete(&w, "seven",
+        ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.within_limits(&w);
+}
+
+fn main() i32 {
+    work_sweep();
+    self_sweep();
+    small_bound();
+    publication_differs();
+    content_then_work();
+    stored_stops();
+    reserved_ordinal();
+    coverage();
+    println("recursive limits ok");
+    return 0;
+}

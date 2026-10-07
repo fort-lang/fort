@@ -1,0 +1,531 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| R01 self recursion
+//| R02 mutual recursion
+//| R03 recursive borrow return
+//| R04 conditional ownership recursion
+//| R13 incomplete recursive exit outcome
+//| recursive components ok
+/// Checks summaries of recursive call components (D17.18, `spec/fir.md` 14.1).
+import fir;
+import ownership_api;
+import ownership_recursive;
+import ownership_recursive_env;
+import ownership_summary_model;
+
+// Each recursive call passes an exact value, so one case of the callee holds.
+string[3] SELF = {
+    "fn count(i32* p, bool b) i32 { if (b) { return *p; } return count(p, true); }",
+    "fn use(i32* p) i32 { return count(p, false); }",
+    "fn after(i32 mut* own p) i32 { i32* v = p; del(p); i32 r = count(v, false); return r; }",
+};
+
+// `spin(p, false)` calls itself with false again, so no case covers that call.
+string[2] SPIN = {
+    "fn spin(i32* p, bool b) i32 { if (b) { return *p; } return spin(p, false); }",
+    "fn user(i32* p) i32 { return spin(p, true); }",
+};
+
+string[3] MUTUAL = {
+    "fn f(i32* p, bool b) i32* { if (b) { return p; } return g(p); }",
+    "fn g(i32* p) i32* { return f(p, true); }",
+    "fn user(i32* p) i32 { return *f(p, false); }",
+};
+
+// The member that calls the other member comes first in key order, so its first round finds
+// only bottom and publishes bottom again.
+string[2] MUTUAL_REVERSED = {
+    "fn g(i32* p) i32* { return f(p, true); }",
+    "fn f(i32* p, bool b) i32* { if (b) { return p; } return g(p); }",
+};
+
+string[2] MUTUAL_SPIN = {
+    "fn f(bool b) void { if (b) { return; } g(false); }",
+    "fn g(bool b) void { f(b); }",
+};
+
+string[3] PICK = {
+    "fn pick(i32* p, bool b) i32* { if (b) { return p; } return pick(p, true); }",
+    "fn caller(i32* p) i32* { return pick(p, false); }",
+    "fn dangling() i32* { i32 mut* own a = new(i32); i32* v = pick(a, false); del(a); return v; }",
+};
+
+// The recursive call swaps its arguments, so its frame binds `q` to the formal `p`: the self
+// call needs its own keys for the callee frame.
+string[4] SWAP = {
+    "fn sw(i32* p, i32* q, bool b) i32* { if (b) { return p; } return sw(q, p, true); }",
+    "fn same(i32 mut* own a) i32 { i32* v = sw(a, a, false); del(a); return *v; }",
+    "fn rot(i32* p, i32* q, bool b, bool c) i32* { if (b) { return p; }",
+    "    if (c) { return rot(q, p, true, false); } return rot(q, p, false, true); }",
+};
+
+// Two self calls in one body: each applies its own renamed copy, and the second takes the
+// result of the first. `two(q, p, true)` returns `q`, so the case of `b == 0` returns `q`.
+string[3] TWO_CALLS = {
+    "fn two(i32* p, i32* q, bool b) i32* { if (b) { return p; }",
+    "    i32* x = two(q, p, true); return two(x, p, true); }",
+    "fn same(i32 mut* own a) i32 { i32* v = two(a, a, false); del(a); return *v; }",
+};
+
+// The self call passes `p` twice, so the inner `q` is the outer `p`.
+string[2] ALIASED = {
+    "fn al(i32* p, i32* q, bool b) i32* { if (b) { return q; } return al(p, p, true); }",
+    "fn same(i32 mut* own a) i32 { i32* v = al(a, a, false); del(a); return *v; }",
+};
+
+// Mutual recursion that swaps the arguments: `g(q, p)` returns its `p`, the outer `q`.
+string[3] MUTUAL_SWAP = {
+    "fn f(i32* p, i32* q, bool b) i32* { if (b) { return p; } return g(q, p); }",
+    "fn g(i32* p, i32* q) i32* { return f(p, q, true); }",
+    "fn same(i32 mut* own a) i32 { i32* v = f(a, a, false); del(a); return *v; }",
+};
+
+// The prefix reads `*q`. The self call then passes a view of `p` after its release, but
+// `f(new(i32), v, false)` has no possible case, so no round applies its requirement on `q`.
+string[2] PREFIX = {
+    "fn f(i32 mut* own p, i32* q, bool b) i32 { i32 x = *q;",
+    "    if (b) { del(p); return x; } i32* v = p; del(p); return f(new(i32), v, false); }",
+};
+
+// A cast of the returned view reads 8 bytes from a 4-byte source.
+string[4] CASTS = {
+    "fn widen(i32* p, bool b) i64* { if (b) { return cast(p, i64*); } return widen(p, true); }",
+    "fn reader(i32* p) i64 { return *widen(p, false); }",
+    "fn top() i64 { i32 mut* own a = new(i32); i64 r = reader(a); del(a); return r; }",
+    "fn local() i64 { i32 x = 1; return *widen(&x, false); }",
+};
+
+// `lost(p, false)` never returns, so its summary stays incomplete and returns no borrow.
+string[2] LOST = {
+    "fn lost(i32* p, bool b) i32* { if (b) { return p; } return lost(p, false); }",
+    "fn reader(i32* p) i32 { return *lost(p, false); }",
+};
+
+string[3] GROW = {
+    "fn grow(bool keep) void {",
+    "    i32 mut* own p = new(i32); if (keep) { grow(false); del(p); return; } del(p); }",
+    "fn caller(i32 mut* own q) void { grow(true); del(q); }",
+};
+
+string[2] LEAK = {
+    "fn leak(bool keep) void {",
+    "    i32 mut* own p = new(i32); if (keep) { leak(false); return; } del(p); }",
+};
+
+// The recursive call moves its owner, so the summary stays incomplete. The caller cannot
+// rely on the release in the callee.
+string[2] EAT = {
+    "fn eat(i32 mut* own p, bool b) void { if (b) { del(p); return; } eat(move(p), true); }",
+    "fn feed(i32 mut* own p) void { eat(move(p), false); }",
+};
+
+// `bad` leaks its owner, so it fails on its own. `spin(false)` calls itself, so the component
+// publishes no proof, and `bad` keeps its own failure.
+string[2] FAILED_SPIN = {
+    "fn bad(bool b) void { i32 mut* own p = new(i32); if (b) { return; } spin(false); del(p); }",
+    "fn spin(bool b) void { if (b) { bad(true); return; } spin(false); }",
+};
+
+// `a` and `b` only call each other, so they stay at bottom: no case, and no proof. `z` fails
+// on its own before its call, and keeps its own failure.
+string[4] CYCLE = {
+    "fn a() void { b(); }",
+    "fn b() void { a(); z(); }",
+    "fn z() i32 { i32 mut* own p = new(i32); i32* v = p; del(p); i32 k = *v; a(); return k; }",
+    "fn user(i32 mut* own p) void { a(); del(p); }",
+};
+
+string[3] SPIN_EXIT = {
+    "fn spin(bool b) void { if (b) { return; } spin(false); }",
+    "fn owner(i32 mut* own p) void { spin(false); }",
+    "fn released(i32 mut* own p) void { spin(false); del(p); }",
+};
+
+// Both bodies store `p` into caller storage. `keep(out, p, false)` calls itself with false
+// again, so `keep` publishes no proof, and its caller cannot rely on the store. `kept` covers
+// its recursive call, so its caller sees the retained view outlive the release.
+string[9] RETAIN = {
+    "struct view_box { i32* ptr; }",
+    "fn keep(view_box mut* out, i32* p, bool b) void {",
+    "    if (b) { out->ptr = p; return; } keep(out, p, false); }",
+    "fn kept(view_box mut* out, i32* p, bool b) void {",
+    "    if (b) { out->ptr = p; return; } kept(out, p, true); }",
+    "fn holder(view_box mut* out) void {",
+    "    i32 mut* own a = new(i32); keep(out, a, true); del(a); }",
+    "fn tracked(view_box mut* out) void {",
+    "    i32 mut* own a = new(i32); kept(out, a, false); del(a); }",
+};
+
+string[2] HALT = {
+    "fn halt(bool b) void { if (b) { panic(\"stop\"); } halt(true); }",
+    "fn stopper(i32 mut* own p) void { halt(false); }",
+};
+
+fn case_with_guard(ownership_summary_model.summary* s, u64 index, i64 value) bool {
+    ownership_summary_model.case_record row = s->cases[index];
+    u64 mut g = 0;
+    while (g < s->guards.len) {
+        if (ownership_summary_model.same(s->guards[g].key, row.guard)) {
+            if (s->guards[g].positive.len != 1) { return false; }
+            u64 mut p = 0;
+            while (p < s->predicates.len) {
+                if (ownership_summary_model.same(s->predicates[p].key,
+                    s->guards[g].positive[0])) { return s->predicates[p].lower.value == value; }
+                p += 1;
+            }
+        }
+        g += 1;
+    }
+    return false;
+}
+
+fn result_source(ownership_summary_model.summary* s, u64 index) ownership_api.entity_id {
+    ownership_summary_model.case_record row = s->cases[index];
+    assert(row.results.len == 1);
+    u64 mut r = 0;
+    while (r < s->results.len) {
+        if (ownership_summary_model.same(s->results[r].key, row.results[0])) {
+            return s->results[r].borrow.source;
+        }
+        r += 1;
+    }
+    panic("ownership_recursive_test: no result relation");
+}
+
+// The designated caller source of formal `local` of body `index` (ownership_summary_body).
+fn formal_at(ownership_recursive_env.closure* c, u64 index, u32 local)
+    ownership_api.entity_id {
+    return ownership_api.entity_id{c->graph_inputs[index].key, ownership_api.entity_kind.source,
+        fir.local_count(&c->functions[index]) + local + 1};
+}
+
+fn formal_source(ownership_recursive_env.closure* c, u64 index) ownership_api.entity_id {
+    return formal_at(c, index, 1);
+}
+
+// The fixed point takes three rounds: bottom gives the returning case, the next round adds
+// the case through the recursive call, and the third changes nothing. The call passes true,
+// so the case of `b == 1` holds and covers it.
+fn self_recursion() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"count", "use", "after"};
+    ownership_recursive_env.open(&c, SELF[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "count", 2);
+    assert(ownership_recursive_env.rounds(&c, "count") == 3);
+    ownership_summary_model.summary* s = ownership_recursive_env.summary(&c, "count");
+    assert(case_with_guard(s, 0, 1) && case_with_guard(s, 1, 0));
+    assert(ownership_recursive_env.outcomes(&c, "count",
+        ownership_api.outcome_kind.function_return) == 2);
+    ownership_recursive_env.complete(&c, "use", 1);
+    assert(ownership_recursive_env.rounds(&c, "use") == 0);
+    ownership_recursive_env.failed(&c, "after");
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.caller_requirement,
+        "after") == 1);
+    assert(c.counts.events == 1 && c.counts.computations == 3);
+    ownership_recursive_env.within_limits(&c);
+    // The call of `count` in its own body binds a provisional summary. The call in `use`
+    // binds the published one.
+    ownership_recursive.solution* solved = &c.solution;
+    assert(solved->records[solved->records_first[0]].fort[0].provisional);
+    assert(!solved->records[solved->records_first[1]].fort[0].provisional);
+    ownership_recursive_env.closure mut spin = ownership_recursive_env.closure{};
+    string[2] spin_names = {"spin", "user"};
+    ownership_recursive_env.open(&spin, SPIN[..], spin_names[..]);
+    defer ownership_recursive_env.close(&spin);
+    ownership_recursive_env.solve(&spin);
+    ownership_recursive_env.incomplete(&spin, "spin",
+        ownership_api.incomplete_reason.unknown_effect);
+    // The refusal names the call that no case covers.
+    ownership_summary_model.summary* refused = ownership_recursive_env.summary(&spin, "spin");
+    assert(refused->proof.terminal.operation.block == 2 &&
+        !refused->proof.terminal.operation.terminator);
+    assert(!ownership_api.successful(ownership_recursive_env.summary(&spin, "user")->proof));
+    // The caller copies the unknown result of the call, and that copy has no proof.
+    assert(spin.counts.events == 1 && ownership_recursive_env.saw(&spin,
+        ownership_api.event_kind.incomplete_proof, "user") == 1);
+    println("R01 self recursion");
+}
+
+fn mutual_recursion() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"f", "g", "user"};
+    ownership_recursive_env.open(&c, MUTUAL[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "f", 2);
+    ownership_recursive_env.complete(&c, "g", 1);
+    assert(ownership_recursive_env.rounds(&c, "f") == 3);
+    assert(ownership_recursive_env.rounds(&c, "g") == 3);
+    ownership_summary_model.summary* f = ownership_recursive_env.summary(&c, "f");
+    assert(ownership_summary_model.same(result_source(f, 0), formal_source(&c, 0)));
+    assert(ownership_summary_model.same(result_source(f, 1), formal_source(&c, 0)));
+    ownership_summary_model.summary* g = ownership_recursive_env.summary(&c, "g");
+    assert(ownership_summary_model.same(result_source(g, 0), formal_source(&c, 1)));
+    ownership_recursive_env.complete(&c, "user", 1);
+    assert(c.counts.events == 0 && c.counts.computations == 2);
+    ownership_recursive_env.within_limits(&c);
+    ownership_recursive_env.closure mut reversed = ownership_recursive_env.closure{};
+    string[2] reversed_names = {"g", "f"};
+    ownership_recursive_env.open(&reversed, MUTUAL_REVERSED[..], reversed_names[..]);
+    defer ownership_recursive_env.close(&reversed);
+    ownership_recursive_env.solve(&reversed);
+    ownership_recursive_env.complete(&reversed, "g", 1);
+    ownership_recursive_env.complete(&reversed, "f", 2);
+    assert(ownership_recursive_env.rounds(&reversed, "g") == 3);
+    ownership_recursive_env.closure mut spin = ownership_recursive_env.closure{};
+    string[2] spin_names = {"f", "g"};
+    ownership_recursive_env.open(&spin, MUTUAL_SPIN[..], spin_names[..]);
+    defer ownership_recursive_env.close(&spin);
+    ownership_recursive_env.solve(&spin);
+    ownership_recursive_env.incomplete(&spin, "f", ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.incomplete(&spin, "g", ownership_api.incomplete_reason.unknown_effect);
+    println("R02 mutual recursion");
+}
+
+fn recursive_borrow_return() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"pick", "caller", "dangling"};
+    ownership_recursive_env.open(&c, PICK[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "pick", 2);
+    ownership_summary_model.summary* pick = ownership_recursive_env.summary(&c, "pick");
+    assert(ownership_summary_model.same(result_source(pick, 0), formal_source(&c, 0)));
+    assert(ownership_summary_model.same(result_source(pick, 1), formal_source(&c, 0)));
+    ownership_recursive_env.complete(&c, "caller", 1);
+    ownership_summary_model.summary* caller = ownership_recursive_env.summary(&c, "caller");
+    assert(ownership_summary_model.same(result_source(caller, 0), formal_source(&c, 1)));
+    ownership_recursive_env.failed(&c, "dangling");
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use,
+        "dangling") == 1);
+    ownership_recursive_env.closure mut swap = ownership_recursive_env.closure{};
+    string[3] swap_names = {"sw", "same", "rot"};
+    ownership_recursive_env.open(&swap, SWAP[..], swap_names[..]);
+    defer ownership_recursive_env.close(&swap);
+    ownership_recursive_env.solve(&swap);
+    ownership_recursive_env.complete(&swap, "sw", 2);
+    ownership_summary_model.summary* swapped = ownership_recursive_env.summary(&swap, "sw");
+    assert(ownership_summary_model.same(result_source(swapped, 0), formal_source(&swap, 0)));
+    // The case of `b == 0` returns the argument `q`, which the inner frame calls `p`.
+    assert(ownership_summary_model.same(result_source(swapped, 1), formal_at(&swap, 0, 2)));
+    // Two swaps return `p` again: the third case applies the result write of the second case
+    // under a frame that binds its `q` to the caller `p`.
+    ownership_recursive_env.complete(&swap, "rot", 3);
+    ownership_summary_model.summary* rotated = ownership_recursive_env.summary(&swap, "rot");
+    assert(ownership_summary_model.same(result_source(rotated, 0), formal_at(&swap, 2, 1)));
+    assert(ownership_summary_model.same(result_source(rotated, 1), formal_at(&swap, 2, 2)));
+    assert(ownership_summary_model.same(result_source(rotated, 2), formal_at(&swap, 2, 1)));
+    ownership_recursive_env.failed(&swap, "same");
+    assert(ownership_recursive_env.saw(&swap, ownership_api.event_kind.invalid_use,
+        "same") == 1);
+    ownership_recursive_env.closure mut casts = ownership_recursive_env.closure{};
+    string[4] cast_names = {"widen", "reader", "top", "local"};
+    ownership_recursive_env.open(&casts, CASTS[..], cast_names[..]);
+    defer ownership_recursive_env.close(&casts);
+    ownership_recursive_env.solve(&casts);
+    ownership_recursive_env.complete(&casts, "widen", 2);
+    ownership_recursive_env.complete(&casts, "reader", 1);
+    ownership_recursive_env.failed(&casts, "top");
+    assert(ownership_recursive_env.saw(&casts, ownership_api.event_kind.caller_requirement,
+        "top") == 1);
+    ownership_recursive_env.failed(&casts, "local");
+    assert(ownership_recursive_env.saw(&casts, ownership_api.event_kind.invalid_use,
+        "local") == 1);
+    ownership_recursive_env.closure mut lost = ownership_recursive_env.closure{};
+    string[2] lost_names = {"lost", "reader"};
+    ownership_recursive_env.open(&lost, LOST[..], lost_names[..]);
+    defer ownership_recursive_env.close(&lost);
+    ownership_recursive_env.solve(&lost);
+    ownership_recursive_env.incomplete(&lost, "lost",
+        ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_model.summary* reader = ownership_recursive_env.summary(&lost, "reader");
+    assert(!ownership_api.successful(reader->proof) && reader->cases.len == 0);
+    assert(ownership_recursive_env.saw(&lost, ownership_api.event_kind.invalid_use,
+        "reader") == 0);
+    println("R03 recursive borrow return");
+}
+
+fn conditional_ownership_recursion() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[2] names = {"grow", "caller"};
+    ownership_recursive_env.open(&c, GROW[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "grow", 2);
+    ownership_recursive_env.complete(&c, "caller", 1);
+    assert(c.counts.events == 0);
+    ownership_recursive_env.closure mut leak = ownership_recursive_env.closure{};
+    string[1] leak_names = {"leak"};
+    ownership_recursive_env.open(&leak, LEAK[..], leak_names[..]);
+    defer ownership_recursive_env.close(&leak);
+    ownership_recursive_env.solve(&leak);
+    ownership_recursive_env.failed(&leak, "leak");
+    // Four rounds reach the error, and only the publication round records it.
+    assert(ownership_recursive_env.rounds(&leak, "leak") == 4);
+    assert(ownership_recursive_env.saw(&leak, ownership_api.event_kind.lost_ownership,
+        "leak") == 1 && leak.counts.events == 1);
+    ownership_recursive_env.closure mut eat = ownership_recursive_env.closure{};
+    string[2] eat_names = {"eat", "feed"};
+    ownership_recursive_env.open(&eat, EAT[..], eat_names[..]);
+    defer ownership_recursive_env.close(&eat);
+    ownership_recursive_env.solve(&eat);
+    // Flow keeps the moved owner at the unresolved call, so neither body proves cleanup.
+    ownership_recursive_env.incomplete(&eat, "eat", ownership_api.incomplete_reason.missing_path);
+    ownership_recursive_env.incomplete(&eat, "feed",
+        ownership_api.incomplete_reason.missing_path);
+    assert(ownership_recursive_env.saw(&eat, ownership_api.event_kind.lost_ownership,
+        "feed") == 0 && ownership_recursive_env.saw(&eat,
+        ownership_api.event_kind.incomplete_proof, "feed") == 2);
+    println("R04 conditional ownership recursion");
+}
+
+// A06: the caller owns an allocation and calls a component without a complete summary. The
+// possible return keeps the owner, so the caller cannot prove cleanup and reports no lost
+// owner. A component whose complete summary only aborts removes the caller continuation.
+fn incomplete_recursive_exit() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"spin", "owner", "released"};
+    ownership_recursive_env.open(&c, SPIN_EXIT[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "spin", ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_recursive_env.rounds(&c, "spin") == 2);
+    ownership_recursive_env.incomplete(&c, "owner", ownership_api.incomplete_reason.missing_path);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.incomplete_proof,
+        "owner") == 2);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.lost_ownership,
+        "owner") == 0);
+    // The release after the unresolved call cannot prove a live owner either.
+    ownership_recursive_env.incomplete(&c, "released",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use,
+        "released") == 0 && ownership_recursive_env.saw(&c,
+        ownership_api.event_kind.incomplete_proof, "released") == 1);
+    ownership_recursive_env.closure mut mixed = ownership_recursive_env.closure{};
+    string[2] mixed_names = {"bad", "spin"};
+    ownership_recursive_env.open(&mixed, FAILED_SPIN[..], mixed_names[..]);
+    defer ownership_recursive_env.close(&mixed);
+    ownership_recursive_env.solve(&mixed);
+    ownership_recursive_env.failed(&mixed, "bad");
+    assert(ownership_recursive_env.saw(&mixed, ownership_api.event_kind.lost_ownership,
+        "bad") == 1);
+    assert(!ownership_api.successful(ownership_recursive_env.summary(&mixed, "spin")->proof));
+    ownership_recursive_env.closure mut cycle = ownership_recursive_env.closure{};
+    string[4] cycle_names = {"a", "b", "z", "user"};
+    ownership_recursive_env.open(&cycle, CYCLE[..], cycle_names[..]);
+    defer ownership_recursive_env.close(&cycle);
+    ownership_recursive_env.solve(&cycle);
+    ownership_recursive_env.incomplete(&cycle, "a", ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.incomplete(&cycle, "b", ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.failed(&cycle, "z");
+    assert(ownership_recursive_env.saw(&cycle, ownership_api.event_kind.invalid_use, "z") == 1);
+    assert(!ownership_api.successful(ownership_recursive_env.summary(&cycle, "user")->proof));
+    assert(ownership_recursive_env.saw(&cycle, ownership_api.event_kind.lost_ownership,
+        "user") == 0);
+    ownership_recursive_env.closure mut retain = ownership_recursive_env.closure{};
+    string[4] retain_names = {"keep", "kept", "holder", "tracked"};
+    ownership_recursive_env.open(&retain, RETAIN[..], retain_names[..]);
+    defer ownership_recursive_env.close(&retain);
+    ownership_recursive_env.solve(&retain);
+    ownership_recursive_env.incomplete(&retain, "keep",
+        ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.complete(&retain, "kept", 2);
+    assert(ownership_recursive_env.summary(&retain, "kept")->retained.len == 2);
+    ownership_summary_model.summary* holder = ownership_recursive_env.summary(&retain, "holder");
+    assert(holder->proof.kind == ownership_api.proof_kind.incomplete && holder->cases.len == 0);
+    assert(ownership_recursive_env.saw(&retain, ownership_api.event_kind.invalid_use,
+        "holder") == 0);
+    ownership_recursive_env.failed(&retain, "tracked");
+    assert(ownership_recursive_env.saw(&retain, ownership_api.event_kind.invalid_use,
+        "tracked") == 1);
+    ownership_recursive_env.closure mut halt = ownership_recursive_env.closure{};
+    string[2] halt_names = {"halt", "stopper"};
+    ownership_recursive_env.open(&halt, HALT[..], halt_names[..]);
+    defer ownership_recursive_env.close(&halt);
+    ownership_recursive_env.solve(&halt);
+    ownership_recursive_env.complete(&halt, "halt", 2);
+    assert(ownership_recursive_env.outcomes(&halt, "halt",
+        ownership_api.outcome_kind.abort) == 2);
+    ownership_recursive_env.complete(&halt, "stopper", 1);
+    assert(ownership_recursive_env.outcomes(&halt, "stopper",
+        ownership_api.outcome_kind.abort) == 1);
+    assert(halt.counts.events == 0);
+    println("R13 incomplete recursive exit outcome");
+}
+
+// Each renamed frame keeps the formals of its call apart: two self calls in one body, a self
+// call with one argument twice, and two members that swap the arguments. Each caller that
+// passes one owner twice reads its released view.
+fn renamed_frames() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[2] names = {"two", "same"};
+    ownership_recursive_env.open(&c, TWO_CALLS[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "two", 2);
+    assert(ownership_recursive_env.rounds(&c, "two") == 4);
+    ownership_summary_model.summary* two = ownership_recursive_env.summary(&c, "two");
+    assert(ownership_summary_model.same(result_source(two, 0), formal_at(&c, 0, 1)));
+    assert(ownership_summary_model.same(result_source(two, 1), formal_at(&c, 0, 2)));
+    ownership_recursive_env.failed(&c, "same");
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use, "same") == 1);
+    ownership_recursive_env.closure mut aliased = ownership_recursive_env.closure{};
+    string[2] aliased_names = {"al", "same"};
+    ownership_recursive_env.open(&aliased, ALIASED[..], aliased_names[..]);
+    defer ownership_recursive_env.close(&aliased);
+    ownership_recursive_env.solve(&aliased);
+    ownership_recursive_env.complete(&aliased, "al", 2);
+    ownership_summary_model.summary* al = ownership_recursive_env.summary(&aliased, "al");
+    assert(ownership_summary_model.same(result_source(al, 0), formal_at(&aliased, 0, 2)));
+    assert(ownership_summary_model.same(result_source(al, 1), formal_at(&aliased, 0, 1)));
+    ownership_recursive_env.failed(&aliased, "same");
+    assert(ownership_recursive_env.saw(&aliased, ownership_api.event_kind.invalid_use,
+        "same") == 1);
+    ownership_recursive_env.closure mut swap = ownership_recursive_env.closure{};
+    string[3] swap_names = {"f", "g", "same"};
+    ownership_recursive_env.open(&swap, MUTUAL_SWAP[..], swap_names[..]);
+    defer ownership_recursive_env.close(&swap);
+    ownership_recursive_env.solve(&swap);
+    ownership_recursive_env.complete(&swap, "f", 2);
+    ownership_recursive_env.complete(&swap, "g", 1);
+    ownership_summary_model.summary* f = ownership_recursive_env.summary(&swap, "f");
+    assert(ownership_summary_model.same(result_source(f, 0), formal_at(&swap, 0, 1)));
+    assert(ownership_summary_model.same(result_source(f, 1), formal_at(&swap, 0, 2)));
+    ownership_summary_model.summary* g = ownership_recursive_env.summary(&swap, "g");
+    assert(ownership_summary_model.same(result_source(g, 0), formal_at(&swap, 1, 1)));
+    ownership_recursive_env.failed(&swap, "same");
+    assert(ownership_recursive_env.saw(&swap, ownership_api.event_kind.invalid_use,
+        "same") == 1);
+}
+
+// The withdrawal of a divergent prefix records no event. The read of the released view gets
+// no error, and the published summary names the self call with `unknown_effect`. A client
+// that reads the summary must render it (`spec/fir.md` 14.1); this test pins the gap.
+fn divergent_prefix() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[1] names = {"f"};
+    ownership_recursive_env.open(&c, PREFIX[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "f", ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_model.summary* f = ownership_recursive_env.summary(&c, "f");
+    u64 call = ownership_recursive_env.call_of(&c, "f", 0);
+    assert(f->proof.terminal.operation.block == c.graph.calls[call].position.block);
+    assert(f->proof.terminal.operation.operation == c.graph.calls[call].position.operation);
+    assert(c.counts.events == 0);
+}
+
+fn main() i32 {
+    self_recursion();
+    mutual_recursion();
+    recursive_borrow_return();
+    conditional_ownership_recursion();
+    incomplete_recursive_exit();
+    renamed_frames();
+    divergent_prefix();
+    println("recursive components ok");
+    return 0;
+}
