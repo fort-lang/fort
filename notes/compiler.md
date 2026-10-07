@@ -872,7 +872,12 @@ came here.
   It reports an error only if a later operation needs the lost fact.
   Collection and call effects charge W before they change facts.
   A repeated allocation site keeps a bounded record of released allocations and their histories.
-  A retained borrow prevents reuse of that site's current identity.
+  A retained borrow prevents reuse of that site's current identity, unless the step supplies
+  earlier identities (D17.16). Then a live or borrowed allocation of the site takes them, and each
+  allocation, history, source, contents, borrow and predicate fact that named it is renamed. An
+  allocation that already holds them leaves first, and only when it is released or escaped and
+  no contents fact borrows it. Otherwise the path stops with incomplete proof: one site has two
+  identities and cannot keep three allocations apart.
   A range loan starts at loan_begin and ends at loan_end.
   Direct and summarized writes to captured storage use one overlap test.
   At normal return, the pass checks complete returned-borrow relations after expanded effects.
@@ -914,7 +919,11 @@ came here.
   the value only where the flag is live at its target, so a dead flag splits no paths. A dead
   marker of a flag removes its value. The value survives a later write of the tested pointer:
   `ok = p != null; del(p); if (ok) { *p = 1; }` is a validated violation.
-  `test/fort/ownership_source_local_refine_test.ft` holds these rules.
+  Each allocation step names the earlier identities of its site, ordinal `EARLIER_BASE + i` for
+  step i, so the flow keeps the allocations of two iterations apart (D17.16). A leak of an
+  earlier iteration's allocation is then rejected as incomplete proof at its storage end: its
+  witness needs a back edge (`keep_two_leak`, line 130 of `_refine_test.ft`).
+  `test/fort/ownership_source_local_refine_test.ft` holds both rules.
   A violation counts only when each path state that reached the operation failed it, no path
   stopped or passed an unknown fort call before it, and a witness path reaches it
   (`spec/toolchain.md` 4.2). Otherwise it is incomplete proof. The witness walk starts at the
@@ -935,7 +944,7 @@ came here.
   pass joins the paths of each block (G = 1). A joined state covers each path, so a joined
   pass with no failure shows that no path fails. Only a failed joined pass runs the exact
   pass. Both passes charge one `local_classification` ledger, and a refusal there is a budget
-  error. 978 of 3312 unique bodies of the source audit run it, and none refuses. With the
+  error. 989 of 3340 unique bodies of the source audit run it, and none refuses. With the
   exact pass alone, 4 refused W: `copy_contents` and `scratch` in `ownership_borrows.ft`,
   `copy_state` in `ownership_ffi.ft` and `copy_view` in `ownership_globals.ft` need 107376 to
   641461 W, 1.4 to 6.3 times their bounds. Their joined passes need 5083 to 16510 W.
@@ -948,19 +957,26 @@ came here.
   These legal shapes give incomplete proof in the declared scope, so scoped CI rejects them.
   Correlated tests stay a limit where no flag carries the correlation: a condition that the
   body computes twice (`if (n > 0)` twice), a test of an integer, and a null test of a
-  parameter, a trusted foreign result or a loaded value, whose contents decide nothing. A flag
+  parameter, a trusted foreign result or a loaded value, whose contents decide nothing. So
+  `if (q == null) { return *q; }` on a parameter q proves, on `main` before these rules and with
+  them alike: the read keeps the caller source, and no rule makes q an empty owner there. A null
+  test of a pointer that an address through a pointer fills decides only "not null", even for
+  the field at offset 0 (`first_field` of `_refine_test.ft`). A flag
   value lives in one path state, so a widening at G drops a value that one side lacks. A loop
-  whose allocation site runs again while its earlier allocation is live stays a limit (D17.16).
-  So does a loop that exhausts the transfer history E (256 of 256), and a path that needs a back
-  edge, a short-circuit condition or a second choice of one parameter. The flow also stops a
-  path at its first failure, so a later independent obligation on that path is not examined: the
-  corpus file `fail/ownership/054` expects line 12, and local proof reports line 11 only. Null
-  tests of a TL whose contents decide them and one flag tested twice are no longer limits
-  (`_refine_test.ft`).
-  `bind_fresh_source` in `ownership_calls.ft` had such a shape: it allocated a borrows array
+  site whose allocations of two earlier iterations stay in the facts at once, or whose released
+  earlier allocation a view keeps, has no third identity (D17.16). A loop that exhausts the
+  transfer history E (256 of 256) stays a limit. So does a path that needs a back edge, a
+  short-circuit condition or a second choice of one parameter. The flow also stops a path at its
+  first failure, so a later independent obligation on that path is not examined: the corpus file
+  `fail/ownership/054` expects line 12, and local proof reports line 11 only. Null tests of a
+  TL whose contents decide them, one flag tested twice, and a loop site with one earlier
+  allocation are no longer limits (`_refine_test.ft`).
+  `bind_fresh_source` in `ownership_calls.ft` had a loop shape: it allocated a borrows array
   in a loop and stored views of each. Its exact second pass failed 32 times with "old borrow
   keeps a released site identity" (D17.16). It now allocates one array outside every loop and
-  gives each row a slice, so its failures are call scope.
+  gives each row a slice, so its failures are call scope. A model of the old loop
+  (`old_pattern` in `_refine_test.ft`) leaves the declared scope too: its view slices a span
+  that the block holds, which has no known source (D17.17).
   `test/fort/ownership_source_local_review_test.ft` pins the probes of each shape.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.

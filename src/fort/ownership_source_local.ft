@@ -18,6 +18,9 @@ u64 U64_MAX = 18446744073709551615;
 u32 U32_MAX = 4294967295;
 // Parameter entities use this base so that they never meet a step ordinal.
 u32 PARAMETER_BASE = 2147483648;
+// The earlier identities of the allocation site of step i use EARLIER_BASE + i. The base leaves
+// 2^30 parameter ordinals below it and 2^30 - 2 site ordinals below STATIC_ORDINAL.
+u32 EARLIER_BASE = 3221225472;
 u32 STATIC_ORDINAL = 4294967294;
 
 enum status {
@@ -646,6 +649,15 @@ fn key_ordinal(u64 index) u32 {
     return cast(index, u32);
 }
 
+// The ordinal of the earlier identities of the allocation site of step `index`.
+fn earlier_ordinal(u64 index) u32 {
+    if (index >= cast(STATIC_ORDINAL - EARLIER_BASE, u64)) {
+        // panic-coverage: unreachable: read: one body cannot hold 2^30 steps and bindings.
+        panic("ownership_source_local: earlier ordinal overflow");
+    }
+    return EARLIER_BASE + cast(index, u32);
+}
+
 // Slices into the step arrays move when they grow. link fixes them after the last step.
 fn add_step(context mut* c, u32 block, u32 gap, ownership_flow.step_kind kind,
     ownership_transfer.action effect, u32 from, u32 to) u64 {
@@ -778,6 +790,14 @@ fn allocation_step(context mut* c, u32 block, u32 gap, u32 local, fir.operand co
         .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live,
         .allocation = key};
     r->source_key = fresh;
+    // A loop can run the site again while this allocation stays in the facts. This allocation
+    // then takes the earlier identities of its site (D17.16).
+    u32 earlier = earlier_ordinal(i);
+    c->steps[i].earlier = ownership_flow.site_identity{
+        entity(c, ownership_api.entity_kind.allocation, earlier),
+        entity(c, ownership_api.entity_kind.source, earlier),
+        entity(c, ownership_api.entity_kind.value, earlier),
+        entity(c, ownership_api.entity_kind.relation, earlier)};
     c->relations[i] = ownership_api.borrow_relation{.key = entity(c,
         ownership_api.entity_kind.relation, ordinal), .value_version = version,
         .containing = slot(c, local), .source = fresh, .representation_complete = true};
@@ -1356,6 +1376,10 @@ fn flow_bindings(context mut* c) void {
                         ownership_api.entity_id key = s.local.fresh_source.key;
                         bind(c, op, ownership_api.event_kind.invalid_use, key, block, true);
                         bind(c, op, ownership_api.event_kind.incomplete_proof, key, block, true);
+                        ownership_api.entity_id earlier = s.earlier.source;
+                        bind(c, op, ownership_api.event_kind.invalid_use, earlier, block, true);
+                        bind(c, op, ownership_api.event_kind.incomplete_proof, earlier, block,
+                            true);
                     }
                     i += 1;
                 }
