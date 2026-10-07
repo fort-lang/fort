@@ -29,6 +29,7 @@ struct body_input {
     bool verified;
 }
 
+// Facts of one body form a chain in insertion order. Lookups read only that chain.
 struct fact {
     u32 body;
     fir.base_kind base;
@@ -36,6 +37,7 @@ struct fact {
     ast.sym* global;
     u32 field;
     target value;
+    u64 next;
 }
 
 struct call_site {
@@ -67,6 +69,8 @@ struct graph {
     ownership_api.limit_table limits;
     fact mut@ own facts;
     u64 facts_len;
+    u64 mut@ own first_fact;
+    u64 mut@ own last_fact;
     call_site mut@ own calls;
     u64 calls_len;
     u32 mut@ own components;
@@ -189,18 +193,24 @@ fn same_place(fact* a, fact* b) bool {
         a->global == b->global && a->field == b->field;
 }
 
-fn add_fact(graph mut* g, fact value) bool {
+fn add_fact(graph mut* g, fact mut value) bool {
     if (!ownership_api.successful(g->proof)) { return false; }
-    u64 mut i = 0;
-    while (i < g->facts_len) {
+    u64 body = cast(value.body, u64);
+    u64 mut i = g->first_fact[body];
+    while (i != U64_MAX) {
         if (same_place(&g->facts[i], &value) && same_target(g->facts[i].value, value.value)) {
             return false;
         }
-        i += 1;
+        i = g->facts[i].next;
     }
     if (!charge_work(g, 1)) { return false; }
     reserve_facts(g);
-    g->facts[g->facts_len] = value;
+    u64 index = g->facts_len;
+    value.next = U64_MAX;
+    g->facts[index] = value;
+    if (g->last_fact[body] == U64_MAX) { g->first_fact[body] = index; }
+    else { g->facts[g->last_fact[body]].next = index; }
+    g->last_fact[body] = index;
     g->facts_len += 1;
     return true;
 }
@@ -286,8 +296,8 @@ fn copy_place(graph mut* g, u32 from_body, fir.place source, u32 to_body,
     }
     if (!ownership_api.successful(g->proof)) { return false; }
     u64 count = g->facts_len;
-    u64 mut i = 0;
-    while (i < count) {
+    u64 mut i = g->first_fact[cast(from_body, u64)];
+    while (i != U64_MAX && i < count) {
         fact current = g->facts[i];
         bool matched = source_field == ROOT ?
             matches(&current, from_body, source, current.field) :
@@ -306,7 +316,7 @@ fn copy_place(graph mut* g, u32 from_body, fir.place source, u32 to_body,
             changed = add_fact(g, next) || changed;
             if (!ownership_api.successful(g->proof)) { return false; }
         }
-        i += 1;
+        i = g->facts[i].next;
     }
     return changed;
 }
@@ -378,14 +388,14 @@ fn collect_callee(graph mut* g, call_site mut* call) bool {
         changed = add_target(g, call, target{.kind = target_kind.residual_fort});
     }
     if (!ownership_api.successful(g->proof)) { return false; }
-    u64 mut i = 0;
-    while (i < g->facts_len) {
+    u64 mut i = g->first_fact[cast(call->body, u64)];
+    while (i != U64_MAX) {
         fact current = g->facts[i];
         if (matches(&current, call->body, callee_slot, field)) {
             changed = add_target(g, call, current.value) || changed;
             if (!ownership_api.successful(g->proof)) { return false; }
         }
-        i += 1;
+        i = current.next;
     }
     return changed;
 }
@@ -865,6 +875,14 @@ fn build(body_input@ bodies, ownership_api.limit_table limits) graph {
         }
         i += 1;
     }
+    g.first_fact = new(u64, bodies.len);
+    g.last_fact = new(u64, bodies.len);
+    i = 0;
+    while (i < bodies.len) {
+        g.first_fact[i] = U64_MAX;
+        g.last_fact[i] = U64_MAX;
+        i += 1;
+    }
     if (!collect_calls(&g)) { return g; }
     if (!seed_parameters(&g)) { return g; }
     stabilize(&g);
@@ -1007,6 +1025,8 @@ fn free(graph mut* g) void {
     }
     del(g->calls);
     del(g->facts);
+    del(g->first_fact);
+    del(g->last_fact);
     del(g->components);
     del(g->recursive);
     del(g->query_targets);
