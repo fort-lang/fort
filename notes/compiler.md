@@ -908,13 +908,14 @@ came here.
   failure or refusal of it keeps the body in scope: a refusal explains no failure. Its first
   pass joins the paths of each block (G = 1). A joined state covers each path, so a joined
   pass with no failure shows that no path fails. Only a failed joined pass runs the exact
-  pass. Both passes charge one ledger of their own. 978 of 3312 unique bodies of the source
-  audit run it, and none refuses. With the
+  pass. Both passes charge one `local_classification` ledger, and a refusal there is a budget
+  error. 978 of 3312 unique bodies of the source audit run it, and none refuses. With the
   exact pass alone, 4 refused W: `copy_contents` and `scratch` in `ownership_borrows.ft`,
   `copy_state` in `ownership_ffi.ft` and `copy_view` in `ownership_globals.ft` need 107376 to
   641461 W, 1.4 to 6.3 times their bounds. Their joined passes need 5083 to 16510 W.
   Own parameters, own extern results, loads of references from other storage, owning non-TL
   locals, struct results with reference leaves and range loans also leave it incomplete.
+  A W, E or V refusal of a local ledger is a budget error (fir.md 14.1).
   These legal shapes give incomplete proof in the declared scope:
   a null test that the flow does not refine; a loop whose allocation site runs again while
   its earlier allocation is live (D17.16); flags that test one condition twice; a loop that
@@ -925,6 +926,7 @@ came here.
   One compiler body has such a shape: `bind_fresh_source` in `ownership_calls.ft` allocates
   in a loop and stores views of the allocation. Its exact second pass fails 32 times with "old
   borrow keeps a released site identity" (D17.16), so it stays in scope.
+  `test/fort/ownership_source_local_review_test.ft` pins the probes of each shape.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
   Captured index versions stay separate from local slot names.

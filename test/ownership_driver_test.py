@@ -110,10 +110,13 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["enumeration"]["selected_bodies"], 0)
         self.assertEqual(len(document["analyses"]), 7)
-        self.assertEqual([row["producer"] for row in document["analyses"]][2:],
-                         ["unavailable"] * 5)
-        self.assertEqual([row["status"] for row in document["analyses"]][2:],
-                         ["incomplete"] * 5)
+        # The local analysis has no closure facts outside bodies, so no body leaves no gap.
+        self.assertEqual(document["analyses"][2], {"name": "local", "producer": "integrated",
+                                                   "status": "complete"})
+        self.assertEqual([row["producer"] for row in document["analyses"]][3:],
+                         ["unavailable"] * 4)
+        self.assertEqual([row["status"] for row in document["analyses"]][3:],
+                         ["incomplete"] * 4)
         self.assertEqual([row["name"] for row in document["meters"]], ["graph_private"])
 
     def test_diagnostic_document_stays_version_one(self):
@@ -125,8 +128,8 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(diagnostic["symbols"], [])
         self.assertIn("ownership proof is incomplete", diagnostic["diagnostics"][0]["message"])
         self.assertEqual(coverage["kind"], "fort-ownership-report")
-        # The report moved to version 2 with the W scale and the FIR size of each meter.
-        self.assertEqual(coverage["version"], 2)
+        # Version 2 added the W scale and FIR sizes. Version 3 adds the local ledgers.
+        self.assertEqual(coverage["version"], 3)
         self.assertIn("w_scale", coverage["limits"])
 
     def test_index_still_populates_identifier_records(self):
@@ -375,8 +378,10 @@ class OwnershipDriverTest(unittest.TestCase):
         document = self.evidence(complete=False)
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["meters"], [])
-        self.assertEqual([row["status"] for row in document["analyses"]][2:],
-                         ["incomplete"] * 5)
+        self.assertEqual([row["status"] for row in document["analyses"]][3:],
+                         ["incomplete"] * 4)
+        # The local analysis ran on no body and the denominator is incomplete.
+        self.assertEqual(document["analyses"][2]["status"], "unexecuted")
 
     def test_actual_verifier_failure_exits_two_and_retains_unexecuted_rows(self):
         # The empty runtime lacks the checked arithmetic trap entry.
@@ -428,6 +433,144 @@ class OwnershipDriverTest(unittest.TestCase):
         matches = [row for row in diagnostics if row["message"] == expected]
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["line"], 201)
+
+    LOCAL_CASES = (
+        "fn leak() void {\n"
+        "    i32 mut* own p = new(i32);\n"
+        "}\n"
+        "fn reuse() i32 {\n"
+        "    i32 mut* own p = new(i32);\n"
+        "    i32* q = p;\n"
+        "    del(p);\n"
+        "    return *q;\n"
+        "}\n"
+        "fn overwrite() void {\n"
+        "    i32 mut* own mut p = new(i32);\n"
+        "    p = new(i32);\n"
+        "    del(p);\n"
+        "}\n"
+        "fn safe() i32 {\n"
+        "    i32 mut* own p = new(i32);\n"
+        "    *p = 7;\n"
+        "    i32 v = *p;\n"
+        "    del(p);\n"
+        "    return v;\n"
+        "}\n"
+        "fn main() i32 { return 0; }\n"
+    )
+
+    def local_row(self, document, name):
+        return self.body(document, name)["analyses"][2]
+
+    def test_local_violations_are_rendered_and_counted(self):
+        self.entry.write_text(self.LOCAL_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        self.assertIn("main.ft:3:1: error: lost ownership of 'p'", stderr)
+        self.assertIn("main.ft:3:1: note: storage ends with a live owner", stderr)
+        self.assertIn("main.ft:8:12: error: invalid use of 'q'", stderr)
+        self.assertIn("main.ft:8:12: note: reference source is no longer live", stderr)
+        self.assertIn("main.ft:12:7: error: lost ownership of 'p'", stderr)
+        self.assertIn("main.ft:12:7: note: move would discard a live owner", stderr)
+        # Violations come before the one closure reason, in body order.
+        self.assertLess(stderr.index("lost ownership of 'p'"), stderr.index("invalid use"))
+        self.assertLess(stderr.index("invalid use"), stderr.index("ownership proof is incomplete"))
+        self.assertEqual(document["totals"]["violations"], 3)
+        self.assertEqual(document["totals"]["analyses"][2]["violations"], 3)
+        self.assertEqual(document["totals"]["analyses"][2]["proof"]["violated"], 3)
+        for name in ("leak", "reuse", "overwrite"):
+            with self.subTest(name=name):
+                row = self.local_row(document, name)
+                self.assertEqual(row, {"name": "local", "correspondence": "complete",
+                                       "solver": "complete", "proof": "violated",
+                                       "violations": 1})
+                self.assertEqual(self.body(document, name)["ownership"], "violated")
+                self.assertEqual(self.body(document, name)["violations"], 1)
+        self.assertEqual(self.local_row(document, "safe")["proof"], "complete")
+        self.assertEqual(self.body(document, "safe")["ownership"], "incomplete")
+        self.assertEqual(document["analyses"][2]["producer"], "integrated")
+        self.assertEqual(document["analyses"][2]["status"], "incomplete")
+        self.assertEqual(document["verdict"], "rejected")
+
+    def test_local_ledgers_pair_with_service_ledgers(self):
+        self.entry.write_text(self.LOCAL_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        services = {json.dumps(row["owner"], sort_keys=True): row
+                    for row in document["meters"] if row["name"] == "services"}
+        local = [row for row in document["meters"] if row["name"] == "local"]
+        self.assertEqual(len(local), len(services))
+        for row in local:
+            paired = services[json.dumps(row["owner"], sort_keys=True)]
+            self.assertEqual(row["fir_size"], paired["fir_size"])
+            counts = {count["category"]: count for count in row["counts"]}
+            self.assertEqual(sorted(counts), sorted("DRPGHTEWV"))
+            limits = document["limits"]
+            self.assertEqual(counts["W"]["bound"], limits["w"] + limits["w_scale"] *
+                             row["fir_size"])
+            self.assertIsNone(row["first_refusal"])
+        # The violated body retained one event and rendered an error and a note.
+        leak = self.body(document, "leak")["key"]
+        ledger = next(row for row in local if row["owner"] == leak)
+        used = {count["category"]: count["used"] for count in ledger["counts"]}
+        self.assertEqual(used["V"], 3)
+        self.assertGreater(used["W"], 0)
+
+    def test_local_diagnostics_keep_json_version_one(self):
+        self.entry.write_text(self.LOCAL_CASES)
+        self.assertEqual(self.invoke("--json", standard=Path(OPTIONS.std_dir)).returncode, 1)
+        self.evidence()
+        diagnostic = json.loads(self.result.stdout)
+        self.assertEqual(diagnostic["version"], 1)
+        messages = [(row["line"], row["message"]) for row in diagnostic["diagnostics"]]
+        self.assertIn((3, "lost ownership of 'p'"), messages)
+        self.assertIn((8, "invalid use of 'q'"), messages)
+        self.assertIn((12, "lost ownership of 'p'"), messages)
+        notes = [note["message"] for row in diagnostic["diagnostics"]
+                 for note in row.get("notes", [])]
+        self.assertIn("reference source is no longer live", notes)
+
+    def test_local_verdicts_stay_identical_in_every_mode(self):
+        self.entry.write_text(self.LOCAL_CASES)
+        projections = []
+        for flags in ((), ("--release",), ("--no-bounds-check",),
+                      ("--release", "--no-bounds-check")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.invoke(*flags, standard=Path(OPTIONS.std_dir)).returncode,
+                                 1)
+                document = self.evidence()
+                projections.append(([row["analyses"][2] for row in document["bodies"]],
+                                    document["totals"]["violations"],
+                                    self.result.stderr))
+        self.assertTrue(all(value == projections[0] for value in projections))
+        self.assertEqual(projections[0][1], 3)
+
+    def test_local_failures_after_unknown_calls_stay_unproved(self):
+        self.entry.write_text(
+            "fn helper() void {}\n"
+            "fn after_call() void {\n"
+            "    i32 mut* own p = new(i32);\n"
+            "    helper();\n"
+            "}\n"
+            "fn caller_storage(i32* v) i32 {\n"
+            "    helper();\n"
+            "    return *v;\n"
+            "}\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        self.assertEqual(document["totals"]["violations"], 0)
+        self.assertNotIn(b"lost ownership", self.result.stderr)
+        # The leak after an unknown call has only a possible continuation. The failure stays
+        # in the local scope, because it fails without the call's effects too.
+        after = self.local_row(document, "after_call")
+        self.assertEqual((after["correspondence"], after["proof"]), ("complete", "incomplete"))
+        # The read of caller storage fails only because of the call: that is call scope.
+        caller = self.local_row(document, "caller_storage")
+        self.assertEqual((caller["correspondence"], caller["proof"]),
+                         ("incomplete", "incomplete"))
 
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")

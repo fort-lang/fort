@@ -92,7 +92,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
             )
     report = {
         "kind": "fort-ownership-report",
-        "version": 2,
+        "version": 3,
         "complete": True,
         "compiler_version": "fort synthetic 1",
         "invocation": {
@@ -116,7 +116,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
         "analyses": [
             {
                 "name": name,
-                "producer": "integrated" if accepted else "unavailable",
+                "producer": "integrated" if accepted or name == "local" else "unavailable",
                 "status": "complete" if accepted else "incomplete",
             }
             for name in audit.ANALYSES
@@ -130,7 +130,62 @@ def make_report(argv, cwd, *, accepted=False, files=None):
         "verdict": "accepted" if accepted else "rejected",
         "exit_status": 0 if accepted else 1,
     }
+    fit_local_ledgers(report)
     return report
+
+
+def body_ledger(index, name, owner, size, limits):
+    bound = audit.work_bound(limits, size)
+    return {
+        "id": index,
+        "name": name,
+        "owner": dict(owner),
+        "fir_size": size,
+        "counts": [{"category": "W", "scope": "computation", "used": 0, "bound": bound}],
+        "first_refusal": None,
+    }
+
+
+def owner_key(owner):
+    return tuple(owner[name] for name in ("module", "declaration", "instance"))
+
+
+def fit_local_ledgers(report):
+    """Give each verified body of a report its service ledger and one local ledger.
+
+    A body ledger of a key that names no verified body goes. A verified body without a service
+    ledger gets a pair of FIR size 0, so a graph sum keeps its value. The other meters keep
+    their order, and the IDs follow it.
+    """
+    verified = [
+        body["key"]
+        for body in report["bodies"]
+        if body["verification"] == "complete" and body["key"] is not None
+    ]
+    keys = {owner_key(key) for key in verified}
+    meters = [
+        meter
+        for meter in report["meters"]
+        if meter["name"] not in ("services", "local")
+        or meter["owner"] is None
+        or owner_key(meter["owner"]) in keys
+    ]
+    local = {owner_key(m["owner"]) for m in meters if m["name"] == "local" and m["owner"]}
+    services = {
+        owner_key(m["owner"]): m["fir_size"]
+        for m in meters
+        if m["name"] == "services" and m["owner"] is not None
+    }
+    for key in verified:
+        if owner_key(key) in local:
+            continue
+        if owner_key(key) not in services:
+            meters.append(body_ledger(0, "services", key, 0, report["limits"]))
+            services[owner_key(key)] = 0
+        meters.append(body_ledger(0, "local", key, services[owner_key(key)], report["limits"]))
+    for index, meter in enumerate(meters):
+        meter["id"] = index
+    report["meters"] = meters
 
 
 class RepositoryFixture(unittest.TestCase):
@@ -246,7 +301,7 @@ import json
 from pathlib import Path
 import sys
 sys.path.insert(0, {str(REPOSITORY / "test")!r})
-from ownership_audit_test import make_report
+from ownership_audit_test import fit_local_ledgers, make_report
 if sys.argv[1:] == ["--version"]:
     print({version!r})
     sys.exit(0)
@@ -262,6 +317,8 @@ files.append(str(standard / "rt.ft"))
 report = make_report(argv, Path.cwd(), accepted={mode == "accepted"!r}, files=files)
 mode = {mode!r}
 report["limits"] = {limits or LIMITS!r}
+report["meters"] = []
+fit_local_ledgers(report)
 report["compiler_version"] = {version.strip()!r}
 if mode == "version_mismatch":
     report["compiler_version"] = "wrong compiler version"
@@ -365,7 +422,8 @@ class SchemaTests(RepositoryFixture):
                 self.reject(lambda value, select=select: select(value).update(extra=0))
 
     def test_unknown_versions_and_invalid_complete_types(self):
-        for version in (0, 1, 3, True, -1, 2.0, "2", audit.U64_MAX + 1):
+        # Version 3 adds local ledgers. Versions 1 and 2 have no local ledger.
+        for version in (0, 1, 2, 4, True, -1, 3.0, "3", audit.U64_MAX + 1):
             with self.subTest(version=version):
                 self.reject(lambda value: value.update(version=version))
         for complete in (False, 0, 1, "true", None):
@@ -499,6 +557,7 @@ class SchemaTests(RepositoryFixture):
     def test_keys_can_skip_declarations_without_bodies(self):
         self.report["bodies"][0]["key"] = {"module": 3, "declaration": 7, "instance": 0}
         self.report["bodies"][1]["key"] = {"module": 8, "declaration": 17, "instance": 0}
+        fit_local_ledgers(self.report)
         self.validate()
         self.reject(lambda value: value["bodies"].reverse())
 
@@ -581,6 +640,7 @@ class SchemaTests(RepositoryFixture):
                 ),
             },
         ]
+        fit_local_ledgers(self.report)
         self.validate()
         for mutation in (
             lambda r: r["meters"][1].update(id=3),
@@ -649,19 +709,102 @@ class SchemaTests(RepositoryFixture):
             ledger(index + 1, "services", dict(body["key"]), sizes[index])
             for index, body in enumerate(bodies)
         ]
+        fit_local_ledgers(self.report)
         self.validate()
-        self.report["meters"].append(ledger(3, "services", None, sizes[2]))
+        self.report["meters"].append(ledger(len(self.report["meters"]), "services", None, sizes[2]))
         with self.assertRaisesRegex(audit.InvalidEvidence, "graph FIR size differs"):
             self.validate()
         self.report["meters"].pop()
         self.report["meters"][1]["fir_size"] = sizes[2]
         self.report["meters"][1]["counts"][0]["bound"] = 65536 + 64 * sizes[2]
+        # The local ledger of that body follows its service ledger.
+        for meter in self.report["meters"]:
+            if meter["name"] == "local" and meter["owner"] == bodies[0]["key"]:
+                meter["fir_size"] = sizes[2]
+                meter["counts"][0]["bound"] = 65536 + 64 * sizes[2]
         with self.assertRaisesRegex(audit.InvalidEvidence, "graph FIR size differs"):
             self.validate()
         self.report["meters"] = self.report["meters"][1:]
         for index, meter in enumerate(self.report["meters"]):
             meter["id"] = index
         self.validate()
+
+    def test_local_ledgers_follow_the_service_ledger_of_their_body(self):
+        sizes = [3, 5]
+        bodies = self.report["bodies"][:2]
+        for stage in (1, 2):
+            self.report["analyses"][stage]["producer"] = "integrated"
+        for body in self.report["bodies"]:
+            body["analyses"][1].update(correspondence="complete", solver="incomplete")
+            body["analyses"][2].update(correspondence="complete", solver="incomplete")
+        self.report["totals"] = audit.derived_totals(self.report["bodies"])
+
+        def ledger(index, name, owner, size, refusal=None):
+            bound = 65536 + 64 * size
+            used = bound if refusal else 0
+            return {
+                "id": index,
+                "name": name,
+                "owner": owner,
+                "fir_size": size,
+                "counts": [{"category": "W", "scope": "computation", "used": used, "bound": bound}],
+                "first_refusal": refusal,
+            }
+
+        def build(local_sizes, owners=None):
+            owners = owners or [dict(body["key"]) for body in bodies]
+            meters = [ledger(0, "graph_private", None, sum(sizes))]
+            for index, body in enumerate(bodies):
+                meters.append(ledger(len(meters), "services", dict(body["key"]), sizes[index]))
+                if index < len(local_sizes):
+                    meters.append(ledger(len(meters), "local", owners[index], local_sizes[index]))
+            self.report["meters"] = meters
+
+        # The local ledgers repeat the FIR size of their body. The graph sums services only.
+        build(sizes)
+        self.validate()
+        # Version 3 gives each verified body one local ledger, and no other body one.
+        build(sizes[:1])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "exactly one local ledger"):
+            self.validate()
+        # Version 3 integrates the local producer, even where no body proves anything.
+        report = make_report(self.argv, self.checkout)
+        self.validate(report)
+        report["analyses"][2]["producer"] = "unavailable"
+        with self.assertRaisesRegex(audit.InvalidEvidence, "producer is not integrated"):
+            self.validate(report)
+        build([sizes[0], sizes[0]])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "differs from the service ledger"):
+            self.validate()
+        build(sizes, owners=[None, dict(bodies[1]["key"])])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "local ledger: missing owner"):
+            self.validate()
+        build(sizes, owners=[dict(bodies[1]["key"]), dict(bodies[1]["key"])])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "local ledger: duplicate owner"):
+            self.validate()
+        # A local ledger of a body without a service ledger has no FIR size to match.
+        build(sizes)
+        self.report["meters"] = [
+            meter
+            for meter in self.report["meters"]
+            if not (meter["name"] == "services" and meter["owner"] == bodies[1]["key"])
+        ]
+        self.report["meters"][0]["fir_size"] = sizes[0]
+        self.report["meters"][0]["counts"][0]["bound"] = 65536 + 64 * sizes[0]
+        for index, meter in enumerate(self.report["meters"]):
+            meter["id"] = index
+        with self.assertRaisesRegex(audit.InvalidEvidence, "differs from the service ledger"):
+            self.validate()
+        # A local W refusal needs an incomplete local closure and body row.
+        bound = 65536 + 64 * sizes[0]
+        refusal = incomplete(
+            "local", "work_limit", limit={"category": "W", "used": bound, "bound": bound}
+        )
+        build(sizes)
+        self.report["meters"][2] = ledger(2, "local", dict(bodies[0]["key"]), sizes[0], refusal)
+        self.validate()
+        self.reject(lambda value: value["analyses"][2].update(status="complete"))
+        self.reject(lambda value: value["meters"][2].update(name="other"))
 
     def test_meter_w_bound_scales_with_its_fir_size(self):
         def grow_graph(report, size):
@@ -710,6 +853,7 @@ class SchemaTests(RepositoryFixture):
                 "first_refusal": refusal,
             },
         ]
+        fit_local_ledgers(self.report)
         self.validate()
         for mutation, pattern in (
             (lambda r: r["meters"][0].update(fir_size=1200), "meter: bound mismatch"),
@@ -720,7 +864,10 @@ class SchemaTests(RepositoryFixture):
             ),
             (lambda r: r["meters"][1].update(fir_size=-1), "meter FIR size"),
             (lambda r: grow_graph(r, 1202), "graph FIR size differs"),
-            (lambda r: r["meters"].append(dict(r["meters"][0], id=2)), "two graph ledgers"),
+            (
+                lambda r: r["meters"].append(dict(r["meters"][0], id=len(r["meters"]))),
+                "two graph ledgers",
+            ),
             (lambda r: r["meters"][1].update(fir_size=True), "meter FIR size"),
             (lambda r: r["meters"][1].pop("fir_size"), "incorrect members"),
             (lambda r: r["limits"].pop("w_scale"), "incorrect members"),
@@ -733,6 +880,7 @@ class SchemaTests(RepositoryFixture):
         self.report["bodies"] = []
         self.report["enumeration"]["selected_bodies"] = 0
         self.report["totals"] = audit.derived_totals([])
+        fit_local_ledgers(self.report)
         self.assertEqual(self.validate()[2], 0)
         self.report.update(exit_status=0, verdict="accepted")
         with self.assertRaisesRegex(audit.InvalidEvidence, "incomplete ownership proof"):
@@ -743,6 +891,7 @@ class SchemaTests(RepositoryFixture):
         report["bodies"] = []
         report["enumeration"]["selected_bodies"] = 0
         report["totals"] = audit.derived_totals([])
+        fit_local_ledgers(report)
         self.assertEqual(self.validate(report, exit_status=0)[2], 0)
 
     def test_count_overflow_fails_without_wrap(self):
@@ -827,6 +976,7 @@ class SchemaTests(RepositoryFixture):
         self.report["files"][0]["module"] = "context_main"
         self.report["bodies"][0]["source"]["module"] = "context_main"
         self.report["bodies"][0]["key"]["declaration"] = 23
+        fit_local_ledgers(self.report)
         after_inputs, after_identities, _ = self.validate()
         self.assertEqual(inputs, after_inputs)
         self.assertEqual(identities, after_identities)
@@ -1002,6 +1152,7 @@ class ReasonRangeTests(RepositoryFixture):
                     "first_refusal": incomplete("graph", "missing_correspondence", source),
                 }
             ]
+            fit_local_ledgers(report)
         elif container == "failure":
             report.update(
                 failure=incomplete("tool", "tool_failure", source), exit_status=2, verdict="failed"
@@ -1121,6 +1272,7 @@ class ReasonRangeTests(RepositoryFixture):
                 ),
             }
         ]
+        fit_local_ledgers(report)
         with self.assertRaisesRegex(audit.InvalidEvidence, "source line outside input"):
             self.validate(report, exit_status=0)
         report["meters"][0]["first_refusal"]["source"] = self.position(2, 1)
@@ -1144,10 +1296,12 @@ class StageTests(RepositoryFixture):
         }
         self.report["failure"] = incomplete(stage, codes[stage])
         self.report["totals"] = audit.derived_totals(self.report["bodies"])
+        fit_local_ledgers(self.report)
 
     def test_failed_checking_keeps_unexecuted_rows(self):
         self.block("checking")
         self.report["bodies"][0]["key"] = None
+        fit_local_ledgers(self.report)
         self.assertEqual(self.validate()[2], 2)
         self.reject(lambda value: value["bodies"][0].update(lowering="complete"))
         self.reject(lambda value: value["bodies"][0]["analyses"][0].update(proof="incomplete"))
@@ -1156,6 +1310,16 @@ class StageTests(RepositoryFixture):
         self.block("lowering")
         self.assertEqual(self.validate()[2], 2)
         self.reject(lambda value: value["bodies"][0].update(verification="complete"))
+
+        # A body that verification never reached has no local ledger.
+        def unverified_ledgers(report):
+            key = report["bodies"][0]["key"]
+            for name in ("services", "local"):
+                report["meters"].append(
+                    body_ledger(len(report["meters"]), name, key, 0, report["limits"])
+                )
+
+        self.reject(unverified_ledgers, "exactly one local ledger")
 
     def test_verifier_failure_requires_exit_two_and_fails_audit(self):
         self.block("verification")
@@ -1266,6 +1430,7 @@ class BudgetTests(RepositoryFixture):
                 "first_refusal": refusal,
             }
         ]
+        fit_local_ledgers(self.report)
         return refusal
 
     def work_refusal(self):
@@ -1323,6 +1488,7 @@ class BudgetTests(RepositoryFixture):
                 "first_refusal": None,
             }
         ]
+        fit_local_ledgers(self.report)
         self.assertEqual(self.validate(exit_status=0)[2], 2)
 
     def test_precision_refusal_can_retain_independent_complete_proof(self):

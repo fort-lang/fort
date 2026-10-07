@@ -5,8 +5,10 @@ import json;
 import modules;
 import ownership_api;
 import ownership_events;
+import ownership_keys;
 import ownership_limits;
 import ownership_source;
+import ownership_source_local;
 import session;
 import std.io;
 import std.libc;
@@ -21,6 +23,9 @@ extern fn mkstemp(char mut* path) i32;
 extern fn rename(char* from, char* to) i32;
 
 u64 ANALYSIS_COUNT = 7;
+// The graph, liveness and local analyses have source producers.
+u64 INTEGRATED = 3;
+u64 LOCAL = 2;
 string[ANALYSIS_COUNT] ANALYSES = {
     "graph", "liveness", "local", "stored_borrows", "raw", "calls_heap", "process_exit"};
 string[3] STAGES = {"checking", "lowering", "verification"};
@@ -58,6 +63,15 @@ fn work_status(ownership_source.status value) string {
     case ownership_source.status.complete: return "complete";
     case ownership_source.status.incomplete: return "incomplete";
     case ownership_source.status.failed: return "failed";
+    }
+}
+
+fn local_status(ownership_source_local.status value) string {
+    switch (value) {
+    case ownership_source_local.status.unexecuted: return "unexecuted";
+    case ownership_source_local.status.complete: return "complete";
+    case ownership_source_local.status.incomplete: return "incomplete";
+    case ownership_source_local.status.failed: return "failed";
     }
 }
 
@@ -117,7 +131,14 @@ fn stage_status(ownership_source.body* row, u64 stage) string {
 // A producer does not change solver outcomes when later report rendering refuses V.
 fn analysis_status(ownership_source.body* row, u64 stage, u64 field) string {
     if (!prerequisites(row)) { return "unexecuted"; }
-    if (stage >= 2) { return field == 2 ? "incomplete" : "unexecuted"; }
+    if (stage == LOCAL) {
+        if (!row->local.solved) { return field == 2 ? "incomplete" : "unexecuted"; }
+        if (field == 0) { return local_status(row->local.correspondence); }
+        if (field == 1) { return local_status(row->local.solver); }
+        if (row->local.violations_len > 0) { return "violated"; }
+        return proof_status(row->local.proof);
+    }
+    if (stage >= INTEGRATED) { return field == 2 ? "incomplete" : "unexecuted"; }
     if (stage == 0) {
         if (field == 0) { return work_status(row->graph_correspondence); }
         if (field == 1) { return work_status(row->graph_solver); }
@@ -145,16 +166,46 @@ fn body_ownership(ownership_source.body* row) string {
     return "unexecuted";
 }
 
+// The first reason in analysis order. The first analysis without a producer ends the order.
 fn body_reason(ownership_source.body* row) reason {
     if (!prerequisites(row)) { return reason{}; }
     reason first = proof_reason(row->first_incomplete_stage ==
         ownership_source.analysis_stage.graph ? "graph" : "liveness", row->first_incomplete);
     if (first.present) { return first; }
-    return fallback_reason("local", "missing_producer", row->source);
+    if (analysis_status(row, LOCAL, 2) == "incomplete") {
+        reason local = proof_reason("local", row->local.proof);
+        if (local.present) { return local; }
+    }
+    return fallback_reason(ANALYSES[INTEGRATED], "missing_producer", row->source);
 }
 
+// The local analysis has no closure facts outside its bodies.
+fn local_closure(ownership_source.context* c) string {
+    bool mut complete = c->enumeration_complete;
+    bool mut executed = false;
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        string proof = analysis_status(&c->bodies[i], LOCAL, 2);
+        if (proof == "failed") { return "failed"; }
+        if (analysis_status(&c->bodies[i], LOCAL, 1) != "unexecuted") { executed = true; }
+        if (proof != "complete") { complete = false; }
+        i += 1;
+    }
+    if (complete) { return "complete"; }
+    return executed ? "incomplete" : "unexecuted";
+}
+
+fn analysis_violations(ownership_source.body* row, u64 stage) u64 {
+    if (stage != LOCAL || !prerequisites(row) || !row->local.solved) { return 0; }
+    return row->local.violations_len;
+}
+
+// Only the local analysis reports violations, so its count is the body total.
+fn body_violations(ownership_source.body* row) u64 { return analysis_violations(row, LOCAL); }
+
 fn closure_status(ownership_source.context* c, u64 stage) string {
-    if (stage >= 2) { return "incomplete"; }
+    if (stage == LOCAL) { return local_closure(c); }
+    if (stage >= INTEGRATED) { return "incomplete"; }
     bool mut executed = stage == 0 && c->graph_built;
     u64 mut i = 0;
     while (i < c->bodies.len) {
@@ -171,11 +222,16 @@ fn first_incomplete(ownership_source.context* c) reason {
     reason graph = proof_reason("graph", c->graph_first_refusal);
     if (graph.present) { return graph; }
     u64 mut stage = 0;
-    while (stage < 2) {
+    while (stage < INTEGRATED) {
         u64 mut i = 0;
         while (i < c->bodies.len) {
             ownership_source.body* row = &c->bodies[i];
-            ownership_api.proof_status value = stage == 0 ? row->graph_proof : row->liveness_proof;
+            ownership_api.proof_status mut value = stage == 0 ? row->graph_proof :
+                row->liveness_proof;
+            if (stage == LOCAL) {
+                value = row->local.solved && analysis_status(row, LOCAL, 2) == "incomplete" ?
+                    row->local.proof : ownership_api.proof_status{};
+            }
             reason got = proof_reason(ANALYSES[stage], value);
             if (got.present) { return got; }
             i += 1;
@@ -186,7 +242,8 @@ fn first_incomplete(ownership_source.context* c) reason {
         }
         stage += 1;
     }
-    return fallback_reason("local", "missing_producer", ownership_api.source_position{});
+    return fallback_reason(ANALYSES[INTEGRATED], "missing_producer",
+        ownership_api.source_position{});
 }
 
 fn failure(ownership_source.context* c, i32 exit_status) reason {
@@ -198,7 +255,7 @@ fn failure(ownership_source.context* c, i32 exit_status) reason {
         }
         if (prerequisites(&c->bodies[i])) {
             u64 mut stage = 0;
-            while (stage < 2) {
+            while (stage < INTEGRATED) {
                 if (analysis_status(&c->bodies[i], stage, 2) == "failed") {
                     return fallback_reason(ANALYSES[stage], "analysis_failure",
                         c->bodies[i].source);
@@ -299,15 +356,52 @@ fn diagnostic(ownership_source.context mut* c, diag.sink mut* diagnostics, strin
     return normal;
 }
 
+// Renders validated local violations in canonical body and operation order.
+// A V refusal keeps one terminal error and stops the later records.
+fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry) bool {
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        ownership_source.body mut* row = &c->bodies[i];
+        u64 mut k = 0;
+        while (row->local.solved && k < row->local.violations_len) {
+            ownership_source_local.violation* v = &row->local.violations[k];
+            if (!ownership_source_local.charge_rendered(&row->local, v)) {
+                strbuf.str_buf mut limit = strbuf.create();
+                defer strbuf.free(&limit);
+                strbuf.append(&limit,
+                    "cannot prove complete ownership reporting within the report bound ");
+                strbuf.append_u64(&limit, row->local.meter.bounds.v);
+                diag.error(diagnostics, location(c, v->source, entry), strbuf.view(&limit));
+                return false;
+            }
+            strbuf.str_buf mut message = strbuf.create();
+            defer strbuf.free(&message);
+            strbuf.append(&message, v->kind == ownership_api.event_kind.invalid_use ?
+                "invalid use of " : "lost ownership of ");
+            if (v->quoted) { strbuf.push(&message, '\''); }
+            strbuf.append(&message, v->name);
+            if (v->quoted) { strbuf.push(&message, '\''); }
+            diag.loc at = location(c, v->source, entry);
+            diag.error(diagnostics, at, strbuf.view(&message));
+            diag.note(diagnostics, at, v->text);
+            k += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 /// Emits closure and service errors. V refusal stops normal errors and keeps one terminal error.
 fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry) void {
+    if (!violations(c, diagnostics, entry)) { return; }
     ownership_source.body mut* mut charged = null;
     u64 mut i = 0;
     while (i < c->bodies.len) {
         if (c->bodies[i].live.initialized) { charged = &c->bodies[i]; break; }
         i += 1;
     }
-    if (!diagnostic(c, diagnostics, entry, first_incomplete(c), charged)) { return; }
+    reason first = first_incomplete(c);
+    if (!diagnostic(c, diagnostics, entry, first, charged)) { return; }
     i = 0;
     while (i < c->bodies.len) {
         ownership_source.body mut* row = &c->bodies[i];
@@ -317,8 +411,47 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
              why.limit.category == ownership_api.limit_category.v)) {
             if (!diagnostic(c, diagnostics, entry, why, row)) { return; }
         }
+        if (!local_budget(c, diagnostics, entry, row, row->local.first_refusal, "local",
+            first)) {
+            return;
+        }
+        // Two ledgers that refuse one operation for one category give one error (4.2).
+        ownership_api.terminal_failure primary = row->local.first_refusal.terminal;
+        ownership_api.terminal_failure second = row->local.classify_refusal.terminal;
+        bool repeated = primary.present && second.present && primary.limit.present &&
+            second.limit.present && primary.limit.category == second.limit.category &&
+            ownership_keys.operation(primary.operation, second.operation) == 0;
+        if (!repeated && !local_budget(c, diagnostics, entry, row,
+            row->local.classify_refusal, "local classification", first)) {
+            return;
+        }
         i += 1;
     }
+}
+
+fn same_reason(reason a, reason b) bool {
+    return a.present == b.present && a.stage == b.stage && a.code == b.code &&
+        ownership_keys.source(a.source, b.source) == 0 &&
+        a.limit.present == b.limit.present && a.limit.category == b.limit.category &&
+        a.limit.used == b.limit.used && a.limit.bound == b.limit.bound;
+}
+
+// A W, E or V refusal of a local ledger is a budget error even when no later use needs its
+// result (fir.md 14.1). The error charges one V unit of the local ledger. A V refusal renders
+// as it is. `label` names the ledger in the error: "local" or "local classification".
+fn local_budget(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    ownership_source.body mut* row, ownership_api.proof_status refusal, string label,
+    reason shown) bool {
+    reason mut why = proof_reason("local", refusal);
+    if (!why.present || !why.limit.present || same_reason(why, shown)) { return true; }
+    why.stage = label;
+    ownership_api.limit_category kind = why.limit.category;
+    if (kind != ownership_api.limit_category.w && kind != ownership_api.limit_category.e &&
+        kind != ownership_api.limit_category.v) { return true; }
+    // A refused charge keeps this error as the terminal record and stops the later errors.
+    bool allowed = kind == ownership_api.limit_category.v || ownership_source_local.charge_report(
+        &row->local, refusal.terminal.operation, why.source, 1);
+    return diagnostic(c, diagnostics, entry, why, null) && allowed;
 }
 
 fn key_string(json.writer mut* j, string key, string value) void {
@@ -491,9 +624,43 @@ fn write_meters(json.writer mut* j, ownership_source.context* c) void {
         write_reason(j, proof_reason("liveness", row->live.first_refusal));
         json.json_object_end(j);
         id += 1;
+        if (row->local.initialized) {
+            write_local_meter(j, row, id, "local", &row->local.meter, row->local.first_refusal);
+            id += 1;
+        }
+        if (row->local.classified) {
+            write_local_meter(j, row, id, "local_classification", &row->local.classify_meter,
+                row->local.classify_refusal);
+            id += 1;
+        }
         i += 1;
     }
     json.json_array_end(j);
+}
+
+// Each flow computation of one body keeps its own ledger (D17.18): the local run, and the
+// classification run when the body needed one.
+fn write_local_meter(json.writer mut* j, ownership_source.body* row, u64 id, string name,
+    ownership_limits.meter* ledger, ownership_api.proof_status refusal) void {
+    json.json_object_begin(j);
+    key_uint(j, "id", id);
+    key_string(j, "name", name);
+    json.json_key(j, "owner");
+    write_key(j, row->key);
+    key_uint(j, "fir_size", row->local.fir_size);
+    json.json_key(j, "counts");
+    json.json_array_begin(j);
+    u64 mut category = 0;
+    while (category < ownership_api.LIMIT_COUNT) {
+        ownership_api.limit_category kind = cast(category, ownership_api.limit_category);
+        write_count(j, category, ownership_limits.used(&ledger->used, kind),
+            ownership_limits.bound(&ledger->bounds, kind));
+        category += 1;
+    }
+    json.json_array_end(j);
+    json.json_key(j, "first_refusal");
+    write_reason(j, proof_reason("local", refusal));
+    json.json_object_end(j);
 }
 
 fn write_analysis(json.writer mut* j, ownership_source.body* row, u64 stage) void {
@@ -502,7 +669,7 @@ fn write_analysis(json.writer mut* j, ownership_source.body* row, u64 stage) voi
     key_string(j, "correspondence", analysis_status(row, stage, 0));
     key_string(j, "solver", analysis_status(row, stage, 1));
     key_string(j, "proof", analysis_status(row, stage, 2));
-    key_uint(j, "violations", 0);
+    key_uint(j, "violations", analysis_violations(row, stage));
     json.json_object_end(j);
 }
 
@@ -528,7 +695,7 @@ fn write_body(json.writer mut* j, ownership_source.body* row) void {
     while (stage < ANALYSIS_COUNT) { write_analysis(j, row, stage); stage += 1; }
     json.json_array_end(j);
     key_string(j, "ownership", body_ownership(row));
-    key_uint(j, "violations", 0);
+    key_uint(j, "violations", body_violations(row));
     json.json_key(j, "first_incomplete");
     write_reason(j, body_reason(row));
     json.json_object_end(j);
@@ -560,10 +727,21 @@ fn counter(json.writer mut* j, ownership_source.context* c, string@ statuses,
     json.json_object_end(j);
 }
 
+// A body has at most one violation for each produced step and return, so the sum fits.
+fn total_violations(ownership_source.context* c) u64 {
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        total += body_violations(&c->bodies[i]);
+        i += 1;
+    }
+    return total;
+}
+
 fn write_totals(json.writer mut* j, ownership_source.context* c) void {
     json.json_object_begin(j);
     key_uint(j, "bodies", c->bodies.len);
-    key_uint(j, "violations", 0);
+    key_uint(j, "violations", total_violations(c));
     u64 mut stage = 0;
     while (stage < STAGES.len) {
         json.json_key(j, STAGES[stage]);
@@ -584,7 +762,7 @@ fn write_totals(json.writer mut* j, ownership_source.context* c) void {
         counter(j, c, WORK_STATUSES[..], 2, stage, 1);
         json.json_key(j, "proof");
         counter(j, c, PROOF_STATUSES[..], 2, stage, 2);
-        key_uint(j, "violations", 0);
+        key_uint(j, "violations", stage == LOCAL ? total_violations(c) : 0);
         json.json_object_end(j);
         stage += 1;
     }
@@ -600,7 +778,8 @@ fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
     json.json_object_begin(&j);
     key_string(&j, "kind", "fort-ownership-report");
     // Version 2 adds the W scale of the limit table and the FIR size of each meter.
-    key_uint(&j, "version", 2);
+    // Version 3 adds the integrated local analysis and its `local` ledgers.
+    key_uint(&j, "version", 3);
     key_bool(&j, "complete", true);
     key_string(&j, "compiler_version", call->compiler_version);
     json.json_key(&j, "invocation");
@@ -619,7 +798,7 @@ fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
     while (stage < ANALYSIS_COUNT) {
         json.json_object_begin(&j);
         key_string(&j, "name", ANALYSES[stage]);
-        key_string(&j, "producer", stage < 2 ? "integrated" : "unavailable");
+        key_string(&j, "producer", stage < INTEGRATED ? "integrated" : "unavailable");
         key_string(&j, "status", closure_status(c, stage));
         json.json_object_end(&j);
         stage += 1;

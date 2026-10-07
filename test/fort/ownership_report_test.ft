@@ -39,7 +39,9 @@ fn zero_bodies_retain_missing_producers_and_no_body_meter() void {
     ownership_source.analyze(&e.source);
     assert(e.source.bodies.len == 0);
     assert(ownership_report.verdict(&e.source) == 1);
-    u64 mut stage = 2;
+    // The local analysis has no closure facts outside bodies, so no body means no local gap.
+    assert(ownership_report.closure_status(&e.source, ownership_report.LOCAL) == "complete");
+    u64 mut stage = ownership_report.INTEGRATED;
     while (stage < ownership_report.ANALYSIS_COUNT) {
         assert(ownership_report.closure_status(&e.source, stage) == "incomplete");
         stage += 1;
@@ -81,6 +83,7 @@ fn failure_before_any_body_ledger_keeps_unexecuted_analyses() void {
     assert(row->live.events.budget.used.v == 0);
 }
 
+// The first analysis without a producer gives the reason when the earlier ones have none.
 fn missing_reason_uses_an_explicit_missing_producer() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     ownership_source_env.open(&e);
@@ -89,9 +92,34 @@ fn missing_reason_uses_an_explicit_missing_producer() void {
     ownership_source.analyze(&e.source);
     ownership_source.body mut* row = &e.source.bodies[0];
     row->first_incomplete = ownership_api.proof_status{};
+    assert(ownership_report.analysis_status(row, ownership_report.LOCAL, 2) == "complete");
     ownership_report.reason why = ownership_report.body_reason(row);
-    assert(why.present && why.stage == "local" && why.code == "missing_producer");
+    assert(why.present && why.stage == "stored_borrows" && why.code == "missing_producer");
     assert(why.source.filename_present && !why.limit.present);
+    assert(why.source.line == 1 && why.source.col == 4);
+}
+
+// An incomplete local proof gives the body reason before the analyses without a producer.
+fn local_reason_comes_before_a_missing_producer() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn root(bool c) void {\n    i32 mut* own p = new(i32);\n    if (c) { del(p); }\n}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "root");
+    row->first_incomplete = ownership_api.proof_status{};
+    assert(ownership_report.analysis_status(row, ownership_report.LOCAL, 2) == "incomplete");
+    ownership_report.reason why = ownership_report.body_reason(row);
+    assert(why.present && why.stage == "local" && why.code == "missing_path");
+    assert(why.source.line == 4 && !why.limit.present);
+    // A first reason of graph or liveness stays first.
+    row->first_incomplete = ownership_api.incomplete(
+        ownership_api.incomplete_reason.source_coverage,
+        ownership_api.operation_position{.function = row->key}, row->source);
+    assert(ownership_report.body_reason(row).stage == "liveness" ||
+        ownership_report.body_reason(row).stage == "graph");
 }
 
 fn graph_refusal_keeps_the_original_category_counts_and_location() void {
@@ -347,7 +375,7 @@ fn computation_bounds_are_published() void {
     ownership_report.build(&out, &e.source, &call, 1);
     strbuf.str_buf mut expected = strbuf.create();
     defer strbuf.free(&expected);
-    strbuf.append(&expected, "{\"kind\":\"fort-ownership-report\",\"version\":2,");
+    strbuf.append(&expected, "{\"kind\":\"fort-ownership-report\",\"version\":3,");
     contains(&out, strbuf.view(&expected));
     strbuf.clear(&expected);
     strbuf.append(&expected, "\"limits\":{\"version\":2,");
@@ -394,6 +422,7 @@ fn main() i32 {
     failure_before_any_body_ledger_keeps_unexecuted_analyses();
     println("statuses ok");
     missing_reason_uses_an_explicit_missing_producer();
+    local_reason_comes_before_a_missing_producer();
     graph_refusal_keeps_the_original_category_counts_and_location();
     println("reasons ok");
     internal_verifier_failure_exits_two();

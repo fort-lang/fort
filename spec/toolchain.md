@@ -327,7 +327,7 @@ temporary directory for the intermediate IR file (D19.1).
 
 ### 1.1 Ownership coverage reports (D19.8)
 
-The compiler report is a JSON version 2 document. The audit attestation is a JSON version 1
+The compiler report is a JSON version 3 document. The audit attestation is a JSON version 1
 document.
 Neither document changes the diagnostic JSON of section 4.1.
 The compiler writes one report for one checked closure. The runner attests the invocation and bytes.
@@ -343,7 +343,7 @@ Count overflow gives report failure, not wrapped totals.
 | Member | Type and meaning |
 |---|---|
 | `kind` | String `fort-ownership-report`. |
-| `version` | Integer 2. Version 2 adds `limits.w_scale` and meter `fir_size`. |
+| `version` | Integer 3. Version 2 adds `limits.w_scale` and `fir_size`; version 3, local ledgers. |
 | `complete` | Boolean true; the report is complete, not necessarily its proof. |
 | `compiler_version` | The string that --version identifies. |
 | `invocation` | Entry, working directory, arguments, target, configuration, and mode. |
@@ -397,6 +397,20 @@ Category uses D, R, P, G, H, T, E, W, or V. Scope uses ownership_api.limit_scope
 Report only categories the actual ledger measures. Absence does not mean zero use.
 First refusal uses the reason object below, or null. Meter IDs start at 0 without gaps.
 The first milestone names the existing graph ledger `graph_private` and service ledgers `services`.
+The local increment adds one `local` ledger for each verified body: its local flow computation.
+A `local` ledger has an owner. Its FIR size equals the FIR size of that body's service ledger.
+Local correspondence can need a second local flow run, the classification run.
+It runs when the first run has a failure, no validated violation and no refusal.
+It drops the outside effects of calls and non-local releases.
+When it ends within its budget and fails nothing, each failure depends on those effects.
+Then the body leaves the local scope. Any other end keeps the body in that scope.
+Its first pass keeps one joined path state for each block, as if G were 1.
+Only a first pass that fails a step needs the second pass, with the production G.
+The classification run is a computation of its own, with a `local_classification` ledger.
+That ledger has the owner and the FIR size of the body's `local` ledger.
+A refusal there explains no failure: the body stays in the local scope with incomplete proof.
+The ledger keeps that refusal, and the compiler emits its budget error.
+The graph FIR size is the sum of the service ledgers only.
 Graph construction uses the graph's retained private W ledger.
 Service dispatch, liveness, and the target queries of one body charge that body's service ledger.
 Report these scopes separately.
