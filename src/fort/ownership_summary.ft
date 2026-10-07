@@ -413,13 +413,27 @@ fn listed(ownership_api.entity_id@ keys, ownership_api.entity_id key) bool {
     return false;
 }
 
+// The normal continuations of one call. The first is kept; each later one widens it.
+// A store export attaches to each exit after the call, so it cannot name one case. The
+// store list of each applied case must be a prefix of `stores`, and each normal case must
+// export all of it. Any other export keeps the summary incomplete (D17.14, D17.18).
+struct continuation {
+    ownership_state.state facts;
+    u64 normals;
+    ownership_api.entity_id mut@ own stores;
+    u64 stores_len;
+    // The store count of each normal case, or U64_MAX before the first normal case.
+    u64 normal_stores;
+}
+
 // Exports the callee requirements and the call result of this body (D17.14, D17.17).
-// Any other caller-visible callee effect keeps the published summary incomplete.
+// Any other caller-visible callee effect keeps the published summary incomplete. So does a
+// store that not each applied case of the call does, as `continuation` says.
 // A call of several targets exports nothing: an exported requirement or effect would bind
 // each caller to one target, and a target of several is not a witness (`spec/fir.md` 14.1).
 fn export_call(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
-    ownership_flow.step* s, ownership_calls.application* applied, u64 index, bool definite)
-    bool {
+    ownership_flow.step* s, ownership_calls.application* applied, u64 index, bool definite,
+    continuation mut* kept) bool {
     ownership_summary_body.body_program mut* program = c->program;
     ownership_summary_model.summary* bound = &applied->bound.model;
     // Only the applied case runs. A requirement or effect after its abort is not exported.
@@ -452,6 +466,9 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
         if (!ownership_api.successful(program->proof)) { return false; }
         i += 1;
     }
+    // `n` counts the caller-visible stores of this case. A store that an earlier case of
+    // this call exported at the same index is not exported again.
+    u64 mut n = 0;
     i = 0;
     while (i < bound->effects.len) {
         if (!call_work(c, 2) || !call_work(c, applied_case.effects.len)) { return false; }
@@ -459,12 +476,26 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
         if (listed(applied_case.effects, node.effect.key) &&
             node.payload != ownership_summary_model.payload_kind.read &&
             (caller_visible(c, node.effect.place, node.effect.allocation) ||
-            caller_visible(c, node.operand, ownership_api.entity_id{})) &&
-            (!definite || !export_store(c, call, s, bound, node))) {
-            program->call_residual = true;
+            caller_visible(c, node.operand, ownership_api.entity_id{}))) {
+            if (!definite) {
+                program->call_residual = true;
+            } else if (n < kept->stores_len) {
+                if (!ownership_summary_model.same(kept->stores[n], node.effect.key)) {
+                    program->call_residual = true;
+                }
+            } else {
+                kept->stores[n] = node.effect.key;
+                kept->stores_len = n + 1;
+                if (!export_store(c, call, s, bound, node)) { program->call_residual = true; }
+            }
+            n += 1;
         }
         if (!ownership_api.successful(program->proof)) { return false; }
         i += 1;
+    }
+    if (applied_case.outcome.kind == ownership_api.outcome_kind.function_return) {
+        if (kept->normal_stores == ownership_api.U64_MAX) { kept->normal_stores = n; }
+        else if (kept->normal_stores != n) { program->call_residual = true; }
     }
     u32 mut op = 0;
     while (op < call->value.ops_len) {
@@ -479,17 +510,63 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
     return ownership_api.successful(program->proof);
 }
 
-// The call result becomes one write of the one normal continuation. Two normal cases give two
-// values at one position, which this summary cannot export, so it stays incomplete.
+// One borrow of two joined result rows names one source, place, and window. Only its key and
+// its value version can differ.
+fn same_window(ownership_api.borrow_relation a, ownership_api.borrow_relation b) bool {
+    return ownership_summary_model.same(a.source, b.source) &&
+        ownership_state.same_place(a.containing, b.containing) &&
+        a.representation_complete == b.representation_complete &&
+        ownership_state.same_region(a.range, b.range);
+}
+
+fn same_value(ownership_api.contents_fact a, ownership_api.contents_fact b) bool {
+    if (a.kind != b.kind || !ownership_state.same_scalar(a.span_length, b.span_length) ||
+        a.owner_empty != b.owner_empty || a.borrows.len != b.borrows.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.borrows.len) {
+        if (!same_window(a.borrows[i], b.borrows[i])) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Joined normal cases leave one row of the call result for each case. When the rows write
+// one value, the first row stands for each of them, so the result has one value (D17.18).
+// Rows of different values stay, and the result keeps no unique value.
+fn collapse_result(call_context* c, fir.statement* call, ownership_state.state mut* facts)
+    bool {
+    ownership_api.place_path destination = ownership_summary_body.slot(c->in,
+        call->place.local);
+    u64 mut first = ownership_api.U64_MAX;
+    u64 mut i = 0;
+    while (i < facts->contents_len) {
+        if (!call_work(c, 1)) { return false; }
+        if (ownership_state.same_place(facts->contents[i].place, destination)) {
+            if (first == ownership_api.U64_MAX) { first = i; }
+            else if (!same_value(facts->contents[first], facts->contents[i])) { return true; }
+        }
+        i += 1;
+    }
+    u64 mut kept = 0;
+    i = 0;
+    while (i < facts->contents_len) {
+        if (i == first || !ownership_state.same_place(facts->contents[i].place, destination)) {
+            facts->contents[kept] = facts->contents[i];
+            kept += 1;
+        }
+        i += 1;
+    }
+    facts->contents_len = kept;
+    return true;
+}
+
+// The call result becomes one write of its value in the one normal continuation. A result
+// without one value at the destination cannot be exported, so the summary stays incomplete.
 fn export_call_result(call_context* c, fir.statement* call, ownership_flow.step* s,
-    ownership_state.state* continuation, u64 normals) bool {
+    ownership_state.state* continuation) bool {
     ownership_summary_body.body_program mut* program = c->program;
     types.node* result = fir.local_at(c->in->function.body, call->place.local)->ty;
     if (!ownership_summary_body.reference(result)) { return true; }
-    if (normals != 1) {
-        program->call_residual = true;
-        return true;
-    }
     ownership_api.place_path destination = ownership_summary_body.slot(c->in,
         call->place.local);
     if (!call_work(c, continuation->contents_len)) { return false; }
@@ -533,18 +610,37 @@ fn unresolved_call(call_context* c, fir.statement* call, ownership_state.state m
     return verdict;
 }
 
-// The normal continuations of one call. The first is kept; each later one widens it.
-struct continuation {
-    ownership_state.state facts;
-    u64 normals;
+// The atoms that a case guard added to the state, which the caller state did not hold.
+fn strip_atoms(call_context* c, ownership_state.state mut* facts,
+    ownership_api.state_view* before) bool {
+    u64 mut kept = 0;
+    u64 mut i = 0;
+    while (i < facts->predicates_len) {
+        bool mut held = false;
+        u64 mut j = 0;
+        while (!held && j < before->predicates.len) {
+            if (!call_work(c, 1)) { return false; }
+            held = ownership_state.same_predicate(facts->predicates[i], before->predicates[j]);
+            j += 1;
+        }
+        if (held) {
+            facts->predicates[kept] = facts->predicates[i];
+            kept += 1;
+        }
+        i += 1;
+    }
+    facts->predicates_len = kept;
+    return true;
 }
 
 // Applies one possible case. An abort records its exit. A normal return joins the
 // continuation. `stop` names a verdict that ends the path. A case of one target of several
-// is a possibility: a failed application keeps the call unresolved.
+// is a possibility: a failed application keeps the call unresolved. `strip` removes the case
+// atoms from a normal continuation when the normal cases of the target cover each captured
+// value: their join then holds for each value, with no atom to lose (D17.18).
 fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
     ownership_flow.step* s, ownership_calls.request* req, u64 index, bool definite,
-    continuation mut* kept, ownership_flow.call_verdict mut* verdict) bool {
+    bool strip, continuation mut* kept, ownership_flow.call_verdict mut* verdict) bool {
     ownership_calls.application mut applied = ownership_calls.apply_case(req, index);
     defer ownership_calls.free(&applied);
     // A refused charge stops this computation, whatever reason the application reports.
@@ -563,7 +659,7 @@ fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.stateme
         verdict->proof = applied.proof;
         return false;
     }
-    if (!export_call(c, site, call, s, &applied, index, definite)) {
+    if (!export_call(c, site, call, s, &applied, index, definite, kept)) {
         verdict->proof = c->program->proof;
         return false;
     }
@@ -576,6 +672,10 @@ fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.stateme
         verdict->proof = observe(cast(c->observations, void mut*), &ended, applied.outcome,
             s->operation, s->source);
         return ownership_api.successful(verdict->proof);
+    }
+    if (strip && !strip_atoms(c, &applied.state, &req->before)) {
+        verdict->proof = c->program->proof;
+        return false;
     }
     if (kept->normals == 0) {
         kept->facts = move(applied.state);
@@ -637,6 +737,8 @@ struct target_plan {
     bool vacuous;
     // A possible case of the target returns normally.
     bool returns;
+    // The possible normal cases of the target cover each captured value.
+    bool strip;
 }
 
 fn free_plans(target_plan mut@ plans) void {
@@ -716,6 +818,7 @@ fn plan_target(call_context* c, ownership_summary_body.call_site site,
     plan->guard = ownership_summary_model.context{svc, s->operation, s->source,
         site.event, summary->source};
     u64 mut possible = 0;
+    u64 mut normals = 0;
     u64 mut i = 0;
     while (i < summary->cases.len) {
         ownership_calls.guard_answer answer = ownership_calls.case_answer(&plan->req,
@@ -724,11 +827,16 @@ fn plan_target(call_context* c, ownership_summary_body.call_site site,
         if (!ownership_api.successful(c->program->proof)) { return plan_result.stop; }
         if (answer != ownership_calls.guard_answer.fails) {
             possible += 1;
-            plan->returns = plan->returns ||
-                summary->cases[i].outcome.kind == ownership_api.outcome_kind.function_return;
+            if (summary->cases[i].outcome.kind == ownership_api.outcome_kind.function_return) {
+                normals += 1;
+            }
         }
         i += 1;
     }
+    plan->returns = normals != 0;
+    plan->strip = normals > 1 &&
+        ownership_calls.covered(&plan->req, &plan->guard, &c->program->proof, true);
+    if (!ownership_api.successful(c->program->proof)) { return plan_result.stop; }
     // Guards that all fail cover no caller value. They prove no absence of return.
     if (possible == 0 && !target.binding.provisional) { return plan_result.unresolved; }
     if (possible == 0) {
@@ -802,8 +910,14 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
     if (!definite && returning != 0 && returning != running) {
         return unresolved_call(c, call, facts);
     }
-    continuation mut kept = continuation{.facts = ownership_state.empty()};
+    continuation mut kept = continuation{.facts = ownership_state.empty(),
+        .normal_stores = ownership_api.U64_MAX};
     defer ownership_state.free(&kept.facts);
+    // Only one target exports stores. Its case lists name the effects of its summary.
+    u64 mut capacity = 0;
+    if (definite && !plans[0].vacuous) { capacity = plans[0].req.summary->effects.len; }
+    kept.stores = new(ownership_api.entity_id, capacity);
+    defer del(kept.stores);
     t = 0;
     while (t < site.targets_len) {
         ownership_summary_model.summary_view* summary = plans[t].req.summary;
@@ -816,8 +930,8 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
                 return verdict;
             }
             if (answer != ownership_calls.guard_answer.fails) {
-                if (!apply_one(c, site, call, s, &plans[t].req, i, definite, &kept,
-                    &verdict)) {
+                if (!apply_one(c, site, call, s, &plans[t].req, i, definite, plans[t].strip,
+                    &kept, &verdict)) {
                     if (verdict.unknown) { return unresolved_call(c, call, facts); }
                     return verdict;
                 }
@@ -826,13 +940,21 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
         }
         t += 1;
     }
+    // A store of an abort case that a normal case does not do would reach the normal exits.
+    if (kept.normal_stores != ownership_api.U64_MAX && kept.normal_stores != kept.stores_len) {
+        c->program->call_residual = true;
+    }
     if (kept.normals == 0) {
         // When each target is a provisional target without a possible case, no execution
         // reaches past this call in this round (D17.18).
         if (running == 0) { c->program->vacuous = true; }
         return verdict;
     }
-    if (!export_call_result(c, call, s, &kept.facts, kept.normals)) {
+    if (kept.normals > 1 && !collapse_result(c, call, &kept.facts)) {
+        verdict.proof = c->program->proof;
+        return verdict;
+    }
+    if (!export_call_result(c, call, s, &kept.facts)) {
         verdict.proof = c->program->proof;
         return verdict;
     }
