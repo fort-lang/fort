@@ -894,15 +894,18 @@ bullet at a time and without a rewrite.
   c9b834a7 deleted the citations of `src/fort/gen.ft`, `gen_expr.ft`, `gen_stmt.ft` and
   `gen_data.ft`, and b0606efa then replaced the direct path by FIR. At `a3e0c95d` those files
   cited 86 decisions, the bare `D16` (5 times), 19 `item N` and 2 sections of `toolchain.md`;
-  `gen_fir.ft` cites `toolchain.md 1` today. The table has a row for each at the current line
-  that decides the rule, two for D16, and 8 further rows: 116 rows. Four rules have no
-  mutation-measured verdict. D2.4 has no emitter line: the lexer refuses a reserved word
-  (`fail/lexical/002_reserved_word`). D9.5 has no emitter line either: `modules.ft` refuses an
-  import cycle before the checker runs (`fail/modules/001_circular`). The D4.4 row is a probe of
-  a dead guard: `consts.cv_to_float` reaches it only for an integer constant, and an integer of
-  at most 2^64 in magnitude is finite in `f32` and `f64`. The D17.8 row is a probe of a dead
-  guard too: `lower_builtin` meets no builtin but `move` there, and the checker refuses a
-  discarded `move` (`fail/ownership/018_discard_own_rvalue`).
+  `gen_fir.ft` cites `toolchain.md 1` today. The table has a row for each at the current line that
+  decides the rule, two for D16, and 8 further rows, except four rules: 114 rows. These four rules
+  have no row and no mutation-measured verdict. D2.4 has no emitter line: the lexer refuses a
+  reserved word (`fail/lexical/002_reserved_word`). D9.5 has no emitter line either: `modules.ft`
+  refuses an import cycle before the checker runs (`fail/modules/001_circular`). The emitter line of
+  D4.4 is a panic that `tools/panic_coverage.py` holds as unreachable: `consts.cv_to_float` reaches
+  it only for an integer constant, and an integer of less than 2^64 in magnitude is finite in `f32`
+  (`consts_float_test`). The emitter line of D17.8 is a panic that
+  `fir_lower_builtin_value_panic_test` reaches with a forged statement: `lower_builtin` meets no
+  builtin but `move` there, and the checker refuses a discarded `move`
+  (`fail/ownership/018_discard_own_rvalue`). No compile reaches either panic, so a mutant of either
+  line measures no rule of the emitter.
   **A mutant of `src/fort` reaches two places.** bootstrap-1 builds the product compiler from it,
   and each `test/fort` suite compiles the mutated module itself. So a row that turns every suite
   red usually means that the compiler stopped on `std.rt`, often with a panic of `fir_verify`.
