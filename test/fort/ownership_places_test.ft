@@ -19,6 +19,7 @@
 //| leaf scans cost linear work
 //| kept sources cost linear work
 //| transfer refusals keep the state
+//| dispatch refusals report one event
 //| removal passes keep row order
 //| copied rows count each vector
 /// Tests aggregate ownership places and retained source relations.
@@ -164,6 +165,12 @@ fn place_request(ownership_local_env.env mut* e, ownership_places.action kind,
 
 fn storage_end(ownership_local_env.env mut* e, u32 slot, u32 source,
     bool retained) ownership_api.proof_status {
+    ownership_places.request mut req = end_request(e, slot, source, retained);
+    return ownership_places.apply(&e->state, &e->service, &req);
+}
+
+fn end_request(ownership_local_env.env mut* e, u32 slot, u32 source,
+    bool retained) ownership_places.request {
     ownership_places.request mut req = ownership_places.request{};
     req.base = ownership_local_env.req(e, ownership_transfer.action.dead, slot, slot);
     req.kind = ownership_places.action.end_storage;
@@ -175,7 +182,7 @@ fn storage_end(ownership_local_env.env mut* e, u32 slot, u32 source,
     req.storage_source = id(ownership_api.entity_kind.source, source);
     req.base.source_key = req.storage_source;
     req.base.source_correspondence_proved = true;
-    return ownership_places.apply(&e->state, &e->service, &req);
+    return req;
 }
 
 fn use_value(ownership_local_env.env mut* e, ownership_api.place_path place)
@@ -535,6 +542,8 @@ struct budget_probe {
     // The item count of the last refused request. A state mutator's precision request has more
     // than one item; each charge of the transfer of places has one.
     u64 denied_items;
+    // Refuses the denied call with no limit, as a meter that gives an invalid answer.
+    bool invalid;
 }
 
 fn deny_later_charge(void mut* opaque, ownership_api.charge_request* req)
@@ -545,6 +554,7 @@ fn deny_later_charge(void mut* opaque, ownership_api.charge_request* req)
         (probe->repeat_after != 0 && probe->calls == probe->repeat_after)) {
         probe->denied_items = req->items.len;
         ownership_api.charge_result mut out = ownership_api.charge_result{};
+        if (probe->invalid) { return out; }
         out.limit.present = true;
         out.limit.category = ownership_api.limit_category.w;
         out.limit.scope = ownership_api.limit_scope.computation;
@@ -953,9 +963,9 @@ fn kept_source_work(types.node* pair_type, types.node* view_type) void {
     println("kept sources cost linear work");
 }
 
-// A refusal at any charge of a transfer leaves the state as it was. A refusal after the
-// dispatch unit reports one work failure, from the transfer's own scans or from a state mutator.
-// Each failure carries the event key and the operation of the transfer's request.
+// A refusal at any charge of a transfer leaves the state as it was. Each refusal reports one
+// work failure, from the dispatch unit, the transfer's own scans or a state mutator. Each failure
+// carries the event key and the operation of the transfer's request.
 fn transfer_refusals(types.node* pair_type) void {
     work_env mut control = work_env{};
     work_open(&control);
@@ -982,26 +992,14 @@ fn transfer_refusals(types.node* pair_type) void {
         unrelated_rows(&w.local, 3, 2, 1);
         ownership_state.state mut before = ownership_state.clone(&w.local.state);
         w.probe.deny_at = w.probe.calls + cut;
-        ownership_api.proof_status refused = apply(&w.local, ownership_places.action.move_value,
-            pair_type, root(1), root(2));
+        ownership_api.proof_status refused = rekeyed_apply(&w.local,
+            ownership_places.action.move_value, pair_type, root(1), root(2));
         bad(refused);
         assert(refused.terminal.reason == ownership_api.incomplete_reason.work_limit);
         assert(refused.terminal.limit.category == ownership_api.limit_category.w);
         assert(w.probe.calls == w.probe.deny_at);
         assert(ownership_state.equal(&w.local.state, &before));
-        if (cut == 1) { assert(w.events.len == 0); }
-        else {
-            // The request of the transfer takes the last operation and event key of the env.
-            u32 operation = w.local.counts.next_operation;
-            assert(w.events.len == 1);
-            ownership_api.event_descriptor* event = ownership_events.at(&w.events, 0);
-            assert(event->kind == ownership_api.event_kind.work_failure);
-            assert(event->key.kind == ownership_api.entity_kind.event);
-            assert(event->key.ordinal == operation && event->operation.operation == operation);
-            assert(event->limit.present && event->limit.attempted == 1);
-            assert(ownership_keys.operation(event->limit.operation, event->operation) == 0);
-            assert(ownership_keys.source(event->limit.source, event->source) == 0);
-        }
+        assert(mapped_work_failure(&w));
         if (w.probe.denied_items > 1) { delegated += 1; }
         ownership_state.free(&before);
         work_close(&w);
@@ -1011,6 +1009,113 @@ fn transfer_refusals(types.node* pair_type) void {
     // among the cuts, so the sweep checks failures that a mutator reports inside a transfer.
     assert(cost == REFUSAL_COST && delegated == 6);
     println("transfer refusals keep the state");
+}
+
+// A binding key ordinal is MAPPED_KEY plus the operation number after rekey, so that a test can
+// tell the key of the mapped route from the key that report_failure writes: the operation number.
+u32 MAPPED_KEY = 7000;
+
+// Gives the last event binding of the env the key ordinal MAPPED_KEY plus its operation number.
+// A request built before holds a view of the bindings, so it sees the new key.
+fn rekey(ownership_local_env.env mut* e) void {
+    u64 last = e->event_bindings_len - 1;
+    e->event_bindings[last].key.ordinal = MAPPED_KEY + e->event_bindings[last].operation.operation;
+}
+
+// Builds a request, gives it a mapped key that differs from its operation number, and applies it.
+fn rekeyed_apply(ownership_local_env.env mut* e, ownership_places.action kind,
+    types.node* ty, ownership_api.place_path source,
+    ownership_api.place_path destination) ownership_api.proof_status {
+    ownership_places.request mut req = place_request(e, kind, ty, source, destination);
+    rekey(e);
+    return ownership_places.apply(&e->state, &e->service, &req);
+}
+
+// The env holds one event of this kind, and it carries the mapped key of the last request, which
+// rekey set, and that request's operation.
+fn mapped_event(work_env* w, ownership_api.event_kind kind) bool {
+    u32 operation = w->local.counts.next_operation;
+    if (w->events.len != 1) { return false; }
+    ownership_api.event_descriptor* event = ownership_events.at(&w->events, 0);
+    return event->kind == kind && event->key.kind == ownership_api.entity_kind.event &&
+        event->key.ordinal == MAPPED_KEY + operation && event->operation.operation == operation;
+}
+
+// The env holds one work failure of the last request, with its mapped key and the limit of the
+// refused charge.
+fn mapped_work_failure(work_env* w) bool {
+    if (!mapped_event(w, ownership_api.event_kind.work_failure)) { return false; }
+    ownership_api.event_descriptor* event = ownership_events.at(&w->events, 0);
+    return event->limit.present && event->limit.attempted == 1 &&
+        ownership_keys.operation(event->limit.operation, event->operation) == 0 &&
+        ownership_keys.source(event->limit.source, event->source) == 0;
+}
+
+// The dispatch unit is the first charge of each of the 4 actions, before any check of the
+// action. Each round refuses it and keeps the state. Mode 0: a W refusal reports one work failure
+// through the mapped route. Mode 1: without an event route the charge refuses before it calls
+// the meter, and the dispatch keeps that proof (missing events) and records nothing. Mode 2: a
+// meter answer with no limit refuses with invalid input and reports one incomplete proof through
+// the mapped route. Copy and move take slot 1 to slot 2; release and end select slot 1.
+fn dispatch_refusals(types.node* pair_type, types.node* owner_type) void {
+    u64 mut round = 0;
+    while (round < 12) {
+        u64 mode = round / 4;
+        u64 kind = round % 4;
+        work_env mut w = work_env{};
+        work_open(&w);
+        ownership_api.projection[1] mut left_parts = {};
+        ownership_api.projection[1] mut right_parts = {};
+        seed_owner(&w.local, field(1, 0, left_parts[..]), 81, 181);
+        seed_owner(&w.local, field(1, 1, right_parts[..]), 82, 182);
+        unrelated_rows(&w.local, 2, 1, 1);
+        if (mode == 1) { w.local.service.event = null; }
+        w.probe.invalid = mode == 2;
+        ownership_state.state mut before = ownership_state.clone(&w.local.state);
+        w.probe.deny_at = w.probe.calls + 1;
+        ownership_places.request mut req = ownership_places.request{};
+        if (kind == 0) {
+            req = place_request(&w.local, ownership_places.action.copy_value, pair_type,
+                root(1), root(2));
+        } else if (kind == 1) {
+            req = place_request(&w.local, ownership_places.action.move_value, pair_type,
+                root(1), root(2));
+        } else if (kind == 2) {
+            req = place_request(&w.local, ownership_places.action.release_value, owner_type,
+                field(1, 0, left_parts[..]), field(1, 0, left_parts[..]));
+        } else {
+            req = end_request(&w.local, 1, 4000, false);
+        }
+        rekey(&w.local);
+        ownership_api.proof_status refused = ownership_places.apply(&w.local.state,
+            &w.local.service, &req);
+        bad(refused);
+        assert(refused.kind == ownership_api.proof_kind.incomplete && refused.failed);
+        assert(ownership_state.equal(&w.local.state, &before));
+        if (mode == 0) {
+            assert(refused.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(refused.terminal.limit.present);
+            assert(refused.terminal.limit.category == ownership_api.limit_category.w);
+            assert(w.probe.calls == w.probe.deny_at && w.probe.denied_items == 1);
+            assert(mapped_work_failure(&w));
+        } else if (mode == 1) {
+            assert(refused.terminal.reason == ownership_api.incomplete_reason.missing_events);
+            assert(!refused.terminal.limit.present);
+            assert(w.probe.calls == w.probe.deny_at - 1 && w.events.len == 0);
+        } else {
+            assert(refused.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+            assert(!refused.terminal.limit.present);
+            assert(w.probe.calls == w.probe.deny_at && w.probe.denied_items == 1);
+            assert(mapped_event(&w, ownership_api.event_kind.incomplete_proof));
+            ownership_api.event_descriptor* event = ownership_events.at(&w.events, 0);
+            assert(event->reason == ownership_api.incomplete_reason.invalid_input);
+            assert(!event->limit.present);
+        }
+        ownership_state.free(&before);
+        work_close(&w);
+        round += 1;
+    }
+    println("dispatch refusals report one event");
 }
 
 fn places_of(ownership_local_env.env* e, ownership_api.place_path mut@ out) u64 {
@@ -1139,6 +1244,7 @@ fn main() i32 {
     leaf_rows_work(pair_type);
     kept_source_work(pair_type, view_type);
     transfer_refusals(pair_type);
+    dispatch_refusals(pair_type, owner_type);
     removal_order(owner_type);
     copied_rows();
     check_env.close(&checked);
