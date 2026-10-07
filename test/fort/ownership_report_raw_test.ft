@@ -1,0 +1,259 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| rendering ok
+//| interleaving ok
+//| document ok
+//| render refusal ok
+//| reasons ok
+//| unnamed ok
+//| budget error ok
+/// Checks how the report carries the raw analysis: its diagnostics in toolchain 4.2 order, its
+/// row and ledger in version 4, and the analysis order of reasons.
+import diag;
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import std.str;
+import std.strbuf;
+
+string WINDOW = "typed access exceeds its inherited window";
+// The same reason under "cannot prove": possible wording (toolchain 4.2).
+string WINDOW_MAYBE = "typed access window remains unproved";
+
+fn open_program(ownership_source_env.env mut* e, string@ lines) void {
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&text, lines[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    assert(ownership_source_env.prepare(e, strbuf.view(&text)));
+    ownership_source.analyze(&e->source);
+}
+
+string[9] MIXED = {
+    "fn mixed(bool c) u64 {",
+    "    u8 tag = 1;",
+    "    u8* mut r = null;",
+    "    if (c) { r = &tag; }",
+    "    u64* s = cast(r, u64*);",
+    "    u64 a = *s;",
+    "    u64* w = cast(&tag, u64*);",
+    "    return a +% *w;",
+    "}",
+};
+
+// A raw failure without a witness renders as "cannot prove", a validated one as an invalid
+// use. Each has the kernel reason as its note, and the closure reason follows them.
+fn rendering() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open_program(&e, MIXED[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.count(&found) == 3 && diag.record_count(&found) == 5);
+    assert(diag.record_at(&found, 0).msg ==
+        "cannot prove that 's' designates the accessed storage");
+    assert(diag.record_at(&found, 0).loc.line == 6);
+    assert(diag.record_at(&found, 1).msg == WINDOW_MAYBE);
+    assert(diag.record_at(&found, 2).msg == "invalid use of 'w'");
+    assert(diag.record_at(&found, 2).loc.line == 8);
+    assert(diag.record_at(&found, 3).msg == WINDOW);
+    assert(str.find(diag.record_at(&found, 4).msg, "ownership proof is incomplete") == 0);
+    println("rendering ok");
+}
+
+// Local and raw records of one body merge in source order. The local flow stops a path at its
+// first failure, so the local use of 'q' comes before the raw access through 'w'.
+fn interleaving() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    string[9] lines = {
+        "fn both() u64 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    del(p);",
+        "    u64 a = cast(*q, u64);",
+        "    u8 tag = 1;",
+        "    u64* w = cast(&tag, u64*);",
+        "    return a +% *w;",
+        "}",
+    };
+    open_program(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.count(&found) == 3 && diag.record_count(&found) == 5);
+    assert(diag.record_at(&found, 0).msg == "invalid use of 'q'");
+    assert(diag.record_at(&found, 0).loc.line == 5);
+    assert(diag.record_at(&found, 1).msg == "reference source is no longer live");
+    assert(diag.record_at(&found, 2).msg == "invalid use of 'w'");
+    assert(diag.record_at(&found, 2).loc.line == 8);
+    assert(diag.record_at(&found, 3).msg == WINDOW);
+    println("interleaving ok");
+}
+
+fn contains(strbuf.str_buf* out, string text) void {
+    if (str.find(strbuf.view(out), text) < 0) {
+        eprintln("missing: ", text);
+        assert(false);
+    }
+}
+
+// Version 4 integrates the raw analysis. Each verified body has one raw ledger with the FIR
+// size of its service ledger, and the totals count raw violations.
+fn document() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open_program(&e, MIXED[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "mixed");
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 0) == "complete");
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 1) == "complete");
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "violated");
+    assert(ownership_report.analysis_violations(row, ownership_report.RAW) == 1);
+    assert(ownership_report.body_violations(row) == 1);
+    assert(ownership_report.body_ownership(row) == "violated");
+    assert(ownership_report.integrated(ownership_report.RAW));
+    assert(!ownership_report.integrated(ownership_report.STORED_BORROWS));
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":4,");
+    contains(&out, "{\"name\":\"raw\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
+    contains(&out, "{\"name\":\"stored_borrows\",\"producer\":\"unavailable\"");
+    strbuf.str_buf mut expected = strbuf.create();
+    defer strbuf.free(&expected);
+    strbuf.append(&expected, "\"name\":\"raw\",\"owner\":{\"module\":");
+    contains(&out, strbuf.view(&expected));
+    strbuf.clear(&expected);
+    strbuf.append(&expected, "\"name\":\"raw\",\"correspondence\":\"complete\",");
+    strbuf.append(&expected, "\"solver\":\"complete\",\"proof\":\"violated\",\"violations\":1}");
+    contains(&out, strbuf.view(&expected));
+    assert(row->raw.fir_size == row->live.fir_size);
+    println("document ok");
+}
+
+// Rendering charges two V units for each record of the raw ledger. A refused charge keeps
+// one terminal error and stops the later records.
+fn render_refusal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open_program(&e, MIXED[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "mixed");
+    row->raw.meter.bounds.v = row->raw.meter.used.v + 3;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.count(&found) == 2 && diag.record_count(&found) == 3);
+    assert(diag.record_at(&found, 0).loc.line == 6);
+    assert(str.find(diag.record_at(&found, 2).msg,
+        "cannot prove complete ownership reporting within the report bound ") == 0);
+    assert(row->raw.first_refusal.terminal.reason ==
+        ownership_api.incomplete_reason.report_limit);
+    println("render refusal ok");
+}
+
+// The body reason follows analysis order. Stored borrows has no producer and comes before raw,
+// so a raw outcome never gives the reason while the earlier analyses complete.
+fn reasons() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    string[6] lines = {
+        "fn static_bytes() u64 {",
+        "    string s = \"ab\";",
+        "    char* p = s.ptr;",
+        "    u64* w = cast(p, u64*);",
+        "    return *w;",
+        "}",
+    };
+    open_program(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "static_bytes");
+    row->first_incomplete = ownership_api.proof_status{};
+    assert(ownership_report.analysis_status(row, ownership_report.LOCAL, 2) == "complete");
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "violated");
+    ownership_report.reason why = ownership_report.body_reason(row);
+    assert(why.present && why.stage == "stored_borrows" && why.code == "missing_producer");
+    assert(ownership_report.closure_status(&e.source, ownership_report.RAW) == "incomplete");
+    println("reasons ok");
+}
+
+// A reference with no source name renders as "a temporary value", without quotes, in both
+// forms of the record.
+fn unnamed() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    string[10] lines = {
+        "fn temporary() u64 {",
+        "    u8 tag = 1;",
+        "    return *cast(&tag, u64*);",
+        "}",
+        "fn temporary_unproved(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    u8* mut r = null;",
+        "    if (c) { r = &tag; }",
+        "    return *cast(r, u64*);",
+        "}",
+    };
+    open_program(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.record_count(&found) >= 4);
+    assert(diag.record_at(&found, 0).msg == "invalid use of a temporary value");
+    assert(diag.record_at(&found, 0).loc.line == 3);
+    assert(diag.record_at(&found, 1).msg == WINDOW);
+    assert(diag.record_at(&found, 2).msg ==
+        "cannot prove that a temporary value designates the accessed storage");
+    assert(diag.record_at(&found, 2).loc.line == 9);
+    assert(diag.record_at(&found, 3).msg == WINDOW_MAYBE);
+    println("unnamed ok");
+}
+
+// A W refusal of the raw ledger renders one budget error (fir.md 14.1).
+fn budget_error() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn wide() u64 {\n    u8 tag = 1;\n    u64* p = cast(&tag, u64*);\n    return *p;\n}\n"));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "wide");
+    row->raw.meter.bounds.w = 3;
+    ownership_source.analyze(&e.source);
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 0) == "complete");
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 1) == "incomplete");
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "incomplete");
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    bool mut seen = false;
+    u64 mut i = 0;
+    while (i < diag.record_count(&found)) {
+        if (diag.record_at(&found, i).msg ==
+            "ownership proof is incomplete (raw: work_limit; category W; used 3; bound 3)") {
+            seen = true;
+        }
+        i += 1;
+    }
+    assert(seen);
+    println("budget error ok");
+}
+
+fn main() i32 {
+    rendering();
+    interleaving();
+    document();
+    render_refusal();
+    reasons();
+    unnamed();
+    budget_error();
+    return 0;
+}

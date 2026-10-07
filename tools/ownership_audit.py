@@ -68,7 +68,7 @@ FAILURE_CODES = (
 U64_MAX = (1 << 64) - 1
 U32_MAX = (1 << 32) - 1
 LIMIT_VERSION = 2
-REPORT_VERSION = 3
+REPORT_VERSION = 4
 LIMIT_MEMBERS = ("version", "d", "r", "p", "g", "h", "t", "e", "w", "w_scale", "v")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -702,6 +702,7 @@ def validate_report(
     service_sizes = {}
     local_sizes = {}
     classification_sizes = {}
+    raw_sizes = {}
     for index, meter in enumerate(array(report["meters"], "meters")):
         obj(meter, ("id", "name", "owner", "fir_size", "counts", "first_refusal"), "meter")
         require(integer(meter["id"], "meter id") == index, "meters: IDs have gaps")
@@ -709,7 +710,7 @@ def validate_report(
         meter_bounds["w"] = work_bound(table, integer(meter["fir_size"], "meter FIR size"))
         choice(
             meter["name"],
-            ("graph_private", "services", "local", "local_classification"),
+            ("graph_private", "services", "local", "local_classification", "raw"),
             "meter name",
         )
         if meter["name"] == "graph_private":
@@ -734,6 +735,11 @@ def validate_report(
             require(owner_key is not None, "classification ledger: missing owner")
             require(owner_key not in classification_sizes, "classification ledger: duplicate owner")
             classification_sizes[owner_key] = meter["fir_size"]
+        elif meter["name"] == "raw":
+            # A raw ledger is the raw analysis of one body, beside its service ledger.
+            require(owner_key is not None, "raw ledger: missing owner")
+            require(owner_key not in raw_sizes, "raw ledger: duplicate owner")
+            raw_sizes[owner_key] = meter["fir_size"]
         elif meter["name"] == "services" and owner_key is not None:
             service_sizes[owner_key] = meter["fir_size"]
         count_keys = set()
@@ -782,6 +788,11 @@ def validate_report(
             local_sizes.get(owner_key) == size,
             "classification ledger: FIR size differs from the local ledger of its body",
         )
+    for owner_key, size in raw_sizes.items():
+        require(
+            service_sizes.get(owner_key) == size,
+            "raw ledger: FIR size differs from the service ledger of its body",
+        )
     # The graph build covers each verified body, and each verified body has one ledger.
     require(len(graph_sizes) <= 1, "meters: two graph ledgers")
     require(
@@ -805,6 +816,15 @@ def validate_report(
     require(
         set(local_sizes) == verified,
         "local ledger: each verified body needs exactly one local ledger",
+    )
+    # Version 4 integrates the raw analysis: each verified body has one raw ledger.
+    require(
+        analyses[ANALYSES.index("raw")]["producer"] == "integrated",
+        "raw analysis: producer is not integrated",
+    )
+    require(
+        set(raw_sizes) == verified,
+        "raw ledger: each verified body needs exactly one raw ledger",
     )
     if any(row["status"] == "incomplete" for row in analyses) or any(
         body["first_incomplete"] is not None for body in bodies

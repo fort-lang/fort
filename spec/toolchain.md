@@ -338,7 +338,7 @@ temporary directory for the intermediate IR file (D19.1).
 
 ### 1.1 Ownership coverage reports (D19.8)
 
-The compiler report is a JSON version 3 document. The audit attestation is a JSON version 1
+The compiler report is a JSON version 4 document. The audit attestation is a JSON version 1
 document.
 Neither document changes the diagnostic JSON of section 4.1.
 The compiler writes one report for one checked closure. The runner attests the invocation and bytes.
@@ -354,7 +354,7 @@ Count overflow gives report failure, not wrapped totals.
 | Member | Type and meaning |
 |---|---|
 | `kind` | String `fort-ownership-report`. |
-| `version` | Integer 3. Version 2 adds `limits.w_scale` and `fir_size`; version 3, local ledgers. |
+| `version` | Integer 4. Version 2 adds `limits.w_scale` and `fir_size`; 3, local ledgers; 4, raw. |
 | `complete` | Boolean true; the report is complete, not necessarily its proof. |
 | `compiler_version` | The string that --version identifies. |
 | `invocation` | Entry, working directory, arguments, target, configuration, and mode. |
@@ -421,6 +421,8 @@ The classification run is a computation of its own, with a `local_classification
 That ledger has the owner and the FIR size of the body's `local` ledger.
 A refusal there explains no failure: the body stays in the local scope with incomplete proof.
 The ledger keeps that refusal, and the compiler emits its budget error.
+The raw increment adds one `raw` ledger for each verified body: its raw computation.
+A `raw` ledger has an owner. Its FIR size equals the FIR size of that body's service ledger.
 The graph FIR size is the sum of the service ledgers only.
 Graph construction uses the graph's retained private W ledger.
 Service dispatch, liveness, and the target queries of one body charge that body's service ledger.
