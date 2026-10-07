@@ -1,0 +1,553 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ranges ok
+//| reconstruction ok
+//| spans ok
+//| precision ok
+//| huge bounds ok
+//| huge types ok
+//| sized values ok
+/// Holds the raw verdicts of raw ranges, integer reconstruction and span elements.
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+// A raw range of a pointer needs 0 <= lo <= hi and its bytes inside each window.
+// A bound with a symbolic value takes the range of its type.
+fn ranges() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[59] lines = {
+        "extern fn shared_bytes() u8*;",
+        "fn in_window() u8 {",
+        "    u8[8] mut bytes = {1, 2, 3, 4, 5, 6, 7, 8};",
+        "    u8* p = cast(&bytes, u8*);",
+        "    u8@ s = p[2..6];",
+        "    return s[0];",
+        "}",
+        "fn past_window() u8 {",
+        "    u8[4] mut bytes = {1, 2, 3, 4};",
+        "    u8* p = cast(&bytes, u8*);",
+        "    u8@ s = p[0..8];",
+        "    return 0;",
+        "}",
+        "fn negative_lower() u8 {",
+        "    u8[4] mut bytes = {1, 2, 3, 4};",
+        "    u8* p = cast(&bytes, u8*);",
+        "    i32 lower = -1;",
+        "    u8@ s = p[lower..2];",
+        "    return 0;",
+        "}",
+        "fn reversed() u8 {",
+        "    u8[4] mut bytes = {1, 2, 3, 4};",
+        "    u8* p = cast(&bytes, u8*);",
+        "    u8@ s = p[3..1];",
+        "    return 0;",
+        "}",
+        "fn byte_bound(u8 n) u64 {",
+        "    u8[256] mut bytes = {};",
+        "    u8* p = cast(&bytes, u8*);",
+        "    u8@ s = p[0..n];",
+        "    return s.len;",
+        "}",
+        "fn wide_bound(u64 n) u64 {",
+        "    u8[4] mut bytes = {1, 2, 3, 4};",
+        "    u8* p = cast(&bytes, u8*);",
+        "    u8@ s = p[0..n];",
+        "    return s.len;",
+        "}",
+        "fn through_parameter(u8* p) u8 {",
+        "    u8@ s = p[0..4];",
+        "    return s[0];",
+        "}",
+        "fn foreign_range() u8 {",
+        "    u8* p = shared_bytes();",
+        "    u8@ s = p[0..100];",
+        "    return s[99];",
+        "}",
+        "fn element_stride() i32 {",
+        "    i32[4] mut words = {1, 2, 3, 4};",
+        "    i32* p = cast(&words, i32*);",
+        "    i32@ s = p[1..4];",
+        "    return s[2];",
+        "}",
+        "fn past_stride() i32 {",
+        "    i32[4] mut words = {1, 2, 3, 4};",
+        "    i32* p = cast(&words, i32*);",
+        "    i32@ s = p[1..5];",
+        "    return 0;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "in_window");
+    ownership_raw_source_env.counts(&c, "in_window", 0, 1, 1, 1, 0, 0);
+    ownership_raw_source_env.violation(&c, "past_window", "p",
+        "raw range exceeds proved storage", 11);
+    ownership_raw_source_env.violation(&c, "negative_lower", "p",
+        "raw range bounds remain unproved", 18);
+    ownership_raw_source_env.violation(&c, "reversed", "p",
+        "raw range bounds remain unproved", 24);
+    ownership_raw_source_env.proved(&c, "byte_bound");
+    ownership_raw_source_env.unproved(&c, "wide_bound",
+        "raw range storage remains unproved", 36);
+    ownership_raw_source_env.outside(&c, "through_parameter",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.proved(&c, "foreign_range");
+    ownership_raw_source_env.counts(&c, "foreign_range", 0, 1, 1, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "element_stride");
+    ownership_raw_source_env.violation(&c, "past_stride", "p",
+        "raw range exceeds proved storage", 57);
+    ownership_raw_source_env.report(&c, "ranges");
+}
+
+// Integer reconstruction supplies no source, even after an exact round trip (D17.17).
+// The cast alone is legal. An access through it fails on each path, in any scope.
+fn reconstruction() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[47] lines = {
+        "fn exact_round_trip() i32 {",
+        "    i32 x = 5;",
+        "    i32* p = &x;",
+        "    u64 bits = cast(p, u64);",
+        "    i32* q = cast(bits, i32*);",
+        "    return *q;",
+        "}",
+        "fn changed_bits() u8 {",
+        "    u8 x = 5;",
+        "    u64 bits = cast(&x, u64) +% 1;",
+        "    u8* q = cast(bits, u8*);",
+        "    return *q;",
+        "}",
+        "fn arbitrary_bits(u64 bits) u8 {",
+        "    u8* q = cast(bits, u8*);",
+        "    return *q;",
+        "}",
+        "fn constant_address() u8 {",
+        "    u8* q = cast(cast(4096, u64), u8*);",
+        "    return *q;",
+        "}",
+        "fn one_path(bool c) u8 {",
+        "    u8 x = 1;",
+        "    u8* mut p = &x;",
+        "    if (c) { p = cast(cast(&x, u64), u8*); }",
+        "    return *p;",
+        "}",
+        "fn beside_a_gap(u8* param) u8 {",
+        "    u8* q = cast(cast(param, u64), u8*);",
+        "    u8 a = *param;",
+        "    return *q +% a;",
+        "}",
+        "fn reconstructed_range(u64 bits) u8 {",
+        "    u8* q = cast(bits, u8*);",
+        "    u8@ s = q[0..1];",
+        "    return s[0];",
+        "}",
+        "fn cast_alone(u64 bits) u64 {",
+        "    u8* q = cast(bits, u8*);",
+        "    return cast(q, u64);",
+        "}",
+        "fn void_round_trip() i32 {",
+        "    i32 x = 4;",
+        "    void* v = cast(&x, void*);",
+        "    i32* p = cast(v, i32*);",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "exact_round_trip", "q",
+        "raw access needs a proved original source", 6);
+    ownership_raw_source_env.counts(&c, "exact_round_trip", 1, 0, 1, 0, 0, 1);
+    ownership_raw_source_env.violation(&c, "changed_bits", "q",
+        "raw access needs a proved original source", 12);
+    ownership_raw_source_env.violation(&c, "arbitrary_bits", "q",
+        "raw access needs a proved original source", 16);
+    ownership_raw_source_env.violation(&c, "constant_address", "q",
+        "raw access needs a proved original source", 20);
+    ownership_raw_source_env.unproved(&c, "one_path",
+        "raw access needs a proved original source", 26);
+    ownership_raw_source_env.outside(&c, "beside_a_gap",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.violation(&c, "beside_a_gap", "q",
+        "raw access needs a proved original source", 31);
+    ownership_raw_source_env.violated(&c, "reconstructed_range", 2, "q",
+        "raw access needs a proved original source");
+    ownership_raw_source_env.proved(&c, "cast_alone");
+    ownership_raw_source_env.counts(&c, "cast_alone", 0, 0, 0, 0, 0, 1);
+    ownership_raw_source_env.proved(&c, "void_round_trip");
+    ownership_raw_source_env.counts(&c, "void_round_trip", 1, 0, 1, 2, 0, 0);
+    ownership_raw_source_env.report(&c, "reconstruction");
+}
+
+// An index of a span local needs a coherent header and an aligned element. The bounds
+// check stays. An empty view and an end pointer permit no element access (D17.17). A slice
+// past an empty header traps, so its value is no longer empty. A constant slice of an
+// allocation of symbolic length keeps its bound below that length: the span check traps
+// past it, and the kernel keeps that fact as a relation.
+fn spans() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[87] lines = {
+        "fn empty_view() u64 {",
+        "    u8 mut@ own bytes = new(u8, 4);",
+        "    u8@ empty = bytes[4..4];",
+        "    u64 n = empty.len;",
+        "    del(bytes);",
+        "    return n;",
+        "}",
+        "fn end_pointer() u8 {",
+        "    u8 mut@ own bytes = new(u8, 4);",
+        "    defer del(bytes);",
+        "    u8* tail = bytes[4..4].ptr;",
+        "    return *tail;",
+        "}",
+        "fn zero_elements() u8 {",
+        "    u8 mut@ own z = new(u8, 0);",
+        "    defer del(z);",
+        "    u8* p = z.ptr;",
+        "    return *p;",
+        "}",
+        "fn symbolic_allocation(u64 n) u8 {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    defer del(s);",
+        "    u8* p = s.ptr;",
+        "    return *p;",
+        "}",
+        "fn coherent_index() u8 {",
+        "    u8 mut@ own s = new(u8, 4);",
+        "    defer del(s);",
+        "    return s[1];",
+        "}",
+        "fn string_index() char {",
+        "    string s = \"abc\";",
+        "    return s[1];",
+        "}",
+        "fn parameter_span(u8@ s) u8 { return s[0]; }",
+        "fn misaligned_access() u32 {",
+        "    i32[2] mut words = {1, 2};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ view = b[1..5];",
+        "    u32* w = cast(view.ptr, u32*);",
+        "    return *w;",
+        "}",
+        "fn misaligned_elements() u32 {",
+        "    i32[2] mut words = {1, 2};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ view = b[1..5];",
+        "    u32* w = cast(view.ptr, u32*);",
+        "    u32@ s = w[0..1];",
+        "    return s[0];",
+        "}",
+        "fn aligned_elements() u32 {",
+        "    i32[2] mut words = {1, 2};",
+        "    u32* w = cast(&words, u32*);",
+        "    u32@ s = w[0..2];",
+        "    return s[1];",
+        "}",
+        "fn symbolic_slice(u64 n) u8 {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    defer del(s);",
+        "    u8@ head = s[0..4];",
+        "    u8* p = head.ptr;",
+        "    return *p;",
+        "}",
+        "fn symbolic_slice_past(u64 n) u64 {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    defer del(s);",
+        "    u8@ head = s[0..4];",
+        "    u8* p = head.ptr;",
+        "    u8@ more = p[0..5];",
+        "    return more.len;",
+        "}",
+        "fn symbolic_slice_words(u64 n) u32 {",
+        "    u32 mut@ own s = new(u32, n);",
+        "    defer del(s);",
+        "    u32@ middle = s[1..3];",
+        "    u32* p = middle.ptr;",
+        "    return *p;",
+        "}",
+        "extern fn tick() void;",
+        "fn maybe_empty(bool c) u8 {",
+        "    u8[4] mut bytes = {1, 2, 3, 4};",
+        "    u8@ one = bytes[0..1];",
+        "    u8@ mut s = {};",
+        "    if (c) { s = one; } else { tick(); }",
+        "    u8* p = s[1..1].ptr;",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "empty_view");
+    ownership_raw_source_env.violation(&c, "end_pointer", "tail",
+        "typed access exceeds its inherited window", 12);
+    ownership_raw_source_env.violation(&c, "zero_elements", "p",
+        "typed access exceeds its inherited window", 18);
+    ownership_raw_source_env.unproved(&c, "symbolic_allocation",
+        "typed access window remains unproved", 24);
+    ownership_raw_source_env.proved(&c, "coherent_index");
+    ownership_raw_source_env.proved(&c, "string_index");
+    ownership_raw_source_env.counts(&c, "string_index", 0, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.outside(&c, "parameter_span",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.violation(&c, "misaligned_access", "w",
+        "typed access alignment remains unproved", 41);
+    ownership_raw_source_env.violation(&c, "misaligned_elements", "s",
+        "element alignment remains unproved", 49);
+    ownership_raw_source_env.proved(&c, "aligned_elements");
+    ownership_raw_source_env.proved(&c, "symbolic_slice");
+    ownership_raw_source_env.unproved(&c, "symbolic_slice_past",
+        "raw range storage remains unproved", 69);
+    ownership_raw_source_env.proved(&c, "symbolic_slice_words");
+    ownership_raw_source_env.violation(&c, "maybe_empty", "p",
+        "typed access exceeds its inherited window", 86);
+    ownership_raw_source_env.report(&c, "spans");
+}
+
+// A symbolic bound of a checked slice, or a variable index of an address through a
+// pointer, needs a relation to a length that no window keeps: the value is unknown.
+fn precision() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[31] lines = {
+        "fn symbolic_array_slice(u64 n) u8 {",
+        "    u8[4] mut a = {1, 2, 3, 4};",
+        "    u8@ s = a[0..n];",
+        "    u8* p = s.ptr;",
+        "    return *p;",
+        "}",
+        "fn symbolic_span_slice(u64 n) u8 {",
+        "    u8 mut@ own b = new(u8, 4);",
+        "    defer del(b);",
+        "    u8@ s = b[0..n];",
+        "    u8* p = s.ptr;",
+        "    return *p;",
+        "}",
+        "fn symbolic_slice_through_pointer(u64 n) u8 {",
+        "    u8[4] mut a = {1, 2, 3, 4};",
+        "    u8[4]* q = &a;",
+        "    u8@ s = (*q)[0..n];",
+        "    return s[0];",
+        "}",
+        "fn variable_element_address(u64 i) u8 {",
+        "    u8[4] mut a = {1, 2, 3, 4};",
+        "    u8[4]* q = &a;",
+        "    u8* e = &(*q)[i];",
+        "    return *e;",
+        "}",
+        "fn constant_slice() u8 {",
+        "    u8[4] mut a = {1, 2, 3, 4};",
+        "    u8@ s = a[1..3];",
+        "    u8* p = s.ptr;",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "symbolic_array_slice",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.outside(&c, "symbolic_span_slice",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.outside(&c, "symbolic_slice_through_pointer",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.outside(&c, "variable_element_address",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.proved(&c, "constant_slice");
+    ownership_raw_source_env.counts(&c, "constant_slice", 1, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.report(&c, "precision");
+}
+
+// A window bound comes from a program value and can be near 2^64 - 1. The checks add it to an
+// offset and a size in exact arithmetic: no u64 sum wraps, so the compiler reports each range
+// and each access past the window and does not stop.
+fn huge_bounds() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[60] lines = {
+        "fn huge_range() u64 {",
+        "    u64[2] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[8..16];",
+        "    u8* p = w.ptr;",
+        "    u64 big = 18446744073709551615;",
+        "    u8@ x = p[0..big];",
+        "    return x.len;",
+        "}",
+        "fn huge_begin() u32 {",
+        "    u64[2] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[8..16];",
+        "    u8* p = w.ptr;",
+        "    u64 big = 18446744073709551607;",
+        "    u8@ x = p[big..big];",
+        "    u32* q = cast(x.ptr, u32*);",
+        "    return *q;",
+        "}",
+        "fn huge_write() void {",
+        "    u64[2] mut words = {};",
+        "    u8 mut* b = cast(&words, u8 mut*);",
+        "    u8 mut@ w = b[8..16];",
+        "    u8 mut* p = w.ptr;",
+        "    u64 big = 18446744073709551607;",
+        "    u8 mut@ x = p[big..big];",
+        "    u32 mut* q = cast(x.ptr, u32 mut*);",
+        "    *q = 1;",
+        "}",
+        "fn huge_field(u64 n) u64 {",
+        "    u64[2] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[8..16];",
+        "    u8* p = w.ptr;",
+        "    u64 big = 18446744073709551607;",
+        "    u8@ x = p[big..big];",
+        "    u64[2]* q = cast(x.ptr, u64[2]*);",
+        "    return (*q)[1];",
+        "}",
+        "struct wide2 { u64 a; u64 b; }",
+        "fn huge_field_write() void {",
+        "    u64[2] mut words = {};",
+        "    u8 mut* b = cast(&words, u8 mut*);",
+        "    u8 mut@ w = b[8..16];",
+        "    u8 mut* p = w.ptr;",
+        "    u64 big = 18446744073709551607;",
+        "    u8 mut@ x = p[big..big];",
+        "    wide2 mut* q = cast(x.ptr, wide2 mut*);",
+        "    q->b = 1;",
+        "}",
+        "fn huge_past(u64 n) u64 {",
+        "    u64[2] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[8..16];",
+        "    u8* p = w.ptr;",
+        "    u64 big = 18446744073709551615;",
+        "    u8@ x = p[big..big];",
+        "    u64[2]* q = cast(x.ptr, u64[2]*);",
+        "    return (*q)[1];",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "huge_range", "p",
+        "raw range exceeds proved storage", 7);
+    ownership_raw_source_env.violated(&c, "huge_begin", 2, "p",
+        "raw range exceeds proved storage");
+    ownership_raw_source_env.violated(&c, "huge_write", 2, "p",
+        "raw range exceeds proved storage");
+    ownership_raw_source_env.violated(&c, "huge_field", 2, "p",
+        "raw range exceeds proved storage");
+    // 8 + (2^64 - 1) fits no window: the range fails, and its result names no window.
+    ownership_raw_source_env.violated(&c, "huge_past", 1, "p",
+        "raw range exceeds proved storage");
+    ownership_raw_source_env.outside(&c, "huge_past", ownership_source_raw.missing.unknown_origin);
+    // The written field starts 8 bytes past 2^64 - 1: no u64 holds its start.
+    ownership_raw_source_env.violated(&c, "huge_field_write", 2, "p",
+        "raw range exceeds proved storage");
+    ownership_raw_source_env.report(&c, "huge bounds");
+}
+
+// A pointed-to type of TYPE_MAX_SIZE bytes, the largest that the checker accepts, has a
+// size: a region at an offset near 2^63 keeps its window, and a region past it fails
+// exactly. A constant allocation above I64_MAX bytes never succeeds, so a bounded value
+// stands for its length.
+fn huge_types() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[45] lines = {
+        "fn sized_stride() u16 {",
+        "    u64[2] words = {};",
+        "    u16[2][8]* p = cast(&words, u16[2][8]*);",
+        "    return (*p)[1][0];",
+        "}",
+        "fn at_max_fits() u8 {",
+        "    u64[2] words = {};",
+        "    u8[9223372036854775807]* p = cast(&words, u8[9223372036854775807]*);",
+        "    return (*p)[15];",
+        "}",
+        "fn at_max_past() u8 {",
+        "    u64[2] words = {};",
+        "    u8[9223372036854775807]* p = cast(&words, u8[9223372036854775807]*);",
+        "    return (*p)[9223372036854775806];",
+        "}",
+        "fn at_max_range() u64 {",
+        "    u64[2] words = {};",
+        "    u8[9223372036854775807]* p = cast(&words, u8[9223372036854775807]*);",
+        "    u8[9223372036854775807]@ s = p[0..1];",
+        "    return s.len;",
+        "}",
+        "fn alloc_imax() u8 {",
+        "    u64 n = 9223372036854775807;",
+        "    u8@ own s = new(u8, n);",
+        "    u8* p = s.ptr;",
+        "    u8 x = *p;",
+        "    del(s);",
+        "    return x;",
+        "}",
+        "fn alloc_imax_plus_one() u8 {",
+        "    u64 n = 9223372036854775808;",
+        "    u8@ own s = new(u8, n);",
+        "    u8* p = s.ptr;",
+        "    u8 x = *p;",
+        "    del(s);",
+        "    return x;",
+        "}",
+        "fn alloc_words_over() u64 {",
+        "    u64 n = 1152921504606846977;",
+        "    u64@ own s = new(u64, n);",
+        "    u64* p = s.ptr;",
+        "    u64 x = *p;",
+        "    del(s);",
+        "    return x;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "sized_stride", "p",
+        "typed access exceeds its inherited window", 4);
+    ownership_raw_source_env.proved(&c, "at_max_fits");
+    ownership_raw_source_env.violation(&c, "at_max_past", "p",
+        "typed access exceeds its inherited window", 14);
+    ownership_raw_source_env.violation(&c, "at_max_range", "p",
+        "raw range exceeds proved storage", 19);
+    ownership_raw_source_env.proved(&c, "alloc_imax");
+    ownership_raw_source_env.unproved(&c, "alloc_imax_plus_one",
+        "typed access window remains unproved", 34);
+    ownership_raw_source_env.unproved(&c, "alloc_words_over",
+        "typed access window remains unproved", 42);
+    ownership_raw_source_env.report(&c, "huge types");
+}
+
+// A window with a symbolic end skips the extent test, so the alignment test decides an
+// offset near 2^63 alone: an odd residue there fails exactly. A null value is the local
+// analysis's, so raw passes an access through it.
+fn sized_values() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[12] lines = {
+        "fn offset_near_max(u64 m) u16 {",
+        "    u64[4] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[5..m];",
+        "    u8* c = w.ptr;",
+        "    u16[4611686018427387903]* p = cast(c, u16[4611686018427387903]*);",
+        "    return (*p)[4611686018427387902];",
+        "}",
+        "fn null_access_small() u16 {",
+        "    u16[2][8]* p = null;",
+        "    return (*p)[1][0];",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "offset_near_max", "p",
+        "typed access alignment remains unproved", 7);
+    ownership_raw_source_env.first_unproved(&c, "offset_near_max",
+        "raw range bounds remain unproved", 4);
+    ownership_raw_source_env.proved(&c, "null_access_small");
+    ownership_raw_source_env.report(&c, "sized values");
+}
+
+fn main() i32 {
+    ranges();
+    reconstruction();
+    spans();
+    precision();
+    huge_bounds();
+    huge_types();
+    sized_values();
+    return 0;
+}

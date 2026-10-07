@@ -1,0 +1,188 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| layouts ok
+/// Holds the byte writes of the raw analysis over each kind of layout leaf.
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+// A byte write overlaps the original layout over its range only: `nested` holds 32 bytes,
+// and `inner.p` holds bytes 24 to 31. A write into a scalar or
+// into padding has no representation effect. A write over a borrowed reference leaf counts;
+// one over an owning leaf leaves the declared scope (no fact proves the old owner empty).
+// The overwrite check of a typed owner write reads the old owner: two accesses.
+fn layouts() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[122] lines = {
+        "struct pair { i32 a; i64 b; u8* p; }",
+        "struct owner_box { i32 mut* own p; }",
+        "struct nested { u8 tag; pair inner; }",
+        "struct holders { u8*[3] refs; }",
+        "struct owners { u64 count; i32 mut* own[2] items; }",
+        "struct viewer { u32 n; u8@ view; }",
+        "struct padded { u8 small; u64 big; }",
+        "fn nested_tag() void {",
+        "    nested mut o = nested{1, pair{2, 3, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[0..1];",
+        "    v[0] = 1;",
+        "}",
+        "fn nested_padding() void {",
+        "    nested mut o = nested{1, pair{2, 3, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[1..2];",
+        "    v[0] = 1;",
+        "}",
+        "fn nested_reference() void {",
+        "    nested mut o = nested{1, pair{2, 3, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[25..26];",
+        "    v[0] = 1;",
+        "}",
+        "fn nested_past() void {",
+        "    nested mut o = nested{1, pair{2, 3, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[32..33];",
+        "    v[0] = 1;",
+        "}",
+        "fn holders_middle() void {",
+        "    holders mut o = holders{{null, null, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[9..10];",
+        "    v[0] = 1;",
+        "}",
+        "fn owners_count() void {",
+        "    owners mut o = owners{0, {null, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[0..1];",
+        "    v[0] = 1;",
+        "}",
+        "fn owners_item() void {",
+        "    owners mut o = owners{0, {null, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[8..9];",
+        "    v[0] = 1;",
+        "}",
+        "fn owners_last_byte() void {",
+        "    owners mut o = owners{0, {null, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[23..24];",
+        "    v[0] = 1;",
+        "}",
+        "fn viewer_count() void {",
+        "    viewer mut o = viewer{1, {}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[0..1];",
+        "    v[0] = 1;",
+        "}",
+        "fn viewer_length() void {",
+        "    viewer mut o = viewer{1, {}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[16..17];",
+        "    v[0] = 1;",
+        "}",
+        "fn padded_small() void {",
+        "    padded mut o = padded{1, 2};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[0..1];",
+        "    v[0] = 1;",
+        "}",
+        "fn padded_gap() void {",
+        "    padded mut o = padded{1, 2};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[3..4];",
+        "    v[0] = 1;",
+        "}",
+        "fn whole_window_owner() void {",
+        "    owners mut o = owners{0, {null, null}};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[0..24];",
+        "    v[0] = 1;",
+        "}",
+        "fn typed_reference() void {",
+        "    holders mut o = holders{{null, null, null}};",
+        "    u8 x = 1;",
+        "    holders mut* q = &o;",
+        "    q->refs[1] = &x;",
+        "}",
+        "fn typed_pair() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    pair mut* q = &s;",
+        "    *q = pair{3, 4, null};",
+        "}",
+        "fn words_over_pair() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    u64 mut* w = cast(&s, u64 mut*);",
+        "    u64 mut@ words = w[0..3];",
+        "    words[2] = 0;",
+        "}",
+        "fn word_over_scalars() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    u64 mut* w = cast(&s, u64 mut*);",
+        "    *w = 0;",
+        "}",
+        "fn word_over_reference() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    u64 mut* w = cast(&s.p, u64 mut*);",
+        "    *w = 0;",
+        "}",
+        "fn typed_owner_write() void {",
+        "    owner_box mut o = owner_box{null};",
+        "    owner_box mut* q = &o;",
+        "    q->p = null;",
+        "}",
+        "fn byte_over_owner_field() void {",
+        "    owner_box mut o = owner_box{null};",
+        "    u8 mut* b = cast(&o.p, u8 mut*);",
+        "    *b = 0;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "nested_tag");
+    ownership_raw_source_env.counts(&c, "nested_tag", 0, 1, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "nested_padding");
+    ownership_raw_source_env.counts(&c, "nested_padding", 0, 1, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "nested_reference");
+    ownership_raw_source_env.counts(&c, "nested_reference", 0, 1, 1, 1, 1, 0);
+    ownership_raw_source_env.violation(&c, "nested_past", "b",
+        "raw range exceeds proved storage", 29);
+    ownership_raw_source_env.proved(&c, "holders_middle");
+    ownership_raw_source_env.counts(&c, "holders_middle", 0, 1, 1, 1, 1, 0);
+    ownership_raw_source_env.proved(&c, "owners_count");
+    ownership_raw_source_env.counts(&c, "owners_count", 0, 1, 1, 1, 0, 0);
+    ownership_raw_source_env.outside(&c, "owners_item",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.outside(&c, "owners_last_byte",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.proved(&c, "viewer_count");
+    ownership_raw_source_env.counts(&c, "viewer_count", 0, 1, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "viewer_length");
+    ownership_raw_source_env.counts(&c, "viewer_length", 0, 1, 1, 1, 1, 0);
+    ownership_raw_source_env.proved(&c, "padded_small");
+    ownership_raw_source_env.counts(&c, "padded_small", 0, 1, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "padded_gap");
+    ownership_raw_source_env.counts(&c, "padded_gap", 0, 1, 1, 1, 0, 0);
+    ownership_raw_source_env.outside(&c, "whole_window_owner",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.proved(&c, "typed_reference");
+    ownership_raw_source_env.counts(&c, "typed_reference", 1, 0, 2, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "typed_pair");
+    ownership_raw_source_env.counts(&c, "typed_pair", 1, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "words_over_pair");
+    ownership_raw_source_env.counts(&c, "words_over_pair", 0, 1, 1, 1, 1, 0);
+    ownership_raw_source_env.proved(&c, "word_over_scalars");
+    ownership_raw_source_env.counts(&c, "word_over_scalars", 1, 0, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "word_over_reference");
+    ownership_raw_source_env.counts(&c, "word_over_reference", 1, 0, 1, 1, 1, 0);
+    ownership_raw_source_env.proved(&c, "typed_owner_write");
+    ownership_raw_source_env.counts(&c, "typed_owner_write", 2, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.outside(&c, "byte_over_owner_field",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.report(&c, "layouts");
+}
+
+fn main() i32 {
+    layouts();
+    return 0;
+}

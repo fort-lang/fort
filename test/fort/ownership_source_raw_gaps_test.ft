@@ -1,0 +1,180 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| callers ok
+//| storage ok
+//| calls ok
+/// Holds the raw gaps: the facts that other analyses own leave the declared raw scope.
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+// A window that a parameter carries comes from the caller: a call summary owns that fact.
+// Each form that reads a parameter, directly or through its storage, is a caller gap.
+fn callers() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[31] lines = {
+        "struct pair { i32 a; i64 b; u8* p; }",
+        "struct holder { u8* p; u8@ view; }",
+        "fn pointer(u32* p) u32 { return *p; }",
+        "fn double_pointer(u32** pp) u32 { return **pp; }",
+        "fn span_index(u8@ s) u8 { return s[0]; }",
+        "fn string_index(string s) char { return s[1]; }",
+        "fn void_view(void* v) u32 {",
+        "    u32* p = cast(v, u32*);",
+        "    return *p;",
+        "}",
+        "fn by_value_pointer(holder h) u8 { return *h.p; }",
+        "fn by_value_span(holder h) u8 { return h.view[0]; }",
+        "fn field_address(pair* p) u8 {",
+        "    u8** q = &p->p;",
+        "    return 0;",
+        "}",
+        "fn raw_range(u8* p, u64 n) u64 {",
+        "    u8@ s = p[0..n];",
+        "    return s.len;",
+        "}",
+        "fn copied_parameter(u32* p) u32 {",
+        "    u32* q = p;",
+        "    u32* r = q;",
+        "    return *r;",
+        "}",
+        "fn unused_parameter(u32* p) u32 {",
+        "    u32 x = 1;",
+        "    u32* q = &x;",
+        "    return *q;",
+        "}",
+        "fn length_only(u8@ s) u64 { return s.len; }",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "pointer",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "double_pointer",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "span_index",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "string_index",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "void_view",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "by_value_pointer",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "by_value_span",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "field_address",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "raw_range",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "copied_parameter",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.proved(&c, "unused_parameter");
+    ownership_raw_source_env.proved(&c, "length_only");
+    ownership_raw_source_env.counts(&c, "length_only", 0, 0, 0, 0, 0, 0);
+    ownership_raw_source_env.report(&c, "callers");
+}
+
+// A reference that the body loads from storage carries a fact of the stored-borrow
+// analysis: a field, an element, a global, a dereference, or a local whose address is taken.
+fn storage() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[33] lines = {
+        "struct holder { u8* p; u8@ view; }",
+        "u8* mut shared = null;",
+        "u8@ mut shared_view = {};",
+        "fn global_pointer() u8 { return *shared; }",
+        "fn global_span() u8 { return shared_view[0]; }",
+        "fn local_field() u8 {",
+        "    u8 x = 1;",
+        "    holder h = holder{&x, {}};",
+        "    return *h.p;",
+        "}",
+        "fn local_field_span() u8 {",
+        "    u8[2] mut bytes = {1, 2};",
+        "    holder h = holder{null, bytes[..]};",
+        "    return h.view[1];",
+        "}",
+        "fn loaded_through_pointer() u8 {",
+        "    u8 x = 1;",
+        "    holder h = holder{&x, {}};",
+        "    holder* q = &h;",
+        "    return *q->p;",
+        "}",
+        "fn element_pointer() u8 {",
+        "    u8 x = 1;",
+        "    u8*[2] refs = {&x, &x};",
+        "    u8* p = refs[1];",
+        "    return *p;",
+        "}",
+        "fn taken_pointer() u8 {",
+        "    u8 x = 1;",
+        "    u8* p = &x;",
+        "    u8** pp = &p;",
+        "    return **pp;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "global_pointer",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "global_span",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "local_field",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "local_field_span",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "loaded_through_pointer",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "element_pointer",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "taken_pointer",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.report(&c, "storage");
+}
+
+// A fort call result carries a fact of the call summary. A call through a function value
+// is a fort call too. An extern result is trusted instead (D17.13).
+fn calls() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[23] lines = {
+        "fn make(u32* p) u32* { return p; }",
+        "extern fn external(u32* p) u32*;",
+        "fn through_fort_call() u32 {",
+        "    u32 x = 1;",
+        "    u32* p = make(&x);",
+        "    return *p;",
+        "}",
+        "fn through_value(fn (u32*) u32* f) u32 {",
+        "    u32 x = 1;",
+        "    u32* p = f(&x);",
+        "    return *p;",
+        "}",
+        "fn through_extern_call() u32 {",
+        "    u32 x = 1;",
+        "    u32* p = external(&x);",
+        "    return *p;",
+        "}",
+        "fn call_then_local() u32 {",
+        "    u32 x = 1;",
+        "    u32* mut p = make(&x);",
+        "    p = &x;",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "through_fort_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "through_value",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.proved(&c, "through_extern_call");
+    ownership_raw_source_env.counts(&c, "through_extern_call", 1, 0, 2, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "call_then_local");
+    ownership_raw_source_env.report(&c, "calls");
+}
+
+fn main() i32 {
+    callers();
+    storage();
+    calls();
+    return 0;
+}

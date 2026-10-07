@@ -1,0 +1,982 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| derivation pass ok
+//| derivation window ok
+//| derivation align ok
+//| derivation inexact ok
+//| derivation foreign ok
+//| derivation recon ok
+//| derivation none ok
+//| derivation caller ok
+//| derivation stored ok
+//| derivation call ok
+//| derivation unknown ok
+/// Holds the raw verdict of a field address through each value class, alone and
+/// joined with each other class on a second path (D17.17, D17.18).
+///
+/// The classes: `pass` is a window that holds the operation; `window` is a constant
+/// window that it exceeds; `align` is a window whose start no aligned base repairs;
+/// `inexact` is a window whose symbolic end can be too short; `foreign` is an extern
+/// result (D17.13); `recon` is an integer cast (D17.17); `none` is null, which the local
+/// analysis owns. `caller`, `stored`, `call` and `unknown` are gaps: other analyses own
+/// their facts, so the body leaves the declared raw scope with the first of them.
+/// A failure is a violation only when each value fails exactly; any other failure is
+/// incomplete proof at the operation.
+/// A derivation checks the window, not the alignment, so `align` holds it. Null has
+/// no window, so a derivation through it fails (memory model 2.8.1).
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+fn derivation_pass() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[122] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_pass() u64 {",
+        "    pair whole = pair{1, 2};",
+        "    pair* mut p = null;",
+        "    p = &whole;",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_window(bool c) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    u8 tag = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        p = cast(&tag, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_align(bool c) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_inexact(bool c, u8 n) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_foreign(bool c) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_recon(bool c, u64 bits) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        p = cast(bits, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_none(bool c) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        p = null;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_caller(bool c, pair* q) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        p = q;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_stored(bool c) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_call(bool c) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_pass_unknown(bool c, u64 k) u64 {",
+        "    pair whole = pair{1, 2};",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = &whole;",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "m_pass");
+    ownership_raw_source_env.unproved_at(&c, "m_pass_window", 20);
+    ownership_raw_source_env.proved(&c, "m_pass_align");
+    ownership_raw_source_env.unproved_at(&c, "m_pass_inexact", 46);
+    ownership_raw_source_env.proved(&c, "m_pass_foreign");
+    ownership_raw_source_env.unproved_at(&c, "m_pass_recon", 66);
+    ownership_raw_source_env.unproved_at(&c, "m_pass_none", 76);
+    ownership_raw_source_env.outside(&c, "m_pass_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_pass_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_pass_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_pass_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation pass");
+}
+
+fn derivation_window() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[111] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_window() u64 {",
+        "    u8 tag = 1;",
+        "    pair* mut p = null;",
+        "    p = cast(&tag, pair*);",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_align(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_inexact(bool c, u8 n) u64 {",
+        "    u8 tag = 1;",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_foreign(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_recon(bool c, u64 bits) u64 {",
+        "    u8 tag = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        p = cast(bits, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_none(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        p = null;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_caller(bool c, pair* q) u64 {",
+        "    u8 tag = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        p = q;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_stored(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_call(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_window_unknown(bool c, u64 k) u64 {",
+        "    u8 tag = 1;",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(&tag, pair*);",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violated_at(&c, "m_window", "p", 9);
+    ownership_raw_source_env.unproved_at(&c, "m_window_align", 22);
+    ownership_raw_source_env.unproved_at(&c, "m_window_inexact", 35);
+    ownership_raw_source_env.unproved_at(&c, "m_window_foreign", 45);
+    ownership_raw_source_env.violated_at(&c, "m_window_recon", "p", 55);
+    ownership_raw_source_env.violated_at(&c, "m_window_none", "p", 65);
+    ownership_raw_source_env.outside(&c, "m_window_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_window_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_window_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_window_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation window");
+}
+
+fn derivation_align() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[115] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_align() u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ v = b[4..20];",
+        "    p = cast(v.ptr, pair*);",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_inexact(bool c, u8 n) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_foreign(bool c) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_recon(bool c, u64 bits) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = cast(bits, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_none(bool c) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = null;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_caller(bool c, pair* q) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = q;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_stored(bool c) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_call(bool c) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_align_unknown(bool c, u64 k) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&words, u8*);",
+        "        u8@ v = b[4..20];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "m_align");
+    ownership_raw_source_env.unproved_at(&c, "m_align_inexact", 26);
+    ownership_raw_source_env.proved(&c, "m_align_foreign");
+    ownership_raw_source_env.unproved_at(&c, "m_align_recon", 50);
+    ownership_raw_source_env.unproved_at(&c, "m_align_none", 62);
+    ownership_raw_source_env.outside(&c, "m_align_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_align_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_align_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_align_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation align");
+}
+
+fn derivation_inexact() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[101] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_inexact(u8 n) u64 {",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    u8* b = cast(&big, u8*);",
+        "    u8@ v = b[0..cast(n, u64)];",
+        "    p = cast(v.ptr, pair*);",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_inexact_foreign(bool c, u8 n) u64 {",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_inexact_recon(bool c, u8 n, u64 bits) u64 {",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = cast(bits, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_inexact_none(bool c, u8 n) u64 {",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = null;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_inexact_caller(bool c, u8 n, pair* q) u64 {",
+        "    u64[32] big = {};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = q;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_inexact_stored(bool c, u8 n) u64 {",
+        "    u64[32] big = {};",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_inexact_call(bool c, u8 n) u64 {",
+        "    u64[32] big = {};",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_inexact_unknown(bool c, u8 n, u64 k) u64 {",
+        "    u64[32] big = {};",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        u8* b = cast(&big, u8*);",
+        "        u8@ v = b[0..cast(n, u64)];",
+        "        p = cast(v.ptr, pair*);",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved_at(&c, "m_inexact", 11);
+    ownership_raw_source_env.unproved_at(&c, "m_inexact_foreign", 23);
+    ownership_raw_source_env.unproved_at(&c, "m_inexact_recon", 35);
+    ownership_raw_source_env.unproved_at(&c, "m_inexact_none", 47);
+    ownership_raw_source_env.outside(&c, "m_inexact_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_inexact_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_inexact_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_inexact_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation inexact");
+}
+
+fn derivation_foreign() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[68] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_foreign() u64 {",
+        "    pair* mut p = null;",
+        "    p = cast(shared_bytes(), pair*);",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_foreign_recon(bool c, u64 bits) u64 {",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    } else {",
+        "        p = cast(bits, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_foreign_none(bool c) u64 {",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    } else {",
+        "        p = null;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_foreign_caller(bool c, pair* q) u64 {",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    } else {",
+        "        p = q;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_foreign_stored(bool c) u64 {",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_foreign_call(bool c) u64 {",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_foreign_unknown(bool c, u64 k) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(shared_bytes(), pair*);",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "m_foreign");
+    ownership_raw_source_env.unproved_at(&c, "m_foreign_recon", 17);
+    ownership_raw_source_env.unproved_at(&c, "m_foreign_none", 26);
+    ownership_raw_source_env.outside(&c, "m_foreign_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_foreign_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_foreign_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_foreign_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation foreign");
+}
+
+fn derivation_recon() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[59] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_recon(u64 bits) u64 {",
+        "    pair* mut p = null;",
+        "    p = cast(bits, pair*);",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_recon_none(bool c, u64 bits) u64 {",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(bits, pair*);",
+        "    } else {",
+        "        p = null;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_recon_caller(bool c, u64 bits, pair* q) u64 {",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(bits, pair*);",
+        "    } else {",
+        "        p = q;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_recon_stored(bool c, u64 bits) u64 {",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(bits, pair*);",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_recon_call(bool c, u64 bits) u64 {",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(bits, pair*);",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_recon_unknown(bool c, u64 bits, u64 k) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = cast(bits, pair*);",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violated_at(&c, "m_recon", "p", 8);
+    ownership_raw_source_env.violated_at(&c, "m_recon_none", "p", 17);
+    ownership_raw_source_env.outside(&c, "m_recon_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_recon_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_recon_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_recon_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation recon");
+}
+
+fn derivation_none() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[50] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_none() u64 {",
+        "    pair* mut p = null;",
+        "    p = null;",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_none_caller(bool c, pair* q) u64 {",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = null;",
+        "    } else {",
+        "        p = q;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_none_stored(bool c) u64 {",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = null;",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_none_call(bool c) u64 {",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = null;",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_none_unknown(bool c, u64 k) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = null;",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violated_at(&c, "m_none", "p", 8);
+    ownership_raw_source_env.outside(&c, "m_none_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_none_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_none_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_none_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation none");
+}
+
+fn derivation_caller() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[41] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_caller(pair* q) u64 {",
+        "    pair* mut p = null;",
+        "    p = q;",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_caller_stored(bool c, pair* q) u64 {",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = q;",
+        "    } else {",
+        "        p = h.p;",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_caller_call(bool c, pair* q) u64 {",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = q;",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_caller_unknown(bool c, pair* q, u64 k) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = q;",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "m_caller",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_caller_stored",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_caller_call",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "m_caller_unknown",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.report(&c, "derivation caller");
+}
+
+fn derivation_stored() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[35] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_stored() u64 {",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    p = h.p;",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_stored_call(bool c) u64 {",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = h.p;",
+        "    } else {",
+        "        p = make(cast(&word, pair*));",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_stored_unknown(bool c, u64 k) u64 {",
+        "    u64 word = 1;",
+        "    holder h = holder{cast(&word, pair*)};",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = h.p;",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "m_stored",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_stored_call",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "m_stored_unknown",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.report(&c, "derivation stored");
+}
+
+fn derivation_call() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[22] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_call() u64 {",
+        "    u64 word = 1;",
+        "    pair* mut p = null;",
+        "    p = make(cast(&word, pair*));",
+        "    return cast(&p->b, u64);",
+        "}",
+        "fn m_call_unknown(bool c, u64 k) u64 {",
+        "    u64 word = 1;",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    if (c) {",
+        "        p = make(cast(&word, pair*));",
+        "    } else {",
+        "        u64@ s = words[k..4];",
+        "        p = cast(s.ptr, pair*);",
+        "    }",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "m_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "m_call_unknown",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.report(&c, "derivation call");
+}
+
+fn derivation_unknown() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[11] lines = {
+        "struct pair { i32 a; i64 b; }",
+        "struct holder { pair* p; }",
+        "extern fn shared_bytes() u8*;",
+        "fn make(pair* x) pair* { return x; }",
+        "fn m_unknown(u64 k) u64 {",
+        "    u64[4] words = {1, 2, 3, 4};",
+        "    pair* mut p = null;",
+        "    u64@ s = words[k..4];",
+        "    p = cast(s.ptr, pair*);",
+        "    return cast(&p->b, u64);",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "m_unknown",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.report(&c, "derivation unknown");
+}
+
+fn main() i32 {
+    derivation_pass();
+    derivation_window();
+    derivation_align();
+    derivation_inexact();
+    derivation_foreign();
+    derivation_recon();
+    derivation_none();
+    derivation_caller();
+    derivation_stored();
+    derivation_call();
+    derivation_unknown();
+    return 0;
+}

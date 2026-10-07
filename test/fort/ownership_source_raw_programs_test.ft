@@ -1,0 +1,94 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| programs ok
+/// Holds the raw verdicts of small programs that mix raw operations.
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+// Small programs that mix raw operations as compiler code does: serializers, views of a
+// buffer as a header, rings, and scanners of constant strings.
+fn programs() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[56] lines = {
+        "struct header { u32 kind; u32 size; }",
+        "fn put_word() u64 {",
+        "    u64[2] mut storage = {0, 0};",
+        "    u8 mut* bytes = cast(&storage, u8 mut*);",
+        "    u8 mut@ field = bytes[4..8];",
+        "    u32 mut* word = cast(field.ptr, u32 mut*);",
+        "    *word = 7;",
+        "    return storage[0];",
+        "}",
+        "fn put_word_odd() u64 {",
+        "    u64[2] mut storage = {0, 0};",
+        "    u8 mut* bytes = cast(&storage, u8 mut*);",
+        "    u8 mut@ field = bytes[5..9];",
+        "    u32 mut* word = cast(field.ptr, u32 mut*);",
+        "    *word = 7;",
+        "    return storage[0];",
+        "}",
+        "fn header_of_words() u32 {",
+        "    u32[4] words = {1, 8, 0, 0};",
+        "    header* h = cast(&words, header*);",
+        "    return h->size;",
+        "}",
+        "fn header_of_bytes() u32 {",
+        "    u8[8] bytes = {1, 0, 0, 0, 8, 0, 0, 0};",
+        "    header* h = cast(&bytes, header*);",
+        "    return h->size;",
+        "}",
+        "fn header_too_short() u32 {",
+        "    u32 word = 1;",
+        "    header* h = cast(&word, header*);",
+        "    return h->size;",
+        "}",
+        "fn ring(u64 head) u32 {",
+        "    u32[8] mut slots = {};",
+        "    u32 mut* slot = &slots[head % 8];",
+        "    *slot = 1;",
+        "    return slots[0];",
+        "}",
+        "fn scan_constant() u64 {",
+        "    string text = \"key=value\";",
+        "    char* p = text.ptr;",
+        "    char@ key = p[0..3];",
+        "    char@ value = p[4..9];",
+        "    return key.len + value.len;",
+        "}",
+        "fn scan_past_constant() u64 {",
+        "    string text = \"key\";",
+        "    char* p = text.ptr;",
+        "    char@ key = p[0..4];",
+        "    return key.len;",
+        "}",
+        "fn mixed(header* given) u32 {",
+        "    u32[2] words = {1, 2};",
+        "    header* local = cast(&words, header*);",
+        "    return local->size + given->size;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "put_word");
+    ownership_raw_source_env.violation(&c, "put_word_odd", "word",
+        "typed access alignment remains unproved", 15);
+    ownership_raw_source_env.proved(&c, "header_of_words");
+    ownership_raw_source_env.unproved(&c, "header_of_bytes",
+        "typed access alignment remains unproved", 26);
+    ownership_raw_source_env.violation(&c, "header_too_short", "h",
+        "typed access exceeds its inherited window", 31);
+    ownership_raw_source_env.proved(&c, "ring");
+    ownership_raw_source_env.proved(&c, "scan_constant");
+    ownership_raw_source_env.counts(&c, "scan_constant", 0, 2, 1, 0, 0, 0);
+    ownership_raw_source_env.violation(&c, "scan_past_constant", "p",
+        "raw range exceeds proved storage", 49);
+    ownership_raw_source_env.outside(&c, "mixed",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.report(&c, "programs");
+}
+
+fn main() i32 {
+    programs();
+    return 0;
+}

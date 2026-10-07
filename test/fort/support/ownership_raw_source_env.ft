@@ -1,0 +1,212 @@
+/// Checks small actual programs and reads the raw outcome of their bodies.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_source_raw;
+import std.strbuf;
+
+struct closure {
+    ownership_source_env.env e;
+    strbuf.str_buf text;
+    // Mismatches print and count, so one run lists each wrong case.
+    u64 mismatches;
+}
+
+/// Checks and analyzes `lines` as module `main`, with a root function.
+fn open(closure mut* c, string@ lines) void {
+    c->text = strbuf.create();
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&c->text, lines[i]);
+        strbuf.push(&c->text, '\n');
+        i += 1;
+    }
+    strbuf.append(&c->text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(&c->e);
+    ownership_source_env.runtime(&c->e);
+    if (!ownership_source_env.prepare(&c->e, strbuf.view(&c->text))) {
+        eprintln(strbuf.view(&c->text));
+        panic("ownership_raw_source_env: the program does not check");
+    }
+    ownership_source.analyze(&c->e.source);
+}
+
+fn close(closure mut* c) void {
+    ownership_source_env.close(&c->e);
+    strbuf.free(&c->text);
+}
+
+fn mismatch(closure mut* c) void { c->mismatches += 1; }
+
+fn row(closure mut* c, string name) ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(&c->e, "main", name);
+    assert(found->verification == ownership_source.status.complete);
+    assert(found->raw.solved);
+    return found;
+}
+
+fn raw(closure mut* c, string name) ownership_source_raw.context* { return &row(c, name)->raw; }
+
+fn status_text(ownership_source_local.status value) string {
+    switch (value) {
+    case ownership_source_local.status.unexecuted: return "unexecuted";
+    case ownership_source_local.status.complete: return "complete";
+    case ownership_source_local.status.incomplete: return "incomplete";
+    case ownership_source_local.status.failed: return "failed";
+    }
+}
+
+/// The raw proof of a solved context, in the words of the report rows.
+fn proof_text(ownership_source_raw.context* r) string {
+    if (r->violations_len > 0) { return "violated"; }
+    if (ownership_api.successful(r->proof)) { return "complete"; }
+    return "incomplete";
+}
+
+/// The raw correspondence and proof of one body, in the words of the report rows.
+fn outcome(closure mut* c, string name, string correspondence, string proof) bool {
+    ownership_source_raw.context* r = raw(c, name);
+    string got_correspondence = status_text(r->correspondence);
+    string got_proof = proof_text(r);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln(name, ": correspondence ", got_correspondence, ", proof ", got_proof);
+        mismatch(c);
+        return false;
+    }
+    return true;
+}
+
+/// A body that proves its raw obligations.
+fn proved(closure mut* c, string name) void {
+    if (!outcome(c, name, "complete", "complete")) { return; }
+    ownership_source_raw.context* r = raw(c, name);
+    assert(r->violations_len == 0 && r->unproved_len == 0);
+    assert(r->solver == ownership_source_local.status.complete);
+}
+
+/// A declared body with incomplete proof at `line`: the kernel reason is `text`.
+fn unproved(closure mut* c, string name, string text, u32 line) void {
+    if (!outcome(c, name, "complete", "incomplete")) { return; }
+    first_unproved(c, name, text, line);
+}
+
+/// Incomplete proof at `line` in a body of any scope.
+fn first_unproved(closure mut* c, string name, string text, u32 line) void {
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->unproved_len == 0) {
+        eprintln(name, ": no failure");
+        mismatch(c);
+        return;
+    }
+    ownership_source_local.violation u = r->unproved[0];
+    if (u.text != text || u.source.line != line ||
+        u.kind != ownership_api.event_kind.incomplete_proof) {
+        eprintln(name, ": ", u.text, " at line ", u.source.line);
+        mismatch(c);
+    }
+}
+
+/// A body outside the declared scope, with the first gap that put it there.
+fn outside(closure mut* c, string name, ownership_source_raw.missing why) void {
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->gap != why) {
+        eprintln(name, ": gap ", cast(r->gap, i32), ", wanted ", cast(why, i32));
+        mismatch(c);
+        return;
+    }
+    if (r->violations_len > 0) {
+        outcome(c, name, "incomplete", "violated");
+        return;
+    }
+    outcome(c, name, "incomplete", "incomplete");
+}
+
+/// One validated raw violation of the reference `slot` on `line` with the kernel reason `text`.
+fn violation(closure mut* c, string name, string slot, string text, u32 line) void {
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->violations_len != 1) {
+        eprintln(name, ": ", r->violations_len, " violations, ", r->unproved_len, " failures");
+        mismatch(c);
+        return;
+    }
+    assert(proof_text(r) == "violated");
+    ownership_source_local.violation v = r->violations[0];
+    if (v.kind != ownership_api.event_kind.invalid_use || v.name != slot || v.text != text ||
+        v.source.line != line) {
+        eprintln(name, ": ", v.name, " ", v.text, " at line ", v.source.line);
+        mismatch(c);
+    }
+}
+
+/// Record `index` of the failures without a witness: its note `text` on `line`.
+fn unproved_record(closure mut* c, string name, u64 index, string text, u32 line) void {
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->unproved_len <= index) {
+        eprintln(name, ": ", r->unproved_len, " failures");
+        mismatch(c);
+        return;
+    }
+    ownership_source_local.violation u = r->unproved[index];
+    if (u.text != text || u.source.line != line ||
+        u.kind != ownership_api.event_kind.incomplete_proof) {
+        eprintln(name, ": ", u.text, " at line ", u.source.line);
+        mismatch(c);
+    }
+}
+
+/// One validated raw violation of the reference `slot` on `line`, with any kernel reason.
+fn violated_at(closure mut* c, string name, string slot, u32 line) void {
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->violations_len != 1 || r->unproved_len != 0 || r->violations[0].name != slot ||
+        r->violations[0].source.line != line) {
+        eprintln(name, ": ", r->violations_len, " violations, ", r->unproved_len, " failures");
+        mismatch(c);
+        return;
+    }
+    outcome(c, name, "complete", "violated");
+}
+
+/// A declared body with one failure without a witness, on `line`, with any kernel reason.
+fn unproved_at(closure mut* c, string name, u32 line) void {
+    if (!outcome(c, name, "complete", "incomplete")) { return; }
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->violations_len != 0 || r->unproved_len != 1 || r->unproved[0].source.line != line) {
+        eprintln(name, ": ", r->violations_len, " violations, ", r->unproved_len, " failures");
+        mismatch(c);
+    }
+}
+
+/// The raw cases of one body: typed accesses and derivations, raw ranges, address origins,
+/// reference casts, byte writes and integer reconstructions.
+fn counts(closure mut* c, string name, u64 accesses, u64 ranges, u64 origins, u64 casts,
+    u64 bytes, u64 reconstructions) void {
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->accesses != accesses || r->ranges != ranges || r->origins != origins ||
+        r->casts != casts || r->byte_writes != bytes || r->reconstructions != reconstructions) {
+        eprintln(name, ": accesses ", r->accesses, ", ranges ", r->ranges, ", origins ",
+            r->origins);
+        eprintln("  casts ", r->casts, ", byte writes ", r->byte_writes, ", reconstructions ",
+            r->reconstructions);
+        mismatch(c);
+    }
+}
+
+/// Prints `label ok` when the group matched each case.
+fn report(closure mut* c, string label) void {
+    if (c->mismatches == 0) { println(label, " ok"); }
+}
+
+/// `count` validated violations, the first of the reference `slot` with the reason `text`.
+fn violated(closure mut* c, string name, u64 count, string slot, string text) void {
+    ownership_source_raw.context* r = raw(c, name);
+    if (r->violations_len != count || count == 0) {
+        eprintln(name, ": ", r->violations_len, " violations");
+        mismatch(c);
+        return;
+    }
+    if (r->violations[0].name != slot || r->violations[0].text != text) {
+        eprintln(name, ": ", r->violations[0].name, " ", r->violations[0].text);
+        mismatch(c);
+    }
+}

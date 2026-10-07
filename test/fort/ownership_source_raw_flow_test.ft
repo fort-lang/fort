@@ -1,0 +1,520 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| joins ok
+//| loops ok
+//| owners ok
+//| scalars ok
+//| written parameters ok
+//| self-feeding loops ok
+//| joined windows ok
+/// Holds the raw verdicts of reaching definitions, loops, owners and bound values.
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+// A use reads each definition that reaches it. Two windows that both hold the access
+// prove it. One window that fails among others that pass leaves a failure unproved.
+fn joins() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[48] lines = {
+        "fn two_windows(bool c) u32 {",
+        "    u32 x = 1;",
+        "    u32 y = 2;",
+        "    u32* mut p = &x;",
+        "    if (c) { p = &y; }",
+        "    return *p;",
+        "}",
+        "fn one_too_small(bool c) u32 {",
+        "    u32 x = 1;",
+        "    u8 y = 2;",
+        "    u32* mut p = &x;",
+        "    if (c) { p = cast(&y, u32*); }",
+        "    return *p;",
+        "}",
+        "fn both_too_small(bool c) u32 {",
+        "    u8 x = 1;",
+        "    u16 y = 2;",
+        "    u32* mut p = cast(&x, u32*);",
+        "    if (c) { p = cast(&y, u32*); }",
+        "    return *p;",
+        "}",
+        "fn three_arms(u32 k) u32 {",
+        "    u32 x = 1;",
+        "    u32 y = 2;",
+        "    u32 z = 3;",
+        "    u32* mut p = &x;",
+        "    switch (k) {",
+        "    case 1: p = &y;",
+        "    case 2: p = &z;",
+        "    }",
+        "    return *p;",
+        "}",
+        "fn early_return(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    u64 word = 2;",
+        "    u64* mut p = &word;",
+        "    if (c) {",
+        "        p = cast(&tag, u64*);",
+        "        return 0;",
+        "    }",
+        "    return *p;",
+        "}",
+        "fn parameter_in_branch(u32* param, bool c) u32 {",
+        "    u32 x = 1;",
+        "    u32* mut p = &x;",
+        "    if (c) { p = param; }",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "two_windows");
+    ownership_raw_source_env.unproved(&c, "one_too_small",
+        "typed access window remains unproved", 13);
+    ownership_raw_source_env.violation(&c, "both_too_small", "p",
+        "typed access exceeds its inherited window", 20);
+    ownership_raw_source_env.proved(&c, "three_arms");
+    ownership_raw_source_env.proved(&c, "early_return");
+    ownership_raw_source_env.outside(&c, "parameter_in_branch",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.report(&c, "joins");
+}
+
+// A loop joins the definitions of each iteration. A definition that the loop body repeats
+// keeps its window, and a later definition ends the earlier ones.
+fn loops() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[73] lines = {
+        "fn index_loop() u32 {",
+        "    u32[8] mut a = {};",
+        "    u64 mut i = 0;",
+        "    u32 mut sum = 0;",
+        "    while (i < 8) {",
+        "        u32* e = &a[i];",
+        "        sum +%= *e;",
+        "        i += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+        "fn nested_loops() u32 {",
+        "    u32[4][4] mut grid = {};",
+        "    u64 mut i = 0;",
+        "    u32 mut sum = 0;",
+        "    while (i < 4) {",
+        "        u64 mut j = 0;",
+        "        while (j < 4) {",
+        "            u32* e = &grid[i][j];",
+        "            sum +%= *e;",
+        "            j += 1;",
+        "        }",
+        "        i += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+        "fn carried_pointer() u32 {",
+        "    u32 x = 1;",
+        "    u32 y = 2;",
+        "    u32* mut p = &x;",
+        "    u32 mut sum = 0;",
+        "    u64 mut i = 0;",
+        "    while (i < 3) {",
+        "        sum +%= *p;",
+        "        p = &y;",
+        "        i += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+        "fn carried_failure() u64 {",
+        "    u8 tag = 1;",
+        "    u64 word = 2;",
+        "    u64* mut p = &word;",
+        "    u64 mut sum = 0;",
+        "    u64 mut i = 0;",
+        "    while (i < 3) {",
+        "        sum +%= *p;",
+        "        p = cast(&tag, u64*);",
+        "        i += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+        "fn break_out(bool c) u32 {",
+        "    u32 x = 1;",
+        "    u8 tag = 2;",
+        "    u32* mut p = &x;",
+        "    while (true) {",
+        "        if (c) { break; }",
+        "        p = cast(&tag, u32*);",
+        "        break;",
+        "    }",
+        "    return *p;",
+        "}",
+        "fn self_cast() u8 {",
+        "    u8 x = 1;",
+        "    u8* mut p = &x;",
+        "    u64 mut i = 0;",
+        "    while (i < 2) {",
+        "        p = cast(cast(p, void*), u8*);",
+        "        i += 1;",
+        "    }",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "index_loop");
+    ownership_raw_source_env.counts(&c, "index_loop", 1, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "nested_loops");
+    ownership_raw_source_env.proved(&c, "carried_pointer");
+    ownership_raw_source_env.unproved(&c, "carried_failure",
+        "typed access window remains unproved", 47);
+    ownership_raw_source_env.unproved(&c, "break_out",
+        "typed access window remains unproved", 62);
+    ownership_raw_source_env.proved(&c, "self_cast");
+    ownership_raw_source_env.counts(&c, "self_cast", 1, 0, 1, 2, 0, 0);
+    ownership_raw_source_env.report(&c, "loops");
+}
+
+// A move or a `del` empties a local: a null value needs no raw proof, because the local
+// analysis owns the empty reference. A copy chain keeps the window.
+fn owners() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[39] lines = {
+        "fn moved_owner() u32 {",
+        "    u32 mut* own p = new(u32);",
+        "    u32 mut* own q = move(p);",
+        "    u32 v = *q;",
+        "    del(q);",
+        "    return v;",
+        "}",
+        "fn read_after_move() u32 {",
+        "    u32 mut* own p = new(u32);",
+        "    u32 mut* own q = move(p);",
+        "    defer del(q);",
+        "    return *p;",
+        "}",
+        "fn read_after_del() u32 {",
+        "    u32 mut* own p = new(u32);",
+        "    del(p);",
+        "    return *p;",
+        "}",
+        "fn copy_chain() u32 {",
+        "    u32 x = 1;",
+        "    u32* p = &x;",
+        "    u32* q = p;",
+        "    u32* r = q;",
+        "    return *r;",
+        "}",
+        "fn deferred_read() u32 {",
+        "    u32 x = 1;",
+        "    u32 mut out = 0;",
+        "    u32 mut* o = &out;",
+        "    u32* p = &x;",
+        "    defer *o = *p;",
+        "    return 0;",
+        "}",
+        "fn owner_then_window() u64 {",
+        "    u32 mut* own p = new(u32);",
+        "    defer del(p);",
+        "    u64* w = cast(p, u64*);",
+        "    return *w;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "moved_owner");
+    ownership_raw_source_env.proved(&c, "read_after_move");
+    ownership_raw_source_env.proved(&c, "read_after_del");
+    ownership_raw_source_env.proved(&c, "copy_chain");
+    ownership_raw_source_env.proved(&c, "deferred_read");
+    ownership_raw_source_env.violation(&c, "owner_then_window", "w",
+        "typed access exceeds its inherited window", 38);
+    ownership_raw_source_env.report(&c, "owners");
+}
+
+// A bound is a constant, the stable value of a local, or a fresh value bounded by its type.
+// A definition in a loop, or a second definition, gives no stable value.
+fn scalars() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[66] lines = {
+        "fn constant_bound() u64 {",
+        "    u8[4] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u32 n = 3;",
+        "    u64 m = cast(n, u64);",
+        "    u8@ v = b[1..m];",
+        "    return v.len;",
+        "}",
+        "fn twice_defined() u64 {",
+        "    u8[4] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u64 mut n = 2;",
+        "    n = 3;",
+        "    u8@ v = b[0..n];",
+        "    return v.len;",
+        "}",
+        "fn byte_parameter(u8 n) u64 {",
+        "    u8[256] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8@ v = b[0..n];",
+        "    return v.len;",
+        "}",
+        "fn widened_parameter(u8 n) u64 {",
+        "    u8[256] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u32 m = cast(n, u32);",
+        "    u8@ v = b[0..m];",
+        "    return v.len;",
+        "}",
+        "fn narrowed_value(u64 n) u64 {",
+        "    u8[256] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8 m = cast(n, u8);",
+        "    u8@ v = b[0..m];",
+        "    return v.len;",
+        "}",
+        "fn short_parameter(u16 n) u64 {",
+        "    u8[256] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8@ v = b[0..n];",
+        "    return v.len;",
+        "}",
+        "fn signed_lower(i32 k) u64 {",
+        "    u8[4] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8@ v = b[k..4];",
+        "    return v.len;",
+        "}",
+        "fn loop_bound() u64 {",
+        "    u8[8] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u64 mut n = 0;",
+        "    u64 mut total = 0;",
+        "    while (n < 4) {",
+        "        u8@ v = b[0..n];",
+        "        total += v.len;",
+        "        n += 1;",
+        "    }",
+        "    return total;",
+        "}",
+        "fn same_value(u8 n) u64 {",
+        "    u8[256] mut bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8@ v = b[n..n];",
+        "    return v.len;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "constant_bound");
+    ownership_raw_source_env.unproved(&c, "twice_defined",
+        "raw range storage remains unproved", 14);
+    ownership_raw_source_env.proved(&c, "byte_parameter");
+    ownership_raw_source_env.proved(&c, "widened_parameter");
+    ownership_raw_source_env.proved(&c, "narrowed_value");
+    ownership_raw_source_env.unproved(&c, "short_parameter",
+        "raw range storage remains unproved", 40);
+    ownership_raw_source_env.unproved(&c, "signed_lower",
+        "raw range bounds remain unproved", 46);
+    // A bound in a loop names no value of one pass, so the range stays unproved.
+    ownership_raw_source_env.unproved(&c, "loop_bound", "raw access remains unproved", 55);
+    ownership_raw_source_env.proved(&c, "same_value");
+    ownership_raw_source_env.report(&c, "scalars");
+}
+
+// A parameter holds the caller's value until a write reaches a use. A use before the write
+// reads the caller's value, so a parameter that the body writes has no one value: a later
+// constant neither proves nor fails an earlier range or index.
+fn written_parameters() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[35] lines = {
+        "struct box { u32[4] arr; }",
+        "fn small_after_use(u64 mut n) u64 {",
+        "    u8[4] bytes = {1, 2, 3, 4};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8@ v = b[0..n];",
+        "    n = 4;",
+        "    return v.len;",
+        "}",
+        "fn large_after_use(u64 mut n) u64 {",
+        "    u8[4] bytes = {1, 2, 3, 4};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8@ v = b[0..n];",
+        "    n = 100;",
+        "    return v.len;",
+        "}",
+        "fn index_after_use(u64 mut n) u32 {",
+        "    u64 small = 7;",
+        "    box* p = cast(&small, box*);",
+        "    u32 r = p->arr[n];",
+        "    n = 0;",
+        "    return r;",
+        "}",
+        "fn unwritten(u8 n) u64 {",
+        "    u8[256] bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    u8@ v = b[0..cast(n, u64)];",
+        "    return v.len;",
+        "}",
+        "fn written_before_use(u64 mut n) u64 {",
+        "    u8[4] bytes = {1, 2, 3, 4};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    n = 4;",
+        "    u8@ v = b[0..n];",
+        "    return v.len;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved_at(&c, "small_after_use", 5);
+    ownership_raw_source_env.unproved_at(&c, "large_after_use", 12);
+    ownership_raw_source_env.unproved_at(&c, "index_after_use", 19);
+    ownership_raw_source_env.proved(&c, "unwritten");
+    // The write before the use is the one definition that reaches it, but the parameter still
+    // has two values in the body, so the range stays unproved.
+    ownership_raw_source_env.unproved_at(&c, "written_before_use", 33);
+    ownership_raw_source_env.report(&c, "written parameters");
+}
+
+// A range in a loop whose result feeds its own pointer: each pass narrows the window of the
+// pass before. One name for the bound of each pass would compare a bound with itself, so the
+// loop leaves the window unknown. A straight line keeps two statements and two names.
+fn self_feeding_loops() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[48] lines = {
+        "fn widen_in_loop() u64 {",
+        "    u8[256] big = {};",
+        "    u8* mut p = cast(&big, u8*);",
+        "    u64 mut i = 0;",
+        "    u64 mut total = 0;",
+        "    while (i < 3) {",
+        "        u8 n = cast(i * 100, u8);",
+        "        u8@ t = p[0..n];",
+        "        total += t.len;",
+        "        p = t.ptr;",
+        "        i += 1;",
+        "    }",
+        "    return total;",
+        "}",
+        "fn widen_in_loop_words() u64 {",
+        "    u32[256] big = {};",
+        "    u32* mut p = cast(&big, u32*);",
+        "    u64 mut i = 0;",
+        "    u64 mut total = 0;",
+        "    while (i < 3) {",
+        "        u8 n = cast(i * 100, u8);",
+        "        u32@ t = p[0..n];",
+        "        total += t.len;",
+        "        p = t.ptr;",
+        "        i += 1;",
+        "    }",
+        "    return total;",
+        "}",
+        "fn widen_straight() u64 {",
+        "    u8[256] big = {};",
+        "    u8* p = cast(&big, u8*);",
+        "    u8@ t = p[0..0];",
+        "    u8* q = t.ptr;",
+        "    u8@ w = q[0..200];",
+        "    return w.len;",
+        "}",
+        "fn fixed_pointer_in_loop(u8 m) u64 {",
+        "    u8[256] big = {};",
+        "    u8* p = cast(&big, u8*);",
+        "    u64 mut i = 0;",
+        "    u64 mut total = 0;",
+        "    while (i < 3) {",
+        "        u8@ t = p[0..cast(m, u64)];",
+        "        total += t.len;",
+        "        i += 1;",
+        "    }",
+        "    return total;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "widen_in_loop",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.outside(&c, "widen_in_loop_words",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.violated_at(&c, "widen_straight", "q", 34);
+    // A stable bound in a loop keeps its name: m holds one value in each pass.
+    ownership_raw_source_env.proved(&c, "fixed_pointer_in_loop");
+    ownership_raw_source_env.report(&c, "self-feeding loops");
+}
+
+// The fact that a window lies in its object holds only on the path that made the window. A
+// joined value checks each window alone, so the checked slice on one path proves nothing about
+// the whole allocation that the other path keeps. An allocation in a loop makes one object of
+// a new size on each pass, and the slice of pass 0 proves nothing about the object of pass 1.
+fn joined_windows() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[48] lines = {
+        "fn joined_relation(u64 n, bool c) u8 {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    u8* mut q = s.ptr;",
+        "    if (c) {",
+        "        u8@ t = s[0..16777216];",
+        "        q = t.ptr;",
+        "    }",
+        "    u8@ v = q[0..16777216];",
+        "    u8 r = v[16777215];",
+        "    del(s);",
+        "    return r;",
+        "}",
+        "fn no_join(u64 n) u8 {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    u8* q = s.ptr;",
+        "    u8@ v = q[0..16777216];",
+        "    u8 r = v[16777215];",
+        "    del(s);",
+        "    return r;",
+        "}",
+        "fn loop_relation() u8 {",
+        "    u64 mut i = 0;",
+        "    u8 mut r = 0;",
+        "    while (i < 2) {",
+        "        u64 n = 64 - 63 * i;",
+        "        u8 mut@ own s = new(u8, n);",
+        "        u8* mut q = s.ptr;",
+        "        if (i == 0) {",
+        "            u8@ t = s[0..64];",
+        "            q = t.ptr;",
+        "        }",
+        "        u8@ v = q[0..64];",
+        "        r = v[63];",
+        "        del(s);",
+        "        i += 1;",
+        "    }",
+        "    return r;",
+        "}",
+        "fn both_paths_sliced(u64 n, bool c) u8 {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    u8@ mut t = s[0..16];",
+        "    if (c) { t = s[0..32]; }",
+        "    u8* q = t.ptr;",
+        "    u8@ v = q[0..16];",
+        "    u8 r = v[15];",
+        "    del(s);",
+        "    return r;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved_at(&c, "joined_relation", 8);
+    ownership_raw_source_env.unproved_at(&c, "no_join", 16);
+    ownership_raw_source_env.unproved_at(&c, "loop_relation", 32);
+    // Each path made its window by a checked slice that holds the range.
+    ownership_raw_source_env.proved(&c, "both_paths_sliced");
+    ownership_raw_source_env.report(&c, "joined windows");
+}
+
+fn main() i32 {
+    joins();
+    loops();
+    owners();
+    scalars();
+    written_parameters();
+    self_feeding_loops();
+    joined_windows();
+    return 0;
+}

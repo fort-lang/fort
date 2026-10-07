@@ -1,0 +1,611 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| objects ok
+//| gaps ok
+//| foreign ok
+//| paths ok
+//| variable indexes ok
+//| writes through ok
+//| partial elements ok
+//| misaligned parts ok
+//| part notes ok
+/// Holds the raw verdicts of typed accesses in small actual programs.
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+// A typed access through an address of local storage lies in the window of that storage.
+// A field address has the window of the field: a cast does not widen it.
+fn objects() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[38] lines = {
+        "struct pair { i32 a; i64 b; u8* p; }",
+        "i32 LIMIT = 10;",
+        "fn field_of_local() i64 {",
+        "    pair s = pair{1, 2, null};",
+        "    pair* p = &s;",
+        "    return p->b;",
+        "}",
+        "fn whole_local() i32 {",
+        "    i32 x = 3;",
+        "    i32* p = &x;",
+        "    return *p;",
+        "}",
+        "fn wider_cast() u64 {",
+        "    u8 tag = 1;",
+        "    u64* p = cast(&tag, u64*);",
+        "    return *p;",
+        "}",
+        "fn narrower_cast() u8 {",
+        "    i64 wide = 7;",
+        "    u8* p = cast(&wide, u8*);",
+        "    return *p;",
+        "}",
+        "fn field_window() i64 {",
+        "    pair s = pair{1, 2, null};",
+        "    i32* a = &s.a;",
+        "    i64* b = cast(a, i64*);",
+        "    return *b;",
+        "}",
+        "fn global_object() i32 {",
+        "    i32* p = &LIMIT;",
+        "    return *p;",
+        "}",
+        "fn writes_local() i64 {",
+        "    pair mut s = pair{1, 2, null};",
+        "    pair mut* p = &s;",
+        "    p->b = 5;",
+        "    return s.b;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "field_of_local");
+    ownership_raw_source_env.counts(&c, "field_of_local", 1, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "whole_local");
+    ownership_raw_source_env.counts(&c, "whole_local", 1, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.violation(&c, "wider_cast", "p",
+        "typed access exceeds its inherited window", 16);
+    ownership_raw_source_env.counts(&c, "wider_cast", 1, 0, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "narrower_cast");
+    ownership_raw_source_env.violation(&c, "field_window", "b",
+        "typed access exceeds its inherited window", 27);
+    ownership_raw_source_env.proved(&c, "global_object");
+    ownership_raw_source_env.proved(&c, "writes_local");
+    ownership_raw_source_env.counts(&c, "writes_local", 1, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.report(&c, "objects");
+}
+
+// A window that comes from a caller, from storage or from a fort call is a fact of
+// another analysis: the body leaves the declared raw scope.
+fn gaps() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[31] lines = {
+        "struct pair { i32 a; i64 b; u8* p; }",
+        "struct holder { u8* p; }",
+        "pair* mut shared = null;",
+        "fn through_parameter(pair* p) i64 { return p->b; }",
+        "fn through_global() i64 {",
+        "    pair* p = shared;",
+        "    return p->b;",
+        "}",
+        "fn make() pair* { return shared; }",
+        "fn through_call() i64 {",
+        "    pair* p = make();",
+        "    return p->b;",
+        "}",
+        "fn through_local_field() u8 {",
+        "    u8 x = 1;",
+        "    holder h = holder{&x};",
+        "    return *h.p;",
+        "}",
+        "fn span_element() u8 {",
+        "    u8 mut@ own s = new(u8, 4);",
+        "    defer del(s);",
+        "    u8* e = &s[1];",
+        "    return *e;",
+        "}",
+        "fn by_value(holder h) u8 { return *h.p; }",
+        "fn address_taken() u8 {",
+        "    u8 x = 1;",
+        "    u8* p = &x;",
+        "    u8** pp = &p;",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "through_parameter",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "through_global",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "through_call",
+        ownership_source_raw.missing.call_origin);
+    ownership_raw_source_env.outside(&c, "through_local_field",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.outside(&c, "span_element",
+        ownership_source_raw.missing.unknown_origin);
+    ownership_raw_source_env.outside(&c, "by_value",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.outside(&c, "address_taken",
+        ownership_source_raw.missing.stored_origin);
+    ownership_raw_source_env.report(&c, "gaps");
+}
+
+// A foreign result has trusted extent and alignment (D17.13): no static window applies.
+fn foreign() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[11] lines = {
+        "extern fn malloc(u64 n) void mut* own;",
+        "extern fn shared_value() i32*;",
+        "fn owned_result() i32 {",
+        "    i32 mut* own p = cast(malloc(8), i32 mut* own);",
+        "    return *p;",
+        "}",
+        "fn borrowed_result() i32 { return *shared_value(); }",
+        "fn wide_view() u64 {",
+        "    u64* p = cast(shared_value(), u64*);",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "owned_result");
+    ownership_raw_source_env.counts(&c, "owned_result", 1, 0, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "borrowed_result");
+    ownership_raw_source_env.counts(&c, "borrowed_result", 1, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "wide_view");
+    ownership_raw_source_env.counts(&c, "wide_view", 1, 0, 1, 1, 0, 0);
+    ownership_raw_source_env.report(&c, "foreign");
+}
+
+// Each use reads the definitions that reach it. A null value is the local analysis's
+// obligation, and a path with null leaves a failure without a validated witness.
+// The overflow check and the sum each read the element: two accesses. A block that no
+// path reaches holds no obligation. A witness crosses no fort call (it can fail to
+// return) and crosses an extern call (D17.13).
+fn paths() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[72] lines = {
+        "struct pair { i32 a; i64 b; u8* p; }",
+        "fn null_pointer() i32 {",
+        "    i32* p = null;",
+        "    return *p;",
+        "}",
+        "fn maybe_null(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    u8* mut p = null;",
+        "    if (c) { p = &tag; }",
+        "    u64* q = cast(p, u64*);",
+        "    return *q;",
+        "}",
+        "fn reassigned(pair* param) i64 {",
+        "    pair s = pair{1, 2, null};",
+        "    pair* mut p = param;",
+        "    p = &s;",
+        "    return p->b;",
+        "}",
+        "fn joined(bool c) i64 {",
+        "    pair s = pair{1, 2, null};",
+        "    pair t = pair{3, 4, null};",
+        "    pair* mut p = &s;",
+        "    if (c) { p = &t; }",
+        "    return p->b;",
+        "}",
+        "fn either_wide(bool c) u64 {",
+        "    u8 one = 1;",
+        "    u16 two = 2;",
+        "    u8* mut p = &one;",
+        "    if (c) { p = cast(&two, u8*); }",
+        "    u64* q = cast(p, u64*);",
+        "    return *q;",
+        "}",
+        "fn loop_elements() i32 {",
+        "    i32[4] mut a = {1, 2, 3, 4};",
+        "    i32 mut total = 0;",
+        "    i32 mut i = 0;",
+        "    while (i < 4) {",
+        "        i32* e = &a[i];",
+        "        total += *e;",
+        "        i += 1;",
+        "    }",
+        "    return total;",
+        "}",
+        "fn parameter_then_local(pair* param, bool c) i64 {",
+        "    pair s = pair{1, 2, null};",
+        "    pair* mut p = &s;",
+        "    if (c) { p = param; }",
+        "    return p->b;",
+        "}",
+        "fn dead_access() u64 {",
+        "    u8 tag = 1;",
+        "    if (false) {",
+        "        u64* p = cast(&tag, u64*);",
+        "        return *p;",
+        "    }",
+        "    return 0;",
+        "}",
+        "fn helper() void {}",
+        "extern fn tick() void;",
+        "fn after_fort_call() u64 {",
+        "    u8 tag = 1;",
+        "    helper();",
+        "    u64* p = cast(&tag, u64*);",
+        "    return *p;",
+        "}",
+        "fn after_extern_call() u64 {",
+        "    u8 tag = 1;",
+        "    tick();",
+        "    u64* p = cast(&tag, u64*);",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "null_pointer");
+    ownership_raw_source_env.unproved(&c, "maybe_null",
+        "typed access window remains unproved", 11);
+    ownership_raw_source_env.proved(&c, "reassigned");
+    ownership_raw_source_env.proved(&c, "joined");
+    ownership_raw_source_env.violation(&c, "either_wide", "q",
+        "typed access exceeds its inherited window", 32);
+    ownership_raw_source_env.proved(&c, "loop_elements");
+    ownership_raw_source_env.counts(&c, "loop_elements", 2, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.outside(&c, "parameter_then_local",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.proved(&c, "dead_access");
+    ownership_raw_source_env.unproved(&c, "after_fort_call",
+        "typed access window remains unproved", 65);
+    ownership_raw_source_env.violation(&c, "after_extern_call", "p",
+        "typed access exceeds its inherited window", 71);
+    ownership_raw_source_env.report(&c, "paths");
+}
+
+// A variable index selects the whole array as its region, but the access reads one element.
+// A window that holds part of the array fails the region without an exact failure: index 0
+// and 1 are inside the window here, so the access stays unproved and is no violation. A
+// constant index selects its element alone. When element 0 already ends past the window, each
+// element does, so that failure is exact.
+fn variable_indexes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[33] lines = {
+        "struct box { u32[4] arr; }",
+        "fn partial_window(u64 n) u32 {",
+        "    u64 small = 7;",
+        "    box* p = cast(&small, box*);",
+        "    return p->arr[n];",
+        "}",
+        "fn constant_index() u32 {",
+        "    u64 small = 7;",
+        "    box* p = cast(&small, box*);",
+        "    u64 n = 1;",
+        "    return p->arr[n];",
+        "}",
+        "fn constant_index_past() u32 {",
+        "    u64 small = 7;",
+        "    box* p = cast(&small, box*);",
+        "    u64 n = 2;",
+        "    return p->arr[n];",
+        "}",
+        "fn whole_window(u64 n) u32 {",
+        "    box b = box{{1, 2, 3, 4}};",
+        "    box* p = &b;",
+        "    return p->arr[n];",
+        "}",
+        "fn tiny_window(u64 n) u32 {",
+        "    u8 tiny = 1;",
+        "    box* p = cast(&tiny, box*);",
+        "    return p->arr[n];",
+        "}",
+        "fn first_element_fits(u64 n) u32 {",
+        "    u32 word = 7;",
+        "    box* p = cast(&word, box*);",
+        "    return p->arr[n];",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved_at(&c, "partial_window", 5);
+    ownership_raw_source_env.proved(&c, "constant_index");
+    ownership_raw_source_env.violation(&c, "constant_index_past", "p",
+        "typed access exceeds its inherited window", 17);
+    ownership_raw_source_env.proved(&c, "whole_window");
+    ownership_raw_source_env.violation(&c, "tiny_window", "p",
+        "typed access exceeds its inherited window", 27);
+    // Element 0 ends at the window end: index 0 is inside, so no failure is exact.
+    ownership_raw_source_env.unproved_at(&c, "first_element_fits", 32);
+    ownership_raw_source_env.report(&c, "variable indexes");
+}
+
+// A write through a reference, into a span element or through the pointer field of a span
+// leaves the local as it is, so a later access through it keeps its window. Only a write of a
+// header field changes the local.
+fn writes_through() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[34] lines = {
+        "fn wide_after_store() u64 {",
+        "    u32 mut word = 1;",
+        "    u32 mut* p = &word;",
+        "    *p = 2;",
+        "    u64* q = cast(p, u64*);",
+        "    return *q;",
+        "}",
+        "fn wide_without_store() u64 {",
+        "    u32 mut word = 1;",
+        "    u32 mut* p = &word;",
+        "    u64* q = cast(p, u64*);",
+        "    return *q;",
+        "}",
+        "fn wide_after_element_store() u64 {",
+        "    u8 mut@ own s = new(u8, 4);",
+        "    defer del(s);",
+        "    s[0] = 2;",
+        "    u64* q = cast(s.ptr, u64*);",
+        "    return *q;",
+        "}",
+        "fn fits_after_store() u32 {",
+        "    u32 mut word = 1;",
+        "    u32 mut* p = &word;",
+        "    *p = 2;",
+        "    return *p;",
+        "}",
+        "fn wide_after_pointer_field_store() u64 {",
+        "    u8[8] mut bytes = {};",
+        "    u8 mut* b = cast(&bytes, u8 mut*);",
+        "    u8 mut@ s = b[0..4];",
+        "    *s.ptr = 1;",
+        "    u64* q = cast(s.ptr, u64*);",
+        "    return *q;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "wide_after_store", "q",
+        "typed access exceeds its inherited window", 6);
+    ownership_raw_source_env.violation(&c, "wide_without_store", "q",
+        "typed access exceeds its inherited window", 12);
+    ownership_raw_source_env.violation(&c, "wide_after_element_store", "q",
+        "typed access exceeds its inherited window", 19);
+    ownership_raw_source_env.proved(&c, "fits_after_store");
+    ownership_raw_source_env.violation(&c, "wide_after_pointer_field_store", "q",
+        "typed access exceeds its inherited window", 33);
+    ownership_raw_source_env.report(&c, "writes through");
+}
+
+// A field or a second index after a variable index reads a part of one element. That part of
+// element 0 can lie in the window when element 0 does not, so no failure is exact there. A
+// variable index as the last projection reads the whole element, and element 0 past the
+// window fails each element exactly.
+fn partial_elements() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[29] lines = {
+        "struct item { u64 a; u32 x; }",
+        "struct list { item[4] items; }",
+        "struct grid { u32[4][4] cells; }",
+        "fn leaf_inside(u64 i) u64 {",
+        "    u64 small = 7;",
+        "    list* p = cast(&small, list*);",
+        "    return p->items[i].a;",
+        "}",
+        "fn leaf_address(u64 i) u64 {",
+        "    u64 small = 7;",
+        "    list* p = cast(&small, list*);",
+        "    return cast(&p->items[i].a, u64);",
+        "}",
+        "fn cell_inside(u64 i, u64 j) u32 {",
+        "    u64 small = 7;",
+        "    grid* p = cast(&small, grid*);",
+        "    return p->cells[i][j];",
+        "}",
+        "fn last_index_out(u64 i) u64 {",
+        "    u32 small = 7;",
+        "    list* p = cast(&small, list*);",
+        "    item q = p->items[i];",
+        "    return q.a;",
+        "}",
+        "fn leaf_past(u64 i) u64 {",
+        "    u32 small = 7;",
+        "    list* p = cast(&small, list*);",
+        "    return p->items[i].a;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved_at(&c, "leaf_inside", 7);
+    ownership_raw_source_env.unproved_at(&c, "leaf_address", 12);
+    ownership_raw_source_env.unproved_at(&c, "cell_inside", 17);
+    ownership_raw_source_env.violation(&c, "last_index_out", "p",
+        "typed access exceeds its inherited window", 22);
+    // Even when the part of element 0 lies past the window, the rule stays with the last
+    // projection: the access stays unproved.
+    ownership_raw_source_env.unproved_at(&c, "leaf_past", 28);
+    ownership_raw_source_env.report(&c, "partial elements");
+}
+
+// A part of an element after a variable index needs only the alignment of its own type, at
+// its offset in the element (memory model 2.8.2). Each element repeats that offset at a
+// multiple of its size, so a part that is aligned in element 0 is aligned in each element:
+// such an access stays unproved and is no violation. A part misaligned in element 0 is
+// misaligned in each element, and so is a whole element: those failures are exact. A
+// constant index reads one known part, which proves.
+fn misaligned_parts() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[84] lines = {
+        "struct item { u64 a; u32 x; u32 y; }",
+        "struct list { item[4] items; }",
+        "struct inner { u64 h; u32[4] arr; }",
+        "struct outer { inner[4] rows; }",
+        "struct bitem { u64 a; u8 c; }",
+        "struct blist { bitem[4] items; }",
+        "fn byte_leaf_var(u64 i) u8 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[1..128];",
+        "    blist* p = cast(w.ptr, blist*);",
+        "    return p->items[i].c;",
+        "}",
+        "fn byte_leaf_const() u8 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[1..128];",
+        "    blist* p = cast(w.ptr, blist*);",
+        "    return p->items[3].c;",
+        "}",
+        "fn word_leaf_var(u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[i].x;",
+        "}",
+        "fn second_word_leaf_var(u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[i].y;",
+        "}",
+        "fn word_leaf_write(u64 i) void {",
+        "    u64[16] mut words = {};",
+        "    u8 mut* b = cast(&words, u8 mut*);",
+        "    u8 mut@ w = b[4..128];",
+        "    list mut* p = cast(w.ptr, list mut*);",
+        "    p->items[i].x = 5;",
+        "}",
+        "fn word_leaf_const() u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[2].x;",
+        "}",
+        "fn nested_leaf_var(u64 i, u64 j) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    outer* p = cast(w.ptr, outer*);",
+        "    return p->rows[i].arr[j];",
+        "}",
+        "fn nested_leaf_const() u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    outer* p = cast(w.ptr, outer*);",
+        "    return p->rows[1].arr[2];",
+        "}",
+        "fn small_window_leaf(u64 i) u32 {",
+        "    u64[2] words = {1, 2};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..16];",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[i].x;",
+        "}",
+        "fn wide_leaf_var(u64 i) u64 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[i].a;",
+        "}",
+        "fn whole_element_var(u64 i) u64 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    list* p = cast(w.ptr, list*);",
+        "    item q = p->items[i];",
+        "    return q.a;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved_at(&c, "byte_leaf_var", 12);
+    ownership_raw_source_env.proved(&c, "byte_leaf_const");
+    ownership_raw_source_env.unproved_at(&c, "word_leaf_var", 26);
+    ownership_raw_source_env.unproved_at(&c, "second_word_leaf_var", 33);
+    ownership_raw_source_env.unproved_at(&c, "word_leaf_write", 40);
+    ownership_raw_source_env.proved(&c, "word_leaf_const");
+    ownership_raw_source_env.unproved_at(&c, "nested_leaf_var", 54);
+    ownership_raw_source_env.proved(&c, "nested_leaf_const");
+    ownership_raw_source_env.unproved_at(&c, "small_window_leaf", 68);
+    ownership_raw_source_env.violation(&c, "wide_leaf_var", "p",
+        "typed access alignment remains unproved", 75);
+    ownership_raw_source_env.violation(&c, "whole_element_var", "p",
+        "typed access alignment remains unproved", 82);
+    ownership_raw_source_env.report(&c, "misaligned parts");
+}
+
+// The note of a violation names the reason that holds on each path. In part_fits_r2, x of
+// element 0 lies in the window, so the extent of the whole array is no exact reason: the
+// misalignment of x is. A join of an aligned and a misaligned window gives no exact reason.
+// A field of lower alignment after a field of higher alignment needs only its own alignment.
+fn part_notes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[42] lines = {
+        "struct item { u64 a; u32 x; u32 y; }",
+        "struct list { item[4] items; }",
+        "struct deep { u64 a; u32 b; u32 c; }",
+        "struct ditem { u64 h; deep d; }",
+        "struct dlist { ditem[4] items; }",
+        "fn part_fits_r2(u64 i) u32 {",
+        "    u64[2] words = {1, 2};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..16];",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[i].x;",
+        "}",
+        "fn joined_mixed(u64 i, bool c) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[4..128];",
+        "    if (c) { w = b[2..128]; }",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[i].x;",
+        "}",
+        "fn joined_both_bad(u64 i, bool c) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[6..128];",
+        "    if (c) { w = b[2..128]; }",
+        "    list* p = cast(w.ptr, list*);",
+        "    return p->items[i].x;",
+        "}",
+        "fn deep_leaf_r4(u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[4..128];",
+        "    dlist* p = cast(w.ptr, dlist*);",
+        "    return p->items[i].d.b;",
+        "}",
+        "fn deep_leaf_r2(u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..128];",
+        "    dlist* p = cast(w.ptr, dlist*);",
+        "    return p->items[i].d.b;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "part_fits_r2", "p",
+        "typed access alignment remains unproved", 11);
+    ownership_raw_source_env.unproved_at(&c, "joined_mixed", 19);
+    ownership_raw_source_env.violation(&c, "joined_both_bad", "p",
+        "typed access alignment remains unproved", 27);
+    ownership_raw_source_env.unproved_at(&c, "deep_leaf_r4", 34);
+    ownership_raw_source_env.violation(&c, "deep_leaf_r2", "p",
+        "typed access alignment remains unproved", 41);
+    ownership_raw_source_env.report(&c, "part notes");
+}
+
+fn main() i32 {
+    objects();
+    gaps();
+    foreign();
+    paths();
+    variable_indexes();
+    writes_through();
+    partial_elements();
+    misaligned_parts();
+    part_notes();
+    return 0;
+}
