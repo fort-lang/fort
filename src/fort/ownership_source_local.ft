@@ -1,6 +1,8 @@
 /// Produces local ownership effects from verified source FIR and validates local violations.
 // The caller keeps this context, its FIR and the checker's types at stable addresses through
 // free. A tracked local slot (TL) is a reference local whose storage no FIR address names.
+// The stored run (`stored_borrows`) also tracks the reference leaves of private aggregates
+// (TA) and the stack sources of the locals whose storage an address names.
 import consts;
 import diag;
 import fir;
@@ -9,6 +11,7 @@ import ownership_api;
 import ownership_flow;
 import ownership_keys;
 import ownership_limits;
+import ownership_source_leaves;
 import ownership_state;
 import ownership_transfer;
 import prim;
@@ -44,6 +47,8 @@ enum missing {
     range_loan,
     owned_leaves,
     call_dependent,
+    // A variable index selects an element that the stored run cannot read or release.
+    dynamic_element,
 }
 
 // One event of the flow run. Texts are literals of the transfer and flow modules.
@@ -69,6 +74,8 @@ struct violation {
     string name;
     bool quoted;
     ownership_api.entity_id relation;
+    // The leaf that the message names, or WHOLE: the name is then `name`.
+    u64 leaf;
 }
 
 // What a place of one statement means for the TLs.
@@ -79,6 +86,23 @@ struct access {
     bool indirect;
     bool length;
     bool pointer;
+}
+
+u64 WHOLE = 18446744073709551615;
+
+/// A tracked place: a whole TL when `leaf` is WHOLE, else leaf `leaf` of a TA.
+struct spot {
+    u32 local;
+    u64 leaf;
+}
+
+// The leaves that a step reads and writes, and the elements of a weak store, for messages
+// and for link. WHOLE means a whole slot.
+struct step_extra {
+    u64 from;
+    u64 to;
+    u64 weak_first;
+    u64 weak_count;
 }
 
 // A flow binding outside the steps: one return, call or allocation event.
@@ -127,6 +151,18 @@ struct context {
     ownership_flow.source_file_binding[1] files;
     ownership_state.state entry;
     ownership_api.entity_id result_slot;
+    // The stored run (spec/toolchain.md 1.1).
+    bool stored;
+    ownership_source_leaves.table leaves;
+    // `stack_units[u]`: TL or TA leaf `u` can hold a borrow of local storage (stack_borrows).
+    bool mut@ own stack_units;
+    step_extra mut@ own extras;
+    // The places of weak stores, which link gives to their requests.
+    ownership_api.place_path mut@ own weak_places;
+    u64 weak_places_len;
+    // The FIR places of loan collections that are TA leaves (fir.md 14).
+    ownership_flow.place_binding mut@ own bindings;
+    u64 bindings_len;
     ownership_api.limit_table limits;
     ownership_limits.meter meter;
     // The ledger of the classification run, a computation of its own over the same FIR. It
@@ -324,6 +360,7 @@ fn classify(context mut* c) void {
     c->owning = new(bool, cast(count, u64));
     c->taken = new(bool, cast(count, u64));
     mark_taken(c->function, c->taken);
+    if (c->stored) { c->leaves = ownership_source_leaves.build(c->function, c->taken[..]); }
     u32 mut n = 0;
     while (n < count) {
         fir.local* l = fir.local_at(c->function, n);
@@ -618,6 +655,7 @@ fn grow_steps(context mut* c) void {
     bool mut@ own barriers = new(bool, cap);
     ownership_transfer.event_binding mut@ own events = new(ownership_transfer.event_binding, cap);
     ownership_api.borrow_relation mut@ own relations = new(ownership_api.borrow_relation, cap);
+    step_extra mut@ own extras = new(step_extra, cap);
     u64 mut i = 0;
     while (i < c->steps_len) {
         steps[i] = c->steps[i];
@@ -625,6 +663,7 @@ fn grow_steps(context mut* c) void {
         barriers[i] = c->barrier[i];
         events[i] = c->step_events[i];
         relations[i] = c->relations[i];
+        extras[i] = c->extras[i];
         i += 1;
     }
     del(c->steps);
@@ -632,11 +671,13 @@ fn grow_steps(context mut* c) void {
     del(c->barrier);
     del(c->step_events);
     del(c->relations);
+    del(c->extras);
     c->steps = move(steps);
     c->step_slot = move(slots);
     c->barrier = move(barriers);
     c->step_events = move(events);
     c->relations = move(relations);
+    c->extras = move(extras);
 }
 
 // Steps and flow bindings take ordinals below PARAMETER_BASE, so no two keys meet.
@@ -693,6 +734,7 @@ fn add_step(context mut* c, u32 block, u32 gap, ownership_flow.step_kind kind,
     c->step_events[index] = ownership_transfer.event_binding{op,
         entity(c, ownership_api.entity_kind.event, key)};
     c->relations[index] = ownership_api.borrow_relation{};
+    c->extras[index] = step_extra{WHOLE, WHOLE, 0, 0};
     c->steps_len += 1;
     return index;
 }
@@ -811,7 +853,12 @@ fn allocation_step(context mut* c, u32 block, u32 gap, u32 local, fir.operand co
 // Del stays shallow (D17.16). Owned leaves of the element type need the heap analysis.
 fn release_step(context mut* c, u32 block, u32 gap, u32 local) void {
     u64 i = local_step(c, block, gap, ownership_transfer.action.release, local, local);
-    types.node* t = local_type(c, local);
+    shallow_release(c, i, local_type(c, local));
+}
+
+// The release step `i` of a reference of type `t` leaves no owned leaf behind when the
+// referent holds none; otherwise the heap analysis owns it.
+fn shallow_release(context mut* c, u64 i, types.node* t) void {
     bool leaves = t->kind == types.type_kind.k_string ||
         (t->kind != types.type_kind.k_voidptr && t->elem != null && !owning_type(t->elem));
     c->steps[i].local.leaves_empty_proved = leaves;
@@ -953,6 +1000,141 @@ fn switch_flag_edges(context mut* c, u32 block) void {
     }
 }
 
+// ---- stored steps -------------------------------------------------------------------------------
+
+fn whole(u32 local) spot { return spot{local, WHOLE}; }
+
+fn leaf_spot(context* c, u64 k) spot { return spot{c->leaves.leaves[k].local, k}; }
+
+fn spot_place(context* c, spot at) ownership_api.place_path {
+    if (at.leaf == WHOLE) { return slot(c, at.local); }
+    return ownership_source_leaves.place(&c->leaves, c->identity, at.leaf);
+}
+
+fn spot_type(context* c, spot at) types.node* {
+    if (at.leaf == WHOLE) { return local_type(c, at.local); }
+    return c->leaves.leaves[at.leaf].ty;
+}
+
+fn spot_owning(context* c, spot at) bool { return owning_type(spot_type(c, at)); }
+
+// The keys of parameter leaves and stack sources follow the parameter keys of whole locals.
+fn leaf_parameter_ordinal(context* c, u64 k) u32 {
+    return PARAMETER_BASE + fir.local_count(c->function) + key_ordinal(k);
+}
+
+fn stack_key(context* c, u32 local) ownership_api.entity_id {
+    return entity(c, ownership_api.entity_kind.source, leaf_parameter_ordinal(c,
+        c->leaves.leaves_len) + local);
+}
+
+// The source of the ended instances of a taken local: a `live` marker moves the old borrows
+// there, so they stay ended while the local's storage begins again.
+fn retired_stack_key(context* c, u32 local) ownership_api.entity_id {
+    return entity(c, ownership_api.entity_kind.source, leaf_parameter_ordinal(c,
+        c->leaves.leaves_len) + fir.local_count(c->function) + local);
+}
+
+// Points step `i` at the places of two spots. A leaf place uses the leaf rule of transfer:
+// distinct fields and constant indices of one root are separate (D17.15).
+fn retarget(context mut* c, u64 i, spot from, spot to) void {
+    if (from.leaf == WHOLE && to.leaf == WHOLE) { return; }
+    ownership_transfer.request mut* r = &c->steps[i].local;
+    r->source = spot_place(c, from);
+    r->destination = spot_place(c, to);
+    r->leaf_places_proved = true;
+    c->extras[i].from = from.leaf;
+    c->extras[i].to = to.leaf;
+    if (c->relations[i].key.kind == ownership_api.entity_kind.relation) {
+        c->relations[i].containing = r->destination;
+    }
+}
+
+fn spot_step(context mut* c, u32 block, u32 gap, ownership_transfer.action effect, spot from,
+    spot to) u64 {
+    u64 i = local_step(c, block, gap, effect, from.local, to.local);
+    retarget(c, i, from, to);
+    return i;
+}
+
+fn copy_at(context mut* c, u32 block, u32 gap, spot from, spot to) void {
+    u64 i = spot_step(c, block, gap, ownership_transfer.action.copy, from, to);
+    c->steps[i].local.destination_owns = spot_owning(c, to);
+}
+
+fn move_at(context mut* c, u32 block, u32 gap, spot from, spot to) void {
+    spot_step(c, block, gap, ownership_transfer.action.move_owner, from, to);
+}
+
+fn empty_at(context mut* c, u32 block, u32 gap, spot at) void {
+    u64 i = spot_step(c, block, gap, ownership_transfer.action.assignment, at, at);
+    c->steps[i].local.value = empty_value(c, i);
+}
+
+fn opaque_at(context mut* c, u32 block, u32 gap, spot at, missing why) void {
+    u64 i = spot_step(c, block, gap, ownership_transfer.action.assignment, at, at);
+    c->steps[i].local.opaque_value = true;
+    note_gap(c, why, c->steps[i].source);
+}
+
+fn reference_at(context mut* c, u32 block, u32 gap, spot at,
+    ownership_api.entity_id source_key, ownership_api.scalar_fact length) void {
+    assign_reference(c, block, gap, at.local, source_key, length);
+    retarget(c, c->steps_len - 1, at, at);
+}
+
+fn inspect_at(context mut* c, u32 block, u32 gap, spot at) void {
+    spot_step(c, block, gap, ownership_transfer.action.inspect, at, at);
+}
+
+// A use through the reference at `at`: a dereference or an element of its referent.
+fn use_at(context mut* c, u32 block, u32 gap, spot at) void {
+    u64 i = spot_step(c, block, gap, ownership_transfer.action.use, at, at);
+    c->steps[i].local.temporal_use = true;
+}
+
+fn escape_at(context mut* c, u32 block, u32 gap, spot at) void {
+    spot_step(c, block, gap, ownership_transfer.action.escape, at, at);
+}
+
+// Del stays shallow (D17.16), as shallow_release says.
+fn release_at(context mut* c, u32 block, u32 gap, spot at) void {
+    u64 i = spot_step(c, block, gap, ownership_transfer.action.release, at, at);
+    shallow_release(c, i, spot_type(c, at));
+}
+
+fn end_at(context mut* c, u32 block, u32 gap, spot at) void {
+    u64 i = spot_step(c, block, gap, ownership_transfer.action.dead, at, at);
+    c->steps[i].local.private_slot_proved = true;
+    c->steps[i].local.liveness_proved = true;
+}
+
+// A step that the stored run cannot model: it stops its path with incomplete proof.
+fn unsupported_at(context mut* c, u32 block, u32 gap, spot at, missing why) void {
+    u64 i = spot_step(c, block, gap, ownership_transfer.action.inspect, at, at);
+    c->steps[i].local.direct_source_proved = false;
+    note_gap(c, why, c->steps[i].source);
+}
+
+// Begins or ends the stack source of a taken local (D17.14).
+fn stack_step(context mut* c, u32 block, u32 gap, ownership_transfer.action effect,
+    u32 local) void {
+    u64 i = local_step(c, block, gap, effect, local, local);
+    c->steps[i].local.source_key = stack_key(c, local);
+    c->steps[i].local.fresh_source.key = retired_stack_key(c, local);
+}
+
+fn leaf_access(context* c, fir.place p) ownership_source_leaves.access {
+    if (!c->stored) { return ownership_source_leaves.access{}; }
+    return ownership_source_leaves.resolve(&c->leaves, c->function, p);
+}
+
+// Whether the place names the storage of a taken local, so its address is a stack borrow.
+fn stack_address(context* c, fir.place p, fir.rvalue_kind kind) bool {
+    return c->stored && p.base == fir.base_kind.bk_local && c->taken[cast(p.local, u64)] &&
+        names_storage(c->function, p, kind);
+}
+
 // ---- statements -------------------------------------------------------------------------------
 
 // The operand a write consumes as its value, or none.
@@ -967,7 +1149,10 @@ fn read_operand(context mut* c, u32 block, u32 gap, fir.operand o, consumed take
     if (taken.present && fir.same_base(taken.place, o.place) &&
         taken.place.proj_len == o.place.proj_len && o.place.proj_len == 0) { return; }
     access a = place_access(c, o.place);
-    if (!a.tracked) { return; }
+    if (!a.tracked) {
+        read_leaves(c, block, gap, o);
+        return;
+    }
     if (a.indirect) { dereference(c, block, gap, a.local); return; }
     if (a.length) { return; }
     if (o.kind == fir.operand_kind.ok_move) {
@@ -975,6 +1160,39 @@ fn read_operand(context mut* c, u32 block, u32 gap, fir.operand o, consumed take
         return;
     }
     inspect(c, block, gap, a.local);
+}
+
+// The stored effects of one operand read of a TA place. A copy of a reference leaf is a
+// semantic read; a move of an owning leaf leaves local proof (escape). A whole TA reads each
+// reference leaf. A read through a variable index has no element to check.
+fn read_leaves(context mut* c, u32 block, u32 gap, fir.operand o) void {
+    ownership_source_leaves.access l = leaf_access(c, o.place);
+    bool moved = o.kind == fir.operand_kind.ok_move;
+    switch (l.kind) {
+    case ownership_source_leaves.access_kind.none, ownership_source_leaves.access_kind.scalar,
+        ownership_source_leaves.access_kind.length:
+        return;
+    case ownership_source_leaves.access_kind.leaf, ownership_source_leaves.access_kind.pointer:
+        if (moved) { escape_at(c, block, gap, leaf_spot(c, l.first)); }
+        else { inspect_at(c, block, gap, leaf_spot(c, l.first)); }
+    case ownership_source_leaves.access_kind.prefix:
+        u64 mut k = l.first;
+        while (k < l.first + l.count) {
+            spot at = leaf_spot(c, k);
+            if (moved && spot_owning(c, at)) { escape_at(c, block, gap, at); }
+            else { inspect_at(c, block, gap, at); }
+            k += 1;
+        }
+    case ownership_source_leaves.access_kind.indirect:
+        use_at(c, block, gap, leaf_spot(c, l.first));
+    case ownership_source_leaves.access_kind.dynamic:
+        // A move empties an element that the run cannot select, so the path stops there.
+        if (moved) {
+            unsupported_at(c, block, gap, whole(l.local), missing.dynamic_element);
+        } else {
+            note_gap(c, missing.dynamic_element, source(c, location(c, block, gap)));
+        }
+    }
 }
 
 fn whole_tracked(context* c, fir.operand o) bool {
@@ -1017,48 +1235,70 @@ fn unknown_length() ownership_api.scalar_fact {
 
 // The value of `rv_use` or `rv_cast` into a whole TL destination.
 fn write_operand(context mut* c, u32 block, u32 gap, u32 to, fir.operand o) consumed {
+    return write_operand_at(c, block, gap, whole(to), o);
+}
+
+// The value of `rv_use` or `rv_cast` into a TL or a TA leaf.
+fn write_operand_at(context mut* c, u32 block, u32 gap, spot to, fir.operand o) consumed {
     fir.func* f = c->function;
     if (o.kind == fir.operand_kind.ok_const) {
         fir.const_kind k = o.value.kind;
         ownership_api.entity_id static_key = entity(c, ownership_api.entity_kind.source,
             STATIC_ORDINAL);
         if (k == fir.const_kind.ck_string || k == fir.const_kind.ck_bytes) {
-            assign_reference(c, block, gap, to, static_key, static_length(o.value));
+            reference_at(c, block, gap, to, static_key, static_length(o.value));
         } else if (k == fir.const_kind.ck_enum_table) {
-            assign_reference(c, block, gap, to, static_key, unknown_length());
+            reference_at(c, block, gap, to, static_key, unknown_length());
         } else if (k == fir.const_kind.ck_null || k == fir.const_kind.ck_zero) {
-            assign_empty(c, block, gap, to);
+            empty_at(c, block, gap, to);
         } else {
             // An integer cast to a reference names no proved source (D17.17).
-            opaque(c, block, gap, to, missing.unknown_source);
+            opaque_at(c, block, gap, to, missing.unknown_source);
         }
         return consumed{};
     }
     access a = place_access(c, o.place);
     if (a.tracked && a.whole && o.kind == fir.operand_kind.ok_move) {
-        move_step(c, block, gap, a.local, to);
+        move_at(c, block, gap, whole(a.local), to);
         return consumed{true, o.place};
     }
     if (a.tracked && (a.whole || a.pointer) && o.kind == fir.operand_kind.ok_copy &&
         reference_type(fir.operand_type(f, o))) {
-        copy_step(c, block, gap, a.local, to);
+        copy_at(c, block, gap, whole(a.local), to);
+        return consumed{true, o.place};
+    }
+    ownership_source_leaves.access l = leaf_access(c, o.place);
+    if (l.kind == ownership_source_leaves.access_kind.leaf &&
+        o.kind == fir.operand_kind.ok_move) {
+        move_at(c, block, gap, leaf_spot(c, l.first), to);
+        return consumed{true, o.place};
+    }
+    if ((l.kind == ownership_source_leaves.access_kind.leaf ||
+        l.kind == ownership_source_leaves.access_kind.pointer) &&
+        o.kind == fir.operand_kind.ok_copy && reference_type(fir.operand_type(f, o))) {
+        copy_at(c, block, gap, leaf_spot(c, l.first), to);
         return consumed{true, o.place};
     }
     // A load from storage that no TL holds, or an integer cast to a reference.
     read_operand(c, block, gap, o, consumed{});
     missing mut why = missing.unknown_source;
-    if (o.kind == fir.operand_kind.ok_move || c->owning[cast(to, u64)]) {
+    if (o.kind == fir.operand_kind.ok_move || spot_owning(c, to)) {
         why = missing.owner_load;
     }
-    opaque(c, block, gap, to, why);
+    opaque_at(c, block, gap, to, why);
     return consumed{true, o.place};
 }
 
 // The write into a whole TL destination. It returns the operand that the write consumes.
 fn write_tracked(context mut* c, u32 block, u32 gap, u32 to, fir.rvalue r) consumed {
+    return write_tracked_at(c, block, gap, whole(to), r);
+}
+
+// The write into a TL or a TA leaf. It returns the operand that the write consumes.
+fn write_tracked_at(context mut* c, u32 block, u32 gap, spot to, fir.rvalue r) consumed {
     fir.func* f = c->function;
     if (r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_cast) {
-        return write_operand(c, block, gap, to, fir.rvalue_operand(f, r, 0));
+        return write_operand_at(c, block, gap, to, fir.rvalue_operand(f, r, 0));
     }
     if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
         access a = place_access(c, r.place);
@@ -1067,52 +1307,79 @@ fn write_tracked(context mut* c, u32 block, u32 gap, u32 to, fir.rvalue r) consu
                 // The place loads through the TL. Its result has no source that local proof
                 // knows, so a null test of it decides nothing.
                 dereference(c, block, gap, a.local);
-                opaque(c, block, gap, to, missing.unknown_source);
+                opaque_at(c, block, gap, to, missing.unknown_source);
                 return consumed{};
             }
-            copy_step(c, block, gap, a.local, to);
+            copy_at(c, block, gap, whole(a.local), to);
             return consumed{true, r.place};
         }
-        if (r.place.base == fir.base_kind.bk_global && !fir.place_indirect(f, r.place)) {
-            ownership_api.entity_id static_key = entity(c, ownership_api.entity_kind.source,
-                STATIC_ORDINAL);
-            assign_reference(c, block, gap, to, static_key, unknown_length());
+        ownership_source_leaves.access l = leaf_access(c, r.place);
+        if (l.kind == ownership_source_leaves.access_kind.indirect ||
+            (l.kind == ownership_source_leaves.access_kind.leaf &&
+            r.kind == fir.rvalue_kind.rv_slice)) {
+            copy_at(c, block, gap, leaf_spot(c, l.first), to);
+            return consumed{true, r.place};
+        }
+        if (stack_address(c, r.place, r.kind)) {
+            // The address of local storage borrows its stack source (inline escape, D17.14).
+            reference_at(c, block, gap, to, stack_key(c, r.place.local), unknown_length());
             return consumed{};
         }
-        opaque(c, block, gap, to, missing.unknown_source);
+        // The address of global storage is static. So is a slice of a constant global's own
+        // span or string. A slice of a mutable global's span reads a reference that the run
+        // does not follow, so it falls to the opaque case.
+        if (r.place.base == fir.base_kind.bk_global && (names_storage(f, r.place, r.kind) ||
+            tracked_reference(c, r.place, r.place.proj_len))) {
+            ownership_api.entity_id static_key = entity(c, ownership_api.entity_kind.source,
+                STATIC_ORDINAL);
+            reference_at(c, block, gap, to, static_key, unknown_length());
+            return consumed{};
+        }
+        opaque_at(c, block, gap, to, missing.unknown_source);
         return consumed{};
     }
     if (r.kind == fir.rvalue_kind.rv_alloc) {
-        allocation_step(c, block, gap, to, fir.rvalue_operand(f, r, 0));
+        if (to.leaf != WHOLE) {
+            opaque_at(c, block, gap, to, missing.unknown_source);
+            return consumed{};
+        }
+        allocation_step(c, block, gap, to.local, fir.rvalue_operand(f, r, 0));
         return consumed{};
     }
     if (r.kind == fir.rvalue_kind.rv_slice_ptr || r.kind == fir.rvalue_kind.rv_aggregate) {
         fir.operand o = fir.rvalue_operand(f, r, 0);
-        bool owned = c->owning[cast(to, u64)];
+        bool owned = spot_owning(c, to);
         if (r.kind == fir.rvalue_kind.rv_aggregate && owned && owned_span(c, block, gap, r)) {
-            move_step(c, block, gap, o.place.local, to);
+            move_at(c, block, gap, whole(o.place.local), to);
             return consumed{true, o.place};
         }
         bool view = r.kind == fir.rvalue_kind.rv_slice_ptr || (!owned && r.ops_len == 2);
         if (view && o.kind == fir.operand_kind.ok_copy && whole_tracked(c, o)) {
-            copy_step(c, block, gap, o.place.local, to);
+            copy_at(c, block, gap, whole(o.place.local), to);
             return consumed{true, o.place};
         }
-        opaque(c, block, gap, to, missing.unknown_source);
+        ownership_source_leaves.access l = o.kind == fir.operand_kind.ok_copy ?
+            leaf_access(c, o.place) : ownership_source_leaves.access{};
+        if (view && (l.kind == ownership_source_leaves.access_kind.leaf ||
+            l.kind == ownership_source_leaves.access_kind.pointer)) {
+            copy_at(c, block, gap, leaf_spot(c, l.first), to);
+            return consumed{true, o.place};
+        }
+        opaque_at(c, block, gap, to, missing.unknown_source);
         return consumed{};
     }
     if (r.kind == fir.rvalue_kind.rv_call && r.callee == fir.callee_kind.cl_extern) {
-        if (c->owning[cast(to, u64)]) {
-            opaque(c, block, gap, to, missing.foreign_owner);
+        if (spot_owning(c, to)) {
+            opaque_at(c, block, gap, to, missing.foreign_owner);
             return consumed{};
         }
         ownership_api.entity_id foreign = entity(c, ownership_api.entity_kind.source,
             cast(c->steps_len, u32));
-        assign_reference(c, block, gap, to, foreign, unknown_length());
+        reference_at(c, block, gap, to, foreign, unknown_length());
         c->steps[c->steps_len - 1].local.source_key = foreign;
         return consumed{};
     }
-    opaque(c, block, gap, to, r.kind == fir.rvalue_kind.rv_call ? missing.fort_call :
+    opaque_at(c, block, gap, to, r.kind == fir.rvalue_kind.rv_call ? missing.fort_call :
         missing.unknown_source);
     return consumed{};
 }
@@ -1122,9 +1389,12 @@ fn statement_effects(context mut* c, u32 block, u32 gap) void {
     fir.statement* s = fir.block_statement(f, block, gap);
     switch (s->kind) {
     case fir.stmt_kind.st_live:
+        if (c->stored && c->taken[cast(s->local, u64)]) {
+            stack_step(c, block, gap, ownership_transfer.action.stack_begin, s->local);
+        }
         return;
     case fir.stmt_kind.st_dead:
-        // prepare already notes an owning local that is no TL.
+        // prepare already notes an owning local that is no TL and no TA.
         if (c->tracked[cast(s->local, u64)]) {
             if (c->owning[cast(s->local, u64)]) { end_step(c, block, gap, s->local); }
             else { assign_empty(c, block, gap, s->local); }
@@ -1132,9 +1402,11 @@ fn statement_effects(context mut* c, u32 block, u32 gap) void {
         if (c->flag[cast(s->local, u64)]) {
             flag_step(c, block, gap, s->local, ownership_flow.flag_kind.clear, s->local, false);
         }
+        if (c->stored) { end_storage(c, block, gap, s->local); }
         return;
     case fir.stmt_kind.st_loan_begin, fir.stmt_kind.st_loan_end:
-        note_gap(c, missing.range_loan, source(c, s->loc));
+        // The stored run binds each loan that it can prove and notes the others (prepare).
+        if (!c->stored) { note_gap(c, missing.range_loan, source(c, s->loc)); }
         return;
     case fir.stmt_kind.st_del:
         access a = place_access(c, s->place);
@@ -1143,6 +1415,19 @@ fn statement_effects(context mut* c, u32 block, u32 gap) void {
             return;
         }
         if (a.tracked && a.indirect) { dereference(c, block, gap, a.local); }
+        ownership_source_leaves.access l = leaf_access(c, s->place);
+        if (l.kind == ownership_source_leaves.access_kind.leaf) {
+            release_at(c, block, gap, leaf_spot(c, l.first));
+            return;
+        }
+        if (l.kind == ownership_source_leaves.access_kind.indirect) {
+            use_at(c, block, gap, leaf_spot(c, l.first));
+        }
+        if (l.kind == ownership_source_leaves.access_kind.dynamic) {
+            // The release of an element that the run cannot select stops the path.
+            unsupported_at(c, block, gap, whole(l.local), missing.dynamic_element);
+            return;
+        }
         // The release ends an allocation that no slot owns. Slot owners keep their facts.
         outside_step(c, block, gap, false);
         return;
@@ -1187,6 +1472,10 @@ fn assignment_effects(context mut* c, u32 block, u32 gap, fir.statement* s) void
         if (into_tracked) { write_tracked(c, block, gap, destination.local, r); }
         else if (destination.tracked && destination.indirect) {
             dereference(c, block, gap, destination.local);
+        } else if (c->stored) { call_into_leaves(c, block, gap, s); }
+        if (!into_tracked && stored_untracked(c, s->place) && stores_stack_borrow(c, r)) {
+            // A callee can return its argument, so the result can hold a stack borrow.
+            note_gap(c, missing.escape, source(c, s->loc));
         }
         if (!into_tracked && r.callee == fir.callee_kind.cl_extern &&
             owning_type(fir.place_type(f, s->place))) {
@@ -1198,11 +1487,18 @@ fn assignment_effects(context mut* c, u32 block, u32 gap, fir.statement* s) void
         write_tracked_after_reads(c, block, gap, destination.local, r);
         return;
     }
+    if (c->stored && store_into_leaves(c, block, gap, s)) { return; }
     if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
         access a = place_access(c, r.place);
         if (a.tracked && (a.indirect || (a.whole && r.kind == fir.rvalue_kind.rv_slice))) {
             if (same_referent(c, r.place, r.kind)) { inspect(c, block, gap, a.local); }
             else { dereference(c, block, gap, a.local); }
+        }
+        ownership_source_leaves.access l = leaf_access(c, r.place);
+        if (l.kind == ownership_source_leaves.access_kind.indirect ||
+            (l.kind == ownership_source_leaves.access_kind.leaf &&
+            r.kind == fir.rvalue_kind.rv_slice)) {
+            inspect_at(c, block, gap, leaf_spot(c, l.first));
         }
     }
     if (r.kind == fir.rvalue_kind.rv_alloc) {
@@ -1219,11 +1515,550 @@ fn assignment_effects(context mut* c, u32 block, u32 gap, fir.statement* s) void
     if (destination.tracked && !destination.whole && !destination.indirect) {
         unsupported(c, block, gap, destination.local, missing.unknown_source);
     }
+    ownership_source_leaves.access into = leaf_access(c, s->place);
+    if (into.kind == ownership_source_leaves.access_kind.indirect) {
+        use_at(c, block, gap, leaf_spot(c, into.first));
+    }
+    if (stored_untracked(c, s->place) && stores_stack_borrow(c, r)) {
+        // A stack borrow in storage that the run does not track can outlive its local.
+        note_gap(c, missing.escape, source(c, s->loc));
+    }
 }
+
+// ---- stored writes ----------------------------------------------------------------------------
+
+// Ends the storage of local `n` in the stored run: each owning leaf of a TA needs an empty
+// owner, each borrowed leaf is cleared, and the stack source of a taken local ends (D17.14).
+fn end_storage(context mut* c, u32 block, u32 gap, u32 n) void {
+    u64 at = cast(n, u64);
+    if (c->leaves.aggregate[at]) {
+        u64 mut k = c->leaves.first[at];
+        while (k < c->leaves.first[at] + c->leaves.count[at]) {
+            spot leaf = leaf_spot(c, k);
+            if (spot_owning(c, leaf)) { end_at(c, block, gap, leaf); }
+            else { empty_at(c, block, gap, leaf); }
+            k += 1;
+        }
+    }
+    if (c->taken[at]) {
+        stack_step(c, block, gap, ownership_transfer.action.stack_end, n);
+    }
+}
+
+// The result of a call into a TA place. A fort call result is unknown to the stored run, and
+// a foreign aggregate result has no leaf facts here (D17.13 applies to reference results).
+fn call_into_leaves(context mut* c, u32 block, u32 gap, fir.statement* s) void {
+    fir.rvalue r = s->value;
+    ownership_source_leaves.access l = leaf_access(c, s->place);
+    switch (l.kind) {
+    case ownership_source_leaves.access_kind.none, ownership_source_leaves.access_kind.scalar,
+        ownership_source_leaves.access_kind.length:
+        return;
+    case ownership_source_leaves.access_kind.leaf:
+        write_tracked_at(c, block, gap, leaf_spot(c, l.first), r);
+    case ownership_source_leaves.access_kind.prefix:
+        missing why = r.callee == fir.callee_kind.cl_extern ? missing.foreign_owner :
+            missing.fort_call;
+        u64 mut k = l.first;
+        while (k < l.first + l.count) {
+            opaque_at(c, block, gap, leaf_spot(c, k), why);
+            k += 1;
+        }
+    case ownership_source_leaves.access_kind.indirect:
+        use_at(c, block, gap, leaf_spot(c, l.first));
+    case ownership_source_leaves.access_kind.pointer:
+        unsupported_at(c, block, gap, whole(l.local), missing.unknown_source);
+    case ownership_source_leaves.access_kind.dynamic:
+        unsupported_at(c, block, gap, whole(l.local), missing.dynamic_element);
+    }
+}
+
+// Whether the rvalue reads a place of local `n`. An aggregate write that reads its own
+// destination reads the old value first (fir.md 6), which leaf-by-leaf steps cannot keep.
+fn reads_local(context* c, fir.rvalue r, u32 n) bool {
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(c->function, r, k);
+        if (o.kind != fir.operand_kind.ok_const && o.place.base == fir.base_kind.bk_local &&
+            o.place.local == n) { return true; }
+        k += 1;
+    }
+    return false;
+}
+
+// A store into a TA place: one leaf, a part with leaves, or an element that a variable index
+// selects. False when the place holds no leaf, so the caller reads the operands.
+fn store_into_leaves(context mut* c, u32 block, u32 gap, fir.statement* s) bool {
+    fir.func* f = c->function;
+    fir.rvalue r = s->value;
+    ownership_source_leaves.access l = leaf_access(c, s->place);
+    switch (l.kind) {
+    case ownership_source_leaves.access_kind.none, ownership_source_leaves.access_kind.scalar,
+        ownership_source_leaves.access_kind.length, ownership_source_leaves.access_kind.indirect:
+        return false;
+    case ownership_source_leaves.access_kind.leaf:
+        write_after_reads_at(c, block, gap, leaf_spot(c, l.first), r);
+    case ownership_source_leaves.access_kind.prefix:
+        write_prefix(c, block, gap, l, s);
+    case ownership_source_leaves.access_kind.pointer:
+        read_all(c, block, gap, r);
+        unsupported_at(c, block, gap, whole(l.local), missing.unknown_source);
+    case ownership_source_leaves.access_kind.dynamic:
+        if (l.elements && (r.kind == fir.rvalue_kind.rv_use ||
+            r.kind == fir.rvalue_kind.rv_cast) && r.ops_len == 1) {
+            weak_store_step(c, block, gap, l, fir.rvalue_operand(f, r, 0));
+        } else {
+            read_all(c, block, gap, r);
+            unsupported_at(c, block, gap, whole(l.local), missing.dynamic_element);
+        }
+    }
+    return true;
+}
+
+fn read_all(context mut* c, u32 block, u32 gap, fir.rvalue r) void {
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        read_operand(c, block, gap, fir.rvalue_operand(c->function, r, k), consumed{});
+        k += 1;
+    }
+}
+
+// A whole aggregate value into the leaves [first, first + count) of a TA: the leaves of a
+// TA place, `zero`, or unknown contents. V4 makes the operand agree with the destination type,
+// so the leaves of the two places correspond in order.
+fn write_value(context mut* c, u32 block, u32 gap, u64 first, u64 count, fir.operand o)
+    void {
+    if (o.kind == fir.operand_kind.ok_const && o.value.kind == fir.const_kind.ck_zero) {
+        u64 mut k = first;
+        while (k < first + count) { empty_at(c, block, gap, leaf_spot(c, k)); k += 1; }
+        return;
+    }
+    ownership_source_leaves.access l = o.kind == fir.operand_kind.ok_const ?
+        ownership_source_leaves.access{} : leaf_access(c, o.place);
+    if (l.kind == ownership_source_leaves.access_kind.prefix && l.count == count) {
+        u64 mut j = 0;
+        while (j < count) {
+            spot from = leaf_spot(c, l.first + j);
+            spot to = leaf_spot(c, first + j);
+            if (o.kind == fir.operand_kind.ok_move) { move_at(c, block, gap, from, to); }
+            else { copy_at(c, block, gap, from, to); }
+            j += 1;
+        }
+        return;
+    }
+    read_operand(c, block, gap, o, consumed{});
+    missing why = o.kind == fir.operand_kind.ok_move ? missing.owner_load : missing.unknown_source;
+    u64 mut k = first;
+    while (k < first + count) { opaque_at(c, block, gap, leaf_spot(c, k), why); k += 1; }
+}
+
+// A store into a TA part that holds the leaves of `into`. An aggregate literal gives each
+// member to its own leaves; a whole value copies or moves leaf by leaf. A write that reads its
+// own destination, a cast between aggregate types and any other rvalue give unknown leaves.
+fn write_prefix(context mut* c, u32 block, u32 gap, ownership_source_leaves.access into,
+    fir.statement* s) void {
+    fir.func* f = c->function;
+    fir.rvalue r = s->value;
+    if (reads_local(c, r, into.local) || (r.kind != fir.rvalue_kind.rv_aggregate &&
+        r.kind != fir.rvalue_kind.rv_use)) {
+        read_all(c, block, gap, r);
+        u64 mut k = into.first;
+        while (k < into.first + into.count) {
+            opaque_at(c, block, gap, leaf_spot(c, k), missing.unknown_source);
+            k += 1;
+        }
+        return;
+    }
+    if (r.kind == fir.rvalue_kind.rv_use) {
+        write_value(c, block, gap, into.first, into.count, fir.rvalue_operand(f, r, 0));
+        return;
+    }
+    types.node* t = fir.place_type(f, s->place);
+    u64 mut at = into.first;
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        types.node* member = t->kind == types.type_kind.k_struct ?
+            fir.struct_field_type(t, k) : t->elem;
+        u64 count = ownership_source_leaves.count_leaves(member, 0);
+        fir.operand o = fir.rvalue_operand(f, r, k);
+        if (count == 0) {
+            read_operand(c, block, gap, o, consumed{});
+        } else if (reference_type(member)) {
+            write_operand_at(c, block, gap, leaf_spot(c, at), o);
+        } else {
+            write_value(c, block, gap, at, count, o);
+        }
+        at += count;
+        k += 1;
+    }
+}
+
+// A store of one reference element that a variable index selects: a weak store over each
+// element of the actual array (D17.15). The value is a constant, a TL or a TA leaf; any
+// other value is unknown.
+fn weak_store_step(context mut* c, u32 block, u32 gap, ownership_source_leaves.access into,
+    fir.operand o) void {
+    fir.func* f = c->function;
+    spot mut from = whole(into.local);
+    bool mut moves = false;
+    ownership_api.contents_fact mut value = ownership_api.contents_fact{};
+    bool mut opaque_value = false;
+    ownership_api.borrow_relation mut relation = ownership_api.borrow_relation{};
+    if (o.kind == fir.operand_kind.ok_const) {
+        fir.const_kind k = o.value.kind;
+        if (k == fir.const_kind.ck_null || k == fir.const_kind.ck_zero) {
+            value.kind = ownership_api.contents_kind.empty_owner;
+            value.owner_empty = true;
+            value.span_length.kind = ownership_api.fact_kind.exact;
+        } else if (k == fir.const_kind.ck_string || k == fir.const_kind.ck_bytes) {
+            value.kind = ownership_api.contents_kind.reference;
+            value.span_length = static_length(o.value);
+            relation.source = entity(c, ownership_api.entity_kind.source, STATIC_ORDINAL);
+        } else {
+            opaque_value = true;
+        }
+    } else {
+        access a = place_access(c, o.place);
+        ownership_source_leaves.access l = leaf_access(c, o.place);
+        if (a.tracked && a.whole) {
+            from = whole(a.local);
+        } else if (l.kind == ownership_source_leaves.access_kind.leaf) {
+            from = leaf_spot(c, l.first);
+        } else {
+            read_operand(c, block, gap, o, consumed{});
+            opaque_value = true;
+        }
+        moves = !opaque_value && o.kind == fir.operand_kind.ok_move;
+    }
+    u64 i = local_step(c, block, gap, ownership_transfer.action.weak_store, from.local,
+        into.local);
+    retarget(c, i, from, whole(into.local));
+    ownership_transfer.request mut* req = &c->steps[i].local;
+    req->leaf_places_proved = true;
+    req->weak_guard = entity(c, ownership_api.entity_kind.guard, key_ordinal(i));
+    req->weak_moves = moves;
+    req->opaque_value = opaque_value;
+    req->destination_owns = owning_type(c->leaves.leaves[into.first].ty);
+    if (opaque_value) { note_gap(c, missing.unknown_source, c->steps[i].source); }
+    if (relation.source.kind == ownership_api.entity_kind.source) {
+        ownership_api.entity_id version = value_of(c, i);
+        c->relations[i] = ownership_api.borrow_relation{.key = entity(c,
+            ownership_api.entity_kind.relation, key_ordinal(i)), .value_version = version,
+            .containing = slot(c, into.local), .source = relation.source,
+            .representation_complete = true};
+        value.value_version = version;
+    } else if (value.kind == ownership_api.contents_kind.empty_owner) {
+        value.value_version = value_of(c, i);
+    }
+    req->value = value;
+    // The places of the elements. Link gives the request a view of them.
+    u64 needed = c->weak_places_len + into.count;
+    if (needed > c->weak_places.len) {
+        ownership_api.place_path mut@ own bigger = new(ownership_api.place_path, needed * 2);
+        u64 mut j = 0;
+        while (j < c->weak_places_len) { bigger[j] = c->weak_places[j]; j += 1; }
+        del(c->weak_places);
+        c->weak_places = move(bigger);
+    }
+    c->extras[i].weak_first = c->weak_places_len;
+    c->extras[i].weak_count = into.count;
+    u64 mut k = 0;
+    while (k < into.count) {
+        c->weak_places[c->weak_places_len] = spot_place(c, leaf_spot(c, into.first + k));
+        c->weak_places_len += 1;
+        k += 1;
+    }
+}
+
+// ---- stack borrows ---------------------------------------------------------------------------
+
+// Whether a stored-run write into `p` goes to storage that the run does not track, and the
+// place can hold a reference: heap through a pointer, a global, or a taken local.
+fn stored_untracked(context* c, fir.place p) bool {
+    if (!c->stored) { return false; }
+    access a = place_access(c, p);
+    if (a.tracked && a.whole) { return false; }
+    ownership_source_leaves.access l = leaf_access(c, p);
+    return (l.kind == ownership_source_leaves.access_kind.none ||
+        l.kind == ownership_source_leaves.access_kind.indirect) &&
+        reference_leaf(fir.place_type(c->function, p));
+}
+
+// A unit is a TL (its local number) or a TA leaf (the local count plus the leaf index).
+fn leaf_unit(context* c, u64 k) u64 { return cast(fir.local_count(c->function), u64) + k; }
+
+// Appends the units whose value an operand place carries: a whole TL or its pointer field, a
+// leaf or its pointer field, or each leaf of a TA part. A value loaded through a reference
+// carries none of them.
+fn value_units(context* c, fir.place p, u64 mut@ out, u64 mut* len) void {
+    access a = place_access(c, p);
+    if (a.tracked && (a.whole || a.pointer)) {
+        out[*len] = cast(a.local, u64);
+        *len += 1;
+        return;
+    }
+    ownership_source_leaves.access l = leaf_access(c, p);
+    if (l.kind == ownership_source_leaves.access_kind.leaf ||
+        l.kind == ownership_source_leaves.access_kind.pointer ||
+        l.kind == ownership_source_leaves.access_kind.prefix) {
+        u64 mut k = l.first;
+        while (k < l.first + l.count) {
+            out[*len] = leaf_unit(c, k);
+            *len += 1;
+            k += 1;
+        }
+    }
+}
+
+// Appends the units of a view that `addr` or `slice` takes through a reference: the TL or the
+// leaf that it loads.
+fn view_units(context* c, fir.rvalue r, u64 mut@ out, u64 mut* len) void {
+    if (r.kind != fir.rvalue_kind.rv_addr && r.kind != fir.rvalue_kind.rv_slice) { return; }
+    access a = place_access(c, r.place);
+    if (a.tracked && (a.indirect || (a.whole && r.kind == fir.rvalue_kind.rv_slice))) {
+        out[*len] = cast(a.local, u64);
+        *len += 1;
+        return;
+    }
+    ownership_source_leaves.access l = leaf_access(c, r.place);
+    if (l.kind == ownership_source_leaves.access_kind.indirect ||
+        (l.kind == ownership_source_leaves.access_kind.leaf &&
+        r.kind == fir.rvalue_kind.rv_slice)) {
+        out[*len] = leaf_unit(c, l.first);
+        *len += 1;
+    }
+}
+
+// The units that a write fills: a whole TL, a leaf, the leaves of a TA part, or the elements
+// that a variable index can select.
+fn write_units(context* c, fir.place p, u64 mut@ out, u64 mut* len) void {
+    access a = place_access(c, p);
+    if (a.tracked && a.whole) {
+        out[*len] = cast(a.local, u64);
+        *len += 1;
+        return;
+    }
+    ownership_source_leaves.access l = leaf_access(c, p);
+    if (l.kind == ownership_source_leaves.access_kind.leaf ||
+        l.kind == ownership_source_leaves.access_kind.prefix ||
+        (l.kind == ownership_source_leaves.access_kind.dynamic && l.elements)) {
+        u64 mut k = l.first;
+        while (k < l.first + l.count) {
+            out[*len] = leaf_unit(c, k);
+            *len += 1;
+            k += 1;
+        }
+    }
+}
+
+// Collects the units that one assignment reads into `from` and fills into `to`. It returns
+// true when the rvalue takes the address of local storage itself.
+fn assignment_units(context* c, fir.statement* s, u64 mut@ from, u64 mut* from_len,
+    u64 mut@ to, u64 mut* to_len) bool {
+    fir.rvalue r = s->value;
+    *from_len = 0;
+    *to_len = 0;
+    write_units(c, s->place, to, to_len);
+    view_units(c, r, from, from_len);
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(c->function, r, k);
+        if (o.kind != fir.operand_kind.ok_const) { value_units(c, o.place, from, from_len); }
+        k += 1;
+    }
+    return (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) &&
+        stack_address(c, r.place, r.kind);
+}
+
+// The largest unit list of one assignment: the leaves of its operands and of its destination.
+fn units_bound(context* c, fir.statement* s) u64 {
+    u64 each = ownership_source_leaves.MAX_LEAVES + 1;
+    return each * (cast(s->value.ops_len, u64) + 2);
+}
+
+// A growing list of directed edges between search nodes.
+struct edge_list {
+    u64 mut@ own from;
+    u64 mut@ own to;
+    u64 len;
+}
+
+fn add_edge(edge_list mut* edges, u64 from, u64 to) void {
+    if (edges->len == edges->from.len) {
+        u64 cap = edges->from.len * 2 + 16;
+        u64 mut@ own wider_from = new(u64, cap);
+        u64 mut@ own wider_to = new(u64, cap);
+        u64 mut e = 0;
+        while (e < edges->len) {
+            wider_from[e] = edges->from[e];
+            wider_to[e] = edges->to[e];
+            e += 1;
+        }
+        del(edges->from);
+        del(edges->to);
+        edges->from = move(wider_from);
+        edges->to = move(wider_to);
+    }
+    edges->from[edges->len] = from;
+    edges->to[edges->len] = to;
+    edges->len += 1;
+}
+
+// Marks each TL and TA leaf that can hold a borrow of local storage: the address of a taken
+// local, and every value that a copy, a move, a view or a call result derives from such a
+// unit. A call result counts because a callee can return its argument. Each assignment is a
+// hub node: its read units lead to the hub and the hub leads to its written units, so an
+// assignment adds as many edges as it has units. One pass over the statements builds the
+// edges, and one search over them marks the units: the work is linear in the FIR size and the
+// leaf count, with no fixed point over the statements.
+fn stack_borrows(context mut* c) void {
+    fir.func* f = c->function;
+    u64 units = leaf_unit(c, c->leaves.leaves_len);
+    u64 mut assigns = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            if (fir.block_statement(f, b, i)->kind == fir.stmt_kind.st_assign) { assigns += 1; }
+            i += 1;
+        }
+        b += 1;
+    }
+    u64 nodes = units + assigns;
+    c->stack_units = new(bool, units);
+    bool mut@ own marked = new(bool, nodes);
+    defer del(marked);
+    edge_list mut edges = edge_list{.from = new(u64, 0), .to = new(u64, 0)};
+    defer del(edges.from);
+    defer del(edges.to);
+    u64 mut@ own seeds = new(u64, nodes + 1);
+    defer del(seeds);
+    u64 mut seeds_len = 0;
+    u64 mut@ own mut from = new(u64, 0);
+    u64 mut@ own mut to = new(u64, 0);
+    defer del(from);
+    defer del(to);
+    u64 mut hub = units;
+    b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_assign) {
+                u64 bound = units_bound(c, s);
+                if (bound > from.len) {
+                    del(from);
+                    del(to);
+                    from = new(u64, bound);
+                    to = new(u64, bound);
+                }
+                u64 mut from_len = 0;
+                u64 mut to_len = 0;
+                bool seeded = assignment_units(c, s, from, &from_len, to, &to_len);
+                if (to_len > 0) {
+                    if (seeded) {
+                        marked[hub] = true;
+                        seeds[seeds_len] = hub;
+                        seeds_len += 1;
+                    }
+                    u64 mut x = 0;
+                    while (x < from_len) { add_edge(&edges, from[x], hub); x += 1; }
+                    u64 mut t = 0;
+                    while (t < to_len) { add_edge(&edges, hub, to[t]); t += 1; }
+                }
+                hub += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    // The edges in order of their source node (a counting sort), then a search from the seeds.
+    u64 mut@ own start = new(u64, nodes + 1);
+    defer del(start);
+    u64 mut e = 0;
+    while (e < edges.len) { start[edges.from[e] + 1] += 1; e += 1; }
+    u64 mut n = 0;
+    while (n < nodes) { start[n + 1] += start[n]; n += 1; }
+    u64 mut@ own fill = new(u64, nodes + 1);
+    defer del(fill);
+    u64 mut@ own targets = new(u64, edges.len + 1);
+    defer del(targets);
+    e = 0;
+    while (e < edges.len) {
+        u64 origin = edges.from[e];
+        targets[start[origin] + fill[origin]] = edges.to[e];
+        fill[origin] += 1;
+        e += 1;
+    }
+    u64 mut next = 0;
+    while (next < seeds_len) {
+        u64 at = seeds[next];
+        next += 1;
+        u64 mut j = start[at];
+        while (j < start[at + 1]) {
+            u64 reached = targets[j];
+            if (!marked[reached]) {
+                marked[reached] = true;
+                seeds[seeds_len] = reached;
+                seeds_len += 1;
+            }
+            j += 1;
+        }
+    }
+    n = 0;
+    while (n < units) { c->stack_units[n] = marked[n]; n += 1; }
+}
+
+// Whether an operand place carries a unit that can hold a stack borrow.
+fn holds_stack_borrow(context* c, fir.place p) bool {
+    if (c->stack_units.len == 0) { return false; }
+    access a = place_access(c, p);
+    if (a.tracked && (a.whole || a.pointer)) { return c->stack_units[cast(a.local, u64)]; }
+    ownership_source_leaves.access l = leaf_access(c, p);
+    if (l.kind != ownership_source_leaves.access_kind.leaf &&
+        l.kind != ownership_source_leaves.access_kind.pointer &&
+        l.kind != ownership_source_leaves.access_kind.prefix) { return false; }
+    u64 mut k = l.first;
+    while (k < l.first + l.count) {
+        if (c->stack_units[leaf_unit(c, k)]) { return true; }
+        k += 1;
+    }
+    return false;
+}
+
+// Whether the rvalue stores a stack borrow: the address of local storage, a view through a
+// unit that can hold one, or an operand that carries one.
+fn stores_stack_borrow(context* c, fir.rvalue r) bool {
+    if (c->stack_units.len == 0) { return false; }
+    if ((r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) &&
+        stack_address(c, r.place, r.kind)) { return true; }
+    u64[2] mut views = {0, 0};
+    u64 mut views_len = 0;
+    view_units(c, r, views[..], &views_len);
+    u64 mut v = 0;
+    while (v < views_len) {
+        if (c->stack_units[views[v]]) { return true; }
+        v += 1;
+    }
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(c->function, r, k);
+        if (o.kind != fir.operand_kind.ok_const && holds_stack_borrow(c, o.place)) {
+            return true;
+        }
+        k += 1;
+    }
+    return false;
+}
+
 
 // The operands that the write does not consume are read before it, in FIR order. The write
 // reads the consumed operand itself, so the operand keeps its place before the store.
 fn write_tracked_after_reads(context mut* c, u32 block, u32 gap, u32 to, fir.rvalue r) void {
+    write_after_reads_at(c, block, gap, whole(to), r);
+}
+
+fn write_after_reads_at(context mut* c, u32 block, u32 gap, spot to, fir.rvalue r) void {
     fir.func* f = c->function;
     bool first_value = r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_cast ||
         r.kind == fir.rvalue_kind.rv_slice_ptr || r.kind == fir.rvalue_kind.rv_aggregate;
@@ -1234,7 +2069,7 @@ fn write_tracked_after_reads(context mut* c, u32 block, u32 gap, u32 to, fir.rva
         }
         k += 1;
     }
-    consumed taken = write_tracked(c, block, gap, to, r);
+    consumed taken = write_tracked_at(c, block, gap, to, r);
     if (first_value && r.ops_len > 0 && !taken.present) {
         read_operand(c, block, gap, fir.rvalue_operand(f, r, 0), consumed{});
     }
@@ -1252,6 +2087,7 @@ fn terminator_effects(context mut* c, u32 block) void {
                 l->kind != fir.local_kind.lk_param) { end_step(c, block, gap, n); }
             n += 1;
         }
+        if (c->stored) { return_storage(c, block, gap); }
         return;
     }
     if (b->term.kind == fir.term_kind.tk_check_overwrite) { return; }
@@ -1266,6 +2102,27 @@ fn terminator_effects(context mut* c, u32 block) void {
             read_operand(c, block, gap, fir.operand_at(f, b->term.args_first + k), none);
             k += 1;
         }
+    }
+}
+
+// Each return ends the owning leaves of each TA that is no parameter, and the stack source of
+// each taken local, parameters included (D17.14, D17.15). The flow then checks the returned
+// borrows against those ends.
+fn return_storage(context mut* c, u32 block, u32 gap) void {
+    fir.func* f = c->function;
+    u32 mut n = 1;
+    while (n < fir.local_count(f)) {
+        u64 at = cast(n, u64);
+        if (c->leaves.aggregate[at] && fir.local_at(f, n)->kind != fir.local_kind.lk_param) {
+            u64 mut k = c->leaves.first[at];
+            while (k < c->leaves.first[at] + c->leaves.count[at]) {
+                spot leaf = leaf_spot(c, k);
+                if (spot_owning(c, leaf)) { end_at(c, block, gap, leaf); }
+                k += 1;
+            }
+        }
+        if (c->taken[at]) { stack_step(c, block, gap, ownership_transfer.action.stack_end, n); }
+        n += 1;
     }
 }
 
@@ -1294,6 +2151,14 @@ fn entry_facts(context mut* c) void {
     while (n < fir.local_count(c->function)) {
         fir.local* l = fir.local_at(c->function, n);
         if (l->kind == fir.local_kind.lk_param) { parameter_facts(c, n, l); }
+        // The storage of a taken local is live at entry. A `live` marker begins it again, and
+        // the retired source holds the borrows of its ended instances.
+        if (c->stored && c->taken[cast(n, u64)]) {
+            add_source(c, stack_key(c, n), ownership_api.source_kind.stack);
+            ownership_state.append_sources(&c->entry, ownership_api.source_fact{
+                .key = retired_stack_key(c, n), .kind = ownership_api.source_kind.stack,
+                .validity = ownership_api.validity_kind.ended});
+        }
         n += 1;
     }
 }
@@ -1302,6 +2167,10 @@ fn parameter_facts(context mut* c, u32 n, fir.local* l) void {
     ownership_api.source_position at = source(c, l->loc);
     if (owning_type(l->ty)) {
         note_gap(c, missing.own_parameter, at);
+        return;
+    }
+    if (c->stored && c->leaves.aggregate[cast(n, u64)]) {
+        parameter_leaves(c, n);
         return;
     }
     if (!c->tracked[cast(n, u64)]) { return; }
@@ -1320,6 +2189,34 @@ fn parameter_facts(context mut* c, u32 n, fir.local* l) void {
     value.span_length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
         .symbol = version};
     ownership_state.append_contents(&c->entry, value);
+}
+
+// Each borrowed leaf of a TA parameter borrows a symbolic caller source of its own: the
+// referents of two leaves are separate caller facts (D17.15). An owning leaf made the whole
+// parameter the gap `own_parameter`, so no leaf here owns.
+fn parameter_leaves(context mut* c, u32 n) void {
+    u64 at = cast(n, u64);
+    u64 mut k = c->leaves.first[at];
+    while (k < c->leaves.first[at] + c->leaves.count[at]) {
+        u32 ordinal = leaf_parameter_ordinal(c, k);
+        ownership_api.entity_id caller = entity(c, ownership_api.entity_kind.source, ordinal);
+        add_source(c, caller, ownership_api.source_kind.symbolic_caller);
+        ownership_api.entity_id version = entity(c, ownership_api.entity_kind.value, ordinal);
+        ownership_api.place_path place = spot_place(c, leaf_spot(c, k));
+        ownership_api.borrow_relation[1] relation = {ownership_api.borrow_relation{
+            .key = entity(c, ownership_api.entity_kind.relation, ordinal),
+            .value_version = version, .containing = place, .source = caller,
+            .representation_complete = true}};
+        ownership_api.contents_fact mut value = ownership_api.contents_fact{};
+        value.place = place;
+        value.kind = ownership_api.contents_kind.reference;
+        value.value_version = version;
+        value.borrows = relation[..];
+        value.span_length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
+            .symbol = version};
+        ownership_state.append_contents(&c->entry, value);
+        k += 1;
+    }
 }
 
 // ---- flow bindings ----------------------------------------------------------------------------
@@ -1415,7 +2312,228 @@ fn link(context mut* c) void {
         if (c->steps[i].kind == ownership_flow.step_kind.call_outcome) {
             c->steps[i].outcomes = c->trusted_return[..];
         }
+        if (r->kind == ownership_transfer.action.weak_store) {
+            u64 first = c->extras[i].weak_first;
+            r->weak_places = c->weak_places[first..first + c->extras[i].weak_count];
+        }
         i += 1;
+    }
+}
+
+// ---- untracked loads ----------------------------------------------------------------------------
+
+// Whether the reference at the first `depth` projections of `p` is one that the run tracks: a
+// whole TL or its pointer field, a TA leaf or its pointer field (stored run), or the constant
+// initializer of a global that no code can write, reached with no dereference before it. A
+// variable index on the way to a TA leaf is the gap dynamic_element of the steps instead.
+fn tracked_reference(context* c, fir.place p, u32 depth) bool {
+    fir.place mut prefix = p;
+    prefix.proj_len = depth;
+    if (p.base == fir.base_kind.bk_global) {
+        // A constant global holds its constant initializer: null, static storage, or the
+        // address of other global storage (D7.10). Only that reference is constant: one that
+        // the prefix reaches through it can sit in mutable storage (`**GP` for `GP = &GM`).
+        return !p.global->mut0 && !fir.place_indirect(c->function, prefix);
+    }
+    u64 n = cast(p.local, u64);
+    if (depth == 0) { return c->tracked[n]; }
+    // The pointer field of a span or string TL is the TL's own reference, as place_access
+    // reads it: `*t.ptr` dereferences t.
+    if (c->tracked[n]) { return place_access(c, prefix).pointer; }
+    if (!c->stored || !c->leaves.aggregate[n]) { return false; }
+    ownership_source_leaves.access a = leaf_access(c, prefix);
+    return a.kind == ownership_source_leaves.access_kind.leaf ||
+        a.kind == ownership_source_leaves.access_kind.pointer ||
+        a.kind == ownership_source_leaves.access_kind.dynamic;
+}
+
+// Whether place `p` goes through a reference that the run does not track (tracked_reference).
+// Its value comes from storage whose contents the run does not follow: the heap, a mutable
+// global, caller storage, a taken local, an aggregate past the leaf bounds, or the storage
+// that a constant global's address names.
+fn untracked_load(context* c, fir.place p) bool {
+    fir.func* f = c->function;
+    types.node* mut t = fir.base_type(f, p);
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        bool through = pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index &&
+            (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string));
+        if (through && !tracked_reference(c, p, i)) { return true; }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    return false;
+}
+
+// Whether place `p` holds a value in storage whose contents the run does not follow, so a
+// reference read from it has no known source.
+fn untracked_storage(context* c, fir.place p) bool {
+    if (fir.place_indirect(c->function, p)) { return true; }
+    if (p.base == fir.base_kind.bk_global) { return p.global->mut0; }
+    u64 n = cast(p.local, u64);
+    return !c->tracked[n] && !(c->stored && c->leaves.aggregate[n]);
+}
+
+fn note_untracked(context mut* c, fir.place p, diag.loc at) void {
+    if (untracked_load(c, p)) { note_gap(c, missing.unknown_source, source(c, at)); }
+}
+
+// A read of a value with a reference leaf out of such storage is a semantic read of a
+// reference that the run cannot check (D17.14): a copy, a comparison, a cast, a call
+// argument or a release. Whatever the operation, it is the gap unknown_source.
+fn note_untracked_value(context mut* c, fir.place p, diag.loc at) void {
+    if (reference_leaf(fir.place_type(c->function, p)) && untracked_storage(c, p)) {
+        note_gap(c, missing.unknown_source, source(c, at));
+    }
+}
+
+// Both checks for one place that an operation reads: a use through an untracked reference,
+// and a read of a reference value out of untracked storage.
+fn note_untracked_read(context mut* c, fir.place p, diag.loc at) void {
+    note_untracked(c, p, at);
+    note_untracked_value(c, p, at);
+}
+
+// A use through a reference whose value the run does not follow is the gap unknown_source in
+// both runs, so no row proves it: `*saved.ptr` after `remember(&saved, p)` (approved example
+// 09), `**h` after `*h = p` and `del(p)`, `*G` for a mutable global G, `**GP` for `GP = &GM`.
+// Each read of that value is the same gap (note_untracked_value). The pass visits each read
+// that fir.stmt_read and fir.term_read report: an operand, a callee, a released place, the
+// place of a slice of a span or a `string`, and the pointers that an address or a destination
+// loads. So the verdict on such a reference does not depend on how lowering writes the load,
+// and no body uses or reads a reference that such storage keeps, in a read that FIR reports,
+// without this gap; a borrow that a body writes there needs no gap of its own.
+fn untracked_loads(context mut* c) void {
+    fir.func* f = c->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            // Every read of the statement, in the walk of fir.stmt_read: the operands, the
+            // callee, the place of a slice of a span or a `string`, a released place, and the
+            // pointers that an address or the destination loads. Each read is a use.
+            fir.read mut got = fir.read{};
+            u32 mut k = 0;
+            while (fir.stmt_read(f, s, k, &got)) {
+                note_untracked_read(c, got.place, s->loc);
+                k += 1;
+            }
+            i += 1;
+        }
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        fir.read mut value = fir.read{};
+        u32 mut k = 0;
+        while (fir.term_read(f, t, k, &value)) {
+            // The test of an overwrite check reads its place and is no use (fir.md 14).
+            if (value.is_use) { note_untracked_read(c, value.place, t->loc); }
+            else { note_untracked(c, value.place, t->loc); }
+            k += 1;
+        }
+        b += 1;
+    }
+}
+
+// ---- loans --------------------------------------------------------------------------------------
+
+// Binds the collection of a loan for the flow: a whole local needs no binding, and a TA leaf
+// reached by fields gets one. Another place has no binding the flow can check (fir.md 14).
+fn bind_collection(context mut* c, fir.statement* s) bool {
+    fir.place p = s->place;
+    if (p.base == fir.base_kind.bk_local && p.proj_len == 0) { return true; }
+    ownership_source_leaves.access l = leaf_access(c, p);
+    if (l.kind != ownership_source_leaves.access_kind.leaf) { return false; }
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        if (fir.place_projection(c->function, p, i).kind != fir.proj_kind.pj_field) {
+            return false;
+        }
+        i += 1;
+    }
+    if (c->bindings_len == c->bindings.len) {
+        ownership_flow.place_binding mut@ own bigger = new(ownership_flow.place_binding,
+            c->bindings.len * 2 + 2);
+        u64 mut j = 0;
+        while (j < c->bindings_len) { bigger[j] = c->bindings[j]; j += 1; }
+        del(c->bindings);
+        c->bindings = move(bigger);
+    }
+    c->bindings[c->bindings_len] = ownership_flow.place_binding{c->identity, p, null,
+        spot_place(c, leaf_spot(c, l.first)), true};
+    c->bindings_len += 1;
+    return true;
+}
+
+// Whether a statement of a loan region keeps the flow able to check the loan: no fort call,
+// and no write or release of a place other than a whole local. Only call summaries and alias
+// facts prove that such a statement preserves the collection.
+fn loan_checkable(context* c, fir.statement* s) bool {
+    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call &&
+        s->value.callee != fir.callee_kind.cl_extern) { return false; }
+    fir.place mut written = fir.place{};
+    if (fir.stmt_writes_place(s, &written)) {
+        return written.base == fir.base_kind.bk_local && written.proj_len == 0;
+    }
+    return true;
+}
+
+// Walks the region of loan `id` from the statement after its begin at (block, gap) until
+// each path reaches its end. Each block is searched once.
+fn loan_region_checkable(context* c, u32 block, u32 gap, u32 id) bool {
+    fir.func* f = c->function;
+    fir_flow.bits mut seen = fir_flow.bits_new(fir.block_count(f));
+    defer fir_flow.bits_free(&seen);
+    u32 mut@ own work = new(u32, cast(fir.block_count(f), u64) + 1);
+    defer del(work);
+    u64 mut len = 1;
+    work[0] = block;
+    u32 mut first = gap + 1;
+    while (len > 0) {
+        len -= 1;
+        u32 b = work[len];
+        u32 count = fir.block_statement_count(f, b);
+        u32 mut i = first;
+        first = 0;
+        bool mut ended = false;
+        while (i < count && !ended) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_loan_end && s->loan == id) { ended = true; }
+            else if (!loan_checkable(c, s)) { return false; }
+            i += 1;
+        }
+        fir.block* at = fir.block_at(f, b);
+        u32 mut index = 0;
+        u32 mut target = 0;
+        while (!ended && at->terminated &&
+            fir_flow.reachable_target(f, &at->term, index, &target)) {
+            if (!fir_flow.bits_get(&seen, target)) {
+                fir_flow.bits_set(&seen, target);
+                work[len] = target;
+                len += 1;
+            }
+            index += 1;
+        }
+    }
+    return true;
+}
+
+// The stored run proves a range loan with the flow (D17.10). A collection that it cannot bind
+// and a region that it cannot check are the gap `range_loan`.
+fn loans(context mut* c) void {
+    fir.func* f = c->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_loan_begin &&
+                (!bind_collection(c, s) || !loan_region_checkable(c, b, i, s->loan))) {
+                note_gap(c, missing.range_loan, source(c, s->loc));
+            }
+            i += 1;
+        }
+        b += 1;
     }
 }
 
@@ -1502,6 +2620,15 @@ fn configure(ownership_limits.meter mut* m, ownership_api.limit_table* limits) v
     }
 }
 
+/// Produces the steps and the entry facts of the stored run of one verified body: the local
+/// steps, and the steps of TA leaves, stack sources and range loans.
+fn prepare_stored(context mut* c, fir.func* function, ownership_api.function_id identity,
+    u32 file, string filename, ownership_api.source_position declaration) void {
+    // prepare refuses a prepared context before it reads the mode.
+    c->stored = true;
+    prepare(c, function, identity, file, filename, declaration);
+}
+
 /// Produces the steps and the entry facts of one verified body.
 fn prepare(context mut* c, fir.func* function, ownership_api.function_id identity, u32 file,
     string filename, ownership_api.source_position declaration) void {
@@ -1526,12 +2653,18 @@ fn prepare(context mut* c, fir.func* function, ownership_api.function_id identit
     u32 mut n = 1;
     while (n < fir.local_count(function)) {
         fir.local* l = fir.local_at(function, n);
-        if (!c->tracked[cast(n, u64)] && owning_type(l->ty) &&
+        bool aggregate = c->stored && c->leaves.aggregate[cast(n, u64)];
+        if (!c->tracked[cast(n, u64)] && !aggregate && owning_type(l->ty) &&
             l->kind != fir.local_kind.lk_param) {
             note_gap(c, missing.owning_storage, source(c, l->loc));
         }
         n += 1;
     }
+    if (c->stored) {
+        stack_borrows(c);
+        loans(c);
+    }
+    untracked_loads(c);
     transients(c);
     classify_flags(c);
     mark_offsets(c);
@@ -1715,8 +2848,9 @@ fn passes_without_failure(context mut* c, ownership_flow.step@ kept,
     ownership_flow.program input = ownership_flow.program{.function = c->function,
         .identity = c->identity, .entry = &c->entry, .services = &classifying,
         .limits = limits, .steps = kept, .flags = c->flag_edges[..c->flag_edges_len],
-        .events = c->events[..c->events_len], .source_files = c->files[..],
-        .result_slot = c->result_slot, .supplied_complete = true, .verified_fir = true};
+        .events = c->events[..c->events_len], .places = c->bindings[..c->bindings_len],
+        .source_files = c->files[..], .result_slot = c->result_slot,
+        .supplied_complete = true, .verified_fir = true};
     ownership_flow.analysis mut pass = ownership_flow.solve(&input);
     defer ownership_flow.free(&pass);
     return !c->classify_refusal.terminal.present && !pass.stops_lost &&
@@ -1756,6 +2890,8 @@ struct witness_value {
 struct walk {
     context mut* owner;
     witness_value mut@ own values;
+    // The value of each TA leaf in the stored run.
+    witness_value mut@ own leaf_values;
     bool mut@ own chosen;
     consts.cval mut@ own choice;
     fir_flow.bits toward;
@@ -1810,6 +2946,7 @@ fn walk_start(context mut* c, fir.pred_table* preds, u32 block, walk mut* w) boo
     u64 locals = cast(fir.local_count(f), u64);
     w->owner = c;
     w->values = new(witness_value, locals);
+    w->leaf_values = new(witness_value, c->leaves.leaves_len);
     w->chosen = new(bool, locals);
     w->choice = new(consts.cval, locals);
     w->toward = fir_flow.bits_new(count);
@@ -1850,6 +2987,7 @@ fn walk_start(context mut* c, fir.pred_table* preds, u32 block, walk mut* w) boo
 
 fn walk_free(walk mut* w) void {
     del(w->values);
+    del(w->leaf_values);
     del(w->chosen);
     del(w->choice);
     del(w->distance);
@@ -1885,6 +3023,17 @@ fn place_value(walk* w, fir.place p) witness_value {
     if (p.base != fir.base_kind.bk_local || c->taken[cast(p.local, u64)]) {
         return witness_value{};
     }
+    ownership_source_leaves.access l = leaf_access(c, p);
+    if (l.kind == ownership_source_leaves.access_kind.leaf) { return w->leaf_values[l.first]; }
+    if (l.kind == ownership_source_leaves.access_kind.length) {
+        witness_value v = w->leaf_values[l.first];
+        if (v.kind == witness_kind.constant && v.value.kind == consts.cval_kind.cv_null) {
+            return constant_value(consts.cv_from_u64(0));
+        }
+        if (v.kind == witness_kind.header && v.has_length) { return constant_value(v.value); }
+        return witness_value{};
+    }
+    if (l.kind != ownership_source_leaves.access_kind.none) { return witness_value{}; }
     witness_value v = resolve(w, w->values[cast(p.local, u64)]);
     if (p.proj_len == 0) { return v; }
     if (p.proj_len != 1 || !header_type(local_type(c, p.local))) { return witness_value{}; }
@@ -1908,6 +3057,22 @@ fn set_place(walk mut* w, fir.place p, witness_value v) void {
     context* c = w->owner;
     if (p.base != fir.base_kind.bk_local || !names_storage(c->function, p,
         fir.rvalue_kind.rv_addr)) { return; }
+    ownership_source_leaves.access l = leaf_access(c, p);
+    if (l.kind == ownership_source_leaves.access_kind.leaf) {
+        w->leaf_values[l.first] = v;
+        return;
+    }
+    if (l.kind == ownership_source_leaves.access_kind.prefix ||
+        l.kind == ownership_source_leaves.access_kind.dynamic) {
+        // A part of a TA, or an element that a variable index selects: its leaves are unknown.
+        u64 count = l.kind == ownership_source_leaves.access_kind.dynamic && !l.elements ?
+            c->leaves.count[cast(l.local, u64)] : l.count;
+        u64 first = l.kind == ownership_source_leaves.access_kind.dynamic && !l.elements ?
+            c->leaves.first[cast(l.local, u64)] : l.first;
+        u64 mut k = first;
+        while (k < first + count) { w->leaf_values[k] = witness_value{}; k += 1; }
+        return;
+    }
     w->values[cast(p.local, u64)] = p.proj_len == 0 ? v : witness_value{};
 }
 
@@ -2102,6 +3267,61 @@ fn returns(fir.func* f, fir.rvalue r) bool {
 }
 
 // Applies one statement to the walk. False when the walk cannot cross it.
+// The values of the leaves [first, first + count) that a whole aggregate operand gives: the
+// leaves of a TA part, null for `zero`, else unknown.
+fn operand_leaves(walk* w, fir.operand o, witness_value mut@ out) void {
+    if (o.kind == fir.operand_kind.ok_const) {
+        if (o.value.kind == fir.const_kind.ck_zero) {
+            u64 mut k = 0;
+            while (k < out.len) { out[k] = null_value(); k += 1; }
+        }
+        return;
+    }
+    ownership_source_leaves.access l = leaf_access(w->owner, o.place);
+    if (l.kind != ownership_source_leaves.access_kind.prefix || l.count != out.len) { return; }
+    u64 mut k = 0;
+    while (k < out.len) { out[k] = w->leaf_values[l.first + k]; k += 1; }
+}
+
+// A write of a whole value into a TA part: each leaf takes the value of its member, read
+// before the moves of the operands empty them (fir.md 6). False for another destination.
+fn walk_aggregate(walk mut* w, fir.statement* s) bool {
+    context* c = w->owner;
+    fir.func* f = c->function;
+    ownership_source_leaves.access l = leaf_access(c, s->place);
+    fir.rvalue r = s->value;
+    if (l.kind != ownership_source_leaves.access_kind.prefix ||
+        r.kind == fir.rvalue_kind.rv_call) { return false; }
+    witness_value mut@ own values = new(witness_value, l.count);
+    defer del(values);
+    if (r.kind == fir.rvalue_kind.rv_aggregate) {
+        types.node* t = fir.place_type(f, s->place);
+        u64 mut at = 0;
+        u32 mut k = 0;
+        while (k < r.ops_len) {
+            types.node* member = t->kind == types.type_kind.k_struct ?
+                fir.struct_field_type(t, k) : t->elem;
+            u64 count = ownership_source_leaves.count_leaves(member, 0);
+            fir.operand o = fir.rvalue_operand(f, r, k);
+            if (count > 0 && reference_type(member)) { values[at] = operand_value(w, o); }
+            else if (count > 0) { operand_leaves(w, o, values[at..at + count]); }
+            at += count;
+            k += 1;
+        }
+    } else if (r.kind == fir.rvalue_kind.rv_use) {
+        operand_leaves(w, fir.rvalue_operand(f, r, 0), values[..]);
+    }
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, k);
+        if (o.kind == fir.operand_kind.ok_move) { empty_place(w, o.place); }
+        k += 1;
+    }
+    u64 mut i = 0;
+    while (i < l.count) { w->leaf_values[l.first + i] = values[i]; i += 1; }
+    return true;
+}
+
 fn walk_statement(walk mut* w, fir.statement* s) bool {
     fir.func* f = w->owner->function;
     if (s->kind == fir.stmt_kind.st_del) {
@@ -2110,6 +3330,7 @@ fn walk_statement(walk mut* w, fir.statement* s) bool {
     }
     if (s->kind != fir.stmt_kind.st_assign) { return true; }
     if (s->value.kind == fir.rvalue_kind.rv_call && !returns(f, s->value)) { return false; }
+    if (walk_aggregate(w, s)) { return true; }
     witness_value v = s->value.kind == fir.rvalue_kind.rv_call ? witness_value{} :
         rvalue_value(w, s);
     u32 mut k = 0;
@@ -2356,7 +3577,7 @@ fn name_of(context* c, u32 local, bool mut* quoted) string {
     return name;
 }
 
-fn add_violation(context mut* c, record* r, string name, bool quoted) void {
+fn add_violation(context mut* c, record* r, string name, bool quoted, u64 leaf) void {
     if (c->violations_len == c->violations.len) {
         u64 cap = c->violations.len * 2 + 4;
         violation mut@ own bigger = new(violation, cap);
@@ -2366,7 +3587,7 @@ fn add_violation(context mut* c, record* r, string name, bool quoted) void {
         c->violations = move(bigger);
     }
     c->violations[c->violations_len] = violation{r->operation, r->source, r->kind, r->text,
-        name, quoted, r->relation};
+        name, quoted, r->relation, leaf};
     c->violations_len += 1;
 }
 
@@ -2425,6 +3646,7 @@ fn validate(context mut* c) void {
         bool mut valid = !mixed && !c->records_lost;
         string mut name = "";
         bool mut quoted = false;
+        u64 mut leaf = WHOLE;
         u32 mut block = 0;
         u32 mut gap = 0;
         if (r->key < c->steps_len) {
@@ -2432,8 +3654,12 @@ fn validate(context mut* c) void {
             valid = valid && !c->barrier[r->key] && same == c->step_attempts[r->key] &&
                 c->step_uncertain[r->key] == 0 &&
                 !stopped_before(c, s->block, s->gap, cast(s->order, u64) + 1);
-            u32 named = r->relation.kind == ownership_api.entity_kind.slot ?
+            u32 mut named = r->relation.kind == ownership_api.entity_kind.slot ?
                 r->relation.ordinal : c->step_slot[r->key];
+            // A leaf names the place: the destination of a lost owner, else the source.
+            leaf = r->kind == ownership_api.event_kind.lost_ownership ? c->extras[r->key].to :
+                c->extras[r->key].from;
+            if (leaf != WHOLE) { named = c->leaves.leaves[leaf].local; }
             name = name_of(c, named, &quoted);
             block = s->block;
             gap = s->gap;
@@ -2457,7 +3683,7 @@ fn validate(context mut* c) void {
             kind = trap.element_trap;
         }
         if (valid && witness(c, &preds, block, gap, kind)) {
-            add_violation(c, r, name, quoted);
+            add_violation(c, r, name, quoted, leaf);
             j = 0;
             while (j < c->records_len) {
                 if (c->records[j].key == r->key) { c->records[j].validated = true; }
@@ -2508,7 +3734,8 @@ fn solve(context mut* c) void {
         .identity = c->identity, .entry = &c->entry, .services = &c->services,
         .limits = &c->limits, .steps = c->steps[..c->steps_len],
         .flags = c->flag_edges[..c->flag_edges_len],
-        .events = c->events[..c->events_len], .source_files = c->files[..],
+        .events = c->events[..c->events_len], .places = c->bindings[..c->bindings_len],
+        .source_files = c->files[..],
         .result_slot = c->result_slot, .supplied_complete = true, .verified_fir = true,
         .observed = &seen, .continue_separate = true};
     c->result = ownership_flow.solve(&input);
@@ -2543,6 +3770,48 @@ fn solve(context mut* c) void {
     }
 }
 
+fn same_violation(violation* a, violation* b) bool {
+    return ownership_keys.operation(a->operation, b->operation) == 0 && a->kind == b->kind &&
+        a->text == b->text && a->leaf == WHOLE && b->leaf == WHOLE && a->name == b->name;
+}
+
+/// Removes from a stored run each violation that the local run validated: the same
+/// operation, event, text and whole local. The local row reports it, and toolchain 1.1 counts
+/// a diagnostic once. A stored run left with no violation but stopped by a local one has
+/// incomplete proof at the first removed operation.
+fn exclude(context mut* stored, context* local) void {
+    if (!stored->solved || !local->solved || !stored->stored) {
+        panic("ownership_source_local: invalid exclusion order");
+    }
+    u64 before = stored->violations_len;
+    u64 mut kept = 0;
+    u64 mut removed = 0;
+    violation mut first = violation{};
+    u64 mut i = 0;
+    while (i < stored->violations_len) {
+        bool mut repeated = false;
+        u64 mut j = 0;
+        while (j < local->violations_len && !repeated) {
+            repeated = same_violation(&stored->violations[i], &local->violations[j]);
+            j += 1;
+        }
+        if (repeated) {
+            if (removed == 0) { first = stored->violations[i]; }
+            removed += 1;
+        } else {
+            stored->violations[kept] = stored->violations[i];
+            kept += 1;
+        }
+        i += 1;
+    }
+    if (kept == before) { return; }
+    stored->violations_len = kept;
+    if (kept == 0) {
+        stored->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+            first.operation, first.source);
+    }
+}
+
 // Releases the flow input, the path states and the records. Results stay for the report.
 fn release_work(context mut* c) void {
     ownership_flow.free(&c->result);
@@ -2552,6 +3821,9 @@ fn release_work(context mut* c) void {
     del(c->barrier);
     del(c->step_events);
     del(c->relations);
+    del(c->extras);
+    del(c->weak_places);
+    del(c->bindings);
     del(c->events);
     del(c->event_info);
     del(c->records);
@@ -2564,6 +3836,8 @@ fn release_work(context mut* c) void {
     c->events_len = 0;
     c->records_len = 0;
     c->flag_edges_len = 0;
+    c->weak_places_len = 0;
+    c->bindings_len = 0;
 }
 
 fn free(context mut* c) void {
@@ -2579,6 +3853,8 @@ fn free(context mut* c) void {
     while (k < c->flag_live.len) { fir_flow.bits_free(&c->flag_live[k]); k += 1; }
     del(c->flag_live);
     del(c->violations);
+    del(c->stack_units);
+    ownership_source_leaves.free(&c->leaves);
     *c = context{};
 }
 

@@ -1,0 +1,154 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| leaf values ok
+//| parameter choices ok
+//| unknown conditions ok
+//| bounds ok
+/// Tests the witness walk of the stored run: the values of TA leaves decide overwrite checks
+/// and bounds checks, a parameter can choose the path, and an unknown condition leaves the
+/// event as incomplete proof (spec/toolchain.md 4.2).
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[41] SOURCE = {
+    "struct pair { i32 mut* own a; i32 mut* own b; }",
+    "struct box { i32 mut* p; i32 n; }",
+    "struct view { u8@ bytes; u64 at; }",
+    "fn helper() void {}",
+    "fn null_then_store() void {",
+    "    pair mut s = pair{null, null}; s.a = new(i32); s.b = new(i32); del(s.a);",
+    "    i32 mut* own p = new(i32); i32* q = p; del(p); i32 v = *q; del(s.b);",
+    "}",
+    "fn copied_owner() void {",
+    "    pair mut s = pair{new(i32), null}; pair mut t = move(s); t.a = new(i32);",
+    "    del(t.a);",
+    "}",
+    "fn chosen(bool c) void {",
+    "    pair s = pair{new(i32), new(i32)}; if (c) { del(s.a); del(s.b); return; } del(s.b);",
+    "}",
+    "fn chosen_use(i32 n) i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 0}; if (n > 3) { del(p); return *b.p; }",
+    "    del(p); return 0;",
+    "}",
+    "fn by_field(box b) i32 {",
+    "    i32 mut* own p = new(i32); box c = box{p, b.n}; del(p);",
+    "    if (c.n > 0) { return *c.p; } return 0;",
+    "}",
+    "fn after_call() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 0}; del(p); helper(); return *b.p;",
+    "}",
+    "fn constant_span() u8 {",
+    "    u8 mut@ own s = new(u8, 4); view v = view{s, 0}; del(s); return v.bytes[1];",
+    "}",
+    "fn symbolic_span(u64 n) u8 {",
+    "    u8 mut@ own s = new(u8, n); view v = view{s, 0}; del(s); return v.bytes[1];",
+    "}",
+    "fn empty_span() u8 {",
+    "    view v = view{{}, 0}; return v.bytes[0];",
+    "}",
+    "fn weak_then_use(u64 i, i32* q) i32 {",
+    "    i32 mut* own p = new(i32); i32*[2] mut a = {p, p}; a[i] = q; del(p); return *a[0];",
+    "}",
+    "fn mixed(bool c) void {",
+    "    pair s = pair{new(i32), new(i32)}; if (c) { del(s.a); } del(s.b);",
+    "}",
+};
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    assert(found->stored.solved);
+    return &found->stored;
+}
+
+// One validated stored violation of `kind` at `line`.
+fn validated(ownership_source_env.env mut* e, string name, ownership_api.event_kind kind,
+    u32 line) void {
+    ownership_source_local.context* c = row(e, name);
+    if (c->violations_len != 1 || c->violations[0].kind != kind ||
+        c->violations[0].source.line != line) {
+        eprintln(name, ": ", c->violations_len, " violations");
+        if (c->violations_len > 0) {
+            eprintln("  first at line ", c->violations[0].source.line);
+        }
+        assert(false);
+    }
+}
+
+// No validated violation: the event stays incomplete proof without a witness.
+fn unwitnessed(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = row(e, name);
+    if (c->violations_len != 0 || ownership_api.successful(c->proof) || c->unvalidated == 0) {
+        eprintln(name, ": ", c->violations_len, " violations, ", c->unvalidated,
+            " unvalidated");
+        assert(false);
+    }
+}
+
+fn leaf_values(ownership_source_env.env mut* e) void {
+    // A literal of nulls passes each overwrite check of a field store, so the walk reaches
+    // the later use of q after its release.
+    validated(e, "null_then_store", ownership_api.event_kind.invalid_use, 7);
+    // A whole move carries the leaf values: t.a holds the allocation, so its overwrite check
+    // traps and the store is the event (lost ownership, D17.11).
+    validated(e, "copied_owner", ownership_api.event_kind.lost_ownership, 10);
+    println("leaf values ok");
+}
+
+fn parameter_choices(ownership_source_env.env mut* e) void {
+    // c = false skips the release of s.a, so its owner remains at the scope end, which only
+    // that path reaches.
+    validated(e, "chosen", ownership_api.event_kind.lost_ownership, 15);
+    // When both paths reach one scope end and only one fails, the event depends on the path:
+    // incomplete proof, no violation. A violation needs each path into the operation to fail.
+    unwitnessed(e, "mixed");
+    // n = 4 takes the branch with the use after the release.
+    validated(e, "chosen_use", ownership_api.event_kind.invalid_use, 17);
+    println("parameter choices ok");
+}
+
+fn unknown_conditions(ownership_source_env.env mut* e) void {
+    // A scalar field that a parameter fills is unknown to the walk.
+    unwitnessed(e, "by_field");
+    // A fort call before the use can fail to return (A06), so no witness crosses it.
+    unwitnessed(e, "after_call");
+    // An element read after a weak store has no single value: incomplete, no event.
+    ownership_source_local.context* weak = row(e, "weak_then_use");
+    assert(weak->violations_len == 0 && !ownership_api.successful(weak->proof));
+    println("unknown conditions ok");
+}
+
+fn bounds(ownership_source_env.env mut* e) void {
+    // The constant length of the span field passes the bounds check before the read.
+    validated(e, "constant_span", ownership_api.event_kind.invalid_use, 28);
+    // A parameter length leaves the bounds check unknown.
+    unwitnessed(e, "symbolic_span");
+    // An empty span field has no element: the trap of the bounds check is the event.
+    validated(e, "empty_span", ownership_api.event_kind.invalid_use, 34);
+    println("bounds ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    leaf_values(&e);
+    parameter_choices(&e);
+    unknown_conditions(&e);
+    bounds(&e);
+    return 0;
+}

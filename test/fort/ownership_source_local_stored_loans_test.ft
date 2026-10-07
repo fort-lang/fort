@@ -1,0 +1,138 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| bound collections ok
+//| refused collections ok
+//| checked regions ok
+/// Tests how the stored run gives range loans to the flow (D17.10): which collections it
+/// binds, which loan regions it can check, and the proof of each loan.
+import fir;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[26] SOURCE = {
+    "struct view { u8@ bytes; u64 at; }",
+    "struct pairs { view first; view second; }",
+    "fn whole(string s) u64 { u64 mut n = 0; for (char c : s) { n += 1; } return n; }",
+    "fn field(view v) u64 { u64 mut n = 0; for (u8 c : v.bytes) { n += 1; } return n; }",
+    "fn nested_field(pairs p) u64 {",
+    "    u64 mut n = 0; for (u8 c : p.second.bytes) { n += 1; } return n;",
+    "}",
+    "fn indexed(view[2] vs) u64 { u64 mut n = 0; for (u8 c : vs[1].bytes) { n += 1; } return n; }",
+    "fn behind(view* v) u64 { u64 mut n = 0; for (u8 c : v->bytes) { n += 1; } return n; }",
+    "fn written(view v, u64 mut* out) u64 {",
+    "    u64 mut n = 0; for (u8 c : v.bytes) { *out = n; n += 1; } return n;",
+    "}",
+    "fn two_loops(view v, string s) u64 {",
+    "    u64 mut n = 0; for (u8 c : v.bytes) { n += 1; } for (char d : s) { n += 1; } return n;",
+    "}",
+    "fn inner_loops(view v, string s) u64 {",
+    "    u64 mut n = 0;",
+    "    for (u8 c : v.bytes) { for (char d : s) { n += 1; } }",
+    "    return n;",
+    "}",
+    "fn local_span() u64 {",
+    "    u8 mut@ own s = new(u8, 3); u64 mut n = 0; for (u8 c : s) { n += 1; } del(s); return n;",
+    "}",
+    "fn local_view(u8@ s) u64 { view v = view{s, 0}; u64 mut n = 0;",
+    "    for (u8 c : v.bytes) { n += 1; } return n; }",
+    "fn root() i32 { return 0; }",
+};
+
+fn stored(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    assert(row->stored.solved);
+    return &row->stored;
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = stored(e, name);
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof)) {
+        eprintln(name, ": not proved, gap ", cast(c->gap, u64));
+        assert(false);
+    }
+}
+
+fn refused(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = stored(e, name);
+    if (c->gap != ownership_source_local.missing.range_loan || c->violations_len != 0) {
+        eprintln(name, ": gap ", cast(c->gap, u64));
+        assert(false);
+    }
+}
+
+// The binding of a collection place: the FIR place and the leaf path of its storage.
+fn bound_collections(ownership_source_env.env mut* e) void {
+    // A whole local needs no binding: the flow resolves it.
+    proved(e, "whole");
+    assert(stored(e, "whole")->bindings_len == 0);
+    // A field leaf gets one binding, a field of a nested field too.
+    proved(e, "field");
+    ownership_source.body* row = ownership_source_env.find(e, "main", "field");
+    // The bindings live until free, so the solved run keeps them out of the report.
+    assert(row->stored.leaves.leaves_len == 1);
+    proved(e, "nested_field");
+    proved(e, "local_view");
+    proved(e, "local_span");
+    // The local run keeps a loan out of its scope: the range_loan gap, or an earlier gap such
+    // as the load of the field into a TL.
+    ownership_source.body* plain = ownership_source_env.find(e, "main", "whole");
+    assert(plain->local.gap == ownership_source_local.missing.range_loan);
+    assert(row->local.correspondence == ownership_source_local.status.incomplete);
+    println("bound collections ok");
+}
+
+// A collection behind an index or a pointer has no binding the flow can check.
+fn refused_collections(ownership_source_env.env mut* e) void {
+    refused(e, "indexed");
+    refused(e, "behind");
+    println("refused collections ok");
+}
+
+// A loan region with a write through a pointer cannot be checked without alias facts.
+// Two loans in a row and nested loans are each checked.
+fn checked_regions(ownership_source_env.env mut* e) void {
+    refused(e, "written");
+    proved(e, "two_loops");
+    proved(e, "inner_loops");
+    println("checked regions ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    // The bindings exist after preparation and before the solve releases the flow input.
+    ownership_source.body* field = ownership_source_env.find(&e, "main", "field");
+    assert(field->stored.bindings_len == 1);
+    fir.place bound = field->stored.bindings[0].place;
+    assert(bound.base == fir.base_kind.bk_local && bound.local == 1 && bound.proj_len == 1);
+    ownership_api.place_path storage = field->stored.bindings[0].storage;
+    assert(storage.root.ordinal == 1 && storage.projections.len == 1);
+    assert(storage.projections[0].kind == ownership_api.projection_kind.field);
+    assert(storage.projections[0].field == 0 && field->stored.bindings[0].complete);
+    ownership_source.body* nested = ownership_source_env.find(&e, "main", "nested_field");
+    assert(nested->stored.bindings_len == 1);
+    assert(nested->stored.bindings[0].storage.projections.len == 2);
+    ownership_source.body* two = ownership_source_env.find(&e, "main", "two_loops");
+    assert(two->stored.bindings_len == 1);
+    ownership_source.analyze(&e.source);
+    bound_collections(&e);
+    refused_collections(&e);
+    checked_regions(&e);
+    return 0;
+}

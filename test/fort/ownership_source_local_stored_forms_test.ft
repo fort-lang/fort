@@ -1,0 +1,429 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| leaf writes ok
+//| aggregate writes ok
+//| calls ok
+//| weak stores ok
+//| releases ok
+/// Pins the stored steps of each rvalue form that writes or reads a TA leaf. A step reads
+/// `block.gap.order action from->to` and then its flags. A leaf place reads `local.fK` for
+/// field K and `local[K]` for element K.
+import fir;
+import ownership_api;
+import ownership_flow;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_transfer;
+import std.strbuf;
+
+string[40] SOURCE = {
+    "extern fn foreign_text() char*;",
+    "extern fn foreign_owner() char mut* own;",
+    "struct box { i32 mut* p; i32 n; }",
+    "struct chars { string text; u64 n; }",
+    "struct owned { char mut* own text; }",
+    "struct ctext { char* text; }",
+    "struct view { u8@ bytes; u64 at; }",
+    "struct pair { box first; box second; }",
+    "struct row { box[2] cells; }",
+    "fn made() box { return box{null, 0}; }",
+    "fn addressed(view v) u8* { return &v.bytes[0]; }",
+    "fn sliced(view v) u8@ { return v.bytes[1..]; }",
+    "fn header(view v) u64 { return v.bytes.len; }",
+    "fn pointer(view v) u8* { return v.bytes.ptr; }",
+    "fn literal() char { chars c = chars{\"abc\", 3}; return c.text[0]; }",
+    "fn foreign() char { ctext mut c = ctext{null}; c.text = foreign_text(); return *c.text; }",
+    "fn foreign_owned() void { owned mut o = owned{null}; o.text = foreign_owner(); del(o.text); }",
+    "fn nested(i32 mut* p) i32 { pair q = pair{box{p, 1}, box{p, 2}}; return *q.second.p; }",
+    "fn moved_pair() void {",
+    "    owned mut a = owned{null}; a.text = new(char); owned b = move(a); del(b.text);",
+    "}",
+    "fn rows(i32 mut* p) i32 { row r = row{{box{p, 1}, box{null, 2}}}; return *r.cells[0].p; }",
+    "fn zeroed() box { box mut b = box{}; return b; }",
+    "fn cast_box(box b) i32 { box c = cast(b, box); return *c.p; }",
+    "fn from_call() i32 { box b = made(); return b.n; }",
+    "fn weak_null(u64 i, i32* p) void { i32*[2] mut a = {p, p}; a[i] = null; }",
+    "fn weak_string(u64 i) void { string[2] mut a = {\"x\", \"y\"}; a[i] = \"z\"; }",
+    "fn weak_leaf(u64 i, box b) void { i32*[2] mut a = {null, null}; a[i] = b.p; }",
+    "fn weak_owner(u64 i) void {",
+    "    i32 mut* own[2] mut a = {null, null}; i32 mut* own p = new(i32); a[i] = move(p);",
+    "}",
+    "fn weak_struct(u64 i, box b) void { box[2] mut a = {b, b}; a[i] = b; }",
+    "fn release_field() void {",
+    "    owned mut o = owned{null}; char mut* own t = new(char); o.text = move(t); del(o.text);",
+    "}",
+    "fn release_through(owned mut* o) void { del(o->text); }",
+    "fn move_out() void {",
+    "    owned mut o = owned{null}; o.text = new(char); char mut* own t = move(o.text); del(t);",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+fn action_name(ownership_transfer.action effect) string {
+    switch (effect) {
+    case ownership_transfer.action.allocation: return "allocation";
+    case ownership_transfer.action.copy: return "copy";
+    case ownership_transfer.action.move_owner: return "move";
+    case ownership_transfer.action.release: return "release";
+    case ownership_transfer.action.assignment: return "assignment";
+    case ownership_transfer.action.address: return "address";
+    case ownership_transfer.action.use: return "use";
+    case ownership_transfer.action.inspect: return "inspect";
+    case ownership_transfer.action.dead: return "dead";
+    case ownership_transfer.action.escape: return "escape";
+    case ownership_transfer.action.outside: return "outside";
+    case ownership_transfer.action.stack_begin: return "stack begin";
+    case ownership_transfer.action.stack_end: return "stack end";
+    case ownership_transfer.action.weak_store: return "weak store";
+    }
+}
+
+fn describe_place(ownership_api.place_path p, strbuf.str_buf mut* out) void {
+    strbuf.append_u64(out, cast(p.root.ordinal, u64));
+    u64 mut i = 0;
+    while (i < p.projections.len) {
+        ownership_api.projection part = p.projections[i];
+        if (part.kind == ownership_api.projection_kind.field) {
+            strbuf.append(out, ".f");
+            strbuf.append_u64(out, cast(part.field, u64));
+        } else {
+            strbuf.push(out, '[');
+            strbuf.append_u64(out, cast(part.index.value, u64));
+            strbuf.push(out, ']');
+        }
+        i += 1;
+    }
+}
+
+fn describe(ownership_source_local.context* c, u64 i, strbuf.str_buf mut* out) void {
+    ownership_flow.step* s = &c->steps[i];
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(s->block, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->gap, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->order, u64));
+    if (s->kind == ownership_flow.step_kind.call_outcome) {
+        strbuf.append(out, s->outcomes_complete ? " trusted call" : " unknown call");
+        return;
+    }
+    ownership_transfer.request* r = &s->local;
+    strbuf.push(out, ' ');
+    strbuf.append(out, action_name(r->kind));
+    strbuf.push(out, ' ');
+    describe_place(r->source, out);
+    strbuf.append(out, "->");
+    describe_place(r->destination, out);
+    if (r->temporal_use) { strbuf.append(out, " temporal"); }
+    if (r->leaves_empty_proved) { strbuf.append(out, " leaves"); }
+    if (r->destination_owns) { strbuf.append(out, " owns"); }
+    if (r->opaque_value) { strbuf.append(out, " opaque"); }
+    if (r->weak_moves) { strbuf.append(out, " moves"); }
+    if (!r->direct_source_proved) { strbuf.append(out, " unsupported"); }
+    if (c->barrier[i]) { strbuf.append(out, " barrier"); }
+    if (r->kind == ownership_transfer.action.weak_store) {
+        strbuf.append(out, " elements ");
+        strbuf.append_u64(out, c->extras[i].weak_count);
+        if (r->value.kind == ownership_api.contents_kind.empty_owner) {
+            strbuf.append(out, " empty");
+        } else if (r->value.kind == ownership_api.contents_kind.reference) {
+            strbuf.append(out, " static");
+        }
+    }
+    if (r->kind == ownership_transfer.action.assignment && !r->opaque_value) {
+        if (r->value.kind == ownership_api.contents_kind.empty_owner) {
+            strbuf.append(out, " empty");
+        } else if (c->relations[i].source.ordinal == ownership_source_local.STATIC_ORDINAL) {
+            strbuf.append(out, " static");
+        } else if (c->relations[i].source.ordinal >= ownership_source_local.PARAMETER_BASE) {
+            strbuf.append(out, " stack");
+        } else {
+            strbuf.append(out, " foreign");
+        }
+    }
+}
+
+fn expect(ownership_source_env.env mut* e, string name, string@ expected,
+    ownership_source_local.missing why) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    ownership_source_local.context* c = &row->stored;
+    assert(c->initialized && !c->solved && c->stored);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool mut same = c->steps_len == expected.len && c->gap == why;
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        describe(c, i, &got);
+        if (i >= expected.len || strbuf.view(&got) != expected[i]) { same = false; }
+        i += 1;
+    }
+    if (!same) {
+        eprintln(name, ": gap ", cast(c->gap, u64));
+        i = 0;
+        while (i < c->steps_len) {
+            describe(c, i, &got);
+            eprintln("    \"", strbuf.view(&got), "\",");
+            i += 1;
+        }
+        assert(false);
+    }
+}
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(text, SOURCE[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+fn leaf_writes(ownership_source_env.env mut* e) void {
+    string[1] none = {"-"};
+    // An address through a leaf is a view of its referent: a copy of the leaf.
+    string[3] addressed = {
+        "1.0.0 copy 1.f0->5",
+        "1.1.0 copy 5->0",
+        "1.1.1 assignment 5->5 empty",
+    };
+    expect(e, "addressed", addressed[..], ownership_source_local.missing.none);
+    // A slice of a span leaf keeps the source of the leaf.
+    string[1] sliced = {
+        "1.0.0 copy 1.f0->0",
+    };
+    expect(e, "sliced", sliced[..], ownership_source_local.missing.none);
+    // A length read of a span leaf is no use of its referent.
+    expect(e, "header", none[0..0], ownership_source_local.missing.none);
+    // The pointer field of a span leaf is the leaf's reference.
+    string[1] pointer = {
+        "0.0.0 copy 1.f0->0",
+    };
+    expect(e, "pointer", pointer[..], ownership_source_local.missing.none);
+    // A string constant in a field is static storage; an element read is a use.
+    string[3] literal = {
+        "0.1.0 assignment 1.f0->1.f0 static",
+        "1.0.0 use 1.f0->1.f0 temporal",
+        "1.1.0 assignment 1.f0->1.f0 empty",
+    };
+    expect(e, "literal", literal[..], ownership_source_local.missing.none);
+    // A borrowed extern result is trusted foreign storage, kept through a field (D17.13).
+    string[7] foreign = {
+        "0.1.0 assignment 1.f0->1.f0 empty",
+        "0.2.0 trusted call",
+        "0.2.1 assignment 2->2 foreign",
+        "0.3.0 copy 2->1.f0",
+        "0.3.1 assignment 2->2 empty",
+        "0.4.0 use 1.f0->1.f0 temporal",
+        "0.5.0 assignment 1.f0->1.f0 empty",
+    };
+    expect(e, "foreign", foreign[..], ownership_source_local.missing.none);
+    // An own extern result is the gap foreign_owner, as for a TL.
+    string[8] foreign_owned = {
+        "0.1.0 assignment 1.f0->1.f0 empty",
+        "0.2.0 trusted call",
+        "0.2.1 assignment 2->2 opaque",
+        "1.0.0 move 2->1.f0",
+        "1.1.0 release 1.f0->1.f0 leaves",
+        "1.2.0 dead 1.f0->1.f0",
+        "1.3.0 dead 2->2",
+        "1.3.1 dead 1.f0->1.f0",
+    };
+    expect(e, "foreign_owned", foreign_owned[..], ownership_source_local.missing.foreign_owner);
+    println("leaf writes ok");
+}
+
+fn aggregate_writes(ownership_source_env.env mut* e) void {
+    // A nested literal fills the leaves of each member through its temporary.
+    string[9] nested = {
+        "0.1.0 assignment 3.f0->3.f0 empty",
+        "0.2.0 copy 1->3.f0",
+        "0.3.0 assignment 4.f0->4.f0 empty",
+        "0.4.0 copy 1->4.f0",
+        "0.5.0 copy 3.f0->2.f0.f0",
+        "0.5.1 copy 4.f0->2.f1.f0",
+        "0.6.0 use 2.f1.f0->2.f1.f0 temporal",
+        "0.7.0 assignment 2.f0.f0->2.f0.f0 empty",
+        "0.7.1 assignment 2.f1.f0->2.f1.f0 empty",
+    };
+    expect(e, "nested", nested[..], ownership_source_local.missing.none);
+    // A whole move of an owning aggregate moves each leaf owner (D17.15).
+    string[10] moved_pair = {
+        "0.1.0 assignment 1.f0->1.f0 empty",
+        "0.2.0 allocation 3->3",
+        "1.0.0 move 3->1.f0",
+        "1.2.0 move 1.f0->2.f0",
+        "1.3.0 release 2.f0->2.f0 leaves",
+        "1.4.0 dead 1.f0->1.f0",
+        "1.5.0 dead 2.f0->2.f0",
+        "1.6.0 dead 3->3",
+        "1.6.1 dead 1.f0->1.f0",
+        "1.6.2 dead 2.f0->2.f0",
+    };
+    expect(e, "moved_pair", moved_pair[..], ownership_source_local.missing.none);
+    // An array of structs has one leaf for each element field.
+    string[13] rows = {
+        "0.1.0 assignment 3[0].f0->3[0].f0 empty",
+        "0.1.1 assignment 3[1].f0->3[1].f0 empty",
+        "0.2.0 assignment 4.f0->4.f0 empty",
+        "0.3.0 copy 1->4.f0",
+        "0.4.0 assignment 5.f0->5.f0 empty",
+        "0.5.0 assignment 5.f0->5.f0 empty",
+        "0.6.0 copy 4.f0->3[0].f0",
+        "0.6.1 copy 5.f0->3[1].f0",
+        "0.7.0 copy 3[0].f0->2.f0[0].f0",
+        "0.7.1 copy 3[1].f0->2.f0[1].f0",
+        "1.0.0 use 2.f0[0].f0->2.f0[0].f0 temporal",
+        "1.1.0 assignment 2.f0[0].f0->2.f0[0].f0 empty",
+        "1.1.1 assignment 2.f0[1].f0->2.f0[1].f0 empty",
+    };
+    expect(e, "rows", rows[..], ownership_source_local.missing.none);
+    // `box{}` zeroes each leaf; an aggregate result is the gap aggregate_result.
+    string[3] zeroed = {
+        "0.1.0 assignment 1.f0->1.f0 empty",
+        "0.2.0 inspect 1.f0->1.f0",
+        "0.3.0 assignment 1.f0->1.f0 empty",
+    };
+    expect(e, "zeroed", zeroed[..], ownership_source_local.missing.aggregate_result);
+    // A cast between aggregate types gives unknown leaves (gap unknown_source).
+    string[4] cast_box = {
+        "0.1.0 inspect 1.f0->1.f0",
+        "0.1.1 assignment 2.f0->2.f0 opaque",
+        "0.2.0 use 2.f0->2.f0 temporal",
+        "0.3.0 assignment 2.f0->2.f0 empty",
+    };
+    expect(e, "cast_box", cast_box[..], ownership_source_local.missing.unknown_source);
+    println("aggregate writes ok");
+}
+
+fn calls(ownership_source_env.env mut* e) void {
+    // A fort call result into a TA has no leaf facts.
+    string[3] from_call = {
+        "0.1.0 outside 0->0 barrier",
+        "0.1.1 assignment 1.f0->1.f0 opaque",
+        "0.3.0 assignment 1.f0->1.f0 empty",
+    };
+    expect(e, "from_call", from_call[..], ownership_source_local.missing.fort_call);
+    println("calls ok");
+}
+
+fn weak_stores(ownership_source_env.env mut* e) void {
+    // Each weak value form: null, a string, a leaf, a moved owner (D17.15).
+    string[5] weak_null = {
+        "0.1.0 copy 2->3[0]",
+        "0.1.1 copy 2->3[1]",
+        "1.0.0 weak store 3->3 elements 2 empty",
+        "1.1.0 assignment 3[0]->3[0] empty",
+        "1.1.1 assignment 3[1]->3[1] empty",
+    };
+    expect(e, "weak_null", weak_null[..], ownership_source_local.missing.none);
+    string[5] weak_string = {
+        "0.1.0 assignment 2[0]->2[0] static",
+        "0.1.1 assignment 2[1]->2[1] static",
+        "1.0.0 weak store 2->2 elements 2 static",
+        "1.1.0 assignment 2[0]->2[0] empty",
+        "1.1.1 assignment 2[1]->2[1] empty",
+    };
+    expect(e, "weak_string", weak_string[..], ownership_source_local.missing.none);
+    string[5] weak_leaf = {
+        "0.1.0 assignment 3[0]->3[0] empty",
+        "0.1.1 assignment 3[1]->3[1] empty",
+        "1.0.0 weak store 2.f0->3 elements 2",
+        "1.1.0 assignment 3[0]->3[0] empty",
+        "1.1.1 assignment 3[1]->3[1] empty",
+    };
+    expect(e, "weak_leaf", weak_leaf[..], ownership_source_local.missing.none);
+    string[15] weak_owner = {
+        "0.0.0 assignment 3->3 empty",
+        "0.2.0 assignment 2[0]->2[0] empty",
+        "0.2.1 assignment 2[1]->2[1] empty",
+        "0.4.0 allocation 4->4",
+        "1.0.0 move 4->3",
+        "2.0.0 move 3->8",
+        "3.0.0 weak store 8->2 owns moves elements 2",
+        "3.1.0 dead 2[0]->2[0]",
+        "3.1.1 dead 2[1]->2[1]",
+        "3.2.0 dead 3->3",
+        "3.3.0 dead 3->3",
+        "3.3.1 dead 4->4",
+        "3.3.2 dead 8->8",
+        "3.3.3 dead 2[0]->2[0]",
+        "3.3.4 dead 2[1]->2[1]",
+    };
+    expect(e, "weak_owner", weak_owner[..], ownership_source_local.missing.none);
+    // A weak store of a struct element has several leaves: the gap dynamic_element.
+    string[6] weak_struct = {
+        "0.1.0 copy 2.f0->3[0].f0",
+        "0.1.1 copy 2.f0->3[1].f0",
+        "1.0.0 inspect 2.f0->2.f0",
+        "1.0.1 inspect 3->3 unsupported",
+        "1.1.0 assignment 3[0].f0->3[0].f0 empty",
+        "1.1.1 assignment 3[1].f0->3[1].f0 empty",
+    };
+    expect(e, "weak_struct", weak_struct[..], ownership_source_local.missing.dynamic_element);
+    println("weak stores ok");
+}
+
+fn releases(ownership_source_env.env mut* e) void {
+    // A field owner moves in from a TL and is released through the leaf.
+    string[13] release_field = {
+        "0.0.0 assignment 2->2 empty",
+        "0.2.0 assignment 1.f0->1.f0 empty",
+        "0.4.0 allocation 3->3",
+        "1.0.0 move 3->2",
+        "1.1.0 move 2->4",
+        "2.0.0 move 4->1.f0",
+        "2.1.0 release 1.f0->1.f0 leaves",
+        "2.2.0 dead 1.f0->1.f0",
+        "2.3.0 dead 2->2",
+        "2.4.0 dead 2->2",
+        "2.4.1 dead 3->3",
+        "2.4.2 dead 4->4",
+        "2.4.3 dead 1.f0->1.f0",
+    };
+    expect(e, "release_field", release_field[..], ownership_source_local.missing.none);
+    // A release through a pointer is no leaf effect. It reads the owner out of caller
+    // storage, which the run does not follow: the gap unknown_source.
+    string[2] release_through = {
+        "0.0.0 use 1->1 temporal",
+        "0.0.1 outside 0->0",
+    };
+    expect(e, "release_through", release_through[..],
+        ownership_source_local.missing.unknown_source);
+    // A move out of a field leaves an empty owner there.
+    string[13] move_out = {
+        "0.0.0 assignment 2->2 empty",
+        "0.2.0 assignment 1.f0->1.f0 empty",
+        "0.3.0 allocation 3->3",
+        "1.0.0 move 3->1.f0",
+        "1.2.0 move 1.f0->4",
+        "2.0.0 move 4->2",
+        "2.1.0 release 2->2 leaves",
+        "2.2.0 dead 1.f0->1.f0",
+        "2.3.0 dead 2->2",
+        "2.4.0 dead 2->2",
+        "2.4.1 dead 3->3",
+        "2.4.2 dead 4->4",
+        "2.4.3 dead 1.f0->1.f0",
+    };
+    expect(e, "move_out", move_out[..], ownership_source_local.missing.none);
+    println("releases ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text);
+    defer ownership_source_env.close(&e);
+    leaf_writes(&e);
+    aggregate_writes(&e);
+    calls(&e);
+    weak_stores(&e);
+    releases(&e);
+    return 0;
+}

@@ -1,0 +1,271 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| depth bounds ok
+//| count bounds ok
+//| element order ok
+//| dynamic elements ok
+//| nested names ok
+/// Tests the bounds of the leaf table of the stored run: the depth of a leaf, the number of
+/// leaves of one local, the order and names of leaves in nested arrays and structs, and which
+/// variable-index places name one leaf of each element.
+import fir;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_leaves;
+import ownership_source_local;
+import std.strbuf;
+
+string[49] SOURCE = {
+    "struct l15 { i32* p; }",
+    "struct l14 { l15 f; }",
+    "struct l13 { l14 f; }",
+    "struct l12 { l13 f; }",
+    "struct l11 { l12 f; }",
+    "struct l10 { l11 f; }",
+    "struct l9 { l10 f; }",
+    "struct l8 { l9 f; }",
+    "struct l7 { l8 f; }",
+    "struct l6 { l7 f; }",
+    "struct l5 { l6 f; }",
+    "struct l4 { l5 f; }",
+    "struct l3 { l4 f; }",
+    "struct l2 { l3 f; }",
+    "struct l1 { l2 f; }",
+    "struct l0 { l1 f; }",
+    "struct m0 { l0 f; }",
+    "struct cell { i32 n; i32* p; }",
+    "struct scalars { i32 a; u64 b; }",
+    "struct halves { i32*[128] a; i32*[128] b; }",
+    "struct over { i32*[128] a; i32*[128] b; i32* c; }",
+    "struct row { cell[2] cells; u8@ name; }",
+    "fn deep(i32* p) i32 {",
+    "    l0 mut d = l0{};",
+    "    d.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.p = p;",
+    "    return *d.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.p;",
+    "}",
+    "fn deeper(i32* p) i32 {",
+    "    m0 mut d = m0{};",
+    "    d.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.p = p;",
+    "    return *d.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.p;",
+    "}",
+    "fn counts() u64 {",
+    "    i32*[2][128] square = {}; i32*[2][129] wide = {};",
+    "    halves h = halves{}; over o = over{};",
+    "    i32[300] plain = {}; scalars[4] flat = {};",
+    "    return square.len + wide.len + plain.len + flat.len;",
+    "}",
+    "fn grid(i32* p, u64 i) i32 {",
+    "    i32*[2][3] mut m = {}; m[1][2] = p; m[1][i] = p;",
+    "    return *m[1][2];",
+    "}",
+    "fn grid_outer(i32* p, u64 i) i32 { i32*[2][3] mut m = {}; m[i][1] = p; return 0; }",
+    "fn grid_read(i32* p, u64 i) i32 { i32*[2][3] m = {}; return *m[i][1]; }",
+    "fn cells(i32* p) i32 { cell[3] mut c = {}; c[2].p = p; return *c[2].p + c[0].n; }",
+    "fn rows(i32* p, u8@ s) u64 {",
+    "    row[2] mut r = {}; r[1].cells[0].p = p; r[1].name = s; return r[1].name.len;",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+fn stored(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    assert(row->stored.solved && row->stored.stored);
+    return &row->stored;
+}
+
+fn local(ownership_source_local.context* c, string name) u32 {
+    u32 mut n = 0;
+    while (n < fir.local_count(c->function)) {
+        if (fir.local_name(fir.local_at(c->function, n)) == name) { return n; }
+        n += 1;
+    }
+    panic("ownership_source_leaves_bounds_test: local is absent");
+}
+
+fn tracked(ownership_source_local.context* c, string name) bool {
+    return c->leaves.aggregate[cast(local(c, name), u64)];
+}
+
+fn count_of(ownership_source_local.context* c, string name) u64 {
+    return c->leaves.count[cast(local(c, name), u64)];
+}
+
+fn type_leaves(ownership_source_local.context* c, string name) u64 {
+    return ownership_source_leaves.count_leaves(fir.local_at(c->function, local(c, name))->ty,
+        0);
+}
+
+// The source name of leaf `k` of local `name`.
+fn name_of(ownership_source_local.context* c, string name, u64 k, strbuf.str_buf mut* out)
+    string {
+    strbuf.clear(out);
+    u64 first = c->leaves.first[cast(local(c, name), u64)];
+    ownership_source_leaves.append_name(&c->leaves, c->function, first + k, out);
+    return strbuf.view(out);
+}
+
+fn gap(ownership_source_env.env mut* e, string name) ownership_source_local.missing {
+    return stored(e, name)->gap;
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = stored(e, name);
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof)) {
+        eprintln(name, ": not proved, gap ", cast(c->gap, u64));
+        assert(false);
+    }
+}
+
+// A leaf 16 projections deep is a leaf: d.f (15 times) .p. One more struct around it puts
+// the innermost container at depth 16, so that local stays untracked and a use through it
+// is the gap unknown_source (an aggregate past the leaf bounds).
+fn depth_bounds(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "deep");
+    assert(tracked(c, "d") && count_of(c, "d") == 1);
+    u64 first = c->leaves.first[cast(local(c, "d"), u64)];
+    assert(ownership_source_leaves.path(&c->leaves, first).len == 16);
+    assert(ownership_source_leaves.path(&c->leaves, first)[15].field == 0);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    assert(name_of(c, "d", 0, &text) == "d.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.p");
+    // The store and the use through the leaf are steps, so the body is proved.
+    proved(e, "deep");
+    ownership_source_local.context* d = stored(e, "deeper");
+    assert(!tracked(d, "d") && d->leaves.leaves_len == 0);
+    assert(type_leaves(d, "d") == ownership_source_leaves.MAX_LEAVES + 1);
+    assert(gap(e, "deeper") == ownership_source_local.missing.unknown_source);
+    println("depth bounds ok");
+}
+
+// 256 leaves is the most one local holds: two rows of 128, or two fields of 128. One leaf
+// more makes the local untracked. A local with no reference leaf is no TA at all.
+fn count_bounds(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "counts");
+    assert(tracked(c, "square") && count_of(c, "square") == 256);
+    assert(!tracked(c, "wide"));
+    assert(type_leaves(c, "wide") == ownership_source_leaves.MAX_LEAVES + 1);
+    assert(tracked(c, "h") && count_of(c, "h") == 256);
+    assert(!tracked(c, "o") && type_leaves(c, "o") == ownership_source_leaves.MAX_LEAVES + 1);
+    assert(!tracked(c, "plain") && type_leaves(c, "plain") == 0);
+    assert(!tracked(c, "flat") && type_leaves(c, "flat") == 0);
+    // The table holds the leaves of the two tracked locals, each with a path of two parts.
+    assert(c->leaves.leaves_len == 512 && c->leaves.parts_len == 1024);
+    assert(c->violations_len == 0);
+    println("count bounds ok");
+}
+
+// Leaves follow element order, the last index fastest: m[0][0], m[0][1], ..., m[1][2]. The
+// path of a struct element is the index, then the field.
+fn element_order(ownership_source_env.env mut* e) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    ownership_source_local.context* g = stored(e, "grid_outer");
+    assert(count_of(g, "m") == 6);
+    assert(name_of(g, "m", 0, &text) == "m[0][0]");
+    assert(name_of(g, "m", 2, &text) == "m[0][2]");
+    assert(name_of(g, "m", 3, &text) == "m[1][0]");
+    assert(name_of(g, "m", 5, &text) == "m[1][2]");
+    ownership_source_local.context* c = stored(e, "cells");
+    assert(count_of(c, "c") == 3);
+    assert(name_of(c, "c", 2, &text) == "c[2].p");
+    u64 first = c->leaves.first[cast(local(c, "c"), u64)];
+    ownership_api.projection@ parts = ownership_source_leaves.path(&c->leaves, first + 1);
+    assert(parts.len == 2 && parts[0].kind == ownership_api.projection_kind.fixed_index);
+    assert(parts[0].index.value == 1 && parts[1].field == 1);
+    // A store and a use through c[2].p, and a scalar read of c[0].n.
+    proved(e, "cells");
+    println("element order ok");
+}
+
+// The destination places of a body that a variable index makes a weak store of one leaf in
+// each element, and the other dynamic destinations.
+struct dynamics {
+    u64 elements;
+    u64 others;
+    u64 count;
+}
+
+fn survey(ownership_source_local.context* c) dynamics {
+    dynamics mut out = dynamics{};
+    fir.func* f = c->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_assign) {
+                ownership_source_leaves.access a =
+                    ownership_source_leaves.resolve(&c->leaves, f, s->place);
+                if (a.kind == ownership_source_leaves.access_kind.dynamic) {
+                    if (a.elements) {
+                        out.elements += 1;
+                        out.count = a.count;
+                    } else {
+                        out.others += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return out;
+}
+
+// m[1][i] = p selects one leaf of row 1: a weak store over its 3 leaves, and m[1][2] keeps
+// a single value, so its read is proved. m[i][1] = p selects a leaf of an unknown row: the
+// gap dynamic_element, and so is a read through m[i][1].
+fn dynamic_elements(ownership_source_env.env mut* e) void {
+    dynamics inner = survey(stored(e, "grid"));
+    assert(inner.elements == 1 && inner.count == 3 && inner.others == 0);
+    proved(e, "grid");
+    dynamics outer = survey(stored(e, "grid_outer"));
+    assert(outer.elements == 0 && outer.others == 1);
+    assert(gap(e, "grid_outer") == ownership_source_local.missing.dynamic_element);
+    assert(gap(e, "grid_read") == ownership_source_local.missing.dynamic_element);
+    println("dynamic elements ok");
+}
+
+// A struct array inside a struct array: r[1].cells[0].p and the span r[1].name are leaves;
+// a length read of the span is no use.
+fn nested_names(ownership_source_env.env mut* e) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    ownership_source_local.context* c = stored(e, "rows");
+    assert(count_of(c, "r") == 6);
+    assert(name_of(c, "r", 0, &text) == "r[0].cells[0].p");
+    assert(name_of(c, "r", 2, &text) == "r[0].name");
+    assert(name_of(c, "r", 3, &text) == "r[1].cells[0].p");
+    assert(name_of(c, "r", 5, &text) == "r[1].name");
+    u64 first = c->leaves.first[cast(local(c, "r"), u64)];
+    assert(ownership_source_leaves.path(&c->leaves, first + 3).len == 4);
+    assert(ownership_source_leaves.path(&c->leaves, first + 5).len == 2);
+    proved(e, "rows");
+    println("nested names ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    depth_bounds(&e);
+    count_bounds(&e);
+    element_order(&e);
+    dynamic_elements(&e);
+    nested_names(&e);
+    return 0;
+}

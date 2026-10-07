@@ -1,0 +1,259 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| heap ok
+//| globals ok
+//| caller storage ok
+//| local aggregates ok
+//| controls ok
+//| chain ok
+//| constant globals ok
+/// Tests the gap for a use through a reference that the run does not follow, in the local row
+/// and the stored row alike. The reference comes from the heap, a mutable global or caller
+/// storage, or, in the local run, from an aggregate local. A use through it, and a call
+/// argument that copies it, are the gap unknown_source wherever lowering puts the load. A
+/// line here is a line of SOURCE.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[81] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "struct holder { i32* mut* pp; }",
+    "i32 mut* mut G = null;",
+    "string[2] NAMES = {\"ab\", \"cd\"};",
+    "fn use_ref(i32* r) i32 { return *r; }",
+    "fn use_box(box b) i32 { return b.n; }",
+    "fn use_name(string s) u64 { return s.len; }",
+    "fn heap_cell() i32 {",
+    "    i32 mut* own p = new(i32); i32* mut* own h = new(i32*); *h = p; del(p);",
+    "    i32 v = **h; del(h); return v;",
+    "}",
+    "fn heap_cell_copy() i32 {",
+    "    i32 mut* own p = new(i32); i32* mut* own h = new(i32*); *h = p; del(p);",
+    "    i32* q = *h; i32 v = *q; del(h); return v;",
+    "}",
+    "fn heap_cell_argument() i32 {",
+    "    i32 mut* own p = new(i32); i32* mut* own h = new(i32*); *h = p; del(p);",
+    "    i32 v = use_ref(*h); del(h); return v;",
+    "}",
+    "fn mutable_global() i32 { i32 mut* own p = new(i32); G = p; del(p); return *G; }",
+    "fn mutable_global_argument() i32 {",
+    "    i32 mut* own p = new(i32); G = p; del(p); return use_ref(G);",
+    "}",
+    "fn heap_field() i32 {",
+    "    i32 mut* own p = new(i32); box mut* own hb = new(box); hb->p = p; del(p);",
+    "    i32 v = *hb->p; del(hb); return v;",
+    "}",
+    "fn heap_aggregate_argument() i32 {",
+    "    i32 mut* own p = new(i32); box mut* own hb = new(box); hb->p = p; del(p);",
+    "    i32 v = use_box(*hb); del(hb); return v;",
+    "}",
+    "fn leaf_cell() i32 {",
+    "    i32 mut* own p = new(i32); i32* mut* own h = new(i32*); *h = p; holder hd = holder{h};",
+    "    del(p); i32 v = **hd.pp; del(h); return v;",
+    "}",
+    "fn caller_field(box* b) i32 { return *b->p; }",
+    "fn caller_field_copy(box* b) i32 { i32* q = b->p; return *q; }",
+    "fn caller_aggregate_argument(box* b) i32 { return use_box(*b); }",
+    "fn local_field() i32 {",
+    "    i32 mut* own p = new(i32); box mut b = box{null, 0}; b.p = p; del(p); return *b.p;",
+    "}",
+    "fn local_aggregate_argument() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 0}; del(p); return use_box(b);",
+    "}",
+    "fn constant_global() u64 { return NAMES[1].len + cast(NAMES[0][1], u64); }",
+    "fn constant_argument() u64 { return use_name(NAMES[0]); }",
+    "fn heap_unused() i32 {",
+    "    i32 mut* own p = new(i32); i32* mut* own h = new(i32*); *h = p; del(p); del(h);",
+    "    return 0;",
+    "}",
+    "fn pointer_scalar(box* b) i32 { return b->n; }",
+    "fn pointer_parameter(i32* p) i32 { return *p; }",
+    "fn stash(box b) void { G = b.p; }",
+    "fn stash_ptr(i32 mut* p) void { G = p; }",
+    "fn make() void { i32 mut x = 1; box b = box{&x, 0}; stash(b); }",
+    "fn make_ptr() void { i32 mut x = 1; stash_ptr(&x); }",
+    "fn use_it() i32 { return *G; }",
+    "i32 mut* mut GM = null;",
+    "i32 mut* mut* GP = &GM;",
+    "box mut GB = box{null, 0};",
+    "box mut* GBP = &GB;",
+    "struct cells { i32 mut* mut* pp; }",
+    "cells GC = cells{&GM};",
+    "i32 mut WATCHED = 0;",
+    "i32 mut* WATCH = &WATCHED;",
+    "fn through_constant() i32 { i32 mut* own p = new(i32); GM = p; del(p); return **GP; }",
+    "fn through_constant_box() i32 {",
+    "    i32 mut* own p = new(i32); GB.p = p; del(p); return *GBP->p;",
+    "}",
+    "fn through_constant_field() i32 {",
+    "    i32 mut* own p = new(i32); GM = p; del(p); return **GC.pp;",
+    "}",
+    "fn through_constant_argument() i32 {",
+    "    i32 mut* own p = new(i32); GM = p; del(p); return use_ref(*GP);",
+    "}",
+    "fn through_constant_copy() i32 {",
+    "    i32 mut* own p = new(i32); GM = p; del(p); i32* q = *GP; return *q;",
+    "}",
+    "fn constant_pointer() i32 { *WATCH = 3; return *WATCH; }",
+    "fn constant_cell() i32 { return *GP == null ? 0 : 1; }",
+    "fn root() i32 { return 0; }",
+};
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    assert(found->local.solved && found->stored.solved && found->stored.stored);
+    return found;
+}
+
+// The gap unknown_source at `line` and `col` in one run.
+fn gap_at(string name, string run, ownership_source_local.context* c, u32 line, u32 col)
+    void {
+    if (c->gap != ownership_source_local.missing.unknown_source ||
+        c->correspondence != ownership_source_local.status.incomplete ||
+        c->gap_source.line != line || c->gap_source.col != col) {
+        eprintln(name, " ", run, ": gap ", cast(c->gap, u64), " at ", c->gap_source.line, ":",
+            c->gap_source.col);
+        assert(false);
+    }
+    assert(c->violations_len == 0 && !ownership_api.successful(c->proof));
+}
+
+// The same gap in the local row and in the stored row.
+fn both(ownership_source_env.env mut* e, string name, u32 line, u32 col) void {
+    ownership_source.body* found = row(e, name);
+    gap_at(name, "local", &found->local, line, col);
+    gap_at(name, "stored", &found->stored, line, col);
+}
+
+fn proved_in(string name, string run, ownership_source_local.context* c) void {
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof) || c->violations_len != 0) {
+        eprintln(name, " ", run, ": not proved, gap ", cast(c->gap, u64), " at ",
+            c->gap_source.line, ":", c->gap_source.col);
+        assert(false);
+    }
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name);
+    proved_in(name, "local", &found->local);
+    proved_in(name, "stored", &found->stored);
+}
+
+// A reference that the heap holds: through it, copied into a TL, or passed to a call.
+fn heap(ownership_source_env.env mut* e) void {
+    both(e, "heap_cell", 10, 13);
+    both(e, "heap_cell_copy", 14, 14);
+    both(e, "heap_cell_argument", 18, 20);
+    both(e, "heap_field", 26, 13);
+    both(e, "heap_aggregate_argument", 30, 20);
+    // A TA leaf holds h; the reference that h points at is still heap contents.
+    both(e, "leaf_cell", 34, 21);
+    println("heap ok");
+}
+
+// A mutable global holds a reference that any body can change. A global that no code can
+// write holds its constant initializer, a static source.
+fn globals(ownership_source_env.env mut* e) void {
+    both(e, "mutable_global", 20, 76);
+    both(e, "mutable_global_argument", 22, 61);
+    proved(e, "constant_global");
+    proved(e, "constant_argument");
+    println("globals ok");
+}
+
+// Caller storage behind a pointer parameter: the reference in it has no source in this body.
+fn caller_storage(ownership_source_env.env mut* e) void {
+    both(e, "caller_field", 36, 38);
+    both(e, "caller_field_copy", 37, 46);
+    both(e, "caller_aggregate_argument", 38, 58);
+    println("caller storage ok");
+}
+
+// The local run tracks no aggregate local, so a use through its field and a whole copy of it
+// into a call are the gap there. The stored run tracks the aggregate and finds the use of
+// the released source in both bodies (field UAF and source invalidation, D17.14).
+fn local_aggregates(ownership_source_env.env mut* e) void {
+    ownership_source.body* field = row(e, "local_field");
+    gap_at("local_field", "local", &field->local, 40, 82);
+    assert(field->stored.violations_len == 1 && field->stored.violations[0].source.line == 40);
+    ownership_source.body* argument = row(e, "local_aggregate_argument");
+    gap_at("local_aggregate_argument", "local", &argument->local, 43, 73);
+    assert(argument->stored.violations_len == 1);
+    assert(argument->stored.violations[0].source.line == 43);
+    println("local aggregates ok");
+}
+
+// A body that stores a reference into the heap and never reads it, a scalar read through a
+// pointer, and a use through a pointer parameter itself are proved in both rows.
+fn controls(ownership_source_env.env mut* e) void {
+    proved(e, "heap_unused");
+    proved(e, "pointer_scalar");
+    proved(e, "pointer_parameter");
+    proved(e, "use_ref");
+    println("controls ok");
+}
+
+// make_ptr passes the address of x to stash_ptr, which keeps it in G; use_it reads *G after
+// x ends. The body that stores the borrow proves: it never follows G. The body that follows
+// G is the gap, so no row of the chain proves the use. The local run has no stack sources,
+// so the address in make and make_ptr is the gap there.
+fn chain(ownership_source_env.env mut* e) void {
+    // The local run tracks no aggregate parameter, so stash copies b.p out of storage that it
+    // does not follow: the gap there. The stored run tracks b and proves the copy.
+    ownership_source.body* stashed = row(e, "stash");
+    gap_at("stash", "local", &stashed->local, 53, 26);
+    proved_in("stash", "stored", &stashed->stored);
+    proved(e, "stash_ptr");
+    ownership_source.body* made = row(e, "make_ptr");
+    proved_in("make_ptr", "stored", &made->stored);
+    assert(made->local.gap == ownership_source_local.missing.unknown_source);
+    proved_in("make", "stored", &row(e, "make")->stored);
+    both(e, "use_it", 57, 26);
+    println("chain ok");
+}
+
+// A constant global holds its initializer, here the address of mutable global storage (D7.10).
+// A use through that address is proved; the reference that the mutable storage holds, one
+// dereference further, is the gap in both rows, however lowering writes the load, and so is a
+// comparison of it.
+fn constant_globals(ownership_source_env.env mut* e) void {
+    both(e, "through_constant", 66, 79);
+    both(e, "through_constant_box", 68, 57);
+    both(e, "through_constant_field", 71, 55);
+    both(e, "through_constant_argument", 74, 62);
+    both(e, "through_constant_copy", 77, 57);
+    proved(e, "constant_pointer");
+    // A comparison reads the reference that GM holds: a semantic read, the gap.
+    both(e, "constant_cell", 80, 37);
+    println("constant globals ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    heap(&e);
+    globals(&e);
+    caller_storage(&e);
+    local_aggregates(&e);
+    controls(&e);
+    chain(&e);
+    constant_globals(&e);
+    return 0;
+}

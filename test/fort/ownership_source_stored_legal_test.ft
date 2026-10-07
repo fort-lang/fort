@@ -1,0 +1,202 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| legal bodies ok
+//| no violations ok
+/// Probes the stored run for false hard errors on legal code in the shapes that the compiler
+/// source uses: cursors over spans, swaps of fields, owners in fields, constant and variable
+/// indices, taken locals, loans and switches. Each line of EXPECT names a body and its stored
+/// outcome: `proved`, `declared` (complete correspondence, incomplete proof), or
+/// `gap <missing>`. No row of any body has a violation.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.str;
+import std.strbuf;
+
+string[65] SOURCE = {
+    "struct cursor { u8@ data; u64 pos; }",
+    "struct pointers { i32* a; i32* b; }",
+    "struct buffer { u8 mut@ own data; u64 len; }",
+    "struct inner { i32* p; }",
+    "struct outer { inner a; inner b; }",
+    "struct box { i32 mut* p; i32 n; }",
+    "enum kind { first, second }",
+    "struct tagged { kind k; i32* p; }",
+    "struct named { string name; u64 id; }",
+    "fn peek(cursor c) u8 { if (c.pos < c.data.len) { return c.data[c.pos]; } return 0; }",
+    "fn advance(cursor mut* c) void { c->pos += 1; }",
+    "fn scan(u8@ s) u64 {",
+    "    cursor mut c = cursor{s, 0}; u64 mut n = 0;",
+    "    while (c.pos < c.data.len) { if (c.data[c.pos] == 32) { n += 1; } c.pos += 1; }",
+    "    return n;",
+    "}",
+    "fn swapped(i32* x, i32* y) i32 {",
+    "    pointers mut p = pointers{x, y}; i32* t = p.a; p.a = p.b; p.b = t;",
+    "    return *p.a - *p.b;",
+    "}",
+    "fn constant_names() u64 { string[2] n = {\"a\", \"ccc\"}; return n[0].len + n[1].len; }",
+    "fn variable_names(string[3] n) u64 {",
+    "    u64 mut t = 0; u64 mut i = 0; while (i < 3) { t += n[i].len; i += 1; } return t;",
+    "}",
+    "fn make_free(u64 n) void { buffer b = buffer{new(u8, n), n}; del(b.data); }",
+    "fn sink(u8 mut@ own d) void { del(d); }",
+    "fn hand_off(u64 n) void { buffer mut b = buffer{new(u8, n), n}; sink(move(b.data)); }",
+    "fn read_ptr(i32* p) i32 { return *p; }",
+    "fn pass_address() i32 { i32 x = 4; return read_ptr(&x); }",
+    "fn sum(u8@ s) u64 { u64 mut t = 0; for (u8 b : s) { t += cast(b, u64); } return t; }",
+    "fn local_sum() u64 { u8[4] buf = {1, 2, 3, 4}; return sum(buf[..]); }",
+    "fn nested(i32* x, i32* y) i32 {",
+    "    outer o = outer{inner{x}, inner{y}}; inner c = o.b; return *c.p + *o.a.p;",
+    "}",
+    "fn first_of(pointers p) i32* { return p.a; }",
+    "fn same_name(named a, named b) bool { return a.name == b.name; }",
+    "fn early(bool c) i32 {",
+    "    i32 mut* own p = new(i32); *p = 1; if (c) { del(p); return 0; }",
+    "    i32 v = *p; del(p); return v;",
+    "}",
+    "fn find(u8@ s, u8 b) u64 {",
+    "    u64 mut i = 0; while (i < s.len) { if (s[i] == b) { break; } i += 1; } return i;",
+    "}",
+    "fn owners() void { i32 mut* own[2] mut a = {new(i32), new(i32)}; del(a[0]); del(a[1]); }",
+    "fn tag(tagged t) i32 {",
+    "    switch (t.k) { case kind.first: { return *t.p; } default: { return 0; } }",
+    "}",
+    "fn deferred(u64 n) u64 { buffer b = buffer{new(u8, n), n}; defer del(b.data); return b.len; }",
+    "fn retarget(box mut* b, i32 mut* p) void { b->p = p; }",
+    "fn fill_n(box mut* b) void { b->n = 3; }",
+    "fn filled() i32 { box mut b = box{null, 0}; fill_n(&b); return b.n; }",
+    "fn filled_pointer(i32 mut* p) i32 { box mut b = box{null, 0}; retarget(&b, p); return *b.p; }",
+    "fn walk(i32*[3] xs) i32 {",
+    "    inner mut b = inner{null}; i32 mut t = 0; u64 mut i = 0;",
+    "    while (i < 3) { b.p = xs[i]; t += *b.p; i += 1; }",
+    "    return t;",
+    "}",
+    "fn walk_constant(i32*[3] xs) i32 {",
+    "    inner mut b = inner{null}; b.p = xs[0]; i32 v = *b.p; b.p = xs[2]; return v + *b.p;",
+    "}",
+    "fn refill_field(u64 n) void {",
+    "    buffer mut b = buffer{new(u8, n), n}; del(b.data); b.data = new(u8, n); del(b.data);",
+    "}",
+    "fn shrink(u8@ s) u8@ { cursor c = cursor{s, 1}; return c.data[c.pos..]; }",
+    "fn root() i32 { return 0; }",
+};
+
+// Four legal bodies stay outside the stored scope: a read through a variable index
+// (variable_names, walk), an own parameter (sink), and a use through a reference that a
+// taken local holds after a call wrote it (filled_pointer). No body is declared incomplete.
+string[30] EXPECT = {
+    "peek proved",
+    "advance proved",
+    "scan proved",
+    "swapped proved",
+    "constant_names proved",
+    "variable_names gap dynamic_element",
+    "make_free proved",
+    "sink gap own_parameter",
+    "hand_off proved",
+    "read_ptr proved",
+    "pass_address proved",
+    "sum proved",
+    "local_sum proved",
+    "nested proved",
+    "first_of proved",
+    "same_name proved",
+    "early proved",
+    "find proved",
+    "owners proved",
+    "tag proved",
+    "deferred proved",
+    "retarget proved",
+    "fill_n proved",
+    "filled proved",
+    "filled_pointer gap unknown_source",
+    "walk gap dynamic_element",
+    "walk_constant proved",
+    "refill_field proved",
+    "shrink proved",
+    "root proved",
+};
+
+fn missing_name(ownership_source_local.missing why) string {
+    switch (why) {
+    case ownership_source_local.missing.none: return "none";
+    case ownership_source_local.missing.fort_call: return "fort_call";
+    case ownership_source_local.missing.own_parameter: return "own_parameter";
+    case ownership_source_local.missing.escape: return "escape";
+    case ownership_source_local.missing.owner_load: return "owner_load";
+    case ownership_source_local.missing.foreign_owner: return "foreign_owner";
+    case ownership_source_local.missing.unknown_source: return "unknown_source";
+    case ownership_source_local.missing.owning_storage: return "owning_storage";
+    case ownership_source_local.missing.aggregate_result: return "aggregate_result";
+    case ownership_source_local.missing.range_loan: return "range_loan";
+    case ownership_source_local.missing.owned_leaves: return "owned_leaves";
+    case ownership_source_local.missing.call_dependent: return "call_dependent";
+    case ownership_source_local.missing.dynamic_element: return "dynamic_element";
+    }
+}
+
+// The stored outcome of one body in the form of EXPECT.
+fn outcome(ownership_source.body* row, strbuf.str_buf mut* out) void {
+    ownership_source_local.context* c = &row->stored;
+    strbuf.clear(out);
+    if (c->correspondence != ownership_source_local.status.complete) {
+        strbuf.append(out, "gap ");
+        strbuf.append(out, missing_name(c->gap));
+        return;
+    }
+    strbuf.append(out, ownership_api.successful(c->proof) ? "proved" : "declared");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut wrong = 0;
+    i = 0;
+    while (i < EXPECT.len) {
+        string line = EXPECT[i];
+        i64 space = str.index_of(line, ' ');
+        assert(space > 0);
+        string name = line[..cast(space, u64)];
+        string wanted = line[cast(space, u64) + 1..];
+        ownership_source.body* row = ownership_source_env.find(&e, "main", name);
+        outcome(row, &got);
+        if (strbuf.view(&got) != wanted) {
+            eprintln("    \"", name, " ", strbuf.view(&got), "\",");
+            wrong += 1;
+        }
+        i += 1;
+    }
+    assert(wrong == 0);
+    println("legal bodies ok");
+    // Each body of SOURCE has one line in EXPECT, and no row of any body has a violation.
+    u64 mut bodies = 0;
+    u64 mut violations = 0;
+    i = 0;
+    while (i < e.source.bodies.len) {
+        ownership_source.body* row = &e.source.bodies[i];
+        if (row->module->path == "main") {
+            bodies += 1;
+            violations += row->local.violations_len + row->stored.violations_len;
+        }
+        i += 1;
+    }
+    assert(EXPECT.len == bodies && violations == 0);
+    println("no violations ok");
+    return 0;
+}

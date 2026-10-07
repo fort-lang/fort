@@ -1,0 +1,190 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| span bounds ok
+//| element bounds ok
+//| stack bounds ok
+//| weak bounds ok
+/// Tests the stored run at its boundaries: the first and last element of a span field and of
+/// an array, the index one past the end whose bounds check traps before the use, a use at the
+/// last statement of a block and at the first statement after it, and a weak store into an
+/// array of one element. A line here is a line of SOURCE.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_leaves;
+import ownership_source_local;
+import std.strbuf;
+
+string[49] SOURCE = {
+    "struct view { u8@ bytes; u64 at; }",
+    "struct box { i32 mut* p; i32 n; }",
+    "fn first_byte() u8 {",
+    "    u8 mut@ own s = new(u8, 2); view v = view{s, 0}; del(s); return v.bytes[0];",
+    "}",
+    "fn last_byte() u8 {",
+    "    u8 mut@ own s = new(u8, 2); view v = view{s, 0}; del(s); return v.bytes[1];",
+    "}",
+    "fn past_byte() u8 {",
+    "    u8 mut@ own s = new(u8, 2); view v = view{s, 0}; del(s); return v.bytes[2];",
+    "}",
+    "fn one_byte() u8 {",
+    "    u8 mut@ own s = new(u8, 1); view v = view{s, 0}; del(s); return v.bytes[0];",
+    "}",
+    "fn first_cell() i32 {",
+    "    i32 mut* own p = new(i32); i32*[3] a = {p, null, null}; del(p); return *a[0];",
+    "}",
+    "fn last_cell() i32 {",
+    "    i32 mut* own p = new(i32); i32*[3] a = {null, null, p}; del(p); return *a[2];",
+    "}",
+    "fn other_cell(i32* q) i32 {",
+    "    i32 mut* own p = new(i32); i32*[3] a = {q, q, p}; del(p); return *a[1];",
+    "}",
+    "fn block_last() i32 {",
+    "    box mut b = box{null, 0}; i32 mut t = 0;",
+    "    { i32 mut x = 1; b.p = &x; t = *b.p; }",
+    "    return t;",
+    "}",
+    "fn block_after() i32 {",
+    "    box mut b = box{null, 0};",
+    "    { i32 mut x = 1; b.p = &x; }",
+    "    return *b.p;",
+    "}",
+    "fn last_parameter(i32 a, i32 b) i32* { return &b; }",
+    "fn kept_parameter(i32 a, i32 b) i32 { box c = box{null, b}; i32* q = &a; return *q + c.n; }",
+    "fn single(u64 i, i32* q) i32 {",
+    "    i32 mut* own p = new(i32); i32*[1] mut a = {q}; a[i] = p; del(p); return *a[0];",
+    "}",
+    "fn single_unused(u64 i, i32* q) i32 {",
+    "    i32 mut* own p = new(i32); i32*[1] mut a = {q}; a[i] = p; del(p); return 0;",
+    "}",
+    "fn single_kept(u64 i, i32* q) i32 {",
+    "    i32 mut* own p = new(i32); i32*[1] mut a = {q}; a[i] = p; i32 v = *a[0]; del(p);",
+    "    return v;",
+    "}",
+    "fn weak_owner(u64 i) void {",
+    "    i32 mut* own[1] mut a = {null}; a[i] = new(i32); del(a[0]);",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    assert(found->stored.solved && found->stored.stored);
+    return &found->stored;
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = row(e, name);
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof) || c->violations_len != 0) {
+        eprintln(name, ": not proved, gap ", cast(c->gap, u64), ", violations ",
+            c->violations_len);
+        assert(false);
+    }
+}
+
+// One validated violation of `kind` at `line`, which names `place`.
+fn violated(ownership_source_env.env mut* e, string name, ownership_api.event_kind kind,
+    string place, u32 line) void {
+    ownership_source_local.context* c = row(e, name);
+    strbuf.str_buf mut shown = strbuf.create();
+    defer strbuf.free(&shown);
+    if (c->violations_len == 1) {
+        ownership_source_local.violation v = c->violations[0];
+        if (v.leaf != ownership_source_local.WHOLE && v.quoted) {
+            ownership_source_leaves.append_name(&c->leaves, c->function, v.leaf, &shown);
+        } else {
+            strbuf.append(&shown, v.name);
+        }
+        if (v.kind == kind && strbuf.view(&shown) == place && v.source.line == line) {
+            return;
+        }
+        eprintln(name, ": ", strbuf.view(&shown), " at line ", v.source.line);
+    } else {
+        eprintln(name, ": ", c->violations_len, " violations");
+    }
+    assert(false);
+}
+
+// Complete correspondence, incomplete proof and no violation: an event without a witness
+// path, or a known limit of the run.
+fn incomplete(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = row(e, name);
+    if (c->correspondence != ownership_source_local.status.complete ||
+        c->violations_len != 0 || ownership_api.successful(c->proof)) {
+        eprintln(name, ": gap ", cast(c->gap, u64), ", violations ", c->violations_len);
+        assert(false);
+    }
+}
+
+// The first and the last byte of a released span field are each a use. Index 2 of a span of
+// length 2 traps at its bounds check before the read, so no path reaches the use: the event
+// has no witness. A span of one byte has one element to read.
+fn span_bounds(ownership_source_env.env mut* e) void {
+    ownership_api.event_kind use = ownership_api.event_kind.invalid_use;
+    violated(e, "first_byte", use, "v.bytes", 4);
+    violated(e, "last_byte", use, "v.bytes", 7);
+    incomplete(e, "past_byte");
+    // The flow still meets the event; only the walk finds no path to it.
+    assert(row(e, "past_byte")->unvalidated == 1);
+    violated(e, "one_byte", use, "v.bytes", 13);
+    println("span bounds ok");
+}
+
+// The first and the last element of an array each name their own leaf; another element
+// keeps its own source.
+fn element_bounds(ownership_source_env.env mut* e) void {
+    ownership_api.event_kind use = ownership_api.event_kind.invalid_use;
+    violated(e, "first_cell", use, "a[0]", 16);
+    violated(e, "last_cell", use, "a[2]", 19);
+    proved(e, "other_cell");
+    println("element bounds ok");
+}
+
+// A use at the last statement of the block that owns x, and the first use after its end.
+// A parameter ends at the return, so its address cannot leave as the result.
+fn stack_bounds(ownership_source_env.env mut* e) void {
+    ownership_api.event_kind use = ownership_api.event_kind.invalid_use;
+    proved(e, "block_last");
+    violated(e, "block_after", use, "b.p", 32);
+    violated(e, "last_parameter", use, "the result", 34);
+    proved(e, "kept_parameter");
+    println("stack bounds ok");
+}
+
+// A variable index into an array of one element still stores weakly: a[0] keeps q as an
+// alternative. A use of a[0] cannot pick one of its two values, so its proof stays
+// incomplete whether p is released or live (a known limit). With no later use the body is
+// proved. An owning weak store keeps its obligation at the array root, so no release of a[0]
+// discharges it (a known limit too).
+fn weak_bounds(ownership_source_env.env mut* e) void {
+    incomplete(e, "single");
+    proved(e, "single_unused");
+    incomplete(e, "single_kept");
+    ownership_source_local.context* c = row(e, "weak_owner");
+    assert(c->violations_len == 0 && !ownership_api.successful(c->proof));
+    println("weak bounds ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    span_bounds(&e);
+    element_bounds(&e);
+    stack_bounds(&e);
+    weak_bounds(&e);
+    return 0;
+}

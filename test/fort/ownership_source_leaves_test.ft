@@ -1,0 +1,295 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| tracked aggregates ok
+//| leaf paths ok
+//| place kinds ok
+//| constant indices ok
+//| names ok
+//| bounds ok
+/// Tests the leaf table of the stored run: which aggregate locals it tracks, the leaves of
+/// each, how a FIR place resolves against them, and the names that messages give.
+import fir;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_leaves;
+import ownership_source_local;
+import std.strbuf;
+
+string[18] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "struct outer { box inner; u8@ view; i32 count; }",
+    "struct grid { i32*[3] cells; }",
+    "struct scalars { i32 a; u64 b; }",
+    "struct wide { i32*[300] cells; }",
+    "fn shapes(box b, i32 mut* p) i32 {",
+    "    outer o = outer{box{p, 1}, {}, 2};",
+    "    grid g = grid{{p, p, p}};",
+    "    scalars s = scalars{1, 2};",
+    "    box mut taken = box{p, 3};",
+    "    box* t = &taken;",
+    "    i32 v = *o.inner.p + *g.cells[2] + o.count + s.a + t->n;",
+    "    return v + b.n + cast(o.view.len, i32);",
+    "}",
+    "fn wide_local(i32* p) i32 { wide w = wide{}; return *w.cells[0]; }",
+    "fn indexed(u64 i, i32* p) i32 { i32*[2] a = {p, p}; u64 j = 1; return *a[i] + *a[j]; }",
+    "fn picked(bool c, i32* p, i32* q) i32 { i32*[2] a = {p, q}; return *a[c ? 0 : 1]; }",
+    "fn root() i32 { return 0; }",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(text, SOURCE[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+fn stored(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    assert(row->stored.initialized && row->stored.stored);
+    return &row->stored;
+}
+
+// The local of `name` in a body, by its source name.
+fn local(ownership_source_local.context* c, string name) u32 {
+    u32 mut n = 0;
+    while (n < fir.local_count(c->function)) {
+        if (fir.local_name(fir.local_at(c->function, n)) == name) { return n; }
+        n += 1;
+    }
+    panic("ownership_source_leaves_test: local is absent");
+}
+
+fn path_text(ownership_source_leaves.table* t, u64 k, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    ownership_api.projection@ parts = ownership_source_leaves.path(t, k);
+    u64 mut i = 0;
+    while (i < parts.len) {
+        if (parts[i].kind == ownership_api.projection_kind.field) {
+            strbuf.append(out, ".f");
+            strbuf.append_u64(out, cast(parts[i].field, u64));
+        } else {
+            strbuf.push(out, '[');
+            strbuf.append_u64(out, cast(parts[i].index.value, u64));
+            strbuf.push(out, ']');
+        }
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// Each struct or array local with a reference leaf and no FIR address is tracked. A scalar
+// struct, a taken local and the result place are not (D17.15).
+fn tracked_aggregates(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "shapes");
+    ownership_source_leaves.table* t = &c->leaves;
+    assert(t->aggregate[cast(local(c, "b"), u64)]);
+    assert(t->aggregate[cast(local(c, "o"), u64)]);
+    assert(t->aggregate[cast(local(c, "g"), u64)]);
+    assert(!t->aggregate[cast(local(c, "s"), u64)]);
+    assert(!t->aggregate[cast(local(c, "taken"), u64)]);
+    assert(!t->aggregate[cast(local(c, "p"), u64)]);
+    assert(!t->aggregate[0]);
+    // A local run builds no table.
+    ownership_source.body* row = ownership_source_env.find(e, "main", "shapes");
+    assert(row->local.leaves.leaves_len == 0 && row->local.leaves.aggregate.len == 0);
+    println("tracked aggregates ok");
+}
+
+// Leaves follow field and element order. A reference stops the walk: the view and the
+// pointer of the nested box are leaves, the scalars are none.
+fn leaf_paths(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "shapes");
+    ownership_source_leaves.table* t = &c->leaves;
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 o = cast(local(c, "o"), u64);
+    assert(t->count[o] == 2);
+    assert(path_text(t, t->first[o], &text) == ".f0.f0");
+    assert(path_text(t, t->first[o] + 1, &text) == ".f1");
+    u64 g = cast(local(c, "g"), u64);
+    assert(t->count[g] == 3);
+    assert(path_text(t, t->first[g], &text) == ".f0[0]");
+    assert(path_text(t, t->first[g] + 2, &text) == ".f0[2]");
+    u64 b = cast(local(c, "b"), u64);
+    assert(t->count[b] == 1 && path_text(t, t->first[b], &text) == ".f0");
+    // The place of a leaf is its slot with those projections.
+    ownership_api.place_path place = ownership_source_leaves.place(t, c->identity,
+        t->first[g] + 1);
+    assert(place.root.kind == ownership_api.entity_kind.slot && cast(place.root.ordinal, u64) == g);
+    assert(place.projections.len == 2 && place.projections[1].index.value == 1);
+    assert(!place.residual);
+    println("leaf paths ok");
+}
+
+// Finds the first statement place or operand place of the body that matches `wanted`.
+fn resolve_text(ownership_source_local.context* c, fir.place p) ownership_source_leaves.access {
+    return ownership_source_leaves.resolve(&c->leaves, c->function, p);
+}
+
+fn place_of(ownership_source_local.context* c, u32 base, u32 first, u32 len) fir.place {
+    return fir.place{.base = fir.base_kind.bk_local, .local = base, .proj_first = first,
+        .proj_len = len};
+}
+
+// Collects the access kinds of every operand and destination place of a body.
+struct seen {
+    u64 leaf;
+    u64 prefix;
+    u64 indirect;
+    u64 length;
+    u64 scalar;
+    u64 dynamic;
+    u64 elements;
+    u64 none;
+}
+
+fn count_access(seen mut* s, ownership_source_leaves.access a) void {
+    switch (a.kind) {
+    case ownership_source_leaves.access_kind.none: s->none += 1;
+    case ownership_source_leaves.access_kind.scalar: s->scalar += 1;
+    case ownership_source_leaves.access_kind.leaf: s->leaf += 1;
+    case ownership_source_leaves.access_kind.prefix: s->prefix += 1;
+    case ownership_source_leaves.access_kind.indirect: s->indirect += 1;
+    case ownership_source_leaves.access_kind.length: s->length += 1;
+    case ownership_source_leaves.access_kind.pointer: s->leaf += 1;
+    case ownership_source_leaves.access_kind.dynamic:
+        s->dynamic += 1;
+        if (a.elements) { s->elements += 1; }
+    }
+}
+
+fn survey(ownership_source_local.context* c) seen {
+    seen mut out = seen{};
+    fir.func* f = c->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_assign) {
+                count_access(&out, resolve_text(c, s->place));
+                u32 mut k = 0;
+                while (k < s->value.ops_len) {
+                    fir.operand o = fir.rvalue_operand(f, s->value, k);
+                    if (o.kind != fir.operand_kind.ok_const) {
+                        count_access(&out, resolve_text(c, o.place));
+                    }
+                    k += 1;
+                }
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return out;
+}
+
+// The places of `shapes`: whole aggregates are prefixes, `*o.inner.p` and `*g.cells[2]` go
+// through leaves, `o.count` and `s.a` are scalars, `o.view.len` is a length read.
+fn place_kinds(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "shapes");
+    seen got = survey(c);
+    assert(got.prefix >= 3 && got.indirect >= 3 && got.scalar >= 2 && got.length == 1);
+    assert(got.dynamic == 0 && got.none > 0);
+    // A variable index is dynamic; a temporary with one constant write is an exact index.
+    ownership_source_local.context* d = stored(e, "indexed");
+    seen indexed = survey(d);
+    assert(indexed.prefix >= 1);
+    ownership_source.body* row = ownership_source_env.find(e, "main", "indexed");
+    assert(row->stored.gap == ownership_source_local.missing.dynamic_element);
+    // A whole local with no projection resolves to its leaves; a pointer local to none.
+    u32 o = local(c, "o");
+    ownership_source_leaves.access whole = resolve_text(c, place_of(c, o, 0, 0));
+    assert(whole.kind == ownership_source_leaves.access_kind.prefix && whole.count == 2);
+    ownership_source_leaves.access pointer = resolve_text(c, place_of(c, local(c, "p"), 0, 0));
+    assert(pointer.kind == ownership_source_leaves.access_kind.none);
+    // A global place is no TA place.
+    fir.place global = fir.place{.base = fir.base_kind.bk_global};
+    assert(resolve_text(c, global).kind == ownership_source_leaves.access_kind.none);
+    println("place kinds ok");
+}
+
+// An index temporary with one write from a nonnegative constant has that value. A named
+// local and a temporary written from a variable have none.
+fn constant_indices(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "shapes");
+    ownership_source_leaves.table* t = &c->leaves;
+    u64 mut twos = 0;
+    u64 mut n = 0;
+    while (n < cast(fir.local_count(c->function), u64)) {
+        if (t->constant[n] != ownership_source_leaves.NONE) {
+            assert(fir.local_at(c->function, cast(n, u32))->kind == fir.local_kind.lk_temp);
+            if (t->constant[n] == 2) { twos += 1; }
+        }
+        n += 1;
+    }
+    // `g.cells[2]` reads its index from one such temporary.
+    assert(twos == 1);
+    ownership_source_local.context* d = stored(e, "indexed");
+    n = 0;
+    while (n < cast(fir.local_count(d->function), u64)) {
+        assert(d->leaves.constant[n] == ownership_source_leaves.NONE);
+        n += 1;
+    }
+    // Each arm of `c ? 0 : 1` writes the index temporary once, so it has two writes and no
+    // one value: the read through it has no exact element.
+    ownership_source.body* picked = ownership_source_env.find(e, "main", "picked");
+    assert(picked->stored.gap == ownership_source_local.missing.dynamic_element);
+    ownership_source_local.context* p = &picked->stored;
+    n = 0;
+    while (n < cast(fir.local_count(p->function), u64)) {
+        assert(p->leaves.constant[n] == ownership_source_leaves.NONE);
+        n += 1;
+    }
+    println("constant indices ok");
+}
+
+fn names(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "shapes");
+    ownership_source_leaves.table* t = &c->leaves;
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 o = cast(local(c, "o"), u64);
+    ownership_source_leaves.append_name(t, c->function, t->first[o], &text);
+    assert(strbuf.view(&text) == "o.inner.p");
+    strbuf.clear(&text);
+    ownership_source_leaves.append_name(t, c->function, t->first[o] + 1, &text);
+    assert(strbuf.view(&text) == "o.view");
+    strbuf.clear(&text);
+    u64 g = cast(local(c, "g"), u64);
+    ownership_source_leaves.append_name(t, c->function, t->first[g] + 2, &text);
+    assert(strbuf.view(&text) == "g.cells[2]");
+    println("names ok");
+}
+
+// A local with more than MAX_LEAVES leaves stays untracked, so a read of it is no leaf.
+fn bounds(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = stored(e, "wide_local");
+    assert(!c->leaves.aggregate[cast(local(c, "w"), u64)]);
+    assert(c->leaves.leaves_len == 0);
+    assert(ownership_source_leaves.count_leaves(fir.local_at(c->function, local(c, "w"))->ty,
+        0) == ownership_source_leaves.MAX_LEAVES + 1);
+    println("bounds ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text);
+    defer ownership_source_env.close(&e);
+    tracked_aggregates(&e);
+    leaf_paths(&e);
+    place_kinds(&e);
+    constant_indices(&e);
+    names(&e);
+    bounds(&e);
+    return 0;
+}

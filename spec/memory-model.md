@@ -559,7 +559,10 @@ Do not infer emptiness, release, or pointee separation from index inequality alo
 
 #### 2.6.3 Aggregate transfer and retained addresses
 
-A whole aggregate copy preserves each borrowed field's original source (D17.15).
+A copy of a reference value, alone or as a leaf of a whole aggregate copy, is a semantic use of
+it, so copying a dangling reference is an invalid use (D17.14). A copy of a valid reference
+preserves its source relations: a whole aggregate copy preserves each borrowed field's original
+source (D17.15).
 An owning aggregate copy into an owning place still requires move (D17.7).
 A whole move transfers all owning leaves, borrowed fields, and scalar fields.
 It empties the complete abstract source value, including its non-owning fields (D17.6).

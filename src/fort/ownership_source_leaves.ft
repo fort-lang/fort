@@ -1,0 +1,400 @@
+/// Finds the reference leaves of the private aggregate locals of one verified FIR body.
+// A private aggregate is a struct or fixed-array local whose storage no FIR address names, so
+// only direct FIR writes change it (D17.15). A leaf is a reference of its type, reached by
+// field and constant-index projections. The caller keeps the FIR and its types alive.
+import ast;
+import fir;
+import ownership_api;
+import std.strbuf;
+import types;
+
+u64 NONE = 18446744073709551615;
+// The leaves of one local and the depth of one leaf stay within these bounds. A larger local
+// stays untracked.
+u64 MAX_LEAVES = 256;
+u64 MAX_DEPTH = 16;
+
+struct leaf {
+    u32 local;
+    u64 first;
+    u64 depth;
+    types.node* ty;
+}
+
+/// `aggregate[n]` says that local `n` is tracked. Its leaves are
+/// `leaves[first[n] .. first[n] + count[n]]` in field and element order, and the projections of
+/// a leaf are `parts[first .. first + depth]`. `constant[n]` is the value of an index temporary
+/// with one write from an integer constant, or NONE.
+struct table {
+    bool mut@ own aggregate;
+    u64 mut@ own first;
+    u64 mut@ own count;
+    u64 mut@ own constant;
+    leaf mut@ own leaves;
+    u64 leaves_len;
+    ownership_api.projection mut@ own parts;
+    u64 parts_len;
+}
+
+enum access_kind {
+    // The place is no part of a tracked aggregate.
+    none,
+    // A part of a tracked aggregate that holds no reference.
+    scalar,
+    // One whole leaf.
+    leaf,
+    // A part that holds the leaves [first, first + count).
+    prefix,
+    // An access through leaf `first`: a dereference or an element of its referent.
+    indirect,
+    // The length field of span or string leaf `first`.
+    length,
+    // The pointer field of span or string leaf `first`.
+    pointer,
+    // A variable index selects one element on the way to the place.
+    dynamic,
+}
+
+/// What a FIR place names in the tracked aggregates. A `dynamic` access with `elements` names
+/// one whole leaf of each element, the leaves [first, first + count); it has no other form.
+struct access {
+    access_kind kind;
+    u32 local;
+    u64 first;
+    u64 count;
+    bool elements;
+}
+
+fn reference(types.node* t) bool { return types.type_is_reference(t); }
+
+fn header(types.node* t) bool {
+    return t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+}
+
+// The leaves of a value of type `t`, at most MAX_LEAVES + 1. A depth past MAX_DEPTH counts as
+// too many, so the local stays untracked.
+fn count_leaves(types.node* t, u64 depth) u64 {
+    if (reference(t)) { return 1; }
+    if (depth >= MAX_DEPTH) { return MAX_LEAVES + 1; }
+    if (t->kind == types.type_kind.k_array) {
+        u64 each = count_leaves(t->elem, depth + 1);
+        if (each == 0) { return 0; }
+        if (t->len > MAX_LEAVES || each * t->len > MAX_LEAVES) { return MAX_LEAVES + 1; }
+        return each * t->len;
+    }
+    if (t->kind != types.type_kind.k_struct) { return 0; }
+    u64 mut total = 0;
+    u32 count = fir.struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        total += count_leaves(fir.struct_field_type(t, k), depth + 1);
+        if (total > MAX_LEAVES) { return MAX_LEAVES + 1; }
+        k += 1;
+    }
+    return total;
+}
+
+// The projections of all leaves of `t`: each leaf's depth summed.
+fn count_parts(types.node* t, u64 depth) u64 {
+    if (reference(t)) { return depth; }
+    if (t->kind == types.type_kind.k_array) {
+        return count_parts(t->elem, depth + 1) * t->len;
+    }
+    if (t->kind != types.type_kind.k_struct) { return 0; }
+    u64 mut total = 0;
+    u32 count = fir.struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        total += count_parts(fir.struct_field_type(t, k), depth + 1);
+        k += 1;
+    }
+    return total;
+}
+
+fn field(u32 k) ownership_api.projection {
+    return ownership_api.projection{.kind = ownership_api.projection_kind.field, .field = k};
+}
+
+fn element(u64 k) ownership_api.projection {
+    return ownership_api.projection{.kind = ownership_api.projection_kind.fixed_index,
+        .index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+        .value = cast(k, i64)}};
+}
+
+// Appends the leaves of a value of type `t` at `path` for local `n`.
+fn fill(table mut* out, u32 n, types.node* t, ownership_api.projection mut@ path, u64 depth)
+    void {
+    if (reference(t)) {
+        u64 at = out->parts_len;
+        u64 mut i = 0;
+        while (i < depth) { out->parts[at + i] = path[i]; i += 1; }
+        out->parts_len += depth;
+        out->leaves[out->leaves_len] = leaf{n, at, depth, t};
+        out->leaves_len += 1;
+        return;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        u64 mut i = 0;
+        while (i < t->len) {
+            path[depth] = element(i);
+            fill(out, n, t->elem, path, depth + 1);
+            i += 1;
+        }
+        return;
+    }
+    if (t->kind != types.type_kind.k_struct) { return; }
+    u32 count = fir.struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        path[depth] = field(k);
+        fill(out, n, fir.struct_field_type(t, k), path, depth + 1);
+        k += 1;
+    }
+}
+
+// The value of local `n` when it is a temporary with one whole write from a nonnegative integer
+// constant. V13 orders that write before each read, so each read sees that value.
+fn constants(fir.func* f, bool@ taken, u64 mut@ out) void {
+    u64 count = cast(fir.local_count(f), u64);
+    u64 mut@ own writes = new(u64, count);
+    defer del(writes);
+    u64 mut n = 0;
+    while (n < count) { out[n] = NONE; n += 1; }
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            fir.place mut written = fir.place{};
+            if (fir.stmt_writes_place(s, &written) && written.base == fir.base_kind.bk_local) {
+                u64 at = cast(written.local, u64);
+                writes[at] += 1;
+                if (s->kind == fir.stmt_kind.st_assign && written.proj_len == 0 &&
+                    (s->value.kind == fir.rvalue_kind.rv_use ||
+                    s->value.kind == fir.rvalue_kind.rv_cast) && s->value.ops_len == 1) {
+                    fir.operand o = fir.rvalue_operand(f, s->value, 0);
+                    if (o.kind == fir.operand_kind.ok_const &&
+                        o.value.kind == fir.const_kind.ck_int && !o.value.value.neg &&
+                        o.value.value.mag <= 9223372036854775807) {
+                        out[at] = o.value.value.mag;
+                    }
+                }
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    n = 0;
+    while (n < count) {
+        fir.local* l = fir.local_at(f, cast(n, u32));
+        if (writes[n] != 1 || l->kind != fir.local_kind.lk_temp || taken[n]) { out[n] = NONE; }
+        n += 1;
+    }
+}
+
+/// Builds the table of one body. `taken[n]` says that some FIR address names local `n`. The
+/// result place `_0` is caller storage and stays untracked (D17.15).
+fn build(fir.func* f, bool@ taken) table {
+    u64 count = cast(fir.local_count(f), u64);
+    table mut out = table{};
+    out.aggregate = new(bool, count);
+    out.first = new(u64, count);
+    out.count = new(u64, count);
+    out.constant = new(u64, count);
+    constants(f, taken, out.constant);
+    u64 mut leaves = 0;
+    u64 mut parts = 0;
+    u64 mut n = 1;
+    while (n < count) {
+        types.node* t = fir.local_at(f, cast(n, u32))->ty;
+        if (!taken[n] && !reference(t) && (t->kind == types.type_kind.k_struct ||
+            t->kind == types.type_kind.k_array)) {
+            u64 found = count_leaves(t, 0);
+            if (found > 0 && found <= MAX_LEAVES) {
+                out.aggregate[n] = true;
+                out.count[n] = found;
+                leaves += found;
+                parts += count_parts(t, 0);
+            }
+        }
+        n += 1;
+    }
+    out.leaves = new(leaf, leaves);
+    out.parts = new(ownership_api.projection, parts);
+    ownership_api.projection mut@ own path = new(ownership_api.projection, MAX_DEPTH);
+    defer del(path);
+    n = 1;
+    while (n < count) {
+        if (out.aggregate[n]) {
+            out.first[n] = out.leaves_len;
+            fill(&out, cast(n, u32), fir.local_at(f, cast(n, u32))->ty, path, 0);
+        }
+        n += 1;
+    }
+    return out;
+}
+
+fn free(table mut* t) void {
+    del(t->aggregate);
+    del(t->first);
+    del(t->count);
+    del(t->constant);
+    del(t->leaves);
+    del(t->parts);
+    *t = table{};
+}
+
+/// The projections of leaf `k`.
+fn path(table* t, u64 k) ownership_api.projection@ {
+    leaf l = t->leaves[k];
+    return t->parts[l.first..l.first + l.depth];
+}
+
+/// The place of leaf `k` in the proof state.
+fn place(table* t, ownership_api.function_id function, u64 k) ownership_api.place_path {
+    leaf l = t->leaves[k];
+    return ownership_api.place_path{.root = ownership_api.entity_id{function,
+        ownership_api.entity_kind.slot, l.local}, .projections = path(t, k)};
+}
+
+fn same_part(ownership_api.projection a, ownership_api.projection b) bool {
+    if (a.kind != b.kind) { return false; }
+    if (a.kind == ownership_api.projection_kind.field) { return a.field == b.field; }
+    return a.index.value == b.index.value;
+}
+
+// The leaves of local `n` whose paths begin with `prefix[..depth]`: a contiguous range.
+fn under(table* t, u32 n, ownership_api.projection@ prefix, u64 depth, u64 mut* first,
+    u64 mut* count) void {
+    u64 begin = t->first[cast(n, u64)];
+    u64 end = begin + t->count[cast(n, u64)];
+    *first = NONE;
+    *count = 0;
+    u64 mut k = begin;
+    while (k < end) {
+        leaf l = t->leaves[k];
+        bool mut inside = l.depth >= depth;
+        u64 mut i = 0;
+        while (inside && i < depth) {
+            if (!same_part(t->parts[l.first + i], prefix[i])) { inside = false; }
+            i += 1;
+        }
+        if (inside) {
+            if (*first == NONE) { *first = k; }
+            *count += 1;
+        }
+        k += 1;
+    }
+}
+
+/// Classifies FIR place `p` against the tracked aggregates.
+fn resolve(table* t, fir.func* f, fir.place p) access {
+    access mut out = access{};
+    if (p.base != fir.base_kind.bk_local || !t->aggregate[cast(p.local, u64)]) { return out; }
+    out.local = p.local;
+    types.node* mut ty = fir.local_at(f, p.local)->ty;
+    ownership_api.projection[16] mut path = {};
+    u64 mut depth = 0;
+    bool mut dynamic = false;
+    u64 mut dynamic_depth = 0;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (reference(ty)) {
+            // The rest of the place goes through the leaf at `path[..depth]`.
+            if (dynamic) { out.kind = access_kind.dynamic; return out; }
+            u64 mut first = NONE;
+            u64 mut count = 0;
+            under(t, p.local, path[..], depth, &first, &count);
+            if (count != 1) { return access{.kind = access_kind.dynamic, .local = p.local}; }
+            out.first = first;
+            out.count = 1;
+            bool through = pj.kind == fir.proj_kind.pj_deref ||
+                (pj.kind == fir.proj_kind.pj_index && header(ty));
+            if (through) { out.kind = access_kind.indirect; return out; }
+            if (pj.kind == fir.proj_kind.pj_field && header(ty) && i + 1 == p.proj_len) {
+                out.kind = pj.field == 1 ? access_kind.length : access_kind.pointer;
+                return out;
+            }
+            out.kind = access_kind.dynamic;
+            return out;
+        }
+        if (depth >= MAX_DEPTH) { return access{.kind = access_kind.dynamic, .local = p.local}; }
+        if (pj.kind == fir.proj_kind.pj_field) {
+            path[depth] = field(pj.field);
+        } else if (pj.kind == fir.proj_kind.pj_index) {
+            u64 mut value = t->constant[cast(pj.index, u64)];
+            if (value == NONE || value >= ty->len) {
+                if (!dynamic) { dynamic_depth = depth; }
+                dynamic = true;
+                value = 0;
+            }
+            path[depth] = element(value);
+        } else {
+            // A dereference of an aggregate does not type-check (V3).
+            return access{.kind = access_kind.dynamic, .local = p.local};
+        }
+        depth += 1;
+        ty = fir.apply_projection(f, ty, pj);
+        i += 1;
+    }
+    if (dynamic) {
+        // A store of one whole leaf element of the array at `path[..dynamic_depth]`.
+        out.kind = access_kind.dynamic;
+        if (reference(ty) && depth == dynamic_depth + 1) {
+            u64 mut first = NONE;
+            u64 mut count = 0;
+            under(t, p.local, path[..], dynamic_depth, &first, &count);
+            out.first = first;
+            out.count = count;
+            out.elements = count > 0 && first != NONE;
+        }
+        return out;
+    }
+    u64 mut first = NONE;
+    u64 mut count = 0;
+    under(t, p.local, path[..], depth, &first, &count);
+    if (count == 0) { out.kind = access_kind.scalar; return out; }
+    out.first = first;
+    out.count = count;
+    out.kind = reference(ty) ? access_kind.leaf : access_kind.prefix;
+    return out;
+}
+
+fn field_name(types.node* t, u32 k) string {
+    ast.node* decl = fir.struct_decl(t);
+    u32 mut at = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* member = ast.ast_child(decl, i);
+        if (member->kind == ast.ast_kind.k_field_decl) {
+            if (at == k) { return member->name; }
+            at += 1;
+        }
+        i += 1;
+    }
+    return "?";
+}
+
+/// Appends the source name of leaf `k` of a named local: `b.p` or `a[1]`.
+fn append_name(table* t, fir.func* f, u64 k, strbuf.str_buf mut* out) void {
+    leaf l = t->leaves[k];
+    fir.local* base = fir.local_at(f, l.local);
+    strbuf.append(out, fir.local_name(base));
+    types.node* mut ty = base->ty;
+    u64 mut i = 0;
+    while (i < l.depth) {
+        ownership_api.projection part = t->parts[l.first + i];
+        if (part.kind == ownership_api.projection_kind.field) {
+            strbuf.push(out, '.');
+            strbuf.append(out, field_name(ty, part.field));
+            ty = fir.struct_field_type(ty, part.field);
+        } else {
+            strbuf.push(out, '[');
+            strbuf.append_u64(out, cast(part.index.value, u64));
+            strbuf.push(out, ']');
+            ty = ty->elem;
+        }
+        i += 1;
+    }
+}

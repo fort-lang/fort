@@ -1027,7 +1027,9 @@ came here.
   A tracked local slot (TL) is a reference local whose storage no `addr` or array `slice`
   names. One pass over the statements marks those locals. Only direct FIR writes change a TL,
   so a TL owner keeps its allocation across any effect outside local proof. Scalars, structs
-  and arrays are not TLs.
+  and arrays are not TLs. A use through a reference that no TL holds (a struct field, the
+  heap, a mutable global, caller storage) is the gap `unknown_source`, as the stored-borrow
+  entry below says.
   The producer gives allocations, moves, copies, releases, reads through a TL, and the
   storage end of TL owners at dead markers and at each return.
   A fort call and a release through a pointer are `outside` effects: only TL owners, static
@@ -1116,6 +1118,69 @@ came here.
   (`old_pattern` in `_refine_test.ft`) leaves the declared scope too: its view slices a span
   that the block holds, which has no known source (D17.17).
   `test/fort/ownership_source_local_review_test.ft` pins the probes of each shape.
+- **Stored-borrow effects come from verified FIR** (D17.14, D17.15, D19.8).
+  `ownership_source_local` runs a second flow computation for each body, the stored run.
+  It has every local step, its own `stored_borrows` ledger, and three more kinds of storage.
+  A tracked aggregate (TA) is a struct or fixed-array local with a reference leaf whose
+  storage no FIR address names. `ownership_source_leaves` lists its leaves, reached by field
+  and constant-index projections (at most 256 leaves and depth 16; a larger local stays
+  untracked). A TA leaf is a place with projections. Transfer separates distinct fields and
+  constant indices of one root (`leaf_places_proved`), and an unknown call keeps leaf owners.
+  A taken local has a stack source: live at entry, begun again at `live`, ended at `dead` and
+  at each return, and kept across an unknown call. A `live` after an end moves the borrows
+  of the old instance to a retired source that stays ended, so no old borrow revives.
+  A constant index is a temporary with one write from an integer constant (V13 orders it
+  before each read). A store through a variable index is a weak store: each element of the
+  actual array keeps its old value and gains the new one; an equal value adds nothing, so a
+  loop converges. A read, move or release through a variable index is the gap
+  `dynamic_element`, and a move or release also stops the path.
+  A stack borrow that reaches storage the run does not track (a store through a pointer, a
+  global, a taken local, or a call result written there) is the gap `escape`. One search over
+  hub edges (a node for each assignment) marks the TLs and leaves that can hold one.
+  Both runs follow only three kinds of reference: a whole TL, a TA leaf (stored run), each
+  with its pointer field when it is a span or a `string` (`*t.ptr` dereferences t, as
+  `place_access` reads it), and the constant initializer of a global that no code writes
+  (null, static storage, or the address of other global storage, D7.10), reached with no
+  `deref` and no span index before it.
+  `tracked_reference` decides this for each `deref`, and for each index of a span or `string`,
+  of a place. Any other reference comes from storage whose contents the run does not follow
+  (the heap, a mutable global, caller storage, a taken local, an aggregate past the leaf
+  bounds, or what a constant global's address points at); a call or a store through a pointer
+  can change it. A use through it is the gap `unknown_source`, and so is each read of its
+  value (`note_untracked_value`; the copy of a dangling reference is an invalid use, D17.14).
+  `untracked_loads` checks each read that `fir.stmt_read` and `fir.term_read` report: each
+  operand of each rvalue kind (a copy, an aggregate member, a return, a comparison, a cast,
+  a call argument), the callee, a released place, the place of a slice of a span or a
+  `string`, and the pointers that an address or a destination loads. The test of an overwrite
+  check is no use (fir.md 14) and is no read of a value here. So the verdict on such a
+  reference does not depend on how lowering writes the load. A copy of a constant global's
+  own reference into a TL is also the gap, though a use straight through it is proved: that
+  difference is in the safe direction. So no body uses or reads a reference that untracked
+  storage keeps, in a read that FIR reports, without the gap. A heap, global or caller borrow
+  that a body writes there, or a stack borrow that a callee receives, needs no gap of its
+  own: in
+  `test/fort/ownership_source_local_stored_untracked_test.ft` the chain `make_ptr`,
+  `stash_ptr`, `use_it` stops at `use_it`, and `**GP` for `GP = &GM` is the gap.
+  The flow proves a range loan whose collection is a whole local or a field leaf and whose
+  region writes only whole locals and calls no fort function; another loan is `range_loan`.
+  The checker's range-call guard rejects a fort call in a range loop, so no FIR has one.
+  The witness walk knows leaf values, so a lost owner at a field store validates.
+  The stored row drops a violation that the local run validated at the same operation.
+  `test/fort/ownership_source_stored_*_test.ft` and `ownership_source_leaves_test.ft` hold
+  these rules. Five known limits stay incomplete proof in the stored scope: a null test of a
+  leaf; a read of an element after a weak store of another value; a failure that only some
+  paths into one operation reach; an owning weak store, whose obligation rests at the array
+  root; a range loan that begins after a write that the flow cannot name, such as a print
+  call.
+  Measured on the source audit of 66 roots: 3868 unique bodies, 751 declare stored
+  obligations and all 751 prove them, 677 declare local obligations and all 677 prove them,
+  0 violations. The reads of reference values out of untracked storage took 17 local and 10
+  stored bodies out of the scopes (662 and 728 before, on 3730 bodies). The rule for
+  untracked references took 72 stored and 161 local bodies out of the scopes when it came
+  (756 and 781 before). `src/fort/main.ft` takes 15.0 s and 874 MB with the local, stored
+  and raw runs (12.1 s and 748 MB before the raw run; `/usr/bin/time -v`, debug build, Linux
+  VM). One body outside the scope refuses a stored ledger: `ownership_events.clone` (W).
+  On the 512 run tests of `test/lang`, no local, stored or raw row has a violation.
 - **Raw-storage effects come from verified FIR** (D17.17, D17.18, D19.8).
   `ownership_source_raw` reads each verified body and proves its raw obligations with
   `ownership_raw`. A reference local that no FIR address names has definitions: writes, moves,
