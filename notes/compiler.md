@@ -72,11 +72,11 @@ came here.
   header is complete before it. `test/lang/fail` is the cascade test (`parser_recovery_test.c`
   walks it): a diagnostic on a line with no `//! error:` annotation fails the suite, and the
   diagnostic counts of the files with two syntax errors are asserted beside it, since a walk that
-  only forbids unannotated lines also passes with recovery switched off. It also asserts the
-  number of files it walked (`CORPUS_FILES`), so a ticket that adds a test under `test/lang/fail`
-  raises that constant in the same commit, and one that adds a suite of its own to
-  `bootstrap0/test/` runs `tools/vm configure` before `build`, since the executables are globbed at
-  configure time.
+  only forbids unannotated lines also passes with recovery switched off. It asserts no file count,
+  so nothing notices a file that the walk skips. The `test/lang` runner judges each file of
+  `test/lang/fail` with the product compiler, not with the parser of bootstrap0. A ticket that adds
+  a suite of its own to `bootstrap0/test/` runs `tools/vm configure` before `build`, since the
+  executables are globbed at configure time.
 
 ## 4. The checker
 

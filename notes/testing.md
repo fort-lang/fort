@@ -814,17 +814,12 @@ bullet at a time and without a rewrite.
   fort port never got, while the language corpus, which judges both compilers, held the rule for
   neither. Mutating the three C lines names the three tests that hold them. The fourth survivor was
   held on neither side, which the same method measured.
-  Four traps, each of which cost that ticket a wrong verdict or a wrong claim.
+  Three traps, each of which cost that ticket a wrong verdict or a wrong claim.
   **Select the oracle by what a test imports, not by its name.** A filter of `check` over
   `test/fort` ran 15 tests where 21 import the checker, so every "survived" verdict was a
   survival against 15 of 21 until the four were re-run against all 161.
   **Do not edit the test tree while a batch runs.** A harness that reads a file during the write
   reports a failure that belongs to no mutation.
-  **Raise each active file counter in the commit that adds the file.** `CORPUS_FILES` in
-  `bootstrap0/test/parser_recovery_test.c` counts fail tests. The same name in
-  `test/highlight_test.py` counts its source corpus.
-  T-145 added two net test programs and routed them into the grammar corpus; since 2026-09-25
-  `run/ffi/013` and `run/stdlib/118` hold the C layout and the errno values on both targets.
   **Say how strong each verdict is.** A verdict a mutant measured, a claim probed by compiling a
   program, and a claim read off the source are three things, and an audit that gives them one word
   hides which rows a reader may rely on.
@@ -990,25 +985,25 @@ bullet at a time and without a rewrite.
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
   `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
   `test/lsp`, `test/tty` and `test/ownership/approved` (T-308).
+  T-145 added two net test programs and routed them into the grammar corpus; since 2026-09-25
+  `run/ffi/013` and `run/stdlib/118` hold the C layout and the errno values on both targets.
   Approved ownership examples receive lexical coverage during fixture preparation.
   T-292 later qualifies their ownership verdicts.
-  `CORPUS_FILES` is the exact number of files in this list, so a
-  ticket that adds or removes a `.ft` under any of them reads the new number off the failure and
-  writes it there, as it does for `CORPUS_FILES` in `bootstrap0/test/parser_recovery_test.c`.
+  No test asserts the exact number of files; `CORPUS_MINIMUMS` gives each directory a floor.
   The other `.ft` files are listed in `EXCLUDED_DIRS`, each
   because it is meant to hold a lexical error (`test/lang/fail`, `test/highlight/scopes.ft`,
   `editors/vscode/test/fixtures/lexical.ft`), and a test asserts that partition, so a new
   directory of fort is a red test rather than a corpus nobody tokenizes -- which is what
   `test/fort` and `test/lang/programs` both were until T-079 measured it.
   **One test checks one directory of `CORPUS_DIRS`, and the corpus is tokenized once** (T-104).
-  `test_the_corpus_is_the_size_it_says_it_is` walked the corpus to count it and then tokenized
-  every file a second time, which took one run of the module to 1396 calls of `Engine.tokenize`
-  over 7575844 bytes where the corpus is 685 files and 3844648 bytes. That second walk also gave
-  cover to `src/lsp` and `test/tty`, which stood in `CORPUS_DIRS` with no test of their own. Each
-  directory now has one test, `CORPUS_MINIMUMS` gives each its floor, and
-  `test_every_corpus_directory_is_checked_by_a_test` reads the source of the class and holds the
-  calls to `check_directory` against `CORPUS_DIRS`. A ticket that adds a directory adds a test
-  with it, or that guard goes red.
+  `test_the_corpus_is_the_size_it_says_it_is`, now `test_the_corpus_walk_holds_no_duplicate`, walked
+  the corpus to count it and then tokenized every file a second time, which took one run of the
+  module to 1396 calls of `Engine.tokenize` over 7575844 bytes where the corpus is 685 files and
+  3844648 bytes. That second walk also gave cover to `src/lsp` and `test/tty`, which stood in
+  `CORPUS_DIRS` with no test of their own. Each directory now has one test, `CORPUS_MINIMUMS` gives
+  each its floor, and `test_every_corpus_directory_is_checked_by_a_test` reads the source of the
+  class and holds the calls to `check_directory` against `CORPUS_DIRS`. A ticket that adds a
+  directory adds a test with it, or that guard goes red.
   **The engine finds the leftmost token of a line in one search.** It called `re.search` once for
   each of the 53 top-level rules at each position, and a search scans to the end of the line, so a
   line cost `positions x rules x length` and not its bytes. `Scanner` writes the rules as one
@@ -1046,6 +1041,7 @@ bullet at a time and without a rewrite.
   T-309 measures cached `CORPUS_FILES = 817` while the current source says 831.
   Both have modification time 1790941933 and source size 35741 bytes.
   Python accepts the timestamp-based cache because these header values match.
+  Since 2026-10-07, no test asserts the exact corpus count; `CORPUS_FILES` is history.
   Load current source with `compile` and `exec` for count measurements.
   Keep cache files that another process can use.
 - The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no build
