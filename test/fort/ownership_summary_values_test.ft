@@ -72,10 +72,51 @@ fn cast_index() void {
     window("    i32 big = 65; char c = cast(big, char); i32 k = 2;", true, 12);
 }
 
+string BOX = "struct arr_box { i32 mut* own[300] items; }";
+string BOX_CALLER = "fn caller(arr_box mut* b) void { callee(b); }";
+
+// One callee body that sets `k` and then releases `b->items[k]` in caller storage.
+fn element(string set, bool proved, i64 index) void {
+    string[5] source = {BOX, "fn callee(arr_box mut* b) void {", set, "    del(b->items[k]); }",
+        BOX_CALLER};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    if (!proved) {
+        assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+        assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+        return;
+    }
+    assert(ownership_api.successful(f.summary.proof) && f.summary.cases.len == 1);
+    u64 mut released = 0;
+    u64 mut e = 0;
+    while (e < f.summary.effects.len) {
+        ownership_summary_model.effect_node node = f.summary.effects[e];
+        if (node.payload == ownership_summary_model.payload_kind.release) {
+            assert(node.effect.place.projections.len == 2);
+            assert(node.effect.place.projections[1].kind ==
+                ownership_api.projection_kind.fixed_index);
+            assert(node.effect.place.projections[1].index.value == index);
+            released += 1;
+        }
+        e += 1;
+    }
+    assert(released == 1);
+}
+
+// The same rules select one owning element of caller storage. The stale index 0 and the
+// wrapped index 4 name another element than the one that the program releases.
+fn element_index() void {
+    element("    i32 mut k = 0; k = 5;", true, 5);
+    element("    i32 big = 260; u8 k = cast(big, u8);", false, 0);
+    element("    i32 big = 255; u8 k = cast(big, u8);", true, 255);
+}
+
 fn main() i32 {
     formal_index();
     addressed_index();
     cast_index();
+    element_index();
     println("summary values ok");
     return 0;
 }

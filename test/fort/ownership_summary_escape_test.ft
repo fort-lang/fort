@@ -393,6 +393,22 @@ fn incomplete_body(string@ text) void {
     assert(f.summary.residual_effects && f.summary.cases.len == 0);
 }
 
+fn designated_body(bool released) void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, released ? INDIRECT_OWN_ADDRESS[..] : DESIGNATED_ADDRESS[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.complete);
+    if (released) {
+        assert(f.summary.proof.failed);
+        assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+        assert(f.services.counts.last.text == "reference source is no longer live");
+    } else {
+        assert(ownership_api.successful(f.summary.proof) && f.summary.results.len == 1);
+        assert(ownership_summary_model.same(f.summary.results[0].borrow.source,
+            ownership_summary_body.designated(&f.inputs[0], 1)));
+    }
+}
+
 fn body_availability() void {
     ownership_calls_fixtures.fixture mut available = ownership_calls_fixtures.fixture{};
     ownership_calls_fixtures.open(&available, SOURCE_1[..]);
@@ -774,8 +790,8 @@ fn main() i32 {
     incomplete_body(NESTED_OWNER[..]);
     incomplete_body(NESTED_POINTER[..]);
     incomplete_body(LOADED_POINTER[..]);
-    incomplete_body(INDIRECT_OWN_ADDRESS[..]);
-    incomplete_body(DESIGNATED_ADDRESS[..]);
+    designated_body(true);
+    designated_body(false);
     incomplete_body(HELD_INLINE_ADDRESS[..]);
     incomplete_body(CLEARED_INLINE_ADDRESS[..]);
     incomplete_body(DEFERRED_CLEAR[..]);
