@@ -904,6 +904,13 @@ bullet at a time and without a rewrite.
   The row `D17.14-residual` read `stale` as the first row of two runs and `caught` as the second
   row of a third run (md5 `e317a12eab36bd2ea481fd6eccdc18ce` against the baseline
   `01afd107d70cd091e469ea64c1c5b8d2`). Re-run a stale first row behind another row.
+  That can fail too: a rerun of 2 rows of the raw table read `stale` for both. A runner that
+  waits 20 s before each guest command caught both rows (`--runner` with a script that runs
+  `sleep 20` and then `tools/vm run "$@"`).
+  **A stage that fails on the baseline catches each row.** `tools/mutate.py` runs no stage on
+  the unmutated build. On 2026-10-08 the row `D17.14-imported-bodies` read `caught`, and its
+  log held 8 failed cases of `ownership_driver_groups` that the baseline failed as well. Before
+  a round, run each stage command on the baseline. Then read the failed case names in each log.
   **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
   citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6

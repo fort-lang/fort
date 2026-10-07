@@ -1,0 +1,473 @@
+{
+  "comment": [
+    "One row for each rule of the raw-storage producer (src/fort/ownership_source_raw.ft), the",
+    "raw report rendering (src/fort/ownership_report.ft) and the shared witness walk",
+    "(src/fort/ownership_source_local.ft) that the raw increment adds or depends on.",
+    "A row names the line that holds the rule and the text that breaks it.",
+    "The build compiles working-tree HEAD with the mutant; the md5 guard reads the product",
+    "compiler build/Linux/debug/fort. The raw module tests compile src/fort with the mutant too.",
+    "The stages run the raw module tests, the raw report test and the witness walk test, then",
+    "the ownership driver test. Run it in the Linux VM with the debug preset.",
+    "The first row of a run can read stale when the guest sees the old file time; a runner that",
+    "sleeps 20 s before each guest command (`sleep 20; exec tools/vm run \"$@\"`) avoids it.",
+    "The stage logs, not the `tests` field, name the catching test: the runner parses only",
+    "ctest names, and these stages run test/lang/run_tests.py.",
+    "The guards for a region without a size (select, offset_plus, the unsized test in decide,",
+    "the residue form of the alignment test) have no row: since the checker refuses an array",
+    "above TYPE_MAX_SIZE behind a reference (b172e3e9), no test can reach them, and each of",
+    "their 9 former rows survived the raw tests there."
+  ],
+  "sources": [
+    "src/fort/ownership_source_raw.ft",
+    "src/fort/ownership_report.ft",
+    "src/fort/ownership_source_local.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "raw module tests",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_source_raw ownership_report_raw ownership_source_local_witness_in"
+    },
+    {
+      "name": "ownership driver",
+      "command": "python3 test/ownership_driver_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --opt /usr/bin/opt-18"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.17-reconstruction",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if (!d->counted) { c->reconstructions += 1; d->counted = true; }\n        insert(c, out, RECONSTRUCTED, null);\n        return;\n    }\n    if (p.base",
+      "new": "        if (!d->counted) { c->reconstructions += 1; d->counted = true; }\n        insert(c, out, NONE, null);\n        return;\n    }\n    if (p.base",
+      "what": "an integer cast to a reference supplies a null value"
+    },
+    {
+      "decision": "D17.13-foreign",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            // A trusted foreign result (D17.13).\n            if (!d->counted) { c->origins += 1; d->counted = true; }\n            insert(c, out, FOREIGN, null);",
+      "new": "            // A trusted foreign result (D17.13).\n            if (!d->counted) { c->origins += 1; d->counted = true; }\n            insert(c, out, CALL, null);",
+      "what": "an extern result is a fort call result"
+    },
+    {
+      "decision": "raw-caller-gap",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (d->kind == def_kind.entry) { insert(c, out, CALLER, null); return; }",
+      "new": "    if (d->kind == def_kind.entry) { insert(c, out, NONE, null); return; }",
+      "what": "a reference parameter holds no caller window"
+    },
+    {
+      "decision": "raw-stored-gap",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        fir.local_at(c->function, p.local)->kind == fir.local_kind.lk_param) {\n        return CALLER;\n    }\n    return STORED;",
+      "new": "        fir.local_at(c->function, p.local)->kind == fir.local_kind.lk_param) {\n        return CALLER;\n    }\n    return NONE;",
+      "what": "a loaded reference is null"
+    },
+    {
+      "decision": "raw-call-gap",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        insert(c, out, CALL, null);\n        return;\n    }\n    insert(c, out, UNKNOWN, null);\n}",
+      "new": "        insert(c, out, NONE, null);\n        return;\n    }\n    insert(c, out, UNKNOWN, null);\n}",
+      "what": "a fort call result is null"
+    },
+    {
+      "decision": "raw-gap-mask",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "u32 GAPS = CALLER | STORED | CALL | UNKNOWN;",
+      "new": "u32 GAPS = STORED | CALL | UNKNOWN;",
+      "what": "a caller window is no gap"
+    },
+    {
+      "decision": "D17.18-null-path",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    u32 mut open = FOREIGN | NONE;",
+      "new": "    u32 mut open = FOREIGN;",
+      "what": "a null path leaves a failing typed access definite"
+    },
+    {
+      "decision": "D17.18-exact-window",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if (window && !o->variable && past_end(item.begin.constant.magnitude, o->offset,\n            o->size, item.end.constant.magnitude)) { return extent; }",
+      "new": "        if (false) { return extent; }",
+      "what": "a region past a constant window is not exact"
+    },
+    {
+      "decision": "D17.18-exact-alignment",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if (need <= a && (r % need + o->offset % need) % need != 0) { return CAUSE_ALIGNMENT; }",
+      "new": "        if (false) { return CAUSE_ALIGNMENT; }",
+      "what": "a misaligned constant residue is not exact"
+    },
+    {
+      "decision": "toolchain-4.2-witness",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            if (ownership_source_local.witness_in(c->function, c->identity, c->declaration,\n                &c->taken, &c->meter, &c->first_refusal, &preds, o.block, o.gap)) {",
+      "new": "            if (ownership_source_local.witness_in(c->function, c->identity, c->declaration,\n                &c->taken, &c->meter, &c->first_refusal, &preds, o.block, o.gap) || true) {",
+      "what": "a definite failure needs no witness path"
+    },
+    {
+      "decision": "raw-reaching-kill",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            clear_local(c, &out, c->defs[cast(d, u64)].local);\n            fir_flow.bits_set(&out, d);",
+      "new": "            fir_flow.bits_set(&out, d);",
+      "what": "a definition does not end the earlier ones"
+    },
+    {
+      "decision": "raw-reachable-edges",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        while (here->terminated && fir_flow.reachable_target(f, &here->term, index, &target)) {",
+      "new": "        while (here->terminated && fir.term_targets(f, &here->term, index, &target)) {",
+      "what": "a constant switch reaches each target"
+    },
+    {
+      "decision": "raw-empty-slice",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (constant && hi.constant.magnitude > 0) { classes = classes & ~NONE; }",
+      "new": "    if (false) { classes = classes & ~NONE; }",
+      "what": "a slice past an empty header keeps the null value"
+    },
+    {
+      "decision": "raw-guarded-index",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            guard_test(c, b, t->cond.place.local, index, constant, span)) { return true; }",
+      "new": "            false) { return true; }",
+      "what": "a bounds check guards no element address"
+    },
+    {
+      "decision": "D17.17-owner-overlap",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            if ((leaves & 2) != 0) {\n                note_gap(c, missing.owner_overlap, o->block, o->gap);",
+      "new": "            if (false) {\n                note_gap(c, missing.owner_overlap, o->block, o->gap);",
+      "what": "a byte write over an owning leaf needs nothing"
+    },
+    {
+      "decision": "D17.17-typed-replacement",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        } else if (bounded && hi > lo && lo / k == (hi - 1) / k) {\n            typed = typed_at(element, lo % k, o->size, o->ty);",
+      "new": "        } else if (bounded && hi > lo && lo / k == (hi - 1) / k) {\n            typed = false;",
+      "what": "a typed replacement counts as a byte write"
+    },
+    {
+      "decision": "D17.17-element-alignment",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        bool aligned = need <= a && r % need == 0;",
+      "new": "        bool aligned = true;",
+      "what": "a span element needs no alignment"
+    },
+    {
+      "decision": "D17.17-derivation",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            duty kind = last && mode == 2 ? duty.derivation : duty.access;",
+      "new": "            duty kind = duty.access;",
+      "what": "an address through a pointer is an access"
+    },
+    {
+      "decision": "D17.17-subobject-window",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        affine begin = add(item.begin, exact(natural(start)));\n        affine end = add(item.begin, exact(natural(stop)));",
+      "new": "        affine begin = add(item.begin, exact(natural(start)));\n        affine end = item.end;",
+      "what": "a field address keeps the window of its object"
+    },
+    {
+      "decision": "toolchain-1.1-raw-integrated",
+      "file": "src/fort/ownership_report.ft",
+      "old": "fn integrated(u64 stage) bool { return stage <= LOCAL || stage == RAW; }",
+      "new": "fn integrated(u64 stage) bool { return stage <= LOCAL; }",
+      "what": "the report keeps raw unavailable"
+    },
+    {
+      "decision": "toolchain-1.1-raw-violations",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    return analysis_violations(row, LOCAL) + analysis_violations(row, RAW);",
+      "new": "    return analysis_violations(row, LOCAL);",
+      "what": "body violations omit raw violations"
+    },
+    {
+      "decision": "toolchain-4.2-raw-unproved",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        } else if (list == 2 && row->raw.solved && at < row->raw.unproved_len) {",
+      "new": "        } else if (false) {",
+      "what": "the report renders no raw failure without a witness"
+    },
+    {
+      "decision": "fir-14.1-raw-budget",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        if (!local_budget(c, diagnostics, entry, row, row->raw.first_refusal, \"raw\", first)) {",
+      "new": "        if (false) {",
+      "what": "a raw refusal gives no budget error"
+    },
+    {
+      "decision": "toolchain-1.1-raw-ledger",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    if (row->raw.initialized) {\n        write_local_meter(j, row, next, \"raw\", &row->raw.meter, row->raw.first_refusal,",
+      "new": "    if (false) {\n        write_local_meter(j, row, next, \"raw\", &row->raw.meter, row->raw.first_refusal,",
+      "what": "the report writes no raw ledger"
+    },
+    {
+      "decision": "toolchain-4.2-slice-ptr-walk",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        u32 first = k == fir.rvalue_kind.rv_slice ? 0 : 1;",
+      "new": "        u32 first = 0;",
+      "what": "the witness walk reads no slice_ptr length"
+    },
+    {
+      "decision": "raw-guard-chain",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        b = c->guard_block[cast(b, u64)];\n    }\n    return false;",
+      "new": "        b = NO_LOCAL;\n    }\n    return false;",
+      "what": "only the nearest bounds check guards an element address"
+    },
+    {
+      "decision": "D17.13-foreign-derivation",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            if (values[i].source.ordinal == FOREIGN_ORDINAL) { i += 1; continue; }",
+      "new": "            if (false) { i += 1; continue; }",
+      "what": "a trusted foreign value needs a static window to derive an address"
+    },
+    {
+      "decision": "D17.17-written-range",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        u32 leaves = bounded ? range_overlap(element, k, lo, hi) : overlap(element, 0, k);",
+      "new": "        u32 leaves = overlap(element, 0, k);",
+      "what": "a byte write overlaps each leaf of its element"
+    },
+    {
+      "decision": "raw-key-table",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (at >= c->key_slot.len || c->key_slot[at] == 0) { return false; }",
+      "new": "    if (true) { return false; }",
+      "what": "a statement key has no recorded bound"
+    },
+    {
+      "decision": "toolchain-4.2-cast-entry-value",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            holds(t, local_type(w->owner, a.param))) { return a; }",
+      "new": "            true) { return a; }",
+      "what": "each integer cast keeps the entry value of a parameter"
+    },
+    {
+      "decision": "toolchain-4.2-cast-sign",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    return !signed_from && signed_to && a < b;",
+      "new": "    return !signed_from && signed_to && a <= b;",
+      "what": "a signed type of the same size holds each unsigned value"
+    },
+    {
+      "decision": "D17.17-function-address",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if (!integer_type(from)) { insert(c, out, UNKNOWN, null); return; }",
+      "new": "        if (false) { insert(c, out, UNKNOWN, null); return; }",
+      "what": "a function address cast to a reference is an integer reconstruction"
+    },
+    {
+      "decision": "raw-kernel-values",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    k->values = new(ownership_raw.address, known.len + 2);",
+      "new": "    k->values = new(ownership_raw.address, known.len + 1);",
+      "what": "a check keeps no room for both a foreign and a reconstructed value"
+    },
+    {
+      "decision": "D17.17-null-range",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if ((classes & NONE) != 0) { classes = classes | RECONSTRUCTED; }",
+      "new": "        if (false) { classes = classes | RECONSTRUCTED; }",
+      "what": "a derivation or a raw range through null needs no source"
+    },
+    {
+      "decision": "D17.18-null-exact",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        open = FOREIGN;\n    }",
+      "new": "        open = FOREIGN | NONE;\n    }",
+      "what": "a null path leaves a failing derivation or raw range unproved"
+    },
+    {
+      "decision": "raw-written-parameter",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if (l->kind == fir.local_kind.lk_param) {",
+      "new": "        if (l->kind == fir.local_kind.lk_param && c->defs_count[at] == 0) {",
+      "what": "a parameter that the body writes once holds the written value at each use"
+    },
+    {
+      "decision": "raw-cyclic-scalar",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (c->cyclic[cast(block, u64)]) { return scalar{}; }",
+      "new": "    if (false) { return scalar{}; }",
+      "what": "a local defined in a CFG cycle keeps one value in each pass"
+    },
+    {
+      "decision": "raw-cyclic-bound",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (c->cyclic[cast(block, u64)]) { return invalid(); }",
+      "new": "    if (false) { return invalid(); }",
+      "what": "a range bound in a CFG cycle keeps one name in each pass"
+    },
+    {
+      "decision": "toolchain-4.2-variable-region",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if (window && !o->variable && past_end(item.begin.constant.magnitude, o->offset,",
+      "new": "        if (window && past_end(item.begin.constant.magnitude, o->offset,",
+      "what": "the whole-array region of a variable index fails exactly"
+    },
+    {
+      "decision": "raw-write-through",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        } else if (to.proj_len == 1 &&\n            fir.place_projection(f, to, 0).kind == fir.proj_kind.pj_field) {",
+      "new": "        } else if (true) {",
+      "what": "a write through a reference changes the reference"
+    },
+    {
+      "decision": "D17.17-integer-place",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (!reference_type(from)) {\n        // An integer names no source",
+      "new": "    if (!reference_type(from) && p.proj_len == 0) {\n        // An integer names no source",
+      "what": "integer bits in a field, an element or loaded storage are a stored reference"
+    },
+    {
+      "decision": "toolchain-4.2-taken-table",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    *taken = move(c.taken);\n    return found;",
+      "new": "    del(c.taken);\n    return found;",
+      "what": "the witness walk keeps the caller's table of address-taken locals"
+    },
+    {
+      "decision": "raw-window-check",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        proof = capture(c, o, one, (extra & FOREIGN) != 0, &k, &req, lower, upper);",
+      "new": "        proof = capture(c, o, known, (extra & FOREIGN) != 0, &k, &req, lower, upper);",
+      "what": "one check holds the containment fact of each window of a joined value"
+    },
+    {
+      "decision": "raw-header-field-write",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        } else if (to.proj_len == 1 &&",
+      "new": "        } else if (true &&",
+      "what": "a write through the pointer field of a span changes the span"
+    },
+    {
+      "decision": "toolchain-4.2-first-element",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            size_of(o->ty->elem, &first) && past_end(item.begin.constant.magnitude, o->offset,\n            first, item.end.constant.magnitude)) { return extent; }",
+      "new": "            false && past_end(item.begin.constant.magnitude, o->offset,\n            first, item.end.constant.magnitude)) { return extent; }",
+      "what": "element 0 past the window leaves a variable index without an exact failure"
+    },
+    {
+      "decision": "toolchain-4.2-last-index",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        if (window && o->variable && !o->tail && o->ty != null &&",
+      "new": "        if (window && o->variable && o->ty != null &&",
+      "what": "a field or an index after a variable index leaves element 0 an exact failure"
+    },
+    {
+      "decision": "toolchain-4.2-part-alignment",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    return types.type_alignof(o->part);",
+      "new": "    return types.type_alignof(o->ty);",
+      "what": "an access needs the alignment of its whole region type, not of the part it reads"
+    },
+    {
+      "decision": "toolchain-4.2-part-type",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    fir.place mut prefix = p;\n    prefix.proj_len = end;\n    return fir.place_type(f, prefix);",
+      "new": "    fir.place mut prefix = p;\n    prefix.proj_len = end - 1;\n    return fir.place_type(f, prefix);",
+      "what": "the part of an access is the type that holds the last projection"
+    },
+    {
+      "decision": "toolchain-4.2-element-part",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            types.node* part = part_type(f, p, j);\n            types.node* written = j == p.proj_len && mode == 1 ? part : null;",
+      "new": "            types.node* part = element;\n            types.node* written = j == p.proj_len && mode == 1 ? part : null;",
+      "what": "a span element needs the alignment of the whole element"
+    },
+    {
+      "decision": "toolchain-4.2-exact-note",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    c->event_causes = causes;\n    return verdict.definite;",
+      "new": "    c->event_causes = 0;\n    return verdict.definite;",
+      "what": "the note of a violation keeps the first reason of the kernel"
+    },
+    {
+      "decision": "raw-element-part-write",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            types.node* written = j == p.proj_len && mode == 1 ? part : null;",
+      "new": "            types.node* written = i + 1 == p.proj_len && mode == 1 ? part : null;",
+      "what": "a write into a part of a span element is no byte write"
+    },
+    {
+      "decision": "toolchain-4.2-mixed-note",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "fn with_cause(u32 causes, u32 why) u32 { return causes | why; }",
+      "new": "fn with_cause(u32 causes, u32 why) u32 { return causes == 0 ? why : causes; }",
+      "what": "the note of a violation names only the reason of the first failing value"
+    },
+    {
+      "decision": "toolchain-4.2-element-note",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        c->event_causes = causes;\n        return verdict.definite;",
+      "new": "        c->event_causes = CAUSE_ALIGNMENT;\n        return verdict.definite;",
+      "what": "the note of an element violation names only its alignment"
+    },
+    {
+      "decision": "toolchain-4.2-own-note",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    c->event_seen = false;\n    c->event_text = \"\";\n    c->event_causes = 0;\n    value mut pointer = value{};",
+      "new": "    value mut pointer = value{};",
+      "what": "a record keeps the note of the obligation before it"
+    },
+    {
+      "decision": "toolchain-4.2-element-failing-note",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    c->event_causes = failing;\n    return verdict.unproved;",
+      "new": "    c->event_causes = CAUSE_ALIGNMENT;\n    return verdict.unproved;",
+      "what": "an element failure names its alignment when a missing source fails it"
+    },
+    {
+      "decision": "raw-exact-sum",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (begin > end) { return true; }\n    u64 room = end - begin;\n    if (offset > room) { return true; }\n    return size > room - offset;",
+      "new": "    return begin + offset + size > end;",
+      "what": "a window bound, an offset and a size add in u64 arithmetic that can wrap"
+    },
+    {
+      "decision": "raw-write-end",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "        u64 last = o->size > U64_MAX - lo ? U64_MAX : lo + o->size;",
+      "new": "        u64 last = lo + o->size;",
+      "what": "the end of a written region adds in u64 arithmetic that can wrap"
+    },
+    {
+      "decision": "toolchain-4.2-certain-wording",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (c->event_causes != 0) { text = cause_text(o, c->event_causes, certain); }",
+      "new": "    if (c->event_causes != 0) { text = cause_text(o, c->event_causes, true); }",
+      "what": "a failure without a witness names its reasons as certain"
+    },
+    {
+      "decision": "raw-write-start",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "            item.begin.constant.magnitude <= U64_MAX - shift;",
+      "new": "            true;",
+      "what": "the start of a written field adds in u64 arithmetic that can wrap"
+    },
+    {
+      "decision": "D10.2-allocation-ceiling",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (!constant_of(n) || !valid(extent) || extent.constant.magnitude > I64_MAX) {",
+      "new": "    if (!constant_of(n) || !valid(extent)) {",
+      "what": "a constant allocation above I64_MAX bytes keeps its constant length"
+    },
+    {
+      "decision": "toolchain-4.2-possible-text",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (!certain) { text = possible_text(text); }",
+      "new": "    if (false) { text = possible_text(text); }",
+      "what": "a failure without a witness names a kernel reason as certain"
+    },
+    {
+      "decision": "toolchain-4.2-possible-cause",
+      "file": "src/fort/ownership_source_raw.ft",
+      "old": "    if (causes == CAUSE_WINDOW) { return certain ? WINDOW_TEXT : WINDOW_MAYBE; }",
+      "new": "    if (causes == CAUSE_WINDOW) { return WINDOW_TEXT; }",
+      "what": "a window failure without a witness names its reason as certain"
+    }
+  ]
+}

@@ -1322,7 +1322,7 @@ def validate_audit(path, *, checkout, compiler, compiler_checkout, compiler_prov
 
 
 # The scopes that a CI gate can enforce. Each names its analysis row.
-ENFORCED_SCOPES = ("local",)
+ENFORCED_SCOPES = ("local", "raw")
 
 
 def scope_problems(report, scope, checkout):
