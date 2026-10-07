@@ -220,6 +220,72 @@ fn represents_terminal(ownership_api.event_descriptor* event,
         event->limit.used == terminal.limit.used && event->limit.bound == terminal.limit.bound;
 }
 
+// Sorts the events in canonical event order and keeps each synthetic mark with its event.
+fn sort_events(ownership_api.event_descriptor mut@ sorted, bool mut@ synthetic) void {
+    u64 mut i = 1;
+    while (i < sorted.len) {
+        ownership_api.event_descriptor item = sorted[i];
+        bool is_synthetic = synthetic[i];
+        u64 mut j = i;
+        while (j > 0 && ownership_keys.event(&item, &sorted[j - 1]) < 0) {
+            sorted[j] = sorted[j - 1];
+            synthetic[j] = synthetic[j - 1];
+            j -= 1;
+        }
+        sorted[j] = item;
+        synthetic[j] = is_synthetic;
+        i += 1;
+    }
+}
+
+// Renders each sorted event that no other event of the same cause makes dependent. A refused
+// render keeps its refusal in `result` and gives false.
+fn render_events(renderer* r, ownership_api.event_descriptor@ sorted, bool@ synthetic,
+    ownership_api.diagnostic_result mut* result) bool {
+    u64 mut i = 0;
+    while (i < sorted.len) {
+        bool mut dependent = false;
+        ownership_api.event_kind cls = rendered_class(&sorted[i]);
+        u64 mut j = 0;
+        while (j < sorted.len) {
+            if (j != i && same_cause(&sorted[j], &sorted[i])) {
+                ownership_api.event_kind other = rendered_class(&sorted[j]);
+                if ((cls == ownership_api.event_kind.incomplete_proof &&
+                     (other == ownership_api.event_kind.work_failure || j < i)) ||
+                    (j < i && cls == other)) {
+                    dependent = true;
+                    break;
+                }
+            }
+            j += 1;
+        }
+        if (!dependent) {
+            if (synthetic[i] && sorted[i].limit.present &&
+                sorted[i].limit.category == ownership_api.limit_category.v) {
+                render_reserved(r, sorted[i].source, sorted[i].limit.bound);
+            } else {
+                ownership_api.charge_result mut refusal = ownership_api.charge_result{};
+                if (!render_one(r, &sorted[i], &refusal)) {
+                    result->proof = refusal.proof;
+                    if (refusal.limit.present &&
+                        refusal.limit.category == ownership_api.limit_category.v) {
+                        result->proof = ownership_api.incomplete(
+                            ownership_api.incomplete_reason.report_limit,
+                            sorted[i].operation, refusal.limit.source);
+                        result->proof.terminal.limit = refusal.limit;
+                        render_reserved(r, refusal.limit.source, refusal.limit.bound);
+                        result->rendered = true;
+                    }
+                    return false;
+                }
+            }
+            result->rendered = true;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 fn callback(void mut* opaque, ownership_api.diagnostic_request* req)
     ownership_api.diagnostic_result {
     ownership_api.diagnostic_result mut result = ownership_api.diagnostic_result{};
@@ -272,61 +338,8 @@ fn callback(void mut* opaque, ownership_api.diagnostic_request* req)
         sorted[i] = terminal;
         synthetic[i] = true;
     }
-    i = 1;
-    while (i < sorted.len) {
-        ownership_api.event_descriptor item = sorted[i];
-        bool is_synthetic = synthetic[i];
-        u64 mut j = i;
-        while (j > 0 && ownership_keys.event(&item, &sorted[j - 1]) < 0) {
-            sorted[j] = sorted[j - 1];
-            synthetic[j] = synthetic[j - 1];
-            j -= 1;
-        }
-        sorted[j] = item;
-        synthetic[j] = is_synthetic;
-        i += 1;
-    }
-    i = 0;
-    while (i < sorted.len) {
-        bool mut dependent = false;
-        ownership_api.event_kind cls = rendered_class(&sorted[i]);
-        u64 mut j = 0;
-        while (j < sorted.len) {
-            if (j != i && same_cause(&sorted[j], &sorted[i])) {
-                ownership_api.event_kind other = rendered_class(&sorted[j]);
-                if ((cls == ownership_api.event_kind.incomplete_proof &&
-                     (other == ownership_api.event_kind.work_failure || j < i)) ||
-                    (j < i && cls == other)) {
-                    dependent = true;
-                    break;
-                }
-            }
-            j += 1;
-        }
-        if (!dependent) {
-            if (synthetic[i] && sorted[i].limit.present &&
-                sorted[i].limit.category == ownership_api.limit_category.v) {
-                render_reserved(r, sorted[i].source, sorted[i].limit.bound);
-            } else {
-                ownership_api.charge_result mut refusal = ownership_api.charge_result{};
-                if (!render_one(r, &sorted[i], &refusal)) {
-                    result.proof = refusal.proof;
-                    if (refusal.limit.present &&
-                        refusal.limit.category == ownership_api.limit_category.v) {
-                        result.proof = ownership_api.incomplete(
-                            ownership_api.incomplete_reason.report_limit,
-                            sorted[i].operation, refusal.limit.source);
-                        result.proof.terminal.limit = refusal.limit;
-                        render_reserved(r, refusal.limit.source, refusal.limit.bound);
-                        result.rendered = true;
-                    }
-                    return result;
-                }
-            }
-            result.rendered = true;
-        }
-        i += 1;
-    }
+    sort_events(sorted, synthetic);
+    if (!render_events(r, sorted, synthetic, &result)) { return result; }
     if (result.rendered && !result.proof.failed) {
         result.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
             ownership_api.operation_position{}, ownership_api.source_position{});
