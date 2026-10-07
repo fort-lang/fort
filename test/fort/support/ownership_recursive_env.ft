@@ -1,0 +1,271 @@
+/// Solves the summaries of checked bodies through their call graph and its components.
+import ast;
+import fir;
+import fir_lower;
+import fir_verify;
+import lower_env;
+import ownership_api;
+import ownership_flow;
+import ownership_graph;
+import ownership_keys;
+import ownership_limits;
+import ownership_recursive;
+import ownership_summary_body;
+import ownership_summary_model;
+
+u64 BODIES = 8;
+u64 EVENTS = 32;
+
+// One recorded event. The observer keeps scalar fields only.
+struct event_row {
+    ownership_api.event_kind kind;
+    ownership_api.evidence_kind evidence;
+    ownership_api.incomplete_reason reason;
+    ownership_api.operation_position operation;
+}
+
+// The meter of the computation that runs now and every event of the whole solve.
+struct counters {
+    ownership_limits.meter meter;
+    u64 calls;
+    u64 deny_at;
+    u64 total_calls;
+    u64 computations;
+    // A W bound for each computation, or 0 for the production bound of its FIR size.
+    u64 work;
+    u64 events;
+    event_row[32] rows;
+    // The W use and the W bound of each computation, in solve order.
+    u64[16] used;
+    u64[16] bounds;
+    // The client refuses each computation, or gives a limit table without a depth bound.
+    bool refuse_begin;
+    bool zero_limits;
+}
+
+// Keeps the W use of the computation that ends now.
+fn finish(counters mut* counts) void {
+    if (counts->computations == 0 || counts->computations > counts->used.len) { return; }
+    counts->used[counts->computations - 1] = counts->meter.used.w;
+    counts->bounds[counts->computations - 1] = counts->meter.bounds.w;
+}
+
+// Function i gets declaration key i + 1, so the graph keeps the names in their given order.
+struct closure {
+    lower_env.env checked;
+    fir.func[8] functions;
+    ownership_graph.body_input[8] graph_inputs;
+    ownership_summary_body.body_input[8] inputs;
+    ownership_flow.source_file_binding[1] files;
+    ownership_api.services services;
+    counters counts;
+    ownership_graph.graph graph;
+    ownership_recursive.solution solution;
+    u64 count;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    counters mut* counts = cast(opaque, counters mut*);
+    assert(ownership_keys.canonical_charges(req));
+    counts->calls += 1;
+    counts->total_calls += 1;
+    if (counts->deny_at != 0 && counts->total_calls == counts->deny_at) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.limit = ownership_api.exhaustion{true, req->items[0].category,
+            req->items[0].scope, req->work, 7, 7, req->items[0].amount,
+            req->operation, req->source, false};
+        return out;
+    }
+    return ownership_limits.try_charge(&counts->meter, req);
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    counters mut* counts = cast(opaque, counters mut*);
+    if (counts->events < counts->rows.len) {
+        counts->rows[counts->events] = event_row{req->event.kind, req->event.evidence,
+            req->event.reason, req->event.operation};
+    }
+    counts->events += 1;
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.retained = true;
+    out.proof = req->current;
+    return out;
+}
+
+// Each computation gets a fresh meter with the bound of its FIR size.
+fn begin(void mut* opaque, u64 size, ownership_api.limit_table mut* limits) bool {
+    counters mut* counts = cast(opaque, counters mut*);
+    finish(counts);
+    if (counts->refuse_begin) { return false; }
+    if (counts->zero_limits) {
+        *limits = ownership_limits.production();
+        limits->d = 0;
+        return true;
+    }
+    ownership_api.limit_table mut table = ownership_limits.computation(size);
+    if (counts->work != 0) { table.w = counts->work; }
+    assert(ownership_limits.configure(&counts->meter, &table));
+    counts->calls = 0;
+    counts->computations += 1;
+    *limits = table;
+    return true;
+}
+
+/// Lowers and verifies each named function, then builds the call graph of all of them.
+fn open(closure mut* c, string@ text, string@ names) void {
+    assert(names.len <= BODIES);
+    lower_env.open(&c->checked);
+    lower_env.check_lines(&c->checked, text, true);
+    c->services.budget_context = cast(&c->counts, void mut*);
+    c->services.event_context = cast(&c->counts, void mut*);
+    c->services.budget = budget;
+    c->services.event = event;
+    u64 mut i = 0;
+    while (i < names.len) {
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function(&c->checked.c.ck, lower_env.decl(&c->checked, names[i]),
+            &c->functions[i], &why));
+        fir_verify.violation mut failure = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&c->functions[i], &c->checked.rt, &failure));
+        c->files[0] = ownership_flow.source_file_binding{1, 1,
+            fir.block_at(&c->functions[i], 0)->term.loc.file};
+        c->graph_inputs[i] = ownership_graph.body_input{ownership_api.function_id{
+            ownership_api.declaration_id{1, cast(i + 1, u32)}, 1}, &c->functions[i], true};
+        ownership_summary_body.callee_binding@ no_callees = {};
+        ownership_summary_body.call_targets@ no_targets = {};
+        c->inputs[i] = ownership_summary_body.body_input{c->graph_inputs[i], c->files[..],
+            &c->services, ownership_limits.production(),
+            ownership_summary_model.coverage_status{true, true, false}, true, no_callees,
+            no_targets};
+        i += 1;
+    }
+    c->count = names.len;
+    ownership_api.limit_table graph_limits = ownership_limits.computation(
+        ownership_graph.closure_size(c->graph_inputs[..c->count]));
+    c->graph = ownership_graph.build(c->graph_inputs[..c->count], graph_limits);
+    assert(ownership_api.successful(c->graph.proof));
+}
+
+/// Solves every component. A repeat replaces the solution and the recorded events.
+fn solve(closure mut* c) void {
+    ownership_recursive.free(&c->solution);
+    c->counts.events = 0;
+    c->counts.total_calls = 0;
+    c->counts.computations = 0;
+    c->solution = ownership_recursive.solve(&c->graph, c->inputs[..c->count], &c->services,
+        ownership_recursive.computation_hook{cast(&c->counts, void mut*), begin});
+    finish(&c->counts);
+}
+
+/// Each computation stayed within its W bound, and the greatest use is returned.
+fn within_limits(closure* c) u64 {
+    u64 mut most = 0;
+    u64 mut i = 0;
+    while (i < c->counts.computations && i < c->counts.used.len) {
+        assert(c->counts.used[i] <= c->counts.bounds[i]);
+        if (c->counts.used[i] > most) { most = c->counts.used[i]; }
+        i += 1;
+    }
+    return most;
+}
+
+fn close(closure mut* c) void {
+    ownership_recursive.free(&c->solution);
+    ownership_graph.free(&c->graph);
+    u64 mut i = 0;
+    while (i < c->count) {
+        fir.func_free(&c->functions[i]);
+        i += 1;
+    }
+    lower_env.close(&c->checked);
+}
+
+fn index(closure* c, string name) u64 {
+    u64 mut i = 0;
+    while (i < c->count) {
+        if (c->functions[i].sym->name == name) { return i; }
+        i += 1;
+    }
+    panic("ownership_recursive_env: no such body");
+}
+
+fn summary(closure* c, string name) ownership_summary_model.summary* {
+    return &c->solution.summaries[index(c, name)];
+}
+
+/// The summary of `name` is complete and has `cases` cases.
+fn complete(closure* c, string name, u64 cases) void {
+    ownership_summary_model.summary* s = summary(c, name);
+    assert(ownership_api.successful(s->proof) && !s->residual_effects);
+    assert(s->cases.len == cases);
+}
+
+/// The summary of `name` is incomplete for `why`, with no case.
+fn incomplete(closure* c, string name, ownership_api.incomplete_reason why) void {
+    ownership_summary_model.summary* s = summary(c, name);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->residual_effects);
+    assert(s->proof.terminal.reason == why && s->cases.len == 0);
+}
+
+/// The summary of `name` failed with a definite error of its own body.
+fn failed(closure* c, string name) void {
+    ownership_summary_model.summary* s = summary(c, name);
+    assert(s->proof.kind == ownership_api.proof_kind.complete && s->proof.failed);
+    assert(!ownership_api.successful(s->proof) && s->cases.len == 0);
+}
+
+/// The number of recorded events of `kind` at an operation of body `name`.
+fn saw(closure* c, ownership_api.event_kind kind, string name) u64 {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        event_row row = c->counts.rows[i];
+        if (row.kind == kind && row.operation.function.declaration.declaration == declaration) {
+            found += 1;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+/// The outcome kinds of the cases of `name`, as counts.
+fn outcomes(closure* c, string name, ownership_api.outcome_kind kind) u64 {
+    ownership_summary_model.summary* s = summary(c, name);
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < s->cases.len) {
+        if (s->cases[i].outcome.kind == kind) { found += 1; }
+        i += 1;
+    }
+    return found;
+}
+
+/// The graph call that is call `ordinal` of body `name`, in FIR order.
+fn call_of(closure* c, string name, u64 ordinal) u64 {
+    u32 body = cast(index(c, name), u32);
+    u64 mut left = ordinal;
+    u64 mut i = 0;
+    while (i < c->graph.calls_len) {
+        if (c->graph.calls[i].body == body) {
+            if (left == 0) { return i; }
+            left -= 1;
+        }
+        i += 1;
+    }
+    panic("ownership_recursive_env: no such call");
+}
+
+/// The number of recorded events of `kind` with abstract-possibility evidence in `name`.
+fn possible(closure* c, ownership_api.event_kind kind, string name) u64 {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        event_row row = c->counts.rows[i];
+        if (row.kind == kind && row.evidence == ownership_api.evidence_kind.abstract_possibility &&
+            row.operation.function.declaration.declaration == declaration) { found += 1; }
+        i += 1;
+    }
+    return found;
+}
