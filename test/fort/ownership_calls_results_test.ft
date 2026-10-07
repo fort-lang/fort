@@ -1,0 +1,399 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary G14.1
+//| boundary G14.2
+//| boundary G14.3
+//| boundary G15.1
+//| boundary G15.2
+//| boundary G15.3
+//| boundary G15.4
+//| boundary G16.2
+//| boundary G16.3
+//| boundary G16.4
+//| direct-call results ok
+/// Checks aggregate call results bound to aliased caller storage (D17.15, D17.18).
+/// The callee summaries come from bodies. Each caller state is supplied, with the leaves of
+/// its storage seeded, because a symbolic caller has no leaves for an aggregate write.
+import ownership_api;
+import ownership_call_bodies;
+import ownership_calls;
+import ownership_calls_fixtures;
+import ownership_keys;
+import ownership_state;
+import ownership_summary_body;
+import ownership_summary_model;
+import ownership_transfer;
+
+string[3] SAME = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "fn callee(owner_box mut* p) owner_box { return move(*p); }",
+    "fn caller(owner_box mut* p) void { *p = callee(p); }",
+};
+
+string[3] FRESH = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "fn callee(owner_box mut* q) owner_box { return owner_box{new(i32), 0}; }",
+    "fn caller(owner_box mut* p) void { *p = callee(p); }",
+};
+
+string[6] REFILL = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "fn callee(owner_box mut* p) owner_box {",
+    "    defer { p->item = new(i32); }",
+    "    return move(*p);",
+    "}",
+    "fn caller(owner_box mut* p) void { *p = callee(p); }",
+};
+
+string[6] HELD = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "fn callee(owner_box mut* p) owner_box {",
+    "    defer { i32 mut* own q = new(i32); del(q); }",
+    "    return move(*p);",
+    "}",
+    "fn caller(owner_box mut* p) void { *p = callee(p); }",
+};
+
+string[3] READS = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(i32* p) view_box { defer { i32 value = *p; } return view_box{p}; }",
+    "fn caller(i32* p) i32 { view_box q = callee(p); return *q.ptr; }",
+};
+
+string[3] DANGLES = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(i32 mut* own p) view_box { defer del(p); return view_box{p}; }",
+    "fn caller(i32 mut* own p) i32 { view_box q = callee(move(p)); return *q.ptr; }",
+};
+
+string[3] PARAMETER = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(i32 x) view_box { i32* q = &x; return view_box{q}; }",
+    "fn caller(i32 x) void { view_box v = callee(x); }",
+};
+
+
+string[4] UNSUPPORTED = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "struct outer_box { owner_box inner; }",
+    "fn kept(owner_box mut* p) i32 { owner_box t = move(*p); return 0; }",
+    "fn nested(outer_box mut* p) outer_box { return move(*p); }",
+};
+
+string[4] BY_VALUE = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "struct view_box { i32* ptr; }",
+    "fn passed(owner_box value) owner_box { return move(value); }",
+    "fn viewed(view_box value) view_box { return value; }",
+};
+
+// The storage that the caller parameter designates, or one leaf of it.
+fn storage(ownership_calls_fixtures.fixture mut* f, u32 parameter, i64 field)
+    ownership_api.place_path {
+    ownership_api.place_path mut path = ownership_summary_body.caller_slot(&f->inputs[1],
+        parameter);
+    if (field < 0) { return path; }
+    ownership_api.projection[1] part = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = cast(field, u32)}};
+    path.projections = part[..];
+    return ownership_state.copy_place(&f->caller, path);
+}
+
+// Seeds `item` and `tag` of the owner box that parameter 1 designates. A live item owns a
+// fresh allocation numbered `number`.
+fn seed_box(ownership_calls_fixtures.fixture mut* f, bool live, u32 number)
+    ownership_api.entity_id {
+    ownership_api.place_path item = storage(f, 1, 0);
+    ownership_api.entity_id key = ownership_summary_body.id(f->inputs[1].function.key,
+        ownership_api.entity_kind.allocation, number);
+    if (live) {
+        ownership_api.entity_id mut source = key;
+        source.kind = ownership_api.entity_kind.source;
+        ownership_state.append_sources(&f->caller, ownership_api.source_fact{
+            .key = source, .kind = ownership_api.source_kind.heap,
+            .validity = ownership_api.validity_kind.live, .allocation = key});
+        ownership_state.append_allocations(&f->caller, ownership_api.allocation_fact{
+            .key = key, .site = key, .validity = ownership_api.validity_kind.live,
+            .count = ownership_api.multiplicity{false, true, false}, .obligation = true,
+            .owner = ownership_api.owner_location{.place = item},
+            .logical_length = ownership_summary_body.integer(1)});
+        ownership_api.entity_id mut version = source;
+        version.kind = ownership_api.entity_kind.value;
+        ownership_api.entity_id mut region = source;
+        region.kind = ownership_api.entity_kind.region;
+        ownership_api.borrow_relation[1] relations = {ownership_api.borrow_relation{
+            .value_version = version, .containing = item, .source = source,
+            .range = ownership_api.region{.key = region, .source = source,
+                .offset = ownership_summary_body.integer(0),
+                .access = ownership_api.byte_window{ownership_summary_body.integer(0),
+                    ownership_summary_body.integer(4), true},
+                .extent = ownership_summary_body.integer(4), .alignment = 4},
+            .representation_complete = true}};
+        ownership_state.append_contents(&f->caller, ownership_api.contents_fact{
+            .place = item, .value_version = version,
+            .kind = ownership_api.contents_kind.reference, .borrows = relations[..],
+            .span_length = ownership_summary_body.integer(1)});
+    } else {
+        ownership_state.append_contents(&f->caller, ownership_summary_body.empty(item, true));
+    }
+    ownership_state.append_contents(&f->caller, ownership_api.contents_fact{
+        .place = storage(f, 1, 1), .kind = ownership_api.contents_kind.scalar});
+    return key;
+}
+
+fn open_box(ownership_calls_fixtures.fixture mut* f, string@ text, bool live,
+    ownership_api.source_kind kind) ownership_api.entity_id {
+    ownership_calls_fixtures.open(f, text);
+    assert(ownership_api.successful(f->summary.proof));
+    ownership_calls_fixtures.prepare(f);
+    ownership_calls_fixtures.configure_source(f, kind, ownership_api.validity_kind.live, 16);
+    return seed_box(f, live, 90);
+}
+
+fn owner_of(ownership_state.state* facts, ownership_api.entity_id key)
+    ownership_api.place_path {
+    u64 a = ownership_state.allocation_index(facts, key);
+    assert(a != ownership_api.U64_MAX && facts->allocations[a].obligation);
+    return facts->allocations[a].owner.place;
+}
+
+fn applied(ownership_calls_fixtures.fixture* f) void {
+    assert(ownership_api.successful(f->application.proof));
+    assert(f->application.normal_continuation);
+}
+
+fn refused(ownership_calls_fixtures.fixture* f, ownership_api.event_kind kind) void {
+    assert(!ownership_api.successful(f->application.proof));
+    assert(!f->application.normal_continuation && f->application.outcome.cleanup_required);
+    assert(f->services.counts.last.kind == kind);
+    assert(ownership_keys.operation(f->services.counts.last.operation,
+        f->call_request.operation) == 0);
+    assert(ownership_state.equal(&f->before, &f->caller));
+}
+
+// The argument and _0 select the same caller storage. The operand move empties it, and the
+// result write puts the owner back into the same leaf.
+fn case_g14_1() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_api.entity_id owner = open_box(&f, SAME[..], true,
+        ownership_api.source_kind.symbolic_caller);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_model.summary* s = &f.summary;
+    assert(s->effects.len == 1);
+    assert(s->effects[0].payload == ownership_summary_model.payload_kind.move);
+    ownership_calls_fixtures.apply(&f, 1);
+    applied(&f);
+    assert(ownership_state.same_place(owner_of(&f.application.state, owner), storage(&f, 1, 0)));
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    ownership_calls_fixtures.boundary("G14.1", "", "none");
+}
+
+// A fresh result fills an empty leaf. The literal requires that leaf to be empty.
+fn case_g14_2() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    open_box(&f, FRESH[..], false, ownership_api.source_kind.symbolic_caller);
+    defer ownership_calls_fixtures.close(&f);
+    u64 mut empties = 0;
+    u64 mut i = 0;
+    while (i < f.summary.requirements.len) {
+        ownership_summary_model.requirement row = f.summary.requirements[i];
+        if (row.kind == ownership_summary_model.requirement_kind.empty_output &&
+            row.path.projections.len == 1) { empties += 1; }
+        i += 1;
+    }
+    assert(empties == 1);
+    ownership_calls_fixtures.apply(&f, 1);
+    applied(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    ownership_calls_fixtures.boundary("G14.2", "", "none");
+}
+
+// The fresh result would discard the live owner of the destination leaf. Freshness of the
+// result proves nothing about the old leaf, so the call fails before its write.
+fn case_g14_3() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    open_box(&f, FRESH[..], true, ownership_api.source_kind.symbolic_caller);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    refused(&f, ownership_api.event_kind.caller_requirement);
+    ownership_calls_fixtures.boundary("G14.3", "", "caller_requirement");
+}
+
+// The result binds to global storage, which has a static source. A fresh result fills its
+// empty leaf, and that storage stays live after the call.
+fn case_g15_1() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    open_box(&f, FRESH[..], false, ownership_api.source_kind.static_storage);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    applied(&f);
+    ownership_api.contents_fact pointer = ownership_calls_fixtures.contents(&f, 1);
+    u64 global = ownership_state.source_index(&f.application.state, pointer.borrows[0].source);
+    assert(f.application.state.sources[global].kind == ownership_api.source_kind.static_storage);
+    assert(f.application.state.sources[global].validity == ownership_api.validity_kind.live);
+    ownership_calls_fixtures.boundary("G15.1", "", "none");
+}
+
+// The argument and _0 both select the global storage. The selections compare the same, so
+// the move empties the global and the result write restores its owner.
+fn case_g15_2() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_api.entity_id owner = open_box(&f, SAME[..], true,
+        ownership_api.source_kind.static_storage);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_model.summary_view summary = ownership_summary_model.view(&f.summary);
+    ownership_calls.request req = ownership_calls_fixtures.call_request(&f, &summary, 1);
+    assert(req.aliases.len == 1);
+    assert(ownership_state.same_place(req.aliases[0].actual, req.result.actual_slot));
+    ownership_calls_fixtures.apply(&f, 1);
+    applied(&f);
+    assert(ownership_state.same_place(owner_of(&f.application.state, owner), storage(&f, 1, 0)));
+    ownership_calls_fixtures.boundary("G15.2", "", "none");
+}
+
+// Global result aliasing supplies no fresh-storage assumption. The live global owner fails
+// the fresh result write.
+fn case_g15_3() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    open_box(&f, FRESH[..], true, ownership_api.source_kind.static_storage);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    refused(&f, ownership_api.event_kind.caller_requirement);
+    ownership_calls_fixtures.boundary("G15.3", "", "caller_requirement");
+}
+
+// The argument may select the global or another storage. With no proved selection, the move
+// cannot prove the global empty before the result write, so the proof stays incomplete and
+// the global keeps its owner.
+fn case_g15_4() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_api.entity_id owner = open_box(&f, SAME[..], true,
+        ownership_api.source_kind.static_storage);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_model.summary_view summary = ownership_summary_model.view(&f.summary);
+    ownership_calls.request mut req = ownership_calls_fixtures.call_request(&f, &summary, 1);
+    ownership_api.alias_binding[1] mut aliases = {req.aliases[0]};
+    aliases[0].actual.residual = true;
+    req.aliases = aliases[..];
+    ownership_state.state mut before = ownership_state.clone(&f.caller);
+    defer ownership_state.free(&before);
+    ownership_calls.application mut result = ownership_calls.apply(&req);
+    defer ownership_calls.free(&result);
+    assert(result.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(!result.normal_continuation && result.outcome.cleanup_required);
+    assert(ownership_state.equal(&before, &f.caller));
+    assert(ownership_state.same_place(owner_of(&f.caller, owner), storage(&f, 1, 0)));
+    ownership_calls_fixtures.boundary("G15.4", "", "incomplete_proof");
+}
+
+// The deferred read runs before the final result write. The result keeps the original source
+// of the caller, and the caller then reads through it.
+fn case_g16_2() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, READS[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.heap,
+        ownership_api.validity_kind.live, 4);
+    ownership_api.entity_id original = ownership_calls_fixtures.contents(&f, 1).borrows[0].source;
+    ownership_calls_fixtures.apply(&f, 1);
+    applied(&f);
+    ownership_api.projection[1] part = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 0}};
+    fir_leaf_check(&f, part[..], original);
+    ownership_calls_fixtures.boundary("G16.2", "", "none");
+}
+
+fn fir_leaf_check(ownership_calls_fixtures.fixture* f, ownership_api.projection@ part,
+    ownership_api.entity_id original) void {
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < f->application.state.contents_len) {
+        ownership_api.contents_fact value = f->application.state.contents[i];
+        if (value.place.projections.len == 1 &&
+            ownership_state.same_projection(value.place.projections[0], part[0]) &&
+            value.borrows.len == 1 &&
+            ownership_summary_model.same(value.borrows[0].source, original)) { found += 1; }
+        i += 1;
+    }
+    assert(found >= 1);
+}
+
+// The deferred release runs after the result holds a view of the released owner. The returned
+// view outlives its source, so the callee fails at its return, after the defer (D17.15).
+fn case_g16_3() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, DANGLES[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.failed && !ownership_api.successful(f.summary.proof));
+    assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+    assert(f.services.counts.last.operation.terminator);
+    assert(f.services.counts.last.operation.function.declaration.declaration == 1);
+    ownership_calls_fixtures.fixture mut parameter = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&parameter, PARAMETER[..]);
+    defer ownership_calls_fixtures.close(&parameter);
+    assert(parameter.summary.proof.failed && !ownership_api.successful(parameter.summary.proof));
+    assert(parameter.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+    ownership_calls_fixtures.boundary("G16.3", "", "invalid_use");
+}
+
+// P17: the move takes the owner into the holding value, the defer refills the same storage
+// with a fresh owner, and the final result write would discard that fresh owner. A defer that
+// allocates and releases another owner keeps the same order and passes.
+fn case_g16_4() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    open_box(&f, REFILL[..], true, ownership_api.source_kind.symbolic_caller);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    refused(&f, ownership_api.event_kind.lost_ownership);
+    ownership_calls_fixtures.fixture mut held = ownership_calls_fixtures.fixture{};
+    ownership_api.entity_id owner = open_box(&held, HELD[..], true,
+        ownership_api.source_kind.symbolic_caller);
+    defer ownership_calls_fixtures.close(&held);
+    ownership_calls_fixtures.apply(&held, 1);
+    applied(&held);
+    assert(ownership_state.same_place(owner_of(&held.application.state, owner),
+        storage(&held, 1, 0)));
+    ownership_calls_fixtures.boundary("G16.4", "", "lost_ownership");
+}
+
+// A holding value that never reaches the result hides its owner from flow, so that body has
+// no summary. A nested aggregate, an owning aggregate parameter, and a returned aggregate
+// parameter stay unsupported as well: only a holding value reaches the result.
+fn unsupported_values() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"kept", "nested"};
+    ownership_call_bodies.open(&b, UNSUPPORTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.bodies mut by_value = ownership_call_bodies.bodies{};
+    string[2] passed = {"passed", "viewed"};
+    ownership_call_bodies.open(&by_value, BY_VALUE[..], passed[..]);
+    defer ownership_call_bodies.close(&by_value);
+    ownership_call_bodies.infer_all(&by_value);
+    ownership_summary_model.summary*[4] all = {ownership_call_bodies.summary(&b, 0),
+        ownership_call_bodies.summary(&b, 1), ownership_call_bodies.summary(&by_value, 0),
+        ownership_call_bodies.summary(&by_value, 1)};
+    for (ownership_summary_model.summary* s : all) {
+        assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+        assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    }
+}
+
+fn main() i32 {
+    case_g14_1();
+    case_g14_2();
+    case_g14_3();
+    case_g15_1();
+    case_g15_2();
+    case_g15_3();
+    case_g15_4();
+    case_g16_2();
+    case_g16_3();
+    case_g16_4();
+    unsupported_values();
+    println("direct-call results ok");
+    return 0;
+}

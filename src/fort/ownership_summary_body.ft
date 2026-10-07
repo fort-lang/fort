@@ -81,6 +81,10 @@ struct body_program {
     ownership_api.scalar_fact mut@ own entry_scalars;
     ownership_flow.value_edge mut@ own values;
     u64 values_len;
+    // A holding aggregate local: 1 after a write, 2 after its move or copy into the result.
+    // Each reached block keeps the marks at its entry.
+    u8 mut@ own holding;
+    u8 mut@ own entry_holding;
     u64 steps_len;
     u64 events_len;
     u64 parameters_len;
@@ -125,6 +129,8 @@ fn free(body_program mut* out) void {
     del(owned.entry_origins);
     del(owned.entry_scalars);
     del(owned.values);
+    del(owned.holding);
+    del(owned.entry_holding);
     *out = body_program{};
 }
 
@@ -1241,6 +1247,172 @@ fn argument_origin(body_input* in, body_program mut* out, fir.rvalue rv,
     return ownership_api.entity_id{};
 }
 
+// The type of field `number` of a resolved struct, or null.
+fn field_type(types.node* ty, u32 number) types.node* {
+    if (ty == null || ty->kind != types.type_kind.k_struct || ty->decl == null ||
+        ty->layout == null || ty->layout->state != types.layout_state.l_resolved) {
+        return null;
+    }
+    ast.sym* declaration = cast(ty->decl, ast.sym*);
+    if (declaration->node == null) { return null; }
+    u64 mut j = 0;
+    u32 mut seen = 0;
+    while (j < ast.ast_len(declaration->node)) {
+        ast.node* member = ast.ast_child(declaration->node, j);
+        if (member->kind == ast.ast_kind.k_field_decl) {
+            if (seen == number) { return member->ty; }
+            seen += 1;
+        }
+        j += 1;
+    }
+    return null;
+}
+
+// A struct whose fields are scalars or references. Nested aggregates stay unsupported.
+fn flat_struct(types.node* ty, u32 fields) bool {
+    u32 mut i = 0;
+    while (i < fields) {
+        types.node* field = field_type(ty, i);
+        if (field == null || (fir.type_aggregate(field) && !reference(field))) { return false; }
+        i += 1;
+    }
+    return field_type(ty, fields) == null;
+}
+
+fn field_count(types.node* ty) u32 {
+    u32 mut n = 0;
+    while (n < 64 && field_type(ty, n) != null) { n += 1; }
+    return n;
+}
+
+fn leaf(body_input* in, body_program mut* out, u32 local, u32 number)
+    ownership_api.place_path {
+    ownership_api.projection[1] part = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = number}};
+    ownership_api.place_path path = ownership_api.place_path{.root = slot(in, local).root,
+        .projections = part[..]};
+    if (!ownership_summary_model.path_charge(&out->context, &out->proof, path)) {
+        return ownership_api.place_path{.residual = true};
+    }
+    return ownership_state.copy_place(&out->metadata, path);
+}
+
+// The result slot leaf must hold no live owner when a literal writes it (D17.15). Each caller
+// checks it after the operand effects of that write.
+fn result_requirement(body_input* in, body_program mut* out, ownership_api.place_path path)
+    void {
+    if (!work(out, 1) || out->requirements_len >= out->requirements.len ||
+        !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations)) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    ownership_api.entity_id key = next(out, ownership_api.entity_kind.relation);
+    if (!ownership_api.successful(out->proof)) { return; }
+    out->requirements[out->requirements_len] = ownership_summary_model.requirement{
+        .key = key, .kind = ownership_summary_model.requirement_kind.empty_output,
+        .path = path, .operation = out->context.operation};
+    out->requirements_len += 1;
+}
+
+// An aggregate value of a flat struct (D17.15). A literal writes each leaf: an owner moves, a
+// borrow copies, and a scalar or a constant adds no effect. A whole move from caller storage
+// or from a holding local moves every leaf. Flow models the owner and borrow leaves of a
+// literal in private slots. The summary keeps each leaf effect, and each caller replays it
+// with the aggregate place service, so the caller checks the real destination leaves.
+// A holding local must reach the result; any other aggregate use stays unsupported.
+fn aggregate_value(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
+    u32 gap) void {
+    fir.func* f = in->function.body;
+    fir.rvalue rv = stmt->value;
+    u32 dst = stmt->place.local;
+    types.node* ty = fir.local_at(f, dst)->ty;
+    u32 fields = field_count(ty);
+    if (fields == 0 || !flat_struct(ty, fields) ||
+        (dst != 0 && fir.local_at(f, dst)->kind == fir.local_kind.lk_param)) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    ownership_api.source_position where = location(in, out, stmt->loc);
+    if (rv.kind == fir.rvalue_kind.rv_aggregate && rv.ops_len == fields) {
+        u32 mut i = 0;
+        while (i < fields) {
+            if (!work(out, 2)) { return; }
+            types.node* field = field_type(ty, i);
+            fir.operand input_operand = fir.rvalue_operand(f, rv, i);
+            ownership_api.place_path destination = leaf(in, out, dst, i);
+            if (dst == 0 && fir.type_owning(field)) { result_requirement(in, out, destination); }
+            if (input_operand.kind == fir.operand_kind.ok_const ||
+                (!reference(field) && direct(input_operand.place))) {
+                i += 1;
+                continue;
+            }
+            if (!direct(input_operand.place) ||
+                !reference(fir.local_at(f, input_operand.place.local)->ty)) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return;
+            }
+            u32 src = input_operand.place.local;
+            ownership_transfer.request mut req = ownership_transfer.request{
+                .kind = ownership_transfer.action.copy, .source = slot(in, src),
+                .destination = destination, .source_key = out->origins[src]};
+            ownership_summary_model.payload_kind mut payload =
+                ownership_summary_model.payload_kind.copy;
+            if (input_operand.kind == fir.operand_kind.ok_move && field->is_own) {
+                req.kind = ownership_transfer.action.move_owner;
+                req.destination_owns = true;
+                payload = ownership_summary_model.payload_kind.move;
+            } else if (input_operand.kind != fir.operand_kind.ok_copy || field->is_own) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return;
+            } else {
+                requirement(in, out, out->origins[src], slot(in, src), 0,
+                    ownership_summary_model.requirement_kind.live_source, 1);
+            }
+            emit(in, out, req, block, gap, i + 1, payload, stmt->loc, stmt->exit_loc,
+                stmt->stmt, ownership_api.place_path{.root = next(out,
+                    ownership_api.entity_kind.slot)});
+            if (!ownership_api.successful(out->proof)) { return; }
+            i += 1;
+        }
+    } else if (rv.kind == fir.rvalue_kind.rv_use) {
+        fir.operand input_operand = fir.rvalue_operand(f, rv, 0);
+        ownership_summary_model.effect_node mut node = ownership_summary_model.effect_node{
+            .effect = ownership_api.ordered_effect{.kind = ownership_api.effect_kind.transfer,
+                .operation = position(in, block, gap, false), .place = slot(in, dst)},
+            .payload = ownership_summary_model.payload_kind.move};
+        if (input_operand.kind == fir.operand_kind.ok_move && !direct(input_operand.place)) {
+            selected_storage selected = select_storage(in, out, input_operand.place);
+            if (!selected.proved || !selected.indirect || !selected.caller ||
+                selected.ty != ty || selected.path.projections.len != 0) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return;
+            }
+            requirement(in, out, selected.source, selected.path, selected.offset + selected.bytes,
+                ownership_summary_model.requirement_kind.extent, types.type_alignof(ty));
+            node.operand = selected.path;
+            node.effect.source = selected.source;
+        } else if (input_operand.kind != fir.operand_kind.ok_const &&
+            direct(input_operand.place) &&
+            fir.local_at(f, input_operand.place.local)->ty == ty &&
+            out->holding[input_operand.place.local] == 1 && dst == 0) {
+            node.operand = slot(in, input_operand.place.local);
+            if (input_operand.kind == fir.operand_kind.ok_copy) {
+                node.payload = ownership_summary_model.payload_kind.copy;
+                node.effect.kind = ownership_api.effect_kind.write;
+            }
+            out->holding[input_operand.place.local] = 2;
+        } else {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return;
+        }
+        export_effect(in, out, node, where, stmt->loc.file);
+    } else {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    if (dst != 0 && ownership_api.successful(out->proof)) { out->holding[dst] = 1; }
+}
+
 // A call of an available summary becomes one flow step at its exact gap (D17.18).
 // Flow applies the summary to the current facts. Unsupported calls stay unknown effects.
 fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap) void {
@@ -1342,6 +1514,11 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
     fir.rvalue rv = stmt->value;
     if (rv.kind == fir.rvalue_kind.rv_call) {
         call(in, out, stmt, block, gap);
+        return;
+    }
+    if (direct(stmt->place) && fir.type_aggregate(fir.local_at(f, stmt->place.local)->ty) &&
+        !reference(fir.local_at(f, stmt->place.local)->ty)) {
+        aggregate_value(in, out, stmt, block, gap);
         return;
     }
     if (rv.kind == fir.rvalue_kind.rv_addr && intrinsic(in, out, rv.place, stmt->place,
@@ -1637,6 +1814,21 @@ fn boolean_switch(body_program mut* out, fir.func* f, fir.terminator* term) bool
         ty->prim == prim.prim_kind.prim_bool;
 }
 
+// A holding aggregate that never reaches the result on a returning path would hide its
+// owners from flow, so that body stays unsupported.
+fn results_reached(body_program mut* out) bool {
+    u64 mut i = 0;
+    while (i < out->holding.len) {
+        if (!work(out, 1)) { return false; }
+        if (out->holding[i] == 1) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 fn restore_entry(body_program mut* out, u32 block, u64 locals) bool {
     if (!work(out, locals * 2)) { return false; }
     u64 base = cast(block, u64) * locals;
@@ -1644,6 +1836,7 @@ fn restore_entry(body_program mut* out, u32 block, u64 locals) bool {
     while (i < locals) {
         out->origins[i] = out->entry_origins[base + i];
         out->scalars[i] = out->entry_scalars[base + i];
+        out->holding[i] = out->entry_holding[base + i];
         i += 1;
     }
     return true;
@@ -1678,6 +1871,7 @@ fn follow_targets(body_input* in, body_program mut* out, u32 block, fir.terminat
         while (i < locals) {
             out->entry_origins[base + i] = out->origins[i];
             out->entry_scalars[base + i] = out->scalars[i];
+            out->entry_holding[base + i] = out->holding[i];
             i += 1;
         }
         if (tested.kind == ownership_api.fact_kind.symbolic &&
@@ -1809,6 +2003,7 @@ fn extract(body_input* in) body_program {
     out.provenance_records = new(ownership_summary_model.provenance, cap);
     out.origins = new(ownership_api.entity_id, locals);
     out.scalars = new(ownership_api.scalar_fact, locals);
+    out.holding = new(u8, locals);
     out.calls = new(call_site, count);
     if (operands > types.TYPE_MAX_SIZE / sizeof(ownership_api.scalar_fact)) {
         reject(&out, ownership_api.incomplete_reason.invalid_input);
@@ -1825,6 +2020,7 @@ fn extract(body_input* in) body_program {
     out.reached = new(bool, blocks);
     out.entry_origins = new(ownership_api.entity_id, blocks * locals);
     out.entry_scalars = new(ownership_api.scalar_fact, blocks * locals);
+    out.entry_holding = new(u8, blocks * locals);
     out.values = new(ownership_flow.value_edge, blocks * 2);
     u64 mut parent = 0;
     while (parent < blocks) {
@@ -1905,6 +2101,9 @@ fn extract(body_input* in) body_program {
             current->term.kind != fir.term_kind.tk_trap &&
             !boolean_switch(&out, f, &current->term)) {
             reject(&out, ownership_api.incomplete_reason.unknown_effect);
+            return out;
+        }
+        if (current->term.kind == fir.term_kind.tk_return && !results_reached(&out)) {
             return out;
         }
         if (!follow_targets(in, &out, b, &current->term, locals)) { return out; }

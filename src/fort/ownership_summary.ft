@@ -1037,8 +1037,7 @@ fn caller_storage(ownership_summary_body.body_program mut* program,
 // live at the return, after deferred effects (D17.14). A later store at that path, such as a
 // null store, ends the relation.
 fn retained_stores(ownership_summary_body.body_program mut* program, exit_snapshot* exit,
-    ownership_api.entity_id@ sequence, u64 index, publication mut* out) bool {
-    u64 first = out->retained_len;
+    ownership_api.entity_id@ sequence, publication mut* out) bool {
     u64 mut i = 0;
     while (i < sequence.len) {
         u64 at = effect_at(program, sequence[i]);
@@ -1086,7 +1085,96 @@ fn retained_stores(ownership_summary_body.body_program mut* program, exit_snapsh
         }
         i += 1;
     }
-    return ownership_api.successful(program->proof) && first <= out->retained_len;
+    return ownership_api.successful(program->proof);
+}
+
+// One borrowed leaf of an aggregate local on one exit path.
+struct leaf_source {
+    ownership_api.entity_id root;
+    u32 field;
+    ownership_api.entity_id source;
+}
+
+fn local_slot(ownership_summary_body.body_input* in, ownership_api.entity_id root) bool {
+    return root.kind == ownership_api.entity_kind.slot &&
+        ownership_keys.function(root.function, in->function.key) == 0 &&
+        cast(root.ordinal, u64) < cast(fir.local_count(in->function.body), u64);
+}
+
+// Removes the leaves of `root` and returns the new length.
+fn drop_leaves(leaf_source mut@ leaves, u64 len, ownership_api.entity_id root) u64 {
+    u64 mut kept = 0;
+    u64 mut i = 0;
+    while (i < len) {
+        if (!ownership_summary_model.same(leaves[i].root, root)) {
+            leaves[kept] = leaves[i];
+            kept += 1;
+        }
+        i += 1;
+    }
+    return kept;
+}
+
+// A borrowed leaf of an aggregate result designates its source after the return. The exit path
+// copies leaves into locals and moves locals into the result in FIR order. Each result leaf
+// source must still be live at the return, after deferred effects (D17.15).
+fn result_leaves(ownership_summary_body.body_input* in,
+    ownership_summary_body.body_program mut* program, exit_snapshot* exit,
+    ownership_api.entity_id@ sequence) bool {
+    if (!ownership_summary_body.work(program, sequence.len * 2)) { return false; }
+    leaf_source mut@ own leaves = new(leaf_source, sequence.len);
+    defer del(leaves);
+    u64 mut len = 0;
+    ownership_api.entity_id result = ownership_summary_body.slot(in, 0).root;
+    u64 mut i = 0;
+    while (i < sequence.len) {
+        u64 at = effect_at(program, sequence[i]);
+        if (at == ownership_api.U64_MAX) { return false; }
+        ownership_summary_model.effect_node node = program->effects[at];
+        ownership_api.place_path place = node.effect.place;
+        bool whole = node.payload == ownership_summary_model.payload_kind.move ||
+            node.payload == ownership_summary_model.payload_kind.copy;
+        if (whole && local_slot(in, place.root) && place.projections.len == 1 &&
+            place.projections[0].kind == ownership_api.projection_kind.field) {
+            len = drop_leaves(leaves[..], len, place.root);
+            if (node.payload == ownership_summary_model.payload_kind.copy &&
+                node.effect.source.kind == ownership_api.entity_kind.source && len < leaves.len) {
+                leaves[len] = leaf_source{place.root, place.projections[0].field,
+                    node.effect.source};
+                len += 1;
+            }
+        } else if (whole && local_slot(in, place.root) && place.projections.len == 0) {
+            len = drop_leaves(leaves[..], len, place.root);
+            u64 mut k = 0;
+            u64 copied = len;
+            while (k < copied && local_slot(in, node.operand.root) &&
+                node.operand.projections.len == 0) {
+                if (!ownership_summary_body.work(program, 1)) { return false; }
+                if (ownership_summary_model.same(leaves[k].root, node.operand.root) &&
+                    len < leaves.len) {
+                    leaves[len] = leaf_source{place.root, leaves[k].field, leaves[k].source};
+                    len += 1;
+                }
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < len) {
+        if (ownership_summary_model.same(leaves[i].root, result)) {
+            u64 known = ownership_state.source_index(&exit->facts, leaves[i].source);
+            if (known != ownership_api.U64_MAX &&
+                (exit->facts.sources[known].validity == ownership_api.validity_kind.released ||
+                exit->facts.sources[known].validity == ownership_api.validity_kind.ended)) {
+                intrinsic_use(program, exit->operation, exit->source, leaves[i].source,
+                    "returned aggregate view outlives its source");
+                return false;
+            }
+        }
+        i += 1;
+    }
+    return true;
 }
 
 // One case for each exit (D17.18). A case keeps the requirements and the effects on the path
@@ -1148,7 +1236,8 @@ fn exit_case(ownership_summary_body.body_input* in,
         i += 1;
     }
     u64 retained_first = out->retained_len;
-    if (returns && !retained_stores(program, exit, effects[..sequence], index, out)) {
+    if (returns && (!retained_stores(program, exit, effects[..sequence], out) ||
+        !result_leaves(in, program, exit, effects[..sequence]))) {
         return false;
     }
     ownership_api.entity_id guard = exit_guard(in, program, exit, out);
