@@ -1,0 +1,167 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary X21
+//| direct-call failed teardown ok
+/// Measures refusal after nested allocation and complete failure teardown.
+import heap;
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_summary_model;
+
+u64 ROUNDS = 32;
+u64 CALLS = 512;
+u64 LATE_START = 16;
+
+fn case_x21() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_summary_model.summary mut baseline = ownership_summary_model.clone(&e.input,
+        &e.services);
+    ownership_calls_env.accepted(baseline.proof);
+    u64 mut total = e.counts.calls;
+    ownership_summary_model.free(&baseline);
+    bool mut nested_refusal = false;
+    u64 mut at = 1;
+    while (at <= total) {
+        ownership_calls_env.reset(&e);
+        e.counts.deny_at = at;
+        ownership_summary_model.summary mut out = ownership_summary_model.clone(&e.input,
+            &e.services);
+        ownership_calls_env.rejected(out.proof, ownership_api.incomplete_reason.work_limit);
+        assert(out.proof.terminal.limit.present && e.counts.calls == at);
+        assert(out.residual_effects && e.counts.events == 1);
+        assert(e.parts.len == 2 && e.parts[0].field == 3 && e.keys[1].ordinal == 20);
+        assert(e.actual_allocations[0].obligation
+            && e.actual_sources[0].kind == ownership_api.source_kind.heap);
+        if (out.requirements.len == 2 && out.requirements[0].path.projections.len == 2 &&
+            out.requirements[1].path.projections.len == 0 && out.metadata.blocks != null) {
+            nested_refusal = true;
+        }
+        ownership_summary_model.free(&out);
+        assert(out.metadata.blocks == null && out.roots.len == 0);
+        ownership_summary_model.free(&out);
+        at += 1;
+    }
+    assert(nested_refusal);
+    e.counts.deny_at = 0;
+    ownership_calls_env.reset(&e);
+    e.aliases[0].actual.projections = e.parts[..];
+    e.aliases[1].actual.projections = e.parts[..];
+    ownership_calls.request req = ownership_calls_env.request(&e);
+    ownership_calls.frame mut complete = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(complete.proof);
+    total = e.counts.calls;
+    ownership_calls.free_frame(&complete);
+    nested_refusal = false;
+    at = 1;
+    while (at <= total) {
+        ownership_calls_env.reset(&e);
+        e.counts.deny_at = at;
+        ownership_calls.frame mut out = ownership_calls.bind(&req);
+        ownership_calls_env.rejected(out.proof, ownership_api.incomplete_reason.work_limit);
+        ownership_calls_env.possible(&out);
+        assert(out.proof.terminal.limit.present && e.counts.calls == at);
+        assert(e.aliases[0].actual.root.ordinal == 10 && e.actual_allocations[0].obligation);
+        assert(e.parts[1].index.kind == ownership_api.fact_kind.symbolic);
+        if (out.aliases.len == 4 && out.aliases[0].actual.projections.len == 2 &&
+            out.aliases[1].actual.projections.len == 0 && out.metadata.blocks != null) {
+            nested_refusal = true;
+        }
+        ownership_calls.free_frame(&out);
+        assert(out.model.metadata.blocks == null && out.metadata.blocks == null);
+        ownership_calls.free_frame(&out);
+        at += 1;
+    }
+    assert(nested_refusal);
+    e.counts.deny_at = 0;
+    ownership_calls_env.boundary("X21",
+        "9d397578f7c8c0315d8e87e93c5448a50d142ca39e984621b658601b22ce8785", "work_failure");
+}
+
+fn allocator_teardown() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_summary_model.summary mut model = ownership_summary_model.clone(&e.input,
+        &e.services);
+    ownership_calls_env.accepted(model.proof);
+    u64 model_failure = e.counts.calls;
+    ownership_summary_model.free(&model);
+    ownership_calls_env.reset(&e);
+    ownership_calls.request req = ownership_calls_env.request(&e);
+    ownership_calls.frame mut kept_frame = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(kept_frame.proof);
+    u64 frame_failure = e.counts.calls;
+    ownership_calls.free_frame(&kept_frame);
+    u64 mut early_system = 0;
+    u64 mut early_block = 0;
+    u64 mut system_distance = ownership_api.U64_MAX;
+    u64 mut block_distance = ownership_api.U64_MAX;
+    u64 mut round = 0;
+    while (round < ROUNDS) {
+        u64 mut index = 0;
+        while (index < CALLS) {
+            ownership_calls_env.reset(&e);
+            e.counts.deny_at = model_failure;
+            model = ownership_summary_model.clone(&e.input, &e.services);
+            ownership_calls_env.rejected(model.proof, ownership_api.incomplete_reason.work_limit);
+            assert(model.roots.len == 6 && model.effects.len == 2 && model.cases.len == 1);
+            assert(model.metadata.blocks != null && model.outcome_blocks != null);
+            assert(model.provenance_records.len == 1 && model.witnesses.len == 1);
+            assert(model.order.len == 1 && model.correlations.len == 1);
+            ownership_summary_model.free(&model);
+            assert(model.metadata.blocks == null && model.outcome_blocks == null);
+            ownership_summary_model.free(&model);
+            ownership_calls_env.reset(&e);
+            e.counts.deny_at = frame_failure;
+            kept_frame = ownership_calls.bind(&req);
+            ownership_calls_env.rejected(
+                kept_frame.proof, ownership_api.incomplete_reason.work_limit);
+            ownership_calls_env.possible(&kept_frame);
+            assert(kept_frame.model.roots.len == 6 && kept_frame.model.effects.len == 2);
+            assert(kept_frame.model.metadata.blocks != null && kept_frame.metadata.blocks != null);
+            assert(
+                kept_frame.aliases.len == 4 && kept_frame.sources.len == 4
+                    && kept_frame.allocations.len == 3);
+            assert(kept_frame.captures.len == 3);
+            assert(kept_frame.result_writes.len == 2 && kept_frame.result_order.len == 1);
+            ownership_calls.free_frame(&kept_frame);
+            assert(kept_frame.model.metadata.blocks == null && kept_frame.metadata.blocks == null);
+            assert(kept_frame.aliases.len == 0 && kept_frame.result_writes.len == 0);
+            ownership_calls.free_frame(&kept_frame);
+            index += 1;
+        }
+        u64 system_value = heap.system_view();
+        u64 block_value = heap.block_view();
+        if (round == 4) { early_system = system_value; early_block = block_value; }
+        if (round >= LATE_START) {
+            u64 mut distance_value = heap.distance(early_system, system_value);
+            if (distance_value < system_distance) { system_distance = distance_value; }
+            distance_value = heap.distance(early_block, block_value);
+            if (distance_value < block_distance) { block_distance = distance_value; }
+        }
+        round += 1;
+    }
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 8192 : 1024;
+    if (ownership_calls_env.measurement()) {
+        println("ALLOCATOR_RECEIPT {\"path\":\"failure\",\"rounds\":", ROUNDS,
+            ",\"calls\":", CALLS, ",\"late_start\":", LATE_START,
+            ",\"model_failure\":", model_failure, ",\"frame_failure\":", frame_failure,
+            ",\"system_distance\":", system_distance, ",\"block_distance\":", block_distance,
+            ",\"bound\":", bound, ",\"address_is_a_view\":", heap.ADDRESS_IS_A_VIEW, "}");
+    }
+    if (system_distance >= bound || (heap.ADDRESS_IS_A_VIEW && block_distance >= bound)) {
+        eprintln("allocator distances: system ", system_distance, " block ", block_distance);
+        panic("failed direct-call teardown retains allocations");
+    }
+}
+
+fn main() i32 {
+    case_x21();
+    allocator_teardown();
+    println("direct-call failed teardown ok");
+    return 0;
+}

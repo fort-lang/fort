@@ -1,0 +1,124 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary X28
+//| direct-call successful teardown ok
+/// Measures successful model and frame teardown with allocator views.
+import heap;
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_summary_model;
+
+u64 ROUNDS = 32;
+u64 CALLS = 512;
+u64 LATE_START = 16;
+
+fn case_x28() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_summary_model.summary mut kept = ownership_summary_model.clone(&e.input, &e.services);
+    ownership_calls_env.accepted(kept.proof);
+    ownership_calls_env.reset(&e);
+    e.aliases[0].actual.projections = e.parts[0..1];
+    ownership_calls.request req = ownership_calls_env.request(&e);
+    ownership_calls.frame mut bound = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(bound.proof);
+    ownership_calls_env.possible(&bound);
+    assert(kept.requirements[0].path.projections.ptr != cast(e.parts.ptr,
+        ownership_api.projection*));
+    assert(kept.guards[0].positive.ptr != cast(e.keys.ptr, ownership_api.entity_id*));
+    assert(bound.model.requirements[0].path.projections.ptr != cast(e.parts.ptr,
+        ownership_api.projection*));
+    ownership_calls_env.free_inputs(&e);
+    // Checked types and source filenames stay alive through both observations.
+    assert(kept.roots[0].ty == e.ty && kept.provenance_records[0].filename == "a.ft");
+    assert(kept.requirements[0].path.projections[0].field == 3);
+    assert(kept.requirements[0].path.projections[1].captured_version.ordinal == 1);
+    assert(kept.effects[0].value.borrows[0].containing.projections[0].field == 3);
+    assert(kept.results[0].borrow.range.leaves[0].ty == e.ty);
+    assert(kept.retained[0].borrow.range.partitions[0].membership.ordinal == 1);
+    assert(kept.guards[0].positive[0].kind == ownership_api.entity_kind.predicate);
+    assert(kept.cases[0].requirements[0].ordinal == 20 && kept.cases[0].effects[1].ordinal == 31);
+    assert(kept.cases[0].results[0].ordinal == 40 && kept.cases[0].retained[0].ordinal == 41);
+    assert(kept.provenance_records[0].substitutions[1].ordinal == 21);
+    assert(kept.provenance_records[0].witnesses[0].ordinal == 1);
+    assert(bound.model.requirements[0].path.projections[2].index.value == 4);
+    assert(bound.destinations[0].projections[0].field == 3);
+    assert(bound.model.results[0].borrow.range.partitions[0].membership.ordinal == 100);
+    assert(bound.model.effects[0].value.borrows[0].value_version.ordinal == 100);
+    assert(bound.allocations[0].actual.history[0].before.place.projections[0].field == 3);
+    assert(bound.result.order[0].proved
+        && bound.result.writes[1].kind == ownership_api.effect_kind.release);
+    ownership_summary_model.free(&kept);
+    assert(bound.model.guards[0].positive[0].ordinal == 1);
+    assert(bound.model.provenance_records[0].witnesses[0].ordinal == 1);
+    assert(bound.model.cases[0].outcome.effects[1].allocation.ordinal == 100);
+    ownership_calls.free_frame(&bound);
+    ownership_summary_model.free(&kept);
+    ownership_calls.free_frame(&bound);
+    ownership_calls_env.boundary("X28",
+        "59c4f6fdbf1357d5a5ef0f6d6b9bbfb688870c75572fecd167a75eddead1fc3a", "none");
+}
+
+fn allocator_teardown() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_calls.request req = ownership_calls_env.request(&e);
+    u64 mut early_system = 0;
+    u64 mut early_block = 0;
+    u64 mut system_distance = ownership_api.U64_MAX;
+    u64 mut block_distance = ownership_api.U64_MAX;
+    u64 mut round = 0;
+    while (round < ROUNDS) {
+        u64 mut index = 0;
+        while (index < CALLS) {
+            ownership_calls_env.reset(&e);
+            ownership_calls.frame mut out = ownership_calls.bind(&req);
+            ownership_calls_env.accepted(out.proof);
+            ownership_calls_env.possible(&out);
+            assert(out.model.roots.len == 6 && out.model.effects.len == 2);
+            assert(out.model.metadata.blocks != null && out.model.outcome_blocks != null);
+            assert(out.aliases.len == 4 && out.sources.len == 4 && out.allocations.len == 3);
+            assert(out.captures.len == 3 && out.destinations.len == 4);
+            assert(out.result_writes.len == 2 && out.result_order.len == 1);
+            assert(out.metadata.blocks != null && out.result.actual_slot.root.ordinal == 10);
+            ownership_calls.free_frame(&out);
+            assert(out.model.roots.len == 0 && out.model.outcome_blocks == null);
+            assert(out.model.metadata.blocks == null && out.metadata.blocks == null);
+            assert(out.aliases.len == 0 && !ownership_api.successful(out.proof));
+            ownership_calls.free_frame(&out);
+            index += 1;
+        }
+        u64 system_value = heap.system_view();
+        u64 block_value = heap.block_view();
+        if (round == 4) { early_system = system_value; early_block = block_value; }
+        if (round >= LATE_START) {
+            u64 mut distance_value = heap.distance(early_system, system_value);
+            if (distance_value < system_distance) { system_distance = distance_value; }
+            distance_value = heap.distance(early_block, block_value);
+            if (distance_value < block_distance) { block_distance = distance_value; }
+        }
+        round += 1;
+    }
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 8192 : 1024;
+    if (ownership_calls_env.measurement()) {
+        println("ALLOCATOR_RECEIPT {\"path\":\"success\",\"rounds\":", ROUNDS,
+            ",\"calls\":", CALLS, ",\"late_start\":", LATE_START,
+            ",\"system_distance\":", system_distance, ",\"block_distance\":", block_distance,
+            ",\"bound\":", bound, ",\"address_is_a_view\":", heap.ADDRESS_IS_A_VIEW, "}");
+    }
+    if (system_distance >= bound || (heap.ADDRESS_IS_A_VIEW && block_distance >= bound)) {
+        eprintln("allocator distances: system ", system_distance, " block ", block_distance);
+        panic("successful direct-call teardown retains allocations");
+    }
+}
+
+fn main() i32 {
+    case_x28();
+    allocator_teardown();
+    println("direct-call successful teardown ok");
+    return 0;
+}

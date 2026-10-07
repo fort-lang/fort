@@ -1182,6 +1182,18 @@ came here.
   The translator ignores both statement kinds before it changes pending source notes.
   The LLVM equality test removes the statements and compares actual emitted text in four modes.
   Build-mode passes keep statement order and verify V14 again.
+- **Direct-call model storage keeps ordered records.**
+  `ownership_summary_model.clone` copies temporary nested metadata.
+  Checked types and source filenames stay alive through its last observer.
+  `ownership_calls.bind` binds caller sources, allocations, captured values, globals, and results.
+  It keeps by-value slots separate from caller storage.
+  It preserves known caller facts and compares substituted storage, not formal identity.
+  It evaluates no body and applies no effect.
+  A bound frame keeps an unknown caller outcome and requires cleanup. (D17.18)
+  Each owner charges E with the count of the relations that it retains now, not with an
+  increment, so a clone of the same records adds no unit (`spec/fir.md` 14.1).
+  Each record kind keeps strictly increasing keys, so a lookup is a binary search. A case check
+  costs its length and the order count, not their product.
 
 ## 7. The runtime and the standard library
 
