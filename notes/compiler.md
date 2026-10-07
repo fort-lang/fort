@@ -416,6 +416,15 @@ came here.
   Paid iterative queries compare reference types and measure layouts.
   Query refusal keeps the first terminal proof and the mapped operation and source.
   The paired R request counts the semantic borrowed-region union and current raw leaves.
+  The paired count appends each region identity and each partition. Then it sorts each list
+  once and keeps one entry of each equal run (`ownership_state.region_settle`,
+  `ownership_raw_bytes.partition_settle`). It pays one W unit for each appended row and one
+  for each 64 sorted rows, so its W is linear in the paired state.
+  `owner_empty` pays the core price once and the path price once for each allocation.
+  At 100 extra allocations, sorted insertion cost 7057 W and is now 1602. The owner scan cost
+  the core price times the allocations, 142620 W, and is now 4260. A zero write cost 167275 W
+  and is now 12550. `test/fort/ownership_raw_bytes_work_test.ft` pins four states and checks
+  that their costs add.
   Representation partitions use the full source key and a canonical half-open storage interval.
   Snapshot partitions use their ledger's snapshot key and a canonical half-open snapshot interval.
   These two namespaces remain distinct. Duplicate identities count once within one namespace.

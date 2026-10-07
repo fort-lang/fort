@@ -22,6 +22,8 @@
 //| shallow release sibling accept
 //| shallow release descendant reject
 //| missing route at its effect
+//| source alternatives 1
+//| source alternatives 2
 /// Tests byte layout boundaries: count repetition, owner leaves, snapshot gaps, parents,
 /// shallow release descendants, and missing event routes.
 import ownership_api;
@@ -378,6 +380,40 @@ fn missing_route() void {
     ownership_raw_bytes_env.same(&e, &before.states[0]);
     println("missing route at its effect");
 }
+// The borrows of one value are exclusive source alternatives. The byte kernel counts them with
+// ownership_state.alternative_units, as the raw kernel does, so k >= 2 sources need G >= k.
+fn source_alternatives(u64 g) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 61, 0, false);
+    e.limits.g = g;
+    ownership_api.contents_fact mut value = ownership_raw_bytes_env.value(&e, 1, 1, 1, 0, 6, 1);
+    ownership_api.contents_fact other = ownership_raw_bytes_env.value(&e, 1, 1, 2, 0, 6, 1);
+    ownership_api.borrow_relation[2] both = {value.borrows[0], other.borrows[0]};
+    value.borrows = both[..];
+    u64 mut check = 0;
+    while (check < 2) {
+        ownership_raw.request req = ownership_raw_bytes_env.request(&e, 2600);
+        ownership_raw_bytes_env.reset_budget(&e);
+        ownership_raw.work_cursor mut cursor = {};
+        ownership_api.proof_status begun = ownership_raw.begin_work(e.paired.states[0].core,
+            &e.service, &req, &cursor);
+        ownership_raw_bytes.work mut current = ownership_raw_bytes.work{&e.service,
+            &cursor.selected, begun, 0};
+        u64 mut price = 0;
+        bool accepted = check == 0 ?
+            ownership_raw_bytes.value_price(&current, value, &price) :
+            ownership_raw_bytes.valid_sources(&current, &e.paired.states[0], value);
+        string refusal = check == 0 ? "byte source alternatives exceed their bound" :
+            "reference source correspondence is incomplete";
+        // Two sources give two G units: G = 1 refuses them and G = 2 accepts them.
+        assert(accepted == (g == 2));
+        assert((e.budget.events != 0 && e.budget.last_event.text == refusal) == (g == 1));
+        check += 1;
+    }
+    println("source alternatives ", g);
+}
+
 fn main() i32 {
     unknown_element(0);
     unknown_element(1);
@@ -400,5 +436,7 @@ fn main() i32 {
     shallow_sibling(false);
     shallow_sibling(true);
     missing_route();
+    source_alternatives(1);
+    source_alternatives(2);
     return 0;
 }
