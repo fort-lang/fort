@@ -916,7 +916,10 @@ came here.
   Own parameters, own extern results, loads of references from other storage, owning non-TL
   locals, struct results with reference leaves and range loans also leave it incomplete.
   A W, E or V refusal of a local ledger is a budget error (fir.md 14.1).
-  These legal shapes give incomplete proof in the declared scope:
+  Scoped CI rejects each local violation and each declared body without complete local proof.
+  `tools/ownership_audit.py enforce --scope local` reports the declared bodies of each root and
+  each problem. A declared body has complete local correspondence.
+  These legal shapes give incomplete proof in the declared scope, so scoped CI rejects them:
   a null test that the flow does not refine; a loop whose allocation site runs again while
   its earlier allocation is live (D17.16); flags that test one condition twice; a loop that
   exhausts the transfer history E (256); a path that needs a back edge, a short-circuit

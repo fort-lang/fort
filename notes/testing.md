@@ -863,16 +863,24 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
-  **Three tables exist today**, and they cover 12 files:
-  `ls tools/mutations/*.json | wc -l` prints 3.
+  **Four tables exist today**, and they cover 16 files:
+  `ls tools/mutations/*.json | wc -l` prints 4.
   `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
   the four files of the C emitter, and the same command over
   `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`.
   `grep -o 'src/fort/[a-z_]*\.ft' tools/mutations/emitter_fort.json | sort -u` prints the six
   files of the fort emitter: `fir.ft`, `fir_llvm.ft`, `fir_lower.ft`, `gen.ft`, `gen_data.ft`
-  and `gen_fir.ft`. Each list is the `"sources"` list the runner saves. Two earlier changes
+  and `gen_fir.ft`. The same command over `tools/mutations/ownership_local.json` prints the four
+  ownership files of the local increment: `ownership_flow.ft`, `ownership_report.ft`,
+  `ownership_source_local.ft` and `ownership_transfer.ft`, with one row for each local check.
+  Each list is the `"sources"` list the runner saves. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. No table covers the fort checker today.
+  **The first row of a VM run can read `stale`.** The host writes the mutant, and the guest
+  `ninja` compares its mtime with an output that the baseline build wrote in the same second.
+  The row `D17.14-residual` read `stale` as the first row of two runs and `caught` as the second
+  row of a third run (md5 `e317a12eab36bd2ea481fd6eccdc18ce` against the baseline
+  `01afd107d70cd091e469ea64c1c5b8d2`). Re-run a stale first row behind another row.
   **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
   citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6

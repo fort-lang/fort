@@ -1,0 +1,330 @@
+{
+  "comment": [
+    "One row for each check that the local ownership increment adds or depends on.",
+    "A row names the line that holds the check and the text that breaks it.",
+    "The build compiles working-tree HEAD with the mutant. The module tests compile",
+    "src/fort with the mutant too. The stages run from the narrowest tests to the",
+    "driver test. The table runs in the Linux VM with the debug preset."
+  ],
+  "sources": [
+    "src/fort/ownership_transfer.ft",
+    "src/fort/ownership_flow.ft",
+    "src/fort/ownership_source_local.ft",
+    "src/fort/ownership_report.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "local module tests",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_transfer_local ownership_flow_observer ownership_source_local ownership_report_local ownership_report_test"
+    },
+    {
+      "name": "ownership driver",
+      "command": "python3 test/ownership_driver_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --opt /usr/bin/opt-18"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.14-residual",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    if (overlap == overlap_kind.definite) {\n        return invalid(svc, req, ownership_api.event_kind.lost_ownership,\n            req->source.root, \"storage ends with a live owner\");",
+      "new": "    if (false) {\n        return invalid(svc, req, ownership_api.event_kind.lost_ownership,\n            req->source.root, \"storage ends with a live owner\");",
+      "what": "a slot that ends with a live owner is no violation"
+    },
+    {
+      "decision": "D17.14-private-end",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    if (req->private_slot_proved && req->source_key.kind == ownership_api.entity_kind.none) {",
+      "new": "    if (false && req->private_slot_proved) {",
+      "what": "a private slot end still needs a stack source"
+    },
+    {
+      "decision": "D17.17-temporal",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    if (dereference && !req->temporal_use &&",
+      "new": "    if (dereference && req->temporal_use &&",
+      "what": "the temporal rule swaps with the exact-length rule"
+    },
+    {
+      "decision": "D17.16-length",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        a.symbol.kind == ownership_api.entity_kind.value && same_entity(a.symbol, b.symbol);",
+      "new": "        a.symbol.kind == ownership_api.entity_kind.value;",
+      "what": "two symbolic lengths are equal without one value version"
+    },
+    {
+      "decision": "D17.11-opaque",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    if (req->opaque_value) {\n        ownership_api.contents_fact mut unknown",
+      "new": "    if (req->opaque_value && false) {\n        ownership_api.contents_fact mut unknown",
+      "what": "an opaque store reads its value like an ordinary assignment"
+    },
+    {
+      "decision": "D17.14-escape",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    after.detached = true;",
+      "new": "    after.detached = false;",
+      "what": "an escaped allocation keeps no detached owner"
+    },
+    {
+      "decision": "D17.18-outside",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        if (!kept && source.validity == ownership_api.validity_kind.live) {",
+      "new": "        if (false) {",
+      "what": "an outside effect keeps every source live"
+    },
+    {
+      "decision": "D17.18-observer",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                        in->observed->step_attempts[i] += 1;",
+      "new": "                        in->observed->step_attempts[i] += 2;",
+      "what": "the observer counts each path state twice"
+    },
+    {
+      "decision": "D17.18-return-observer",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "            in->observed->return_attempts[cast(block, u64)] += 1;",
+      "new": "            in->observed->return_attempts[cast(block, u64)] += 2;",
+      "what": "the observer counts each return twice"
+    },
+    {
+      "decision": "D17.18-stop",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                if (!ownership_api.successful(proof)) {\n                    note_failure(out, proof);\n                    note_stop(out, block, gap, rank_of(&s));\n                    return false;\n                }\n            }\n            i += 1;",
+      "new": "                if (!ownership_api.successful(proof)) {\n                    note_failure(out, proof);\n                    return false;\n                }\n            }\n            i += 1;",
+      "what": "a failed local step records no stop"
+    },
+    {
+      "decision": "D17.16-retire-escape",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    bool escaped = a != U64_MAX && p->facts.allocations[a].obligation &&",
+      "new": "    bool escaped = false && a != U64_MAX && p->facts.allocations[a].obligation &&",
+      "what": "an escaped site identity cannot retire"
+    },
+    {
+      "decision": "D17.18-step-index",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        out.step_first[cast(first_block, u64)] = step_at;",
+      "new": "        out.step_first[cast(first_block, u64)] = 0;",
+      "what": "every block reads the steps of earlier blocks"
+    },
+    {
+      "decision": "D17.18-validation",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            valid = valid && !c->barrier[r->key] && same == c->step_attempts[r->key] &&",
+      "new": "            valid = valid && !c->barrier[r->key] && same >= 1 &&",
+      "what": "one failing path state validates a violation"
+    },
+    {
+      "decision": "D17.18-barrier",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    c->barrier[i] = unknown_call;",
+      "new": "    c->barrier[i] = false;",
+      "what": "an unknown fort call is no barrier"
+    },
+    {
+      "decision": "D17.18-stopped-before",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (follows(c, at.block, at.gap, at.rank, block, gap, rank)) { return true; }",
+      "new": "        if (false) { return true; }",
+      "what": "an earlier stopped path does not block validation"
+    },
+    {
+      "decision": "D19.8-classification",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (!clean && c->gap == missing.none && c->violations_len == 0 &&\n        !c->first_refusal.terminal.present && call_dependent(c)) {",
+      "new": "    if (false && c->gap == missing.none && c->violations_len == 0 &&\n        !c->first_refusal.terminal.present && call_dependent(c)) {",
+      "what": "a failure that only an outside effect explains stays in the local scope"
+    },
+    {
+      "decision": "D17.15-address",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "                names_storage(f, s->value.place, s->value.kind)) {\n                taken[cast(s->value.place.local, u64)] = true;",
+      "new": "                false) {\n                taken[cast(s->value.place.local, u64)] = true;",
+      "what": "an address of a local leaves it tracked"
+    },
+    {
+      "decision": "D17.18-call-havoc",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        } else {\n            outside_step(c, block, gap, true);\n        }",
+      "new": "        } else {\n        }",
+      "what": "a fort call has no outside effect"
+    },
+    {
+      "decision": "D17.6-escape-step",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        local_step(c, block, gap, ownership_transfer.action.escape, a.local, a.local);",
+      "new": "        inspect(c, block, gap, a.local);",
+      "what": "a moved argument stays in its slot"
+    },
+    {
+      "decision": "D17.16-leaves",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (!leaves) { note_gap(c, missing.owned_leaves, c->steps[i].source); }",
+      "new": "    if (false) { note_gap(c, missing.owned_leaves, c->steps[i].source); }",
+      "what": "a shallow release with owned leaves stays in the local scope"
+    },
+    {
+      "decision": "D17.14-transient",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        c->transient[n] = l->kind == fir.local_kind.lk_temp && c->tracked[n] &&",
+      "new": "        c->transient[n] = false && l->kind == fir.local_kind.lk_temp && c->tracked[n] &&",
+      "what": "a borrowed temporary keeps its stale borrow"
+    },
+    {
+      "decision": "toolchain-1.1-violations",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    return row->local.violations_len;\n}",
+      "new": "    return 0;\n}",
+      "what": "the report counts no local violation"
+    },
+    {
+      "decision": "toolchain-1.1-closure",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        if (proof != \"complete\") { complete = false; }",
+      "new": "        if (false) { complete = false; }",
+      "what": "an incomplete body leaves the local closure complete"
+    },
+    {
+      "decision": "toolchain-4.2-message",
+      "file": "src/fort/ownership_report.ft",
+      "old": "                \"invalid use of \" : \"lost ownership of \");",
+      "new": "                \"lost ownership of \" : \"invalid use of \");",
+      "what": "the two violation messages swap"
+    },
+    {
+      "decision": "D19.8-repeated-failure",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        pass.blocks.len > 0 && pass.failures == 0;",
+      "new": "        pass.blocks.len > 0;",
+      "what": "a failure that the second run repeats leaves the local scope"
+    },
+    {
+      "decision": "D19.8-first-refusal",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        !c->first_refusal.terminal.present && call_dependent(c)) {",
+      "new": "        call_dependent(c)) {",
+      "what": "a second run starts after a refusal of the first run"
+    },
+    {
+      "decision": "D19.8-exact-pass",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    return !c->classify_refusal.terminal.present &&\n        passes_without_failure(c, kept[..], &c->limits);",
+      "new": "    return false;",
+      "what": "a failed joined pass keeps the body in scope with no exact pass"
+    },
+    {
+      "decision": "D19.8-classification-ledger",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    classifying.budget = classify_budget;",
+      "new": "    classifying.budget = budget;",
+      "what": "the classification run charges the ledger of the first run"
+    },
+    {
+      "decision": "toolchain-4.2-witness",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (valid && witness(c, &preds, block, gap, kind)) {",
+      "new": "        if (valid) {",
+      "what": "a violation needs no witness path"
+    },
+    {
+      "decision": "toolchain-4.2-back-edge",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (fir_flow.bits_get(&visited, at)) { return false; }",
+      "new": "        if (false) { return false; }",
+      "what": "a witness path can cross a back edge"
+    },
+    {
+      "decision": "toolchain-4.2-fort-call",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (r.callee != fir.callee_kind.cl_extern) { return false; }",
+      "new": "    if (false) { return false; }",
+      "what": "a witness path can cross a fort call"
+    },
+    {
+      "decision": "toolchain-4.2-unknown-condition",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (cond.kind != witness_kind.entry_value && cond.kind != witness_kind.relation) {\n        return false;\n    }\n    bool mut found = false;",
+      "new": "    if (cond.kind != witness_kind.entry_value && cond.kind != witness_kind.relation) {\n        *out = fir.term_arm(f, t, 0).target;\n        return true;\n    }\n    bool mut found = false;",
+      "what": "an unknown switch condition takes its first arm"
+    },
+    {
+      "decision": "toolchain-4.2-unknown-check",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            if (result != outcome.passes) { return false; }",
+      "new": "            if (false) { return false; }",
+      "what": "a check with an unknown outcome passes"
+    },
+    {
+      "decision": "toolchain-4.2-trap-kind",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "                return kind == expected && t->target == block && gap == 0;",
+      "new": "                return t->target == block && gap == 0;",
+      "what": "any trap reaches the statement that its check guards"
+    },
+    {
+      "decision": "toolchain-4.2-relation",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (fits && consts.cv_eq(consts.cv_compare(cond.rel, x, cond.value), wanted)) {",
+      "new": "        if (fits) {",
+      "what": "a relation takes its constant whatever the wanted outcome"
+    },
+    {
+      "decision": "D17.17-integer-reference",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        } else if (k == fir.const_kind.ck_null || k == fir.const_kind.ck_zero) {",
+      "new": "        } else if (true) {",
+      "what": "an integer cast to a reference is an empty owner"
+    },
+    {
+      "decision": "toolchain-4.2-order",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (built) { fir.pred_table_free(&preds); }\n    sort_violations(c);",
+      "new": "    if (built) { fir.pred_table_free(&preds); }",
+      "what": "violations keep their arrival order"
+    },
+    {
+      "decision": "toolchain-4.2-quotes",
+      "file": "src/fort/ownership_report.ft",
+      "old": "            if (v->quoted) { strbuf.push(&message, '\\''); }\n            strbuf.append(&message, v->name);",
+      "new": "            strbuf.push(&message, '\\'');\n            strbuf.append(&message, v->name);",
+      "what": "the result and a temporary take quotes like a source name"
+    },
+    {
+      "decision": "fir-14.1-local-budget",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        if (!local_budget(c, diagnostics, entry, row, row->local.first_refusal, \"local\",\n            first)) {",
+      "new": "        if (false && !local_budget(c, diagnostics, entry, row, row->local.first_refusal, \"local\",\n            first)) {",
+      "what": "a local W, E or V refusal gives no budget error"
+    },
+    {
+      "decision": "toolchain-1.1-classification-ledger",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        if (row->local.classified) {",
+      "new": "        if (false) {",
+      "what": "the report omits the classification ledger"
+    },
+    {
+      "decision": "toolchain-1.1-missing-producer",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    return fallback_reason(ANALYSES[INTEGRATED], \"missing_producer\", row->source);",
+      "new": "    return fallback_reason(\"local\", \"missing_producer\", row->source);",
+      "what": "the body reason names the local analysis as a missing producer"
+    },
+    {
+      "decision": "toolchain-4.2-one-error",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        bool repeated = primary.present && second.present && primary.limit.present &&",
+      "new": "        bool repeated = false && primary.present && second.present && primary.limit.present &&",
+      "what": "two ledgers that refuse one operation give two errors"
+    },
+    {
+      "decision": "toolchain-4.2-ledger-name",
+      "file": "src/fort/ownership_report.ft",
+      "old": "            row->local.classify_refusal, \"local classification\", first)) {",
+      "new": "            row->local.classify_refusal, \"local\", first)) {",
+      "what": "the classification refusal reads as a refusal of the first run"
+    }
+  ]
+}

@@ -531,6 +531,9 @@ It also rejects incomplete selected-body enumeration. Discovered rows prove no c
 Preserve that failed root and report. Unsupported lowering can remain valid exit-1 audit evidence
 when its selected-body denominator is complete.
 Exit 2 or a missing valid report fails the gate. No coverage-regression baseline applies initially.
+The local scope declares a body when that body's `local` correspondence is complete.
+Scoped local enforcement rejects each local violation in any body.
+It also rejects each declared body whose `local` proof is not complete.
 Later scoped enforcement reads the same reports and requires complete proof within its declared
 scope.
 It never converts exit 1 into accepted complete compiler proof.
