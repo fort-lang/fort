@@ -1,0 +1,37 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_lower.lower_builtin: a builtin statement with a value
+//! stdout:
+//| move
+/// The checker refuses a `move` statement, because no one reads its owning value (D17.8). The
+/// test gives the lowering the `move(p)` of `del(move(p));` as a statement, so the lowering panics.
+import ast;
+import check_env;
+import fir;
+import fir_lower;
+import lower_env;
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[3] source = {
+        "fn f(u8 mut* own p) void {",
+        "    del(move(p));",
+        "}",
+    };
+    lower_env.check_lines(&e, source[..], true);
+    ast.node* decl = lower_env.decl(&e, "f");
+    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_free(&f);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    defer fir_lower.scopes_free(&lw.scopes);
+    fir_lower.prescan(&lw, decl->b);
+    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
+    ast.node* freed = check_env.node_in_main(&e.c, ast.ast_kind.k_call, "");
+    ast.node* moved = ast.ast_child(freed, 0);
+    println(moved->a->sym->name);
+    fir_lower.lower_builtin(&lw, moved);
+    return 0;
+}
