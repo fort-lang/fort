@@ -1,0 +1,807 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| tracked slots ok
+//| effects ok
+//| gaps ok
+//| violations ok
+//| validation ok
+//| classification ok
+//| ledgers ok
+/// Checks local effects that the producer reads from actual source and their validation.
+import fir;
+import ownership_api;
+import ownership_flow;
+import ownership_keys;
+import ownership_limits;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_transfer;
+import std.strbuf;
+
+fn body(ownership_source_env.env mut* e, string name) ownership_source.body mut* {
+    ownership_source.body mut* row = ownership_source_env.find(e, "main", name);
+    assert(row->verification == ownership_source.status.complete);
+    assert(row->local.initialized);
+    return row;
+}
+
+fn count(ownership_source.body* row, ownership_transfer.action effect) u64 {
+    assert(!row->local.solved);
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < row->local.steps_len) {
+        ownership_flow.step* s = &row->local.steps[i];
+        if (s->kind == ownership_flow.step_kind.local_effect && s->local.kind == effect) {
+            total += 1;
+        }
+        i += 1;
+    }
+    return total;
+}
+
+fn calls(ownership_source.body* row) u64 {
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < row->local.steps_len) {
+        if (row->local.steps[i].kind == ownership_flow.step_kind.call_outcome) { total += 1; }
+        i += 1;
+    }
+    return total;
+}
+
+fn barriers(ownership_source.body* row) u64 {
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < row->local.steps_len) {
+        if (row->local.barrier[i]) { total += 1; }
+        i += 1;
+    }
+    return total;
+}
+
+// The first step of `effect` whose source is `local`.
+fn step_of(ownership_source.body* row, ownership_transfer.action effect, u32 local)
+    ownership_flow.step* {
+    u64 mut i = 0;
+    while (i < row->local.steps_len) {
+        ownership_flow.step* s = &row->local.steps[i];
+        if (s->kind == ownership_flow.step_kind.local_effect && s->local.kind == effect &&
+            s->local.source.root.ordinal == local) { return s; }
+        i += 1;
+    }
+    panic("ownership_source_local_test: step is absent");
+}
+
+fn local_named(ownership_source.body* row, string name) u32 {
+    u32 mut n = 0;
+    while (n < fir.local_count(&row->function)) {
+        if (fir.local_name(fir.local_at(&row->function, n)) == name) { return n; }
+        n += 1;
+    }
+    panic("ownership_source_local_test: local is absent");
+}
+
+fn open(ownership_source_env.env mut* e, string text) void {
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, text));
+}
+
+fn lines(strbuf.str_buf mut* out, string@ text) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < text.len) {
+        strbuf.append(out, text[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn complete(ownership_source.body* row) void {
+    assert(row->local.solved);
+    assert(row->local.correspondence == ownership_source_local.status.complete);
+    assert(row->local.solver == ownership_source_local.status.complete);
+    assert(ownership_api.successful(row->local.proof));
+    assert(row->local.violations_len == 0 && row->local.unvalidated == 0);
+}
+
+fn violated(ownership_source.body* row, ownership_api.event_kind kind, string name,
+    string text, u32 line) void {
+    assert(row->local.solved);
+    assert(row->local.violations_len == 1);
+    assert(row->local.proof.failed && !row->local.proof.terminal.present);
+    ownership_source_local.violation v = row->local.violations[0];
+    assert(v.kind == kind);
+    assert(v.name == name);
+    assert(v.text == text);
+    assert(v.source.line == line && v.source.filename_present);
+    assert(v.source.file == row->source.file);
+    assert(v.source.module == row->key.declaration.module);
+    assert(ownership_keys.function(v.operation.function, row->key) == 0);
+}
+
+// Incomplete proof: no violation, and a terminal reason that names a source line.
+fn unproved(ownership_source.body* row) void {
+    assert(row->local.solved);
+    assert(row->local.violations_len == 0);
+    assert(!ownership_api.successful(row->local.proof));
+    assert(row->local.proof.terminal.present);
+    assert(row->local.proof.kind == ownership_api.proof_kind.incomplete);
+}
+
+fn in_scope(ownership_source.body* row) void {
+    assert(row->local.gap == ownership_source_local.missing.none);
+    assert(row->local.correspondence == ownership_source_local.status.complete);
+}
+
+fn tracked_slots() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[12] source = {
+        "struct pair { i32 a; i32 b; }",
+        "fn slots(i32 mut* p, u64 n) i32* {",
+        "    i32 mut x = 1;",
+        "    i32 mut* q = &x;",
+        "    pair mut s = {};",
+        "    s.a = 2;",
+        "    string t = \"abc\";",
+        "    u8@ v = cast(t, u8@);",
+        "    i32 mut* own o = new(i32);",
+        "    del(o);",
+        "    return p;",
+        "}",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = body(&e, "slots");
+    ownership_source_local.context* c = &row->local;
+    // References whose storage no address names are TLs. Scalars, structs and x are not.
+    assert(c->tracked[0]);
+    assert(c->tracked[cast(local_named(row, "p"), u64)]);
+    assert(!c->tracked[cast(local_named(row, "n"), u64)]);
+    assert(!c->tracked[cast(local_named(row, "x"), u64)]);
+    assert(c->tracked[cast(local_named(row, "q"), u64)]);
+    assert(!c->tracked[cast(local_named(row, "s"), u64)]);
+    assert(c->tracked[cast(local_named(row, "t"), u64)]);
+    assert(c->tracked[cast(local_named(row, "v"), u64)]);
+    assert(c->tracked[cast(local_named(row, "o"), u64)]);
+    assert(c->owning[cast(local_named(row, "o"), u64)]);
+    assert(!c->owning[cast(local_named(row, "q"), u64)]);
+    assert(!c->owning[cast(local_named(row, "t"), u64)]);
+    // A reference result names the result slot for the returned-borrow check.
+    assert(c->result_slot.kind == ownership_api.entity_kind.slot && c->result_slot.ordinal == 0);
+    assert(ownership_keys.function(c->result_slot.function, row->key) == 0);
+    // An address of x names x's storage. The other locals have no address.
+    assert(row->local.taken[cast(local_named(row, "x"), u64)]);
+    assert(!row->local.taken[cast(local_named(row, "t"), u64)]);
+    assert(!row->local.taken[cast(local_named(row, "o"), u64)]);
+    // The address of x gives q an unknown source, so correspondence is incomplete.
+    assert(c->gap == ownership_source_local.missing.unknown_source);
+    assert(c->gap_source.line == 4);
+    ownership_source.analyze(&e.source);
+    unproved(row);
+    assert(row->local.correspondence == ownership_source_local.status.incomplete);
+}
+
+fn span_slices_and_field_addresses_keep_tracking() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[9] source = {
+        "struct cell { i32 value; }",
+        "fn views(u8@ s, cell mut* p) i32 {",
+        "    u8@ part = s[1..];",
+        "    i32 mut* inner = &p->value;",
+        "    u8[4] bytes = {1, 2, 3, 4};",
+        "    u8@ local = bytes[..];",
+        "    *inner = 3;",
+        "    return cast(part.len, i32);",
+        "}",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = body(&e, "views");
+    // A span slice reads the header. A field address goes through p. Neither names a slot.
+    assert(!row->local.taken[cast(local_named(row, "s"), u64)]);
+    assert(!row->local.taken[cast(local_named(row, "p"), u64)]);
+    // A slice of a fixed array takes the address of the array.
+    assert(row->local.taken[cast(local_named(row, "bytes"), u64)]);
+    assert(row->local.tracked[cast(local_named(row, "part"), u64)]);
+    assert(row->local.tracked[cast(local_named(row, "inner"), u64)]);
+    // The array slice gives local an unknown source; the gap names that line.
+    assert(row->local.gap == ownership_source_local.missing.unknown_source);
+    assert(row->local.gap_source.line == 6);
+    // The derived views copy their sources from s and p.
+    assert(count(row, ownership_transfer.action.copy) >= 2);
+}
+
+fn result_classes() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[6] source = {
+        "struct view { string s; }",
+        "struct plain { i32 a; i64 b; }",
+        "fn a() void {}",
+        "fn b() view { return view{\"x\"}; }",
+        "fn c() plain { return plain{1, 2}; }",
+        "fn d(string s) string { return s; }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body* a = body(&e, "a");
+    ownership_source.body* b = body(&e, "b");
+    ownership_source.body* c = body(&e, "c");
+    ownership_source.body* d = body(&e, "d");
+    // A struct result with a reference leaf needs returned-borrow facts that no TL holds.
+    assert(b->local.gap == ownership_source_local.missing.aggregate_result);
+    assert(b->local.result_slot.kind == ownership_api.entity_kind.none);
+    // A struct result with scalar leaves only, or no result, has nothing to check.
+    in_scope(a);
+    in_scope(c);
+    assert(c->local.result_slot.kind == ownership_api.entity_kind.none);
+    // A string result is one TL. Its returned borrow names the caller source of s.
+    in_scope(d);
+    assert(d->local.result_slot.kind == ownership_api.entity_kind.slot);
+    ownership_source.analyze(&e.source);
+    complete(a);
+    complete(c);
+    complete(d);
+    unproved(b);
+    assert(b->local.correspondence == ownership_source_local.status.incomplete);
+    // The returned-borrow check ran and found the caller source live.
+    assert(d->local.solver == ownership_source_local.status.complete);
+}
+
+fn effects_of_owners() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[17] source = {
+        "fn owners(u64 n) u8 {",
+        "    u8 mut@ own s = new(u8, n);",
+        "    s[0] = 1;",
+        "    u8 v = s[0];",
+        "    u64 len = s.len;",
+        "    u8@ view = s;",
+        "    u8 mut@ own t = move(s);",
+        "    u8 w = view[0];",
+        "    del(t);",
+        "    i32 mut* own p = new(i32);",
+        "    *p = 1;",
+        "    i32* q = p;",
+        "    i32 r = *q;",
+        "    del(p);",
+        "    string z = \"text\";",
+        "    return v + w + cast(len, u8) + cast(r, u8) + cast(z.len, u8);",
+        "}",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = body(&e, "owners");
+    in_scope(row);
+    u32 s = local_named(row, "s");
+    u32 t = local_named(row, "t");
+    u32 view = local_named(row, "view");
+    u32 p = local_named(row, "p");
+    u32 q = local_named(row, "q");
+    // Two allocation sites, each in a temporary that moves into its named owner.
+    // The moves: the span aggregate, two into named owners, and move(s) through a temporary.
+    assert(count(row, ownership_transfer.action.allocation) == 2);
+    assert(count(row, ownership_transfer.action.move_owner) == 5);
+    assert(count(row, ownership_transfer.action.release) == 2);
+    // new(u8, n) keeps a symbolic length. new(i32) keeps the exact length 1.
+    u64 mut i = 0;
+    bool mut symbolic = false;
+    bool mut exact = false;
+    while (i < row->local.steps_len) {
+        ownership_flow.step* at = &row->local.steps[i];
+        if (at->local.kind == ownership_transfer.action.allocation) {
+            ownership_api.scalar_fact length = at->local.allocation.logical_length;
+            if (length.kind == ownership_api.fact_kind.symbolic) {
+                symbolic = true;
+                assert(length.symbol.kind == ownership_api.entity_kind.value);
+                assert(at->local.value.span_length.symbol.ordinal == length.symbol.ordinal);
+            }
+            if (length.kind == ownership_api.fact_kind.exact) {
+                exact = true;
+                assert(length.value == 1);
+            }
+            assert(at->local.fresh_source.kind == ownership_api.source_kind.heap);
+            assert(at->local.allocation.obligation && at->local.allocation.count.one);
+            assert(at->local.value.borrows.len == 1);
+            assert(ownership_keys.entity(at->local.value.borrows[0].source,
+                at->local.fresh_source.key) == 0);
+        }
+        i += 1;
+    }
+    assert(symbolic && exact);
+    // The moves read s and the borrow copies view from s.
+    u32 moved = step_of(row, ownership_transfer.action.move_owner, s)->local.destination.root
+        .ordinal;
+    assert(fir.local_at(&row->function, moved)->kind == fir.local_kind.lk_temp);
+    assert(step_of(row, ownership_transfer.action.move_owner, moved)->local.destination.root
+        .ordinal == t);
+    assert(step_of(row, ownership_transfer.action.copy, s)->local.destination.root.ordinal ==
+        view);
+    assert(!step_of(row, ownership_transfer.action.copy, s)->local.destination_owns);
+    assert(step_of(row, ownership_transfer.action.copy, p)->local.destination.root.ordinal == q);
+    // Element and pointee reads and writes check only the temporal source.
+    ownership_flow.step* through = step_of(row, ownership_transfer.action.use, s);
+    assert(through->local.temporal_use);
+    assert(step_of(row, ownership_transfer.action.use, view)->local.temporal_use);
+    assert(step_of(row, ownership_transfer.action.use, p)->local.temporal_use);
+    assert(step_of(row, ownership_transfer.action.use, q)->local.temporal_use);
+    // The element type u8 has no owned leaf, so del proves empty leaves.
+    assert(step_of(row, ownership_transfer.action.release, t)->local.leaves_empty_proved);
+    assert(step_of(row, ownership_transfer.action.release, p)->local.leaves_empty_proved);
+    // Dead markers end owning TLs with the private rule and clear borrowed TLs.
+    ownership_flow.step* ending = step_of(row, ownership_transfer.action.dead, p);
+    assert(ending->local.private_slot_proved);
+    assert(ending->local.source_key.kind == ownership_api.entity_kind.none);
+    // The string constant borrows static storage, which the entry state holds live.
+    assert(count(row, ownership_transfer.action.assignment) > 0);
+    ownership_source.analyze(&e.source);
+    complete(row);
+    // The steps went with the flow work after validation.
+    assert(row->local.steps_len == 0 && row->local.records_len == 0);
+    assert(row->local.steps.len == 0 && row->local.result.blocks.len == 0);
+}
+
+fn effects_of_calls() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[16] source = {
+        "extern fn foreign_text() char*;",
+        "extern fn foreign_count(char* p) i32;",
+        "fn callee(i32* p) i32 { return *p; }",
+        "fn take(i32 mut* own p) void { del(p); }",
+        "fn calls() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    *p = 2;",
+        "    i32 r = callee(p);",
+        "    take(move(p));",
+        "    char* f = foreign_text();",
+        "    i32 k = foreign_count(f);",
+        "    i32 mut* own o = new(i32);",
+        "    del(o);",
+        "    return r + k;",
+        "}",
+        "fn take_twice(i32 mut* own a, i32 mut* own b) void { take(move(a)); take(move(b)); }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = body(&e, "calls");
+    u32 p = local_named(row, "p");
+    // A borrowed argument is a semantic read. A moved argument leaves local proof.
+    assert(count(row, ownership_transfer.action.inspect) >= 1);
+    assert(count(row, ownership_transfer.action.escape) == 1);
+    assert(step_of(row, ownership_transfer.action.escape, p)->local.source.root.ordinal == p);
+    // Two fort calls are outside effects and barriers. The two extern calls are trusted calls.
+    assert(count(row, ownership_transfer.action.outside) == 2);
+    assert(barriers(row) == 2);
+    assert(calls(row) == 2);
+    // The scalar results need no facts, so correspondence stays complete.
+    in_scope(row);
+    // The trusted borrowed result has a trusted foreign source in the entry state.
+    u64 mut foreign = 0;
+    u64 mut i = 0;
+    while (i < row->local.entry.sources_len) {
+        if (row->local.entry.sources[i].kind == ownership_api.source_kind.trusted_foreign) {
+            foreign += 1;
+            assert(row->local.entry.sources[i].validity == ownership_api.validity_kind.live);
+        }
+        i += 1;
+    }
+    assert(foreign == 1);
+    ownership_source.body* twice = body(&e, "take_twice");
+    // Own parameters need the symbolic caller owner that call summaries supply.
+    assert(twice->local.gap == ownership_source_local.missing.own_parameter);
+    ownership_source.analyze(&e.source);
+    // The allocation after the calls is slot-owned. Its release and end need no call facts.
+    complete(row);
+    unproved(twice);
+}
+
+fn extern_owner_and_moved_argument() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[13] source = {
+        "extern fn adopt(i32 mut* own p) void;",
+        "extern fn produce() i32 mut* own;",
+        "fn handed() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    adopt(move(p));",
+        "    return *q;",
+        "}",
+        "fn produced() void {",
+        "    i32 mut* own p = produce();",
+        "    del(p);",
+        "}",
+        "fn root() i32 { return 0; }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body* handed = body(&e, "handed");
+    ownership_source.body* produced = body(&e, "produced");
+    // An own argument of a trusted call can be released by foreign code at any time.
+    assert(count(handed, ownership_transfer.action.escape) == 1);
+    assert(count(handed, ownership_transfer.action.outside) == 1);
+    assert(barriers(handed) == 0);
+    // An own extern result needs a foreign owner model.
+    assert(produced->local.gap == ownership_source_local.missing.foreign_owner);
+    ownership_source.analyze(&e.source);
+    // q's source became unknown after the call, and only the call explains it.
+    unproved(handed);
+    assert(handed->local.correspondence == ownership_source_local.status.incomplete);
+    assert(handed->local.gap == ownership_source_local.missing.call_dependent);
+    unproved(produced);
+}
+
+fn gaps_of_storage() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[14] source = {
+        "struct holder { i32 mut* own p; }",
+        "struct node { i32 v; node mut* own next; }",
+        "fn field_owner() void { holder mut h = {}; h.p = new(i32); del(h.p); }",
+        "fn owned_leaves(node mut* own n) void { del(n); }",
+        "fn local_leaves() void { node mut* own n = new(node); del(n); }",
+        "fn loaded(holder* h) i32 { i32* p = h->p; return *p; }",
+        "fn moved_out(holder mut* h) void { i32 mut* own p = move(h->p); del(p); }",
+        "fn released(holder mut* h) void { del(h->p); }",
+        "fn reread(holder mut* h, i32* v) i32 { del(h->p); return *v; }",
+        "fn stored(holder mut* h) void { h->p = new(i32); }",
+        "fn loop_over(u8@ s) u32 {",
+        "    u32 mut total = 0; for (u8 b : s) { total += cast(b, u32); } return total;",
+        "}",
+        "fn root() i32 { return 0; }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    assert(body(&e, "field_owner")->local.gap == ownership_source_local.missing.owning_storage);
+    // The first gap wins: the release comes before the parameter facts.
+    assert(body(&e, "owned_leaves")->local.gap == ownership_source_local.missing.owned_leaves);
+    assert(body(&e, "local_leaves")->local.gap == ownership_source_local.missing.owned_leaves);
+    assert(body(&e, "loaded")->local.gap == ownership_source_local.missing.unknown_source);
+    assert(body(&e, "moved_out")->local.gap == ownership_source_local.missing.owner_load);
+    // A new allocation moves from its temporary into the field: the obligation escapes.
+    ownership_source.body* stored = body(&e, "stored");
+    in_scope(stored);
+    assert(count(stored, ownership_transfer.action.allocation) == 1);
+    assert(count(stored, ownership_transfer.action.escape) == 1);
+    assert(body(&e, "loop_over")->local.gap == ownership_source_local.missing.range_loan);
+    // A release through a field is an outside effect, not a gap of its own.
+    ownership_source.body* released = body(&e, "released");
+    in_scope(released);
+    assert(count(released, ownership_transfer.action.outside) == 1);
+    assert(barriers(released) == 0);
+    assert(count(released, ownership_transfer.action.use) == 1);
+    ownership_source.body* reread = body(&e, "reread");
+    in_scope(reread);
+    ownership_source.analyze(&e.source);
+    complete(released);
+    complete(stored);
+    // The release can end v's caller storage. Only the outside effect explains the failure.
+    unproved(reread);
+    assert(reread->local.gap == ownership_source_local.missing.call_dependent);
+    assert(reread->local.correspondence == ownership_source_local.status.incomplete);
+}
+
+fn validated_violations() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[32] source = {
+        "fn leak() i32 { i32 mut* own p = new(i32); *p = 7; return *p; }",
+        "fn use_after_release() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    del(p);",
+        "    return *q;",
+        "}",
+        "fn overwrite() void {",
+        "    i32 mut* own mut p = new(i32);",
+        "    p = new(i32);",
+        "    del(p);",
+        "}",
+        "fn use_after_move() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    i32 v = *a;",
+        "    del(b);",
+        "    return v;",
+        "}",
+        "fn returned_view() i32* {",
+        "    i32 mut* own p = new(i32);",
+        "    defer del(p);",
+        "    i32* view = p;",
+        "    return view;",
+        "}",
+        "fn loop_leak(u64 n) void {",
+        "    u64 mut i = 0;",
+        "    while (i < n) { i32 mut* own p = new(i32); i += 1; }",
+        "}",
+        "fn safe() i32 { i32 mut* own p = new(i32); *p = 7; i32 v = *p; del(p); return v; }",
+        "fn empty_release() void { i32 mut* own p = null; del(p); }",
+        "fn root() i32 { return 0; }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    // Residual owner: the dead marker of p is on the return line.
+    violated(body(&e, "leak"), ownership_api.event_kind.lost_ownership, "p",
+        "storage ends with a live owner", 1);
+    violated(body(&e, "use_after_release"), ownership_api.event_kind.invalid_use, "q",
+        "reference source is no longer live", 6);
+    violated(body(&e, "overwrite"), ownership_api.event_kind.lost_ownership, "p",
+        "move would discard a live owner", 10);
+    violated(body(&e, "use_after_move"), ownership_api.event_kind.invalid_use, "a",
+        "empty reference has no element", 16);
+    violated(body(&e, "returned_view"), ownership_api.event_kind.invalid_use, "the result",
+        "returned view outlives its source", 24);
+    violated(body(&e, "loop_leak"), ownership_api.event_kind.lost_ownership, "p",
+        "storage ends with a live owner", 28);
+    // Each violated body keeps complete correspondence and a complete solver.
+    assert(body(&e, "leak")->local.correspondence == ownership_source_local.status.complete);
+    assert(body(&e, "loop_leak")->local.solver == ownership_source_local.status.complete);
+    complete(body(&e, "safe"));
+    complete(body(&e, "empty_release"));
+    complete(body(&e, "root"));
+}
+
+fn path_dependent_failures_stay_unproved() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[24] source = {
+        "fn conditional_release(bool release) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* view = p;",
+        "    if (release) { del(p); }",
+        "    i32 value = *view;",
+        "    del(p);",
+        "    return value;",
+        "}",
+        "fn conditional_leak(bool keep) void {",
+        "    i32 mut* own p = new(i32);",
+        "    if (keep) { return; }",
+        "    del(p);",
+        "}",
+        "fn null_test() i32 {",
+        "    i32 mut* own mut p = null;",
+        "    if (p != null) { return *p; }",
+        "    return 0;",
+        "}",
+        "fn after_unknown_call() void {",
+        "    i32 mut* own p = new(i32);",
+        "    root();",
+        "}",
+        "fn root() i32 { return 0; }",
+        "fn other() void {}",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    // One path releases p and reads view. The other does not. No witness validates the path.
+    ownership_source.body* conditional = body(&e, "conditional_release");
+    unproved(conditional);
+    assert(conditional->local.unvalidated >= 1);
+    in_scope(conditional);
+    // Every path that reaches the early return holds p: the end there is a violation.
+    violated(body(&e, "conditional_leak"), ownership_api.event_kind.lost_ownership, "p",
+        "storage ends with a live owner", 11);
+    // The null test of p is false, so no path reaches the read (D17.9). Every represented
+    // state fails it, yet no witness reaches it: the proof stays incomplete.
+    ownership_source.body* tested = body(&e, "null_test");
+    unproved(tested);
+    assert(tested->local.unvalidated == 1);
+    in_scope(tested);
+    // After an unknown call the end of p has only a possible continuation (A06).
+    ownership_source.body* after = body(&e, "after_unknown_call");
+    unproved(after);
+    assert(after->local.unvalidated == 1);
+    // The failure does not need the call's havoc, so it stays in the declared scope.
+    in_scope(after);
+}
+
+fn stops_before_a_violation_block_its_validation() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[12] source = {
+        "struct holder { i32* p; }",
+        "fn guarded(bool c, holder* h) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    if (c) {",
+        "        i32* r = h->p;",
+        "        i32 x = *r;",
+        "    }",
+        "    del(p);",
+        "    return *q;",
+        "}",
+        "fn root() i32 { return 0; }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    // The load into r stops one path before the read of q. That path never reached the read,
+    // so the read of q fails on every attempt yet stays unvalidated.
+    ownership_source.body* row = body(&e, "guarded");
+    unproved(row);
+    assert(row->local.unvalidated == 1);
+    assert(row->local.correspondence == ownership_source_local.status.incomplete);
+}
+
+fn classification_separates_call_failures() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[14] source = {
+        "fn helper() void {}",
+        "fn caller_storage(i32* v) i32 {",
+        "    helper();",
+        "    return *v;",
+        "}",
+        "fn local_storage() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    helper();",
+        "    i32 v = *p;",
+        "    del(p);",
+        "    return v;",
+        "}",
+        "fn no_calls(i32* v) i32 { return *v; }",
+        "fn root() i32 { return 0; }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    // The call can end v's caller storage. Without its havoc the read succeeds.
+    ownership_source.body* caller = body(&e, "caller_storage");
+    unproved(caller);
+    assert(caller->local.gap == ownership_source_local.missing.call_dependent);
+    assert(caller->local.gap_source.line == 4);
+    // A slot owner keeps its allocation across the call: only the slot can release it.
+    complete(body(&e, "local_storage"));
+    complete(body(&e, "no_calls"));
+}
+
+// A borrowed temporary that one statement reads once ends after that read. Without the end,
+// its stale borrow would keep the released identity of the loop's allocation site.
+fn transient_borrows_end_after_their_read() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[13] source = {
+        "fn peek(u8@ b) u8 { return b[0]; }",
+        "fn loop_view(u64 n) u32 {",
+        "    u64 mut i = 0;",
+        "    u32 mut total = 0;",
+        "    while (i < n) {",
+        "        u8 mut@ own s = new(u8, 4);",
+        "        total += cast(peek(cast(s, u8@)), u32);",
+        "        del(s);",
+        "        i += 1;",
+        "    }",
+        "    return total;",
+        "}",
+        "fn root() i32 { return 0; }",
+    };
+    open(&e, lines(&text, source[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = body(&e, "loop_view");
+    u64 mut transient = 0;
+    u32 mut n = 0;
+    while (n < fir.local_count(&row->function)) {
+        if (row->local.transient[cast(n, u64)]) {
+            transient += 1;
+            assert(fir.local_at(&row->function, n)->kind == fir.local_kind.lk_temp);
+            assert(!row->local.owning[cast(n, u64)]);
+        }
+        n += 1;
+    }
+    // prepare used each transient end, so no transient remains to end.
+    assert(transient == 0);
+    // The cast temporary of the call argument got an empty value after the call.
+    u64 mut emptied = 0;
+    u64 mut i = 0;
+    while (i < row->local.steps_len) {
+        ownership_flow.step* at = &row->local.steps[i];
+        u32 local = at->local.source.root.ordinal;
+        if (at->local.kind == ownership_transfer.action.assignment &&
+            at->local.value.kind == ownership_api.contents_kind.empty_owner &&
+            fir.local_at(&row->function, local)->kind == fir.local_kind.lk_temp) {
+            emptied += 1;
+        }
+        i += 1;
+    }
+    assert(emptied == 1);
+    ownership_source.analyze(&e.source);
+    complete(row);
+}
+
+fn ledgers_and_teardown() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, "fn leak() void { i32 mut* own p = new(i32); }\nfn root() i32 { return 0; }\n");
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = body(&e, "leak");
+    u64 size = ownership_limits.fir_size(&row->function);
+    assert(row->local.fir_size == size);
+    assert(row->local.limits.w == ownership_limits.work_bound(size));
+    assert(row->local.meter.bounds.w == row->local.limits.w);
+    ownership_source.analyze(&e.source);
+    // The flow work charges W. The retained event charges one V unit.
+    assert(row->local.meter.used.w > 0);
+    assert(row->local.meter.used.v == 1);
+    assert(!row->local.first_refusal.terminal.present);
+    assert(row->local.violations_len == 1);
+    ownership_source_local.violation v = row->local.violations[0];
+    assert(ownership_source_local.charge_rendered(&row->local, &v));
+    assert(row->local.meter.used.v == 3);
+    // A V bound that leaves no room refuses the next record and keeps the first refusal.
+    row->local.meter.bounds.v = 3;
+    assert(!ownership_source_local.charge_rendered(&row->local, &v));
+    assert(row->local.first_refusal.terminal.reason ==
+        ownership_api.incomplete_reason.report_limit);
+    assert(row->local.first_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(row->local.first_refusal.terminal.limit.bound == 3);
+    ownership_source_local.free(&row->local);
+    assert(!row->local.initialized && row->local.violations.len == 0);
+    // A second free does nothing.
+    ownership_source_local.free(&row->local);
+}
+
+fn work_refusal_keeps_the_first_reason() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e,
+        "fn small() void { i32 mut* own p = new(i32); del(p); }\nfn root() i32 { return 0; }\n");
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = body(&e, "small");
+    // One W unit allows the first charge and refuses the next one.
+    row->local.meter.bounds.w = 1;
+    ownership_source.analyze(&e.source);
+    assert(row->local.solver == ownership_source_local.status.incomplete);
+    assert(row->local.first_refusal.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(row->local.first_refusal.terminal.limit.category == ownership_api.limit_category.w);
+    assert(row->local.first_refusal.terminal.limit.used == 1);
+    assert(row->local.first_refusal.terminal.limit.bound == 1);
+    assert(row->local.first_refusal.terminal.source.filename_present);
+    unproved(row);
+    assert(row->local.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    // The correspondence itself stayed complete: the refusal is the solver's.
+    assert(row->local.correspondence == ownership_source_local.status.complete);
+}
+
+fn main() i32 {
+    tracked_slots();
+    span_slices_and_field_addresses_keep_tracking();
+    result_classes();
+    println("tracked slots ok");
+    effects_of_owners();
+    effects_of_calls();
+    extern_owner_and_moved_argument();
+    println("effects ok");
+    gaps_of_storage();
+    println("gaps ok");
+    validated_violations();
+    println("violations ok");
+    path_dependent_failures_stay_unproved();
+    stops_before_a_violation_block_its_validation();
+    println("validation ok");
+    classification_separates_call_failures();
+    transient_borrows_end_after_their_read();
+    println("classification ok");
+    ledgers_and_teardown();
+    work_refusal_keeps_the_first_reason();
+    println("ledgers ok");
+    return 0;
+}

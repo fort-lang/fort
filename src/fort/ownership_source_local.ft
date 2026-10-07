@@ -1,0 +1,2163 @@
+/// Produces local ownership effects from verified source FIR and validates local violations.
+// The caller keeps this context, its FIR and the checker's types at stable addresses through
+// free. A tracked local slot (TL) is a reference local whose storage no FIR address names.
+import consts;
+import diag;
+import fir;
+import fir_flow;
+import ownership_api;
+import ownership_flow;
+import ownership_keys;
+import ownership_limits;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import types;
+
+u64 U64_MAX = 18446744073709551615;
+// Parameter entities use this base so that they never meet a step ordinal.
+u32 PARAMETER_BASE = 2147483648;
+u32 STATIC_ORDINAL = 4294967294;
+
+enum status {
+    unexecuted,
+    complete,
+    incomplete,
+    failed,
+}
+
+/// Why the producer supplies no complete local correspondence for a body.
+enum missing {
+    none,
+    fort_call,
+    own_parameter,
+    escape,
+    owner_load,
+    foreign_owner,
+    unknown_source,
+    owning_storage,
+    aggregate_result,
+    range_loan,
+    owned_leaves,
+    call_dependent,
+}
+
+// One event of the flow run. Texts are literals of the transfer and flow modules.
+struct record {
+    u64 key;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.event_kind kind;
+    ownership_api.incomplete_reason reason;
+    ownership_api.entity_id relation;
+    string text;
+    bool violation;
+    bool validated;
+}
+
+/// A validated violation: every path state that reached the operation failed it, and a
+/// witness path reaches the operation. `quoted` says that `name` is a source name.
+struct violation {
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.event_kind kind;
+    string text;
+    string name;
+    bool quoted;
+    ownership_api.entity_id relation;
+}
+
+// What a place of one statement means for the TLs.
+struct access {
+    bool tracked;
+    u32 local;
+    bool whole;
+    bool indirect;
+    bool length;
+    bool pointer;
+}
+
+// A flow binding outside the steps: one return, call or allocation event.
+struct binding_info {
+    u32 block;
+    bool at_return;
+}
+
+struct context {
+    fir.func* function;
+    ownership_api.function_id identity;
+    u32 file;
+    string filename;
+    ownership_api.source_position declaration;
+    bool mut@ own tracked;
+    bool mut@ own owning;
+    // A local whose storage some FIR address names. Pointers can write it at any time.
+    bool mut@ own taken;
+    // A borrowed temporary that one statement writes and a later statement of its block reads
+    // once. Its value has no use after that read.
+    bool mut@ own transient;
+    ownership_flow.step mut@ own steps;
+    u64 steps_len;
+    // The step of each unknown fort call. A violation after one has no validated path.
+    bool mut@ own barrier;
+    u32 mut@ own step_slot;
+    ownership_transfer.event_binding mut@ own step_events;
+    ownership_api.borrow_relation mut@ own relations;
+    ownership_flow.event_binding mut@ own events;
+    binding_info mut@ own event_info;
+    u64 events_len;
+    ownership_api.outcome_fact[1] trusted_return;
+    ownership_flow.source_file_binding[1] files;
+    ownership_state.state entry;
+    ownership_api.entity_id result_slot;
+    ownership_api.limit_table limits;
+    ownership_limits.meter meter;
+    // The ledger of the classification run, a computation of its own over the same FIR. It
+    // exists once `classified` is set.
+    ownership_limits.meter classify_meter;
+    ownership_api.proof_status classify_refusal;
+    bool classified;
+    ownership_api.services services;
+    ownership_api.proof_status first_refusal;
+    u64 fir_size;
+    missing gap;
+    ownership_api.source_position gap_source;
+    ownership_flow.analysis result;
+    record mut@ own records;
+    u64 records_len;
+    bool records_lost;
+    u64 mut@ own step_attempts;
+    u64 mut@ own step_uncertain;
+    u64 mut@ own return_attempts;
+    u64 mut@ own return_uncertain;
+    violation mut@ own violations;
+    u64 violations_len;
+    u64 unvalidated;
+    status correspondence;
+    status solver;
+    ownership_api.proof_status proof;
+    ownership_api.proof_status first_incomplete;
+    bool initialized;
+    bool solved;
+}
+
+fn complete() ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+fn entity(context* c, ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{c->identity, kind, ordinal};
+}
+
+fn slot(context* c, u32 local) ownership_api.place_path {
+    return ownership_api.place_path{.root = entity(c, ownership_api.entity_kind.slot, local)};
+}
+
+fn reference_type(types.node* t) bool { return types.type_is_reference(t); }
+
+// Whether a value of type `t` holds an owning leaf: an own reference or an owning aggregate.
+fn owning_type(types.node* t) bool {
+    if (reference_type(t)) { return t->is_own; }
+    return types.type_is_owning_aggregate(t);
+}
+
+// Whether a value of type `t` holds a reference leaf. A reference stops the walk.
+fn reference_leaf(types.node* t) bool {
+    if (reference_type(t)) { return true; }
+    if (t->kind == types.type_kind.k_array) { return reference_leaf(t->elem); }
+    if (t->kind != types.type_kind.k_struct) { return false; }
+    u32 count = fir.struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        if (reference_leaf(fir.struct_field_type(t, k))) { return true; }
+        k += 1;
+    }
+    return false;
+}
+
+fn local_type(context* c, u32 local) types.node* {
+    return fir.local_at(c->function, local)->ty;
+}
+
+/// Marks each local whose storage some FIR address names, in one pass over the statements.
+fn mark_taken(fir.func* f, bool mut@ taken) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_assign &&
+                (s->value.kind == fir.rvalue_kind.rv_addr ||
+                s->value.kind == fir.rvalue_kind.rv_slice) &&
+                s->value.place.base == fir.base_kind.bk_local &&
+                names_storage(f, s->value.place, s->value.kind)) {
+                taken[cast(s->value.place.local, u64)] = true;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+}
+
+// An address names the local's storage unless an indirection comes before it. A slice of a
+// span or a string reads the header and names the referent.
+fn names_storage(fir.func* f, fir.place p, fir.rvalue_kind kind) bool {
+    types.node* mut t = fir.base_type(f, p);
+    if (kind == fir.rvalue_kind.rv_slice && p.proj_len == 0 &&
+        (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string)) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref) { return false; }
+        if (pj.kind == fir.proj_kind.pj_index &&
+            (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string)) {
+            return false;
+        }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    if (kind == fir.rvalue_kind.rv_slice &&
+        (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string)) {
+        return false;
+    }
+    return true;
+}
+
+// Counts the statements and terminators that read each local, and the whole writes of each.
+fn transients(context mut* c) void {
+    fir.func* f = c->function;
+    u64 count = cast(fir.local_count(f), u64);
+    c->transient = new(bool, count);
+    u64 mut@ own reads = new(u64, count);
+    defer del(reads);
+    u64 mut@ own writes = new(u64, count);
+    defer del(writes);
+    u32 mut@ own written_block = new(u32, count);
+    defer del(written_block);
+    u32 mut@ own written_gap = new(u32, count);
+    defer del(written_gap);
+    u32 mut@ own read_block = new(u32, count);
+    defer del(read_block);
+    u32 mut@ own read_gap = new(u32, count);
+    defer del(read_gap);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 len = fir.block_statement_count(f, b);
+        u32 mut g = 0;
+        while (g <= len) {
+            fir.read mut value = fir.read{};
+            u32 mut i = 0;
+            u64 mut last = U64_MAX;
+            while (g < len ? fir.stmt_read(f, fir.block_statement(f, b, g), i, &value) :
+                fir.term_read(f, &fir.block_at(f, b)->term, i, &value)) {
+                if (value.place.base == fir.base_kind.bk_local &&
+                    cast(value.place.local, u64) != last) {
+                    u64 n = cast(value.place.local, u64);
+                    reads[n] += 1;
+                    read_block[n] = b;
+                    read_gap[n] = g;
+                    last = n;
+                }
+                i += 1;
+            }
+            fir.place mut written = fir.place{};
+            if (g < len && fir.stmt_writes_place(fir.block_statement(f, b, g), &written) &&
+                written.base == fir.base_kind.bk_local && written.proj_len == 0) {
+                u64 n = cast(written.local, u64);
+                writes[n] += 1;
+                written_block[n] = b;
+                written_gap[n] = g;
+            }
+            g += 1;
+        }
+        b += 1;
+    }
+    u64 mut n = 0;
+    while (n < count) {
+        fir.local* l = fir.local_at(f, cast(n, u32));
+        c->transient[n] = l->kind == fir.local_kind.lk_temp && c->tracked[n] &&
+            !c->owning[n] && reads[n] == 1 && writes[n] == 1 &&
+            read_block[n] == written_block[n] && read_gap[n] > written_gap[n];
+        n += 1;
+    }
+}
+
+// Ends the borrowed temporaries that this position reads for the last time.
+fn end_transients(context mut* c, u32 block, u32 gap) void {
+    fir.func* f = c->function;
+    u32 len = fir.block_statement_count(f, block);
+    fir.read mut value = fir.read{};
+    u32 mut i = 0;
+    while (gap < len ? fir.stmt_read(f, fir.block_statement(f, block, gap), i, &value) :
+        fir.term_read(f, &fir.block_at(f, block)->term, i, &value)) {
+        if (value.place.base == fir.base_kind.bk_local &&
+            c->transient[cast(value.place.local, u64)]) {
+            c->transient[cast(value.place.local, u64)] = false;
+            assign_empty(c, block, gap, value.place.local);
+        }
+        i += 1;
+    }
+}
+
+fn classify(context mut* c) void {
+    u32 count = fir.local_count(c->function);
+    c->tracked = new(bool, cast(count, u64));
+    c->owning = new(bool, cast(count, u64));
+    c->taken = new(bool, cast(count, u64));
+    mark_taken(c->function, c->taken);
+    u32 mut n = 0;
+    while (n < count) {
+        fir.local* l = fir.local_at(c->function, n);
+        bool reference = reference_type(l->ty);
+        c->tracked[cast(n, u64)] = reference && !c->taken[cast(n, u64)];
+        c->owning[cast(n, u64)] = owning_type(l->ty);
+        n += 1;
+    }
+}
+
+fn note_gap(context mut* c, missing why, ownership_api.source_position at) void {
+    if (c->gap == missing.none) {
+        c->gap = why;
+        c->gap_source = at;
+    }
+}
+
+fn source(context* c, diag.loc at) ownership_api.source_position {
+    if (at.line == 0 || at.col == 0 || at.file != c->filename) { return c->declaration; }
+    return ownership_api.source_position{c->identity.declaration.module, c->file,
+        at.line, at.col, at.end_line, at.end_col, true};
+}
+
+fn position(context* c, u32 block, u32 gap) ownership_api.operation_position {
+    return ownership_api.operation_position{c->identity, block, gap,
+        gap == fir.block_statement_count(c->function, block)};
+}
+
+fn location(context* c, u32 block, u32 gap) diag.loc {
+    if (gap < fir.block_statement_count(c->function, block)) {
+        return fir.block_statement(c->function, block, gap)->loc;
+    }
+    return fir.block_at(c->function, block)->term.loc;
+}
+
+fn place_access(context* c, fir.place p) access {
+    access mut out = access{};
+    if (p.base != fir.base_kind.bk_local || !c->tracked[cast(p.local, u64)]) { return out; }
+    out.tracked = true;
+    out.local = p.local;
+    out.whole = p.proj_len == 0;
+    types.node* mut t = local_type(c, p.local);
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(c->function, p, i);
+        bool header = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+        if (pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index && header)) {
+            out.indirect = true;
+            return out;
+        }
+        if (pj.kind == fir.proj_kind.pj_field && header && i == 0) {
+            out.length = pj.field == 1 && p.proj_len == 1;
+            out.pointer = pj.field == 0 && p.proj_len == 1;
+        }
+        t = fir.apply_projection(c->function, t, pj);
+        i += 1;
+    }
+    return out;
+}
+
+// ---- steps ----------------------------------------------------------------------------------
+
+fn grow_steps(context mut* c) void {
+    if (c->steps_len < c->steps.len) { return; }
+    u64 cap = c->steps.len * 2 + 8;
+    ownership_flow.step mut@ own steps = new(ownership_flow.step, cap);
+    u32 mut@ own slots = new(u32, cap);
+    bool mut@ own barriers = new(bool, cap);
+    ownership_transfer.event_binding mut@ own events = new(ownership_transfer.event_binding, cap);
+    ownership_api.borrow_relation mut@ own relations = new(ownership_api.borrow_relation, cap);
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        steps[i] = c->steps[i];
+        slots[i] = c->step_slot[i];
+        barriers[i] = c->barrier[i];
+        events[i] = c->step_events[i];
+        relations[i] = c->relations[i];
+        i += 1;
+    }
+    del(c->steps);
+    del(c->step_slot);
+    del(c->barrier);
+    del(c->step_events);
+    del(c->relations);
+    c->steps = move(steps);
+    c->step_slot = move(slots);
+    c->barrier = move(barriers);
+    c->step_events = move(events);
+    c->relations = move(relations);
+}
+
+// Steps and flow bindings take ordinals below PARAMETER_BASE, so no two keys meet.
+fn key_ordinal(u64 index) u32 {
+    if (index >= cast(PARAMETER_BASE, u64)) {
+        // A key needs a step or a binding of 64 bytes or more: 2^31 keys need 128 GiB.
+        // panic-coverage: unreachable: read: one body cannot hold 2^31 steps and bindings.
+        panic("ownership_source_local: key ordinal overflow");
+    }
+    return cast(index, u32);
+}
+
+// Slices into the step arrays move when they grow. link fixes them after the last step.
+fn add_step(context mut* c, u32 block, u32 gap, ownership_flow.step_kind kind,
+    ownership_transfer.action effect, u32 from, u32 to) u64 {
+    grow_steps(c);
+    u64 index = c->steps_len;
+    u32 key = key_ordinal(index);
+    u32 mut order = 0;
+    if (index > 0 && c->steps[index - 1].block == block && c->steps[index - 1].gap == gap) {
+        order = c->steps[index - 1].order + 1;
+    }
+    ownership_api.operation_position op = position(c, block, gap);
+    ownership_api.source_position at = source(c, location(c, block, gap));
+    ownership_flow.step mut s = ownership_flow.step{};
+    s.block = block;
+    s.gap = gap;
+    s.order = order;
+    s.kind = kind;
+    s.operation = op;
+    s.source = at;
+    ownership_transfer.request mut r = ownership_transfer.request{};
+    r.kind = effect;
+    r.operation = op;
+    r.source_position = at;
+    r.source = slot(c, from);
+    r.destination = slot(c, to);
+    r.direct_source_proved = true;
+    r.direct_destination_proved = true;
+    r.event_map_complete_proved = true;
+    s.local = r;
+    c->steps[index] = s;
+    c->step_slot[index] = from;
+    c->barrier[index] = false;
+    c->step_events[index] = ownership_transfer.event_binding{op,
+        entity(c, ownership_api.entity_kind.event, key)};
+    c->relations[index] = ownership_api.borrow_relation{};
+    c->steps_len += 1;
+    return index;
+}
+
+fn local_step(context mut* c, u32 block, u32 gap, ownership_transfer.action effect, u32 from,
+    u32 to) u64 {
+    return add_step(c, block, gap, ownership_flow.step_kind.local_effect, effect, from, to);
+}
+
+fn value_of(context* c, u64 index) ownership_api.entity_id {
+    return entity(c, ownership_api.entity_kind.value, cast(index, u32));
+}
+
+// A step that stops its path with incomplete proof: the producer has no effect for it.
+fn unsupported(context mut* c, u32 block, u32 gap, u32 local, missing why) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.inspect, local, local);
+    c->steps[i].local.direct_source_proved = false;
+    note_gap(c, why, c->steps[i].source);
+}
+
+fn inspect(context mut* c, u32 block, u32 gap, u32 local) void {
+    local_step(c, block, gap, ownership_transfer.action.inspect, local, local);
+}
+
+fn dereference(context mut* c, u32 block, u32 gap, u32 local) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.use, local, local);
+    c->steps[i].local.temporal_use = true;
+}
+
+fn empty_value(context* c, u64 index) ownership_api.contents_fact {
+    ownership_api.contents_fact mut value = ownership_api.contents_fact{};
+    value.kind = ownership_api.contents_kind.empty_owner;
+    value.owner_empty = true;
+    value.value_version = value_of(c, index);
+    value.span_length.kind = ownership_api.fact_kind.exact;
+    return value;
+}
+
+fn assign_empty(context mut* c, u32 block, u32 gap, u32 local) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.assignment, local, local);
+    c->steps[i].local.value = empty_value(c, i);
+}
+
+fn opaque(context mut* c, u32 block, u32 gap, u32 local, missing why) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.assignment, local, local);
+    c->steps[i].local.opaque_value = true;
+    note_gap(c, why, c->steps[i].source);
+}
+
+// A reference to a source that local effects never end: static storage or foreign storage.
+fn assign_reference(context mut* c, u32 block, u32 gap, u32 local,
+    ownership_api.entity_id source_key, ownership_api.scalar_fact length) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.assignment, local, local);
+    ownership_api.entity_id version = value_of(c, i);
+    c->relations[i] = ownership_api.borrow_relation{.key = entity(c,
+        ownership_api.entity_kind.relation, cast(i, u32)), .value_version = version,
+        .containing = slot(c, local), .source = source_key, .representation_complete = true};
+    ownership_api.contents_fact mut value = ownership_api.contents_fact{};
+    value.kind = ownership_api.contents_kind.reference;
+    value.value_version = version;
+    value.span_length = length;
+    c->steps[i].local.value = value;
+}
+
+fn copy_step(context mut* c, u32 block, u32 gap, u32 from, u32 to) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.copy, from, to);
+    c->steps[i].local.destination_owns = c->owning[cast(to, u64)];
+}
+
+fn move_step(context mut* c, u32 block, u32 gap, u32 from, u32 to) void {
+    local_step(c, block, gap, ownership_transfer.action.move_owner, from, to);
+}
+
+fn allocation_step(context mut* c, u32 block, u32 gap, u32 local, fir.operand count) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.allocation, local, local);
+    u32 ordinal = cast(i, u32);
+    ownership_api.entity_id key = entity(c, ownership_api.entity_kind.allocation, ordinal);
+    ownership_api.entity_id fresh = entity(c, ownership_api.entity_kind.source, ordinal);
+    ownership_api.entity_id version = value_of(c, i);
+    ownership_api.scalar_fact mut length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.symbolic, .symbol = version};
+    if (count.kind == fir.operand_kind.ok_const &&
+        count.value.kind == fir.const_kind.ck_int && !count.value.value.neg &&
+        count.value.value.mag <= 9223372036854775807) {
+        length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+            .value = cast(count.value.value.mag, i64)};
+    }
+    ownership_transfer.request mut* r = &c->steps[i].local;
+    r->allocation = ownership_api.allocation_fact{.key = key, .site = key,
+        .validity = ownership_api.validity_kind.live, .obligation = true,
+        .logical_length = length};
+    r->allocation.count.one = true;
+    r->allocation.owner.place = slot(c, local);
+    r->fresh_source = ownership_api.source_fact{.key = fresh,
+        .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live,
+        .allocation = key};
+    r->source_key = fresh;
+    c->relations[i] = ownership_api.borrow_relation{.key = entity(c,
+        ownership_api.entity_kind.relation, ordinal), .value_version = version,
+        .containing = slot(c, local), .source = fresh, .representation_complete = true};
+    ownership_api.contents_fact mut value = ownership_api.contents_fact{};
+    value.kind = ownership_api.contents_kind.reference;
+    value.value_version = version;
+    value.span_length = length;
+    r->value = value;
+}
+
+// Del stays shallow (D17.16). Owned leaves of the element type need the heap analysis.
+fn release_step(context mut* c, u32 block, u32 gap, u32 local) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.release, local, local);
+    types.node* t = local_type(c, local);
+    bool leaves = t->kind == types.type_kind.k_string ||
+        (t->kind != types.type_kind.k_voidptr && t->elem != null && !owning_type(t->elem));
+    c->steps[i].local.leaves_empty_proved = leaves;
+    if (!leaves) { note_gap(c, missing.owned_leaves, c->steps[i].source); }
+}
+
+fn end_step(context mut* c, u32 block, u32 gap, u32 local) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.dead, local, local);
+    c->steps[i].local.private_slot_proved = true;
+    c->steps[i].local.liveness_proved = true;
+}
+
+// A trusted extern call returns with its signature effects (D17.13).
+fn call_step(context mut* c, u32 block, u32 gap) void {
+    u64 i = add_step(c, block, gap, ownership_flow.step_kind.call_outcome,
+        ownership_transfer.action.inspect, 0, 0);
+    c->steps[i].outcomes_complete = true;
+}
+
+// Only slot owners keep their facts. An unknown call can also fail to return (D17.18).
+fn outside_step(context mut* c, u32 block, u32 gap, bool unknown_call) void {
+    u64 i = local_step(c, block, gap, ownership_transfer.action.outside, 0, 0);
+    c->barrier[i] = unknown_call;
+}
+
+// ---- statements -------------------------------------------------------------------------------
+
+// The operand a write consumes as its value, or none.
+struct consumed {
+    bool present;
+    fir.place place;
+}
+
+// Effects of one operand read that no write consumed.
+fn read_operand(context mut* c, u32 block, u32 gap, fir.operand o, consumed taken) void {
+    if (o.kind == fir.operand_kind.ok_const) { return; }
+    if (taken.present && fir.same_base(taken.place, o.place) &&
+        taken.place.proj_len == o.place.proj_len && o.place.proj_len == 0) { return; }
+    access a = place_access(c, o.place);
+    if (!a.tracked) { return; }
+    if (a.indirect) { dereference(c, block, gap, a.local); return; }
+    if (a.length) { return; }
+    if (o.kind == fir.operand_kind.ok_move) {
+        local_step(c, block, gap, ownership_transfer.action.escape, a.local, a.local);
+        return;
+    }
+    inspect(c, block, gap, a.local);
+}
+
+fn whole_tracked(context* c, fir.operand o) bool {
+    if (o.kind == fir.operand_kind.ok_const) { return false; }
+    access a = place_access(c, o.place);
+    return a.tracked && a.whole;
+}
+
+// The pattern of new(T, n): `_p = alloc<T>(n)` just before `_d = aggregate T@ own(move _p, n)`.
+fn owned_span(context* c, u32 block, u32 gap, fir.rvalue r) bool {
+    if (r.ops_len != 2 || gap == 0) { return false; }
+    fir.operand pointer = fir.rvalue_operand(c->function, r, 0);
+    fir.operand length = fir.rvalue_operand(c->function, r, 1);
+    if (pointer.kind != fir.operand_kind.ok_move || !whole_tracked(c, pointer)) { return false; }
+    fir.statement* before = fir.block_statement(c->function, block, gap - 1);
+    if (before->kind != fir.stmt_kind.st_assign ||
+        before->value.kind != fir.rvalue_kind.rv_alloc ||
+        before->place.base != fir.base_kind.bk_local || before->place.proj_len != 0 ||
+        before->place.local != pointer.place.local) { return false; }
+    fir.operand count = fir.rvalue_operand(c->function, before->value, 0);
+    if (count.kind != length.kind) { return false; }
+    if (count.kind == fir.operand_kind.ok_const) {
+        return count.value.kind == fir.const_kind.ck_int && length.value.kind ==
+            fir.const_kind.ck_int && count.value.value.neg == length.value.value.neg &&
+            count.value.value.mag == length.value.value.mag;
+    }
+    return count.place.base == fir.base_kind.bk_local && count.place.proj_len == 0 &&
+        length.place.base == fir.base_kind.bk_local && length.place.proj_len == 0 &&
+        count.place.local == length.place.local;
+}
+
+fn static_length(fir.constant k) ownership_api.scalar_fact {
+    return ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+        .value = cast(k.text.len, i64)};
+}
+
+fn unknown_length() ownership_api.scalar_fact {
+    return ownership_api.scalar_fact{.kind = ownership_api.fact_kind.unknown};
+}
+
+// The value of `rv_use` or `rv_cast` into a whole TL destination.
+fn write_operand(context mut* c, u32 block, u32 gap, u32 to, fir.operand o) consumed {
+    fir.func* f = c->function;
+    if (o.kind == fir.operand_kind.ok_const) {
+        fir.const_kind k = o.value.kind;
+        ownership_api.entity_id static_key = entity(c, ownership_api.entity_kind.source,
+            STATIC_ORDINAL);
+        if (k == fir.const_kind.ck_string || k == fir.const_kind.ck_bytes) {
+            assign_reference(c, block, gap, to, static_key, static_length(o.value));
+        } else if (k == fir.const_kind.ck_enum_table) {
+            assign_reference(c, block, gap, to, static_key, unknown_length());
+        } else if (k == fir.const_kind.ck_null || k == fir.const_kind.ck_zero) {
+            assign_empty(c, block, gap, to);
+        } else {
+            // An integer cast to a reference names no proved source (D17.17).
+            opaque(c, block, gap, to, missing.unknown_source);
+        }
+        return consumed{};
+    }
+    access a = place_access(c, o.place);
+    if (a.tracked && a.whole && o.kind == fir.operand_kind.ok_move) {
+        move_step(c, block, gap, a.local, to);
+        return consumed{true, o.place};
+    }
+    if (a.tracked && (a.whole || a.pointer) && o.kind == fir.operand_kind.ok_copy &&
+        reference_type(fir.operand_type(f, o))) {
+        copy_step(c, block, gap, a.local, to);
+        return consumed{true, o.place};
+    }
+    // A load from storage that no TL holds, or an integer cast to a reference.
+    read_operand(c, block, gap, o, consumed{});
+    missing mut why = missing.unknown_source;
+    if (o.kind == fir.operand_kind.ok_move || c->owning[cast(to, u64)]) {
+        why = missing.owner_load;
+    }
+    opaque(c, block, gap, to, why);
+    return consumed{true, o.place};
+}
+
+// The write into a whole TL destination. It returns the operand that the write consumes.
+fn write_tracked(context mut* c, u32 block, u32 gap, u32 to, fir.rvalue r) consumed {
+    fir.func* f = c->function;
+    if (r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_cast) {
+        return write_operand(c, block, gap, to, fir.rvalue_operand(f, r, 0));
+    }
+    if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
+        access a = place_access(c, r.place);
+        if (a.tracked && (a.indirect || (a.whole && r.kind == fir.rvalue_kind.rv_slice))) {
+            copy_step(c, block, gap, a.local, to);
+            return consumed{true, r.place};
+        }
+        if (r.place.base == fir.base_kind.bk_global && !fir.place_indirect(f, r.place)) {
+            ownership_api.entity_id static_key = entity(c, ownership_api.entity_kind.source,
+                STATIC_ORDINAL);
+            assign_reference(c, block, gap, to, static_key, unknown_length());
+            return consumed{};
+        }
+        opaque(c, block, gap, to, missing.unknown_source);
+        return consumed{};
+    }
+    if (r.kind == fir.rvalue_kind.rv_alloc) {
+        allocation_step(c, block, gap, to, fir.rvalue_operand(f, r, 0));
+        return consumed{};
+    }
+    if (r.kind == fir.rvalue_kind.rv_slice_ptr || r.kind == fir.rvalue_kind.rv_aggregate) {
+        fir.operand o = fir.rvalue_operand(f, r, 0);
+        bool owned = c->owning[cast(to, u64)];
+        if (r.kind == fir.rvalue_kind.rv_aggregate && owned && owned_span(c, block, gap, r)) {
+            move_step(c, block, gap, o.place.local, to);
+            return consumed{true, o.place};
+        }
+        bool view = r.kind == fir.rvalue_kind.rv_slice_ptr || (!owned && r.ops_len == 2);
+        if (view && o.kind == fir.operand_kind.ok_copy && whole_tracked(c, o)) {
+            copy_step(c, block, gap, o.place.local, to);
+            return consumed{true, o.place};
+        }
+        opaque(c, block, gap, to, missing.unknown_source);
+        return consumed{};
+    }
+    if (r.kind == fir.rvalue_kind.rv_call && r.callee == fir.callee_kind.cl_extern) {
+        if (c->owning[cast(to, u64)]) {
+            opaque(c, block, gap, to, missing.foreign_owner);
+            return consumed{};
+        }
+        ownership_api.entity_id foreign = entity(c, ownership_api.entity_kind.source,
+            cast(c->steps_len, u32));
+        assign_reference(c, block, gap, to, foreign, unknown_length());
+        c->steps[c->steps_len - 1].local.source_key = foreign;
+        return consumed{};
+    }
+    opaque(c, block, gap, to, r.kind == fir.rvalue_kind.rv_call ? missing.fort_call :
+        missing.unknown_source);
+    return consumed{};
+}
+
+fn statement_effects(context mut* c, u32 block, u32 gap) void {
+    fir.func* f = c->function;
+    fir.statement* s = fir.block_statement(f, block, gap);
+    switch (s->kind) {
+    case fir.stmt_kind.st_live:
+        return;
+    case fir.stmt_kind.st_dead:
+        // prepare already notes an owning local that is no TL.
+        if (c->tracked[cast(s->local, u64)]) {
+            if (c->owning[cast(s->local, u64)]) { end_step(c, block, gap, s->local); }
+            else { assign_empty(c, block, gap, s->local); }
+        }
+        return;
+    case fir.stmt_kind.st_loan_begin, fir.stmt_kind.st_loan_end:
+        note_gap(c, missing.range_loan, source(c, s->loc));
+        return;
+    case fir.stmt_kind.st_del:
+        access a = place_access(c, s->place);
+        if (a.tracked && a.whole) {
+            release_step(c, block, gap, a.local);
+            return;
+        }
+        if (a.tracked && a.indirect) { dereference(c, block, gap, a.local); }
+        // The release ends an allocation that no slot owns. Slot owners keep their facts.
+        outside_step(c, block, gap, false);
+        return;
+    case fir.stmt_kind.st_assign:
+        assignment_effects(c, block, gap, s);
+        return;
+    }
+}
+
+fn assignment_effects(context mut* c, u32 block, u32 gap, fir.statement* s) void {
+    fir.func* f = c->function;
+    fir.rvalue r = s->value;
+    access destination = place_access(c, s->place);
+    bool into_tracked = destination.tracked && destination.whole;
+    consumed mut taken = consumed{};
+    // The write comes first when it consumes its operand; flow applies the steps in order.
+    // A consumed operand is read by the copy or the move itself, before its store.
+    if (r.kind == fir.rvalue_kind.rv_call) {
+        if (r.callee == fir.callee_kind.cl_value) {
+            read_operand(c, block, gap, r.callee_op, taken);
+        }
+        u64 before = c->steps_len;
+        u32 mut k = 0;
+        while (k < r.ops_len) {
+            read_operand(c, block, gap, fir.rvalue_operand(f, r, k), taken);
+            k += 1;
+        }
+        bool mut escaped = false;
+        u64 mut at = before;
+        while (at < c->steps_len) {
+            if (c->steps[at].local.kind == ownership_transfer.action.escape) { escaped = true; }
+            at += 1;
+        }
+        if (r.callee == fir.callee_kind.cl_extern) {
+            call_step(c, block, gap);
+            // Foreign code can release an own argument at any time after the call.
+            if (escaped) { outside_step(c, block, gap, false); }
+        } else {
+            outside_step(c, block, gap, true);
+        }
+        if (into_tracked) { write_tracked(c, block, gap, destination.local, r); }
+        else if (destination.tracked && destination.indirect) {
+            dereference(c, block, gap, destination.local);
+        }
+        if (!into_tracked && r.callee == fir.callee_kind.cl_extern &&
+            owning_type(fir.place_type(f, s->place))) {
+            note_gap(c, missing.foreign_owner, source(c, s->loc));
+        }
+        return;
+    }
+    if (into_tracked) {
+        write_tracked_after_reads(c, block, gap, destination.local, r);
+        return;
+    }
+    if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
+        access a = place_access(c, r.place);
+        if (a.tracked && (a.indirect || (a.whole && r.kind == fir.rvalue_kind.rv_slice))) {
+            inspect(c, block, gap, a.local);
+        }
+    }
+    if (r.kind == fir.rvalue_kind.rv_alloc) {
+        note_gap(c, missing.escape, source(c, s->loc));
+    }
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        read_operand(c, block, gap, fir.rvalue_operand(f, r, k), taken);
+        k += 1;
+    }
+    if (destination.tracked && destination.indirect) {
+        dereference(c, block, gap, destination.local);
+    }
+    if (destination.tracked && !destination.whole && !destination.indirect) {
+        unsupported(c, block, gap, destination.local, missing.unknown_source);
+    }
+}
+
+// The operands that the write does not consume are read before it, in FIR order. The write
+// reads the consumed operand itself, so the operand keeps its place before the store.
+fn write_tracked_after_reads(context mut* c, u32 block, u32 gap, u32 to, fir.rvalue r) void {
+    fir.func* f = c->function;
+    bool first_value = r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_cast ||
+        r.kind == fir.rvalue_kind.rv_slice_ptr || r.kind == fir.rvalue_kind.rv_aggregate;
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        if (k > 0 || !first_value) {
+            read_operand(c, block, gap, fir.rvalue_operand(f, r, k), consumed{});
+        }
+        k += 1;
+    }
+    consumed taken = write_tracked(c, block, gap, to, r);
+    if (first_value && r.ops_len > 0 && !taken.present) {
+        read_operand(c, block, gap, fir.rvalue_operand(f, r, 0), consumed{});
+    }
+}
+
+fn terminator_effects(context mut* c, u32 block) void {
+    fir.func* f = c->function;
+    fir.block* b = fir.block_at(f, block);
+    u32 gap = fir.block_statement_count(f, block);
+    if (b->term.kind == fir.term_kind.tk_return) {
+        u32 mut n = 1;
+        while (n < fir.local_count(f)) {
+            fir.local* l = fir.local_at(f, n);
+            if (c->tracked[cast(n, u64)] && c->owning[cast(n, u64)] &&
+                l->kind != fir.local_kind.lk_param) { end_step(c, block, gap, n); }
+            n += 1;
+        }
+        return;
+    }
+    if (b->term.kind == fir.term_kind.tk_check_overwrite) { return; }
+    consumed none = consumed{};
+    if (b->term.kind == fir.term_kind.tk_switch || b->term.kind == fir.term_kind.tk_check) {
+        read_operand(c, block, gap, b->term.cond, none);
+    }
+    if (b->term.kind == fir.term_kind.tk_check || b->term.kind == fir.term_kind.tk_fail) {
+        u32 mut k = 0;
+        while (k < b->term.args_len) {
+            read_operand(c, block, gap, fir.operand_at(f, b->term.args_first + k), none);
+            k += 1;
+        }
+    }
+}
+
+// ---- entry facts ------------------------------------------------------------------------------
+
+fn add_source(context mut* c, ownership_api.entity_id key, ownership_api.source_kind kind) void {
+    ownership_state.append_sources(&c->entry, ownership_api.source_fact{.key = key,
+        .kind = kind, .validity = ownership_api.validity_kind.live});
+}
+
+fn entry_facts(context mut* c) void {
+    c->entry = ownership_state.empty();
+    add_source(c, entity(c, ownership_api.entity_kind.source, STATIC_ORDINAL),
+        ownership_api.source_kind.static_storage);
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        ownership_flow.step s = c->steps[i];
+        if (s.kind == ownership_flow.step_kind.local_effect &&
+            s.local.kind == ownership_transfer.action.assignment &&
+            s.local.source_key.kind == ownership_api.entity_kind.source) {
+            add_source(c, s.local.source_key, ownership_api.source_kind.trusted_foreign);
+        }
+        i += 1;
+    }
+    u32 mut n = 1;
+    while (n < fir.local_count(c->function)) {
+        fir.local* l = fir.local_at(c->function, n);
+        if (l->kind == fir.local_kind.lk_param) { parameter_facts(c, n, l); }
+        n += 1;
+    }
+}
+
+fn parameter_facts(context mut* c, u32 n, fir.local* l) void {
+    ownership_api.source_position at = source(c, l->loc);
+    if (owning_type(l->ty)) {
+        note_gap(c, missing.own_parameter, at);
+        return;
+    }
+    if (!c->tracked[cast(n, u64)]) { return; }
+    u32 ordinal = PARAMETER_BASE + n;
+    ownership_api.entity_id caller = entity(c, ownership_api.entity_kind.source, ordinal);
+    add_source(c, caller, ownership_api.source_kind.symbolic_caller);
+    ownership_api.entity_id version = entity(c, ownership_api.entity_kind.value, ordinal);
+    ownership_api.borrow_relation[1] relation = {ownership_api.borrow_relation{
+        .key = entity(c, ownership_api.entity_kind.relation, ordinal), .value_version = version,
+        .containing = slot(c, n), .source = caller, .representation_complete = true}};
+    ownership_api.contents_fact mut value = ownership_api.contents_fact{};
+    value.place = slot(c, n);
+    value.kind = ownership_api.contents_kind.reference;
+    value.value_version = version;
+    value.borrows = relation[..];
+    value.span_length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
+        .symbol = version};
+    ownership_state.append_contents(&c->entry, value);
+}
+
+// ---- flow bindings ----------------------------------------------------------------------------
+
+fn grow_events(context mut* c, u64 need) void {
+    if (need <= c->events.len) { return; }
+    u64 cap = need + c->events.len;
+    ownership_flow.event_binding mut@ own events = new(ownership_flow.event_binding, cap);
+    binding_info mut@ own info = new(binding_info, cap);
+    u64 mut i = 0;
+    while (i < c->events_len) {
+        events[i] = c->events[i];
+        info[i] = c->event_info[i];
+        i += 1;
+    }
+    del(c->events);
+    del(c->event_info);
+    c->events = move(events);
+    c->event_info = move(info);
+}
+
+fn bind(context mut* c, ownership_api.operation_position op, ownership_api.event_kind kind,
+    ownership_api.entity_id relation, u32 block, bool at_return) void {
+    grow_events(c, c->events_len + 1);
+    u32 ordinal = key_ordinal(c->steps_len + c->events_len);
+    c->events[c->events_len] = ownership_flow.event_binding{op, kind, relation,
+        entity(c, ownership_api.entity_kind.event, ordinal)};
+    c->event_info[c->events_len] = binding_info{block, at_return};
+    c->events_len += 1;
+}
+
+fn flow_bindings(context mut* c) void {
+    fir.func* f = c->function;
+    u32 mut block = 0;
+    while (block < fir.block_count(f)) {
+        if (fir.block_at(f, block)->term.kind == fir.term_kind.tk_return) {
+            u32 gap = fir.block_statement_count(f, block);
+            ownership_api.operation_position op = position(c, block, gap);
+            bind(c, op, ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{},
+                block, true);
+            if (c->result_slot.kind == ownership_api.entity_kind.slot) {
+                u64 mut i = 0;
+                while (i < c->entry.sources_len) {
+                    ownership_api.entity_id key = c->entry.sources[i].key;
+                    bind(c, op, ownership_api.event_kind.invalid_use, key, block, true);
+                    bind(c, op, ownership_api.event_kind.incomplete_proof, key, block, true);
+                    i += 1;
+                }
+                i = 0;
+                while (i < c->steps_len) {
+                    ownership_flow.step s = c->steps[i];
+                    if (s.kind == ownership_flow.step_kind.local_effect &&
+                        s.local.kind == ownership_transfer.action.allocation) {
+                        ownership_api.entity_id key = s.local.fresh_source.key;
+                        bind(c, op, ownership_api.event_kind.invalid_use, key, block, true);
+                        bind(c, op, ownership_api.event_kind.incomplete_proof, key, block, true);
+                    }
+                    i += 1;
+                }
+            }
+        }
+        block += 1;
+    }
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        ownership_flow.step s = c->steps[i];
+        if (s.kind == ownership_flow.step_kind.local_effect &&
+            s.local.kind == ownership_transfer.action.allocation) {
+            bind(c, s.operation, ownership_api.event_kind.incomplete_proof,
+                s.local.allocation.key, s.block, false);
+        }
+        if (s.kind == ownership_flow.step_kind.call_outcome) {
+            bind(c, s.operation, ownership_api.event_kind.incomplete_proof,
+                ownership_api.entity_id{}, s.block, false);
+        }
+        i += 1;
+    }
+}
+
+// The step arrays reached their final addresses. Each request names its own entries.
+fn link(context mut* c) void {
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        ownership_transfer.request mut* r = &c->steps[i].local;
+        r->event_bindings = c->step_events[i..i + 1];
+        if (c->relations[i].key.kind == ownership_api.entity_kind.relation) {
+            r->value.borrows = c->relations[i..i + 1];
+        }
+        if (c->steps[i].kind == ownership_flow.step_kind.call_outcome) {
+            c->steps[i].outcomes = c->trusted_return[..];
+        }
+        i += 1;
+    }
+}
+
+// ---- services -----------------------------------------------------------------------------------
+
+fn budget(void mut* opaque_context, ownership_api.charge_request* request)
+    ownership_api.charge_result {
+    context mut* c = cast(opaque_context, context mut*);
+    if (c->first_refusal.terminal.present) {
+        return ownership_api.charge_result{.proof = c->first_refusal,
+            .limit = c->first_refusal.terminal.limit};
+    }
+    ownership_api.charge_result out = ownership_limits.try_charge(&c->meter, request);
+    if (!out.allowed) {
+        c->first_refusal = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+            request->operation, request->source);
+        c->first_refusal.terminal.limit = out.limit;
+        c->first_refusal.terminal.limit.source = request->source;
+    }
+    return out;
+}
+
+// Keeps a bounded copy of each event. The validation decides what each event establishes.
+fn event(void mut* opaque_context, ownership_api.event_request* request)
+    ownership_api.event_result {
+    context mut* c = cast(opaque_context, context mut*);
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = request->current;
+    out.retained = true;
+    out.stored_key = request->event.key;
+    ownership_api.event_descriptor* e = &request->event;
+    if (!charge_report(c, e->operation, e->source, 1)) {
+        c->records_lost = true;
+        return out;
+    }
+    if (c->records_len == c->records.len) {
+        u64 mut cap = c->records.len * 2 + 4;
+        if (cap > c->limits.v) { cap = c->limits.v; }
+        if (cap <= c->records_len) {
+            c->records_lost = true;
+            return out;
+        }
+        record mut@ own bigger = new(record, cap);
+        u64 mut i = 0;
+        while (i < c->records_len) { bigger[i] = c->records[i]; i += 1; }
+        del(c->records);
+        c->records = move(bigger);
+    }
+    bool invalid = e->reason == ownership_api.incomplete_reason.none &&
+        (e->kind == ownership_api.event_kind.invalid_use ||
+        e->kind == ownership_api.event_kind.lost_ownership);
+    c->records[c->records_len] = record{cast(e->key.ordinal, u64), e->operation, e->source,
+        e->kind, e->reason, e->relation, e->text, invalid, false};
+    c->records_len += 1;
+    return out;
+}
+
+// Charges retained events and rendered records against the V bound of this ledger.
+fn charge_report(context mut* c, ownership_api.operation_position op,
+    ownership_api.source_position at, u64 amount) bool {
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.v, ownership_api.limit_scope.report, amount}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, op, at, item[..]};
+    ownership_api.charge_result out = ownership_limits.try_charge(&c->meter, &request);
+    if (!out.allowed && !c->first_refusal.terminal.present) {
+        c->first_refusal = ownership_api.incomplete(ownership_api.incomplete_reason.report_limit,
+            op, at);
+        c->first_refusal.terminal.limit = out.limit;
+        c->first_refusal.terminal.limit.source = at;
+    }
+    return out.allowed;
+}
+
+/// Charges one rendered violation: its error and its note.
+fn charge_rendered(context mut* c, violation* v) bool {
+    return charge_report(c, v->operation, v->source, 2);
+}
+
+fn configure(ownership_limits.meter mut* m, ownership_api.limit_table* limits) void {
+    if (!ownership_limits.configure(m, limits)) {
+        // panic-coverage: unreachable: read: computation() returns the valid version 1 table.
+        panic("ownership_source_local: production limits are invalid");
+    }
+}
+
+/// Produces the steps and the entry facts of one verified body.
+fn prepare(context mut* c, fir.func* function, ownership_api.function_id identity, u32 file,
+    string filename, ownership_api.source_position declaration) void {
+    if (c->initialized) { panic("ownership_source_local: context is already prepared"); }
+    c->function = function;
+    c->identity = identity;
+    c->file = file;
+    c->filename = filename;
+    c->declaration = declaration;
+    c->initialized = true;
+    c->trusted_return[0] = ownership_api.outcome_fact{
+        .kind = ownership_api.outcome_kind.function_return, .possible_caller_return = true};
+    c->files[0] = ownership_flow.source_file_binding{identity.declaration.module, file,
+        filename};
+    classify(c);
+    types.node* result = local_type(c, 0);
+    if (c->tracked[0]) {
+        c->result_slot = entity(c, ownership_api.entity_kind.slot, 0);
+    } else if (result->kind != types.type_kind.k_void && reference_leaf(result)) {
+        note_gap(c, missing.aggregate_result, declaration);
+    }
+    u32 mut n = 1;
+    while (n < fir.local_count(function)) {
+        fir.local* l = fir.local_at(function, n);
+        if (!c->tracked[cast(n, u64)] && owning_type(l->ty) &&
+            l->kind != fir.local_kind.lk_param) {
+            note_gap(c, missing.owning_storage, source(c, l->loc));
+        }
+        n += 1;
+    }
+    transients(c);
+    u32 mut block = 0;
+    while (block < fir.block_count(function)) {
+        u32 count = fir.block_statement_count(function, block);
+        u32 mut gap = 0;
+        while (gap < count) {
+            statement_effects(c, block, gap);
+            end_transients(c, block, gap);
+            gap += 1;
+        }
+        terminator_effects(c, block);
+        end_transients(c, block, count);
+        block += 1;
+    }
+    entry_facts(c);
+    flow_bindings(c);
+    link(c);
+    c->fir_size = ownership_limits.fir_size(function);
+    c->limits = ownership_limits.computation(c->fir_size);
+    configure(&c->meter, &c->limits);
+    c->services.budget_context = cast(c, void mut*);
+    c->services.budget = budget;
+    c->services.event_context = cast(c, void mut*);
+    c->services.event = event;
+    c->step_attempts = new(u64, c->steps_len);
+    c->step_uncertain = new(u64, c->steps_len);
+    c->return_attempts = new(u64, cast(fir.block_count(function), u64));
+    c->return_uncertain = new(u64, cast(fir.block_count(function), u64));
+    c->correspondence = c->gap == missing.none ? status.complete : status.incomplete;
+}
+
+// ---- stops -------------------------------------------------------------------------------------
+
+// Whether block `to` follows block `from` on a path of at least one edge.
+fn reaches(fir.func* f, u32 from, u32 to) bool {
+    fir_flow.bits mut seen = fir_flow.bits_new(fir.block_count(f));
+    defer fir_flow.bits_free(&seen);
+    u32 mut@ own work = new(u32, cast(fir.block_count(f), u64));
+    defer del(work);
+    u64 mut len = 0;
+    u32 mut index = 0;
+    u32 mut target = 0;
+    fir.block* start = fir.block_at(f, from);
+    while (start->terminated && fir_flow.reachable_target(f, &start->term, index, &target)) {
+        if (!fir_flow.bits_get(&seen, target)) {
+            fir_flow.bits_set(&seen, target);
+            work[len] = target;
+            len += 1;
+        }
+        index += 1;
+    }
+    while (len > 0) {
+        len -= 1;
+        u32 b = work[len];
+        if (b == to) { return true; }
+        fir.block* at = fir.block_at(f, b);
+        index = 0;
+        while (at->terminated && fir_flow.reachable_target(f, &at->term, index, &target)) {
+            if (!fir_flow.bits_get(&seen, target)) {
+                fir_flow.bits_set(&seen, target);
+                work[len] = target;
+                len += 1;
+            }
+            index += 1;
+        }
+    }
+    return false;
+}
+
+// Whether a path from position (from_block, from_gap, from_rank) can reach position
+// (block, gap, rank) after it. A loop can bring a later position of one block back.
+fn follows(context* c, u32 from_block, u32 from_gap, u64 from_rank, u32 block, u32 gap,
+    u64 rank) bool {
+    if (from_block == block && from_gap == gap && from_rank == rank) { return false; }
+    bool earlier = from_block == block &&
+        (from_gap < gap || (from_gap == gap && from_rank < rank));
+    return earlier || reaches(c->function, from_block, block);
+}
+
+// Whether a path stopped, or passed an unknown fort call, before (block, gap, rank).
+fn stopped_before(context* c, u32 block, u32 gap, u64 rank) bool {
+    if (c->result.stops_lost) { return true; }
+    u64 mut i = 0;
+    while (i < c->result.stops_len) {
+        ownership_flow.stop at = c->result.stops[i];
+        if (follows(c, at.block, at.gap, at.rank, block, gap, rank)) { return true; }
+        i += 1;
+    }
+    i = 0;
+    while (i < c->steps_len) {
+        ownership_flow.step* b = &c->steps[i];
+        if (c->barrier[i] && follows(c, b->block, b->gap, cast(b->order, u64) + 1, block, gap,
+            rank)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// ---- classification ---------------------------------------------------------------------------
+
+// A second run classifies the failures of a body. It drops the outside steps, so calls and
+// non-local releases keep every fact. A failure that it does not repeat depends on such an
+// effect. The second run never proves a step: it only decides the scope of the first run. It
+// is a computation of its own, so it charges a ledger of its own (fir.md 14.1).
+fn classify_budget(void mut* opaque_context, ownership_api.charge_request* request)
+    ownership_api.charge_result {
+    context mut* c = cast(opaque_context, context mut*);
+    if (c->classify_refusal.terminal.present) {
+        return ownership_api.charge_result{.proof = c->classify_refusal,
+            .limit = c->classify_refusal.terminal.limit};
+    }
+    ownership_api.charge_result out = ownership_limits.try_charge(&c->classify_meter, request);
+    if (!out.allowed) {
+        c->classify_refusal = ownership_api.incomplete(
+            ownership_api.incomplete_reason.work_limit, request->operation, request->source);
+        c->classify_refusal.terminal.limit = out.limit;
+        c->classify_refusal.terminal.limit.source = request->source;
+    }
+    return out;
+}
+
+fn classify_event(void mut* opaque_context, ownership_api.event_request* request)
+    ownership_api.event_result {
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = request->current;
+    out.retained = true;
+    out.stored_key = request->event.key;
+    return out;
+}
+
+/// Whether each failure of the first run depends on a call or on a non-local release. That is
+/// true only when the second run ends within its own budget and fails nothing: call summaries
+/// own those failures (calls_heap). Any failure of the second run is local, and so is a
+/// second run that stops at a limit.
+fn call_dependent(context mut* c) bool {
+    u64 mut outside = 0;
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        if (c->steps[i].kind == ownership_flow.step_kind.local_effect &&
+            c->steps[i].local.kind == ownership_transfer.action.outside) { outside += 1; }
+        i += 1;
+    }
+    if (outside == 0) { return false; }
+    ownership_flow.step mut@ own kept = new(ownership_flow.step, c->steps_len - outside);
+    defer del(kept);
+    u64 mut n = 0;
+    i = 0;
+    while (i < c->steps_len) {
+        if (c->steps[i].kind != ownership_flow.step_kind.local_effect ||
+            c->steps[i].local.kind != ownership_transfer.action.outside) {
+            kept[n] = c->steps[i];
+            n += 1;
+        }
+        i += 1;
+    }
+    configure(&c->classify_meter, &c->limits);
+    c->classified = true;
+    // The second run is one computation in two passes on one ledger. The first pass keeps one
+    // path state for each block: G = 1 joins every alternative. A joined state covers each
+    // path, so it fails a step whenever a path does. So a first pass with no failure means
+    // that no path fails. Only a failed first pass needs the exact pass with the production G.
+    ownership_api.limit_table mut joined = c->limits;
+    joined.g = 1;
+    if (passes_without_failure(c, kept[..], &joined)) { return true; }
+    return !c->classify_refusal.terminal.present &&
+        passes_without_failure(c, kept[..], &c->limits);
+}
+
+// Whether one pass of the second run over `kept` ends within its budget and fails nothing.
+fn passes_without_failure(context mut* c, ownership_flow.step@ kept,
+    ownership_api.limit_table* limits) bool {
+    ownership_api.services mut classifying = ownership_api.services{};
+    classifying.budget_context = cast(c, void mut*);
+    classifying.budget = classify_budget;
+    classifying.event_context = cast(c, void mut*);
+    classifying.event = classify_event;
+    ownership_flow.program input = ownership_flow.program{.function = c->function,
+        .identity = c->identity, .entry = &c->entry, .services = &classifying,
+        .limits = limits, .steps = kept, .events = c->events[..c->events_len],
+        .source_files = c->files[..], .result_slot = c->result_slot,
+        .supplied_complete = true, .verified_fir = true};
+    ownership_flow.analysis mut pass = ownership_flow.solve(&input);
+    defer ownership_flow.free(&pass);
+    return !c->classify_refusal.terminal.present && !pass.stops_lost &&
+        pass.blocks.len > 0 && pass.failures == 0;
+}
+
+// ---- witnesses --------------------------------------------------------------------------------
+
+// What the witness walk knows about the value of one local.
+enum witness_kind {
+    unknown,
+    // `value`: an integer, a bool, a char or null.
+    constant,
+    // The entry value of parameter `param`. No condition chose it yet.
+    entry_value,
+    // Whether the entry value of `param` stands in `rel` to the integer or bool `value`.
+    relation,
+    // A pointer to an allocation of at least one element.
+    allocated,
+    // A span or a string. `value` is its length when `has_length` is set. `live` says that its
+    // pointer designates an allocation of at least one element.
+    header,
+}
+
+struct witness_value {
+    witness_kind kind;
+    consts.cval value;
+    u32 param;
+    consts.cv_rel rel;
+    bool has_length;
+    bool live;
+}
+
+// One concrete path from the entry toward one block. `toward` holds the blocks that can reach
+// that block, and `distance[b]` the fewest edges from block `b` to it. `chosen[p]` says that a
+// condition fixed the entry value of parameter `p` to `choice[p]`.
+struct walk {
+    context mut* owner;
+    witness_value mut@ own values;
+    bool mut@ own chosen;
+    consts.cval mut@ own choice;
+    fir_flow.bits toward;
+    u32 mut@ own distance;
+}
+
+fn constant_value(consts.cval v) witness_value {
+    return witness_value{.kind = witness_kind.constant, .value = v};
+}
+
+fn null_value() witness_value { return constant_value(consts.cv_null()); }
+
+// Whether a condition can choose a value of type `t`: a bool or an integer.
+fn choosable(types.node* t) bool {
+    return t->kind == types.type_kind.k_prim &&
+        (prim.prim_is_integer(t->prim) || t->prim == prim.prim_kind.prim_bool);
+}
+
+fn integer_type(types.node* t) bool {
+    return t->kind == types.type_kind.k_prim && prim.prim_is_integer(t->prim);
+}
+
+fn header_type(types.node* t) bool {
+    return t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+}
+
+// Charges one W unit of validation to the local ledger: a block or a statement of a walk.
+fn charge_work(context mut* c, u32 block) bool {
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.w, ownership_api.limit_scope.computation, 1}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, position(c, block, 0), c->declaration, item[..]};
+    return budget(cast(c, void mut*), &request).allowed;
+}
+
+// Starts a walk toward `block`: the blocks that reach it, and the entry value of each local.
+// Each bool or integer parameter that no address names is free for a condition to choose.
+fn walk_start(context mut* c, fir.pred_table* preds, u32 block, walk mut* w) bool {
+    fir.func* f = c->function;
+    u32 count = fir.block_count(f);
+    u64 locals = cast(fir.local_count(f), u64);
+    w->owner = c;
+    w->values = new(witness_value, locals);
+    w->chosen = new(bool, locals);
+    w->choice = new(consts.cval, locals);
+    w->toward = fir_flow.bits_new(count);
+    u64 mut n = 0;
+    while (n < locals) {
+        fir.local* l = fir.local_at(f, cast(n, u32));
+        if (l->kind == fir.local_kind.lk_param && !c->taken[n] && choosable(l->ty)) {
+            w->values[n] = witness_value{.kind = witness_kind.entry_value, .param = cast(n, u32)};
+        }
+        n += 1;
+    }
+    // A search in breadth order over the predecessors finds the distances.
+    w->distance = new(u32, cast(count, u64));
+    u32 mut@ own queue = new(u32, cast(count, u64));
+    defer del(queue);
+    fir_flow.bits_set(&w->toward, block);
+    queue[0] = block;
+    u64 mut head = 0;
+    u64 mut tail = 1;
+    while (head < tail) {
+        u32 b = queue[head];
+        head += 1;
+        if (!charge_work(c, b)) { return false; }
+        u32 mut i = 0;
+        while (i < fir.pred_count(preds, b)) {
+            u32 from = fir.pred_at(preds, b, i);
+            if (!fir_flow.bits_get(&w->toward, from)) {
+                fir_flow.bits_set(&w->toward, from);
+                w->distance[cast(from, u64)] = w->distance[cast(b, u64)] + 1;
+                queue[tail] = from;
+                tail += 1;
+            }
+            i += 1;
+        }
+    }
+    return true;
+}
+
+fn walk_free(walk mut* w) void {
+    del(w->values);
+    del(w->chosen);
+    del(w->choice);
+    del(w->distance);
+    fir_flow.bits_free(&w->toward);
+}
+
+// The value of `v` after the conditions that chose its parameter.
+fn resolve(walk* w, witness_value v) witness_value {
+    if (v.kind != witness_kind.entry_value && v.kind != witness_kind.relation) { return v; }
+    u64 p = cast(v.param, u64);
+    if (!w->chosen[p]) { return v; }
+    if (v.kind == witness_kind.entry_value) { return constant_value(w->choice[p]); }
+    return constant_value(consts.cv_compare(v.rel, w->choice[p], v.value));
+}
+
+fn constant_of(fir.constant k) witness_value {
+    if (k.kind == fir.const_kind.ck_int || k.kind == fir.const_kind.ck_bool) {
+        return constant_value(k.value);
+    }
+    if (k.kind == fir.const_kind.ck_null) { return null_value(); }
+    if (k.kind == fir.const_kind.ck_zero && k.ty != null) {
+        if (types.type_is_reference(k.ty)) { return null_value(); }
+        if (integer_type(k.ty)) { return constant_value(consts.cv_from_u64(0)); }
+        if (choosable(k.ty)) { return constant_value(consts.cv_from_bool(false)); }
+    }
+    return witness_value{};
+}
+
+// The value at `p`. The walk knows whole locals that no address names, and the length of a
+// span or a string local.
+fn place_value(walk* w, fir.place p) witness_value {
+    context* c = w->owner;
+    if (p.base != fir.base_kind.bk_local || c->taken[cast(p.local, u64)]) {
+        return witness_value{};
+    }
+    witness_value v = resolve(w, w->values[cast(p.local, u64)]);
+    if (p.proj_len == 0) { return v; }
+    if (p.proj_len != 1 || !header_type(local_type(c, p.local))) { return witness_value{}; }
+    fir.projection pj = fir.place_projection(c->function, p, 0);
+    if (pj.kind != fir.proj_kind.pj_field || pj.field != 1) { return witness_value{}; }
+    if (v.kind == witness_kind.constant && v.value.kind == consts.cval_kind.cv_null) {
+        return constant_value(consts.cv_from_u64(0));
+    }
+    if (v.kind == witness_kind.header && v.has_length) { return constant_value(v.value); }
+    return witness_value{};
+}
+
+fn operand_value(walk* w, fir.operand o) witness_value {
+    if (o.kind == fir.operand_kind.ok_const) { return constant_of(o.value); }
+    return place_value(w, o.place);
+}
+
+// A write changes the local that the place names unless an indirection comes first. A write
+// into part of a local makes its value unknown.
+fn set_place(walk mut* w, fir.place p, witness_value v) void {
+    context* c = w->owner;
+    if (p.base != fir.base_kind.bk_local || !names_storage(c->function, p,
+        fir.rvalue_kind.rv_addr)) { return; }
+    w->values[cast(p.local, u64)] = p.proj_len == 0 ? v : witness_value{};
+}
+
+// A move and a del leave the zero value of the type at the place: null for a reference.
+fn empty_place(walk mut* w, fir.place p) void {
+    bool reference = types.type_is_reference(fir.place_type(w->owner->function, p));
+    set_place(w, p, reference ? null_value() : witness_value{});
+}
+
+fn both_integers(witness_value a, witness_value b) bool {
+    return a.kind == witness_kind.constant && b.kind == witness_kind.constant &&
+        a.value.kind == consts.cval_kind.cv_int && b.value.kind == consts.cval_kind.cv_int;
+}
+
+// The exact result of an integer rvalue. False when the operation has no exact result.
+fn exact(fir.rvalue_kind kind, consts.cval a, consts.cval b, consts.cval mut* out) bool {
+    if (kind == fir.rvalue_kind.rv_add || kind == fir.rvalue_kind.rv_add_overflows) {
+        return consts.cv_add(a, b, out);
+    }
+    if (kind == fir.rvalue_kind.rv_sub || kind == fir.rvalue_kind.rv_sub_overflows) {
+        return consts.cv_sub(a, b, out);
+    }
+    if (kind == fir.rvalue_kind.rv_mul || kind == fir.rvalue_kind.rv_mul_overflows) {
+        return consts.cv_mul(a, b, out);
+    }
+    if (kind == fir.rvalue_kind.rv_div) { return consts.cv_div(a, b, out); }
+    if (kind == fir.rvalue_kind.rv_rem) { return consts.cv_rem(a, b, out); }
+    return false;
+}
+
+fn relation_of(fir.rvalue_kind kind) consts.cv_rel {
+    if (kind == fir.rvalue_kind.rv_eq) { return consts.cv_rel.cv_rel_eq; }
+    if (kind == fir.rvalue_kind.rv_ne) { return consts.cv_rel.cv_rel_ne; }
+    if (kind == fir.rvalue_kind.rv_lt) { return consts.cv_rel.cv_rel_lt; }
+    if (kind == fir.rvalue_kind.rv_le) { return consts.cv_rel.cv_rel_le; }
+    if (kind == fir.rvalue_kind.rv_gt) { return consts.cv_rel.cv_rel_gt; }
+    return consts.cv_rel.cv_rel_ge;
+}
+
+// The relation with its operands exchanged: `k < x` is `x > k`.
+fn mirror(consts.cv_rel rel) consts.cv_rel {
+    if (rel == consts.cv_rel.cv_rel_lt) { return consts.cv_rel.cv_rel_gt; }
+    if (rel == consts.cv_rel.cv_rel_le) { return consts.cv_rel.cv_rel_ge; }
+    if (rel == consts.cv_rel.cv_rel_gt) { return consts.cv_rel.cv_rel_lt; }
+    if (rel == consts.cv_rel.cv_rel_ge) { return consts.cv_rel.cv_rel_le; }
+    return rel;
+}
+
+fn ordering(consts.cv_rel rel) bool {
+    return rel != consts.cv_rel.cv_rel_eq && rel != consts.cv_rel.cv_rel_ne;
+}
+
+fn compare_constants(consts.cv_rel rel, consts.cval a, consts.cval b) witness_value {
+    if (a.kind != b.kind) { return witness_value{}; }
+    bool integer = a.kind == consts.cval_kind.cv_int || a.kind == consts.cval_kind.cv_char;
+    bool equality = a.kind == consts.cval_kind.cv_bool || a.kind == consts.cval_kind.cv_null;
+    if (integer || (equality && !ordering(rel))) {
+        return constant_value(consts.cv_compare(rel, a, b));
+    }
+    return witness_value{};
+}
+
+// `x rel k` for the entry value `x` of a parameter and a constant `k` of its kind.
+fn parameter_relation(walk* w, consts.cv_rel rel, witness_value x, witness_value k)
+    witness_value {
+    types.node* t = local_type(w->owner, x.param);
+    bool integer = integer_type(t) && k.value.kind == consts.cval_kind.cv_int;
+    bool flag = !integer_type(t) && k.value.kind == consts.cval_kind.cv_bool && !ordering(rel);
+    if (!integer && !flag) { return witness_value{}; }
+    return witness_value{.kind = witness_kind.relation, .param = x.param, .rel = rel,
+        .value = k.value};
+}
+
+fn comparison(walk* w, fir.rvalue r) witness_value {
+    fir.func* f = w->owner->function;
+    consts.cv_rel rel = relation_of(r.kind);
+    witness_value a = operand_value(w, fir.rvalue_operand(f, r, 0));
+    witness_value b = operand_value(w, fir.rvalue_operand(f, r, 1));
+    if (a.kind == witness_kind.constant && b.kind == witness_kind.constant) {
+        return compare_constants(rel, a.value, b.value);
+    }
+    // An allocation is never null.
+    bool a_null = a.kind == witness_kind.constant && a.value.kind == consts.cval_kind.cv_null;
+    bool b_null = b.kind == witness_kind.constant && b.value.kind == consts.cval_kind.cv_null;
+    if (!ordering(rel) && ((a.kind == witness_kind.allocated && b_null) ||
+        (b.kind == witness_kind.allocated && a_null))) {
+        return constant_value(consts.cv_from_bool(rel == consts.cv_rel.cv_rel_ne));
+    }
+    if (a.kind == witness_kind.entry_value && b.kind == witness_kind.constant) {
+        return parameter_relation(w, rel, a, b);
+    }
+    if (b.kind == witness_kind.entry_value && a.kind == witness_kind.constant) {
+        return parameter_relation(w, mirror(rel), b, a);
+    }
+    return witness_value{};
+}
+
+// The value that `s` writes. The walk evaluates exact integer arithmetic, comparisons,
+// integer casts that keep the value, allocations and span headers.
+fn rvalue_value(walk* w, fir.statement* s) witness_value {
+    fir.func* f = w->owner->function;
+    fir.rvalue r = s->value;
+    types.node* t = fir.place_type(f, s->place);
+    fir.rvalue_kind k = r.kind;
+    if (k == fir.rvalue_kind.rv_use) { return operand_value(w, fir.rvalue_operand(f, r, 0)); }
+    if (k == fir.rvalue_kind.rv_eq || k == fir.rvalue_kind.rv_ne ||
+        k == fir.rvalue_kind.rv_lt || k == fir.rvalue_kind.rv_le ||
+        k == fir.rvalue_kind.rv_gt || k == fir.rvalue_kind.rv_ge) { return comparison(w, r); }
+    if (k == fir.rvalue_kind.rv_not) {
+        witness_value v = operand_value(w, fir.rvalue_operand(f, r, 0));
+        if (v.kind == witness_kind.constant && v.value.kind == consts.cval_kind.cv_bool) {
+            return constant_value(consts.cv_lnot(v.value));
+        }
+        return witness_value{};
+    }
+    if (k == fir.rvalue_kind.rv_slice) {
+        // `slice(p, lo, hi)` has the length hi - lo. Checks before it hold lo <= hi.
+        if (!header_type(t) || r.ops_len != 2) { return witness_value{}; }
+        witness_value low = operand_value(w, fir.rvalue_operand(f, r, 0));
+        witness_value high = operand_value(w, fir.rvalue_operand(f, r, 1));
+        consts.cval mut length = consts.cv_none();
+        if (!both_integers(low, high) || !consts.cv_sub(high.value, low.value, &length) ||
+            length.neg) { return witness_value{}; }
+        return witness_value{.kind = witness_kind.header, .value = length, .has_length = true};
+    }
+    if (k == fir.rvalue_kind.rv_and || k == fir.rvalue_kind.rv_or ||
+        k == fir.rvalue_kind.rv_xor) {
+        witness_value x = operand_value(w, fir.rvalue_operand(f, r, 0));
+        witness_value y = operand_value(w, fir.rvalue_operand(f, r, 1));
+        if (x.kind != witness_kind.constant || y.kind != witness_kind.constant ||
+            x.value.kind != consts.cval_kind.cv_bool || y.value.kind != consts.cval_kind.cv_bool) {
+            return witness_value{};
+        }
+        if (k == fir.rvalue_kind.rv_and) {
+            return constant_value(consts.cv_land(x.value, y.value));
+        }
+        if (k == fir.rvalue_kind.rv_or) {
+            return constant_value(consts.cv_lor(x.value, y.value));
+        }
+        return constant_value(consts.cv_from_bool(x.value.mag != y.value.mag));
+    }
+    if (k == fir.rvalue_kind.rv_alloc) {
+        witness_value count = operand_value(w, fir.rvalue_operand(f, r, 0));
+        if (count.kind == witness_kind.constant && count.value.kind == consts.cval_kind.cv_int &&
+            !count.value.neg && count.value.mag > 0) {
+            return witness_value{.kind = witness_kind.allocated};
+        }
+        return witness_value{};
+    }
+    if (k == fir.rvalue_kind.rv_aggregate) {
+        if (!header_type(t) || r.ops_len != 2) { return witness_value{}; }
+        witness_value pointer = operand_value(w, fir.rvalue_operand(f, r, 0));
+        witness_value length = operand_value(w, fir.rvalue_operand(f, r, 1));
+        bool known = length.kind == witness_kind.constant &&
+            length.value.kind == consts.cval_kind.cv_int;
+        return witness_value{.kind = witness_kind.header, .value = length.value,
+            .has_length = known, .live = pointer.kind == witness_kind.allocated};
+    }
+    if (r.ops_len != 1 && r.ops_len != 2) { return witness_value{}; }
+    witness_value a = operand_value(w, fir.rvalue_operand(f, r, 0));
+    if (k == fir.rvalue_kind.rv_cast) {
+        // A cast that keeps the value: any other cast leaves the walk without it.
+        if (a.kind == witness_kind.constant && a.value.kind == consts.cval_kind.cv_int &&
+            integer_type(t) && consts.int_fits(a.value, t->prim)) { return a; }
+        return witness_value{};
+    }
+    if (r.ops_len != 2) { return witness_value{}; }
+    witness_value b = operand_value(w, fir.rvalue_operand(f, r, 1));
+    consts.cval mut out = consts.cv_none();
+    if (!both_integers(a, b) || !exact(k, a.value, b.value, &out)) { return witness_value{}; }
+    if (k == fir.rvalue_kind.rv_add_overflows || k == fir.rvalue_kind.rv_sub_overflows ||
+        k == fir.rvalue_kind.rv_mul_overflows) {
+        types.node* operand = fir.operand_type(f, fir.rvalue_operand(f, r, 0));
+        if (!integer_type(operand)) { return witness_value{}; }
+        return constant_value(consts.cv_from_bool(!consts.int_fits(out, operand->prim)));
+    }
+    if (!integer_type(t) || !consts.int_fits(out, t->prim)) { return witness_value{}; }
+    return constant_value(out);
+}
+
+// Whether the walk can cross a call. An extern declaration is trusted to return as its
+// signature says (D17.13). A fort callee can fail to return, and local proof has no summary.
+fn returns(fir.func* f, fir.rvalue r) bool {
+    if (r.callee != fir.callee_kind.cl_extern) { return false; }
+    types.node* t = fir.callee_type(f, r);
+    return t != null && !t->is_noreturn;
+}
+
+// Applies one statement to the walk. False when the walk cannot cross it.
+fn walk_statement(walk mut* w, fir.statement* s) bool {
+    fir.func* f = w->owner->function;
+    if (s->kind == fir.stmt_kind.st_del) {
+        empty_place(w, s->place);
+        return true;
+    }
+    if (s->kind != fir.stmt_kind.st_assign) { return true; }
+    if (s->value.kind == fir.rvalue_kind.rv_call && !returns(f, s->value)) { return false; }
+    witness_value v = s->value.kind == fir.rvalue_kind.rv_call ? witness_value{} :
+        rvalue_value(w, s);
+    u32 mut k = 0;
+    while (k < s->value.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, s->value, k);
+        if (o.kind == fir.operand_kind.ok_move) { empty_place(w, o.place); }
+        k += 1;
+    }
+    set_place(w, s->place, v);
+    return true;
+}
+
+fn fix(walk mut* w, u32 param, consts.cval v) void {
+    w->chosen[cast(param, u64)] = true;
+    w->choice[cast(param, u64)] = v;
+}
+
+// An entry value of the parameter of `cond` that makes `cond` equal `wanted`, in `out`. A
+// relation tries its constant and the integers next to it, which satisfy any satisfiable
+// relation of one integer to a constant. The walk changes nothing.
+fn pick(walk* w, witness_value cond, consts.cval wanted, consts.cval mut* out) bool {
+    types.node* t = local_type(w->owner, cond.param);
+    if (cond.kind == witness_kind.entry_value) {
+        bool fits = integer_type(t) ? wanted.kind == consts.cval_kind.cv_int &&
+            consts.int_fits(wanted, t->prim) : wanted.kind == consts.cval_kind.cv_bool;
+        if (fits) { *out = wanted; }
+        return fits;
+    }
+    if (cond.kind != witness_kind.relation || wanted.kind != consts.cval_kind.cv_bool) {
+        return false;
+    }
+    consts.cval[3] mut candidates = {cond.value, consts.cv_none(), consts.cv_none()};
+    if (!integer_type(t)) {
+        candidates[1] = consts.cv_from_bool(false);
+        candidates[2] = consts.cv_from_bool(true);
+    } else {
+        consts.cval one = consts.cv_from_u64(1);
+        consts.cval mut near = consts.cv_none();
+        if (consts.cv_add(cond.value, one, &near)) { candidates[1] = near; }
+        if (consts.cv_sub(cond.value, one, &near)) { candidates[2] = near; }
+    }
+    u64 mut i = 0;
+    while (i < candidates.len) {
+        consts.cval x = candidates[i];
+        bool fits = integer_type(t) ? x.kind == consts.cval_kind.cv_int &&
+            consts.int_fits(x, t->prim) : x.kind == consts.cval_kind.cv_bool;
+        if (fits && consts.cv_eq(consts.cv_compare(cond.rel, x, cond.value), wanted)) {
+            *out = x;
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn matches_arm(fir.func* f, fir.terminator* t, consts.cval v) bool {
+    u32 mut i = 0;
+    while (i < t->arms_len) {
+        if (consts.cv_eq(fir.term_arm(f, t, i).value, v)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// An entry value that sends `cond` to the `otherwise` target of `t`: a value of `cond` that no
+// arm names.
+fn pick_otherwise(walk* w, fir.terminator* t, witness_value cond, consts.cval mut* out) bool {
+    fir.func* f = w->owner->function;
+    bool flag = cond.kind == witness_kind.relation ||
+        !integer_type(local_type(w->owner, cond.param));
+    u32 limit = flag ? 1 : t->arms_len;
+    u32 mut i = 0;
+    while (i <= limit) {
+        consts.cval v = flag ? consts.cv_from_bool(i == 1) : consts.cv_from_u64(cast(i, u64));
+        if (!matches_arm(f, t, v) && pick(w, cond, v, out)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// The target of a switch on the walk. An unknown condition gives no witness. On a condition
+// that a parameter value decides, the walk takes the target nearest to the operation that some
+// value reaches, and fixes that value.
+fn choose_arm(walk mut* w, fir.terminator* t, u32 mut* out) bool {
+    fir.func* f = w->owner->function;
+    witness_value cond = operand_value(w, t->cond);
+    if (cond.kind == witness_kind.constant) {
+        u32 mut i = 0;
+        while (i < t->arms_len) {
+            fir.arm choice = fir.term_arm(f, t, i);
+            if (choice.value.kind == cond.value.kind && consts.cv_eq(choice.value, cond.value)) {
+                *out = choice.target;
+                return true;
+            }
+            i += 1;
+        }
+        *out = t->otherwise;
+        return true;
+    }
+    if (cond.kind != witness_kind.entry_value && cond.kind != witness_kind.relation) {
+        return false;
+    }
+    bool mut found = false;
+    u32 mut best = 0;
+    consts.cval mut value = consts.cv_none();
+    u32 mut i = 0;
+    while (i <= t->arms_len) {
+        bool otherwise = i == t->arms_len;
+        u32 target = otherwise ? t->otherwise : fir.term_arm(f, t, i).target;
+        consts.cval mut entry = consts.cv_none();
+        bool nearer = !found || w->distance[cast(target, u64)] < w->distance[cast(best, u64)];
+        if (fir_flow.bits_get(&w->toward, target) && nearer && (otherwise ?
+            pick_otherwise(w, t, cond, &entry) : pick(w, cond, fir.term_arm(f, t, i).value,
+            &entry))) {
+            found = true;
+            best = target;
+            value = entry;
+        }
+        i += 1;
+    }
+    if (!found) { return false; }
+    fix(w, cond.param, value);
+    *out = best;
+    return true;
+}
+
+enum outcome {
+    passes,
+    fails,
+    unknown_outcome,
+}
+
+// The outcome of a check on the walk. A free parameter takes a value that passes it. The
+// condition is true on failure, except for `chk_user`, where it is true on success.
+fn check_outcome(walk mut* w, fir.terminator* t) outcome {
+    bool success = t->check == fir.check_kind.chk_user;
+    witness_value cond = operand_value(w, t->cond);
+    if (cond.kind == witness_kind.constant && cond.value.kind == consts.cval_kind.cv_bool) {
+        return (cond.value.mag == 1) == success ? outcome.passes : outcome.fails;
+    }
+    consts.cval mut entry = consts.cv_none();
+    if ((cond.kind == witness_kind.entry_value || cond.kind == witness_kind.relation) &&
+        pick(w, cond, consts.cv_from_bool(success), &entry)) {
+        fix(w, cond.param, entry);
+        return outcome.passes;
+    }
+    return outcome.unknown_outcome;
+}
+
+// The outcome of `check(overwrite: p)`: it passes on an empty owner and traps on a live one.
+fn overwrite_outcome(walk* w, fir.terminator* t) outcome {
+    witness_value owner = place_value(w, t->place);
+    if (owner.kind == witness_kind.constant && owner.value.kind == consts.cval_kind.cv_null) {
+        return outcome.passes;
+    }
+    if (owner.kind == witness_kind.allocated || (owner.kind == witness_kind.header && owner.live)) {
+        return outcome.fails;
+    }
+    return outcome.unknown_outcome;
+}
+
+/// Which runtime trap is the operation of an event. The check that traps guards the first
+/// statement of its continuation: the store of an overwrite, or the access of an element.
+enum trap {
+    no_trap,
+    overwrite_trap,
+    element_trap,
+}
+
+// The text of the transfer event for an access through an empty reference. The trap of a
+// bounds or span check is that access (D17.9).
+string EMPTY_ELEMENT = "empty reference has no element";
+
+/// Whether a concrete path reaches position `gap` of `block` from the entry (toolchain 4.2).
+/// The path crosses no back edge and no fort call, and each condition on it evaluates or
+/// takes a parameter value that no earlier condition fixed. An unknown condition gives no
+/// witness. A check that traps ends the path. It reaches the operation only when the trap is
+/// the event `kind` names and the operation is the statement that the check guards.
+fn witness(context mut* c, fir.pred_table* preds, u32 block, u32 gap, trap kind) bool {
+    walk mut w = walk{};
+    defer walk_free(&w);
+    return walk_to(c, preds, block, gap, kind, &w);
+}
+
+/// The walk of witness, which leaves its values in `w` for the caller to free.
+// One choice at each condition: a feasible path that needs another choice stays unwitnessed.
+fn walk_to(context mut* c, fir.pred_table* preds, u32 block, u32 gap, trap kind,
+    walk mut* w) bool {
+    fir.func* f = c->function;
+    if (!walk_start(c, preds, block, w)) { return false; }
+    fir_flow.bits mut visited = fir_flow.bits_new(fir.block_count(f));
+    defer fir_flow.bits_free(&visited);
+    u32 mut at = 0;
+    while (true) {
+        if (fir_flow.bits_get(&visited, at)) { return false; }
+        fir_flow.bits_set(&visited, at);
+        u32 last = at == block ? gap : fir.block_statement_count(f, at);
+        u32 mut i = 0;
+        while (i < last) {
+            if (!charge_work(c, at) || !walk_statement(w, fir.block_statement(f, at, i))) {
+                return false;
+            }
+            i += 1;
+        }
+        if (at == block) { return true; }
+        if (!charge_work(c, at)) { return false; }
+        fir.terminator* t = &fir.block_at(f, at)->term;
+        u32 mut next = 0;
+        if (t->kind == fir.term_kind.tk_goto) {
+            next = t->target;
+        } else if (t->kind == fir.term_kind.tk_switch) {
+            if (!choose_arm(w, t, &next)) { return false; }
+        } else if (t->kind == fir.term_kind.tk_check ||
+            t->kind == fir.term_kind.tk_check_overwrite) {
+            bool overwrite = t->kind == fir.term_kind.tk_check_overwrite;
+            outcome result = overwrite ? overwrite_outcome(w, t) : check_outcome(w, t);
+            if (result == outcome.fails) {
+                trap expected = overwrite ? trap.overwrite_trap : trap.element_trap;
+                return kind == expected && t->target == block && gap == 0;
+            }
+            if (result != outcome.passes) { return false; }
+            next = t->target;
+        } else {
+            return false;
+        }
+        if (!fir_flow.bits_get(&w->toward, next)) { return false; }
+        at = next;
+    }
+    return false;
+}
+
+// ---- validation -------------------------------------------------------------------------------
+
+fn same_record(record* a, record* b) bool {
+    return a->kind == b->kind && a->text == b->text &&
+        ownership_keys.entity(a->relation, b->relation) == 0;
+}
+
+// The name of a local in a message. Only a source name takes quotes.
+fn name_of(context* c, u32 local, bool mut* quoted) string {
+    string name = fir.local_name(fir.local_at(c->function, local));
+    *quoted = name.len > 0;
+    if (name.len == 0) { return "a temporary value"; }
+    return name;
+}
+
+fn add_violation(context mut* c, record* r, string name, bool quoted) void {
+    if (c->violations_len == c->violations.len) {
+        u64 cap = c->violations.len * 2 + 4;
+        violation mut@ own bigger = new(violation, cap);
+        u64 mut i = 0;
+        while (i < c->violations_len) { bigger[i] = c->violations[i]; i += 1; }
+        del(c->violations);
+        c->violations = move(bigger);
+    }
+    c->violations[c->violations_len] = violation{r->operation, r->source, r->kind, r->text,
+        name, quoted, r->relation};
+    c->violations_len += 1;
+}
+
+// Toolchain 4.2 orders events by source range, operation key, event class and relation key.
+fn before(violation* a, violation* b) bool {
+    i32 by_source = ownership_keys.source(a->source, b->source);
+    if (by_source != 0) { return by_source < 0; }
+    i32 by_operation = ownership_keys.operation(a->operation, b->operation);
+    if (by_operation != 0) { return by_operation < 0; }
+    if (a->kind != b->kind) { return cast(a->kind, i32) < cast(b->kind, i32); }
+    return ownership_keys.entity(a->relation, b->relation) < 0;
+}
+
+fn sort_violations(context mut* c) void {
+    u64 mut i = 1;
+    while (i < c->violations_len) {
+        violation item = c->violations[i];
+        u64 mut j = i;
+        while (j > 0 && before(&item, &c->violations[j - 1])) {
+            c->violations[j] = c->violations[j - 1];
+            j -= 1;
+        }
+        c->violations[j] = item;
+        i += 1;
+    }
+}
+
+// A violation counts when each path state that reached it reported the same event, no stop
+// or unknown call comes before it, and a witness path reaches it (toolchain 4.2).
+fn validate(context mut* c) void {
+    fir.pred_table mut preds = fir.pred_table{};
+    bool mut built = false;
+    u64 mut i = 0;
+    while (i < c->records_len) {
+        record* r = &c->records[i];
+        if (!r->violation) { i += 1; continue; }
+        // Count each step or return event once, at its first record.
+        bool mut first = true;
+        u64 mut j = 0;
+        while (j < i) {
+            if (c->records[j].key == r->key && c->records[j].violation &&
+                same_record(&c->records[j], r)) { first = false; }
+            j += 1;
+        }
+        if (!first) { i += 1; continue; }
+        u64 mut same = 0;
+        bool mut mixed = false;
+        j = 0;
+        while (j < c->records_len) {
+            if (c->records[j].key == r->key) {
+                if (same_record(&c->records[j], r)) { same += 1; }
+                else { mixed = true; }
+            }
+            j += 1;
+        }
+        bool mut valid = !mixed && !c->records_lost;
+        string mut name = "";
+        bool mut quoted = false;
+        u32 mut block = 0;
+        u32 mut gap = 0;
+        if (r->key < c->steps_len) {
+            ownership_flow.step* s = &c->steps[r->key];
+            valid = valid && !c->barrier[r->key] && same == c->step_attempts[r->key] &&
+                c->step_uncertain[r->key] == 0 &&
+                !stopped_before(c, s->block, s->gap, cast(s->order, u64) + 1);
+            u32 named = r->relation.kind == ownership_api.entity_kind.slot ?
+                r->relation.ordinal : c->step_slot[r->key];
+            name = name_of(c, named, &quoted);
+            block = s->block;
+            gap = s->gap;
+        } else {
+            binding_info info = c->event_info[r->key - c->steps_len];
+            block = info.block;
+            gap = fir.block_statement_count(c->function, block);
+            valid = valid && info.at_return && same == c->return_attempts[cast(block, u64)] &&
+                c->return_uncertain[cast(block, u64)] == 0 &&
+                !stopped_before(c, block, gap, ownership_flow.STOP_AFTER - 1);
+            name = c->result_slot.kind == ownership_api.entity_kind.slot ? "the result" : "";
+        }
+        if (valid && !built) {
+            preds = fir.func_predecessors(c->function);
+            built = true;
+        }
+        trap mut kind = trap.no_trap;
+        if (r->key < c->steps_len && r->kind == ownership_api.event_kind.lost_ownership) {
+            kind = trap.overwrite_trap;
+        } else if (r->kind == ownership_api.event_kind.invalid_use && r->text == EMPTY_ELEMENT) {
+            kind = trap.element_trap;
+        }
+        if (valid && witness(c, &preds, block, gap, kind)) {
+            add_violation(c, r, name, quoted);
+            j = 0;
+            while (j < c->records_len) {
+                if (c->records[j].key == r->key) { c->records[j].validated = true; }
+                j += 1;
+            }
+        } else { c->unvalidated += 1; }
+        i += 1;
+    }
+    if (built) { fir.pred_table_free(&preds); }
+    sort_violations(c);
+}
+
+fn first_reason(context mut* c) void {
+    if (c->first_refusal.terminal.present) {
+        c->first_incomplete = c->first_refusal;
+        return;
+    }
+    u64 mut i = 0;
+    while (i < c->records_len) {
+        record* r = &c->records[i];
+        if (!r->validated) {
+            ownership_api.incomplete_reason why = r->reason == ownership_api.incomplete_reason.none
+                ? ownership_api.incomplete_reason.missing_path : r->reason;
+            ownership_api.proof_status candidate = ownership_api.incomplete(why, r->operation,
+                r->source);
+            if (!c->first_incomplete.terminal.present || ownership_keys.source(r->source,
+                c->first_incomplete.terminal.source) < 0) { c->first_incomplete = candidate; }
+        }
+        i += 1;
+    }
+    if (!c->first_incomplete.terminal.present && c->result.failures > 0) {
+        c->first_incomplete = c->result.first_failure;
+    }
+    if (!c->first_incomplete.terminal.present && c->gap != missing.none) {
+        c->first_incomplete = ownership_api.incomplete(
+            ownership_api.incomplete_reason.missing_correspondence,
+            ownership_api.operation_position{.function = c->identity}, c->gap_source);
+    }
+}
+
+/// Runs the flow solver over the produced steps and validates its violations.
+fn solve(context mut* c) void {
+    if (!c->initialized || c->solved) { panic("ownership_source_local: invalid solve order"); }
+    c->solved = true;
+    ownership_flow.observer mut seen = ownership_flow.observer{c->step_attempts[..],
+        c->step_uncertain[..], c->return_attempts[..], c->return_uncertain[..]};
+    ownership_flow.program input = ownership_flow.program{.function = c->function,
+        .identity = c->identity, .entry = &c->entry, .services = &c->services,
+        .limits = &c->limits, .steps = c->steps[..c->steps_len],
+        .events = c->events[..c->events_len], .source_files = c->files[..],
+        .result_slot = c->result_slot, .supplied_complete = true, .verified_fir = true,
+        .observed = &seen};
+    c->result = ownership_flow.solve(&input);
+    validate(c);
+    first_reason(c);
+    bool clean = c->result.failures == 0 && c->unvalidated == 0 && c->records_len == 0;
+    // A validated violation is local. Otherwise the second run decides the scope. A refusal
+    // explains no failure, so the body stays in the declared scope: after a refusal of the
+    // first run no second run starts, and a refusal of the second run moves nothing.
+    if (!clean && c->gap == missing.none && c->violations_len == 0 &&
+        !c->first_refusal.terminal.present && call_dependent(c)) {
+        note_gap(c, missing.call_dependent, c->first_incomplete.terminal.source);
+        c->correspondence = status.incomplete;
+    }
+    // A refused classification run leaves the solver of the body incomplete.
+    bool ran = c->result.blocks.len > 0;
+    c->solver = ran && !c->first_refusal.terminal.present &&
+        !c->classify_refusal.terminal.present && !c->result.stops_lost && !c->records_lost ?
+        status.complete : status.incomplete;
+    release_work(c);
+    if (c->violations_len > 0) {
+        c->proof = complete();
+        c->proof.failed = true;
+    } else if (c->correspondence == status.complete && c->solver == status.complete && clean) {
+        c->proof = complete();
+    } else {
+        c->proof = c->first_incomplete;
+        if (!c->proof.terminal.present) {
+            c->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+                ownership_api.operation_position{.function = c->identity}, c->declaration);
+        }
+    }
+}
+
+// Releases the flow input, the path states and the records. Results stay for the report.
+fn release_work(context mut* c) void {
+    ownership_flow.free(&c->result);
+    ownership_state.free(&c->entry);
+    del(c->steps);
+    del(c->step_slot);
+    del(c->barrier);
+    del(c->step_events);
+    del(c->relations);
+    del(c->events);
+    del(c->event_info);
+    del(c->records);
+    del(c->step_attempts);
+    del(c->step_uncertain);
+    del(c->return_attempts);
+    del(c->return_uncertain);
+    c->steps_len = 0;
+    c->events_len = 0;
+    c->records_len = 0;
+}
+
+fn free(context mut* c) void {
+    release_work(c);
+    del(c->tracked);
+    del(c->owning);
+    del(c->taken);
+    del(c->transient);
+    del(c->violations);
+    *c = context{};
+}

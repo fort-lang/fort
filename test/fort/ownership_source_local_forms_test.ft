@@ -1,0 +1,322 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| value forms ok
+//| reference forms ok
+//| gap sources ok
+//| first gap ok
+//| integer addresses ok
+/// Pins the steps of the rvalue and terminator forms that the producer maps, and the
+/// source line of each gap that leaves local correspondence incomplete.
+import ownership_api;
+import ownership_flow;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_transfer;
+import std.strbuf;
+
+fn action_name(ownership_transfer.action effect) string {
+    switch (effect) {
+    case ownership_transfer.action.allocation: return "allocation";
+    case ownership_transfer.action.copy: return "copy";
+    case ownership_transfer.action.move_owner: return "move";
+    case ownership_transfer.action.release: return "release";
+    case ownership_transfer.action.assignment: return "assignment";
+    case ownership_transfer.action.address: return "address";
+    case ownership_transfer.action.use: return "use";
+    case ownership_transfer.action.inspect: return "inspect";
+    case ownership_transfer.action.dead: return "dead";
+    case ownership_transfer.action.escape: return "escape";
+    case ownership_transfer.action.outside: return "outside";
+    }
+}
+
+fn describe(ownership_source_local.context* c, u64 i, strbuf.str_buf mut* out) void {
+    ownership_flow.step* s = &c->steps[i];
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(s->block, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->gap, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->order, u64));
+    if (s->kind == ownership_flow.step_kind.call_outcome) {
+        strbuf.append(out, " trusted call");
+        return;
+    }
+    ownership_transfer.request* r = &s->local;
+    strbuf.push(out, ' ');
+    strbuf.append(out, action_name(r->kind));
+    strbuf.push(out, ' ');
+    strbuf.append_u64(out, cast(r->source.root.ordinal, u64));
+    strbuf.append(out, "->");
+    strbuf.append_u64(out, cast(r->destination.root.ordinal, u64));
+    if (r->temporal_use) { strbuf.append(out, " temporal"); }
+    if (r->private_slot_proved) { strbuf.append(out, " private"); }
+    if (r->opaque_value) { strbuf.append(out, " opaque"); }
+    if (!r->direct_source_proved) { strbuf.append(out, " unsupported"); }
+    if (c->barrier[i]) { strbuf.append(out, " barrier"); }
+    if (r->kind == ownership_transfer.action.assignment && !r->opaque_value &&
+        r->value.kind == ownership_api.contents_kind.empty_owner) {
+        strbuf.append(out, " empty");
+    }
+}
+
+fn expect(ownership_source_env.env mut* e, string name, string@ expected) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    assert(row->local.initialized && !row->local.solved);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool mut same = row->local.steps_len == expected.len;
+    u64 mut i = 0;
+    while (i < row->local.steps_len) {
+        describe(&row->local, i, &got);
+        if (i >= expected.len || strbuf.view(&got) != expected[i]) { same = false; }
+        i += 1;
+    }
+    if (!same) {
+        eprintln(name, ":");
+        i = 0;
+        while (i < row->local.steps_len) {
+            describe(&row->local, i, &got);
+            eprintln("    \"", strbuf.view(&got), "\",");
+            i += 1;
+        }
+        assert(false);
+    }
+}
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(text, lines[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+string[12] FORMS = {
+    "extern fn foreign_count(char* p) i32;",
+    "fn helper() void {}",
+    "fn function_value() fn () void { return helper; }",
+    "fn call_value(fn () void f) void { f(); }",
+    "fn pointer_cast(i32 mut* p) void* { return cast(p, void*); }",
+    "fn owner_cast() void* own { i32* own p = new(i32); return cast(move(p), void* own); }",
+    "fn raw_view(u8 mut* p, u64 n) u8 { u8 mut@ v = p[0..n]; return v[0]; }",
+    "fn header_pointer(u8@ s) u8* { return s.ptr; }",
+    "fn switch_pointer(i32* p) i32 { if (p == null) { return 0; } return *p; }",
+    "fn checked_index(u8@ s, u64 i) u8 { return s[i]; }",
+    "fn foreign_borrow(char* p) i32 { return foreign_count(p); }",
+    "fn header_length(u8@ s) u64 { return s.len; }",
+};
+
+fn value_forms(ownership_source_env.env mut* e) void {
+    // A function value is no reference, so its constant has no step.
+    string[1] none = {""};
+    expect(e, "function_value", none[0..0]);
+    // A call through a value is an unknown fort call. The callee value is no reference.
+    string[1] call_value = {"0.0.0 outside 0->0 barrier"};
+    expect(e, "call_value", call_value[..]);
+    // A cast between reference types copies the source. Its temporary ends after its read.
+    string[3] pointer_cast = {
+        "0.0.0 copy 1->2",
+        "0.1.0 copy 2->0",
+        "0.1.1 assignment 2->2 empty",
+    };
+    expect(e, "pointer_cast", pointer_cast[..]);
+    // A cast of a moved owner moves the obligation (D3.14 adds no own).
+    string[8] owner_cast = {
+        "0.0.0 assignment 1->1 empty",
+        "0.2.0 allocation 2->2",
+        "1.0.0 move 2->1",
+        "1.1.0 move 1->3",
+        "1.2.0 move 3->0",
+        "1.3.0 dead 1->1 private",
+        "1.4.0 dead 1->1 private",
+        "1.4.1 dead 2->2 private",
+    };
+    // The cast temporary _3 is an owning temporary too.
+    string[9] with_temporary = {owner_cast[0], owner_cast[1], owner_cast[2], owner_cast[3],
+        owner_cast[4], owner_cast[5], owner_cast[6], owner_cast[7], "1.4.2 dead 3->3 private"};
+    expect(e, "owner_cast", with_temporary[..]);
+    // A scalar result has no step.
+    expect(e, "header_length", none[0..0]);
+    println("value forms ok");
+}
+
+fn reference_forms(ownership_source_env.env mut* e) void {
+    // A raw slice copies the pointer's source. Its bounds belong to the raw increment.
+    string[3] raw_view = {
+        "0.1.0 copy 1->3",
+        "1.0.0 use 3->3 temporal",
+        "1.1.0 assignment 3->3 empty",
+    };
+    expect(e, "raw_view", raw_view[..]);
+    // The pointer field of a span header copies the span's source.
+    string[1] header_pointer = {"0.0.0 copy 1->0"};
+    expect(e, "header_pointer", header_pointer[..]);
+    // The null test reads the pointer. The branch reads through it.
+    string[2] switch_pointer = {"0.0.0 inspect 1->1", "2.0.0 use 1->1 temporal"};
+    expect(e, "switch_pointer", switch_pointer[..]);
+    // The bounds check reads only the length. The element read checks the source.
+    string[1] checked_index = {"1.0.0 use 1->1 temporal"};
+    expect(e, "checked_index", checked_index[..]);
+    // A trusted call reads its borrowed argument and keeps every known fact.
+    string[2] foreign_borrow = {"0.0.0 inspect 1->1", "0.0.1 trusted call"};
+    expect(e, "foreign_borrow", foreign_borrow[..]);
+    println("reference forms ok");
+}
+
+fn gap_line(ownership_source_env.env mut* e, string name, ownership_source_local.missing why,
+    u32 line) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    if (row->local.gap != why || row->local.gap_source.line != line) {
+        eprintln(name, ": gap ", cast(row->local.gap, i32), " at line ",
+            row->local.gap_source.line);
+        assert(false);
+    }
+    assert(row->local.gap_source.filename_present);
+    assert(row->local.gap_source.file == row->source.file);
+    assert(row->local.correspondence == ownership_source_local.status.incomplete);
+}
+
+string[24] GAPS = {
+    "struct holder { i32 mut* own p; }",
+    "struct view { string s; }",
+    "struct node { i32 v; node mut* own next; }",
+    "extern fn produce() i32 mut* own;",
+    "fn reference() i32* { return null; }",
+    "fn owned(",
+    "    i32 mut* own p) void { del(p); }",
+    "fn field_owner() void {",
+    "    holder mut h = {};",
+    "}",
+    "fn result_view() view {",
+    "    return view{\"x\"};",
+    "}",
+    "fn loaded(i32** h) i32 { i32* p = *h;",
+    "    return *p; }",
+    "fn moved_out(holder mut* h) void { i32 mut* own p = move(h->p);",
+    "    del(p); }",
+    "fn produced() void { i32 mut* own p = produce(); del(p); }",
+    "fn call_result() i32 { i32* r = reference(); return *r; }",
+    "fn ranged(u8@ s) u8 { u8 mut t = 0; for (u8 b : s) { t = b; } return t; }",
+    "fn shallow() void {",
+    "    node mut* own n = new(node);",
+    "    del(n);",
+    "}",
+};
+
+fn gap_sources(ownership_source_env.env mut* e) void {
+    // Each gap names the line of the construct that put the body outside the scope.
+    // A FIR parameter local has no location of its own, so the gap names the declaration.
+    gap_line(e, "owned", ownership_source_local.missing.own_parameter, 6);
+    gap_line(e, "field_owner", ownership_source_local.missing.owning_storage, 9);
+    // A struct result names the declaration, which has no statement of its own.
+    gap_line(e, "result_view", ownership_source_local.missing.aggregate_result, 11);
+    gap_line(e, "loaded", ownership_source_local.missing.unknown_source, 14);
+    gap_line(e, "moved_out", ownership_source_local.missing.owner_load, 16);
+    gap_line(e, "produced", ownership_source_local.missing.foreign_owner, 18);
+    gap_line(e, "call_result", ownership_source_local.missing.fort_call, 19);
+    gap_line(e, "ranged", ownership_source_local.missing.range_loan, 20);
+    gap_line(e, "shallow", ownership_source_local.missing.owned_leaves, 23);
+    println("gap sources ok");
+}
+
+fn first_gap() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[6] lines = {
+        "struct view { string s; }",
+        "fn reference() i32* { return null; }",
+        "fn many(i32 mut* own p) view {",
+        "    i32* r = reference();",
+        "    del(p); return view{\"x\"};",
+        "}",
+    };
+    open(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    // The result class comes first, before the statements and the parameters.
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "many");
+    assert(row->local.gap == ownership_source_local.missing.aggregate_result);
+    assert(row->local.gap_source.line == 3);
+    // A later gap does not replace the first one.
+    ownership_source_local.context mut* c = &row->local;
+    ownership_source_local.note_gap(c, ownership_source_local.missing.escape,
+        ownership_api.source_position{.line = 99, .col = 1});
+    assert(c->gap == ownership_source_local.missing.aggregate_result);
+    assert(c->gap_source.line == 3);
+    ownership_source.analyze(&e.source);
+    assert(row->local.correspondence == ownership_source_local.status.incomplete);
+    assert(!ownership_api.successful(row->local.proof));
+    // The incomplete proof names the gap when no flow failure names another reason.
+    assert(row->local.proof.terminal.present);
+    println("first gap ok");
+}
+
+// An integer cast to a reference names no proved source, not an empty owner (D17.17). Only a
+// null or zero constant empties a reference.
+fn integer_addresses() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[13] lines = {
+        "fn peek() i32 {",
+        "    i32* p = cast(cast(4096, u64), i32*);",
+        "    return *p;",
+        "}",
+        "fn peek_zero() i32 {",
+        "    i32* p = cast(cast(0, u64), i32*);",
+        "    return *p;",
+        "}",
+        "fn peek_null() i32 {",
+        "    i32* p = null;",
+        "    return *p;",
+        "}",
+        "fn peek_var(u64 a) i32 { i32* p = cast(a, i32*); return *p; }",
+    };
+    open(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    ownership_source.body* constant = ownership_source_env.find(&e, "main", "peek");
+    assert(constant->local.gap == ownership_source_local.missing.unknown_source);
+    assert(constant->local.gap_source.line == 2);
+    assert(constant->local.violations_len == 0);
+    assert(constant->local.correspondence == ownership_source_local.status.incomplete);
+    ownership_source.body* zero = ownership_source_env.find(&e, "main", "peek_zero");
+    assert(zero->local.gap == ownership_source_local.missing.unknown_source);
+    assert(zero->local.violations_len == 0);
+    // A null reference is a proved empty owner: its dereference is a violation.
+    ownership_source.body* empty = ownership_source_env.find(&e, "main", "peek_null");
+    assert(empty->local.gap == ownership_source_local.missing.none);
+    assert(empty->local.violations_len == 1);
+    assert(empty->local.violations[0].text == "empty reference has no element");
+    assert(empty->local.violations[0].source.line == 11);
+    ownership_source.body* variable = ownership_source_env.find(&e, "main", "peek_var");
+    assert(variable->local.gap == ownership_source_local.missing.unknown_source);
+    println("integer addresses ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, FORMS[..]);
+    defer ownership_source_env.close(&e);
+    value_forms(&e);
+    reference_forms(&e);
+    ownership_source_env.env mut gaps = ownership_source_env.env{};
+    strbuf.str_buf mut gap_text = strbuf.create();
+    defer strbuf.free(&gap_text);
+    open(&gaps, &gap_text, GAPS[..]);
+    defer ownership_source_env.close(&gaps);
+    gap_sources(&gaps);
+    first_gap();
+    integer_addresses();
+    return 0;
+}

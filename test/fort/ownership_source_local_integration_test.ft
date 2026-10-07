@@ -1,0 +1,146 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| prerequisites ok
+//| identities ok
+//| analysis ok
+//| teardown ok
+/// Checks how ownership_source prepares, solves and frees one local context per body.
+import check_env;
+import modules;
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+
+// Only a body whose FIR lowers and verifies gets a local context.
+fn prerequisites() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    // Without the print entries of a runtime, println does not lower.
+    assert(ownership_source_env.prepare(&e,
+        "fn unsupported() void { println(1); }\nfn good() void {}\n"));
+    ownership_source.body* unsupported = ownership_source_env.find(&e, "main", "unsupported");
+    ownership_source.body* good = ownership_source_env.find(&e, "main", "good");
+    assert(unsupported->lowering == ownership_source.status.failed);
+    assert(!unsupported->local.initialized);
+    assert(good->local.initialized && !good->local.solved);
+    ownership_source.analyze(&e.source);
+    assert(!unsupported->local.solved);
+    assert(good->local.solved);
+    // A failed check prepares no context at all.
+    ownership_source_env.env mut bad = ownership_source_env.env{};
+    ownership_source_env.open(&bad);
+    defer ownership_source_env.close(&bad);
+    assert(!ownership_source_env.prepare(&bad, "fn bad() void { missing(); }\n"));
+    ownership_source.analyze(&bad.source);
+    assert(!bad.source.bodies[0].local.initialized);
+    assert(!bad.source.bodies[0].local.solved);
+    println("prerequisites ok");
+}
+
+// Each context names its body's key, file and declaration.
+fn identities() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    check_add(&e);
+    assert(ownership_source_env.prepare(&e,
+        "import other;\nfn near() void { i32 mut* own p = new(i32); del(p); }\n"));
+    ownership_source.body* near = ownership_source_env.find(&e, "main", "near");
+    ownership_source.body* far = ownership_source_env.find(&e, "other", "far");
+    assert(ownership_keys.function(near->local.identity, near->key) == 0);
+    assert(ownership_keys.function(far->local.identity, far->key) == 0);
+    assert(near->local.file == near->source.file && far->local.file == far->source.file);
+    assert(near->local.file != far->local.file);
+    assert(near->local.filename == near->module->file);
+    assert(far->local.filename == far->module->file);
+    assert(ownership_keys.source(near->local.declaration, near->source) == 0);
+    assert(near->local.function == &near->function);
+    // The file map of the flow program names the body's own file.
+    assert(near->local.files[0].filename == near->module->file);
+    assert(near->local.files[0].module == near->key.declaration.module);
+    // Every step and entity carries the body's own function key.
+    u64 mut i = 0;
+    while (i < near->local.steps_len) {
+        assert(ownership_keys.function(near->local.steps[i].operation.function, near->key) == 0);
+        assert(ownership_keys.function(near->local.steps[i].local.source.root.function,
+            near->key) == 0);
+        i += 1;
+    }
+    // The limits follow the body's own FIR size, apart from its liveness ledger.
+    assert(near->local.fir_size == ownership_limits.fir_size(&near->function));
+    assert(near->local.fir_size == near->live.fir_size);
+    assert(&near->local.meter != &near->live.events.budget);
+    println("identities ok");
+}
+
+// An imported module whose body leaks.
+fn check_add(ownership_source_env.env mut* e) void {
+    check_env.add(&e->checked, "other.ft", "fn far() void { i32 mut* own q = new(i32); }\n");
+}
+
+// analyze() solves each verified body after its liveness and frees the flow work.
+fn analysis() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    check_add(&e);
+    assert(ownership_source_env.prepare(&e,
+        "import other;\nfn near() void { i32 mut* own p = new(i32); del(p); }\n"));
+    ownership_source.analyze(&e.source);
+    u64 mut solved = 0;
+    u64 mut i = 0;
+    while (i < e.source.bodies.len) {
+        ownership_source.body* row = &e.source.bodies[i];
+        if (row->verification == ownership_source.status.complete) {
+            assert(row->local.solved);
+            assert(row->local.steps.len == 0 && row->local.records.len == 0);
+            assert(row->local.result.blocks.len == 0 && row->local.entry.sources_len == 0);
+            assert(row->local.step_attempts.len == 0);
+            solved += 1;
+        }
+        i += 1;
+    }
+    assert(solved == e.source.bodies.len);
+    ownership_source.body* near = ownership_source_env.find(&e, "main", "near");
+    ownership_source.body* far = ownership_source_env.find(&e, "other", "far");
+    assert(ownership_api.successful(near->local.proof));
+    assert(far->local.violations_len == 1);
+    assert(far->local.violations[0].name == "q");
+    // The liveness proof and the graph keep their own results.
+    assert(near->liveness_solver == ownership_source.status.complete);
+    assert(near->graph_correspondence == ownership_source.status.complete);
+    println("analysis ok");
+}
+
+// free() releases each local context with its body.
+fn teardown() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    check_add(&e);
+    assert(ownership_source_env.prepare(&e, "import other;\nfn near() void {}\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body* far = ownership_source_env.find(&e, "other", "far");
+    assert(far->local.violations.len > 0);
+    ownership_source.free(&e.source);
+    assert(e.source.bodies.len == 0 && !e.source.prepared);
+    // The checked environment outlives the contexts that borrowed its FIR and names.
+    assert(modules.count(&e.checked.m.set) > 0);
+    ownership_source_env.close(&e);
+    println("teardown ok");
+}
+
+fn main() i32 {
+    prerequisites();
+    identities();
+    analysis();
+    teardown();
+    return 0;
+}
