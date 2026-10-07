@@ -907,6 +907,10 @@ bullet at a time and without a rewrite.
   That can fail too: a rerun of 2 rows of the raw table read `stale` for both. A runner that
   waits 20 s before each guest command caught both rows (`--runner` with a script that runs
   `sleep 20` and then `tools/vm run "$@"`).
+  A second row can reuse the binary of the first in the same way: `D17.14-untracked-leaves`
+  got the md5 of `D17.14-untracked-load`. A runner that waits 2 s after each build removes
+  both. `D17.16-leaves` read `stale` alone three times and `caught` with `--runner <script>`,
+  where the script runs `tools/vm run "$1"` and then `sleep 2` when `$1` starts with `ninja`.
   **A stage that fails on the baseline catches each row.** `tools/mutate.py` runs no stage on
   the unmutated build. On 2026-10-08 the row `D17.14-imported-bodies` read `caught`, and its
   log held 8 failed cases of `ownership_driver_groups` that the baseline failed as well. Before
