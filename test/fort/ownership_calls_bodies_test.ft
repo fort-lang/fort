@@ -1,0 +1,275 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| direct-call bodies ok
+/// Checks how a body binds and exports each direct call that it applies (D17.15, D17.18).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[2] FRESH = {
+    "fn callee() i32 mut* own { return new(i32); }",
+    "fn caller() void { i32 mut* own p = callee(); del(p); }",
+};
+
+string[2] LEAK = {
+    "fn callee() i32 mut* own { return new(i32); }",
+    "fn caller() void { i32 mut* own p = callee(); }",
+};
+
+string[2] CONSTANT = {
+    "fn callee(i32* p) i32* { return p; }",
+    "fn caller() void { i32* q = callee(null); }",
+};
+
+string[2] OUTPUT = {
+    "fn callee(i32 mut* own mut* out) void { *out = new(i32); }",
+    "fn caller() void { i32 mut* own mut x = null; callee(&x); del(x); }",
+};
+
+string[2] TWICE = {
+    "fn callee(i32* p) i32* { return p; }",
+    "fn caller(i32* p) i32 { i32* a = callee(p); i32* b = callee(a); return *b; }",
+};
+
+string[2] BEFORE = {
+    "fn callee(i32* p) void { i32 x = *p; panic(\"stop\"); }",
+    "fn caller(i32 mut* own p) void { i32* q = p; del(p); callee(q); }",
+};
+
+string[3] UNREACHED = {
+    "fn inner() void { panic(\"stop\"); }",
+    "fn callee(i32@ p) void { inner(); i32 x = p[3]; }",
+    "fn caller(i32@ p) void { callee(p); }",
+};
+
+// `k` holds 0 and then the call result, which has no scalar fact.
+string[2] CALL_INDEX = {
+    "fn callee() i32 { return 5; }",
+    "fn caller(i32@ s) i32 { i32 mut k = 0; k = callee(); return s[k]; }",
+};
+
+// The caller passes a reference that it loaded from caller storage.
+string[2] LOADED_ARGUMENT = {
+    "fn callee(i32* p) i32 { return *p; }",
+    "fn caller(i32** pp) i32 { i32* t = *pp; return callee(t); }",
+};
+
+string[2] LOADED_UNUSED = {
+    "fn callee(i32* p) i32 { return 1; }",
+    "fn caller(i32** pp) i32 { i32* t = *pp; return callee(t); }",
+};
+
+// The call writes a by-value aggregate. The extractor has no leaf write for it.
+string[3] AGGREGATE_RESULT = {
+    "struct pair { i32* a; i32* b; }",
+    "fn callee(i32* p) pair { return pair{p, p}; }",
+    "fn caller(i32 mut* own p) i32 { pair x = callee(p); del(p); return *x.a; }",
+};
+
+fn bodies(ownership_call_bodies.bodies mut* b, string@ text) void {
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(b, text, names[..]);
+    ownership_call_bodies.infer_all(b);
+    ownership_call_bodies.only_case(b, 0);
+}
+
+fn incomplete(ownership_summary_model.summary* s, ownership_api.incomplete_reason why) void {
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->residual_effects);
+    assert(s->proof.terminal.reason == why && s->cases.len == 0);
+}
+
+// A fresh owner from a call is a new allocation of this call site. The caller releases it, so
+// flow finds no error. This unit exports no owned call result, so the summary stays incomplete.
+fn fresh_result() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, FRESH[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    incomplete(ownership_call_bodies.summary(&b, 1),
+        ownership_api.incomplete_reason.unknown_effect);
+    ownership_call_bodies.bodies mut leak = ownership_call_bodies.bodies{};
+    bodies(&leak, LEAK[..]);
+    defer ownership_call_bodies.close(&leak);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&leak, 1);
+    assert(s->proof.failed && !ownership_api.successful(s->proof));
+    assert(ownership_call_bodies.saw(&leak, ownership_api.event_kind.lost_ownership));
+    assert(leak.services.counts.last.operation.function.declaration.declaration == 2);
+}
+
+// A constant argument has no source binding. The call stays unknown.
+fn constant_argument() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, CONSTANT[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+}
+
+// The output root names the storage of `x`, not the argument slot. The call fills `x`, and
+// the caller releases it. Nothing reaches caller storage, so the summary is complete.
+fn output_storage() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, OUTPUT[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, 1);
+    assert(row.outcome.kind == ownership_api.outcome_kind.function_return);
+}
+
+// One callee runs twice in one body. Each call substitutes its own argument.
+fn repeated_callee() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, TWICE[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    ownership_call_bodies.only_case(&b, 1);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    ownership_api.entity_id own_source = ownership_summary_body.designated(&b.inputs[1], 1);
+    u64 mut extent = 0;
+    u64 mut i = 0;
+    while (i < s->requirements.len) {
+        if (s->requirements[i].kind == ownership_summary_model.requirement_kind.extent &&
+            ownership_summary_model.same(s->requirements[i].source, own_source)) {
+            extent += 1;
+        }
+        i += 1;
+    }
+    assert(extent == 1);
+}
+
+// The read before the abort runs, so its requirement fails at the call.
+fn read_before_abort() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, BEFORE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, 0);
+    assert(row.outcome.kind == ownership_api.outcome_kind.abort && row.requirements.len >= 1);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.failed && !ownership_api.successful(s->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.caller_requirement));
+}
+
+// The read after the abort never runs. Its 16-byte requirement is not in the abort case, so the
+// caller neither checks nor exports it. The caller span has no known length.
+fn read_after_abort() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"inner", "callee", "caller"};
+    ownership_call_bodies.open(&b, UNREACHED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    assert(b.services.counts.events == 0);
+    ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 1);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, 1);
+    assert(row.outcome.kind == ownership_api.outcome_kind.abort);
+    bool mut extent = false;
+    u64 mut i = 0;
+    while (i < callee->requirements.len) {
+        if (callee->requirements[i].kind == ownership_summary_model.requirement_kind.extent) {
+            extent = true;
+            u64 mut k = 0;
+            while (k < row.requirements.len) {
+                assert(!ownership_summary_model.same(row.requirements[k],
+                    callee->requirements[i].key));
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    assert(extent);
+    ownership_summary_model.case_record caller_row = ownership_call_bodies.only_case(&b, 2);
+    assert(caller_row.outcome.kind == ownership_api.outcome_kind.abort);
+    i = 0;
+    ownership_summary_model.summary* caller = ownership_call_bodies.summary(&b, 2);
+    while (i < caller->requirements.len) {
+        assert(caller->requirements[i].kind != ownership_summary_model.requirement_kind.extent);
+        i += 1;
+    }
+}
+
+// A refused work charge anywhere in one computation stops it with the work limit. No refusal
+// turns a call into an unknown continuation or a success. Body 0 publishes a result relation;
+// body 1 applies two calls.
+fn work_refusals(u64 body) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, TWICE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.infer(&b, body);
+    ownership_call_bodies.only_case(&b, body);
+    u64 total = b.services.counts.calls;
+    assert(total > 100);
+    u64 mut at = 1;
+    while (at <= total) {
+        b.services.counts.deny_at = at;
+        ownership_call_bodies.infer(&b, body);
+        ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, body);
+        // A clone refused late keeps its partial records. Its proof stays the refusal.
+        assert(!ownership_api.successful(s->proof) && s->residual_effects);
+        assert(s->proof.terminal.reason == ownership_api.incomplete_reason.work_limit ||
+            s->proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+        at += 1;
+    }
+    b.services.counts.deny_at = 0;
+    ownership_call_bodies.infer(&b, body);
+    ownership_call_bodies.only_case(&b, body);
+}
+
+// The call writes `k`, so its old value 0 selects no window of `s` after the call.
+fn call_result_index() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, CALL_INDEX[..]);
+    defer ownership_call_bodies.close(&b);
+    incomplete(ownership_call_bodies.summary(&b, 1), ownership_api.incomplete_reason.missing_path);
+}
+
+// The callee requires a live source and an extent for its formal. In the caller that source is
+// a reference loaded from caller storage, which no formal of the caller names. The caller has
+// no requirement to export for it, so its summary stays incomplete and does not drop it. A
+// callee without that requirement leaves the caller complete.
+fn loaded_argument() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, LOADED_ARGUMENT[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    incomplete(ownership_call_bodies.summary(&b, 1),
+        ownership_api.incomplete_reason.unknown_effect);
+    ownership_call_bodies.bodies mut unused = ownership_call_bodies.bodies{};
+    bodies(&unused, LOADED_UNUSED[..]);
+    defer ownership_call_bodies.close(&unused);
+    ownership_call_bodies.only_case(&unused, 1);
+}
+
+// The refusal comes from extraction, before flow runs, so the read of the released view
+// reports no event.
+fn aggregate_destination() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, AGGREGATE_RESULT[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    incomplete(ownership_call_bodies.summary(&b, 1),
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(b.services.counts.events == 0);
+}
+
+fn main() i32 {
+    fresh_result();
+    constant_argument();
+    output_storage();
+    repeated_callee();
+    read_before_abort();
+    read_after_abort();
+    work_refusals(0);
+    work_refusals(1);
+    call_result_index();
+    loaded_argument();
+    aggregate_destination();
+    println("direct-call bodies ok");
+    return 0;
+}

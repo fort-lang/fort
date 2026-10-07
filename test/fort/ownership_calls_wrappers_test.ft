@@ -1,0 +1,464 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary G02.1
+//| boundary G02.3
+//| boundary G02.4
+//| boundary G02.5
+//| boundary G11.1
+//| boundary G11.2
+//| boundary G11.4
+//| boundary G12.1
+//| boundary G12.2
+//| boundary G12.3
+//| direct-call wrappers ok
+/// Checks summaries of bodies that call other available bodies (D17.14, D17.18).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_calls_env;
+import ownership_keys;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[4] IDENTITY = {
+    "fn inner(i32* p) i32* { return p; }",
+    "fn middle(i32* p) i32* { return inner(p); }",
+    "fn callee(i32* p) i32* { return middle(p); }",
+    "fn caller(i32* p) i32 { return *callee(p); }",
+};
+
+string[3] RELEASED = {
+    "fn inner(i32* p) i32* { return p; }",
+    "fn callee(i32* p) i32* { return inner(p); }",
+    "fn caller(i32 mut* own p) i32 { i32* q = p; del(p); return *callee(q); }",
+};
+
+string[6] RELEASED_FIELD = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "fn inner(owner_box mut* p) i32* { i32* view = p->item; del(p->item); return view; }",
+    "fn callee(owner_box mut* p) i32* { return inner(p); }",
+    "fn caller(owner_box mut* p) i32 { return *callee(p); }",
+    "fn reread(owner_box mut* p) i32 { i32* view = p->item; del(p->item); return *view; }",
+    "fn deferred(owner_box mut* p) i32* { i32* view = p->item; defer del(p->item); return view; }",
+};
+
+string[13] LIVE_FIELD = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "struct two_box { i32 mut* own left; i32 mut* own right; }",
+    "fn stop() void { panic(\"stop\"); }",
+    "fn aborted(owner_box mut* p) i32 {",
+    "    i32* view = p->item; del(p->item); stop(); return *view;",
+    "}",
+    "fn early(owner_box mut* p) i32 {",
+    "    i32* view = p->item; i32 x = *view; del(p->item); return x;",
+    "}",
+    "fn keep(owner_box mut* p) i32* { return p->item; }",
+    "fn other(two_box mut* p) i32 {",
+    "    i32* view = p->left; del(p->right); return *view;",
+    "}",
+};
+
+string[2] ALWAYS = {
+    "fn callee() void { panic(\"stop\"); }",
+    "fn caller(i32 mut* own p) void { callee(); }",
+};
+
+string[2] RETURNS = {
+    "fn callee() void { }",
+    "fn caller(i32 mut* own p) void { callee(); }",
+};
+
+string[4] SINK = {
+    "fn sink() noreturn { panic(\"stop\"); }",
+    "fn callee() void { sink(); }",
+    "fn caller(i32 mut* own p) void { callee(); }",
+    "fn valued() i32 { sink(); }",
+};
+
+string[2] ABORT_THEN = {
+    "fn inner() void { panic(\"stop\"); }",
+    "fn callee(i32 mut* own p) void { inner(); del(p); }",
+};
+
+string[3] ABORT_WRAP = {
+    "fn inner() void { panic(\"stop\"); }",
+    "fn callee() void { inner(); }",
+    "fn caller(i32 mut* own p) void { callee(); }",
+};
+
+string[4] ABORT_DEEP = {
+    "fn inner() void { panic(\"stop\"); }",
+    "fn middle() void { inner(); }",
+    "fn callee() void { middle(); }",
+    "fn caller(i32 mut* own p) void { callee(); }",
+};
+
+string[2] UNKNOWN_DEL = {
+    "fn callee() void { panic(\"stop\"); }",
+    "fn caller(i32 mut* own p) void { callee(); del(p); }",
+};
+
+string[3] OWN_MOVE = {
+    "fn inner(i32 mut* own p) void { del(p); }",
+    "fn callee(i32 mut* own p) void { inner(move(p)); }",
+    "fn caller(i32 mut* own p) void { callee(move(p)); }",
+};
+
+// The callee aborts with its owner still live in its parameter.
+string[2] ABORT_OWNER = {
+    "fn callee(i32 mut* own p) void { panic(\"stop\"); }",
+    "fn caller(i32 mut* own p) void { callee(move(p)); }",
+};
+
+fn requires(ownership_summary_model.summary* s, ownership_summary_model.requirement_kind kind,
+    ownership_api.entity_id source, i64 bytes) bool {
+    u64 mut i = 0;
+    while (i < s->requirements.len) {
+        ownership_summary_model.requirement row = s->requirements[i];
+        if (row.kind == kind && ownership_summary_model.same(row.source, source) &&
+            (bytes < 0 || row.range.access.end.value == bytes)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn node(ownership_summary_model.summary* s, ownership_api.entity_id key)
+    ownership_summary_model.effect_node {
+    u64 mut i = 0;
+    while (i < s->effects.len) {
+        if (ownership_summary_model.same(s->effects[i].effect.key, key)) { return s->effects[i]; }
+        i += 1;
+    }
+    panic("ownership_calls_wrappers_test: no such effect");
+}
+
+fn aborts(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(b, index);
+    assert(row.outcome.kind == ownership_api.outcome_kind.abort);
+    assert(!row.outcome.possible_caller_return && !row.outcome.cleanup_required);
+    assert(row.results.len == 0 && row.guard.kind == ownership_api.entity_kind.none);
+}
+
+fn unresolved(ownership_call_bodies.bodies* b, u64 index, ownership_api.incomplete_reason why)
+    void {
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->residual_effects);
+    assert(s->proof.terminal.reason == why && s->cases.len == 0);
+}
+
+// Three wrapper bodies keep the caller source of their own parameter. Each wrapper exports the
+// callee requirement as a read at its call, before the result write of that call.
+fn case_g02_1() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[4] names = {"inner", "middle", "callee", "caller"};
+    ownership_call_bodies.open(&b, IDENTITY[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    assert(b.services.counts.events == 0);
+    u64 mut i = 0;
+    while (i < 3) {
+        ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, i);
+        assert(row.outcome.kind == ownership_api.outcome_kind.function_return);
+        assert(row.outcome.possible_caller_return && row.results.len == 1);
+        ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, i);
+        ownership_api.entity_id own_source = ownership_summary_body.designated(&b.inputs[i], 1);
+        assert(s->results.len == 1);
+        assert(ownership_summary_model.same(s->results[0].borrow.source, own_source));
+        assert(requires(s, ownership_summary_model.requirement_kind.live_source, own_source, -1));
+        if (i > 0) {
+            ownership_summary_model.effect_node first = node(s, row.effects[0]);
+            ownership_summary_model.effect_node second = node(s, row.effects[1]);
+            assert(first.payload == ownership_summary_model.payload_kind.read);
+            assert(second.payload == ownership_summary_model.payload_kind.replacement);
+            assert(ownership_keys.operation(first.effect.operation,
+                second.effect.operation) == 0);
+            assert(ownership_summary_model.same(first.effect.source, own_source));
+            assert(second.value.borrows.len == 1);
+            assert(ownership_summary_model.same(second.value.borrows[0].source, own_source));
+            assert(s->order.len + 1 == row.effects.len);
+        }
+        i += 1;
+    }
+    ownership_summary_model.case_record last = ownership_call_bodies.only_case(&b, 3);
+    assert(last.outcome.kind == ownership_api.outcome_kind.function_return);
+    assert(requires(ownership_call_bodies.summary(&b, 3),
+        ownership_summary_model.requirement_kind.extent,
+        ownership_summary_body.designated(&b.inputs[3], 1), 4));
+    ownership_calls_env.boundary("G02.1", "", "none");
+}
+
+// The inner body releases the owner field, then copies its view into the result. The copy is a
+// use after release, so the inner body fails there, before any caller (D17.14). The wrapper has
+// no complete callee, so it publishes no proof. A deferred release after the result write fails
+// at the return instead: the returned view outlives its source.
+fn case_g02_3() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[5] names = {"inner", "callee", "caller", "reread", "deferred"};
+    ownership_call_bodies.open(&b, RELEASED_FIELD[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_summary_model.summary* inner = ownership_call_bodies.summary(&b, 0);
+    assert(inner->proof.failed && !ownership_api.successful(inner->proof));
+    assert(inner->cases.len == 0 && inner->residual_effects);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.operation.function.declaration.declaration == 1);
+    assert(!b.services.counts.last.operation.terminator);
+    assert(b.services.counts.last.relation.kind == ownership_api.entity_kind.source);
+    ownership_call_bodies.infer(&b, 1);
+    unresolved(&b, 1, ownership_api.incomplete_reason.unknown_effect);
+    ownership_call_bodies.infer(&b, 2);
+    assert(!ownership_api.successful(ownership_call_bodies.summary(&b, 2)->proof));
+    ownership_call_bodies.infer(&b, 3);
+    ownership_summary_model.summary* reread = ownership_call_bodies.summary(&b, 3);
+    assert(reread->proof.failed && !ownership_api.successful(reread->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(!b.services.counts.last.operation.terminator);
+    ownership_call_bodies.infer(&b, 4);
+    ownership_summary_model.summary* deferred = ownership_call_bodies.summary(&b, 4);
+    assert(deferred->proof.failed && !ownership_api.successful(deferred->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.operation.terminator);
+    assert(b.services.counts.last.operation.function.declaration.declaration == 5);
+    ownership_call_bodies.bodies mut live = ownership_call_bodies.bodies{};
+    string[5] live_names = {"early", "keep", "other", "stop", "aborted"};
+    ownership_call_bodies.open(&live, LIVE_FIELD[..], live_names[..]);
+    defer ownership_call_bodies.close(&live);
+    ownership_call_bodies.infer_all(&live);
+    ownership_call_bodies.only_case(&live, 0);
+    ownership_call_bodies.only_case(&live, 1);
+    ownership_call_bodies.only_case(&live, 2);
+    aborts(&live, 4);
+    ownership_calls_env.boundary("G02.3", "", "invalid_use");
+}
+
+// The caller releases its owner, then passes a view of it through two wrappers.
+// The wrapper requirement fails at the call of the caller, not inside a callee.
+fn case_g02_5() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"inner", "callee", "caller"};
+    ownership_call_bodies.open(&b, RELEASED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    ownership_call_bodies.only_case(&b, 1);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 2);
+    assert(s->proof.failed && !ownership_api.successful(s->proof) && s->cases.len == 0);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.caller_requirement));
+    assert(b.services.counts.last.operation.function.declaration.declaration == 3);
+    assert(!b.services.counts.last.operation.terminator);
+    ownership_calls_env.boundary("G02.5", "", "caller_requirement");
+}
+
+// Without the inner correspondence, no wrapper publishes a source proof. Each wrapper copies
+// the unknown value of its call, and that copy has no proof.
+fn case_g02_4() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[4] names = {"inner", "middle", "callee", "caller"};
+    ownership_call_bodies.open(&b, IDENTITY[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    b.inputs[0].correspondence_complete = false;
+    ownership_call_bodies.infer_all(&b);
+    unresolved(&b, 0, ownership_api.incomplete_reason.missing_correspondence);
+    unresolved(&b, 1, ownership_api.incomplete_reason.unknown_effect);
+    unresolved(&b, 2, ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 3);
+    assert(!ownership_api.successful(s->proof) && s->residual_effects && s->cases.len == 0);
+    ownership_calls_env.boundary("G02.4", "", "incomplete_proof");
+}
+
+// A body that always aborts needs no noreturn type. The caller has no normal return, so its
+// live owner needs no cleanup. The same caller loses the owner when the callee returns.
+fn case_g11_1() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, ALWAYS[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    assert(b.services.counts.events == 0);
+    aborts(&b, 0);
+    aborts(&b, 1);
+    ownership_call_bodies.bodies mut returning = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&returning, RETURNS[..], names[..]);
+    defer ownership_call_bodies.close(&returning);
+    ownership_call_bodies.infer_all(&returning);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&returning, 0);
+    assert(row.outcome.kind == ownership_api.outcome_kind.function_return);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&returning, 1);
+    assert(s->proof.failed && !ownership_api.successful(s->proof));
+    assert(ownership_call_bodies.saw(&returning, ownership_api.event_kind.lost_ownership));
+    ownership_calls_env.boundary("G11.1", "", "none");
+}
+
+// The abort proof comes from the sink body. Its noreturn type alone proves nothing.
+// FIR puts a trap after each noreturn call. A trap reached after a returning call aborts too,
+// but it proves nothing about the callee, so an unbound sink keeps the call unknown.
+fn case_g11_2() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[4] names = {"sink", "callee", "caller", "valued"};
+    ownership_call_bodies.open(&b, SINK[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    aborts(&b, 0);
+    aborts(&b, 1);
+    aborts(&b, 2);
+    aborts(&b, 3);
+    ownership_call_bodies.bodies mut unbound = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&unbound, SINK[..], names[..]);
+    defer ownership_call_bodies.close(&unbound);
+    ownership_call_bodies.infer(&unbound, 1);
+    ownership_call_bodies.infer(&unbound, 2);
+    ownership_call_bodies.infer(&unbound, 3);
+    unresolved(&unbound, 1, ownership_api.incomplete_reason.unknown_effect);
+    unresolved(&unbound, 3, ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&unbound, 2);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&unbound, ownership_api.event_kind.lost_ownership));
+    ownership_calls_env.boundary("G11.2", "", "none");
+}
+
+// An unknown outcome keeps the normal return and the live owner. The caller cannot prove its
+// cleanup, so it reports incomplete proof and no lost owner.
+fn case_g11_4() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, ALWAYS[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    b.inputs[0].correspondence_complete = false;
+    ownership_call_bodies.infer_all(&b);
+    unresolved(&b, 0, ownership_api.incomplete_reason.missing_correspondence);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(b.services.counts.events == 2);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+    ownership_call_bodies.bodies mut released = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&released, UNKNOWN_DEL[..], names[..]);
+    defer ownership_call_bodies.close(&released);
+    released.inputs[0].correspondence_complete = false;
+    ownership_call_bodies.infer_all(&released);
+    ownership_summary_model.summary* after = ownership_call_bodies.summary(&released, 1);
+    assert(after->proof.kind == ownership_api.proof_kind.incomplete && after->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&released, ownership_api.event_kind.lost_ownership));
+    assert(!ownership_call_bodies.saw(&released, ownership_api.event_kind.invalid_use));
+    ownership_calls_env.boundary("G11.4", "", "incomplete_proof");
+}
+
+fn case_g12_1() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"inner", "callee", "caller"};
+    ownership_call_bodies.open(&b, ABORT_WRAP[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    assert(b.services.counts.events == 0);
+    aborts(&b, 0);
+    aborts(&b, 1);
+    aborts(&b, 2);
+    ownership_calls_env.boundary("G12.1", "", "none");
+}
+
+fn case_g12_2() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[4] names = {"inner", "middle", "callee", "caller"};
+    ownership_call_bodies.open(&b, ABORT_DEEP[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    u64 mut i = 0;
+    while (i < 4) {
+        aborts(&b, i);
+        i += 1;
+    }
+    ownership_calls_env.boundary("G12.2", "", "none");
+}
+
+// An abort needs no cleanup, so the applied abort case ends no parameter storage of the
+// callee and reports no live owner (D17.14). The caller summary stays incomplete only because
+// it does not export the transfer of its owner into the call.
+fn abort_keeps_owner() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, ABORT_OWNER[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    aborts(&b, 0);
+    unresolved(&b, 1, ownership_api.incomplete_reason.unknown_effect);
+    assert(b.services.counts.events == 0);
+}
+
+// The abort case holds only the effects before the abort. The release after the call stays in
+// the effect records, but no case applies it.
+fn effects_before_abort() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"inner", "callee"};
+    ownership_call_bodies.open(&b, ABORT_THEN[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    assert(b.services.counts.events == 0);
+    aborts(&b, 1);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    bool mut recorded = false;
+    u64 mut i = 0;
+    while (i < s->effects.len) {
+        recorded = recorded ||
+            s->effects[i].payload == ownership_summary_model.payload_kind.release;
+        i += 1;
+    }
+    assert(recorded);
+    ownership_summary_model.case_record row = s->cases[0];
+    i = 0;
+    while (i < row.effects.len) {
+        assert(node(s, row.effects[i]).payload != ownership_summary_model.payload_kind.release);
+        i += 1;
+    }
+}
+
+// An incomplete inner summary keeps a possible return through the wrapper.
+fn case_g12_3() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"inner", "callee", "caller"};
+    ownership_call_bodies.open(&b, ABORT_WRAP[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    b.inputs[0].correspondence_complete = false;
+    ownership_call_bodies.infer_all(&b);
+    unresolved(&b, 0, ownership_api.incomplete_reason.missing_correspondence);
+    unresolved(&b, 1, ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 2);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&b, ownership_api.event_kind.lost_ownership));
+    ownership_calls_env.boundary("G12.3", "", "incomplete_proof");
+}
+
+// A wrapper that moves its own owner into a callee changes caller storage that this unit does
+// not export. Flow checks the wrapper and finds no error. Its summary stays incomplete.
+fn owning_argument() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"inner", "callee", "caller"};
+    ownership_call_bodies.open(&b, OWN_MOVE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_call_bodies.only_case(&b, 0);
+    ownership_call_bodies.infer(&b, 1);
+    assert(b.services.counts.events == 0);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->residual_effects);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    ownership_call_bodies.infer(&b, 2);
+    unresolved(&b, 2, ownership_api.incomplete_reason.missing_path);
+}
+
+fn main() i32 {
+    case_g02_1();
+    case_g02_3();
+    case_g02_4();
+    case_g02_5();
+    case_g11_1();
+    case_g11_2();
+    case_g11_4();
+    case_g12_1();
+    case_g12_2();
+    abort_keeps_owner();
+    case_g12_3();
+    owning_argument();
+    effects_before_abort();
+    println("direct-call wrappers ok");
+    return 0;
+}

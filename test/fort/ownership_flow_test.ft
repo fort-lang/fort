@@ -485,6 +485,118 @@ fn call_case(u32 variant) void {
     ownership_flow.free(&result);
 }
 
+// The direct-call handler sees each call once and decides the path that follows it.
+struct call_probe {
+    u32 variant;
+    u64 calls;
+    u64 exits;
+    bool released;
+}
+
+fn probe_call(void mut* opaque, ownership_flow.step* s, ownership_state.state mut* facts)
+    ownership_flow.call_verdict {
+    call_probe mut* probe = cast(opaque, call_probe mut*);
+    probe->calls += 1;
+    assert(s->kind == ownership_flow.step_kind.direct_call && facts->allocations_len == 1);
+    ownership_flow.call_verdict mut verdict = ownership_flow.call_verdict{
+        .proof = ownership_api.proof_status{.kind = ownership_api.proof_kind.complete}};
+    if (probe->variant == 1) {
+        facts->allocations[0].obligation = false;
+        facts->allocations[0].validity = ownership_api.validity_kind.released;
+        verdict.continues = true;
+    } else if (probe->variant == 3) {
+        verdict.unknown = true;
+    } else if (probe->variant == 4) {
+        verdict.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+            s->operation, s->source);
+    }
+    return verdict;
+}
+
+fn probe_exit(void mut* opaque, ownership_api.state_view* facts,
+    ownership_api.outcome_fact outcome, ownership_api.operation_position at,
+    ownership_api.source_position where) ownership_api.proof_status {
+    call_probe mut* probe = cast(opaque, call_probe mut*);
+    probe->exits += 1;
+    probe->released = facts->allocations.len == 1 && !facts->allocations[0].obligation;
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+// Variant 0 has no handler. Variant 1 replaces the facts, 2 ends the path, 3 keeps an
+// unresolved continuation, and 4 fails the application. Variant 5 calls inside an open
+// collection loan: the handler checks no loan, so flow refuses the call before it.
+fn direct_call_case(u32 variant) void {
+    fixture mut f = fixture{};
+    string[1] plain = {
+        "bb0: { _2 = call fn main.add(const i32 1, const i64 2); _0 = const i32 0; return; }",
+    };
+    string[3] loaned = {
+        "bb0: { _3 = const zero i32@; loan_begin 1 _3;",
+        "_2 = call fn main.add(const i32 1, const i64 2); loan_end 1;",
+        "_0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "let _2: u64; let _3: i32@;",
+        variant == 5 ? loaned[..] : plain[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.allocation_fact mut allocation = ownership_api.allocation_fact{};
+    allocation.key = id(ownership_api.entity_kind.allocation, 1);
+    allocation.site = allocation.key;
+    allocation.validity = ownership_api.validity_kind.live;
+    allocation.count.one = true;
+    allocation.obligation = true;
+    allocation.owner.place = slot(9);
+    ownership_state.append_allocations(&entry, allocation);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.step[1] mut steps = {};
+    steps[0].kind = ownership_flow.step_kind.direct_call;
+    steps[0].operation.block = 0;
+    if (variant == 5) {
+        steps[0].gap = 2;
+        steps[0].operation.operation = 2;
+    }
+    input.steps = steps[..];
+    call_probe mut probe = call_probe{.variant = variant};
+    if (variant != 0) {
+        input.call_context = cast(&probe, void mut*);
+        input.call_handler = probe_call;
+    }
+    input.exit_context = cast(&probe, void mut*);
+    input.exit_observer = probe_exit;
+    ownership_flow.event_binding[2] events = {
+        flow_event(steps[0].operation, ownership_api.event_kind.incomplete_proof,
+            ownership_api.entity_id{}, 1),
+        flow_event(ownership_api.operation_position{.block = 0,
+            .operation = fir.block_statement_count(function, 0), .terminator = true},
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{}, 2),
+    };
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(probe.calls == (variant == 0 || variant == 5 ? 0 : 1));
+    if (variant == 5) {
+        assert(result.failures == 1 && result.normal_returns == 0 && probe.exits == 0);
+        assert(result.first_failure.terminal.reason ==
+            ownership_api.incomplete_reason.unknown_effect);
+    } else if (variant == 0 || variant == 4) {
+        assert(result.failures == 1 && result.normal_returns == 0 && probe.exits == 0);
+        assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
+        assert(result.first_failure.terminal.reason == (variant == 0 ?
+            ownership_api.incomplete_reason.unknown_effect :
+            ownership_api.incomplete_reason.missing_path));
+    } else if (variant == 1) {
+        assert(result.failures == 0 && result.normal_returns == 1);
+        assert(probe.exits == 1 && probe.released);
+    } else if (variant == 2) {
+        assert(result.failures == 0 && result.normal_returns == 0 && probe.exits == 0);
+    } else {
+        assert(result.failures == 1 && result.normal_returns == 1 && probe.exits == 0);
+        assert(result.first_failure.terminal.reason ==
+            ownership_api.incomplete_reason.unknown_effect);
+    }
+}
+
 fn defer_order(bool reverse) void {
     fixture mut f = fixture{};
     string[1] mut blocks = {"bb0: { del(move _2); dead(_2); _0 = const i32 0; return; }"};
@@ -2698,6 +2810,12 @@ fn main() i32 {
     call_case(6);
     call_case(7);
     call_case(8);
+    direct_call_case(0);
+    direct_call_case(1);
+    direct_call_case(2);
+    direct_call_case(3);
+    direct_call_case(4);
+    direct_call_case(5);
     defer_order(false);
     defer_order(true);
     returned_view_after_defer();

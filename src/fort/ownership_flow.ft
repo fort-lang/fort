@@ -17,6 +17,16 @@ enum step_kind {
     local_effect,
     invalidate_value,
     call_outcome,
+    direct_call,
+}
+
+// A direct-call handler applies one published callee summary to the path facts (D17.18).
+// `continues` keeps the replaced facts as the one normal continuation. `unknown` keeps an
+// unresolved continuation with its obligations. Neither flag ends the path without proof.
+struct call_verdict {
+    ownership_api.proof_status proof;
+    bool continues;
+    bool unknown;
 }
 
 // The producer binds each step to the gap before one FIR statement or terminator.
@@ -99,6 +109,9 @@ struct program {
     fn (void mut*, ownership_api.state_view*, ownership_api.outcome_fact,
         ownership_api.operation_position, ownership_api.source_position)
         ownership_api.proof_status exit_observer;
+    // The direct-call handler owns its context. It replaces the facts only on a continuation.
+    void mut* call_context;
+    fn (void mut*, step*, ownership_state.state mut*) call_verdict call_handler;
 }
 
 struct path {
@@ -991,6 +1004,30 @@ fn call_continues(program* in, path mut* p, step* s, analysis mut* out) bool {
     return possible;
 }
 
+// The handler checks no collection loan. A direct call inside an open loan fails before
+// this step, as an unknown call does (`apply_steps`).
+// A missing handler or a failed application stops this path with its recorded failure.
+// A path without a normal continuation ends here. An unresolved call keeps its obligations.
+fn direct_call(program* in, analysis mut* out, path mut* p, step* s) bool {
+    if (in->call_handler == null) {
+        note_failure(out, failure(in, s->operation, s->source,
+            ownership_api.event_kind.incomplete_proof,
+            ownership_api.incomplete_reason.unknown_effect, ownership_api.entity_id{},
+            "direct call has no summary handler"));
+        return false;
+    }
+    call_verdict verdict = in->call_handler(in->call_context, s, &p->facts);
+    if (!ownership_api.successful(verdict.proof)) {
+        note_failure(out, verdict.proof);
+        return false;
+    }
+    if (verdict.unknown) {
+        unknown_call(p);
+        return true;
+    }
+    return verdict.continues;
+}
+
 // Reuse a site identity only after its released source has no retained relation.
 fn retire_released_site(program* in, path mut* p, step* s)
     ownership_api.proof_status {
@@ -1141,6 +1178,8 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                     }
                 } else if (s.kind == step_kind.invalidate_value) {
                     invalidate_version(p, s.invalidates);
+                } else if (s.kind == step_kind.direct_call) {
+                    if (!direct_call(in, out, p, &s)) { return false; }
                 } else {
                     invalidate_version(p, s.invalidates);
                     if (!call_continues(in, p, &s, out)) { return false; }

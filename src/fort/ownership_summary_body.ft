@@ -6,6 +6,7 @@ import fir;
 import ownership_api;
 import ownership_flow;
 import ownership_graph;
+import ownership_keys;
 import ownership_places;
 import ownership_state;
 import ownership_summary_model;
@@ -14,6 +15,13 @@ import types;
 
 u32 U32_MAX = 4294967295;
 u64 U64_MAX = 18446744073709551615;
+
+// A published direct callee. The checked symbol names its declaration.
+// The summary stays immutable and live through each inference that reads it.
+struct callee_binding {
+    ast.sym* symbol;
+    ownership_summary_model.summary_view* summary;
+}
 
 // Stable identities use the checked function key and its finite FIR local numbers.
 // The verified body, checked types, and filenames outlive this input and its results.
@@ -24,6 +32,18 @@ struct body_input {
     ownership_api.limit_table limits;
     ownership_summary_model.coverage_status coverage;
     bool correspondence_complete;
+    callee_binding@ callees;
+}
+
+// One direct call of an available callee summary. Extraction fixes its event key and the
+// fresh allocation keys of the callee templates, so no call depth creates a key (D17.18).
+struct call_site {
+    u32 block;
+    u32 gap;
+    ownership_summary_model.summary_view* summary;
+    ownership_api.entity_id event;
+    u32 fresh_first;
+    u32 fresh_count;
 }
 
 // Flow borrows these arrays. The program owns its entry and all nested request metadata.
@@ -43,6 +63,8 @@ struct body_program {
     // A local whose storage this body addresses. A store through that address can change
     // it, so it keeps no scalar fact, no value edge and no capture in the whole body.
     bool mut@ own addressed;
+    call_site mut@ own calls;
+    u64 calls_len;
     u64 steps_len;
     u64 events_len;
     u64 parameters_len;
@@ -60,6 +82,9 @@ struct body_program {
     bool residual_effects;
     bool held_inline_address;
     bool definite_prefix;
+    // A call changed caller-visible state that this summary does not export.
+    // Flow still checks the body. The published summary stays incomplete.
+    bool call_residual;
 }
 
 fn free(body_program mut* out) void {
@@ -77,6 +102,7 @@ fn free(body_program mut* out) void {
     del(owned.origins);
     del(owned.scalars);
     del(owned.addressed);
+    del(owned.calls);
     *out = body_program{};
 }
 
@@ -406,6 +432,101 @@ fn emit(body_input* in, body_program mut* out, ownership_transfer.request mut re
         .deferred = deferred, .callee = in->function.key, .filename = at.file};
     out->provenance_len += 1;
     out->steps_len += 1;
+}
+
+// Appends a summary effect without a flow step. Flow already applied the call it records.
+fn export_effect(body_input* in, body_program mut* out,
+    ownership_summary_model.effect_node mut node, ownership_api.source_position where,
+    string filename) void {
+    if (!work(out, 3) ||
+        !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations) ||
+        out->effects_len >= out->effects.len ||
+        out->provenance_len >= out->provenance_records.len) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    if (!ownership_summary_model.path_charge(&out->context, &out->proof, node.effect.place) ||
+        !ownership_summary_model.path_charge(&out->context, &out->proof, node.operand) ||
+        !ownership_summary_model.contents_charge(&out->context, &out->proof, node.value) ||
+        !ownership_summary_model.region_charge(&out->context, &out->proof, node.range)) {
+        return;
+    }
+    node.effect.key = next(out, ownership_api.entity_kind.relation);
+    node.provenance = next(out, ownership_api.entity_kind.event);
+    if (!ownership_api.successful(out->proof)) { return; }
+    node.effect.place = ownership_state.copy_place(&out->metadata, node.effect.place);
+    node.operand = ownership_state.copy_place(&out->metadata, node.operand);
+    node.value = ownership_state.copy_contents(&out->metadata, node.value);
+    node.range = ownership_state.copy_region(&out->metadata, node.range);
+    out->effects[out->effects_len] = node;
+    out->effects_len += 1;
+    out->provenance_records[out->provenance_len] = ownership_summary_model.provenance{
+        .key = node.provenance, .operation = node.effect.operation, .source = where,
+        .callee = in->function.key, .filename = filename};
+    out->provenance_len += 1;
+}
+
+// A callee requirement on a caller source becomes a requirement of this body at the call.
+// One read at that operation makes each later caller check it before application.
+fn export_requirement(body_input* in, body_program mut* out,
+    ownership_summary_model.requirement row, ownership_api.place_path holder,
+    ownership_api.operation_position at, ownership_api.source_position where, string filename)
+    void {
+    u64 mut i = 0;
+    while (i < out->requirements_len) {
+        if (!work(out, 1)) { return; }
+        ownership_summary_model.requirement prior = out->requirements[i];
+        if (prior.kind == row.kind && ownership_summary_model.same(prior.source, row.source) &&
+            ownership_keys.operation(prior.operation, at) == 0 &&
+            prior.range.access.end.kind == row.range.access.end.kind &&
+            prior.range.access.end.value == row.range.access.end.value &&
+            prior.range.alignment == row.range.alignment) { return; }
+        i += 1;
+    }
+    if (!work(out, 1) || out->requirements_len >= out->requirements.len ||
+        !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations) ||
+        !ownership_summary_model.path_charge(&out->context, &out->proof, holder) ||
+        !ownership_summary_model.region_charge(&out->context, &out->proof, row.range)) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    ownership_api.entity_id key = next(out, ownership_api.entity_kind.relation);
+    ownership_api.region mut needed = ownership_state.copy_region(&out->metadata, row.range);
+    needed.key = id(in->function.key, ownership_api.entity_kind.region, key.ordinal);
+    out->requirements[out->requirements_len] = ownership_summary_model.requirement{
+        .key = key, .kind = row.kind, .path = ownership_state.copy_place(&out->metadata, holder),
+        .source = row.source, .range = needed, .operation = at};
+    out->requirements_len += 1;
+    i = 0;
+    while (i < out->effects_len) {
+        if (!work(out, 1)) { return; }
+        ownership_summary_model.effect_node prior = out->effects[i];
+        if (prior.payload == ownership_summary_model.payload_kind.read &&
+            ownership_keys.operation(prior.effect.operation, at) == 0 &&
+            ownership_summary_model.same(prior.effect.source, row.source)) { return; }
+        i += 1;
+    }
+    export_effect(in, out, ownership_summary_model.effect_node{
+        .effect = ownership_api.ordered_effect{.kind = ownership_api.effect_kind.read,
+            .operation = at, .place = holder, .source = row.source},
+        .payload = ownership_summary_model.payload_kind.read, .operand = holder}, where,
+        filename);
+}
+
+// The call result becomes one write of its current contents at the call.
+fn export_result(body_input* in, body_program mut* out, ownership_api.place_path destination,
+    ownership_api.contents_fact value, ownership_api.operation_position at,
+    ownership_api.source_position where, string filename) void {
+    ownership_api.contents_fact mut written = value;
+    written.place = destination;
+    export_effect(in, out, ownership_summary_model.effect_node{
+        .effect = ownership_api.ordered_effect{.kind = ownership_api.effect_kind.write,
+            .operation = at, .place = destination,
+            .source = value.borrows.len == 1 ? value.borrows[0].source :
+                ownership_api.entity_id{}},
+        .payload = ownership_summary_model.payload_kind.replacement, .operand = destination,
+        .value = written, .range = value.borrows.len == 1 ? value.borrows[0].range :
+            ownership_api.region{}}, where, filename);
 }
 
 fn basic(body_input* in, u32 src, u32 dst, ownership_transfer.action effect_action)
@@ -961,10 +1082,169 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
         selected.flow_path);
 }
 
+fn binding(body_input* in, body_program mut* out, ast.sym* symbol)
+    ownership_summary_model.summary_view* {
+    if (symbol == null) { return null; }
+    u64 mut i = 0;
+    while (i < in->callees.len) {
+        if (!work(out, 1)) { return null; }
+        if (in->callees[i].symbol == symbol) { return in->callees[i].summary; }
+        i += 1;
+    }
+    return null;
+}
+
+// Each callee requirement can add one requirement and one read. The result adds one write.
+fn call_capacity(body_input* in, body_program mut* out, fir.statement* stmt) u64 {
+    if (stmt->kind != fir.stmt_kind.st_assign || stmt->value.kind != fir.rvalue_kind.rv_call ||
+        stmt->value.callee != fir.callee_kind.cl_fn) { return 0; }
+    ownership_summary_model.summary_view* summary = binding(in, out, stmt->value.callee_sym);
+    if (summary == null) { return 0; }
+    if (summary->requirements.len > (U64_MAX - 2) / 2) { return U64_MAX; }
+    return summary->requirements.len * 2 + 2;
+}
+
+// The callee result designates the source of one argument in each normal case.
+// Any other result keeps an unknown origin, so a later read cannot export a requirement.
+fn call_origin(body_input* in, body_program mut* out, fir.rvalue rv,
+    ownership_summary_model.summary_view* summary) ownership_api.entity_id {
+    ownership_api.entity_id mut found = ownership_api.entity_id{};
+    u64 mut c = 0;
+    while (c < summary->cases.len) {
+        ownership_summary_model.case_record row = summary->cases[c];
+        u64 mut k = 0;
+        while (row.outcome.kind == ownership_api.outcome_kind.function_return &&
+            k < row.results.len) {
+            u64 mut r = 0;
+            while (r < summary->results.len) {
+                if (!work(out, 1)) { return ownership_api.entity_id{}; }
+                ownership_summary_model.relation result = summary->results[r];
+                if (ownership_summary_model.same(result.key, row.results[k])) {
+                    ownership_api.entity_id origin = argument_origin(in, out, rv, summary,
+                        result.borrow.source);
+                    if (origin.kind == ownership_api.entity_kind.none ||
+                        (found.kind != ownership_api.entity_kind.none &&
+                            !ownership_summary_model.same(found, origin))) {
+                        return ownership_api.entity_id{};
+                    }
+                    found = origin;
+                }
+                r += 1;
+            }
+            k += 1;
+        }
+        c += 1;
+    }
+    return found;
+}
+
+fn argument_origin(body_input* in, body_program mut* out, fir.rvalue rv,
+    ownership_summary_model.summary_view* summary, ownership_api.entity_id formal_source)
+    ownership_api.entity_id {
+    u64 mut i = 0;
+    while (i < summary->roots.len) {
+        if (!work(out, 1)) { return ownership_api.entity_id{}; }
+        ownership_summary_model.symbolic_root root = summary->roots[i];
+        if (root.kind == ownership_summary_model.root_kind.caller_source && root.formal > 0 &&
+            root.formal <= rv.ops_len &&
+            ownership_summary_model.same(root.source, formal_source)) {
+            fir.operand argument = fir.rvalue_operand(in->function.body, rv, root.formal - 1);
+            if (argument.kind == fir.operand_kind.ok_const || !direct(argument.place)) {
+                return ownership_api.entity_id{};
+            }
+            return out->origins[argument.place.local];
+        }
+        i += 1;
+    }
+    return ownership_api.entity_id{};
+}
+
+// A call of an available summary becomes one flow step at its exact gap (D17.18).
+// Flow applies the summary to the current facts. Unsupported calls stay unknown effects.
+fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap) void {
+    fir.func* f = in->function.body;
+    fir.rvalue rv = stmt->value;
+    ownership_summary_model.summary_view* summary = rv.callee == fir.callee_kind.cl_fn ?
+        binding(in, out, rv.callee_sym) : null;
+    if (!ownership_api.successful(out->proof)) { return; }
+    if (summary == null || !direct(stmt->place)) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    u32 mut op = 0;
+    while (op < rv.ops_len) {
+        if (!work(out, 1)) { return; }
+        fir.operand argument = fir.rvalue_operand(f, rv, op);
+        if (argument.kind != fir.operand_kind.ok_const && !direct(argument.place)) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return;
+        }
+        op += 1;
+    }
+    u32 dst = stmt->place.local;
+    types.node* dst_ty = fir.local_at(f, dst)->ty;
+    if (fir.type_aggregate(dst_ty) && !reference(dst_ty)) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    if (out->calls_len >= out->calls.len || out->steps_len >= out->steps.len) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    u32 mut templates = 0;
+    u64 mut i = 0;
+    while (i < summary->roots.len) {
+        if (!work(out, 1)) { return; }
+        if (summary->roots[i].kind == ownership_summary_model.root_kind.allocation_template) {
+            if (templates == U32_MAX) {
+                reject(out, ownership_api.incomplete_reason.invalid_input);
+                return;
+            }
+            templates += 1;
+        }
+        i += 1;
+    }
+    ownership_api.entity_id event = next(out, ownership_api.entity_kind.event);
+    u32 first = out->next_key + 1;
+    u32 mut t = 0;
+    while (t < templates) {
+        next(out, ownership_api.entity_kind.allocation);
+        t += 1;
+    }
+    if (!ownership_api.successful(out->proof)) { return; }
+    out->calls[out->calls_len] = call_site{block, gap, summary, event, first, templates};
+    out->calls_len += 1;
+    ownership_api.operation_position at = position(in, block, gap, false);
+    // Flow reports a refused charge or a missing handler at the call with these keys.
+    u32 mut kind = 0;
+    while (kind < 5) {
+        if (!work(out, 1) || out->events_len >= out->events.len) {
+            reject(out, ownership_api.incomplete_reason.invalid_input);
+            return;
+        }
+        out->events[out->events_len] = ownership_flow.event_binding{at,
+            cast(kind, ownership_api.event_kind), ownership_api.entity_id{},
+            next(out, ownership_api.entity_kind.event)};
+        out->events_len += 1;
+        kind += 1;
+    }
+    out->steps[out->steps_len] = ownership_flow.step{.block = block, .gap = gap,
+        .order = cast(out->steps_len, u32), .kind = ownership_flow.step_kind.direct_call,
+        .operation = at, .source = location(in, out, stmt->loc)};
+    out->steps_len += 1;
+    out->scalars[dst] = ownership_api.scalar_fact{};
+    out->origins[dst] = reference(dst_ty) ? call_origin(in, out, rv, summary) :
+        ownership_api.entity_id{};
+}
+
 fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap)
     void {
     fir.func* f = in->function.body;
     fir.rvalue rv = stmt->value;
+    if (rv.kind == fir.rvalue_kind.rv_call) {
+        call(in, out, stmt, block, gap);
+        return;
+    }
     if (rv.kind == fir.rvalue_kind.rv_addr && intrinsic(in, out, rv.place, stmt->place,
         stmt->loc)) { return; }
     if (rv.kind == fir.rvalue_kind.rv_use) {
@@ -1316,17 +1596,20 @@ fn extract(body_input* in) body_program {
                     op += 1;
                 }
             }
-            if (projections > (U64_MAX - extra) / 2) {
+            u64 calls = call_capacity(in, &out, stmt);
+            if (projections > (U64_MAX - extra) / 2 || calls > U64_MAX - extra - projections * 2) {
                 reject(&out, ownership_api.incomplete_reason.invalid_input);
                 return out;
             }
-            extra += projections * 2;
+            extra += projections * 2 + calls;
             gap += 1;
         }
         b += 1;
     }
+    u64 event_limit = types.TYPE_MAX_SIZE / sizeof(ownership_flow.event_binding);
     if (count > (U64_MAX - locals - blocks - 1) / 4 ||
-        blocks > types.TYPE_MAX_SIZE / sizeof(ownership_flow.event_binding) / (locals * 20 + 25)) {
+        blocks > event_limit / (locals * 20 + 25) ||
+        count > (event_limit - blocks * (locals * 20 + 25)) / 5) {
         reject(&out, ownership_api.incomplete_reason.invalid_input);
         return out;
     }
@@ -1349,7 +1632,7 @@ fn extract(body_input* in) body_program {
     }
     out.steps = new(ownership_flow.step, cap);
     out.transfer_events = new(ownership_transfer.event_binding, cap);
-    out.events = new(ownership_flow.event_binding, blocks * (locals * 20 + 25));
+    out.events = new(ownership_flow.event_binding, blocks * (locals * 20 + 25) + count * 5);
     out.parameters = new(ownership_flow.parameter, locals);
     out.roots = new(ownership_summary_model.symbolic_root, cap + locals * 2);
     out.requirements = new(ownership_summary_model.requirement, cap);
@@ -1357,6 +1640,7 @@ fn extract(body_input* in) body_program {
     out.provenance_records = new(ownership_summary_model.provenance, cap);
     out.origins = new(ownership_api.entity_id, locals);
     out.scalars = new(ownership_api.scalar_fact, locals);
+    out.calls = new(call_site, count);
     out.entry = ownership_state.empty();
     out.metadata = ownership_state.empty();
     out.next_key = cast(locals * 2 + 2, u32);

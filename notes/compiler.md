@@ -1248,6 +1248,33 @@ came here.
   flow of one caller with its call applications. Its W bound is `ownership_limits.computation`
   of that body's FIR size. The function E count continues from the body through each exit.
   These modules do not select a new compiler driver. (D17.18)
+- **A body applies the summary of each direct call at the gap of the call** (D17.18).
+  Extraction records each call site, its event key, and fresh keys for the callee allocation
+  templates. A call depth creates no key.
+  The flow `direct_call` step runs `ownership_summary.call_step`. It binds the callee roots to the
+  current path facts and runs `ownership_calls.apply`.
+  An output root binds to a whole caller root only. An argument such as `&t->b` designates a
+  field, so its type differs from the root type, and the call stays unknown.
+  A proved abort ends the path and records an abort exit. A missing binding, an incomplete callee
+  summary, or an incomplete application keeps an unknown continuation. Flow keeps the obligations,
+  the call result becomes unknown, and the published summary stays incomplete.
+  A refused charge in an application stops the computation with that refusal. The inference sees
+  each charge through a watch, so no later step changes the reason.
+  The summary exports the callee requirements on its own caller sources, with one read at the
+  call, and a reference result that designates its own caller sources. Any other caller-visible
+  callee effect, and an owning argument move, keep the summary incomplete.
+  So does a callee requirement on a source that the body loaded from caller storage, because no
+  formal of the body names that source.
+  Only the effects of the applied case run. A requirement after an abort cannot fail the call.
+  The handler checks no collection loan, so a direct call inside an open loan fails before it.
+  A callee summary without a proof keeps the call unknown. Its body reported its own error, so
+  the call does not fail the caller for it.
+- **A view loaded from an owner field ends when the same body releases that field** (D17.14).
+  Flow models a caller owner field as a private empty slot, so its release does not end the
+  loaded source. `ownership_summary.publish` checks the exit sequence instead. A later
+  requirement on that view is a use after release. A returned borrow of it, for example after
+  a deferred release, outlives its source. The body fails at that operation with an invalid
+  use. A read after an aborting call is not on the exit path, so it is not checked.
 
 ## 7. The runtime and the standard library
 

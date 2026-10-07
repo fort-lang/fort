@@ -1,10 +1,13 @@
 /// Infers ordered linear summaries from checked and verified fort bodies.
+import fir;
 import ownership_api;
+import ownership_calls;
 import ownership_flow;
 import ownership_keys;
 import ownership_state;
 import ownership_summary_body;
 import ownership_summary_model;
+import ownership_transfer;
 import types;
 
 // The observer copies each view before flow releases its working path.
@@ -21,8 +24,8 @@ struct exits {
     u64 count;
     ownership_summary_model.context context;
     ownership_api.proof_status proof;
-    // The E count of the function continues from the body program through each exit.
-    u64 relations;
+    // The exits and the call exports continue one E count of the body program.
+    u64 mut* relations;
 }
 
 fn copy_state(ownership_api.state_view* input, ownership_summary_model.context* ctx,
@@ -82,8 +85,12 @@ fn observe(void mut* opaque, ownership_api.state_view* facts,
     exits mut* out = cast(opaque, exits mut*);
     out->context.operation = operation;
     out->context.source = source;
+    if (out->relations == null && ownership_api.successful(out->proof)) {
+        out->proof = ownership_summary_model.fail(&out->context,
+            ownership_api.incomplete_reason.invalid_input, out->context.event);
+    }
     if (!ownership_summary_model.work(&out->context, &out->proof, 1) ||
-        !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations) ||
+        !ownership_summary_model.effect_charge(&out->context, &out->proof, out->relations) ||
         out->count == ownership_api.U64_MAX) { return out->proof; }
     exit_snapshot mut* own snapshot = new(exit_snapshot);
     snapshot->facts = copy_state(facts, &out->context, &out->proof);
@@ -104,6 +111,420 @@ fn free_exits(exits mut* out) void {
         del(item);
     }
     *out = exits{};
+}
+
+// The watch sees each charge of one inference. It keeps the first refused charge, so a call
+// cannot turn that refusal into another reason (`spec/fir.md` 14.1).
+struct budget_watch {
+    ownership_api.services* inner;
+    bool refused;
+    ownership_api.charge_result refusal;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+}
+
+fn watched_charge(void mut* opaque, ownership_api.charge_request* req)
+    ownership_api.charge_result {
+    budget_watch mut* watch = cast(opaque, budget_watch mut*);
+    ownership_api.charge_result result = ownership_api.charge(watch->inner, req);
+    if (!result.allowed && !watch->refused) {
+        watch->refused = true;
+        watch->refusal = result;
+        watch->operation = req->operation;
+        watch->source = req->source;
+    }
+    return result;
+}
+
+// The call handler borrows the inference input. It owns nothing past one call.
+struct call_context {
+    ownership_summary_body.body_input* in;
+    ownership_summary_body.body_program mut* program;
+    exits mut* observations;
+    budget_watch* watch;
+}
+
+// One call request borrows these arrays. `unknown` names a fact that the state lacks.
+struct call_bindings {
+    ownership_api.alias_binding mut@ own aliases;
+    ownership_calls.source_binding mut@ own sources;
+    ownership_calls.allocation_binding mut@ own allocations;
+    ownership_calls.capture_binding mut@ own captures;
+    u64 aliases_len;
+    u64 sources_len;
+    u64 allocations_len;
+    u64 captures_len;
+    bool unknown;
+}
+
+fn free_bindings(call_bindings mut* out) void {
+    call_bindings mut owned = move(*out);
+    del(owned.aliases);
+    del(owned.sources);
+    del(owned.allocations);
+    del(owned.captures);
+    *out = call_bindings{};
+}
+
+fn call_work(call_context* c, u64 n) bool {
+    return ownership_summary_body.work(c->program, n);
+}
+
+// A pointer output names the storage that the argument designates, not the argument slot.
+// The binding names a whole root only. An argument such as `&t->b` designates a field inside
+// that root, and its type differs from the root type, so that binding stays unknown.
+fn designated_storage(call_context* c, ownership_api.entity_id source, types.node* pointee)
+    ownership_api.place_path {
+    u64 mut r = 0;
+    while (r < c->program->roots_len) {
+        if (!call_work(c, 1)) { break; }
+        ownership_summary_model.symbolic_root root = c->program->roots[r];
+        if ((root.kind == ownership_summary_model.root_kind.by_value_slot ||
+            root.kind == ownership_summary_model.root_kind.caller_source) &&
+            ownership_summary_model.same(root.source, source)) {
+            types.node* whole = root.kind == ownership_summary_model.root_kind.caller_source ?
+                (root.ty == null ? null : root.ty->elem) : root.ty;
+            if (whole == null || pointee == null || !types.type_equal(whole, pointee)) {
+                return ownership_api.place_path{.residual = true};
+            }
+            return ownership_api.place_path{.root = root.slot};
+        }
+        r += 1;
+    }
+    return ownership_api.place_path{.residual = true};
+}
+
+// Binds each callee root to the current facts of this path. Formal identity proves nothing:
+// two formals bound to one source keep one source and one allocation (D17.15).
+fn bind_call(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
+    ownership_state.state* facts, call_bindings mut* out) bool {
+    ownership_summary_model.summary_view* summary = site.summary;
+    u64 count = summary->roots.len;
+    if (count > types.TYPE_MAX_SIZE / sizeof(ownership_calls.source_binding) ||
+        !call_work(c, count)) { return false; }
+    out->aliases = new(ownership_api.alias_binding, count);
+    out->sources = new(ownership_calls.source_binding, count);
+    out->allocations = new(ownership_calls.allocation_binding, count);
+    out->captures = new(ownership_calls.capture_binding, count);
+    fir.func* f = c->in->function.body;
+    u32 mut template = 0;
+    u64 mut i = 0;
+    while (i < count) {
+        if (!call_work(c, 4)) { return false; }
+        ownership_summary_model.symbolic_root row = summary->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.caller_source) {
+            if (row.formal == 0 || row.formal > call->value.ops_len) {
+                out->unknown = true;
+                return true;
+            }
+            fir.operand argument = fir.rvalue_operand(f, call->value, row.formal - 1);
+            if (argument.kind == fir.operand_kind.ok_const ||
+                !ownership_summary_body.direct(argument.place)) {
+                out->unknown = true;
+                return true;
+            }
+            u64 at = ownership_transfer.contents_index(facts,
+                ownership_summary_body.slot(c->in, argument.place.local));
+            if (!call_work(c, facts->contents_len) || at == ownership_api.U64_MAX ||
+                facts->contents[at].borrows.len != 1) {
+                out->unknown = true;
+                return true;
+            }
+            ownership_api.contents_fact input = facts->contents[at];
+            u64 source = ownership_state.source_index(facts, input.borrows[0].source);
+            if (!call_work(c, facts->sources_len) || source == ownership_api.U64_MAX) {
+                out->unknown = true;
+                return true;
+            }
+            // A residual output binding keeps the call unknown: the application refuses it.
+            ownership_api.place_path actual = ownership_calls.output_root(summary, row.slot) ?
+                designated_storage(c, input.borrows[0].source,
+                    row.ty == null ? null : row.ty->elem) : input.place;
+            out->aliases[out->aliases_len] = ownership_api.alias_binding{row.slot, actual,
+                input.value_version};
+            out->aliases_len += 1;
+            out->sources[out->sources_len] = ownership_calls.source_binding{row.source,
+                facts->sources[source], input.borrows[0].range, input.value_version,
+                ownership_api.entity_id{row.source.function, ownership_api.entity_kind.region,
+                    row.source.ordinal}};
+            out->sources_len += 1;
+            out->captures[out->captures_len] = ownership_calls.capture_binding{
+                ownership_api.entity_id{row.source.function, ownership_api.entity_kind.value,
+                    row.formal + 1}, input.value_version, input.span_length};
+            out->captures_len += 1;
+            if (row.allocation.kind != ownership_api.entity_kind.none) {
+                u64 owner = ownership_transfer.owner_index(facts, input.place);
+                if (!call_work(c, facts->allocations_len) || owner == ownership_api.U64_MAX ||
+                    argument.kind != fir.operand_kind.ok_move) {
+                    out->unknown = true;
+                    return true;
+                }
+                out->allocations[out->allocations_len] = ownership_calls.allocation_binding{
+                    row.allocation, facts->allocations[owner], false};
+                out->allocations_len += 1;
+            }
+        } else if (row.kind == ownership_summary_model.root_kind.allocation_template) {
+            if (template >= site.fresh_count) {
+                out->unknown = true;
+                return true;
+            }
+            ownership_api.entity_id key = ownership_api.entity_id{c->in->function.key,
+                ownership_api.entity_kind.allocation, site.fresh_first + template};
+            out->allocations[out->allocations_len] = ownership_calls.allocation_binding{
+                row.allocation, ownership_api.allocation_fact{.key = key,
+                    .validity = ownership_api.validity_kind.live,
+                    .count = ownership_api.multiplicity{false, true, false},
+                    .obligation = true}, true};
+            out->allocations_len += 1;
+            template += 1;
+        } else if (row.kind == ownership_summary_model.root_kind.global) {
+            out->unknown = true;
+            return true;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn call_site_at(call_context* c, ownership_flow.step* s) u64 {
+    u64 mut i = 0;
+    while (i < c->program->calls_len) {
+        if (!call_work(c, 1)) { return ownership_api.U64_MAX; }
+        ownership_summary_body.call_site site = c->program->calls[i];
+        if (site.block == s->block && site.gap == s->gap) { return i; }
+        i += 1;
+    }
+    return ownership_api.U64_MAX;
+}
+
+fn caller_root(call_context* c, ownership_api.entity_id source) u64 {
+    u64 mut r = 0;
+    while (r < c->program->roots_len) {
+        if (!call_work(c, 1)) { return ownership_api.U64_MAX; }
+        ownership_summary_model.symbolic_root root = c->program->roots[r];
+        if (root.kind == ownership_summary_model.root_kind.caller_source &&
+            ownership_summary_model.same(root.source, source)) { return r; }
+        r += 1;
+    }
+    return ownership_api.U64_MAX;
+}
+
+// A loaded root names a reference that this body loaded from caller storage. A callee
+// requirement on its source has no formal of this body, so no caller can check it here.
+fn loaded_root(call_context* c, ownership_api.entity_id source) bool {
+    u64 mut r = 0;
+    while (r < c->program->roots_len) {
+        if (!call_work(c, 1)) { return true; }
+        ownership_summary_model.symbolic_root root = c->program->roots[r];
+        if (root.kind == ownership_summary_model.root_kind.loaded_source &&
+            ownership_summary_model.same(root.source, source)) { return true; }
+        r += 1;
+    }
+    return false;
+}
+
+// A caller-visible place is designated caller storage of this body.
+fn caller_visible(call_context* c, ownership_api.place_path place,
+    ownership_api.entity_id allocation) bool {
+    u64 mut r = 0;
+    while (r < c->program->roots_len) {
+        if (!call_work(c, 1)) { return true; }
+        ownership_summary_model.symbolic_root root = c->program->roots[r];
+        if ((root.kind == ownership_summary_model.root_kind.caller_source ||
+            root.kind == ownership_summary_model.root_kind.loaded_source) &&
+            (ownership_summary_model.same(root.slot, place.root) ||
+            (allocation.kind != ownership_api.entity_kind.none &&
+                ownership_summary_model.same(root.allocation, allocation)))) { return true; }
+        r += 1;
+    }
+    return false;
+}
+
+fn listed(ownership_api.entity_id@ keys, ownership_api.entity_id key) bool {
+    u64 mut i = 0;
+    while (i < keys.len) {
+        if (ownership_summary_model.same(keys[i], key)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// Exports the callee requirements and the call result of this body (D17.14, D17.17).
+// Any other caller-visible callee effect keeps the published summary incomplete.
+fn export_call(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
+    ownership_flow.step* s, ownership_calls.application* applied) bool {
+    ownership_summary_body.body_program mut* program = c->program;
+    ownership_summary_model.summary* bound = &applied->bound.model;
+    // Only the applied case runs. A requirement or effect after its abort is not exported.
+    ownership_summary_model.case_record applied_case = bound->cases[0];
+    u64 mut i = 0;
+    while (i < bound->requirements.len) {
+        if (!call_work(c, 2) || !call_work(c, applied_case.requirements.len)) { return false; }
+        ownership_summary_model.requirement row = bound->requirements[i];
+        if (!listed(applied_case.requirements, row.key)) {
+            i += 1;
+            continue;
+        }
+        u64 root = caller_root(c, row.source);
+        if (!ownership_api.successful(program->proof)) { return false; }
+        bool readable = row.kind == ownership_summary_model.requirement_kind.live_source ||
+            row.kind == ownership_summary_model.requirement_kind.extent;
+        if (root != ownership_api.U64_MAX && readable &&
+            row.guard.kind == ownership_api.entity_kind.none) {
+            ownership_summary_model.symbolic_root formal = program->roots[root];
+            ownership_summary_body.export_requirement(c->in, program, row,
+                ownership_summary_body.slot(c->in, formal.formal), s->operation,
+                s->source, call->loc.file);
+        } else if (root != ownership_api.U64_MAX || loaded_root(c, row.source) ||
+            caller_visible(c, row.path, ownership_api.entity_id{})) {
+            program->call_residual = true;
+        }
+        if (!ownership_api.successful(program->proof)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < bound->effects.len) {
+        if (!call_work(c, 2) || !call_work(c, applied_case.effects.len)) { return false; }
+        ownership_summary_model.effect_node node = bound->effects[i];
+        if (listed(applied_case.effects, node.effect.key) &&
+            node.payload != ownership_summary_model.payload_kind.read &&
+            (caller_visible(c, node.effect.place, node.effect.allocation) ||
+            caller_visible(c, node.operand, ownership_api.entity_id{}))) {
+            program->call_residual = true;
+        }
+        i += 1;
+    }
+    u32 mut op = 0;
+    while (op < call->value.ops_len) {
+        if (!call_work(c, 1)) { return false; }
+        fir.operand argument = fir.rvalue_operand(c->in->function.body, call->value, op);
+        if (argument.kind == fir.operand_kind.ok_move &&
+            fir.local_at(c->in->function.body, argument.place.local)->ty->is_own) {
+            program->call_residual = true;
+        }
+        op += 1;
+    }
+    types.node* result = fir.local_at(c->in->function.body, call->place.local)->ty;
+    if (!ownership_summary_body.reference(result)) { return true; }
+    ownership_api.place_path destination = ownership_summary_body.slot(c->in,
+        call->place.local);
+    if (!call_work(c, applied->state.contents_len)) { return false; }
+    u64 at = ownership_transfer.contents_index(&applied->state, destination);
+    if (at == ownership_api.U64_MAX) {
+        program->call_residual = true;
+        return true;
+    }
+    ownership_api.contents_fact value = applied->state.contents[at];
+    u64 mut b = 0;
+    while (b < value.borrows.len) {
+        if (!call_work(c, 1)) { return false; }
+        if (caller_root(c, value.borrows[b].source) == ownership_api.U64_MAX) {
+            program->call_residual = true;
+            return ownership_api.successful(program->proof);
+        }
+        b += 1;
+    }
+    ownership_summary_body.export_result(c->in, program, destination, value, s->operation,
+        s->source, call->loc.file);
+    return ownership_api.successful(program->proof);
+}
+
+// An unresolved call writes an unknown value to its destination. No stale fact survives.
+fn unresolved_call(call_context* c, fir.statement* call, ownership_state.state mut* facts)
+    ownership_flow.call_verdict {
+    c->program->call_residual = true;
+    ownership_flow.call_verdict mut verdict = ownership_flow.call_verdict{
+        .proof = ownership_summary_model.complete(), .unknown = true};
+    ownership_api.place_path destination = ownership_summary_body.slot(c->in,
+        call->place.local);
+    if (!call_work(c, facts->contents_len + 1)) {
+        verdict.proof = c->program->proof;
+        return verdict;
+    }
+    ownership_api.contents_fact unknown = ownership_api.contents_fact{.place = destination,
+        .kind = ownership_api.contents_kind.unknown};
+    u64 at = ownership_transfer.contents_index(facts, destination);
+    if (at == ownership_api.U64_MAX) { ownership_state.append_contents(facts, unknown); }
+    else { facts->contents[at] = unknown; }
+    return verdict;
+}
+
+// Applies the published callee summary at one call (D17.18). A proved abort ends the path.
+// An unresolved summary keeps a possible return with its obligations.
+fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut* facts)
+    ownership_flow.call_verdict {
+    call_context* c = cast(opaque, call_context*);
+    ownership_flow.call_verdict mut verdict = ownership_flow.call_verdict{
+        .proof = ownership_summary_model.complete()};
+    u64 index = call_site_at(c, s);
+    if (index == ownership_api.U64_MAX) {
+        verdict.proof = c->program->proof;
+        if (ownership_api.successful(verdict.proof)) {
+            verdict.proof = ownership_api.incomplete(
+                ownership_api.incomplete_reason.invalid_input, s->operation, s->source);
+        }
+        return verdict;
+    }
+    ownership_summary_body.call_site site = c->program->calls[index];
+    fir.statement* call = fir.block_statement(c->in->function.body, site.block, site.gap);
+    // A callee without a proof keeps an unknown call. A callee body that failed reported its
+    // own error, so the call does not fail this body for it (D17.18).
+    ownership_summary_model.summary_view* summary = site.summary;
+    if (summary->residual_effects || !ownership_api.successful(summary->proof) ||
+        summary->cases.len == 0) { return unresolved_call(c, call, facts); }
+    call_bindings mut bindings = call_bindings{};
+    defer free_bindings(&bindings);
+    if (!bind_call(c, site, call, facts, &bindings)) {
+        verdict.proof = c->program->proof;
+        return verdict;
+    }
+    if (bindings.unknown) { return unresolved_call(c, call, facts); }
+    ownership_calls.event_binding[1] events = {ownership_calls.event_binding{s->operation,
+        site.event}};
+    ownership_api.alias_binding@ no_globals = {};
+    ownership_calls.request mut req = ownership_calls.request{.summary = summary,
+        .before = ownership_state.view(facts), .operation = s->operation, .source = s->source,
+        .aliases = bindings.aliases[..bindings.aliases_len],
+        .sources = bindings.sources[..bindings.sources_len],
+        .allocations = bindings.allocations[..bindings.allocations_len],
+        .captures = bindings.captures[..bindings.captures_len], .globals = no_globals,
+        .events = events[..], .services = c->in->services, .limits = c->in->limits,
+        .coverage = ownership_summary_model.coverage_status{true, true, false},
+        .correspondence_complete = true, .event_map_complete = true};
+    req.result.actual_slot = ownership_summary_body.slot(c->in, call->place.local);
+    ownership_calls.application mut applied = ownership_calls.apply(&req);
+    defer ownership_calls.free(&applied);
+    // A refused charge stops this computation, whatever reason the application reports.
+    if (c->watch != null && c->watch->refused) {
+        verdict.proof = c->watch->refusal.proof;
+        return verdict;
+    }
+    if (!ownership_api.successful(applied.proof)) {
+        if (applied.proof.kind == ownership_api.proof_kind.incomplete &&
+            applied.proof.terminal.reason != ownership_api.incomplete_reason.work_limit &&
+            applied.proof.terminal.reason != ownership_api.incomplete_reason.report_limit) {
+            return unresolved_call(c, call, facts);
+        }
+        verdict.proof = applied.proof;
+        return verdict;
+    }
+    if (!export_call(c, site, call, s, &applied)) {
+        verdict.proof = c->program->proof;
+        return verdict;
+    }
+    if (!applied.normal_continuation) {
+        if (applied.outcome.kind != ownership_api.outcome_kind.abort) {
+            return unresolved_call(c, call, facts);
+        }
+        ownership_api.state_view ended = ownership_state.view(&applied.state);
+        verdict.proof = observe(cast(c->observations, void mut*), &ended, applied.outcome,
+            s->operation, s->source);
+        return verdict;
+    }
+    ownership_state.free(facts);
+    *facts = move(applied.state);
+    verdict.continues = true;
+    return verdict;
 }
 
 fn sort_roots(ownership_summary_body.body_program mut* program) bool {
@@ -137,21 +558,202 @@ fn failed(ownership_summary_body.body_program* program) ownership_summary_model.
     return out;
 }
 
+// A position precedes an exit on its path. A call export shares the position of its call.
+fn before_exit(ownership_api.operation_position at, ownership_api.operation_position exit)
+    bool {
+    return at.block < exit.block || (at.block == exit.block && at.operation <= exit.operation);
+}
+
+fn position_less(ownership_api.operation_position a, ownership_api.operation_position b) bool {
+    return a.block < b.block || (a.block == b.block && a.operation < b.operation);
+}
+
+// Returns the effects of one exit in FIR order. Equal positions keep their emission order.
+fn exit_sequence(ownership_summary_body.body_program mut* program, exit_snapshot* exit,
+    ownership_api.entity_id mut@ out) u64 {
+    u64 mut@ own index = new(u64, program->effects_len);
+    defer del(index);
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < program->effects_len) {
+        if (!ownership_summary_body.work(program, 1)) { return 0; }
+        ownership_api.operation_position at = program->effects[i].effect.operation;
+        if (before_exit(at, exit->operation)) {
+            u64 mut j = count;
+            while (j > 0 && position_less(at, program->effects[index[j - 1]].effect.operation)) {
+                if (!ownership_summary_body.work(program, 1)) { return 0; }
+                index[j] = index[j - 1];
+                j -= 1;
+            }
+            index[j] = i;
+            count += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < count) {
+        out[i] = program->effects[index[i]].effect.key;
+        i += 1;
+    }
+    return count;
+}
+
+// The order relation is a canonical set. Its records sort by their before and after keys.
+// The case sequence keeps the FIR order that a caller applies.
+fn sort_order(ownership_summary_body.body_program mut* program,
+    ownership_api.ordering_constraint mut@ order) bool {
+    u64 mut i = 1;
+    while (i < order.len) {
+        u64 mut j = i;
+        while (j > 0) {
+            if (!ownership_summary_body.work(program, 1)) { return false; }
+            i32 first = ownership_keys.entity(order[j - 1].before, order[j].before);
+            if (first < 0 || (first == 0 &&
+                ownership_keys.entity(order[j - 1].after, order[j].after) < 0)) { break; }
+            ownership_api.ordering_constraint prior = order[j - 1];
+            order[j - 1] = order[j];
+            order[j] = prior;
+            j -= 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// A sequence key names an effect of this program. A missing key is invalid input. The program
+// appends each effect with a fresh key from one counter, so the keys increase and a binary
+// search finds one in O(log n) W units.
+fn effect_at(ownership_summary_body.body_program mut* program, ownership_api.entity_id key)
+    u64 {
+    u64 mut low = 0;
+    u64 mut high = program->effects_len;
+    while (low < high) {
+        if (!ownership_summary_body.work(program, 1)) { return ownership_api.U64_MAX; }
+        u64 middle = low + (high - low) / 2;
+        i32 order = ownership_keys.entity(program->effects[middle].effect.key, key);
+        if (order == 0) { return middle; }
+        if (order < 0) { low = middle + 1; } else { high = middle; }
+    }
+    ownership_summary_body.reject(program, ownership_api.incomplete_reason.invalid_input);
+    return ownership_api.U64_MAX;
+}
+
+fn position_source(ownership_summary_body.body_program mut* program,
+    ownership_api.operation_position at, ownership_api.source_position fallback)
+    ownership_api.source_position {
+    u64 mut i = 0;
+    while (i < program->provenance_len) {
+        if (!ownership_summary_body.work(program, 1)) { return fallback; }
+        if (ownership_keys.operation(program->provenance_records[i].operation, at) == 0) {
+            return program->provenance_records[i].source;
+        }
+        i += 1;
+    }
+    return fallback;
+}
+
+// The body itself fails at `at`. The event names the view source as its relation.
+fn intrinsic_use(ownership_summary_body.body_program mut* program,
+    ownership_api.operation_position at, ownership_api.source_position where,
+    ownership_api.entity_id view, string message) void {
+    ownership_api.entity_id key = ownership_summary_body.next(program,
+        ownership_api.entity_kind.event);
+    if (!ownership_api.successful(program->proof)) { return; }
+    ownership_api.proof_status mut proof = ownership_summary_model.complete();
+    proof.failed = true;
+    ownership_api.event_descriptor mut event = ownership_api.event_descriptor{};
+    event.key = key;
+    event.operation = at;
+    event.source = where;
+    event.kind = ownership_api.event_kind.invalid_use;
+    event.evidence = ownership_api.evidence_kind.unconditional;
+    event.relation = view;
+    event.text = message;
+    ownership_api.event_request request = ownership_api.event_request{event, proof};
+    program->proof = ownership_api.record_event(program->context.services, &request).proof;
+    program->residual_effects = true;
+}
+
+// A view loaded from a caller owner field designates the owned allocation. A release of that
+// field in the same body ends the view (D17.14). A later requirement on the view is a use after
+// release, and a returned borrow of it outlives its source. The body fails at that operation.
+fn released_views(ownership_summary_body.body_program mut* program, exit_snapshot* exit,
+    ownership_api.entity_id@ sequence, bool returns, ownership_api.place_path result) bool {
+    u64 mut i = 0;
+    while (i < sequence.len) {
+        u64 released = effect_at(program, sequence[i]);
+        if (released == ownership_api.U64_MAX) { return false; }
+        ownership_summary_model.effect_node release = program->effects[released];
+        u64 mut j = 0;
+        while (release.payload == ownership_summary_model.payload_kind.release &&
+            release.effect.place.projections.len != 0 && j < i) {
+            u64 loaded = effect_at(program, sequence[j]);
+            if (loaded == ownership_api.U64_MAX) { return false; }
+            ownership_summary_model.effect_node load = program->effects[loaded];
+            if (load.payload == ownership_summary_model.payload_kind.reference_load &&
+                load.value.borrows.len == 1 &&
+                ownership_state.same_place(load.operand, release.effect.place)) {
+                ownership_api.entity_id view = load.value.borrows[0].source;
+                u64 mut r = 0;
+                while (r < program->requirements_len) {
+                    if (!ownership_summary_body.work(program, 1)) { return false; }
+                    ownership_summary_model.requirement row = program->requirements[r];
+                    if (ownership_summary_model.same(row.source, view) &&
+                        position_less(release.effect.operation, row.operation) &&
+                        before_exit(row.operation, exit->operation)) {
+                        intrinsic_use(program, row.operation,
+                            position_source(program, row.operation, exit->source), view,
+                            "view of an owner field is used after its release");
+                        return false;
+                    }
+                    r += 1;
+                }
+                u64 mut c = 0;
+                while (returns && c < exit->facts.contents_len) {
+                    if (!ownership_summary_body.work(program, 1)) { return false; }
+                    ownership_api.contents_fact value = exit->facts.contents[c];
+                    u64 mut b = 0;
+                    while (ownership_summary_model.same(value.place.root, result.root) &&
+                        b < value.borrows.len) {
+                        if (ownership_summary_model.same(value.borrows[b].source, view)) {
+                            intrinsic_use(program, exit->operation, exit->source, view,
+                                "returned view outlives its released owner field");
+                            return false;
+                        }
+                        b += 1;
+                    }
+                    c += 1;
+                }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 fn publish(ownership_summary_body.body_input* in,
     ownership_summary_body.body_program mut* program, exits* observations)
     ownership_summary_model.summary {
     ownership_summary_model.summary mut out = failed(program);
     if (observations->count != 1 || observations->first == null ||
-        observations->first->outcome.kind != ownership_api.outcome_kind.function_return) {
+        (observations->first->outcome.kind != ownership_api.outcome_kind.function_return &&
+        observations->first->outcome.kind != ownership_api.outcome_kind.abort)) {
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            program->context.operation, program->context.source);
+        return out;
+    }
+    if (program->call_residual) {
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
             program->context.operation, program->context.source);
         return out;
     }
     if (!sort_roots(program)) { return failed(program); }
     exit_snapshot* exit = observations->first;
+    bool returns = exit->outcome.kind == ownership_api.outcome_kind.function_return;
     u64 mut result_count = 0;
     u64 mut i = 0;
-    while (i < exit->facts.contents_len) {
+    while (returns && i < exit->facts.contents_len) {
         if (!ownership_summary_body.work(program, 1)) { return failed(program); }
         ownership_api.contents_fact contents = exit->facts.contents[i];
         if (ownership_summary_model.same(contents.place.root,
@@ -180,7 +782,11 @@ fn publish(ownership_summary_body.body_input* in,
     ownership_api.entity_id mut@ own requirements =
         new(ownership_api.entity_id, program->requirements_len);
     defer del(requirements);
-    u64 order_count = program->effects_len == 0 ? 0 : program->effects_len - 1;
+    u64 sequence = exit_sequence(program, exit, effects[..]);
+    if (!ownership_api.successful(program->proof) ||
+        !released_views(program, exit, effects[..sequence], returns,
+            ownership_summary_body.slot(in, 0))) { return failed(program); }
+    u64 order_count = sequence == 0 ? 0 : sequence - 1;
     ownership_api.ordering_constraint mut@ own order =
         new(ownership_api.ordering_constraint, order_count);
     defer del(order);
@@ -191,13 +797,14 @@ fn publish(ownership_summary_body.body_input* in,
             &program->relations)) {
             return failed(program);
         }
-        order[ordered] = ownership_api.ordering_constraint{
-            program->effects[ordered].effect.key, program->effects[ordered + 1].effect.key, true};
+        order[ordered] = ownership_api.ordering_constraint{effects[ordered],
+            effects[ordered + 1], true};
         ordered += 1;
     }
+    if (!sort_order(program, order[..])) { return failed(program); }
     u64 mut r = 0;
     i = 0;
-    while (i < exit->facts.contents_len) {
+    while (returns && i < exit->facts.contents_len) {
         if (!ownership_summary_body.work(program, 1)) { return failed(program); }
         ownership_api.contents_fact contents = exit->facts.contents[i];
         if (ownership_summary_model.same(contents.place.root,
@@ -218,22 +825,25 @@ fn publish(ownership_summary_body.body_input* in,
         }
         i += 1;
     }
-    i = 0;
-    while (i < program->effects_len) {
-        if (!ownership_summary_body.work(program, 1)) { return failed(program); }
-        effects[i] = program->effects[i].effect.key;
-        i += 1;
-    }
+    u64 mut needed = 0;
     i = 0;
     while (i < program->requirements_len) {
         if (!ownership_summary_body.work(program, 1)) { return failed(program); }
-        requirements[i] = program->requirements[i].key;
+        if (before_exit(program->requirements[i].operation, exit->operation)) {
+            requirements[needed] = program->requirements[i].key;
+            needed += 1;
+        }
         i += 1;
     }
+    // A refused key fails the proof. Each later charge then fails, so this check also covers
+    // a refused result relation key.
+    ownership_api.entity_id case_key = ownership_summary_body.next(program,
+        ownership_api.entity_kind.guard);
+    if (!ownership_api.successful(program->proof)) { return failed(program); }
     ownership_summary_model.case_record[1] cases = {ownership_summary_model.case_record{
-        .key = ownership_summary_body.next(program, ownership_api.entity_kind.guard),
-        .requirements = requirements[..], .effects = effects[..], .results = result_keys[..],
-        .outcome = exit->outcome, .coverage = program->coverage}};
+        .key = case_key,
+        .requirements = requirements[..needed], .effects = effects[..sequence],
+        .results = result_keys[..], .outcome = exit->outcome, .coverage = program->coverage}};
     ownership_summary_model.summary_view input = ownership_summary_model.summary_view{
         .roots = program->roots[..program->roots_len],
         .requirements = program->requirements[..program->requirements_len],
@@ -247,19 +857,20 @@ fn publish(ownership_summary_body.body_input* in,
     return ownership_summary_model.clone(&input, in->services);
 }
 
-fn infer(ownership_summary_body.body_input* in,
-    ownership_summary_model.summary_view@ callees) ownership_summary_model.summary {
+fn infer_watched(ownership_summary_body.body_input* in, budget_watch* watch)
+    ownership_summary_model.summary {
     ownership_summary_body.body_program mut program = ownership_summary_body.extract(in);
     defer ownership_summary_body.free(&program);
     if (!ownership_api.successful(program.proof)) { return failed(&program); }
-    // Direct-call composition starts in the later guarded-summary unit.
-    // Available callee records cannot override an unsupported operation in this body.
     ownership_flow.program mut flow = ownership_summary_body.flow(in, &program);
     exits mut observations = exits{.context = program.context,
-        .proof = ownership_summary_model.complete(), .relations = program.relations};
+        .proof = ownership_summary_model.complete(), .relations = &program.relations};
     defer free_exits(&observations);
     flow.exit_context = cast(&observations, void mut*);
     flow.exit_observer = observe;
+    call_context mut calls = call_context{in, &program, &observations, watch};
+    flow.call_context = cast(&calls, void mut*);
+    flow.call_handler = call_step;
     ownership_flow.analysis mut solved = ownership_flow.solve(&flow);
     defer ownership_flow.free(&solved);
     if (solved.failures != 0) {
@@ -270,6 +881,19 @@ fn infer(ownership_summary_body.body_input* in,
         program.proof = observations.proof;
         return failed(&program);
     }
-    program.relations = observations.relations;
     return publish(in, &program, &observations);
+}
+
+/// Infers the summary of one body. `in->callees` names the published direct callees.
+/// A callee summary cannot override an unsupported operation in this body.
+/// The inference sees each charge through a watch. A call stops at its first refused charge.
+fn infer(ownership_summary_body.body_input* in) ownership_summary_model.summary {
+    if (in->services == null) { return infer_watched(in, null); }
+    budget_watch mut watch = budget_watch{.inner = in->services};
+    ownership_api.services mut watched = *in->services;
+    watched.budget_context = cast(&watch, void mut*);
+    watched.budget = watched_charge;
+    ownership_summary_body.body_input mut input = *in;
+    input.services = &watched;
+    return infer_watched(&input, &watch);
 }
