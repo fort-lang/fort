@@ -616,3 +616,12 @@ without a rewrite.
   and links it with `brew link --force`, so `/opt/homebrew/bin/clang` and `opt`, the default
   `FORT_OPT`, are 18. `lint` adds clang-format 18 and clang-tidy 18 on Linux. Each host fails its
   setup when `clang` or `opt` reports another version.
+- A mirror outage on 2026-10-07 made `apt-get update` hang until GitHub cancelled the job after
+  about 45 minutes. Now each `apt-get` call ends a stalled fetch after 30 seconds, retries it 3
+  times, and runs under `timeout -k 10 120`. A loop runs the pair "update, then install" 3 times
+  at most, and runs `dpkg --configure -a` before each pair, because a timeout during unpack leaves
+  dpkg interrupted. The update may only warn: the install decides the status, because an old
+  index often still holds the packages. Each "Install the tools" step has `timeout-minutes: 14`.
+  The worst case is 3 pairs of 2 calls of 130 s (120 s, then 10 s to KILL), plus 2 sleeps of 10
+  s: 800 s. That is inside the 840 s step bound, so the third pair can run to its end.
+  A normal install takes 9 to 34 seconds on Linux and 21 to 52 seconds on Darwin.

@@ -28,14 +28,51 @@ if [ "$#" -eq 2 ]; then
     lint=yes
 fi
 
+# retry <command...>: run the command at most 3 times and stop at the first success.
+# Wait RETRY_DELAY seconds (default 10) between attempts. Return the last exit status.
+retry() {
+    local attempt=1 status
+    while true; do
+        status=0
+        "$@" || status=$?
+        if [ "$status" -eq 0 ]; then
+            return 0
+        fi
+        if [ "$attempt" -ge 3 ]; then
+            echo "ci_setup.sh: '$*' failed $attempt times" >&2
+            return "$status"
+        fi
+        echo "ci_setup.sh: '$*' exited $status, attempt $attempt of 3" >&2
+        attempt=$((attempt + 1))
+        sleep "${RETRY_DELAY:-10}"
+    done
+}
+
+# apt_install <package...>: run `apt-get update`, then install the packages.
+# The Acquire options end each stalled download after 30 seconds and retry it 3 times.
+# `timeout -k 10 120` sends TERM to each apt-get call after 120 seconds and KILL 10
+# seconds later, so a slow download cannot use the whole step bound (timeout-minutes in
+# the workflows). The update may fail or only warn: an old index often still holds the
+# packages, so the install decides the status. A timeout during unpack leaves dpkg
+# interrupted, so each pair first runs `dpkg --configure -a`, which does nothing on a
+# clean system.
+apt_install() {
+    local apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
+        -o Acquire::https::Timeout=30)
+    sudo dpkg --configure -a || true
+    timeout -k 10 120 sudo apt-get "${apt_options[@]}" update -q || true
+    timeout -k 10 120 sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
+        install -y -q --no-install-recommends "$@"
+}
+
 setup_linux() {
     local packages=(clang-18 llvm-18 libclang-rt-18-dev ninja-build)
     if [ "$lint" = yes ]; then
         packages+=(clang-format-18 clang-tidy-18)
     fi
-    sudo apt-get update -q
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-        "${packages[@]}"
+    # A mirror outage made `apt-get update` hang until GitHub cancelled the job after
+    # about 45 minutes. retry runs the pair "update, then install" 3 times at most.
+    retry apt_install "${packages[@]}"
 
     # The clang 18 sanitizer runtimes cannot map their shadow memory under the runner
     # kernel's default ASLR entropy. 28 bits is the value they support.
