@@ -15,6 +15,7 @@
 //| G12 computation sizes
 //| G13 call target scope
 //| G14 query ledger
+//| G15 callee first
 /// Tests call components and target propagation over verified FIR.
 import ast;
 import check_env;
@@ -812,6 +813,102 @@ fn query_ledger() void {
     println("G14 query ledger");
 }
 
+// Each explicit fort target comes before its caller in the order, unless both share one
+// component. The order lists each component once.
+fn callee_first_holds(fixture* f) void {
+    u32@ order = ownership_graph.callee_first(&f->graph);
+    assert(order.len == cast(f->graph.component_count, u64));
+    u64 mut@ own position = new(u64, order.len);
+    defer del(position);
+    u64 mut i = 0;
+    while (i < order.len) { position[i] = ownership_graph.U64_MAX; i += 1; }
+    i = 0;
+    while (i < order.len) {
+        assert(position[order[i]] == ownership_graph.U64_MAX);
+        position[order[i]] = i;
+        i += 1;
+    }
+    i = 0;
+    while (i < f->graph.calls_len) {
+        ownership_graph.call_site* call = &f->graph.calls[i];
+        u32 caller = f->graph.components[call->body];
+        u64 mut t = 0;
+        while (t < call->fort_len) {
+            u32 callee = ownership_graph.component_of(&f->graph,
+                call->fort_targets[t].function);
+            assert(callee == caller || position[callee] < position[caller]);
+            t += 1;
+        }
+        i += 1;
+    }
+}
+
+fn component_of_name(fixture* f, string name) u32 {
+    u64 mut i = 0;
+    while (i < f->functions.len) {
+        if (f->functions[i].sym->name == name) { return f->graph.components[i]; }
+        i += 1;
+    }
+    panic("ownership_graph_test: missing body");
+}
+
+fn order_index(fixture* f, string name) u64 {
+    u32@ order = ownership_graph.callee_first(&f->graph);
+    u32 component = component_of_name(f, name);
+    u64 mut i = 0;
+    while (i < order.len) {
+        if (order[i] == component) { return i; }
+        i += 1;
+    }
+    panic("ownership_graph_test: component outside the order");
+}
+
+// Key order puts each caller before its callee here, so only the call edges give the order.
+fn callee_first() void {
+    fixture mut chain = fixture{};
+    string[3] chain_source = {"fn top() void { middle(); }", "fn middle() void { leaf(); }",
+        "fn leaf() void {}"};
+    string[3] chain_names = {"top", "middle", "leaf"};
+    open(&chain, chain_source[..], chain_names[..], 4);
+    callee_first_holds(&chain);
+    assert(order_index(&chain, "leaf") == 0 && order_index(&chain, "middle") == 1);
+    assert(order_index(&chain, "top") == 2);
+    close(&chain);
+    fixture mut mixed = fixture{};
+    string[5] mixed_source = {"fn caller() void { a(); }", "fn a() void { b(); leaf(); }",
+        "fn b() void { a(); }", "fn leaf() void {}", "fn alone() void {}"};
+    string[5] mixed_names = {"caller", "a", "b", "leaf", "alone"};
+    open(&mixed, mixed_source[..], mixed_names[..], 4);
+    callee_first_holds(&mixed);
+    assert(component_of_name(&mixed, "a") == component_of_name(&mixed, "b"));
+    assert(order_index(&mixed, "leaf") < order_index(&mixed, "a"));
+    assert(order_index(&mixed, "a") < order_index(&mixed, "caller"));
+    assert(ownership_graph.callee_first(&mixed.graph).len == 4);
+    close(&mixed);
+    // A residual call adds an edge to every body, so the residual caller comes last.
+    fixture mut residual = fixture{};
+    string[3] residual_source = {"fn invoke(fn () void cb) void { cb(); }",
+        "fn first() void {}", "fn second() void { first(); }"};
+    string[3] residual_names = {"invoke", "first", "second"};
+    open(&residual, residual_source[..], residual_names[..], 4);
+    callee_first_holds(&residual);
+    assert(order_index(&residual, "invoke") == 2);
+    assert(order_index(&residual, "first") < order_index(&residual, "second"));
+    close(&residual);
+    // A refused order leaves no order. The graph keeps the refusal.
+    fixture mut refused = fixture{};
+    string[2] refused_source = {"fn leaf() void {}", "fn caller() void { leaf(); }"};
+    string[2] refused_names = {"leaf", "caller"};
+    open(&refused, refused_source[..], refused_names[..], 4);
+    refused.graph.proof.kind = ownership_api.proof_kind.incomplete;
+    assert(ownership_graph.callee_first(&refused.graph).len == 0);
+    refused.graph.proof.kind = ownership_api.proof_kind.complete;
+    del(refused.graph.order);
+    assert(ownership_graph.callee_first(&refused.graph).len == 0);
+    close(&refused);
+    println("G15 callee first");
+}
+
 fn main() i32 {
     acyclic();
     self_recursion();
@@ -828,5 +925,6 @@ fn main() i32 {
     computation_sizes();
     call_target_scope();
     query_ledger();
+    callee_first();
     return 0;
 }
