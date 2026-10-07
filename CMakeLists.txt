@@ -538,6 +538,15 @@ set_tests_properties(ownership_audit_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Test the ownership qualification matrix tool with a fake compiler.
+# It also validates the checked-in manifest. It runs no ownership verdict.
+add_test(NAME ownership_matrix_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_matrix_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(ownership_matrix_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Hold each panic site of src/fort, src/lsp and std against its panic tests (D11.4).
 # A site with no test needs a declaration or a line in test/panic_gaps.txt.
 add_test(NAME panic_coverage

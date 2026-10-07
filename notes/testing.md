@@ -653,6 +653,26 @@ bullet at a time and without a rewrite.
   Bootstrap-0 builds the next compiler in the C-started chain.
 - External-stage1 mode uses an external compiler to build HEAD. It registers no bootstrap tests
   and no C unit suites (T-160).
+- **`tools/ownership_matrix.py` runs the ownership qualification matrix** (D19.8).
+  `test/ownership/qualification/manifest.json` lists 109 cases: the 24 approved originals,
+  21 accepted counterparts, 3 zero-element probes and the 61 retained `test/lang` ownership tests.
+  `run` uses `--ownership-check` in the four combinations of `--release` and `--no-bounds-check`.
+  It runs `--check` mode for each case, and `-S` build mode for 93 of the 109 cases.
+  An approved original keeps its bytes and positions, so it has no `main`. Its build mode compiles
+  a generated entry that imports it through `-I`. The 8 accept originals use build mode.
+  An accepted build also compares the selected and the unselected `-S` output byte for byte.
+  Check mode and build mode must give the same verdict, reason and diagnostics (D20.1).
+  A reject case matches only validated violations on its expected lines with complete proof.
+  Incomplete proof is an error diagnostic of its own (`spec/toolchain.md` 4.2), and an approved
+  position holds no such error. `--require-expected` also needs the expected notes and wording.
+  An exit 2, a crash, a timeout or a missing report fails `run` without that option.
+  The fixtures use the annotation and header patterns of `test/lang/run_tests.py`.
+  Each host report records the git revision and whether a tracked file differs from it.
+  That revision names the checkout, not the compiler binary. Build both from one tree.
+  `compare` holds a Linux report against a Darwin report of one clean revision.
+  `validate` holds the manifest counts and the approved hashes without a compiler.
+  CI runs only `ownership_matrix_selftest`, over a fake compiler. No CI test runs the matrix yet.
+  Register the matrix only with the complete ownership feature.
 
 ## 6. Generated code
 
