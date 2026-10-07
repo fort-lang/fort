@@ -28,8 +28,11 @@ bullet at a time and without a rewrite.
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules`), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
   `highlight_selftest`, `extension_selftest`, `panic_coverage` and `panic_coverage_selftest`;
-  the 69 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty` and
-  `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler. The unit
+  the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty`,
+  `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
+  compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
+  nested groups (D2.11). Before the checkers kept their suffixes on a stack of their own, that
+  type needed 1792 KB in a darwin debug build. The unit
   tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
   On linux each target runs as `tools/vm <target>`.
 - **GitHub PR CI supplies the merge gate** (2026-10-01; T-306).

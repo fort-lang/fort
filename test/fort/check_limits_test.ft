@@ -2,12 +2,13 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| ok
-/// Checks the type-size ceiling and fixed limits of 32 suffixes, 128 parameters, and 128
-/// fields. Only hand-built declarations reach these limits.
+/// Checks the type-size ceiling, the D2.11 limit of 256 suffixes, and the fixed limits of
+/// 128 parameters and 128 fields. Only hand-built declarations reach these limits.
 
 import check;
 import check_env;
 import std.strbuf;
+import types;
 
 // A struct with `n` fields, and the entry module's `main` after it.
 fn many_fields(strbuf.str_buf mut* b, u64 n) string {
@@ -58,17 +59,92 @@ fn many_fn_params(strbuf.str_buf mut* b, u64 n) string {
     return strbuf.view(b);
 }
 
-// A declaration whose written type carries `n` pointer suffixes.
-fn many_suffixes(strbuf.str_buf mut* b, u64 n) string {
-    strbuf.clear(b);
-    strbuf.append(b, "i32");
+// Appends `n` copies of `text` to `b`.
+fn append_times(strbuf.str_buf mut* b, string text, u64 n) void {
     u64 mut i = 0;
     while (i < n) {
-        strbuf.append(b, "*");
+        strbuf.append(b, text);
         i += 1;
     }
-    strbuf.append(b, " deep = null;\n");
+}
+
+// The declaration `<base> <suffix * inner> ... deep = <init>;`. A nonzero
+// `inner` puts `base` and the first `inner` suffixes into a group, and `outer`
+// more suffixes follow it. D2.11 counts the suffixes of the group and its
+// suffixes together.
+fn deep_decl(strbuf.str_buf mut* b, string base, string suffix, u64 inner, u64 outer,
+             string init) string {
+    strbuf.clear(b);
+    if (inner > 0) {
+        strbuf.append(b, "(");
+    }
+    strbuf.append(b, base);
+    append_times(b, suffix, inner);
+    if (inner > 0) {
+        strbuf.append(b, ")");
+    }
+    append_times(b, suffix, outer);
+    strbuf.append(b, " deep = ");
+    strbuf.append(b, init);
+    strbuf.append(b, ";\n");
     return strbuf.view(b);
+}
+
+// The written suffix of one level of `kind`.
+fn suffix_of(types.type_kind kind) string {
+    if (kind == types.type_kind.k_span) {
+        return "@";
+    }
+    if (kind == types.type_kind.k_array) {
+        return "[1]";
+    }
+    return "*";
+}
+
+// The initializer of a `deep` whose outermost level is of `kind`.
+fn init_of(types.type_kind kind) string {
+    if (kind == types.type_kind.k_ptr) {
+        return "null";
+    }
+    return "{}";
+}
+
+// Checks the declaration of `deep_decl` with the suffix of `kind` in a fresh
+// environment. Answers whether the checker took it and gave `deep` `count`
+// levels of `kind` above the type spelled `base`, and closed each frame of its
+// suffix stack.
+fn takes(strbuf.str_buf mut* b, string base, types.type_kind kind, u64 inner, u64 outer,
+         u64 count) bool {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string decl = deep_decl(b, base, suffix_of(kind), inner, outer, init_of(kind));
+    if (!check_env.check_decls(&e, decl)) {
+        return false;
+    }
+    types.node* mut t = check_env.sym_main(&e, "deep")->ty;
+    u64 mut n = 0;
+    while (t->kind == kind) {
+        n += 1;
+        t = t->elem;
+    }
+    return check_env.errors(&e) == 0 && n == count && check_env.type_text(&e, t) == base
+           && e.ck.suffix_top == 0;
+}
+
+// Checks the declaration of `deep_decl` with the suffix of `kind` in a fresh
+// environment. Answers whether the parser refused the 257th suffix and the
+// checker closed each frame of its suffix stack. The checker's own refusal
+// never shows.
+fn refused(strbuf.str_buf mut* b, string base, types.type_kind kind, u64 inner, u64 outer) bool {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string decl = deep_decl(b, base, suffix_of(kind), inner, outer, init_of(kind));
+    return !check_env.check_decls(&e, decl)
+           && check_env.said(&e, "nesting deeper than 256")
+           && !check_env.said(&e, "too many type suffixes") && check_env.errors(&e) == 1
+           && e.ck.suffix_top == 0;
 }
 
 fn a_struct_of_a_hundred_and_twenty_eight_fields_is_the_last_that_fits() void {
@@ -116,19 +192,77 @@ fn a_function_type_of_a_hundred_and_twenty_nine_parameters_is_refused() void {
     assert(check_env.said(&f, "too many parameters"));
 }
 
-fn a_type_of_thirty_three_suffixes_is_refused() void {
+fn a_type_takes_256_suffixes_and_not_257() void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
+    types.type_kind ptr = types.type_kind.k_ptr;
+    assert(takes(&b, "i32", ptr, 0, 256, 256));
+    assert(refused(&b, "i32", ptr, 0, 257));
+    // The array suffix counts as one of the 256.
+    assert(takes(&b, "i32[1]", ptr, 0, 255, 255));
+    assert(refused(&b, "i32[1]", ptr, 0, 256));
+    // The C compiler refuses spans of spans and multi-dimensional arrays; this
+    // compiler takes 256 of each.
+    assert(takes(&b, "i32", types.type_kind.k_span, 0, 256, 256));
+    assert(refused(&b, "i32", types.type_kind.k_span, 0, 257));
+    assert(takes(&b, "i32", types.type_kind.k_array, 0, 256, 256));
+    assert(refused(&b, "i32", types.type_kind.k_array, 0, 257));
+}
+
+// The array length is the size of a type of 200 suffixes. The frame of that type
+// grows the suffix stack while the frame of `deep` is open, so the stack moves.
+fn a_type_in_an_array_length_grows_the_suffix_stack() void {
+    strbuf.str_buf mut base = strbuf.create();
+    defer strbuf.free(&base);
+    strbuf.append(&base, "i32[sizeof(i32");
+    append_times(&base, "*", 200);
+    strbuf.append(&base, ")]");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    types.type_kind ptr = types.type_kind.k_ptr;
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(check_env.check_decls(&e, many_suffixes(&b, 32)));
-    assert(check_env.errors(&e) == 0);
-    check_env.env mut f = check_env.env{};
-    check_env.open(&f);
-    defer check_env.close(&f);
-    assert(!check_env.check_decls(&f, many_suffixes(&b, 33)));
-    assert(check_env.said(&f, "too many type suffixes"));
+    assert(check_env.check_decls(&e, deep_decl(&b, strbuf.view(&base), "*", 0, 50, "null")));
+    assert(check_env.type_text(&e, check_env.sym_main(&e, "deep")->ty)
+           == "i32[8]**************************************************");
+    assert(e.ck.suffix_top == 0);
+    assert(e.ck.suffixes.len >= 251);
+    assert(refused(&b, strbuf.view(&base), ptr, 0, 256));
+}
+
+// Checks `decl` in a fresh environment. Answers whether the checker gave one
+// diagnostic holding `message` and closed each frame of its suffix stack.
+fn fails_once(string decl, string message) bool {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    return !check_env.check_decls(&e, decl) && check_env.said(&e, message)
+           && check_env.errors(&e) == 1 && e.ck.suffix_top == 0;
+}
+
+// A frame that fails closes too: an unknown base stops the frame before its
+// loop, and a bad array length stops it in the loop.
+fn a_failed_type_closes_its_suffix_frame() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string unknown = deep_decl(&b, "nothing", "*", 0, 256, "null");
+    assert(fails_once(unknown, "unknown type 'nothing'"));
+    string negative = deep_decl(&b, "i32[-1]", "*", 0, 255, "null");
+    assert(fails_once(negative, "an array length must be greater than 0"));
+}
+
+fn a_group_does_not_reset_the_suffix_count() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    types.type_kind ptr = types.type_kind.k_ptr;
+    assert(takes(&b, "i32", ptr, 128, 128, 256));
+    assert(takes(&b, "i32", ptr, 255, 1, 256));
+    assert(refused(&b, "i32", ptr, 128, 129));
+    assert(refused(&b, "i32", ptr, 256, 1));
+    assert(refused(&b, "i32", ptr, 1, 256));
+    assert(takes(&b, "i32", types.type_kind.k_span, 128, 128, 256));
+    assert(refused(&b, "i32", types.type_kind.k_span, 128, 129));
 }
 
 fn a_type_whose_size_would_pass_the_ceiling_of_d3_4_is_refused() void {
@@ -145,7 +279,10 @@ fn main() i32 {
     a_struct_of_a_hundred_and_twenty_eight_fields_is_the_last_that_fits();
     a_function_of_a_hundred_and_twenty_nine_parameters_is_refused();
     a_function_type_of_a_hundred_and_twenty_nine_parameters_is_refused();
-    a_type_of_thirty_three_suffixes_is_refused();
+    a_type_takes_256_suffixes_and_not_257();
+    a_type_in_an_array_length_grows_the_suffix_stack();
+    a_failed_type_closes_its_suffix_frame();
+    a_group_does_not_reset_the_suffix_count();
     a_type_whose_size_would_pass_the_ceiling_of_d3_4_is_refused();
     println("ok");
     return 0;

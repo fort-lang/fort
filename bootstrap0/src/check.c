@@ -17,10 +17,10 @@
 #include "sym.h"
 #include "types.h"
 
-// The limits of one declaration. The checker refuses a type with more suffixes.
-// It also refuses a function or struct with more members. It does not size these
-// lists dynamically.
-enum { CHECK_MAX_SUFFIXES = 32, CHECK_MAX_MEMBERS = 128 };
+// The limits of one declaration. A type has at most 256 suffixes, which is the
+// nesting limit of D2.11. The checker also refuses a function or struct with more
+// than 128 members. It does not size the member lists dynamically.
+enum { CHECK_MAX_SUFFIXES = 256, CHECK_MAX_MEMBERS = 128 };
 
 // The width of the `struct` keyword, which is where an infinite-size struct is
 // reported.
@@ -60,6 +60,9 @@ void check_init(check_t* ck) {
     ck->switches = 0;
     ck->defers = 0;
     ck->block_errs = 0;
+    ck->suffixes = NULL;
+    ck->suffix_cap = 0;
+    ck->suffix_top = 0;
 }
 
 void check_free(check_t* ck) {
@@ -76,6 +79,10 @@ void check_free(check_t* ck) {
     ptrvec_free(&ck->externs);
     sb_free(&ck->msg);
     type_table_free(&ck->types);
+    mem_free(ck->suffixes);
+    ck->suffixes = NULL;
+    ck->suffix_cap = 0;
+    ck->suffix_top = 0;
 }
 
 uint64_t check_sym_count(const check_t* ck) {
@@ -545,6 +552,27 @@ static bool suffixes_store_base(const ast_node_t* node) {
     return true;
 }
 
+// Reserves a frame of `count` suffixes on the checker's suffix stack and
+// returns its first index. The caller sets `suffix_top` back to that index
+// before it returns. A growth moves the stack, so the caller indexes
+// `ck->suffixes` again after each call that can check a type.
+static uint64_t suffix_frame(check_t* ck, uint64_t count) {
+    const uint64_t first = ck->suffix_top;
+    const uint64_t need = mem_add(first, count);
+    if (need > ck->suffix_cap) {
+        const uint64_t cap = mem_grown_cap(ck->suffix_cap, need);
+        type_suffix_t* bigger = mem_alloc(mem_mul(cap, sizeof(type_suffix_t)));
+        for (uint64_t i = 0; i < first; i++) {
+            bigger[i] = ck->suffixes[i];
+        }
+        mem_free(ck->suffixes);
+        ck->suffixes = bigger;
+        ck->suffix_cap = cap;
+    }
+    ck->suffix_top = need;
+    return first;
+}
+
 static uint64_t written_suffix_count(const ast_node_t* node) {
     uint64_t count = 0;
     const ast_node_t* cur = node;
@@ -605,24 +633,28 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
             b = type_error(&ck->types);
         }
     }
-    type_suffix_t suffixes[CHECK_MAX_SUFFIXES];
     const uint64_t count = wrapped ? ast_len(node) : 0;
     bool ok = !check_poisoned(b);
     if (ok && written_suffix_count(node) > CHECK_MAX_SUFFIXES) {
         check_error(ck, node->loc, "too many type suffixes");
         ok = false;
     }
+    const uint64_t first = suffix_frame(ck, count);
     for (uint64_t i = 0; ok && i < count; i++) {
         ast_node_t* s = ast_child(node, i);
-        suffixes[i].kind = (suffix_kind_t)s->op;
-        suffixes[i].len = 0;
-        suffixes[i].own = ast_is_own(s);
-        suffixes[i].mut = ast_is_mut(s);
-        if (suffixes[i].kind == SUFFIX_ARRAY && !array_length(ck, s->a, &suffixes[i].len)) {
+        type_suffix_t level;
+        level.kind = (suffix_kind_t)s->op;
+        level.len = 0;
+        level.own = ast_is_own(s);
+        level.mut = ast_is_mut(s);
+        // array_length can check a type in the length, which can move the stack.
+        if (level.kind == SUFFIX_ARRAY && !array_length(ck, s->a, &level.len)) {
             ok = false;
         }
+        ck->suffixes[first + i] = level;
     }
     if (!ok) {
+        ck->suffix_top = first;
         node->type = type_error(&ck->types);
         return type_result(node->type, false);
     }
@@ -658,11 +690,13 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
         if (count == 0) {
             base_mut = b->kind != TYPE_VOID;
         } else {
-            suffixes[count - 1].mut = true;
+            ck->suffixes[first + count - 1].mut = true;
         }
     }
+    const type_suffix_t* suffixes = count > 0 ? &ck->suffixes[first] : NULL;
     const type_build_t built =
         type_build(&ck->types, base_own, base_mut, b, suffixes, (uint32_t)count);
+    ck->suffix_top = first;
     if (built.type == NULL) {
         check_error(ck, node->loc, built.error);
         node->type = type_error(&ck->types);

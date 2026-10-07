@@ -56,10 +56,10 @@ u32 ANN_ALL = ANN_END - 1;
 
 // ---- the limits of one declaration -------------------------------------------------
 
-// A type with more suffixes, or a function, function type or struct with more
-// parameters or fields, is refused rather than sized dynamically. No program of
-// this project comes near either.
-u64 MAX_SUFFIXES = 32;
+// A type has at most 256 suffixes, which is the nesting limit of D2.11. The
+// checker refuses a function, function type or struct with more than 128
+// parameters or fields. It does not size the member lists dynamically.
+u64 MAX_SUFFIXES = 256;
 u64 MAX_MEMBERS = 128;
 
 // The width of the `struct` keyword, which is where an infinite-size struct is
@@ -181,6 +181,14 @@ struct checker {
     u64 switches; // enclosing switches: `break` takes either
     u64 defers; // enclosing deferred statements
     u64 block_errs; // k_error nodes seen in the body
+
+    // ---- the suffixes of the written types being built ----
+    // A stack of frames, one for each check_type_at call that is active. A
+    // frame starts at the `suffix_top` that its call found. The call restores
+    // that value before it returns. So the stack frame of check_type_at stays
+    // small through the 256 suffixes of D2.11 and nested groups.
+    types.suffix mut@ own suffixes;
+    u64 suffix_top;
 }
 
 /// Prepares a checker that reports through `s` and defines the universe symbols.
@@ -215,6 +223,8 @@ fn check_free(checker mut* ck) void {
     ck->externs_len = 0;
     strbuf.free(&ck->msg);
     types.type_table_free(&ck->types);
+    del(ck->suffixes);
+    ck->suffix_top = 0;
 }
 
 // ---- the three vectors -------------------------------------------------------------
@@ -283,6 +293,35 @@ fn externs_reserve(checker mut* ck) void {
     }
     del(ck->externs);
     ck->externs = move(bigger);
+}
+
+// Reserves a frame of `count` suffixes on the checker's suffix stack and
+// returns its first index. The caller sets `suffix_top` back to that index
+// before it returns. A growth moves the stack, so the caller indexes
+// `ck->suffixes` again after each call that can check a type.
+fn suffix_frame(checker mut* ck, u64 count) u64 {
+    u64 first = ck->suffix_top;
+    // The parser bounds each frame by 256 suffixes, so the sum does not trap.
+    u64 need = first + count;
+    if (need > ck->suffixes.len) {
+        u64 mut cap = VEC_MIN_CAP;
+        if (need > cap) {
+            cap = need;
+        }
+        if (ck->suffixes.len <= containers.U64_MAX / 2 && ck->suffixes.len * 2 > cap) {
+            cap = ck->suffixes.len * 2;
+        }
+        types.suffix mut@ own bigger = new(types.suffix, cap);
+        u64 mut i = 0;
+        while (i < first) {
+            bigger[i] = ck->suffixes[i];
+            i += 1;
+        }
+        del(ck->suffixes);
+        ck->suffixes = move(bigger);
+    }
+    ck->suffix_top = need;
+    return first;
 }
 
 // The symbols in the order they were made, for the index walk.
@@ -950,7 +989,6 @@ fn check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bool in_storage
             b = types.type_error(&ck->types);
         }
     }
-    types.suffix[MAX_SUFFIXES] mut suffixes = {};
     u64 mut count = 0;
     if (wrapped) {
         count = ast.ast_len(n);
@@ -960,20 +998,23 @@ fn check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bool in_storage
         check_error(ck, n->loc, "too many type suffixes");
         ok = false;
     }
+    u64 first = suffix_frame(ck, count);
     u64 mut i = 0;
     while (ok && i < count) {
         ast.node mut* s = ast_child_mut(n, i);
-        suffixes[i].kind = cast(s->op, types.suffix_kind);
-        suffixes[i].len = 0;
-        suffixes[i].is_own = ast.ast_is_own(s);
-        suffixes[i].is_mut = ast.ast_is_mut(s);
-        if (suffixes[i].kind == types.suffix_kind.s_array
-            && !array_length(ck, s->a, &suffixes[i].len)) {
+        types.suffix mut level = types.suffix{};
+        level.kind = cast(s->op, types.suffix_kind);
+        level.is_own = ast.ast_is_own(s);
+        level.is_mut = ast.ast_is_mut(s);
+        // array_length can check a type in the length, which can move the stack.
+        if (level.kind == types.suffix_kind.s_array && !array_length(ck, s->a, &level.len)) {
             ok = false;
         }
+        ck->suffixes[first + i] = level;
         i += 1;
     }
     if (!ok) {
+        ck->suffix_top = first;
         n->ty = types.type_error(&ck->types);
         return type_result(n->ty, false);
     }
@@ -1006,11 +1047,12 @@ fn check_type_at(checker mut* ck, ast.node mut* n, type_pos pos, bool in_storage
         if (count == 0) {
             base_mut = b->kind != types.type_kind.k_void;
         } else {
-            suffixes[count - 1].is_mut = true;
+            ck->suffixes[first + count - 1].is_mut = true;
         }
     }
     types.build_result built =
-        types.type_build(&ck->types, base_own, base_mut, b, suffixes[0..count]);
+        types.type_build(&ck->types, base_own, base_mut, b, ck->suffixes[first..first + count]);
+    ck->suffix_top = first;
     if (built.built == null) {
         check_error(ck, n->loc, built.error);
         n->ty = types.type_error(&ck->types);

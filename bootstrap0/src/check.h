@@ -138,6 +138,15 @@ typedef struct {
     uint64_t switches;   // enclosing switches: `break` takes either
     uint64_t defers;     // enclosing deferred statements
     uint64_t block_errs; // AST_ERROR nodes seen in the body
+
+    // ---- the suffixes of the written types being built ----
+    // A stack of frames, one for each check_type_at call that is active. A
+    // frame starts at the `suffix_top` that its call found. The call restores
+    // that value before it returns. So the stack frame of check_type_at stays
+    // small through the 256 suffixes of D2.11 and nested groups.
+    type_suffix_t* suffixes; // owned, `suffix_cap` entries
+    uint64_t suffix_cap;
+    uint64_t suffix_top;
 } check_t;
 
 void check_init(check_t* ck);
