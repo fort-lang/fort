@@ -567,6 +567,18 @@ set_tests_properties(ownership_driver PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Test three selected driver groups: check against build, no C compiler, pre-transform FIR.
+add_test(NAME ownership_driver_groups
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_driver_groups_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            --opt "${FORT_OPT_PATH}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(ownership_driver_groups PROPERTIES
+    LABELS "fort;integration"
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Check the deepest nesting of D2.11 under a 1 MB stack. The test gives each
 # compiler of the build the same type of 254 nested groups.
 set(FORT_STACK_DEPTH_COMPILERS --fort "${FORT_COMPILER_BINARY}")
