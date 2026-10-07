@@ -22,13 +22,52 @@ fn query(ownership_state.state* s, ownership_depth_env.fixture mut* f,
         ownership_api.operation_position{.operation = 7},
         ownership_api.source_position{.line = 23, .col = 4});
 }
+// Counts `n` regions that repeat `distinct` keys, each run in descending order, and returns the
+// heap blocks that the count creates. Each block is released before the count returns
+// (ownership_depth_env.finish).
+fn count_blocks(ownership_api.region mut@ regions, u64 n, u64 distinct,
+    ownership_depth_env.fixture mut* f) u64 {
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    u64 mut i = 0;
+    while (i < n) {
+        regions[i].key = key(cast(distinct - i % distinct, u32));
+        i += 1;
+    }
+    ownership_depth_env.configure(f, ownership_limits.production().w);
+    ownership_depth_env.begin();
+    ownership_state.region_measurement measured = query(&s, f, candidate(regions[0..n]));
+    u64 created = ownership_depth_env.finish();
+    assert(ownership_api.successful(measured.proof));
+    assert(measured.amount == (n < distinct ? n : distinct));
+    return created;
+}
+// A count keeps 64 identities in its fixed array. When the array is full, the count merges
+// equal entries (1 W unit), and it grows only when more than 48 entries stay distinct. Each
+// region pays 3 units: the candidate scan, the range and the append; each settle pays 1 unit
+// for each 64 entries.
+fn storage_boundary() void {
+    ownership_api.region[200] mut regions = {};
+    ownership_depth_env.fixture mut f = {};
+    assert(count_blocks(regions[..], 0, 1, &f) == 0 && f.meter.used.w == 0);
+    assert(count_blocks(regions[..], 1, 1, &f) == 0 && f.meter.used.w == 3 + 1);
+    assert(count_blocks(regions[..], 64, 64, &f) == 0 && f.meter.used.w == 64 * 3 + 1);
+    // Rows of one key merge to 1 entry at rows 65, 128 and 191, and never grow.
+    assert(count_blocks(regions[..], 65, 1, &f) == 0 && f.meter.used.w == 65 * 3 + 1 + 1);
+    assert(count_blocks(regions[..], 200, 1, &f) == 0 && f.meter.used.w == 200 * 3 + 3 + 1);
+    // 48 distinct entries stay in the fixed array. 49 grow it to 128 entries: 1 block.
+    assert(count_blocks(regions[..], 65, 48, &f) == 0 && f.meter.used.w == 65 * 3 + 1 + 1);
+    assert(count_blocks(regions[..], 65, 49, &f) == 1 && f.meter.used.w == 65 * 3 + 1 + 2 + 1);
+    // 65 distinct entries grow the array, and the settle sorts 65 entries with a scratch block.
+    assert(count_blocks(regions[..], 65, 65, &f) == 2 && f.meter.used.w == 65 * 3 + 1 + 2 + 2);
+}
 fn count_refusals() void {
     ownership_state.state mut s = ownership_state.empty();
     defer ownership_state.free(&s);
-    ownership_api.region[24] mut regions = {};
+    ownership_api.region[130] mut regions = {};
     u64 mut i = 0;
     while (i < regions.len) {
-        // Descending keys require sorted insertion shifts and two growth copies.
+        // Descending keys make the settle sort. 130 rows grow the storage twice, at 64 and 128.
         regions[i].key = key(cast(regions.len - i, u32));
         i += 1;
     }
@@ -39,9 +78,13 @@ fn count_refusals() void {
     ownership_state.region_measurement mut measured = query(&s, &f, added);
     u64 created = ownership_depth_env.finish();
     assert(ownership_api.successful(measured.proof) && measured.amount == regions.len);
-    assert(created == 2);
+    // Two growth blocks and one sort scratch block.
+    assert(created == 3);
+    // Each region pays 3 units: the candidate scan, the range and the append. The full fixed
+    // array merges (1 unit) and grows (1 + 1 units), the growth at 128 pays 1 + 2 and the settle
+    // of 130 rows pays 3.
     u64 cost = f.meter.used.w;
-    assert(cost == 421);
+    assert(cost == 130 * 3 + 1 + 2 + 3 + 3);
     u64 mut bound = 0;
     u64 mut populated = 0;
     while (bound < cost) {
@@ -55,14 +98,19 @@ fn count_refusals() void {
         assert(measured.proof.terminal.source.line == 23);
         assert(f.meter.used.w == (bound == 0 ? 1 : bound));
         assert(f.meter.used.r == 0 && s.regions_len == 0);
+        // The settle pays before its sort, so no refusal holds the sort scratch: a refused
+        // count holds at most the two growth blocks.
+        assert(allocated <= 2);
         if (allocated > 0) { populated += 1; }
         bound += 1;
     }
-    assert(populated > 0);
+    // The 65th region pays its 3 units, the merge and the 2 units of the first growth before the
+    // block exists, so each bound from 198 on refuses with a block to release.
+    assert(populated == cost - (65 * 3 + 1 + 2));
     ownership_depth_env.configure(&f, cost);
     ownership_depth_env.begin();
     measured = query(&s, &f, added);
-    assert(ownership_depth_env.finish() == 2);
+    assert(ownership_depth_env.finish() == 3);
     assert(ownership_api.successful(measured.proof) && measured.amount == regions.len);
     assert(f.meter.used.w == cost);
     eprintln("region count cost ", cost, " populated refusals ", populated);
@@ -113,6 +161,7 @@ fn mutation_refusals() void {
     assert(ownership_state.equal(&s, &before));
 }
 fn main() i32 {
+    storage_boundary();
     count_refusals();
     mutation_refusals();
     println("state counting cleanup ok");
