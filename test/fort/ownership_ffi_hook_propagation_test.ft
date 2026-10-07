@@ -1,0 +1,159 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| reject F01-D
+//| accept F03-C
+//| accept F03-F
+//| accept F11-F
+//| accept P27 memmove
+//| accept P27 free
+/// Tests fort facts after the hook: known windows, wrapper returns, and symbol names.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_hook_env as env;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+import ownership_transfer;
+
+ownership_api.entity_id NO_GUARD = {};
+
+fn touched(env.env mut* e, u32 number, string name) void {
+    env.open(e, number, name);
+    env.heap_owner(e);
+    env.operand_at(e, 0, env.slot(8), env.parameter(e, 0));
+    env.finish(e);
+    ownership_api.ffi_result out = env.call(e);
+    env.accepted(e, out);
+    assert(out.signature_transfers.len == 0 && out.trusted_sources.len == 0);
+    assert(ownership_state.equal(env.after(e, 0), &e->input));
+}
+fn known_window() void {
+    env.env mut e = {};
+    touched(&e, 1, "foreign_touch");
+    defer env.close(&e);
+    ownership_state.state mut* s = env.successor(&e);
+    ownership_raw.origin mut input = {};
+    input.source = env.id(ownership_api.entity_kind.source, 1);
+    input.allocation = env.id(ownership_api.entity_kind.allocation, 1);
+    input.place = env.slot(1);
+    input.layout = env.byte(&e);
+    input.count = ownership_raw.literal(4);
+    input.begin = ownership_raw.literal(0);
+    input.end = ownership_raw.literal(4);
+    input.alignment = 8;
+    input.repeated = true;
+    input.correspondence = true;
+    ownership_raw.request mut capture = env.raw_request(&e, 1);
+    ownership_raw.result mut root = ownership_raw.capture_origin(s, &e.b.raw.local.service,
+        &input, ownership_raw_env.NO_BOUNDS, ownership_raw_env.NO_RELATIONS, &capture);
+    ownership_raw_env.accepts(&root);
+    defer ownership_raw.free_result(&root);
+    // The foreign call keeps the four-byte fort window. Five bytes exceed it.
+    ownership_raw.request mut wide = env.raw_request(&e, 2);
+    ownership_raw.result mut slice = ownership_raw.slice_ptr(&root.storage,
+        &e.b.raw.local.service, root.addresses[..], ownership_raw.literal(0),
+        ownership_raw.literal(5), env.byte(&e), &wide);
+    ownership_raw_env.rejects(&slice);
+    assert(e.b.events_seen == 1 && e.b.observed.kind == ownership_api.event_kind.incomplete_proof);
+    assert(env.source(s, 1).kind == ownership_api.source_kind.heap);
+    assert(env.allocation(s, 1).logical_length.value == 4);
+    env.at_call(&e);
+    println("reject F01-D");
+}
+fn wrapper_view() void {
+    env.env mut e = {};
+    touched(&e, 2, "foreign_touch");
+    defer env.close(&e);
+    ownership_state.state mut* s = env.successor(&e);
+    // The wrapper returns its P8 view into the caller slot P5.
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.copy, 1,
+        env.slot(8), env.slot(5))));
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.use, 2,
+        env.slot(5), env.slot(5))));
+    env.views(s, env.slot(5), 1);
+    assert(env.source(s, 1).kind == ownership_api.source_kind.heap);
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.release, 3,
+        env.slot(1), env.slot(1))));
+    env.released(s, 1);
+    // The release invalidates the known A1 view that the wrapper returned.
+    ownership_api.proof_status late = env.act(&e, s, ownership_transfer.action.use, 4,
+        env.slot(5), env.slot(5));
+    assert(!ownership_api.successful(late) && e.b.observed.kind ==
+        ownership_api.event_kind.invalid_use);
+    println("accept F03-C");
+}
+fn owning_wrapper() void {
+    env.env mut e = {};
+    env.open(&e, 3, "foreign_make");
+    defer env.close(&e);
+    env.add_empty(&e, env.slot(9), 90);
+    env.add_empty(&e, env.slot(2), 20);
+    env.add_scalar(&e, env.slot(10), 100);
+    env.operand_at(&e, 0, env.slot(10), env.parameter(&e, 0));
+    env.bind(&e, env.slot(9), env.result_type(&e));
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    env.accepted(&e, env.call(&e));
+    ownership_state.state mut* s = env.successor(&e);
+    // The wrapper returns move(p9) into the caller result P2. The caller deletes it.
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.move_owner, 1,
+        env.slot(9), env.slot(2))));
+    env.obligated(s, 12, env.slot(2));
+    assert(env.contents(s, env.slot(2)).borrows[0].containing.root.ordinal == 2);
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.release, 2,
+        env.slot(2), env.slot(2))));
+    env.empty_at(s, env.slot(9));
+    env.empty_at(s, env.slot(2));
+    env.released(s, 12);
+    assert(e.b.events_seen == 0);
+    println("accept F03-F");
+}
+fn callback_registration() void {
+    env.env mut e = {};
+    env.open(&e, 4, "foreign_register");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.add_scalar(&e, env.slot(4), 40);
+    env.operand_at(&e, 0, env.slot(4), env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    // The hook invents no callback invocation and no call order.
+    assert(out.outcomes[0].effects.len == 0 && out.trusted_sources.len == 0);
+    assert(ownership_state.equal(env.after(&e, 0), &e.input));
+    println("accept F11-F");
+}
+fn named_memmove() void {
+    env.env mut e = {};
+    touched(&e, 5, "memmove");
+    defer env.close(&e);
+    // A symbol name adds no byte effect, no trust, and no second owner.
+    assert(env.after(&e, 0)->allocations_len == 1);
+    println("accept P27 memmove");
+}
+fn named_free() void {
+    env.env mut e = {};
+    env.open(&e, 6, "free");
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    env.bind(&e, env.slot(9), env.parameter(&e, 0));
+    env.operand_at(&e, 0, env.slot(9), env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    // The own parameter transfers the obligation. The name `free` releases nothing.
+    assert(out.signature_transfers.len == 1);
+    env.detached(env.after(&e, 0), 9);
+    env.views(env.after(&e, 0), env.slot(8), 9);
+    println("accept P27 free");
+}
+fn main() i32 {
+    known_window();
+    wrapper_view();
+    owning_wrapper();
+    callback_registration();
+    named_memmove();
+    named_free();
+    return 0;
+}

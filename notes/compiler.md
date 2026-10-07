@@ -388,6 +388,10 @@ came here.
   that the frozen request has no field for.
   The hook suites probe supplied facts. They establish no source producer: the driver reports
   `missing_producer` for the three example 19 programs.
+  Two propagation suites run the existing helpers on supplied trusted sources. Copies, field
+  copies, void pointer casts, and wrapper returns keep the trusted source. A rebuilt integer
+  pointer, an unknown fort source, and an own-adding cast get no trust. A callback body keeps
+  ordinary fort rules for its own allocations, stack views, and own inputs.
   `ownership_flow.unknown_call` (read, not probed) makes each non-trusted source validity unknown
   after an `unresolved_foreign` outcome. D17.13 keeps known fort facts across the call, so the
   integration applies the hook successor states instead.

@@ -1,0 +1,414 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept F02-B
+//| accept F03-A
+//| accept F03-B
+//| reject F03-E
+//| accept F04-A
+//| accept F08-A
+//| reject F08-B
+//| reject F08-C
+//| reject F08-D
+//| accept F08-E
+//| reject F08-F
+//| accept F11-A
+//| accept F11-B
+//| reject F11-C
+//| reject F11-D
+//| reject F11-E
+//| reject F11-G
+//| accept F11-H
+//| reject F11-I
+/// Tests that the existing helpers keep foreign trust and fort obligations apart.
+import ownership_api;
+import ownership_ffi_arithmetic_env as arithmetic;
+import ownership_ffi_helpers_env as helpers;
+import ownership_keys;
+import ownership_local_env as local;
+import ownership_places;
+import ownership_raw;
+import ownership_raw_env as raw;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import std.str;
+import types;
+
+fn pointer(types.table mut* t, types.node* elem, bool owning) types.node* {
+    return types.type_ptr(t, elem, owning, false);
+}
+fn trusted_slice() void {
+    arithmetic.env mut e = {};
+    arithmetic.open(&e, 101, 2101, raw.NO_BOUNDS);
+    defer arithmetic.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw.request mut req = arithmetic.request(&e, 102, 2102);
+    ownership_raw.result mut slice = ownership_raw.slice_ptr(&e.raw.root.storage,
+        &e.raw.local.service, e.raw.root.addresses[..], ownership_raw.literal(0),
+        ownership_raw.literal(99), e.raw.byte, &req);
+    raw.accepts(&slice);
+    defer ownership_raw.free_result(&slice);
+    // Only the slice receives an exact length. The source keeps an unknown extent.
+    assert(slice.addresses[0].source.ordinal == 9);
+    assert(ownership_raw.same_expression(slice.addresses[0].end, ownership_raw.literal(99)));
+    ownership_raw.request mut pick = arithmetic.request(&e, 103, 2103);
+    ownership_raw.result mut element = ownership_raw.derive_address(&slice.storage,
+        &e.raw.local.service, slice.addresses[..], ownership_raw.literal(98),
+        ownership_raw.literal(99), e.raw.byte, &pick);
+    raw.accepts(&element);
+    defer ownership_raw.free_result(&element);
+    ownership_raw.request mut use = arithmetic.request(&e, 104, 2104);
+    raw.accepted(ownership_raw.access(&element.storage, &e.raw.local.service,
+        element.addresses[..], e.raw.byte, &use));
+    assert(element.addresses[0].source.ordinal == 9 && e.observed.events == 0);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+    arithmetic.unknown_extent(&e);
+    println("accept F02-B");
+}
+fn wrapper_copies() void {
+    arithmetic.env mut e = {};
+    helpers.open(&e, false);
+    defer helpers.close(&e);
+    ownership_transfer.request mut inner = helpers.request(&e,
+        ownership_transfer.action.copy, 11, 1101, 9, 2);
+    helpers.apply(&e, &inner, true, ownership_api.event_kind.invalid_use);
+    // The wrapper returns P2 by value into the caller slot P5.
+    ownership_transfer.request mut returned = helpers.request(&e,
+        ownership_transfer.action.copy, 12, 1102, 2, 5);
+    helpers.apply(&e, &returned, true, ownership_api.event_kind.invalid_use);
+    ownership_transfer.request mut read = helpers.request(&e,
+        ownership_transfer.action.use, 13, 1103, 5, 5);
+    helpers.apply(&e, &read, true, ownership_api.event_kind.invalid_use);
+    ownership_api.contents_fact value = helpers.value(&e, 5);
+    assert(value.borrows.len == 1 && value.borrows[0].source.ordinal == 9);
+    assert(value.borrows[0].containing.root.ordinal == 5);
+    assert(helpers.value(&e, 2).borrows[0].containing.root.ordinal == 2);
+    assert(e.raw.local.state.sources[0].kind == ownership_api.source_kind.trusted_foreign);
+    assert(e.raw.local.state.allocations_len == 0);
+    println("accept F03-A");
+}
+fn void_round_trip() void {
+    arithmetic.env mut e = {};
+    arithmetic.open(&e, 111, 2111, raw.NO_BOUNDS);
+    defer arithmetic.close(&e);
+    types.node* bytes = pointer(&e.raw.table, e.raw.byte, false);
+    types.node* opaque = types.type_voidptr(&e.raw.table, false, false);
+    ownership_raw.request mut first = arithmetic.request(&e, 112, 2112);
+    ownership_raw.result mut erased = ownership_raw.cast_reference(&e.raw.root.storage,
+        &e.raw.local.service, e.raw.root.addresses[..], bytes, opaque, &first);
+    raw.accepts(&erased);
+    defer ownership_raw.free_result(&erased);
+    ownership_raw.request mut second = arithmetic.request(&e, 113, 2113);
+    ownership_raw.result mut back = ownership_raw.cast_reference(&erased.storage,
+        &e.raw.local.service, erased.addresses[..], opaque, bytes, &second);
+    raw.accepts(&back);
+    defer ownership_raw.free_result(&back);
+    assert(back.addresses[0].source.ordinal == 9);
+    ownership_raw.request mut use = arithmetic.request(&e, 114, 2114);
+    raw.accepted(ownership_raw.access(&back.storage, &e.raw.local.service,
+        back.addresses[..], e.raw.byte, &use));
+    arithmetic.unknown_extent(&e);
+    println("accept F03-B");
+}
+fn local_view_returned() void {
+    local.env mut e = {};
+    local.init(&e);
+    defer local.free(&e);
+    local.add_stack(&e, 1);
+    assert(ownership_api.successful(local.address(&e, 1, 2, 1, true)));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    defer ownership_state.free(&before);
+    // The wrapper returns P2 after its local storage S1 ends.
+    ownership_api.proof_status proof = local.dead(&e, 1, 1, true, true);
+    assert(!ownership_api.successful(proof) && proof.failed);
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    assert(ownership_state.equal(&before, &e.state));
+    println("reject F03-E");
+}
+fn field_copies() void {
+    arithmetic.env mut e = {};
+    helpers.open(&e, false);
+    defer helpers.close(&e);
+    // Each applied effect replaces the state and its blocks. The path keeps its own storage.
+    ownership_api.projection[1] mut parts = {};
+    parts[0].kind = ownership_api.projection_kind.field;
+    ownership_api.place_path mut field = helpers.place(3);
+    field.projections = parts[..];
+    types.node* view = pointer(&e.raw.table, e.raw.byte, false);
+    ownership_transfer.request mut into = helpers.request(&e,
+        ownership_transfer.action.copy, 21, 1201, 9, 3);
+    into.destination = field;
+    helpers.prepare(&e, &into);
+    ownership_places.request mut copy = {};
+    copy.base = into;
+    copy.kind = ownership_places.action.copy_value;
+    copy.ty = view;
+    copy.source_region_proved = true;
+    copy.destination_region_proved = true;
+    copy.alias_substituted_proved = true;
+    assert(ownership_api.successful(ownership_places.apply(&e.raw.local.state,
+        &e.raw.local.service, &copy)));
+    ownership_transfer.request mut out = helpers.request(&e,
+        ownership_transfer.action.copy, 22, 1202, 3, 2);
+    out.source = field;
+    helpers.prepare(&e, &out);
+    copy.base = out;
+    assert(ownership_api.successful(ownership_places.apply(&e.raw.local.state,
+        &e.raw.local.service, &copy)));
+    ownership_transfer.request mut read = helpers.request(&e,
+        ownership_transfer.action.use, 23, 1203, 2, 2);
+    helpers.apply(&e, &read, true, ownership_api.event_kind.invalid_use);
+    u64 at = ownership_transfer.contents_index(&e.raw.local.state, field);
+    assert(at != ownership_transfer.U64_MAX);
+    assert(e.raw.local.state.contents[at].borrows[0].source.ordinal == 9);
+    assert(helpers.value(&e, 2).borrows[0].source.ordinal == 9);
+    assert(e.raw.local.state.allocations_len == 0 && e.observed.events == 0);
+    println("accept F04-A");
+}
+fn heap_casts(u64 bytes, bool wide) ownership_api.proof_status {
+    raw.env mut e = {};
+    raw.heap(&e, bytes);
+    defer raw.close(&e);
+    types.node* view = pointer(&e.table, e.byte, false);
+    types.node* opaque = types.type_voidptr(&e.table, false, false);
+    types.node* word = types.type_prim(&e.table, prim.prim_kind.prim_u64);
+    ownership_raw.result mut erased = raw.cast_value(&e, &e.root, view, opaque);
+    raw.accepts(&erased);
+    defer ownership_raw.free_result(&erased);
+    types.node* target = wide ? pointer(&e.table, word, false) : view;
+    ownership_raw.result mut back = raw.cast_value(&e, &erased, opaque, target);
+    raw.accepts(&back);
+    defer ownership_raw.free_result(&back);
+    // The cast keeps the fort heap source and its window [0, bytes).
+    raw.source(&back, 1, 0, bytes);
+    return raw.access(&e, &back, wide ? word : e.byte);
+}
+fn fort_casts() void {
+    raw.accepted(heap_casts(4, false));
+    println("accept F08-A");
+}
+fn unknown_cast() void {
+    raw.env mut e = {};
+    raw.open(&e);
+    defer raw.close(&e);
+    ownership_api.source_fact mut unknown = local.source(1, ownership_api.source_kind.unknown_fort,
+        ownership_api.entity_id{});
+    unknown.validity = ownership_api.validity_kind.unknown;
+    assert(ownership_state.add_source(&e.local.state, &e.local.service, unknown,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_raw.origin input = raw.origin(&e, 1, e.byte, ownership_raw.literal(1),
+        ownership_raw.literal(1), false);
+    ownership_raw.request mut req = raw.request(&e);
+    e.root = ownership_raw.capture_origin(&e.local.state, &e.local.service, &input,
+        raw.NO_BOUNDS, raw.NO_RELATIONS, &req);
+    raw.accepts(&e.root);
+    types.node* view = pointer(&e.table, e.byte, false);
+    ownership_raw.result mut erased = raw.cast_value(&e, &e.root, view,
+        types.type_voidptr(&e.table, false, false));
+    raw.accepts(&erased);
+    defer ownership_raw.free_result(&erased);
+    // The cast result keeps S1 unknown_fort. No access can use it.
+    assert(erased.addresses[0].source.ordinal == 1);
+    raw.rejected(raw.access(&e, &erased, e.byte));
+    assert(e.local.state.sources[0].kind == ownership_api.source_kind.unknown_fort);
+    println("reject F08-B");
+}
+fn integer_access() ownership_api.proof_status {
+    raw.env mut e = {};
+    raw.open(&e);
+    defer raw.close(&e);
+    ownership_raw.result mut bits = raw.integer(&e);
+    raw.accepted(bits.proof);
+    defer ownership_raw.free_result(&bits);
+    assert(bits.addresses[0].source.kind == ownership_api.entity_kind.none);
+    return raw.access(&e, &bits, e.byte);
+}
+fn foreign_integer() void {
+    raw.rejected(integer_access());
+    println("reject F08-C");
+}
+fn foreign_round_trip() void {
+    arithmetic.env mut e = {};
+    arithmetic.open(&e, 121, 2121, raw.NO_BOUNDS);
+    defer arithmetic.close(&e);
+    ownership_raw.request mut req = arithmetic.request(&e, 122, 2122);
+    ownership_raw.result mut bits = ownership_raw.reconstruct_integer(&e.raw.local.state,
+        &e.raw.local.service, &req);
+    raw.accepted(bits.proof);
+    defer ownership_raw.free_result(&bits);
+    ownership_raw.request mut use = arithmetic.request(&e, 123, 2123);
+    ownership_api.proof_status proof = ownership_raw.access(&bits.storage, &e.raw.local.service,
+        bits.addresses[..], e.raw.byte, &use);
+    arithmetic.incomplete(&e, proof, &use);
+    // P9 keeps its trusted source. Only the rebuilt pointer has no source.
+    ownership_raw.request mut kept = arithmetic.request(&e, 124, 2124);
+    raw.accepted(ownership_raw.access(&e.raw.root.storage, &e.raw.local.service,
+        e.raw.root.addresses[..], e.raw.byte, &kept));
+    println("reject F08-D");
+}
+fn integer_cast_only() void {
+    raw.env mut e = {};
+    raw.open(&e);
+    defer raw.close(&e);
+    ownership_raw.result mut bits = raw.integer(&e);
+    // A cast that no access uses needs no source.
+    raw.accepted(bits.proof);
+    ownership_raw.free_result(&bits);
+    assert(e.local.state.sources_len == 0 && e.local.counts.events == 0);
+    println("accept F08-E");
+}
+fn wider_pointee() void {
+    raw.rejected(heap_casts(4, true));
+    println("reject F08-F");
+}
+fn entry_view(local.env mut* e, u32 slot, u32 source, bool exact) void {
+    ownership_api.borrow_relation[1] borrows = {local.borrow(
+        local.id(ownership_api.entity_kind.source, source), slot * 10 + 1, local.place(slot))};
+    ownership_api.contents_fact mut value = local.reference(slot * 10 + 1,
+        local.id(ownership_api.entity_kind.source, source), borrows[..]);
+    value.place = local.place(slot);
+    if (!exact) { value.span_length = ownership_api.scalar_fact{}; }
+    assert(ownership_state.add_contents(&e->state, &e->service, value,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+}
+// A foreign entry supplies a trusted input S9 and a symbolic caller input S3.
+fn callback(local.env mut* e, bool owned) void {
+    local.init(e);
+    ownership_api.entity_id none = {};
+    ownership_api.source_fact mut input = local.source(9,
+        ownership_api.source_kind.trusted_foreign, none);
+    if (owned) { input.allocation = local.id(ownership_api.entity_kind.allocation, 9); }
+    assert(ownership_state.add_source(&e->state, &e->service, input,
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(ownership_state.add_source(&e->state, &e->service,
+        local.source(3, ownership_api.source_kind.symbolic_caller, none),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    if (owned) {
+        ownership_api.allocation_fact mut owner = local.allocation(9, 9, 9, 0);
+        owner.logical_length = ownership_api.scalar_fact{};
+        assert(ownership_state.add_allocation(&e->state, &e->service, owner,
+            ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+        entry_view(e, 8, 9, false);
+    }
+    entry_view(e, 9, 9, false);
+    entry_view(e, 3, 3, true);
+    local.add_stack(e, 31);
+}
+fn callback_inputs() void {
+    local.env mut e = {};
+    callback(&e, false);
+    defer local.free(&e);
+    assert(ownership_api.successful(local.use(&e, 9)));
+    assert(ownership_api.successful(local.use(&e, 3)));
+    u64 caller = ownership_state.source_index(&e.state, local.id(ownership_api.entity_kind.source,
+        3));
+    assert(e.state.sources[caller].kind == ownership_api.source_kind.symbolic_caller);
+    assert(e.counts.events == 0);
+    println("accept F11-A");
+}
+fn callback_cleanup(bool released) ownership_api.proof_status {
+    local.env mut e = {};
+    callback(&e, false);
+    defer local.free(&e);
+    assert(ownership_api.successful(local.alloc(&e, 1, 1, 1, 4)));
+    u64 fresh = ownership_state.source_index(&e.state, local.id(ownership_api.entity_kind.source,
+        1));
+    assert(e.state.sources[fresh].kind == ownership_api.source_kind.heap);
+    if (released) { assert(ownership_api.successful(local.release(&e, 1, true))); }
+    ownership_api.proof_status proof = local.dead(&e, 1, 31, true, false);
+    if (!released) {
+        assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    }
+    return proof;
+}
+fn callback_releases() void {
+    assert(ownership_api.successful(callback_cleanup(true)));
+    println("accept F11-B");
+}
+fn callback_leaks() void {
+    raw.rejected(callback_cleanup(false));
+    println("reject F11-C");
+}
+// A callback's scalar input rebuilt as a pointer names no source, even beside trusted inputs.
+fn callback_scalar() void {
+    raw.env mut e = {};
+    raw.open(&e);
+    defer raw.close(&e);
+    ownership_api.entity_id none = {};
+    assert(ownership_state.add_source(&e.local.state, &e.local.service,
+        local.source(9, ownership_api.source_kind.trusted_foreign, none),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(ownership_state.add_source(&e.local.state, &e.local.service,
+        local.source(3, ownership_api.source_kind.symbolic_caller, none),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    ownership_raw.result mut bits = raw.integer(&e);
+    raw.accepted(bits.proof);
+    defer ownership_raw.free_result(&bits);
+    assert(bits.addresses[0].source.kind == ownership_api.entity_kind.none);
+    raw.rejected(raw.access(&e, &bits, e.byte));
+    assert(e.local.state.sources_len == 2);
+    assert(e.local.state.sources[0].kind == ownership_api.source_kind.trusted_foreign);
+    assert(e.local.state.sources[1].kind == ownership_api.source_kind.symbolic_caller);
+    println("reject F11-D");
+}
+fn callback_local_view() void {
+    local.env mut e = {};
+    callback(&e, false);
+    defer local.free(&e);
+    local.add_stack(&e, 1);
+    assert(ownership_api.successful(local.address(&e, 1, 2, 1, true)));
+    raw.rejected(local.dead(&e, 1, 1, true, true));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    println("reject F11-E");
+}
+fn callback_slice() void {
+    raw.env mut e = {};
+    raw.heap(&e, 4);
+    defer raw.close(&e);
+    // The callback's own allocation stays a four-byte heap window.
+    ownership_raw.result mut wide = raw.slice(&e, &e.root, ownership_raw.literal(0),
+        ownership_raw.literal(5), e.byte);
+    raw.rejects(&wide);
+    println("reject F11-G");
+}
+fn callback_own_input(bool released) void {
+    local.env mut e = {};
+    callback(&e, true);
+    defer local.free(&e);
+    if (released) {
+        assert(ownership_api.successful(local.release(&e, 9, true)));
+        u64 input = ownership_state.source_index(&e.state,
+            local.id(ownership_api.entity_kind.source, 9));
+        assert(e.state.sources[input].validity == ownership_api.validity_kind.released);
+        // The known alias P8 of the released input becomes invalid.
+        raw.rejected(local.use(&e, 8));
+        assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    } else {
+        raw.rejected(local.dead(&e, 9, 31, true, false));
+        assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    }
+}
+fn main() i32 {
+    trusted_slice();
+    wrapper_copies();
+    void_round_trip();
+    local_view_returned();
+    field_copies();
+    fort_casts();
+    unknown_cast();
+    foreign_integer();
+    foreign_round_trip();
+    integer_cast_only();
+    wider_pointee();
+    callback_inputs();
+    callback_releases();
+    callback_leaks();
+    callback_scalar();
+    callback_local_view();
+    callback_slice();
+    callback_own_input(true); println("accept F11-H");
+    callback_own_input(false); println("reject F11-I");
+    return 0;
+}
