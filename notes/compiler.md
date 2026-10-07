@@ -310,6 +310,8 @@ came here.
   Its caller resolves heap indirection to a canonical storage root before a strong update.
   Its caller substitutes aliases before it treats different storage roots as disjoint.
   A copied or moved borrow names its new containing field and keeps its original source.
+  Direct slot copies and moves in `ownership_transfer` follow the same rule. A containing place
+  that begins with the source slot maps that prefix to the destination; another place stays.
   Each selected borrowed leaf needs a live source before a copy or move.
   A moved or released owning leaf has an empty-owner fact with exact zero length.
   A delegated aggregate failure keeps the mapped event key and its exhaustion data.

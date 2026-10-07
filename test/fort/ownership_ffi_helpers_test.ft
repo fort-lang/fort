@@ -37,6 +37,8 @@
 //| reject H15
 //| reject P19
 //| reject P20
+//| accept containing after copy and move
+//| accept aggregate containing prefix
 //| accept supplied_snapshot_refusal_sweep
 //| accept retained_cleanup_normal
 //| accept retained_cleanup_refusal
@@ -826,6 +828,70 @@ fn helper_cleanup(u32 mode) void {
     assert(best_live < bound);
     assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
 }
+// A copied or moved borrow names its new containing slot and keeps its source (D17.15).
+fn containing_after_copy_and_move() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, true);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_transfer.request mut copy = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.copy, 41, 1401, 8, 5);
+    ownership_ffi_helpers_env.apply(&e, &copy, true, ownership_api.event_kind.invalid_use);
+    ownership_api.borrow_relation copied = ownership_ffi_helpers_env.value(&e, 5).borrows[0];
+    assert(copied.containing.root.ordinal == 5 && copied.source.ordinal == 9);
+    assert(ownership_ffi_helpers_env.value(&e, 8).borrows[0].containing.root.ordinal == 8);
+    ownership_transfer.request mut moved = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.move_owner, 42, 1402, 9, 3);
+    ownership_ffi_helpers_env.apply(&e, &moved, true, ownership_api.event_kind.invalid_use);
+    ownership_api.borrow_relation owner = ownership_ffi_helpers_env.value(&e, 3).borrows[0];
+    assert(owner.containing.root.ordinal == 3 && owner.source.ordinal == 9);
+    assert(ownership_transfer.empty_owner_proved(ownership_ffi_helpers_env.value(&e, 9)));
+}
+// An aggregate copy maps a containing field of the source to the same field of the destination.
+fn aggregate_containing_prefix() void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_helpers_env.open(&e, false);
+    defer ownership_ffi_helpers_env.close(&e);
+    ownership_api.projection[1] mut parts = {};
+    parts[0].kind = ownership_api.projection_kind.field;
+    ownership_api.place_path mut inside = ownership_ffi_helpers_env.place(4);
+    inside.projections = parts[..];
+    ownership_api.borrow_relation[2] mut borrows = {};
+    u64 mut i = 0;
+    while (i < 2) {
+        borrows[i].key = ownership_ffi_arithmetic_env.id(ownership_api.entity_kind.relation,
+            60 + cast(i, u32));
+        borrows[i].value_version = ownership_ffi_arithmetic_env.id(ownership_api.entity_kind.value,
+            60);
+        borrows[i].source = ownership_ffi_arithmetic_env.id(ownership_api.entity_kind.source, 9);
+        borrows[i].range.source = borrows[i].source;
+        borrows[i].representation_complete = true;
+        i += 1;
+    }
+    borrows[0].containing = inside;
+    // The second relation names storage outside the copied value. It keeps its place.
+    borrows[1].containing = ownership_ffi_helpers_env.place(6);
+    ownership_api.contents_fact mut value = {};
+    value.place = ownership_ffi_helpers_env.place(4);
+    value.kind = ownership_api.contents_kind.aggregate;
+    value.value_version = borrows[0].value_version;
+    value.borrows = borrows[..];
+    ownership_ffi_helpers_env.replace(&e, value);
+    ownership_transfer.request mut copy = ownership_ffi_helpers_env.request(&e,
+        ownership_transfer.action.copy, 43, 1403, 4, 5);
+    ownership_ffi_helpers_env.apply(&e, &copy, true, ownership_api.event_kind.invalid_use);
+    ownership_api.contents_fact copied = ownership_ffi_helpers_env.value(&e, 5);
+    assert(copied.borrows.len == 2);
+    ownership_api.place_path mapped = copied.borrows[0].containing;
+    assert(mapped.root.ordinal == 5 && mapped.projections.len == 1);
+    assert(mapped.projections[0].kind == ownership_api.projection_kind.field);
+    assert(mapped.projections[0].field == 0);
+    assert(copied.borrows[1].containing.root.ordinal == 6);
+    assert(copied.borrows[1].containing.projections.len == 0);
+    // The source keeps its own containing field.
+    ownership_api.contents_fact kept = ownership_ffi_helpers_env.value(&e, 4);
+    assert(kept.borrows[0].containing.root.ordinal == 4);
+    assert(kept.borrows[0].containing.projections.len == 1);
+}
 fn main() i32 {
     f02_a(); println("accept F02-A");
     f02_c(); println("reject F02-C");
@@ -863,6 +929,8 @@ fn main() i32 {
     h15(); println("reject H15");
     p19(); println("reject P19");
     p20(); println("reject P20");
+    containing_after_copy_and_move(); println("accept containing after copy and move");
+    aggregate_containing_prefix(); println("accept aggregate containing prefix");
     snapshot_refusal_sweep(); println("accept supplied_snapshot_refusal_sweep");
     helper_cleanup(0); println("accept retained_cleanup_normal");
     helper_cleanup(1); println("accept retained_cleanup_refusal");

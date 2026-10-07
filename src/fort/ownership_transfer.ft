@@ -398,6 +398,54 @@ fn write(ownership_state.state mut* s, ownership_api.services* svc,
     return result.proof;
 }
 
+// A containing place inside the copied value moves with it. A path that begins with the
+// source place maps that prefix to the destination. Another path stays unchanged.
+fn rebased(ownership_state.state mut* scratch, ownership_api.place_path path,
+    ownership_api.place_path from, ownership_api.place_path to) ownership_api.place_path {
+    if (ownership_state.has_residual(path) || ownership_state.has_residual(from) ||
+        !same_entity(path.root, from.root) ||
+        path.projections.len < from.projections.len) { return path; }
+    u64 mut i = 0;
+    while (i < from.projections.len) {
+        if (!ownership_state.same_projection(path.projections[i], from.projections[i])) {
+            return path;
+        }
+        i += 1;
+    }
+    u64 tail = path.projections.len - from.projections.len;
+    ownership_api.projection mut@ own parts =
+        new(ownership_api.projection, to.projections.len + tail);
+    defer del(parts);
+    i = 0;
+    while (i < to.projections.len) { parts[i] = to.projections[i]; i += 1; }
+    u64 mut j = 0;
+    while (j < tail) { parts[i + j] = path.projections[from.projections.len + j]; j += 1; }
+    ownership_api.place_path mut out = to;
+    out.projections = ownership_state.copy_projections(scratch, parts[..]);
+    return out;
+}
+
+// A copied or moved borrow names its new containing place and keeps its source (D17.15).
+fn write_copied(ownership_state.state mut* s, ownership_api.services* svc,
+    ownership_api.contents_fact value, ownership_api.place_path destination,
+    request* req) ownership_api.proof_status {
+    ownership_state.state mut scratch = ownership_state.empty();
+    defer ownership_state.free(&scratch);
+    ownership_api.borrow_relation mut@ own borrows =
+        new(ownership_api.borrow_relation, value.borrows.len);
+    defer del(borrows);
+    u64 mut i = 0;
+    while (i < value.borrows.len) {
+        borrows[i] = value.borrows[i];
+        borrows[i].containing = rebased(&scratch, borrows[i].containing, value.place,
+            destination);
+        i += 1;
+    }
+    ownership_api.contents_fact mut next = value;
+    next.borrows = borrows[..];
+    return write(s, svc, next, destination, req);
+}
+
 fn empty_value(ownership_api.place_path place) ownership_api.contents_fact {
     ownership_api.contents_fact mut value = ownership_api.contents_fact{};
     value.place = place;
@@ -464,7 +512,7 @@ fn do_copy(ownership_state.state mut* s, ownership_api.services* svc, request* r
         return invalid(svc, req, ownership_api.event_kind.lost_ownership,
             req->destination.root, "copy would discard a live owner");
     }
-    return write(s, svc, value, req->destination, req);
+    return write_copied(s, svc, value, req->destination, req);
 }
 
 fn do_move(ownership_state.state mut* s, ownership_api.services* svc, request* req)
@@ -510,7 +558,7 @@ fn do_move(ownership_state.state mut* s, ownership_api.services* svc, request* r
             req->source, req);
         if (!ownership_api.successful(emptied)) { return emptied; }
     }
-    return write(s, svc, value, req->destination, req);
+    return write_copied(s, svc, value, req->destination, req);
 }
 
 fn do_release(ownership_state.state mut* s, ownership_api.services* svc,
