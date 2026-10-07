@@ -152,8 +152,8 @@ fn close(fixture mut* f) void {
 
 fn prepare(fixture mut* f) void {
     computation(f, 1);
+    // The caller extraction keeps the call as an unresolved step and goes on past it.
     f->caller_program = ownership_summary_body.extract(&f->inputs[1]);
-    assert(f->caller_program.proof.kind == ownership_api.proof_kind.incomplete);
     f->caller = ownership_state.clone(&f->caller_program.entry);
     u32 mut block = 0;
     bool mut found = false;
@@ -173,11 +173,17 @@ fn prepare(fixture mut* f) void {
         block += 1;
     }
     assert(found);
+    // The supplied state holds the effects before the call. The suffix applies the rest.
     u64 mut i = 0;
     while (i < f->caller_program.steps_len) {
-        ownership_transfer.request mut call_request = f->caller_program.steps[i].local;
-        assert(ownership_api.successful(ownership_transfer.apply(&f->caller,
-            &f->services.services, &call_request)));
+        ownership_flow.step before = f->caller_program.steps[i];
+        if (before.kind == ownership_flow.step_kind.local_effect &&
+            (before.block < f->call_block ||
+            (before.block == f->call_block && before.gap < f->call_gap))) {
+            ownership_transfer.request mut call_request = before.local;
+            assert(ownership_api.successful(ownership_transfer.apply(&f->caller,
+                &f->services.services, &call_request)));
+        }
         i += 1;
     }
 }
