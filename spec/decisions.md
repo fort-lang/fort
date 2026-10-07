@@ -2493,6 +2493,14 @@ says ownership is "by convention", this section supersedes it.
 - owner: `fir.md` (14.1), `toolchain.md` (4.2).
 - rule: The ownership analysis uses a finite domain and deterministic work budgets.
   Bound paths, regions, predicates, identities, shape templates, target alternatives, and effects.
+  Count each precision bound from the content of its scope, not from the history of insertions.
+  Regions, predicates, guarded alternatives, and shape templates use the state as their scope.
+  Insertion, join, and widening use the same count for one category.
+  Count work per computation: the call-graph build, the liveness or flow analysis of one function,
+  or the summary solver of one recursive component. Each function keeps its own liveness work.
+  The work bound of a computation is a fixed increasing function of its FIR size.
+  A work refusal stops that computation. Its published result keeps the incomplete status.
+  A new budget for the same computation cannot remove that status.
   Joins represent all predecessor states. Widening can lose precision but cannot remove obligations.
   Preserve release history, owned descendants, transferred regions, and retained source relations.
   Infer recursive summaries to a fixed point over a bounded symbolic interface.
@@ -2514,6 +2522,12 @@ says ownership is "by convention", this section supersedes it.
   These rules add no annotation, unsafe construct, runtime identity data, or ABI change.
 - rationale: Finite summaries permit termination without accepting operations that lack proof.
   Separate witness classes prevent an imprecise state from claiming a concrete memory error.
+  A bound on retained content cannot refuse a state that holds fewer facts than the bound.
+  One fixed work bound refused every body of the compiler source closure, 2038 of 2038.
+- history: Amended 2026-10-06: Shape templates were counted per computation, and guarded
+  alternatives, templates, and targets accumulated over all insertions. One fixed work bound
+  applied to every computation. Now each precision bound counts current content in its scope.
+  The work bound scales with the FIR size of each computation.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),

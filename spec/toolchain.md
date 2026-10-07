@@ -327,11 +327,13 @@ temporary directory for the intermediate IR file (D19.1).
 
 ### 1.1 Ownership coverage reports (D19.8)
 
-The compiler report and the audit attestation use separate JSON version 1 documents.
+The compiler report is a JSON version 2 document. The audit attestation is a JSON version 1
+document.
 Neither document changes the diagnostic JSON of section 4.1.
 The compiler writes one report for one checked closure. The runner attests the invocation and bytes.
 The compiler needs no git executable, revision option, or cryptographic hash implementation.
-Version 1 requires the members and types below. Reject duplicate JSON members and unknown versions.
+These versions require the members and types below. Reject duplicate JSON members and unknown
+versions.
 All count and key integers are nonnegative. Source lines and columns start at 1.
 Integers exclude Boolean values and fit u64. Context-local function keys fit u32.
 Count overflow gives report failure, not wrapped totals.
@@ -341,7 +343,7 @@ Count overflow gives report failure, not wrapped totals.
 | Member | Type and meaning |
 |---|---|
 | `kind` | String `fort-ownership-report`. |
-| `version` | Integer 1. |
+| `version` | Integer 2. Version 2 adds `limits.w_scale` and meter `fir_size`. |
 | `complete` | Boolean true; the report is complete, not necessarily its proof. |
 | `compiler_version` | The string that --version identifies. |
 | `invocation` | Entry, working directory, arguments, target, configuration, and mode. |
@@ -380,19 +382,24 @@ Producer is `integrated` or `unavailable`. Status is `complete`, `incomplete`, `
 Closure outcomes include required non-body facts, such as globals and generated startup.
 The report runs integrated analyses. It never substitutes supplied test facts or permissive
 services.
-`limits` contains integer `version`, `d`, `r`, `p`, `g`, `h`, `t`, `e`, `w`, and `v`.
+`limits` contains integer `version`, `d`, `r`, `p`, `g`, `h`, `t`, `e`, `w`, `w_scale`, and `v`.
 Use the actual production table. Do not copy numeric values into this specification (D17.18).
+`w` and `w_scale` are W_base and W_scale of the FIR-size W function (`fir.md` 14.1).
 
-Each meter row contains integer `id`, string `name`, `owner`, `counts`, and `first_refusal`.
+Each meter row contains integer `id`, string `name`, `owner`, integer `fir_size`, `counts`, and
+`first_refusal`.
 Owner is null for a closure computation, or the context-local function key of its computation.
+`fir_size` is the FIR size of that computation.
 Counts form an array with string `category` and `scope`, plus integer `used` and `bound`.
+A W count has the bound `w + w_scale * fir_size`, saturated at the u64 maximum.
+Each other count has the bound of its table member.
 Category uses D, R, P, G, H, T, E, W, or V. Scope uses ownership_api.limit_scope names.
 Report only categories the actual ledger measures. Absence does not mean zero use.
 First refusal uses the reason object below, or null. Meter IDs start at 0 without gaps.
 The first milestone names the existing graph ledger `graph_private` and service ledgers `services`.
-Graph construction and queries use the graph's retained private W ledger.
-Service dispatch and liveness charges use their actual service ledger. Report these scopes
-separately.
+Graph construction uses the graph's retained private W ledger.
+Service dispatch, liveness, and the target queries of one body charge that body's service ledger.
+Report these scopes separately.
 Never sum separate ledgers as one shared meter. Never reset or split a computation to hide refusal.
 Required accounting that no ledger covers remains incomplete. Graph completion supplies no shared
 graph/liveness accounting claim.
@@ -446,6 +453,7 @@ or `tool_failure`. Source is null without a location, or has `file`, `line`, `co
 and `end_col`. These members are integers.
 Limit is null, or an object with string `category` and integer `used` and `bound`.
 Category uses D, R, P, G, H, T, E, W, or V. Keep the first refused charge and its location.
+A W limit has the W bound of the meter that refused the charge.
 Use analysis order, then canonical function and source order, to select a report's first reason.
 Keep each affected body's first incomplete reason even when report diagnostics reach their limit.
 Stream coverage rows or retain bounded summary records. The report requires no expanded proof trace.

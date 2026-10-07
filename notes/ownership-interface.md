@@ -160,10 +160,10 @@ No numeric test value selects a production default.
 | R | state | One region, representative, or partition. |
 | P | state | One predicate atom. |
 | G | state | One guarded alternative. |
-| H | computation | One structural template or bounded parameter. |
+| H | state | One graph edge, template key, or template parameter, clause, or descendant. |
 | T | call | One explicit target alternative. |
 | E | function | One retained ordered effect node or summary relation. |
-| W | computation | One work unit from the table below. |
+| W | computation | One work unit, cumulative in one computation. The bound scales with FIR size. |
 | V | report | One event, witness link, or rendered record. |
 
 | Work kind | One work unit |
@@ -183,10 +183,10 @@ The budget service checks the whole request before granting permission.
 It returns the first exhausted category under this order. It records used, bound, and attempted
 units.
 D requests absolute projection depth. R requests prospective retained region cardinality.
-P requests prospective predicate cardinality in one represented state.
-E requests prospective retained relation cardinality for one function computation.
-The meter stores the greatest accepted D, R, P, and E amounts.
-Separate states can use one meter. Repeated facts do not add R or P units.
+P, G, and H request prospective predicate, guarded-alternative, and structural cardinality.
+Each counts one represented state. E counts retained relations of one function computation.
+The meter stores the greatest accepted D, R, P, G, H, T, and E amounts.
+Separate states can use one meter. Repeated or removed facts add no R, P, G, or H units.
 Graph rebuilds and separate function computations do not accumulate E copies.
 A graph counts each retained relation occurrence and each unknown-contents fallback.
 A state history mutator counts its retained history occurrences plus the incoming history.
@@ -196,7 +196,8 @@ Refusal preserves history and obligations.
 An explicit domain table can impose a stricter E bound than the service table.
 That local refusal records loss and incomplete proof without inventing a service counter value.
 Equal source keys alone do not identify equal destinations or value versions.
-W remains cumulative. Each new cardinality-query step needs one W permission before work.
+W is cumulative within one computation. Its bound is `W_base + W_scale * S` for FIR size S.
+Each new cardinality-query step needs one W permission before work.
 Canonical region keys identify allocation representatives, explicit regions, and borrowed regions.
 A partition key identifies a partition under its region key.
 A node uses its allocation key when present. Source-validity rows add no separate region.
