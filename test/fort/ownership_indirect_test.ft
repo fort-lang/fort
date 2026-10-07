@@ -9,10 +9,12 @@
 //| R10 abort-only indirect targets
 //| R11 mixed abort and normal targets
 //| R12 unknown target exit outcome
+//| R14 bodies outside the closure
 //| indirect calls ok
 /// Checks calls of function values against the targets of the call graph (D17.13, D17.18).
 import fir;
 import ownership_api;
+import ownership_graph;
 import ownership_recursive;
 import ownership_recursive_env;
 import ownership_summary_body;
@@ -356,6 +358,82 @@ fn solver_inputs() void {
     ownership_recursive_env.complete(&c, "caller", 1);
 }
 
+// The reviewer probes P1, P2 and P7 run a body that no closure statement names. P1 and P2
+// get it from `dlsym`, and P7 moves an address by arithmetic. The call through the value keeps
+// a residual target with no edge, so no summary of `hidden` or `b` applies, and `run` stays
+// incomplete (D17.13, D17.18).
+string[7] DLSYM = {
+    "extern fn dlsym(void* handle, char* name) void*;",
+    "fn hidden() void {}",
+    "fn named() void {}",
+    "fn run(char* name) i32 { u64 rtld = 18446744073709551614;",
+    "    void* p = dlsym(cast(rtld, void*), name);",
+    "    if (p == null) { return 1; }",
+    "    fn () void f = cast(p, fn () void); f(); return 0; }",
+};
+
+string[8] DLSYM_GLOBAL = {
+    "extern fn dlsym(void* handle, char* name) void*;",
+    "u8 mut@ own mut G = {};",
+    "fn hidden() void { del(G); }",
+    "fn run(char* name) i32 { G = new(u8, 4); u64 rtld = 18446744073709551614;",
+    "    void* p = dlsym(cast(rtld, void*), name);",
+    "    if (p == null) { return 1; }",
+    "    fn () void f = cast(p, fn () void); f();",
+    "    del(G); return 0; }",
+};
+
+string[4] MOVED = {
+    "fn a() void {}",
+    "fn b() void {}",
+    "fn run() i32 { u64 pa = cast(cast(a, void*), u64);",
+    "    fn () void f = cast(cast(pa + 92, void*), fn () void); f(); return 0; }",
+};
+
+// The residual call of `run` names no body and gives no edge to `hidden`.
+fn outside(ownership_recursive_env.closure* c, string hidden) void {
+    u64 mut residual = 0;
+    u64 mut i = 0;
+    while (i < c->graph.calls_len) {
+        if (c->graph.calls[i].residual_fort) {
+            assert(c->graph.calls[i].fort_len == 0);
+            residual += 1;
+        }
+        i += 1;
+    }
+    assert(residual == 1);
+    u64 run = ownership_recursive_env.index(c, "run");
+    u64 other = ownership_recursive_env.index(c, hidden);
+    assert(c->graph.components[run] != c->graph.components[other]);
+    assert(!ownership_graph.recursive_component(&c->graph, c->graph.components[run]));
+    ownership_summary_model.summary* s = ownership_recursive_env.summary(c, "run");
+    assert(!ownership_api.successful(s->proof) && s->cases.len == 0);
+}
+
+fn outside_bodies() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"hidden", "named", "run"};
+    ownership_recursive_env.open(&c, DLSYM[..], names[..]);
+    ownership_recursive_env.solve(&c);
+    outside(&c, "hidden");
+    ownership_recursive_env.incomplete(&c, "run", ownership_api.incomplete_reason.missing_ffi);
+    ownership_recursive_env.close(&c);
+    string[2] global_names = {"hidden", "run"};
+    ownership_recursive_env.open(&c, DLSYM_GLOBAL[..], global_names[..]);
+    ownership_recursive_env.solve(&c);
+    outside(&c, "hidden");
+    ownership_summary_model.summary* s = ownership_recursive_env.summary(&c, "run");
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->residual_effects);
+    ownership_recursive_env.close(&c);
+    string[3] moved_names = {"a", "b", "run"};
+    ownership_recursive_env.open(&c, MOVED[..], moved_names[..]);
+    ownership_recursive_env.solve(&c);
+    outside(&c, "b");
+    ownership_recursive_env.incomplete(&c, "run", ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.close(&c);
+    println("R14 bodies outside the closure");
+}
+
 fn main() i32 {
     solver_inputs();
     known_pointer();
@@ -366,6 +444,7 @@ fn main() i32 {
     abort_only();
     mixed_outcomes();
     unknown_exit();
+    outside_bodies();
     println("indirect calls ok");
     return 0;
 }

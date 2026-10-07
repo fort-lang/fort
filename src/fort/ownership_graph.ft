@@ -422,41 +422,40 @@ fn collect_callee(graph mut* g, call_site mut* call) bool {
     return changed;
 }
 
-fn copy_call(graph mut* g, call_site mut* call) bool {
+// Copies the arguments of `call` into the parameters of body `callee`, and the result of that
+// body into the destination of the call.
+fn copy_into(graph mut* g, call_site* call, u64 callee) bool {
     fir.func* caller = g->bodies[call->body].body;
+    fir.func* body = g->bodies[callee].body;
+    bool mut changed = false;
+    u32 mut arg = 0;
+    while (arg < call->value.ops_len && arg + 1 < fir.local_count(body) &&
+        fir.local_at(body, arg + 1)->kind == fir.local_kind.lk_param) {
+        fir.operand source = fir.rvalue_operand(caller, call->value, arg);
+        changed = copy_operand(g, call->body, source, cast(callee, u32),
+            fir.place_local(arg + 1), ROOT) || changed;
+        if (!ownership_api.successful(g->proof)) { return false; }
+        arg += 1;
+    }
+    return copy_place(g, cast(callee, u32), fir.place_local(0),
+        call->body, call->destination, ROOT) || changed;
+}
+
+fn copy_call(graph mut* g, call_site mut* call) bool {
     bool mut changed = collect_callee(g, call);
     if (!ownership_api.successful(g->proof)) { return false; }
     u64 mut i = 0;
-    while (i <= call->targets_len) {
-        target selected = i == call->targets_len ?
-            target{.kind = target_kind.residual_fort} : call->targets[i];
-        if (selected.kind == target_kind.fort ||
-            (i == call->targets_len && call->residual_fort)) {
+    while (i < call->targets_len) {
+        target selected = call->targets[i];
+        if (selected.kind == target_kind.fort) {
             u64 mut callee = 0;
-            while (callee < g->bodies.len) {
-                if (selected.kind == target_kind.fort &&
-                    ownership_keys.function(g->bodies[callee].key, selected.function) == 0) {
-                    break;
-                }
-                if (selected.kind == target_kind.residual_fort) { break; }
+            while (callee < g->bodies.len &&
+                ownership_keys.function(g->bodies[callee].key, selected.function) != 0) {
                 callee += 1;
             }
-            while (callee < g->bodies.len) {
-                fir.func* body = g->bodies[callee].body;
-                u32 mut arg = 0;
-                while (arg < call->value.ops_len && arg + 1 < fir.local_count(body) &&
-                    fir.local_at(body, arg + 1)->kind == fir.local_kind.lk_param) {
-                    fir.operand source = fir.rvalue_operand(caller, call->value, arg);
-                    changed = copy_operand(g, call->body, source, cast(callee, u32),
-                        fir.place_local(arg + 1), ROOT) || changed;
-                    if (!ownership_api.successful(g->proof)) { return false; }
-                    arg += 1;
-                }
-                changed = copy_place(g, cast(callee, u32), fir.place_local(0),
-                    call->body, call->destination, ROOT) || changed;
+            if (callee < g->bodies.len) {
+                changed = copy_into(g, call, callee) || changed;
                 if (!ownership_api.successful(g->proof)) { return false; }
-                if (selected.kind == target_kind.fort) { break; }
-                callee += 1;
             }
         } else if (selected.kind == target_kind.foreign) {
             changed = seed_unknown(g, call->body, call->destination) || changed;
@@ -464,6 +463,8 @@ fn copy_call(graph mut* g, call_site mut* call) bool {
         }
         i += 1;
     }
+    // A residual target names no body, so no argument or result flows through it. The
+    // destination gets the residual target instead.
     if (call->residual_fort || call->residual_foreign) {
         changed = seed_unknown(g, call->body, call->destination) || changed;
         if (!ownership_api.successful(g->proof)) { return false; }
@@ -707,6 +708,11 @@ fn add_edge(graph mut* g, edge_store mut* store, u32 from, u32 to) bool {
     return true;
 }
 
+// Each explicit fort target of a call gives one edge. A residual fort target names no body and
+// gives no edge, because the closure cannot list each body that a function value can reach.
+// Foreign code can name the symbol of any fort function (D9.6, D9.7), and a cast through
+// `void*` or `u64` can compute an address (D3.11, D3.14). A call with a residual target stays
+// an unresolved step that reads no summary (D17.18).
 fn call_edges(graph mut* g, edge_store mut* store) bool {
     u64 mut i = 0;
     while (i < g->calls_len) {
@@ -725,13 +731,6 @@ fn call_edges(graph mut* g, edge_store mut* store) bool {
                     !add_edge(g, store, call->body, cast(to, u32))) { return false; }
             }
             j += 1;
-        }
-        if (call->residual_fort) {
-            u64 mut to = 0;
-            while (to < g->bodies.len) {
-                if (!add_edge(g, store, call->body, cast(to, u32))) { return false; }
-                to += 1;
-            }
         }
         i += 1;
     }

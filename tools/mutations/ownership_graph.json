@@ -1,0 +1,51 @@
+{
+  "comment": [
+    "One row for each check that keeps a residual fort target of a call free of",
+    "graph edges and fact flow, and one for the explicit flow beside it (D17.18).",
+    "A row names the line that holds the check and the text that breaks it. The",
+    "module tests compile src/fort with the mutant. The table runs on a darwin",
+    "host with --runner 'bash -c' after cmake --preset debug. ZERO_AR_DATE=1",
+    "makes the darwin link reproducible, so the md5 guard holds."
+  ],
+  "sources": [
+    "src/fort/ownership_graph.ft"
+  ],
+  "binary": "build/Darwin/debug/fort",
+  "build": "ZERO_AR_DATE=1 cmake --build build/Darwin/debug --target fort",
+  "stages": [
+    {
+      "name": "graph module tests",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --timeout 900 -j 6 ownership_graph_test ownership_source_test ownership_indirect_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.18-residual-edges",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "            j += 1;\n        }\n        i += 1;\n    }\n    return true;\n}",
+      "new": "            j += 1;\n        }\n        u64 mut to = 0;\n        while (call->residual_fort && to < g->bodies.len) {\n            if (!add_edge(g, store, call->body, cast(to, u32))) { return false; }\n            to += 1;\n        }\n        i += 1;\n    }\n    return true;\n}",
+      "what": "a residual call gets an edge to each body"
+    },
+    {
+      "decision": "D17.18-residual-self-edge",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "            j += 1;\n        }\n        i += 1;\n    }\n    return true;\n}",
+      "new": "            j += 1;\n        }\n        if (call->residual_fort && !add_edge(g, store, call->body, call->body)) {\n            return false;\n        }\n        i += 1;\n    }\n    return true;\n}",
+      "what": "a residual call makes its own body recursive"
+    },
+    {
+      "decision": "D17.18-residual-flow",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    // destination gets the residual target instead.\n    if (call->residual_fort || call->residual_foreign) {",
+      "new": "    // destination gets the residual target instead.\n    u64 mut k = 0;\n    while (call->residual_fort && k < g->bodies.len) {\n        changed = copy_into(g, call, k) || changed;\n        if (!ownership_api.successful(g->proof)) { return false; }\n        k += 1;\n    }\n    if (call->residual_fort || call->residual_foreign) {",
+      "what": "a residual call copies its arguments into each body and each result out"
+    },
+    {
+      "decision": "D17.18-explicit-flow",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "            if (callee < g->bodies.len) {\n                changed = copy_into(g, call, callee) || changed;",
+      "new": "            if (false && callee < g->bodies.len) {\n                changed = copy_into(g, call, callee) || changed;",
+      "what": "an explicit fort target receives no argument and gives no result"
+    }
+  ]
+}

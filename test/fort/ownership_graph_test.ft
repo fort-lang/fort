@@ -16,6 +16,10 @@
 //| G13 call target scope
 //| G14 query ledger
 //| G15 callee first
+//| G16 residual calls give no edge
+//| G17 residual flow
+//| G18 determinism
+//| G19 component scale
 /// Tests call components and target propagation over verified FIR.
 import ast;
 import check_env;
@@ -215,9 +219,13 @@ fn mutual_recursion() void {
     open(&erased, erased_source[..], erased_names[..], 4);
     assert(target(&erased, nth_call(&erased, "second", 0), 2));
     assert(erased.graph.calls[nth_call(&erased, "caller", 0)].residual_fort);
+    // A residual target names no body and gives no edge. The call stays an unresolved step,
+    // so `second` and `caller` stay in two components that are not recursive (D17.18).
     u32 component = ownership_graph.component_of(&erased.graph, erased.inputs[0].key);
-    assert(component == ownership_graph.component_of(&erased.graph, erased.inputs[1].key));
-    assert(ownership_graph.recursive_component(&erased.graph, component));
+    u32 caller_component = ownership_graph.component_of(&erased.graph, erased.inputs[1].key);
+    assert(component != caller_component);
+    assert(!ownership_graph.recursive_component(&erased.graph, component));
+    assert(!ownership_graph.recursive_component(&erased.graph, caller_component));
     close(&erased);
     println("G03 mutual recursion");
 }
@@ -243,6 +251,9 @@ fn field_target() void {
     assert(alias.graph.calls[alias_call].residual_fort);
     u64 local_call = nth_call(&alias, "caller", 1);
     assert(target(&alias, local_call, 1) && alias.graph.calls[local_call].residual_fort);
+    // The store through `p` makes `second` an explicit target of the first call. That edge,
+    // not the residual target, keeps `second` and `caller` in one component.
+    assert(target(&alias, alias_call, 2) && !target(&alias, local_call, 2));
     u32 mut second_component = ownership_graph.component_of(&alias.graph, alias.inputs[1].key);
     assert(second_component == ownership_graph.component_of(&alias.graph, alias.inputs[2].key));
     assert(ownership_graph.recursive_component(&alias.graph, second_component));
@@ -260,9 +271,9 @@ fn field_target() void {
     assert(through_call.graph.calls[changed_call].residual_fort);
     second_component = ownership_graph.component_of(&through_call.graph,
         through_call.inputs[1].key);
-    assert(second_component == ownership_graph.component_of(&through_call.graph,
+    assert(second_component != ownership_graph.component_of(&through_call.graph,
         through_call.inputs[3].key));
-    assert(ownership_graph.recursive_component(&through_call.graph, second_component));
+    assert(!ownership_graph.recursive_component(&through_call.graph, second_component));
     close(&through_call);
     fixture mut nested = fixture{};
     string[8] nested_source = {"struct handler { fn () void cb; }",
@@ -275,9 +286,11 @@ fn field_target() void {
     open(&nested, nested_source[..], nested_names[..], 4);
     u64 nested_call = nth_call(&nested, "caller", 0);
     assert(target(&nested, nested_call, 1) && nested.graph.calls[nested_call].residual_fort);
+    // `second` reaches the call only through the residual target, which gives no edge.
+    assert(!target(&nested, nested_call, 2));
     second_component = ownership_graph.component_of(&nested.graph, nested.inputs[1].key);
-    assert(second_component == ownership_graph.component_of(&nested.graph, nested.inputs[2].key));
-    assert(ownership_graph.recursive_component(&nested.graph, second_component));
+    assert(second_component != ownership_graph.component_of(&nested.graph, nested.inputs[2].key));
+    assert(!ownership_graph.recursive_component(&nested.graph, second_component));
     u64 projected_call = nth_call(&nested, "invoke", 1);
     assert(target(&nested, projected_call, 1));
     assert(nested.graph.calls[projected_call].residual_fort);
@@ -292,6 +305,7 @@ fn field_target() void {
     assert(target(&aggregate_cast, cast_call, 1));
     assert(target(&aggregate_cast, cast_call, 2));
     assert(aggregate_cast.graph.calls[cast_call].residual_fort);
+    // The explicit target `second` gives an edge, so the two bodies stay one component.
     second_component = ownership_graph.component_of(&aggregate_cast.graph,
         aggregate_cast.inputs[1].key);
     assert(second_component == ownership_graph.component_of(&aggregate_cast.graph,
@@ -885,14 +899,17 @@ fn callee_first() void {
     assert(order_index(&mixed, "a") < order_index(&mixed, "caller"));
     assert(ownership_graph.callee_first(&mixed.graph).len == 4);
     close(&mixed);
-    // A residual call adds an edge to every body, so the residual caller comes last.
+    // A residual call adds no edge, so the residual caller is a component of its own.
     fixture mut residual = fixture{};
     string[3] residual_source = {"fn invoke(fn () void cb) void { cb(); }",
         "fn first() void {}", "fn second() void { first(); }"};
     string[3] residual_names = {"invoke", "first", "second"};
     open(&residual, residual_source[..], residual_names[..], 4);
     callee_first_holds(&residual);
-    assert(order_index(&residual, "invoke") == 2);
+    u32 invoke = component_of_name(&residual, "invoke");
+    assert(!ownership_graph.recursive_component(&residual.graph, invoke));
+    assert(invoke != component_of_name(&residual, "first"));
+    assert(invoke != component_of_name(&residual, "second"));
     assert(order_index(&residual, "first") < order_index(&residual, "second"));
     close(&residual);
     // A refused order leaves no order. The graph keeps the refusal.
@@ -907,6 +924,272 @@ fn callee_first() void {
     assert(ownership_graph.callee_first(&refused.graph).len == 0);
     close(&refused);
     println("G15 callee first");
+}
+
+fn body_index(fixture* f, string name) u64 {
+    u64 mut i = 0;
+    while (i < f->functions.len) {
+        if (f->functions[i].sym->name == name) { return i; }
+        i += 1;
+    }
+    panic("ownership_graph_test: missing body");
+}
+
+// The first call of body `name` that has a residual fort target.
+fn residual_call(fixture* f, string name) u64 {
+    u64 mut i = 0;
+    while (i < f->graph.calls_len) {
+        ownership_graph.call_site* call = &f->graph.calls[i];
+        if (f->functions[call->body].sym->name == name && call->residual_fort) { return i; }
+        i += 1;
+    }
+    panic("ownership_graph_test: missing residual call");
+}
+
+// `caller` calls a function value that the graph cannot name, and `target` and `other` call
+// `caller`. `source` takes the address of `target` in one way. Whatever the way, the call keeps
+// its residual target, names no body and gives no edge. So the three bodies stay in three
+// components that are not recursive, each caller of `caller` after it, and the query reports
+// the call as residual with no target (D17.18).
+fn unresolved(string@ source, string@ names) void {
+    fixture mut f = fixture{};
+    open(&f, source, names, 4);
+    u64 call = residual_call(&f, "caller");
+    assert(f.graph.calls[call].fort_len == 0 && f.graph.calls[call].foreign_len == 0);
+    u32 caller = component_of_name(&f, "caller");
+    u32 reached = component_of_name(&f, "target");
+    u32 other = component_of_name(&f, "other");
+    assert(caller != reached && caller != other && reached != other);
+    assert(!ownership_graph.recursive_component(&f.graph, caller));
+    assert(!ownership_graph.recursive_component(&f.graph, reached));
+    assert(!ownership_graph.recursive_component(&f.graph, other));
+    assert(order_index(&f, "caller") < order_index(&f, "target"));
+    assert(order_index(&f, "caller") < order_index(&f, "other"));
+    callee_first_holds(&f);
+    ownership_api.graph_request mut req = ownership_api.graph_request{};
+    req.query = ownership_api.graph_query_kind.targets;
+    req.operation = f.graph.calls[call].position;
+    ownership_api.graph_result answer = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(ownership_api.successful(answer.proof) && answer.residual_fort);
+    assert(answer.targets.len == 0);
+    close(&f);
+}
+
+// A residual call gives no edge, whatever way the closure or a foreign caller takes the
+// address of the function that runs. The closure cannot list those functions: an extern
+// can name a fort symbol, and a cast can compute an address (D3.11, D3.14).
+fn residual_sources() void {
+    string[3] three = {"caller", "target", "other"};
+    string[4] with_set = {"caller", "target", "other", "set"};
+    // A body stores the address in a global.
+    string[5] stored = {"(fn () void) mut SLOT = null;", "fn caller() void { SLOT(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set() void { SLOT = target; }"};
+    unresolved(stored[..], with_set[..]);
+    // A global initializer names the function inside a struct.
+    string[5] initialized = {"struct handler { fn () void cb; }",
+        "handler mut HOOK = {target};", "fn caller() void { HOOK.cb(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }"};
+    unresolved(initialized[..], three[..]);
+    // A global initializer names the function inside an array.
+    string[4] table = {"(fn () void)[2] mut TABLE = {target, target};",
+        "fn caller(u64 i) void { TABLE[i](); }", "fn target() void { caller(0); }",
+        "fn other() void { caller(1); }"};
+    unresolved(table[..], three[..]);
+    // A global initializer is the function.
+    string[4] plain = {"(fn () void) mut PLAIN = target;", "fn caller() void { PLAIN(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }"};
+    unresolved(plain[..], three[..]);
+    // A body stores the address in a struct field through a pointer.
+    string[5] field = {"struct handler { fn () void cb; }",
+        "fn caller(handler* h) void { h->cb(); }",
+        "fn target() void { handler h = {null}; caller(&h); }",
+        "fn other() void { handler h = {null}; caller(&h); }",
+        "fn set(handler mut* h) void { h->cb = target; }"};
+    unresolved(field[..], with_set[..]);
+    // A local table holds the address, and the call reads it at a dynamic index.
+    string[3] local_table = {
+        "fn caller(u64 i) void { (fn () void)[2] t = {target, target}; t[i](); }",
+        "fn target() void { caller(0); }", "fn other() void { caller(1); }"};
+    unresolved(local_table[..], three[..]);
+    // The address is an argument of a fort call.
+    string[6] argument = {"(fn () void) mut SLOT = null;", "fn caller() void { SLOT(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn keep(fn () void cb) void { SLOT = cb; }", "fn set() void { keep(target); }"};
+    string[5] argument_names = {"caller", "target", "other", "keep", "set"};
+    unresolved(argument[..], argument_names[..]);
+    // The address goes through `void*`.
+    string[5] erased = {"void* mut KEEP = null;",
+        "fn caller() void { fn () void f = cast(KEEP, fn () void); f(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set() void { KEEP = cast(target, void*); }"};
+    unresolved(erased[..], with_set[..]);
+    // The address goes through an integer, and arithmetic can move it to another body.
+    string[5] integer = {"u64 mut KEEP = 0;",
+        "fn caller() void { fn () void f = cast(cast(KEEP + 92, void*), fn () void); f(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set() void { KEEP = cast(cast(target, void*), u64); }"};
+    unresolved(integer[..], with_set[..]);
+    // The call has another function type than the function that runs.
+    string[5] retyped = {"void* mut KEEP = null;",
+        "fn caller() void { fn (i32) void f = cast(KEEP, fn (i32) void); f(1); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set() void { KEEP = cast(target, void*); }"};
+    unresolved(retyped[..], with_set[..]);
+    // The value comes back from an extern, which can name a fort symbol that no body takes.
+    string[5] foreign = {"extern fn fetch() fn () void;",
+        "fn caller() void { fetch()(); }", "fn target() void { caller(); }",
+        "fn other() void { caller(); }", "fn set() void { }"};
+    unresolved(foreign[..], with_set[..]);
+    // A comparison takes the address, and the value is a parameter.
+    string[3] compared = {"fn caller(fn () void cb) void { if (cb == target) { cb(); } }",
+        "fn target() void { caller(null); }", "fn other() void { caller(null); }"};
+    unresolved(compared[..], three[..]);
+    // Control flow puts the store in another block.
+    string[5] chosen = {"(fn () void) mut SLOT = null;", "fn caller() void { SLOT(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set(bool c) void { SLOT = c ? target : null; }"};
+    unresolved(chosen[..], with_set[..]);
+    string[5] looped = {"(fn () void) mut SLOT = null;", "fn caller() void { SLOT(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set(u32 n) void { u32 mut i = 0; while (i < n) { SLOT = target; i += 1; } }"};
+    unresolved(looped[..], with_set[..]);
+    string[5] switched = {"(fn () void) mut SLOT = null;", "fn caller() void { SLOT(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set(i32 n) void { switch (n) { case 0: SLOT = target; default: SLOT = null; } }"};
+    unresolved(switched[..], with_set[..]);
+    string[5] deferred = {"(fn () void) mut SLOT = null;", "fn caller() void { SLOT(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn set() void { defer SLOT = target; SLOT = null; }"};
+    unresolved(deferred[..], with_set[..]);
+    // A returned address reaches the global through the caller of `pick`.
+    string[6] returned = {"(fn () void) mut SLOT = null;", "fn caller() void { SLOT(); }",
+        "fn target() void { caller(); }", "fn other() void { caller(); }",
+        "fn pick() fn () void { return target; }", "fn set() void { SLOT = pick(); }"};
+    string[5] returned_names = {"caller", "target", "other", "pick", "set"};
+    unresolved(returned[..], returned_names[..]);
+    println("G16 residual calls give no edge");
+}
+
+// A residual target names no body, so no argument flows into a body through it and no result
+// flows out. Each place that such a flow could reach keeps a residual target of its own.
+fn residual_flow() void {
+    string[6] source = {"(fn (fn () void) void) mut SLOT = null;", "fn leaf() void {}",
+        "fn caller() void { SLOT(leaf); }", "fn target(fn () void cb) void { cb(); }",
+        "fn other(fn () void cb) void { cb(); }", "fn set() void { SLOT = target; }"};
+    string[5] names = {"leaf", "caller", "target", "other", "set"};
+    fixture mut f = fixture{};
+    open(&f, source[..], names[..], 4);
+    u64 forwarded = nth_call(&f, "target", 0);
+    assert(!target(&f, forwarded, 1) && f.graph.calls[forwarded].residual_fort);
+    u64 isolated = nth_call(&f, "other", 0);
+    assert(!target(&f, isolated, 1) && f.graph.calls[isolated].residual_fort);
+    close(&f);
+    // The result of a residual call holds no result of a body, only its own residual target.
+    string[7] results = {"(fn () (fn () void)) mut SLOT = null;", "fn first() void {}",
+        "fn second() void {}", "fn caller() void { SLOT()(); }",
+        "fn target() fn () void { return first; }", "fn other() fn () void { return second; }",
+        "fn set() void { SLOT = target; }"};
+    string[6] result_names = {"first", "second", "caller", "target", "other", "set"};
+    open(&f, results[..], result_names[..], 4);
+    u64 through = nth_call(&f, "caller", 1);
+    assert(!target(&f, through, 1) && !target(&f, through, 2));
+    assert(f.graph.calls[through].fort_len == 0 && f.graph.calls[through].residual_fort);
+    close(&f);
+    println("G17 residual flow");
+}
+
+// Two builds of one closure agree on work, facts and components. Global initializers that
+// name functions add no edge.
+fn determinism() void {
+    string[7] source = {"struct handler { fn () void cb; }",
+        "struct wrapper { handler inner; }", "(fn () void) FIRST = late;",
+        "(fn () void) mut SECOND = FIRST;", "wrapper mut NESTED = {{early}};",
+        "fn early() void { SECOND(); NESTED.inner.cb(); }",
+        "fn late() void { (fn () void) f = early; f(); early(); }"};
+    string[2] names = {"early", "late"};
+    fixture mut f = fixture{};
+    open(&f, source[..], names[..], 4);
+    assert(f.graph.calls[residual_call(&f, "early")].fort_len == 0);
+    u64 explicit = nth_call(&f, "late", 0);
+    assert(target(&f, explicit, 1) && !f.graph.calls[explicit].residual_fort);
+    u32 early = component_of_name(&f, "early");
+    assert(early != component_of_name(&f, "late"));
+    assert(!ownership_graph.recursive_component(&f.graph, early));
+    assert(order_index(&f, "early") < order_index(&f, "late"));
+    u64 work = f.graph.work;
+    u64 facts = f.graph.facts_len;
+    u32 components = f.graph.component_count;
+    close(&f);
+    open(&f, source[..], names[..], 4);
+    assert(f.graph.work == work && f.graph.facts_len == facts);
+    assert(f.graph.component_count == components);
+    close(&f);
+    println("G18 determinism");
+}
+
+fn members(fixture* f, u32 component) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < f->graph.bodies.len) {
+        if (f->graph.components[i] == component) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+// Each of 80 bodies calls the residual caller and makes a residual call of its own. A residual
+// call gives no edge, so each body is a component of its own and none is recursive. The work
+// grows linearly with the bodies; an edge to each body at each residual call grew as a square.
+fn component_scale() void {
+    strbuf.str_buf mut text = strbuf.create();
+    strbuf.append(&text, "(fn () void) mut SLOT = null;\nfn caller() void { SLOT(); }\n");
+    strbuf.append(&text, "fn set() void { SLOT = graph_0; }\n");
+    u64[80] mut starts = {};
+    u64[80] mut lengths = {};
+    u64 mut i = 0;
+    while (i < starts.len) {
+        strbuf.append(&text, "fn graph_");
+        starts[i] = text.len - 6;
+        strbuf.append_u64(&text, i);
+        lengths[i] = text.len - starts[i];
+        strbuf.append(&text, "() void { caller(); SLOT(); }\n");
+        i += 1;
+    }
+    string complete_source = strbuf.view(&text);
+    string[1] generated = {complete_source};
+    string mut@ own names = new(string, starts.len + 2);
+    names[0] = "caller";
+    names[1] = "set";
+    i = 0;
+    while (i < starts.len) {
+        names[i + 2] = complete_source[starts[i]..starts[i] + lengths[i]];
+        i += 1;
+    }
+    fixture mut f = fixture{};
+    open(&f, generated[..], names[..], 4);
+    assert(f.graph.component_count == 82);
+    u32 mut component = 0;
+    while (component < f.graph.component_count) {
+        assert(members(&f, component) == 1);
+        assert(!ownership_graph.recursive_component(&f.graph, component));
+        component += 1;
+    }
+    assert(order_index(&f, "caller") < order_index(&f, "graph_79"));
+    callee_first_holds(&f);
+    u64 all = f.graph.work;
+    close(&f);
+    open(&f, generated[..], names[0..42], 4);
+    assert(f.graph.component_count == 42);
+    u64 half = f.graph.work;
+    close(&f);
+    open(&f, generated[..], names[0..22], 4);
+    u64 quarter = f.graph.work;
+    close(&f);
+    assert(all - half == 2 * (half - quarter));
+    del(names);
+    strbuf.free(&text);
+    println("G19 component scale");
 }
 
 fn main() i32 {
@@ -926,5 +1209,9 @@ fn main() i32 {
     call_target_scope();
     query_ledger();
     callee_first();
+    residual_sources();
+    residual_flow();
+    determinism();
+    component_scale();
     return 0;
 }
