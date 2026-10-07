@@ -1,0 +1,632 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| deferred fail tests ok
+//| totals ok
+/// Holds the stored-run outcome of the deferred ownership fail tests whose local outcome
+/// `ownership_source_local_programs_test.ft` holds. Each program keeps its file lines. The
+/// stored row has every local step, so it meets each event that the local row validates, and
+/// it reports none of them again: one diagnostic for each event (toolchain 1.1). No program
+/// here has a stored-borrow event of its own.
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+// The number of bodies in each class, counted as they are checked.
+struct counts {
+    u64 excluded;
+    u64 declared;
+    u64 outside;
+    u64 proved;
+}
+
+fn analyze(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(text, lines[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+fn stored_row(ownership_source_env.env mut* e, string name, string correspondence,
+    string proof) ownership_source.body* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    assert(row->stored.solved && row->stored.stored);
+    u64 stored = ownership_report.STORED_BORROWS;
+    string got_correspondence = ownership_report.analysis_status(row, stored, 0);
+    string got_proof = ownership_report.analysis_status(row, stored, 2);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln(name, ": correspondence ", got_correspondence, ", proof ", got_proof, ", gap ",
+            cast(row->stored.gap, u64));
+        assert(false);
+    }
+    return row;
+}
+
+fn proved(ownership_source_env.env mut* e, counts mut* n, string name) void {
+    stored_row(e, name, "complete", "complete");
+    n->proved += 1;
+}
+
+// The local row validates one violation of `slot`. The stored run meets the same event and
+// excludes it, so its row has no violation and incomplete proof.
+fn excluded(ownership_source_env.env mut* e, counts mut* n, string name, string slot) void {
+    ownership_source.body* row = stored_row(e, name, "complete", "incomplete");
+    assert(row->stored.violations_len == 0);
+    assert(row->local.violations_len == 1 && row->local.violations[0].name == slot);
+    n->excluded += 1;
+}
+
+// Incomplete proof in both rows and no violation in either.
+fn declared(ownership_source_env.env mut* e, counts mut* n, string name) void {
+    ownership_source.body* row = stored_row(e, name, "complete", "incomplete");
+    assert(row->stored.violations_len == 0 && row->local.violations_len == 0);
+    n->declared += 1;
+}
+
+fn outside(ownership_source_env.env mut* e, counts mut* n, string name,
+    ownership_source_local.missing why) void {
+    ownership_source.body* row = stored_row(e, name, "incomplete", "incomplete");
+    assert(row->stored.gap == why && row->local.gap == why);
+    n->outside += 1;
+}
+
+// The deferred test expects the error on line 7.
+fn f047(counts mut* n) void {
+    string[13] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    println(*a);",
+        "    i32 mut* own c = move(b);",
+        "    println(b == null);",
+        "    println(b == null);",
+        "    del(c);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "a");
+}
+
+// The leak follows print calls, which may not return.
+fn f048(counts mut* n) void {
+    string[13] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32* own a = null;",
+        "    println(a == null);",
+        "    u8 mut@ own s = {};",
+        "    println(s.len);",
+        "    i32 mut* own mut b = null;",
+        "    println(b == null);",
+        "    b = new(i32);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    declared(&e, n, "main");
+}
+
+// The leaks follow a print call.
+fn f049(counts mut* n) void {
+    string[16] lines = {
+        "",
+        "",
+        "",
+        "fn show() void {",
+        "    i32 mut* own a = new(i32);",
+        "    {",
+        "        u8 mut@ own s = new(u8, 4);",
+        "        println(s.len);",
+        "    }",
+        "    println(*a);",
+        "}",
+        "",
+        "fn main() i32 {",
+        "    show();",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    declared(&e, n, "show");
+    proved(&e, n, "main");
+}
+
+// The deferred test expects the error on line 7.
+fn f050(counts mut* n) void {
+    string[15] lines = {
+        "",
+        "",
+        "",
+        "fn pick(bool c) i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    if (c) {",
+        "        return 1;",
+        "    }",
+        "    del(a);",
+        "    return 0;",
+        "}",
+        "",
+        "fn main() i32 {",
+        "    return pick(true);",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "pick", "a");
+    proved(&e, n, "main");
+}
+
+// The deferred test expects the error on line 10.
+fn f051(counts mut* n) void {
+    string[12] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut count = 0;",
+        "    while (count < 3) {",
+        "        i32 mut* own p = new(i32);",
+        "        *p = count;",
+        "        count += 1;",
+        "    }",
+        "    return count;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "p");
+}
+
+// The deferred test expects the error on line 6.
+fn f052(counts mut* n) void {
+    string[11] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own mut a = new(i32);",
+        "    a = new(i32);",
+        "    del(a);",
+        "    a = new(i32);",
+        "    del(a);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "a");
+}
+
+// An own parameter needs the symbolic caller owner.
+fn f053(counts mut* n) void {
+    string[11] lines = {
+        "",
+        "",
+        "",
+        "fn keep(i32 mut* own p) void {",
+        "    println(*p);",
+        "}",
+        "",
+        "fn main() i32 {",
+        "    keep(new(i32));",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    outside(&e, n, "keep", ownership_source_local.missing.own_parameter);
+    proved(&e, n, "main");
+}
+
+// The corpus expects errors on lines 11 and 12. Line 11 is validated. The read does not
+// relate b, so the path goes on and examines the leak of b on line 12 (toolchain 4.2). The
+// print calls of line 11 are fort calls: no witness crosses them, so line 12 stays an
+// unvalidated record and the first incomplete reason. The body stays rejected.
+fn f054(counts mut* n) void {
+    string[13] lines = {
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = move(a);",
+        "    println(*a);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "a");
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "main");
+    assert(row->local.unvalidated == 1);
+    assert(row->local.first_incomplete.terminal.present);
+    assert(row->local.first_incomplete.terminal.source.line == 12);
+    assert(row->local.first_incomplete.terminal.reason ==
+        ownership_api.incomplete_reason.missing_path);
+    assert(row->local.proof.failed);
+}
+
+// The leak follows a print call.
+fn f055(counts mut* n) void {
+    string[11] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    while (true) {",
+        "        u8 mut@ own s = new(u8, 2);",
+        "        println(s.len);",
+        "        break;",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    declared(&e, n, "main");
+}
+
+// The deferred test expects the error on line 9.
+fn f056(counts mut* n) void {
+    string[12] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut i = 0;",
+        "    while (i < 2) {",
+        "        i += 1;",
+        "        i32 mut* own p = new(i32);",
+        "        continue;",
+        "    }",
+        "    return i;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "p");
+}
+
+// The leak follows a print call.
+fn f057(counts mut* n) void {
+    string[9] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    for (i32 mut* own p = new(i32); *p < 2; *p += 1) {",
+        "        println(*p);",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    declared(&e, n, "main");
+}
+
+// The deferred test expects the error on line 9.
+fn f058(counts mut* n) void {
+    string[11] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    defer {",
+        "        i32 mut* own b = new(i32);",
+        "        del(a);",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "b");
+}
+
+// The deferred test expects the error on line 7.
+fn f059(counts mut* n) void {
+    string[9] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    del(a);",
+        "    defer println(*a);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "a");
+}
+
+// The leak follows a print call.
+fn f060(counts mut* n) void {
+    string[11] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    bool c = true;",
+        "    if (c) {",
+        "        i32 mut* own p = new(i32);",
+        "        println(*p);",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    declared(&e, n, "main");
+}
+
+// Only a later iteration overwrites: no witness validates it.
+fn f061(counts mut* n) void {
+    string[13] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own mut p = null;",
+        "    i32 mut i = 0;",
+        "    while (i < 3) {",
+        "        p = new(i32);",
+        "        i += 1;",
+        "    }",
+        "    del(p);",
+        "    return i;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    declared(&e, n, "main");
+}
+
+// The empty argument is the callee's matter: call summaries.
+fn f062(counts mut* n) void {
+    string[18] lines = {
+        "",
+        "",
+        "",
+        "fn take(i32 mut* own p) i32 {",
+        "    i32 v = *p;",
+        "    del(p);",
+        "    return v;",
+        "}",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    *p = 1;",
+        "    for (i32 mut i = 0; take(move(p)) == 1; i += 1) {",
+        "        println(\"iteration \", i);",
+        "    }",
+        "    println(\"done\");",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    outside(&e, n, "take", ownership_source_local.missing.own_parameter);
+    proved(&e, n, "main");
+}
+
+// The empty argument is the callee's matter: call summaries.
+fn f063(counts mut* n) void {
+    string[17] lines = {
+        "",
+        "",
+        "",
+        "fn take(i32 mut* own p) i32 {",
+        "    i32 v = *p;",
+        "    del(p);",
+        "    return v;",
+        "}",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    *p = 1;",
+        "    while (take(move(p)) == 1) {",
+        "        println(\"iteration\");",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    outside(&e, n, "take", ownership_source_local.missing.own_parameter);
+    proved(&e, n, "main");
+}
+
+// The flag c holds false, so the deferred release never runs: p leaks at the return.
+fn f064(counts mut* n) void {
+    string[13] lines = {
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    bool c = false;",
+        "    defer {",
+        "        if (c) {",
+        "            del(p);",
+        "        }",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    excluded(&e, n, "main", "p");
+}
+
+// The conditional release goes through a call.
+fn f065(counts mut* n) void {
+    string[20] lines = {
+        "",
+        "",
+        "",
+        "fn drop(i32 mut* own p) void {",
+        "    del(p);",
+        "}",
+        "",
+        "fn leaky(bool c) void {",
+        "    i32 mut* own a = new(i32);",
+        "    defer {",
+        "        if (c) {",
+        "            defer drop(move(a));",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "fn main() i32 {",
+        "    leaky(false);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    outside(&e, n, "drop", ownership_source_local.missing.own_parameter);
+    declared(&e, n, "leaky");
+    proved(&e, n, "main");
+}
+
+// The loop releases p on some paths only.
+fn f066(counts mut* n) void {
+    string[17] lines = {
+        "",
+        "",
+        "",
+        "",
+        "",
+        "fn main() i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32 n = 0;",
+        "    defer {",
+        "        i32 mut i = 0;",
+        "        while (i < n) {",
+        "            del(p);",
+        "            i += 1;",
+        "        }",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    declared(&e, n, "main");
+}
+
+fn main() i32 {
+    counts mut n = counts{};
+    f047(&n);
+    f048(&n);
+    f049(&n);
+    f050(&n);
+    f051(&n);
+    f052(&n);
+    f053(&n);
+    f054(&n);
+    f055(&n);
+    f056(&n);
+    f057(&n);
+    f058(&n);
+    f059(&n);
+    f060(&n);
+    f061(&n);
+    f062(&n);
+    f063(&n);
+    f064(&n);
+    f065(&n);
+    f066(&n);
+    println("deferred fail tests ok");
+    // 20 programs hold 27 bodies. The local row validates 9 events and the stored row repeats
+    // none of them.
+    assert(n.excluded == 9 && n.declared == 8 && n.outside == 4 && n.proved == 6);
+    println("totals ok");
+    return 0;
+}

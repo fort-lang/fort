@@ -1,0 +1,344 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| rows ok
+//| closure ok
+//| document ok
+//| diagnostics ok
+//| order across runs ok
+//| budget errors ok
+//| classification ledger ok
+//| repeated refusals ok
+/// Checks how the report and its diagnostics carry the integrated stored-borrow analysis.
+import diag;
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.str;
+import std.strbuf;
+
+fn lines(strbuf.str_buf mut* out, string@ text) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < text.len) {
+        strbuf.append(out, text[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn open(ownership_source_env.env mut* e, string text) void {
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, text));
+    ownership_source.analyze(&e->source);
+}
+
+fn contains(strbuf.str_buf* text, string expected) void {
+    if (str.find(strbuf.view(text), expected) < 0) {
+        eprintln("missing: ", expected);
+        assert(false);
+    }
+}
+
+fn occurrences(string text, string wanted) u64 {
+    u64 mut total = 0;
+    u64 mut at = 0;
+    while (at + wanted.len <= text.len) {
+        if (text[at..at + wanted.len] == wanted) { total += 1; }
+        at += 1;
+    }
+    return total;
+}
+
+fn count_prefix(diag.sink* found, string start) u64 {
+    u64 mut seen = 0;
+    u64 mut i = 0;
+    while (i < diag.record_count(found)) {
+        if (str.find(diag.record_at(found, i).msg, start) == 0) { seen += 1; }
+        i += 1;
+    }
+    return seen;
+}
+
+string[11] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "fn field_use() void {",
+    "    i32 mut* own p = new(i32); box b = box{p, 1}; del(p); *b.p = 1;",
+    "}",
+    "fn safe() void { i32 mut* own p = new(i32); box b = box{p, 1}; *b.p = 1; del(p); }",
+    "fn local_leak() void { i32 mut* own p = new(i32); }",
+    "fn both() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 0}; i32* q = p; del(p);",
+    "    i32 v = *b.p; i32 w = *q; return v + w;",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+fn rows() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, lines(&text, SOURCE[..]));
+    defer ownership_source_env.close(&e);
+    u64 stored = ownership_report.STORED_BORROWS;
+    ownership_source.body* field = ownership_source_env.find(&e, "main", "field_use");
+    assert(ownership_report.analysis_status(field, stored, 0) == "complete");
+    assert(ownership_report.analysis_status(field, stored, 1) == "complete");
+    assert(ownership_report.analysis_status(field, stored, 2) == "violated");
+    assert(ownership_report.analysis_violations(field, stored) == 1);
+    // The local run cannot follow the reference in b.p, so its row stays out of the scope.
+    assert(ownership_report.analysis_status(field, ownership_report.LOCAL, 0) == "incomplete");
+    assert(ownership_report.body_violations(field) == 1);
+    assert(ownership_report.body_ownership(field) == "violated");
+    ownership_source.body* safe = ownership_source_env.find(&e, "main", "safe");
+    assert(ownership_report.analysis_status(safe, stored, 2) == "complete");
+    // The stored run drops the local violation, so the body counts it once.
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "local_leak");
+    assert(ownership_report.analysis_violations(leak, ownership_report.LOCAL) == 1);
+    assert(ownership_report.analysis_violations(leak, stored) == 0);
+    assert(ownership_report.analysis_status(leak, stored, 2) == "incomplete");
+    assert(ownership_report.body_violations(leak) == 1);
+    ownership_source.body* both = ownership_source_env.find(&e, "main", "both");
+    assert(ownership_report.body_violations(both) == 2);
+    // The body reason follows the analysis order: the stored reason of the leak body names
+    // its stage when the graph and liveness rows give none.
+    ownership_source.body mut* reasoned = ownership_source_env.find(&e, "main", "local_leak");
+    reasoned->first_incomplete = ownership_api.proof_status{};
+    ownership_report.reason why = ownership_report.body_reason(reasoned);
+    assert(why.present && why.stage == "stored_borrows" && why.code == "missing_path");
+    println("rows ok");
+}
+
+fn closure() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, lines(&text, SOURCE[..]));
+    defer ownership_source_env.close(&e);
+    u64 stored = ownership_report.STORED_BORROWS;
+    assert(ownership_report.closure_status(&e.source, stored) == "incomplete");
+    assert(ownership_report.flow_stage(ownership_report.STORED_BORROWS));
+    assert(!ownership_report.flow_stage(ownership_report.RAW));
+    // The raw analysis has a producer but no flow run; calls_heap has neither.
+    assert(ownership_report.producer_stage(ownership_report.RAW));
+    assert(!ownership_report.producer_stage(ownership_report.RAW + 1));
+    // A body without the stored solve has an unexecuted stored row.
+    ownership_source.body mut* safe = ownership_source_env.find(&e, "main", "safe");
+    safe->stored.solved = false;
+    assert(ownership_report.analysis_status(safe, stored, 0) == "unexecuted");
+    assert(ownership_report.analysis_status(safe, stored, 2) == "incomplete");
+    assert(ownership_report.analysis_violations(safe, stored) == 0);
+    safe->stored.solved = true;
+    // With no body the stored analysis has no closure gap.
+    ownership_source_env.env mut empty = ownership_source_env.env{};
+    ownership_source_env.open(&empty);
+    defer ownership_source_env.close(&empty);
+    assert(ownership_source_env.prepare(&empty, "i32 VALUE = 1;\n"));
+    ownership_source.analyze(&empty.source);
+    assert(ownership_report.closure_status(&empty.source, stored) == "complete");
+    println("closure ok");
+}
+
+fn document() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, lines(&text, SOURCE[..]));
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":5,");
+    contains(&out,
+        "{\"name\":\"stored_borrows\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
+    // One stored ledger for each body, beside its local ledger.
+    u64 bodies = e.source.bodies.len;
+    assert(occurrences(strbuf.view(&out), "\"name\":\"stored_borrows\",\"owner\"") == bodies);
+    assert(occurrences(strbuf.view(&out), "\"name\":\"local\",\"owner\"") == bodies);
+    strbuf.str_buf mut row = strbuf.create();
+    defer strbuf.free(&row);
+    strbuf.append(&row, "{\"name\":\"stored_borrows\",\"correspondence\":\"complete\",");
+    strbuf.append(&row, "\"solver\":\"complete\",\"proof\":\"violated\",\"violations\":1}");
+    contains(&out, strbuf.view(&row));
+    // The totals count two stored violations (field_use, both) and two local ones.
+    contains(&out, "\"totals\":{\"bodies\":");
+    contains(&out, ",\"violations\":4,");
+    println("document ok");
+}
+
+fn diagnostics() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, lines(&text, SOURCE[..]));
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(count_prefix(&found, "invalid use of 'b.p'") == 2);
+    assert(count_prefix(&found, "lost ownership of 'p'") == 1);
+    assert(count_prefix(&found, "invalid use of 'q'") == 1);
+    u64 mut i = 0;
+    while (i < diag.record_count(&found)) {
+        diag.record r = diag.record_at(&found, i);
+        if (r.msg == "invalid use of 'b.p'" && r.loc.line == 3) {
+            diag.record note = diag.record_at(&found, i + 1);
+            assert(note.msg == "reference source is no longer live");
+        }
+        i += 1;
+    }
+    println("diagnostics ok");
+}
+
+// Inside one body the stored and local violations render in source order: `*b.p` of the
+// stored run, then `*q` of the local run, on one line by column. The stored run stops at
+// `*b.p`, and the local run, which has no leaf, reaches `*q`.
+fn order_across_runs() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, lines(&text, SOURCE[..]));
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 mut field = 0;
+    u64 mut local = 0;
+    u64 mut i = 0;
+    while (i < diag.record_count(&found)) {
+        diag.record r = diag.record_at(&found, i);
+        if (r.loc.line == 9 && r.msg == "invalid use of 'b.p'") { field = i + 1; }
+        if (r.loc.line == 9 && r.msg == "invalid use of 'q'") { local = i + 1; }
+        i += 1;
+    }
+    assert(field > 0 && local > field);
+    println("order across runs ok");
+}
+
+string[11] LOOP = {
+    "struct box { i32 mut* p; }",
+    "fn swapped(i32 n) void {",
+    "    i32 mut* own mut a = new(i32);",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own t = move(a);",
+    "        a = move(t);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "}",
+};
+
+// A stored refusal of the operation and category that the local ledger refuses gives no
+// second error (toolchain 4.2). Another stored refusal is its own budget error, which
+// charges one V unit of the stored ledger.
+fn budget_errors() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, lines(&text, LOOP[..]));
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* swapped = ownership_source_env.find(&e, "main", "swapped");
+    assert(swapped->local.first_refusal.terminal.present);
+    assert(swapped->stored.first_refusal.terminal.present);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(count_prefix(&found, "ownership proof is incomplete (local: work_limit; ") == 1);
+    assert(count_prefix(&found, "ownership proof is incomplete (stored borrows: ") == 0);
+    // At another operation the stored refusal is an error of its own.
+    swapped->stored.first_refusal.terminal.operation.operation += 1;
+    u64 before = swapped->stored.meter.used.v;
+    diag.sink mut both = diag.sink{};
+    defer diag.free(&both);
+    ownership_report.diagnose(&e.source, &both, "main.ft");
+    assert(count_prefix(&both, "ownership proof is incomplete (stored borrows: work_limit; ") ==
+        1);
+    assert(swapped->stored.meter.used.v == before + 1);
+    println("budget errors ok");
+}
+
+string[3] CALLED = {
+    "fn helper() void {}",
+    "fn leak_after_call() void { i32 mut* own p = new(i32); helper(); }",
+    "fn root() i32 { return 0; }",
+};
+
+// The stored classification run publishes its own ledger, and its refusal is a budget error
+// that names it.
+fn classification_ledger() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, lines(&text, CALLED[..])));
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* leak = ownership_source_env.find(&e, "main", "leak_after_call");
+    leak->stored.limits.w = 1;
+    ownership_source.analyze(&e.source);
+    assert(leak->stored.classified && leak->stored.classify_refusal.terminal.present);
+    assert(!leak->local.classify_refusal.terminal.present);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    assert(occurrences(strbuf.view(&out), "\"name\":\"stored_borrows_classification\"") == 1);
+    contains(&out, "\"first_refusal\":{\"stage\":\"stored_borrows\",\"code\":\"work_limit\",");
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(count_prefix(&found,
+        "ownership proof is incomplete (stored borrows classification: work_limit; ") == 1);
+    assert(count_prefix(&found, "ownership proof is incomplete (stored borrows: work_limit") ==
+        0);
+    println("classification ledger ok");
+}
+
+// A stored classification refusal of the operation and category of the first stored
+// refusal, or of a local refusal, gives no second error.
+fn repeated_refusals() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, lines(&text, CALLED[..])));
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* leak = ownership_source_env.find(&e, "main", "leak_after_call");
+    leak->stored.limits.w = 1;
+    ownership_source.analyze(&e.source);
+    leak->stored.first_refusal = leak->stored.classify_refusal;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(count_prefix(&found, "ownership proof is incomplete (stored borrows: work_limit") ==
+        1);
+    assert(count_prefix(&found, "ownership proof is incomplete (stored borrows classification") ==
+        0);
+    leak->stored.first_refusal = ownership_api.proof_status{};
+    leak->local.first_refusal = leak->stored.classify_refusal;
+    diag.sink mut local = diag.sink{};
+    defer diag.free(&local);
+    ownership_report.diagnose(&e.source, &local, "main.ft");
+    assert(count_prefix(&local, "ownership proof is incomplete (local: work_limit") == 1);
+    assert(count_prefix(&local, "ownership proof is incomplete (stored borrows") == 0);
+    println("repeated refusals ok");
+}
+
+fn main() i32 {
+    rows();
+    closure();
+    document();
+    diagnostics();
+    order_across_runs();
+    budget_errors();
+    classification_ledger();
+    repeated_refusals();
+    return 0;
+}

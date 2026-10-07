@@ -9,6 +9,7 @@ import ownership_events;
 import ownership_keys;
 import ownership_limits;
 import ownership_source;
+import ownership_source_leaves;
 import ownership_source_local;
 import ownership_source_raw;
 import session;
@@ -77,19 +78,32 @@ fn local_status(ownership_source_local.status value) string {
     }
 }
 
-// The graph, liveness, local and raw analyses have source producers.
-fn integrated(u64 stage) bool { return stage <= LOCAL || stage == RAW; }
+// The graph, liveness, local, stored-borrow and raw analyses have source producers.
+fn integrated(u64 stage) bool { return stage <= RAW; }
 
-// The analysis of a stage that a source producer runs per body: local or raw.
+// The local and the stored-borrow analyses are flow runs of one producer.
+fn flow_stage(u64 stage) bool { return stage == LOCAL || stage == STORED_BORROWS; }
+
+fn flow_run(ownership_source.body* row, u64 stage) ownership_source_local.context* {
+    if (stage == STORED_BORROWS) { return &row->stored; }
+    return &row->local;
+}
+
+// Whether a source producer runs the analysis of a stage per body: local, stored borrows or
+// raw.
+fn producer_stage(u64 stage) bool { return flow_stage(stage) || stage == RAW; }
+
+// The analysis of a stage that a source producer runs per body: local, stored borrows or raw.
 fn producer_row(ownership_source.body* row, u64 stage, bool mut* solved,
     ownership_source_local.status mut* correspondence, ownership_source_local.status mut* solver,
     ownership_api.proof_status mut* proof, u64 mut* violations) void {
-    if (stage == LOCAL) {
-        *solved = row->local.solved;
-        *correspondence = row->local.correspondence;
-        *solver = row->local.solver;
-        *proof = row->local.proof;
-        *violations = row->local.violations_len;
+    if (flow_stage(stage)) {
+        ownership_source_local.context* run = flow_run(row, stage);
+        *solved = run->solved;
+        *correspondence = run->correspondence;
+        *solver = run->solver;
+        *proof = run->proof;
+        *violations = run->violations_len;
         return;
     }
     *solved = row->raw.solved;
@@ -155,7 +169,7 @@ fn stage_status(ownership_source.body* row, u64 stage) string {
 // A producer does not change solver outcomes when later report rendering refuses V.
 fn analysis_status(ownership_source.body* row, u64 stage, u64 field) string {
     if (!prerequisites(row)) { return "unexecuted"; }
-    if (stage == LOCAL || stage == RAW) {
+    if (producer_stage(stage)) {
         bool mut solved = false;
         ownership_source_local.status mut correspondence = ownership_source_local.status.unexecuted;
         ownership_source_local.status mut solver = ownership_source_local.status.unexecuted;
@@ -205,8 +219,8 @@ fn body_reason(ownership_source.body* row) reason {
     u64 mut stage = LOCAL;
     while (stage < ANALYSIS_COUNT && integrated(stage)) {
         if (analysis_status(row, stage, 2) == "incomplete") {
-            reason got = proof_reason(ANALYSES[stage], stage == LOCAL ? row->local.proof :
-                row->raw.proof);
+            reason got = proof_reason(ANALYSES[stage], flow_stage(stage) ?
+                flow_run(row, stage)->proof : row->raw.proof);
             if (got.present) { return got; }
         }
         stage += 1;
@@ -214,7 +228,7 @@ fn body_reason(ownership_source.body* row) reason {
     return fallback_reason(ANALYSES[stage], "missing_producer", row->source);
 }
 
-// The local and raw analyses have no closure facts outside their bodies.
+// The local, stored-borrow and raw analyses have no closure facts outside their bodies.
 fn producer_closure(ownership_source.context* c, u64 stage) string {
     bool mut complete = c->enumeration_complete;
     bool mut executed = false;
@@ -231,7 +245,7 @@ fn producer_closure(ownership_source.context* c, u64 stage) string {
 }
 
 fn analysis_violations(ownership_source.body* row, u64 stage) u64 {
-    if ((stage != LOCAL && stage != RAW) || !prerequisites(row)) { return 0; }
+    if (!producer_stage(stage) || !prerequisites(row)) { return 0; }
     bool mut solved = false;
     ownership_source_local.status mut correspondence = ownership_source_local.status.unexecuted;
     ownership_source_local.status mut solver = ownership_source_local.status.unexecuted;
@@ -241,13 +255,15 @@ fn analysis_violations(ownership_source.body* row, u64 stage) u64 {
     return solved ? violations : 0;
 }
 
-// The local and raw analyses report violations. Each counts its own events once.
+// The local, stored-borrow and raw analyses report violations. The stored run drops each
+// violation that the local run validated, so the sum counts each diagnostic once.
 fn body_violations(ownership_source.body* row) u64 {
-    return analysis_violations(row, LOCAL) + analysis_violations(row, RAW);
+    return analysis_violations(row, LOCAL) + analysis_violations(row, STORED_BORROWS) +
+        analysis_violations(row, RAW);
 }
 
 fn closure_status(ownership_source.context* c, u64 stage) string {
-    if (stage == LOCAL || stage == RAW) { return producer_closure(c, stage); }
+    if (producer_stage(stage)) { return producer_closure(c, stage); }
     if (!integrated(stage)) { return "incomplete"; }
     bool mut executed = stage == 0 && c->graph_built;
     u64 mut i = 0;
@@ -271,10 +287,11 @@ fn first_incomplete(ownership_source.context* c) reason {
             ownership_source.body* row = &c->bodies[i];
             ownership_api.proof_status mut value = stage == 0 ? row->graph_proof :
                 row->liveness_proof;
-            if (stage == LOCAL || stage == RAW) {
-                bool solved = stage == LOCAL ? row->local.solved : row->raw.solved;
+            if (producer_stage(stage)) {
+                bool flow = flow_stage(stage);
+                bool solved = flow ? flow_run(row, stage)->solved : row->raw.solved;
                 value = solved && analysis_status(row, stage, 2) == "incomplete" ?
-                    (stage == LOCAL ? row->local.proof : row->raw.proof) :
+                    (flow ? flow_run(row, stage)->proof : row->raw.proof) :
                     ownership_api.proof_status{};
             }
             reason got = proof_reason(ANALYSES[stage], value);
@@ -419,8 +436,10 @@ fn report_limit_message(u64 bound, strbuf.str_buf mut* message) void {
 }
 
 // The text of the error of a validated violation, or of a raw failure without a witness. Its
-// note is the violation text.
-fn violation_message(ownership_source_local.violation* v, strbuf.str_buf mut* message) void {
+// note is the violation text. A leaf of a named aggregate reads `b.p` or `a[1]`: flow run
+// `run` names it. A raw record names a whole local, so its leaf is WHOLE.
+fn violation_message(ownership_source_local.context* run, ownership_source_local.violation* v,
+    strbuf.str_buf mut* message) void {
     if (v->kind == ownership_api.event_kind.incomplete_proof) {
         strbuf.append(message, "cannot prove that ");
     } else {
@@ -428,34 +447,50 @@ fn violation_message(ownership_source_local.violation* v, strbuf.str_buf mut* me
             "invalid use of " : "lost ownership of ");
     }
     if (v->quoted) { strbuf.push(message, '\''); }
-    strbuf.append(message, v->name);
+    if (v->quoted && v->leaf != ownership_source_local.WHOLE) {
+        ownership_source_leaves.append_name(&run->leaves, run->function, v->leaf, message);
+    } else {
+        strbuf.append(message, v->name);
+    }
     if (v->quoted) { strbuf.push(message, '\''); }
     if (v->kind == ownership_api.event_kind.incomplete_proof) {
         strbuf.append(message, " designates the accessed storage");
     }
 }
 
-// Charges one rendered record to the ledger of its analysis: 0 local, 1 raw.
+// Charges one rendered record to the ledger of its list: 0 local, 1 stored borrows, 2 and 3
+// raw.
 fn charge_record(ownership_source.body mut* row, u64 from, ownership_source_local.violation* v)
     bool {
     if (from == 0) { return ownership_source_local.charge_rendered(&row->local, v); }
+    if (from == 1) { return ownership_source_local.charge_rendered(&row->stored, v); }
     return ownership_source_raw.charge_rendered(&row->raw, v);
 }
 
-// The next record of a body in toolchain 4.2 order: local violations, raw violations and raw
-// failures without a witness, each list already in that order. `from` names its analysis.
+// The V bound of the ledger that list `from` charges.
+fn record_bound(ownership_source.body* row, u64 from) u64 {
+    if (from == 0) { return row->local.meter.bounds.v; }
+    if (from == 1) { return row->stored.meter.bounds.v; }
+    return row->raw.meter.bounds.v;
+}
+
+// The next record of a body in toolchain 4.2 order: local violations, stored-borrow
+// violations, raw violations and raw failures without a witness, each list already in that
+// order. `from` names its list. On equal keys the earlier list comes first.
 fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
     ownership_source_local.violation* {
     ownership_source_local.violation* mut best = null;
     u64 mut list = 0;
-    while (list < 3) {
+    while (list < 4) {
         u64 at = cursor[list];
         ownership_source_local.violation* mut item = null;
         if (list == 0 && row->local.solved && at < row->local.violations_len) {
             item = &row->local.violations[at];
-        } else if (list == 1 && row->raw.solved && at < row->raw.violations_len) {
+        } else if (list == 1 && row->stored.solved && at < row->stored.violations_len) {
+            item = &row->stored.violations[at];
+        } else if (list == 2 && row->raw.solved && at < row->raw.violations_len) {
             item = &row->raw.violations[at];
-        } else if (list == 2 && row->raw.solved && at < row->raw.unproved_len) {
+        } else if (list == 3 && row->raw.solved && at < row->raw.unproved_len) {
             item = &row->raw.unproved[at];
         }
         if (item != null && (best == null || ownership_source_raw.before(item, best))) {
@@ -467,29 +502,29 @@ fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
     return best;
 }
 
-// Renders validated violations and raw failures in canonical body and operation order.
+// Renders validated violations and raw failures in canonical body order and, inside a body,
+// in toolchain 4.2 order across the local, stored-borrow and raw analyses.
 // A V refusal keeps one terminal error and stops the later records.
 fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry) bool {
     u64 mut i = 0;
     while (i < c->bodies.len) {
         ownership_source.body mut* row = &c->bodies[i];
-        u64[3] mut cursor = {0, 0, 0};
+        u64[4] mut cursor = {0, 0, 0, 0};
         while (true) {
             u64 mut from = 0;
             ownership_source_local.violation* v = next_record(row, cursor[..], &from);
             if (v == null) { break; }
             cursor[from] += 1;
-            if (!charge_record(row, from == 0 ? 0 : 1, v)) {
+            if (!charge_record(row, from, v)) {
                 strbuf.str_buf mut limit = strbuf.create();
                 defer strbuf.free(&limit);
-                report_limit_message(from == 0 ? row->local.meter.bounds.v :
-                    row->raw.meter.bounds.v, &limit);
+                report_limit_message(record_bound(row, from), &limit);
                 diag.error(diagnostics, location(c, v->source, entry), strbuf.view(&limit));
                 return false;
             }
             strbuf.str_buf mut message = strbuf.create();
             defer strbuf.free(&message);
-            violation_message(v, &message);
+            violation_message(from == 1 ? &row->stored : &row->local, v, &message);
             diag.loc at = location(c, v->source, entry);
             diag.error(diagnostics, at, strbuf.view(&message));
             diag.note(diagnostics, at, v->text);
@@ -533,6 +568,7 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
             row->local.classify_refusal, "local classification", first)) {
             return;
         }
+        if (!stored_budgets(c, diagnostics, entry, row, first)) { return; }
         if (!local_budget(c, diagnostics, entry, row, row->raw.first_refusal, "raw", first)) {
             return;
         }
@@ -565,7 +601,7 @@ fn fir_test_local(fir.func* f, u32 index, diag.sink mut* diagnostics, string fil
             diag.error(diagnostics, at, strbuf.view(&message));
             return errors + 1;
         }
-        violation_message(v, &message);
+        violation_message(&local, v, &message);
         diag.error(diagnostics, at, strbuf.view(&message));
         diag.note(diagnostics, at, v->text);
         errors += 1;
@@ -582,6 +618,30 @@ fn fir_test_local(fir.func* f, u32 index, diag.sink mut* diagnostics, string fil
     return errors;
 }
 
+fn same_refusal(ownership_api.terminal_failure a, ownership_api.terminal_failure b) bool {
+    return a.present && b.present && a.limit.present && b.limit.present &&
+        a.limit.category == b.limit.category &&
+        ownership_keys.operation(a.operation, b.operation) == 0;
+}
+
+// The budget errors of the stored ledgers. A stored refusal of one operation and category
+// that a local ledger already reported gives no second error (4.2).
+fn stored_budgets(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    ownership_source.body mut* row, reason first) bool {
+    ownership_api.terminal_failure local = row->local.first_refusal.terminal;
+    ownership_api.terminal_failure local_second = row->local.classify_refusal.terminal;
+    ownership_api.terminal_failure stored = row->stored.first_refusal.terminal;
+    ownership_api.terminal_failure second = row->stored.classify_refusal.terminal;
+    if (!same_refusal(stored, local) && !same_refusal(stored, local_second) &&
+        !ledger_budget(c, diagnostics, entry, row, STORED_BORROWS, row->stored.first_refusal,
+        "stored borrows", first)) {
+        return false;
+    }
+    return same_refusal(second, stored) || same_refusal(second, local) ||
+        same_refusal(second, local_second) || ledger_budget(c, diagnostics, entry, row,
+        STORED_BORROWS, row->stored.classify_refusal, "stored borrows classification", first);
+}
+
 fn same_reason(reason a, reason b) bool {
     return a.present == b.present && a.stage == b.stage && a.code == b.code &&
         ownership_keys.source(a.source, b.source) == 0 &&
@@ -591,23 +651,41 @@ fn same_reason(reason a, reason b) bool {
 
 // A W, E or V refusal of a local ledger is a budget error even when no later use needs its
 // result (fir.md 14.1). The error charges one V unit of the local ledger. A V refusal renders
-// as it is. `label` names the ledger in the error: "local" or "local classification".
+// as it is. `label` names the ledger in the error: "local", "local classification" or "raw";
+// a "raw" error charges the raw ledger.
 fn local_budget(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
     ownership_source.body mut* row, ownership_api.proof_status refusal, string label,
     reason shown) bool {
-    bool raw = label == "raw";
-    reason mut why = proof_reason(raw ? "raw" : "local", refusal);
+    return ledger_budget(c, diagnostics, entry, row, label == "raw" ? RAW : LOCAL, refusal,
+        label, shown);
+}
+
+// The budget error of one ledger of the analysis of `stage`, which charges the V bound of that
+// analysis. `stage` names the analysis row, so a refusal that is already the shown reason is
+// no second error.
+fn ledger_budget(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    ownership_source.body mut* row, u64 stage, ownership_api.proof_status refusal, string label,
+    reason shown) bool {
+    reason mut why = proof_reason(ANALYSES[stage], refusal);
     if (!why.present || !why.limit.present || same_reason(why, shown)) { return true; }
     why.stage = label;
     ownership_api.limit_category kind = why.limit.category;
     if (kind != ownership_api.limit_category.w && kind != ownership_api.limit_category.e &&
         kind != ownership_api.limit_category.v) { return true; }
     // A refused charge keeps this error as the terminal record and stops the later errors.
-    bool allowed = kind == ownership_api.limit_category.v || (raw ?
-        ownership_source_raw.charge_report(&row->raw, refusal.terminal.operation, why.source, 1) :
-        ownership_source_local.charge_report(&row->local, refusal.terminal.operation, why.source,
-        1));
+    bool allowed = kind == ownership_api.limit_category.v ||
+        charge_ledger(row, stage, refusal.terminal.operation, why.source);
     return diagnostic(c, diagnostics, entry, why, null) && allowed;
+}
+
+// Charges one budget error to the V bound of the ledger of the analysis of `stage`.
+fn charge_ledger(ownership_source.body mut* row, u64 stage, ownership_api.operation_position op,
+    ownership_api.source_position at) bool {
+    if (stage == RAW) { return ownership_source_raw.charge_report(&row->raw, op, at, 1); }
+    if (stage == STORED_BORROWS) {
+        return ownership_source_local.charge_report(&row->stored, op, at, 1);
+    }
+    return ownership_source_local.charge_report(&row->local, op, at, 1);
 }
 
 fn key_string(json.writer mut* j, string key, string value) void {
@@ -787,17 +865,9 @@ fn write_meters(json.writer mut* j, ownership_source.context* c) void {
 
 // The ledgers of the producer computations of one body, from meter ID `id`. Returns the next ID.
 fn write_producer_meters(json.writer mut* j, ownership_source.body* row, u64 id) u64 {
-    u64 mut next = id;
-    if (row->local.initialized) {
-        write_local_meter(j, row, next, "local", &row->local.meter, row->local.first_refusal,
-            row->local.fir_size, "local");
-        next += 1;
-    }
-    if (row->local.classified) {
-        write_local_meter(j, row, next, "local_classification", &row->local.classify_meter,
-            row->local.classify_refusal, row->local.fir_size, "local");
-        next += 1;
-    }
+    u64 mut next = write_flow_meters(j, row, &row->local, id, "local", "local_classification");
+    next = write_flow_meters(j, row, &row->stored, next, "stored_borrows",
+        "stored_borrows_classification");
     if (row->raw.initialized) {
         write_local_meter(j, row, next, "raw", &row->raw.meter, row->raw.first_refusal,
             row->raw.fir_size, "raw");
@@ -806,8 +876,21 @@ fn write_producer_meters(json.writer mut* j, ownership_source.body* row, u64 id)
     return next;
 }
 
-// Each computation of one body keeps its own ledger (D17.18): the local run, the
-// classification run when the body needed one, and the raw analysis.
+// The ledgers of one flow run from meter ID `id`: its own computation and, when the body
+// needs one, its classification run. It returns the next free ID.
+fn write_flow_meters(json.writer mut* j, ownership_source.body* row,
+    ownership_source_local.context* run, u64 id, string name, string classification) u64 {
+    if (!run->initialized) { return id; }
+    string stage = run->stored ? "stored_borrows" : "local";
+    write_local_meter(j, row, id, name, &run->meter, run->first_refusal, run->fir_size, stage);
+    if (!run->classified) { return id + 1; }
+    write_local_meter(j, row, id + 1, classification, &run->classify_meter,
+        run->classify_refusal, run->fir_size, stage);
+    return id + 2;
+}
+
+// Each computation of one body keeps its own ledger (D17.18): the local run, the stored run,
+// the classification run of either when the body needed one, and the raw analysis.
 fn write_local_meter(json.writer mut* j, ownership_source.body* row, u64 id, string name,
     ownership_limits.meter* ledger, ownership_api.proof_status refusal, u64 fir_size,
     string stage) void {
@@ -960,7 +1043,8 @@ fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
     // Version 2 adds the W scale of the limit table and the FIR size of each meter.
     // Version 3 adds the integrated local analysis and its `local` ledgers.
     // Version 4 adds the integrated raw analysis and its `raw` ledgers.
-    key_uint(&j, "version", 4);
+    // Version 5 adds the integrated stored-borrow analysis and its `stored_borrows` ledgers.
+    key_uint(&j, "version", 5);
     key_bool(&j, "complete", true);
     key_string(&j, "compiler_version", call->compiler_version);
     json.json_key(&j, "invocation");

@@ -195,9 +195,11 @@ class DriverGroupsTest(unittest.TestCase):
                 with self.subTest(check=check, flags=flags):
                     document = self.selected(*flags, check=check)
                     # Each ledger records the FIR size of the body that its computation
-                    # reads. The raw analysis reads the lowered FIR as the local one does.
+                    # reads. The stored and raw analyses read the lowered FIR as the local
+                    # one does.
                     self.assertEqual(self.ledger_sizes(document, "count"),
-                                     {"services": lowered, "local": lowered, "raw": lowered})
+                                     {"services": lowered, "local": lowered,
+                                      "stored_borrows": lowered, "raw": lowered})
                     projection = ({key: document[key] for key in PROOF_KEYS},
                                   self.result.stderr)
                     if first is None:

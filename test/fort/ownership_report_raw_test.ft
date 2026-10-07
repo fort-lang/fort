@@ -8,6 +8,7 @@
 //| reasons ok
 //| unnamed ok
 //| budget error ok
+//| raw reason ok
 /// Checks how the report carries the raw analysis: its diagnostics in toolchain 4.2 order, its
 /// row and ledger in version 4, and the analysis order of reasons.
 import diag;
@@ -121,14 +122,16 @@ fn document() void {
     assert(ownership_report.body_violations(row) == 1);
     assert(ownership_report.body_ownership(row) == "violated");
     assert(ownership_report.integrated(ownership_report.RAW));
-    assert(!ownership_report.integrated(ownership_report.STORED_BORROWS));
+    assert(ownership_report.integrated(ownership_report.STORED_BORROWS));
+    assert(!ownership_report.integrated(ownership_report.RAW + 1));
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     ownership_report.invocation call = ownership_report.invocation{};
     ownership_report.build(&out, &e.source, &call, 1);
-    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":4,");
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":5,");
     contains(&out, "{\"name\":\"raw\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
-    contains(&out, "{\"name\":\"stored_borrows\",\"producer\":\"unavailable\"");
+    contains(&out, "{\"name\":\"stored_borrows\",\"producer\":\"integrated\"");
+    contains(&out, "{\"name\":\"calls_heap\",\"producer\":\"unavailable\"");
     strbuf.str_buf mut expected = strbuf.create();
     defer strbuf.free(&expected);
     strbuf.append(&expected, "\"name\":\"raw\",\"owner\":{\"module\":");
@@ -161,8 +164,8 @@ fn render_refusal() void {
     println("render refusal ok");
 }
 
-// The body reason follows analysis order. Stored borrows has no producer and comes before raw,
-// so a raw outcome never gives the reason while the earlier analyses complete.
+// The body reason follows analysis order: local, stored borrows, raw, then the first analysis
+// without a producer. A violated raw row gives no reason, so the reason names calls_heap.
 fn reasons() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     string[6] lines = {
@@ -178,9 +181,11 @@ fn reasons() void {
     ownership_source.body mut* row = ownership_source_env.find(&e, "main", "static_bytes");
     row->first_incomplete = ownership_api.proof_status{};
     assert(ownership_report.analysis_status(row, ownership_report.LOCAL, 2) == "complete");
+    assert(ownership_report.analysis_status(row, ownership_report.STORED_BORROWS, 2) ==
+        "complete");
     assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "violated");
     ownership_report.reason why = ownership_report.body_reason(row);
-    assert(why.present && why.stage == "stored_borrows" && why.code == "missing_producer");
+    assert(why.present && why.stage == "calls_heap" && why.code == "missing_producer");
     assert(ownership_report.closure_status(&e.source, ownership_report.RAW) == "incomplete");
     println("reasons ok");
 }
@@ -247,6 +252,31 @@ fn budget_error() void {
     println("budget error ok");
 }
 
+// The raw row comes after the stored row. With the local and stored rows complete, an
+// incomplete raw row gives the reason of the body.
+fn raw_reason() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn static_bytes() u64 {\n    string s = \"ab\";\n");
+    strbuf.append(&text, "    char* p = s.ptr;\n    u64* w = cast(p, u64*);\n    return *w;\n}\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "static_bytes");
+    row->raw.meter.bounds.w = 3;
+    ownership_source.analyze(&e.source);
+    row->first_incomplete = ownership_api.proof_status{};
+    assert(ownership_report.analysis_status(row, ownership_report.LOCAL, 2) == "complete");
+    assert(ownership_report.analysis_status(row, ownership_report.STORED_BORROWS, 2) ==
+        "complete");
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "incomplete");
+    ownership_report.reason why = ownership_report.body_reason(row);
+    assert(why.present && why.stage == "raw" && why.code == "work_limit");
+    println("raw reason ok");
+}
+
 fn main() i32 {
     rendering();
     interleaving();
@@ -255,5 +285,6 @@ fn main() i32 {
     reasons();
     unnamed();
     budget_error();
+    raw_reason();
     return 0;
 }
