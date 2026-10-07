@@ -25,6 +25,9 @@ struct solution {
     ownership_summary_body.callee_binding mut@ own bindings;
     // Body i owns records `records_first[i]` up to `records_first[i + 1]`.
     u64 mut@ own records_first;
+    // The rounds before the fixed point of the component of each body. A component without
+    // recursion has none.
+    u64 mut@ own rounds;
     ownership_api.proof_status proof;
 }
 
@@ -40,6 +43,7 @@ fn free(solution mut* out) void {
     del(owned.records);
     del(owned.bindings);
     del(owned.records_first);
+    del(owned.rounds);
     *out = solution{};
 }
 
@@ -67,6 +71,31 @@ fn free_solver(solver mut* s) void {
     del(s->record_bindings);
 }
 
+// Rounds before the fixed point record no event: their results are provisional (D17.18).
+fn quiet_event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    return ownership_api.event_result{.proof = req->current, .retained = true,
+        .stored_key = req->event.key};
+}
+
+// The event service of the rounds that record events. It notes a recorded event of a W
+// exhaustion, so a stopped computation records one budget event and no second one.
+struct budget_note {
+    ownership_api.services* inner;
+    bool recorded;
+}
+
+fn noted_event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    budget_note mut* note = cast(opaque, budget_note mut*);
+    ownership_api.exhaustion limit = req->event.limit.present ? req->event.limit :
+        req->current.terminal.limit;
+    if (limit.present && limit.category == ownership_api.limit_category.w) {
+        note->recorded = true;
+    }
+    return ownership_api.record_event(note->inner, req);
+}
+
 // A summary that publishes `proof` with no case and residual effects.
 fn refused_summary(ownership_api.proof_status proof) ownership_summary_model.summary {
     ownership_summary_model.summary mut out = ownership_summary_model.summary{};
@@ -87,6 +116,19 @@ fn refuse_members(solver mut* s, u64 component, ownership_api.proof_status proof
     u64 mut i = s->members_first[component];
     while (i < s->members_first[component + 1]) {
         publish(s, cast(s->members[i], u64), refused_summary(proof));
+        i += 1;
+    }
+}
+
+// A member that published a proof loses it. A member that failed or stayed incomplete keeps
+// its own status, so its own error stays its verdict.
+fn withdraw_members(solver mut* s, u64 component, ownership_api.proof_status proof) void {
+    u64 mut i = s->members_first[component];
+    while (i < s->members_first[component + 1]) {
+        u64 body = cast(s->members[i], u64);
+        if (ownership_api.successful(s->out->summaries[body].proof)) {
+            publish(s, body, refused_summary(proof));
+        }
         i += 1;
     }
 }
@@ -154,6 +196,7 @@ fn lay_out(solver mut* s) bool {
     s->record_calls = new(u64, g->calls_len);
     s->record_bindings = new(u64, g->calls_len);
     s->out->bindings = new(ownership_summary_body.callee_binding, targets);
+    s->out->rounds = new(u64, n);
     i = 0;
     while (i < g->calls_len) {
         s->out->records_first[cast(g->calls[i].body, u64) + 1] += 1;
@@ -210,10 +253,14 @@ fn lay_out(solver mut* s) bool {
     return true;
 }
 
-// One computation: its limits, and the position that its own charges name.
+// One computation: its services and limits, and the position that its own charges name.
 struct computation {
     u64 component;
+    bool recursive;
     ownership_api.limit_table limits;
+    ownership_api.services quiet;
+    ownership_api.services loud;
+    budget_note note;
     ownership_api.operation_position operation;
     ownership_api.proof_status proof;
 }
@@ -232,9 +279,9 @@ fn charge(solver* s, computation mut* c, u64 amount) bool {
     return true;
 }
 
-// Binds each fort target of each call of the members. A target outside a solved component has
-// no published summary, so the call stays unresolved. Thus a call inside a recursive
-// component stays unresolved too: no caller reads an unpublished summary (D17.18).
+// Binds each fort target of each call of the members. A target in this recursive component
+// is provisional. A target outside a solved component has no summary to read yet, so the
+// call stays unresolved: no caller reads an unpublished summary (D17.18).
 fn bind_records(solver mut* s, computation mut* c) bool {
     ownership_graph.graph* g = s->graph;
     u64 mut m = s->members_first[c->component];
@@ -250,14 +297,15 @@ fn bind_records(solver mut* s, computation mut* c) bool {
                 if (!charge(s, c, steps + 1)) { return false; }
                 u64 group = target == ownership_api.U64_MAX ? ownership_api.U64_MAX :
                     cast(g->components[target], u64);
-                if (target == ownership_api.U64_MAX || !s->solved[group]) {
+                if (target == ownership_api.U64_MAX ||
+                    (group != c->component && !s->solved[group])) {
                     s->out->records[k].residual_fort = true;
                     t += 1;
                     continue;
                 }
                 s->out->bindings[s->record_bindings[k] + t] =
                     ownership_summary_body.callee_binding{g->bodies[target].body->sym,
-                        &s->out->views[target]};
+                        &s->out->views[target], group == c->component && c->recursive};
                 t += 1;
             }
             k += 1;
@@ -270,10 +318,128 @@ fn bind_records(solver mut* s, computation mut* c) bool {
     return true;
 }
 
-// A refused W charge stops the computation (D17.18). The summary keeps the refused status.
-fn work_refused(ownership_summary_model.summary* result) bool {
-    return result->proof.terminal.limit.present &&
-        result->proof.terminal.limit.category == ownership_api.limit_category.w;
+// A refused W charge stops the computation (D17.18). Another refused bound only makes the
+// summary of one member incomplete.
+fn work_refused(ownership_summary.inference* r) bool {
+    return r->refused && r->refusal.terminal.limit.present &&
+        r->refusal.terminal.limit.category == ownership_api.limit_category.w;
+}
+
+// Infers one member with the event service of this round. The services of the computation
+// end with it, so only a copy of the input names them. A recursive member compares the
+// result with its last summary. False stops the computation.
+fn infer_member(solver mut* s, computation mut* c, u64 body, bool quiet, bool mut* changed,
+    ownership_summary.inference mut* result) bool {
+    ownership_summary_body.body_input mut input = s->inputs[body];
+    input.services = &c->loud;
+    if (quiet) { input.services = &c->quiet; }
+    *result = ownership_summary.infer_member(&input);
+    if (work_refused(result)) {
+        c->proof = result->refusal;
+        return false;
+    }
+    if (!c->recursive) { return true; }
+    ownership_summary_model.summary_view next = ownership_summary_model.view(&result->summary);
+    ownership_summary_model.context ctx = ownership_summary_model.context{s->services,
+        c->operation, ownership_api.source_position{}, ownership_api.entity_id{},
+        ownership_api.source_position{}};
+    ownership_api.proof_status mut proof = ownership_summary_model.complete();
+    bool same = ownership_summary_model.equal(&next, &s->out->views[body], &ctx, &proof);
+    if (!ownership_api.successful(proof)) {
+        c->proof = proof;
+        return false;
+    }
+    *changed = *changed || !same;
+    return true;
+}
+
+// A computation stops at a refused W charge, and only a W charge carries a limit here. When
+// no event of this computation names a W exhaustion, as in a round that records no event, it
+// records one budget event: the error stands even when no caller reads a refused summary
+// (`spec/fir.md` 14.1). An event store keeps one event for each key. The key names the first
+// member and the ordinal U32_MAX, which no body key takes (`ownership_summary_body.next`), so
+// the stop events of two computations stay apart.
+fn stop(solver mut* s, computation mut* c) void {
+    ownership_api.exhaustion limit = c->proof.terminal.limit;
+    if (!c->note.recorded && limit.present) {
+        ownership_api.event_request mut req = ownership_api.event_request{};
+        req.current = c->proof;
+        req.event.key = ownership_api.entity_id{c->operation.function,
+            ownership_api.entity_kind.event, ownership_summary_body.U32_MAX};
+        req.event.operation = c->proof.terminal.operation;
+        req.event.source = c->proof.terminal.source;
+        req.event.kind = ownership_api.event_kind.work_failure;
+        req.event.evidence = ownership_api.evidence_kind.abstract_possibility;
+        req.event.reason = c->proof.terminal.reason;
+        req.event.limit = limit;
+        req.event.text = "ownership summary solver stopped at the work bound";
+        ownership_api.record_event(s->services, &req);
+    }
+    refuse_members(s, c->component, c->proof);
+}
+
+// Solves a recursive component (D17.18). Each member starts at bottom. Rounds infer the
+// members in key order with the latest provisional summaries and record no event. After a
+// round that changes no member, one publication round infers each member with the real
+// event service. A member that names an uncovered provisional call, or a publication that
+// differs from the fixed point, withdraws the proof of every member.
+fn iterate(solver mut* s, computation mut* c) void {
+    u64 first = s->members_first[c->component];
+    u64 last = s->members_first[c->component + 1];
+    u64 mut m = first;
+    while (m < last) {
+        ownership_summary_model.summary mut bottom = ownership_summary_model.summary{};
+        bottom.proof = ownership_summary_model.complete();
+        publish(s, cast(s->members[m], u64), move(bottom));
+        m += 1;
+    }
+    u64 mut rounds = 0;
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        rounds += 1;
+        m = first;
+        while (m < last) {
+            u64 body = cast(s->members[m], u64);
+            ownership_summary.inference mut result = ownership_summary.inference{};
+            if (!infer_member(s, c, body, true, &changed, &result)) {
+                ownership_summary_model.free(&result.summary);
+                stop(s, c);
+                return;
+            }
+            publish(s, body, move(result.summary));
+            m += 1;
+        }
+    }
+    bool mut differs = false;
+    bool mut uncovered = false;
+    ownership_api.proof_status mut refusal = ownership_summary_model.complete();
+    m = first;
+    while (m < last) {
+        u64 body = cast(s->members[m], u64);
+        s->out->rounds[body] = rounds;
+        ownership_summary.inference mut result = ownership_summary.inference{};
+        bool mut moved = false;
+        if (!infer_member(s, c, body, false, &moved, &result)) {
+            ownership_summary_model.free(&result.summary);
+            stop(s, c);
+            return;
+        }
+        if (moved && !differs) {
+            differs = true;
+            refusal = ownership_api.successful(result.summary.proof) ?
+                ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+                    c->operation, ownership_api.source_position{}) : result.summary.proof;
+        }
+        if (result.uncovered && !uncovered && !differs) {
+            uncovered = true;
+            refusal = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+                result.uncovered_operation, result.uncovered_source);
+        }
+        publish(s, body, move(result.summary));
+        m += 1;
+    }
+    if (differs || uncovered) { withdraw_members(s, c->component, refusal); }
 }
 
 fn solve_component(solver mut* s, u64 component) void {
@@ -281,7 +447,13 @@ fn solve_component(solver mut* s, u64 component) void {
     u64 first = s->members_first[component];
     u64 last = s->members_first[component + 1];
     computation mut c = computation{.component = component,
-        .proof = ownership_summary_model.complete()};
+        .recursive = ownership_graph.recursive_component(g, cast(component, u32)),
+        .quiet = *s->services, .proof = ownership_summary_model.complete()};
+    c.quiet.event = quiet_event;
+    c.note = budget_note{s->services, false};
+    c.loud = *s->services;
+    c.loud.event_context = cast(&c.note, void mut*);
+    c.loud.event = noted_event;
     c.operation = ownership_api.operation_position{
         .function = g->bodies[cast(s->members[first], u64)].key};
     u64 mut size = 0;
@@ -299,30 +471,34 @@ fn solve_component(solver mut* s, u64 component) void {
         return;
     }
     if (!bind_records(s, &c)) {
-        refuse_members(s, component, c.proof);
+        stop(s, &c);
+        return;
+    }
+    if (c.recursive) {
+        iterate(s, &c);
         return;
     }
     m = first;
     while (m < last) {
         u64 body = cast(s->members[m], u64);
-        s->inputs[body].services = s->services;
-        ownership_summary_model.summary mut result = ownership_summary.infer(&s->inputs[body]);
-        if (work_refused(&result)) {
-            ownership_api.proof_status proof = result.proof;
-            ownership_summary_model.free(&result);
-            refuse_members(s, component, proof);
+        ownership_summary.inference mut result = ownership_summary.inference{};
+        bool mut ignored = false;
+        if (!infer_member(s, &c, body, false, &ignored, &result)) {
+            ownership_summary_model.free(&result.summary);
+            stop(s, &c);
             return;
         }
-        publish(s, body, move(result));
+        publish(s, body, move(result.summary));
         m += 1;
     }
 }
 
 /// Solves the summary of each body of `g`, each callee component before its callers
 /// (D17.18, `spec/fir.md` 14.1). `inputs[i]` is the inference input of body i of `g`. The
-/// solver sets its call targets, services, and limits; the client keeps the rest. One
-/// computation solves each component, and `hook` starts it. A call between two members of
-/// one recursive component stays unresolved.
+/// solver sets its call targets and limits; the client keeps the rest. Each inference gets
+/// the services of its computation through a copy of its input. One
+/// computation solves each component, and `hook` starts it. A recursive component publishes
+/// its summaries only after a fixed point that covers each recursive call.
 fn solve(ownership_graph.graph mut* g, ownership_summary_body.body_input mut@ inputs,
     ownership_api.services* svc, computation_hook hook) solution {
     solution mut out = solution{};

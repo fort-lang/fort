@@ -1,0 +1,292 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| call coverage ok
+/// Checks `ownership_calls.covered` on built summaries: which possible cases cover each value of
+/// the captured symbolic arguments of a call (D17.18).
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_summary_model;
+import prim;
+import types;
+
+// A formal number that no fixture uses: each formal is bool.
+u32 NO_INTEGER = 8;
+
+// One built callee summary and one call of it. Formal i is local i + 1 of function (1, 1), and
+// its captured value is value i + 1 of the caller function (2, 9).
+struct fixture {
+    ownership_calls_env.env services;
+    types.node* boolean;
+    ownership_summary_model.symbolic_root[8] roots;
+    ownership_api.predicate_atom[64] atoms;
+    ownership_api.entity_id[64] keys;
+    ownership_api.guard_fact[16] guards;
+    ownership_summary_model.case_record[16] cases;
+    ownership_calls.capture_binding[8] captures;
+    ownership_api.predicate_atom[4] known;
+    ownership_summary_model.summary_view view;
+    u64 atoms_len;
+    u64 cases_len;
+    u64 captures_len;
+    u64 known_len;
+}
+
+fn formal(u32 index) ownership_api.entity_id {
+    return ownership_api.entity_id{ownership_calls_env.function(1, 1),
+        ownership_api.entity_kind.value, index + 1};
+}
+
+fn actual(u32 index) ownership_api.entity_id {
+    return ownership_calls_env.actual(ownership_api.entity_kind.value, index + 1);
+}
+
+// Formal i has type bool unless `integer` names it.
+fn open(fixture mut* f, u64 formals, u32 integer) void {
+    ownership_calls_env.open(&f->services);
+    f->boolean = types.type_prim(&f->services.table, prim.prim_kind.prim_bool);
+    u64 mut i = 0;
+    while (i < formals) {
+        u32 at = cast(i, u32);
+        f->roots[i] = ownership_summary_model.symbolic_root{
+            .key = ownership_calls_env.id(ownership_api.entity_kind.template, at + 1),
+            .kind = ownership_summary_model.root_kind.by_value_slot, .formal = at,
+            .slot = ownership_calls_env.id(ownership_api.entity_kind.slot, at),
+            .ty = at == integer ? f->services.ty : f->boolean};
+        i += 1;
+    }
+}
+
+fn close(fixture mut* f) void { ownership_calls_env.close(&f->services); }
+
+// Adds a case whose guard needs formal `formals[k]` to hold `values[k]` for each k. An empty
+// guard holds for each call.
+fn add_case(fixture mut* f, u32@ formals, i64@ values, ownership_api.outcome_kind kind) void {
+    u64 first = f->atoms_len;
+    u64 mut k = 0;
+    while (k < formals.len) {
+        ownership_api.entity_id key = ownership_calls_env.id(ownership_api.entity_kind.predicate,
+            cast(f->atoms_len + 1, u32));
+        f->atoms[f->atoms_len] = ownership_api.predicate_atom{key,
+            ownership_api.predicate_kind.equality, formal(formals[k]), ownership_api.entity_id{},
+            ownership_calls_env.integer(values[k]), ownership_calls_env.integer(values[k])};
+        f->keys[f->atoms_len] = key;
+        f->atoms_len += 1;
+        k += 1;
+    }
+    ownership_api.entity_id mut guard = ownership_api.entity_id{};
+    if (formals.len > 0) {
+        guard = ownership_calls_env.id(ownership_api.entity_kind.guard,
+            cast(f->cases_len + 1, u32));
+        ownership_api.entity_id@ none = {};
+        f->guards[f->cases_len] = ownership_api.guard_fact{guard,
+            f->keys[first..f->atoms_len], none};
+    }
+    f->cases[f->cases_len] = ownership_summary_model.case_record{.key =
+        ownership_calls_env.id(ownership_api.entity_kind.guard, cast(f->cases_len + 100, u32)),
+        .guard = guard, .outcome = ownership_api.outcome_fact{.kind = kind}};
+    f->cases_len += 1;
+}
+
+fn symbolic(fixture mut* f, u32 index, u32 actual_index) void {
+    f->captures[f->captures_len] = ownership_calls.capture_binding{formal(index),
+        actual(actual_index), ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
+            .symbol = actual(actual_index)}};
+    f->captures_len += 1;
+}
+
+fn exact(fixture mut* f, u32 index, i64 value) void {
+    f->captures[f->captures_len] = ownership_calls.capture_binding{formal(index),
+        actual(index + 50), ownership_calls_env.integer(value)};
+    f->captures_len += 1;
+}
+
+// The caller state proves `value` for its captured value `actual_index`.
+fn caller_knows(fixture mut* f, u32 actual_index, i64 value) void {
+    f->known[f->known_len] = ownership_api.predicate_atom{.kind =
+        ownership_api.predicate_kind.equality, .left = actual(actual_index),
+        .lower = ownership_calls_env.integer(value), .upper = ownership_calls_env.integer(value)};
+    f->known_len += 1;
+}
+
+fn covered(fixture mut* f, u64 formals, bool returns_only) bool {
+    f->view = ownership_summary_model.summary_view{.roots = f->roots[..formals],
+        .predicates = f->atoms[..f->atoms_len], .guards = f->guards[..f->cases_len],
+        .cases = f->cases[..f->cases_len], .proof = ownership_summary_model.complete()};
+    ownership_calls.request mut req = ownership_calls.request{.summary = &f->view,
+        .captures = f->captures[..f->captures_len], .services = &f->services.services,
+        .limits = f->services.limits};
+    req.before.predicates = f->known[..f->known_len];
+    req.before.proof = ownership_summary_model.complete();
+    ownership_summary_model.context ctx = ownership_summary_model.context{
+        &f->services.services, ownership_api.operation_position{}, ownership_api.source_position{},
+        ownership_api.entity_id{}, ownership_api.source_position{}};
+    ownership_api.proof_status mut proof = ownership_summary_model.complete();
+    bool result = ownership_calls.covered(&req, &ctx, &proof, returns_only);
+    assert(ownership_api.successful(proof));
+    return result;
+}
+
+fn returns() ownership_api.outcome_kind { return ownership_api.outcome_kind.function_return; }
+
+fn aborts() ownership_api.outcome_kind { return ownership_api.outcome_kind.abort; }
+
+// A case without a guard holds for each call. A case whose captured value is exact or known to
+// the caller holds or fails without a value to try.
+fn decided() void {
+    fixture mut f = fixture{};
+    open(&f, 1, NO_INTEGER);
+    defer close(&f);
+    u32@ none = {};
+    i64@ no_values = {};
+    add_case(&f, none, no_values, returns());
+    symbolic(&f, 0, 0);
+    assert(covered(&f, 1, false) && covered(&f, 1, true));
+    fixture mut e = fixture{};
+    open(&e, 1, NO_INTEGER);
+    defer close(&e);
+    u32[1] first = {0};
+    i64[1] one = {1};
+    add_case(&e, first[..], one[..], returns());
+    exact(&e, 0, 1);
+    assert(covered(&e, 1, false));
+    e.captures_len = 0;
+    exact(&e, 0, 0);
+    assert(!covered(&e, 1, false));
+    e.captures_len = 0;
+    symbolic(&e, 0, 0);
+    caller_knows(&e, 0, 1);
+    assert(covered(&e, 1, false));
+    e.known_len = 0;
+    caller_knows(&e, 0, 0);
+    assert(!covered(&e, 1, false));
+    // The caller knows `c == 1`, so only `a` takes two values, and the two cases cover it.
+    fixture mut k = fixture{};
+    open(&k, 2, NO_INTEGER);
+    defer close(&k);
+    u32[2] both = {0, 1};
+    i64[2] one_one = {1, 1};
+    i64[2] zero_one = {0, 1};
+    add_case(&k, both[..], one_one[..], returns());
+    add_case(&k, both[..], zero_one[..], returns());
+    symbolic(&k, 0, 0);
+    symbolic(&k, 1, 1);
+    assert(!covered(&k, 2, false));
+    caller_knows(&k, 1, 1);
+    assert(covered(&k, 2, false));
+}
+
+// One captured bool takes 0 and 1. An abort case covers its value unless only normal cases
+// count. A guard atom without a capture gives no coverage.
+fn one_value() void {
+    fixture mut f = fixture{};
+    open(&f, 1, NO_INTEGER);
+    defer close(&f);
+    u32[1] first = {0};
+    i64[1] one = {1};
+    i64[1] zero = {0};
+    add_case(&f, first[..], one[..], returns());
+    symbolic(&f, 0, 0);
+    assert(!covered(&f, 1, false));
+    add_case(&f, first[..], zero[..], aborts());
+    assert(covered(&f, 1, false) && !covered(&f, 1, true));
+    f.cases[1].outcome.kind = returns();
+    assert(covered(&f, 1, true));
+    f.captures_len = 0;
+    assert(!covered(&f, 1, false));
+}
+
+// Two captured values: the cases `a == 1`, `a == 0 and c == 1`, `a == 0 and c == 0` cover each
+// pair. Without the last case the pair (0, 0) has none. Two formals with one captured value
+// make one value to try.
+fn two_values() void {
+    fixture mut f = fixture{};
+    open(&f, 2, NO_INTEGER);
+    defer close(&f);
+    u32[1] first = {0};
+    u32[2] both = {0, 1};
+    i64[1] one = {1};
+    i64[2] zero_one = {0, 1};
+    i64[2] zeros = {0, 0};
+    add_case(&f, first[..], one[..], returns());
+    add_case(&f, both[..], zero_one[..], returns());
+    symbolic(&f, 0, 0);
+    symbolic(&f, 1, 1);
+    assert(!covered(&f, 2, false));
+    add_case(&f, both[..], zeros[..], aborts());
+    assert(covered(&f, 2, false) && !covered(&f, 2, true));
+    // Both formals bound to one value: `a == 0 and c == 1` needs two values, so it fails.
+    fixture mut same = fixture{};
+    open(&same, 2, NO_INTEGER);
+    defer close(&same);
+    add_case(&same, first[..], one[..], returns());
+    add_case(&same, both[..], zero_one[..], returns());
+    symbolic(&same, 0, 0);
+    symbolic(&same, 1, 0);
+    assert(!covered(&same, 2, false));
+    add_case(&same, both[..], zeros[..], returns());
+    assert(covered(&same, 2, false));
+}
+
+// An atom on a formal that is not bool gives no coverage, even with a value for each bool.
+fn integer_value() void {
+    fixture mut f = fixture{};
+    open(&f, 1, 0);
+    defer close(&f);
+    u32[1] first = {0};
+    i64[1] one = {1};
+    i64[1] zero = {0};
+    add_case(&f, first[..], one[..], returns());
+    add_case(&f, first[..], zero[..], returns());
+    symbolic(&f, 0, 0);
+    assert(!covered(&f, 1, false));
+}
+
+// A chain of `count` cases over `count - 1` values: case k needs values 0 to k - 1 at 0 and
+// value k at 1, and the last case needs each value at 0. The chain covers each assignment.
+fn chain(u64 count) bool {
+    fixture mut f = fixture{};
+    open(&f, count - 1, NO_INTEGER);
+    defer close(&f);
+    u32[8] mut formals = {};
+    i64[8] mut values = {};
+    u64 mut k = 0;
+    while (k < count) {
+        u64 mut j = 0;
+        while (j < k && j < count - 1) {
+            formals[j] = cast(j, u32);
+            values[j] = 0;
+            j += 1;
+        }
+        if (k < count - 1) {
+            formals[k] = cast(k, u32);
+            values[k] = 1;
+            j = k + 1;
+        }
+        add_case(&f, formals[..j], values[..j], aborts());
+        k += 1;
+    }
+    k = 0;
+    while (k < count - 1) {
+        symbolic(&f, cast(k, u32), cast(k, u32));
+        k += 1;
+    }
+    return covered(&f, count - 1, false);
+}
+
+// Six captured values give 64 assignments, the most that coverage tries. Seven give none.
+fn bound() void {
+    assert(chain(2) && chain(4) && chain(7));
+    assert(!chain(8));
+}
+
+fn main() i32 {
+    decided();
+    one_value();
+    two_values();
+    integer_value();
+    bound();
+    println("call coverage ok");
+    return 0;
+}

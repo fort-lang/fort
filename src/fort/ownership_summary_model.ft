@@ -1026,3 +1026,538 @@ fn validate(summary mut* out, context* ctx) bool {
     }
     return true;
 }
+
+fn same_proof(ownership_api.proof_status a, ownership_api.proof_status b) bool {
+    return a.kind == b.kind && a.failed == b.failed &&
+        a.terminal.present == b.terminal.present && a.terminal.reason == b.terminal.reason &&
+        ownership_keys.operation(a.terminal.operation, b.terminal.operation) == 0 &&
+        ownership_keys.source(a.terminal.source, b.terminal.source) == 0 &&
+        same(a.terminal.relation, b.terminal.relation) &&
+        a.terminal.limit.present == b.terminal.limit.present &&
+        ownership_keys.exhaustion(&a.terminal.limit, &b.terminal.limit) == 0 &&
+        a.terminal.limit.used == b.terminal.limit.used &&
+        a.terminal.limit.bound == b.terminal.limit.bound &&
+        a.terminal.limit.attempted == b.terminal.limit.attempted;
+}
+
+fn same_coverage(coverage_status a, coverage_status b) bool {
+    return a.structural_valid == b.structural_valid &&
+        a.supplied_complete == b.supplied_complete &&
+        a.actual_source_complete == b.actual_source_complete;
+}
+
+fn same_root(symbolic_root a, symbolic_root b) bool {
+    return same(a.key, b.key) && a.kind == b.kind && a.formal == b.formal &&
+        same(a.slot, b.slot) && same(a.source, b.source) && same(a.allocation, b.allocation) &&
+        same(a.value_version, b.value_version) && a.ownership == b.ownership && a.ty == b.ty;
+}
+
+fn same_requirement(requirement a, requirement b) bool {
+    return same(a.key, b.key) && a.kind == b.kind && same(a.guard, b.guard) &&
+        ownership_state.same_place(a.path, b.path) && same(a.source, b.source) &&
+        ownership_state.same_region(a.range, b.range) &&
+        ownership_keys.operation(a.operation, b.operation) == 0 &&
+        same(a.provenance, b.provenance);
+}
+
+fn same_ordered(ownership_api.ordered_effect a, ownership_api.ordered_effect b) bool {
+    return same(a.key, b.key) && a.kind == b.kind &&
+        ownership_keys.operation(a.operation, b.operation) == 0 &&
+        ownership_state.same_place(a.place, b.place) && same(a.source, b.source) &&
+        same(a.allocation, b.allocation) && same(a.guard, b.guard);
+}
+
+fn same_effect(effect_node a, effect_node b) bool {
+    return same_ordered(a.effect, b.effect) && a.payload == b.payload &&
+        ownership_state.same_place(a.operand, b.operand) &&
+        ownership_state.same_contents(a.value, b.value) &&
+        ownership_state.same_region(a.range, b.range) && same(a.provenance, b.provenance) &&
+        ownership_keys.deferred(a.deferred, b.deferred) == 0 && a.residual == b.residual;
+}
+
+fn same_relation(relation a, relation b) bool {
+    return same(a.key, b.key) && ownership_state.same_borrow(a.borrow, b.borrow) &&
+        same(a.guard, b.guard) && same(a.provenance, b.provenance) && a.residual == b.residual;
+}
+
+fn same_outcome(ownership_api.outcome_fact a, ownership_api.outcome_fact b) bool {
+    if (a.kind != b.kind || !same(a.guard, b.guard) ||
+        a.possible_caller_return != b.possible_caller_return ||
+        a.cleanup_required != b.cleanup_required || a.cleanup_proved != b.cleanup_proved ||
+        a.effects.len != b.effects.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.effects.len) {
+        if (!same_ordered(a.effects[i], b.effects[i])) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_case(case_record a, case_record b) bool {
+    return same(a.key, b.key) && same(a.guard, b.guard) &&
+        ownership_state.same_entities(a.requirements, b.requirements) &&
+        ownership_state.same_entities(a.effects, b.effects) &&
+        ownership_state.same_entities(a.results, b.results) &&
+        ownership_state.same_entities(a.retained, b.retained) &&
+        same_outcome(a.outcome, b.outcome) && same_coverage(a.coverage, b.coverage);
+}
+
+fn same_provenance(provenance a, provenance b) bool {
+    return same(a.key, b.key) && ownership_keys.operation(a.operation, b.operation) == 0 &&
+        ownership_keys.source(a.source, b.source) == 0 &&
+        ownership_keys.deferred(a.deferred, b.deferred) == 0 &&
+        ownership_keys.function(a.callee, b.callee) == 0 &&
+        ownership_state.same_entities(a.substitutions, b.substitutions) &&
+        ownership_state.same_entities(a.witnesses, b.witnesses) && a.filename == b.filename;
+}
+
+fn same_witness(ownership_api.witness_link a, ownership_api.witness_link b) bool {
+    return same(a.key, b.key) && same(a.event, b.event) && same(a.predecessor, b.predecessor) &&
+        ownership_keys.function(a.summary, b.summary) == 0 && same(a.condition, b.condition) &&
+        a.validated == b.validated;
+}
+
+/// True when two summaries hold equal records in equal order (D17.18). A recursive component
+/// reaches its fixed point when a round changes no member. Each compared record costs one
+/// W unit. A refused charge returns false and keeps the refusal in `proof`.
+fn equal(summary_view* a, summary_view* b, context* ctx, ownership_api.proof_status mut* proof)
+    bool {
+    if (!work(ctx, proof, 1)) { return false; }
+    if (!same_proof(a->proof, b->proof) || a->residual_effects != b->residual_effects ||
+        !same_coverage(a->coverage, b->coverage) ||
+        ownership_keys.operation(a->operation, b->operation) != 0 ||
+        ownership_keys.source(a->source, b->source) != 0 || !same(a->event, b->event) ||
+        ownership_keys.source(a->callee_source, b->callee_source) != 0 ||
+        a->roots.len != b->roots.len || a->requirements.len != b->requirements.len ||
+        a->effects.len != b->effects.len || a->order.len != b->order.len ||
+        a->predicates.len != b->predicates.len || a->guards.len != b->guards.len ||
+        a->correlations.len != b->correlations.len || a->results.len != b->results.len ||
+        a->retained.len != b->retained.len || a->cases.len != b->cases.len ||
+        a->provenance_records.len != b->provenance_records.len ||
+        a->witnesses.len != b->witnesses.len) { return false; }
+    u64 mut i = 0;
+    while (i < a->roots.len) {
+        if (!work(ctx, proof, 1) || !same_root(a->roots[i], b->roots[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->requirements.len) {
+        if (!work(ctx, proof, 1) || !same_requirement(a->requirements[i], b->requirements[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->effects.len) {
+        if (!work(ctx, proof, 1) || !same_effect(a->effects[i], b->effects[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->order.len) {
+        if (!work(ctx, proof, 1) || !same(a->order[i].before, b->order[i].before) ||
+            !same(a->order[i].after, b->order[i].after) ||
+            a->order[i].proved != b->order[i].proved) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->predicates.len) {
+        if (!work(ctx, proof, 1) ||
+            !ownership_state.same_predicate(a->predicates[i], b->predicates[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->guards.len) {
+        if (!work(ctx, proof, 1) || !ownership_state.same_guard(a->guards[i], b->guards[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->correlations.len) {
+        if (!work(ctx, proof, 1) ||
+            !ownership_state.same_correlation(a->correlations[i], b->correlations[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->results.len) {
+        if (!work(ctx, proof, 1) || !same_relation(a->results[i], b->results[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->retained.len) {
+        if (!work(ctx, proof, 1) || !same_relation(a->retained[i], b->retained[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->cases.len) {
+        if (!work(ctx, proof, 1) || !same_case(a->cases[i], b->cases[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->provenance_records.len) {
+        if (!work(ctx, proof, 1) ||
+            !same_provenance(a->provenance_records[i], b->provenance_records[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->witnesses.len) {
+        if (!work(ctx, proof, 1) || !same_witness(a->witnesses[i], b->witnesses[i])) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// The keys of one function under a new function identity (D17.15). The scratch state owns the
+// nested slices and the outcome blocks own the outcome effects until the clone copies them.
+struct renaming {
+    ownership_api.function_id from;
+    ownership_api.function_id to;
+    ownership_state.state scratch;
+    effect_block mut* own blocks;
+}
+
+fn free_renaming(renaming mut* r) void {
+    ownership_state.free(&r->scratch);
+    while (r->blocks != null) {
+        effect_block mut* own block = move(r->blocks);
+        r->blocks = move(block->next);
+        del(block->items);
+        del(block);
+    }
+}
+
+fn rename_key(renaming* r, ownership_api.entity_id key) ownership_api.entity_id {
+    if (key.kind == ownership_api.entity_kind.none ||
+        ownership_keys.function(key.function, r->from) != 0) { return key; }
+    ownership_api.entity_id mut out = key;
+    out.function = r->to;
+    return out;
+}
+
+fn rename_scalar(renaming* r, ownership_api.scalar_fact value) ownership_api.scalar_fact {
+    ownership_api.scalar_fact mut out = value;
+    out.symbol = rename_key(r, value.symbol);
+    return out;
+}
+
+fn rename_window(renaming* r, ownership_api.byte_window window) ownership_api.byte_window {
+    ownership_api.byte_window mut out = window;
+    out.begin = rename_scalar(r, window.begin);
+    out.end = rename_scalar(r, window.end);
+    return out;
+}
+
+fn rename_place(renaming mut* r, ownership_api.place_path place) ownership_api.place_path {
+    ownership_api.place_path mut out = ownership_state.copy_place(&r->scratch, place);
+    out.root = rename_key(r, place.root);
+    if (place.projections.len == 0) { return out; }
+    ownership_api.projection mut@ parts = r->scratch.blocks->projections[..];
+    u64 mut i = 0;
+    while (i < parts.len) {
+        parts[i].index = rename_scalar(r, parts[i].index);
+        parts[i].captured_version = rename_key(r, parts[i].captured_version);
+        i += 1;
+    }
+    return out;
+}
+
+fn rename_region(renaming mut* r, ownership_api.region range) ownership_api.region {
+    ownership_api.region mut out = range;
+    out.key = rename_key(r, range.key);
+    out.source = rename_key(r, range.source);
+    out.offset = rename_scalar(r, range.offset);
+    out.extent = rename_scalar(r, range.extent);
+    out.access = rename_window(r, range.access);
+    out.leaves = ownership_state.copy_leaves(&r->scratch, range.leaves);
+    if (range.leaves.len != 0) {
+        ownership_api.layout_leaf mut@ leaves = r->scratch.blocks->leaves[..];
+        u64 mut i = 0;
+        while (i < leaves.len) {
+            leaves[i].bytes = rename_window(r, leaves[i].bytes);
+            i += 1;
+        }
+    }
+    out.partitions = ownership_state.copy_partitions(&r->scratch, range.partitions);
+    if (range.partitions.len != 0) {
+        ownership_api.region_partition mut@ parts = r->scratch.blocks->partitions[..];
+        u64 mut i = 0;
+        while (i < parts.len) {
+            parts[i].key = rename_key(r, parts[i].key);
+            parts[i].membership = rename_key(r, parts[i].membership);
+            parts[i].bytes = rename_window(r, parts[i].bytes);
+            i += 1;
+        }
+    }
+    return out;
+}
+
+fn rename_borrow(renaming mut* r, ownership_api.borrow_relation borrow)
+    ownership_api.borrow_relation {
+    ownership_api.borrow_relation mut out = borrow;
+    out.key = rename_key(r, borrow.key);
+    out.value_version = rename_key(r, borrow.value_version);
+    out.containing = rename_place(r, borrow.containing);
+    out.source = rename_key(r, borrow.source);
+    out.range = rename_region(r, borrow.range);
+    return out;
+}
+
+fn rename_contents(renaming mut* r, ownership_api.contents_fact value)
+    ownership_api.contents_fact {
+    ownership_api.contents_fact mut out = value;
+    out.place = rename_place(r, value.place);
+    out.value_version = rename_key(r, value.value_version);
+    out.span_length = rename_scalar(r, value.span_length);
+    if (value.borrows.len == 0) { return out; }
+    ownership_state.slice_block mut* own block = new(ownership_state.slice_block);
+    block->borrows = new(ownership_api.borrow_relation, value.borrows.len);
+    ownership_api.borrow_relation mut@ rows = block->borrows[..];
+    ownership_state.keep(&r->scratch, move(block));
+    u64 mut i = 0;
+    while (i < rows.len) {
+        rows[i] = rename_borrow(r, value.borrows[i]);
+        i += 1;
+    }
+    out.borrows = rows[..];
+    return out;
+}
+
+fn rename_keys(renaming mut* r, ownership_api.entity_id@ keys) ownership_api.entity_id@ {
+    ownership_api.entity_id@ copied = ownership_state.copy_entities(&r->scratch, keys);
+    if (keys.len == 0) { return copied; }
+    ownership_api.entity_id mut@ rows = r->scratch.blocks->entities[..];
+    u64 mut i = 0;
+    while (i < rows.len) {
+        rows[i] = rename_key(r, rows[i]);
+        i += 1;
+    }
+    return copied;
+}
+
+fn rename_ordered(renaming mut* r, ownership_api.ordered_effect effect)
+    ownership_api.ordered_effect {
+    ownership_api.ordered_effect mut out = effect;
+    out.key = rename_key(r, effect.key);
+    out.place = rename_place(r, effect.place);
+    out.source = rename_key(r, effect.source);
+    out.allocation = rename_key(r, effect.allocation);
+    out.guard = rename_key(r, effect.guard);
+    return out;
+}
+
+fn rename_relation(renaming mut* r, relation row) relation {
+    relation mut out = row;
+    out.key = rename_key(r, row.key);
+    out.borrow = rename_borrow(r, row.borrow);
+    out.guard = rename_key(r, row.guard);
+    out.provenance = rename_key(r, row.provenance);
+    return out;
+}
+
+// The renamed top-level records of one summary. Each array is owned until the clone copies it.
+struct renamed_records {
+    symbolic_root mut@ own roots;
+    requirement mut@ own requirements;
+    effect_node mut@ own effects;
+    ownership_api.ordering_constraint mut@ own order;
+    ownership_api.predicate_atom mut@ own predicates;
+    ownership_api.guard_fact mut@ own guards;
+    ownership_api.correlation mut@ own correlations;
+    relation mut@ own results;
+    relation mut@ own retained;
+    case_record mut@ own cases;
+    provenance mut@ own provenance_records;
+    ownership_api.witness_link mut@ own witnesses;
+}
+
+fn free_renamed(renamed_records mut* out) void {
+    renamed_records mut owned = move(*out);
+    del(owned.roots);
+    del(owned.requirements);
+    del(owned.effects);
+    del(owned.order);
+    del(owned.predicates);
+    del(owned.guards);
+    del(owned.correlations);
+    del(owned.results);
+    del(owned.retained);
+    del(owned.cases);
+    del(owned.provenance_records);
+    del(owned.witnesses);
+    *out = renamed_records{};
+}
+
+fn rename_rows(renaming mut* r, summary_view* input, renamed_records mut* out) void {
+    out->roots = new(symbolic_root, input->roots.len);
+    u64 mut i = 0;
+    while (i < input->roots.len) {
+        symbolic_root mut row = input->roots[i];
+        row.key = rename_key(r, row.key);
+        row.slot = rename_key(r, row.slot);
+        row.source = rename_key(r, row.source);
+        row.allocation = rename_key(r, row.allocation);
+        row.value_version = rename_key(r, row.value_version);
+        out->roots[i] = row;
+        i += 1;
+    }
+    out->requirements = new(requirement, input->requirements.len);
+    i = 0;
+    while (i < input->requirements.len) {
+        requirement mut row = input->requirements[i];
+        row.key = rename_key(r, row.key);
+        row.guard = rename_key(r, row.guard);
+        row.path = rename_place(r, row.path);
+        row.source = rename_key(r, row.source);
+        row.range = rename_region(r, row.range);
+        row.provenance = rename_key(r, row.provenance);
+        out->requirements[i] = row;
+        i += 1;
+    }
+    out->effects = new(effect_node, input->effects.len);
+    i = 0;
+    while (i < input->effects.len) {
+        effect_node mut row = input->effects[i];
+        row.effect = rename_ordered(r, row.effect);
+        row.operand = rename_place(r, row.operand);
+        row.value = rename_contents(r, row.value);
+        row.range = rename_region(r, row.range);
+        row.provenance = rename_key(r, row.provenance);
+        out->effects[i] = row;
+        i += 1;
+    }
+    out->order = new(ownership_api.ordering_constraint, input->order.len);
+    i = 0;
+    while (i < input->order.len) {
+        out->order[i] = ownership_api.ordering_constraint{rename_key(r, input->order[i].before),
+            rename_key(r, input->order[i].after), input->order[i].proved};
+        i += 1;
+    }
+    out->predicates = new(ownership_api.predicate_atom, input->predicates.len);
+    i = 0;
+    while (i < input->predicates.len) {
+        ownership_api.predicate_atom mut row = input->predicates[i];
+        row.key = rename_key(r, row.key);
+        row.left = rename_key(r, row.left);
+        row.right = rename_key(r, row.right);
+        row.lower = rename_scalar(r, row.lower);
+        row.upper = rename_scalar(r, row.upper);
+        out->predicates[i] = row;
+        i += 1;
+    }
+    out->guards = new(ownership_api.guard_fact, input->guards.len);
+    i = 0;
+    while (i < input->guards.len) {
+        out->guards[i] = ownership_api.guard_fact{rename_key(r, input->guards[i].key),
+            rename_keys(r, input->guards[i].positive), rename_keys(r, input->guards[i].negative)};
+        i += 1;
+    }
+    out->correlations = new(ownership_api.correlation, input->correlations.len);
+    i = 0;
+    while (i < input->correlations.len) {
+        out->correlations[i] = ownership_api.correlation{
+            rename_key(r, input->correlations[i].guard),
+            rename_key(r, input->correlations[i].value_version),
+            rename_key(r, input->correlations[i].relation)};
+        i += 1;
+    }
+    out->results = new(relation, input->results.len);
+    i = 0;
+    while (i < input->results.len) {
+        out->results[i] = rename_relation(r, input->results[i]);
+        i += 1;
+    }
+    out->retained = new(relation, input->retained.len);
+    i = 0;
+    while (i < input->retained.len) {
+        out->retained[i] = rename_relation(r, input->retained[i]);
+        i += 1;
+    }
+    out->cases = new(case_record, input->cases.len);
+    i = 0;
+    while (i < input->cases.len) {
+        case_record mut row = input->cases[i];
+        row.key = rename_key(r, row.key);
+        row.guard = rename_key(r, row.guard);
+        row.requirements = rename_keys(r, row.requirements);
+        row.effects = rename_keys(r, row.effects);
+        row.results = rename_keys(r, row.results);
+        row.retained = rename_keys(r, row.retained);
+        row.outcome.guard = rename_key(r, row.outcome.guard);
+        effect_block mut* own block = new(effect_block);
+        block->items = new(ownership_api.ordered_effect, row.outcome.effects.len);
+        u64 mut k = 0;
+        while (k < row.outcome.effects.len) {
+            block->items[k] = rename_ordered(r, row.outcome.effects[k]);
+            k += 1;
+        }
+        row.outcome.effects = block->items[..];
+        block->next = move(r->blocks);
+        r->blocks = move(block);
+        out->cases[i] = row;
+        i += 1;
+    }
+    out->provenance_records = new(provenance, input->provenance_records.len);
+    i = 0;
+    while (i < input->provenance_records.len) {
+        provenance mut row = input->provenance_records[i];
+        row.key = rename_key(r, row.key);
+        row.substitutions = rename_keys(r, row.substitutions);
+        row.witnesses = rename_keys(r, row.witnesses);
+        out->provenance_records[i] = row;
+        i += 1;
+    }
+    out->witnesses = new(ownership_api.witness_link, input->witnesses.len);
+    i = 0;
+    while (i < input->witnesses.len) {
+        ownership_api.witness_link mut row = input->witnesses[i];
+        row.key = rename_key(r, row.key);
+        row.event = rename_key(r, row.event);
+        row.predecessor = rename_key(r, row.predecessor);
+        row.condition = rename_key(r, row.condition);
+        out->witnesses[i] = row;
+        i += 1;
+    }
+}
+
+/// Copies a summary of function `from` with each of its keys under function `to` (D17.15). A
+/// call of a body to itself applies this copy, so the callee frame keeps its locals, values,
+/// and relations apart from the caller keys. Operation positions keep the callee function, so
+/// diagnostics name the callee body. Each copied record costs one W unit.
+fn rename(summary_view* input, ownership_api.function_id from, ownership_api.function_id to,
+    ownership_api.services* svc) summary {
+    context reporting = context{svc, input->operation, input->source, input->event,
+        input->callee_source};
+    // A copy that cannot start has no proof, as a refused charge leaves it.
+    summary mut failed = summary{};
+    failed.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+        input->operation, input->source);
+    failed.residual_effects = true;
+    if (svc == null) { return failed; }
+    failed.proof = complete();
+    u64 count = input->roots.len + input->requirements.len + input->effects.len +
+        input->order.len + input->predicates.len + input->guards.len + input->correlations.len +
+        input->results.len + input->retained.len + input->cases.len +
+        input->provenance_records.len + input->witnesses.len;
+    if (!work(&reporting, &failed.proof, count)) { return failed; }
+    renaming mut r = renaming{.from = from, .to = to, .scratch = ownership_state.empty()};
+    defer free_renaming(&r);
+    renamed_records mut rows = renamed_records{};
+    defer free_renamed(&rows);
+    rename_rows(&r, input, &rows);
+    summary_view renamed = summary_view{rows.roots[..], rows.requirements[..], rows.effects[..],
+        rows.order[..], rows.predicates[..], rows.guards[..], rows.correlations[..],
+        rows.results[..], rows.retained[..], rows.cases[..], rows.provenance_records[..],
+        rows.witnesses[..], input->coverage, input->proof, input->residual_effects,
+        input->operation, input->source, input->event, input->callee_source};
+    return clone(&renamed, svc);
+}

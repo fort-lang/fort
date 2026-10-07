@@ -206,9 +206,8 @@ fn designated_storage(call_context* c, ownership_api.entity_id source, types.nod
 // Binds each callee root to the current facts of this path. Formal identity proves nothing:
 // two formals bound to one source keep one source and one allocation (D17.15).
 fn bind_call(call_context* c, ownership_summary_body.call_site site,
-    ownership_summary_body.call_target target, fir.statement* call,
-    ownership_state.state* facts, call_bindings mut* out) bool {
-    ownership_summary_model.summary_view* summary = target.binding.summary;
+    ownership_summary_body.call_target target, ownership_summary_model.summary_view* summary,
+    fir.statement* call, ownership_state.state* facts, call_bindings mut* out) bool {
     u64 count = summary->roots.len;
     if (count > types.TYPE_MAX_SIZE / sizeof(ownership_calls.source_binding) ||
         !call_work(c, count)) { return false; }
@@ -623,11 +622,19 @@ fn possible_event(void mut* opaque, ownership_api.event_request* req)
     return ownership_api.record_event(wrap->inner, &changed);
 }
 
-// One fort target of a call: its bindings, its request, and its possible cases.
+// The instance of the callee frame of a call of a body to itself.
+u32 FRAME_INSTANCE = 4294967295;
+
+// One fort target of a call: its bindings, its request, and its possible cases. A call of the
+// body to itself owns a renamed copy of the summary.
 struct target_plan {
+    ownership_summary_model.summary renamed;
+    ownership_summary_model.summary_view frame;
     call_bindings bindings;
     ownership_calls.request req;
     ownership_summary_model.context guard;
+    // A provisional target without a possible case. It adds nothing in this round.
+    bool vacuous;
     // A possible case of the target returns normally.
     bool returns;
 }
@@ -636,25 +643,62 @@ fn free_plans(target_plan mut@ plans) void {
     u64 mut i = 0;
     while (i < plans.len) {
         free_bindings(&plans[i].bindings);
+        ownership_summary_model.free(&plans[i].renamed);
         i += 1;
     }
 }
 
 enum plan_result { ready, unresolved, stop }
 
+// A provisional summary at bottom has no case and no residual effect (D17.18).
+fn bottom(ownership_summary_model.summary_view* summary) bool {
+    return ownership_api.successful(summary->proof) && !summary->residual_effects &&
+        summary->cases.len == 0;
+}
+
+// The first provisional call without covering cases names the position of the refusal.
+fn mark_uncovered(call_context* c, ownership_flow.step* s) void {
+    if (c->program->uncovered) { return; }
+    c->program->uncovered = true;
+    c->program->uncovered_operation = s->operation;
+    c->program->uncovered_source = s->source;
+}
+
 // Binds one target and decides each guard of its cases before any case runs. No caller value
-// decides an unbound guard, so the call stays unresolved (D17.18).
+// decides an unbound guard, so the call stays unresolved. A provisional target without a
+// possible case adds nothing in this round. Its possible cases must cover the captured values
+// of the call, or the component cannot publish its summaries (D17.18).
 fn plan_target(call_context* c, ownership_summary_body.call_site site,
     ownership_summary_body.call_target target, fir.statement* call, ownership_flow.step* s,
     ownership_state.state* facts, ownership_api.services* svc, target_plan mut* plan)
     plan_result {
-    ownership_summary_model.summary_view* summary = target.binding.summary;
+    ownership_summary_model.summary_view* mut summary = target.binding.summary;
     if (summary == null) { return plan_result.unresolved; }
+    if (target.binding.provisional && bottom(summary)) {
+        plan->vacuous = true;
+        mark_uncovered(c, s);
+        return plan_result.ready;
+    }
     // A callee without a proof keeps an unknown call. A callee body that failed reported its
     // own error, so the call does not fail this body for it (D17.18).
     if (summary->residual_effects || !ownership_api.successful(summary->proof) ||
         summary->cases.len == 0) { return plan_result.unresolved; }
-    if (!bind_call(c, site, target, call, facts, &plan->bindings)) { return plan_result.stop; }
+    // A call of this body applies its summary under a callee frame: each callee key takes
+    // another function instance, so the callee locals stay apart from this frame (D17.15).
+    if (ownership_keys.function(summary->operation.function, c->in->function.key) == 0) {
+        plan->renamed = ownership_summary_model.rename(summary, c->in->function.key,
+            ownership_api.function_id{c->in->function.key.declaration, FRAME_INSTANCE}, svc);
+        if (c->watch != null && c->watch->refused) {
+            c->program->proof = c->watch->refusal.proof;
+            return plan_result.stop;
+        }
+        if (!ownership_api.successful(plan->renamed.proof)) { return plan_result.unresolved; }
+        plan->frame = ownership_summary_model.view(&plan->renamed);
+        summary = &plan->frame;
+    }
+    if (!bind_call(c, site, target, summary, call, facts, &plan->bindings)) {
+        return plan_result.stop;
+    }
     if (plan->bindings.unknown) { return plan_result.unresolved; }
     plan->bindings.events[0] = ownership_calls.event_binding{s->operation, site.event};
     ownership_api.alias_binding@ no_globals = {};
@@ -686,15 +730,26 @@ fn plan_target(call_context* c, ownership_summary_body.call_site site,
         i += 1;
     }
     // Guards that all fail cover no caller value. They prove no absence of return.
-    if (possible == 0) { return plan_result.unresolved; }
-    return plan_result.ready;
+    if (possible == 0 && !target.binding.provisional) { return plan_result.unresolved; }
+    if (possible == 0) {
+        plan->vacuous = true;
+        mark_uncovered(c, s);
+        return plan_result.ready;
+    }
+    if (target.binding.provisional &&
+        !ownership_calls.covered(&plan->req, &plan->guard, &c->program->proof, false)) {
+        mark_uncovered(c, s);
+    }
+    return ownership_api.successful(c->program->proof) ? plan_result.ready :
+        plan_result.stop;
 }
 
 // Applies the published summary of each fort target at one call (D17.18). Each case whose
 // guard does not fail runs. A proved abort records an abort exit and needs no cleanup. Normal
 // cases join into one continuation. When only aborts run, the path ends. An unresolved target
 // keeps a possible return with its obligations. With several targets, a continuation needs
-// each target to return: otherwise the call stays unresolved.
+// each target that can run to return: otherwise the call stays unresolved. A provisional
+// target without a possible case ends its path in this round only.
 fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut* facts)
     ownership_flow.call_verdict {
     call_context* c = cast(opaque, call_context*);
@@ -727,6 +782,7 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
     target_plan mut@ own plans = new(target_plan, site.targets_len);
     defer del(plans);
     defer free_plans(plans[..]);
+    u64 mut running = 0;
     u64 mut returning = 0;
     u64 mut t = 0;
     while (t < site.targets_len) {
@@ -737,10 +793,13 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
             return verdict;
         }
         if (planned == plan_result.unresolved) { return unresolved_call(c, call, facts); }
-        if (plans[t].returns) { returning += 1; }
+        if (!plans[t].vacuous) {
+            running += 1;
+            if (plans[t].returns) { returning += 1; }
+        }
         t += 1;
     }
-    if (!definite && returning != 0 && returning != site.targets_len) {
+    if (!definite && returning != 0 && returning != running) {
         return unresolved_call(c, call, facts);
     }
     continuation mut kept = continuation{.facts = ownership_state.empty()};
@@ -749,7 +808,7 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
     while (t < site.targets_len) {
         ownership_summary_model.summary_view* summary = plans[t].req.summary;
         u64 mut i = 0;
-        while (i < summary->cases.len) {
+        while (!plans[t].vacuous && i < summary->cases.len) {
             ownership_calls.guard_answer answer = ownership_calls.case_answer(&plans[t].req,
                 &plans[t].guard, &c->program->proof, i);
             if (!ownership_api.successful(c->program->proof)) {
@@ -767,7 +826,12 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
         }
         t += 1;
     }
-    if (kept.normals == 0) { return verdict; }
+    if (kept.normals == 0) {
+        // When each target is a provisional target without a possible case, no execution
+        // reaches past this call in this round (D17.18).
+        if (running == 0) { c->program->vacuous = true; }
+        return verdict;
+    }
     if (!export_call_result(c, call, s, &kept.facts, kept.normals)) {
         verdict.proof = c->program->proof;
         return verdict;
@@ -1444,6 +1508,13 @@ fn publish(ownership_summary_body.body_input* in,
     ownership_summary_model.summary {
     ownership_summary_model.summary mut out = failed(program);
     u64 mut count = observations->count;
+    // Each path ended at a provisional call without a possible case. The member is still at
+    // bottom: it has no case and no residual effect, and it stays private (D17.18).
+    if (count == 0 && !program->call_residual && program->vacuous) {
+        out.proof = program->proof;
+        out.residual_effects = false;
+        return out;
+    }
     if (count == 0 || program->call_residual) {
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
             program->context.operation, program->context.source);
@@ -1527,11 +1598,26 @@ fn publish(ownership_summary_body.body_input* in,
     return ownership_summary_model.clone(&input, in->services);
 }
 
-fn infer_watched(ownership_summary_body.body_input* in, budget_watch* watch)
-    ownership_summary_model.summary {
+// The result of one inference. A recursive component publishes its members only when no
+// member names an uncovered provisional call (D17.18).
+struct inference {
+    ownership_summary_model.summary summary;
+    bool uncovered;
+    ownership_api.operation_position uncovered_operation;
+    ownership_api.source_position uncovered_source;
+    // The first refused charge of the inference.
+    bool refused;
+    ownership_api.proof_status refusal;
+}
+
+fn infer_watched(ownership_summary_body.body_input* in, budget_watch* watch) inference {
+    inference mut out = inference{};
     ownership_summary_body.body_program mut program = ownership_summary_body.extract(in);
     defer ownership_summary_body.free(&program);
-    if (!ownership_api.successful(program.proof)) { return failed(&program); }
+    if (!ownership_api.successful(program.proof)) {
+        out.summary = failed(&program);
+        return out;
+    }
     ownership_flow.program mut flow = ownership_summary_body.flow(in, &program);
     exits mut observations = exits{.context = program.context,
         .proof = ownership_summary_model.complete(), .relations = &program.relations};
@@ -1543,21 +1629,28 @@ fn infer_watched(ownership_summary_body.body_input* in, budget_watch* watch)
     flow.call_handler = call_step;
     ownership_flow.analysis mut solved = ownership_flow.solve(&flow);
     defer ownership_flow.free(&solved);
+    out.uncovered = program.uncovered;
+    out.uncovered_operation = program.uncovered_operation;
+    out.uncovered_source = program.uncovered_source;
     if (solved.failures != 0) {
         program.proof = solved.first_failure;
-        return failed(&program);
+        out.summary = failed(&program);
+        return out;
     }
     if (!ownership_api.successful(observations.proof)) {
         program.proof = observations.proof;
-        return failed(&program);
+        out.summary = failed(&program);
+        return out;
     }
-    return publish(in, &program, &observations);
+    out.summary = publish(in, &program, &observations);
+    return out;
 }
 
-/// Infers the summary of one body. `in->callees` and `in->targets` name the callees.
-/// A callee summary cannot override an unsupported operation in this body.
-/// The inference sees each charge through a watch. A call stops at its first refused charge.
-fn infer(ownership_summary_body.body_input* in) ownership_summary_model.summary {
+/// Infers the summary of one body and reports its uncovered provisional calls.
+/// `in->callees` and `in->targets` name the callees. A callee summary cannot override an
+/// unsupported operation in this body. The inference sees each charge through a watch. A
+/// call stops at its first refused charge.
+fn infer_member(ownership_summary_body.body_input* in) inference {
     if (in->services == null) { return infer_watched(in, null); }
     budget_watch mut watch = budget_watch{.inner = in->services};
     ownership_api.services mut watched = *in->services;
@@ -1565,5 +1658,14 @@ fn infer(ownership_summary_body.body_input* in) ownership_summary_model.summary 
     watched.budget = watched_charge;
     ownership_summary_body.body_input mut input = *in;
     input.services = &watched;
-    return infer_watched(&input, &watch);
+    inference mut out = infer_watched(&input, &watch);
+    out.refused = watch.refused;
+    out.refusal = watch.refusal.proof;
+    return out;
+}
+
+/// Infers the summary of one body. `in->callees` and `in->targets` name the callees.
+fn infer(ownership_summary_body.body_input* in) ownership_summary_model.summary {
+    inference mut out = infer_member(in);
+    return move(out.summary);
 }

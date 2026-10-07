@@ -20,9 +20,12 @@ u64 U64_MAX = 18446744073709551615;
 
 // A published callee. The checked symbol names its declaration.
 // The summary stays immutable and live through each inference that reads it.
+// A provisional summary belongs to the recursive component that the solver infers now. It
+// proves neither absent effects nor absent return (D17.18).
 struct callee_binding {
     ast.sym* symbol;
     ownership_summary_model.summary_view* summary;
+    bool provisional;
 }
 
 // The targets of one call statement from the call graph (D17.18). A residual fort target
@@ -129,6 +132,13 @@ struct body_program {
     // A call changed caller-visible state that this summary does not export.
     // Flow still checks the body. The published summary stays incomplete.
     bool call_residual;
+    // A call of a provisional target that has no possible case, or whose possible cases do
+    // not cover the captured values. The first such call names its position.
+    bool uncovered;
+    ownership_api.operation_position uncovered_operation;
+    ownership_api.source_position uncovered_source;
+    // A provisional call ended a path without an exit.
+    bool vacuous;
 }
 
 fn free(body_program mut* out) void {
@@ -216,8 +226,10 @@ fn reject(body_program mut* out, ownership_api.incomplete_reason reason) void {
     out->residual_effects = true;
 }
 
+// A body key never takes the ordinal U32_MAX: the recursive solver keeps it for the event of
+// a stopped computation (`ownership_recursive.stop`).
 fn next(body_program mut* out, ownership_api.entity_kind kind) ownership_api.entity_id {
-    if (!work(out, 1) || out->next_key == U32_MAX) {
+    if (!work(out, 1) || out->next_key >= U32_MAX - 1) {
         reject(out, ownership_api.incomplete_reason.invalid_input);
         return ownership_api.entity_id{};
     }

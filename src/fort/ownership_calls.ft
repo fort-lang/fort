@@ -7,6 +7,7 @@ import ownership_places;
 import ownership_state;
 import ownership_summary_model;
 import ownership_transfer;
+import prim;
 import types;
 
 struct source_binding {
@@ -2384,10 +2385,154 @@ fn case_answer(request* req, ownership_summary_model.context* ctx,
             if (known.value != atom.lower.value) { return guard_answer.fails; }
         } else if (unbound) {
             answer = guard_answer.unbound;
-        } else if (answer == guard_answer.holds) { answer = guard_answer.unknown; }
+        } else {
+            if (answer == guard_answer.holds) { answer = guard_answer.unknown; }
+            // Two atoms that need two values of one caller value cannot both hold.
+            if (conflicting(req, ctx, proof, keys[..k], req->captures[c].actual,
+                atom.lower.value)) { return guard_answer.fails; }
+        }
         k += 1;
     }
     return answer;
+}
+
+// An earlier atom of `keys` needs another exact value of the caller value `actual`.
+fn conflicting(request* req, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, ownership_api.entity_id@ keys,
+    ownership_api.entity_id actual, i64 value) bool {
+    u64 mut k = 0;
+    while (k < keys.len) {
+        ownership_api.predicate_atom atom = guard_atom(req->summary, ctx, proof, keys[k]);
+        u64 c = atom.kind == ownership_api.predicate_kind.equality &&
+            atom.lower.kind == ownership_api.fact_kind.exact ?
+            capture_of(req, ctx, proof, atom.left) : ownership_api.U64_MAX;
+        if (!ownership_api.successful(*proof)) { return false; }
+        if (c != ownership_api.U64_MAX &&
+            ownership_summary_model.same(req->captures[c].actual, actual) &&
+            atom.lower.value != value) { return true; }
+        k += 1;
+    }
+    return false;
+}
+
+// Coverage tries each assignment of 0 and 1 to at most COVERAGE_VALUES captured symbolic
+// bool values (D17.18). A guard atom on any other captured value gives no coverage.
+u64 COVERAGE_VALUES = 6;
+
+// The type of the callee formal that a guard atom names is bool.
+fn boolean_formal(request* req, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, ownership_api.entity_id formal) bool {
+    u64 mut i = 0;
+    while (i < req->summary->roots.len) {
+        if (!ownership_summary_model.work(ctx, proof, 1)) { return false; }
+        ownership_summary_model.symbolic_root row = req->summary->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.by_value_slot &&
+            ownership_summary_model.same(formal, ownership_api.entity_id{row.slot.function,
+                ownership_api.entity_kind.value, row.formal + 1})) {
+            return row.ty != null && row.ty->kind == types.type_kind.k_prim &&
+                row.ty->prim == prim.prim_kind.prim_bool;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// The captured symbolic bool value that one atom of a possible case tests, or U64_MAX when a
+// caller value decides the atom. A new value joins `values`. `overflow` reports an atom that
+// coverage cannot try.
+fn coverage_slot(request* req, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, ownership_api.predicate_atom atom,
+    ownership_api.entity_id mut@ values, u64 mut* used, bool mut* overflow) u64 {
+    u64 c = capture_of(req, ctx, proof, atom.left);
+    if (c == ownership_api.U64_MAX) { *overflow = true; return ownership_api.U64_MAX; }
+    capture_binding capture = req->captures[c];
+    if (capture.value.kind == ownership_api.fact_kind.exact ||
+        caller_value(req, ctx, proof, capture.actual).kind == ownership_api.fact_kind.exact) {
+        return ownership_api.U64_MAX;
+    }
+    if (!boolean_formal(req, ctx, proof, atom.left) ||
+        (atom.lower.value != 0 && atom.lower.value != 1)) {
+        *overflow = true;
+        return ownership_api.U64_MAX;
+    }
+    u64 mut v = 0;
+    while (v < *used && !ownership_summary_model.same(values[v], capture.actual)) { v += 1; }
+    if (v == *used) {
+        if (*used >= values.len) { *overflow = true; return ownership_api.U64_MAX; }
+        values[v] = capture.actual;
+        *used += 1;
+    }
+    return v;
+}
+
+// One possible case as a pattern over the captured values: bit v of `mask` marks an atom on
+// value v, and bit v of `value` gives the value that it needs.
+struct coverage_pattern {
+    u64 mask;
+    u64 value;
+}
+
+/// True when the possible cases of a call cover each value of its captured symbolic
+/// arguments (D17.18). `returns_only` keeps the normal cases alone. A case that holds covers
+/// each value. A case whose guard keeps an atom that no caller value decides covers only the
+/// value of that atom. A call without such a case, or an atom that coverage cannot try, has
+/// no coverage.
+fn covered(request* req, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, bool returns_only) bool {
+    ownership_api.entity_id[COVERAGE_VALUES] mut values = {};
+    u64 mut used = 0;
+    bool mut overflow = false;
+    if (req->summary->cases.len > types.TYPE_MAX_SIZE / sizeof(coverage_pattern) ||
+        !ownership_summary_model.work(ctx, proof, req->summary->cases.len)) { return false; }
+    coverage_pattern mut@ own patterns = new(coverage_pattern, req->summary->cases.len);
+    defer del(patterns);
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < req->summary->cases.len) {
+        ownership_summary_model.case_record row = req->summary->cases[i];
+        guard_answer answer = case_answer(req, ctx, proof, i);
+        if (!ownership_api.successful(*proof) || answer == guard_answer.unbound) { return false; }
+        bool counted = !returns_only ||
+            row.outcome.kind == ownership_api.outcome_kind.function_return;
+        if (counted && answer == guard_answer.holds) { return true; }
+        if (counted && answer == guard_answer.unknown) {
+            u64 at = guard_record(req->summary, ctx, proof, row.guard);
+            if (at == ownership_api.U64_MAX) { return false; }
+            ownership_api.entity_id@ keys = req->summary->guards[at].positive;
+            coverage_pattern mut pattern = coverage_pattern{};
+            u64 mut k = 0;
+            while (k < keys.len) {
+                ownership_api.predicate_atom atom = guard_atom(req->summary, ctx, proof,
+                    keys[k]);
+                u64 v = coverage_slot(req, ctx, proof, atom, values[..], &used, &overflow);
+                if (overflow || !ownership_api.successful(*proof)) { return false; }
+                if (v != ownership_api.U64_MAX) {
+                    pattern.mask = pattern.mask | (cast(1, u64) << v);
+                    if (atom.lower.value == 1) {
+                        pattern.value = pattern.value | (cast(1, u64) << v);
+                    }
+                }
+                k += 1;
+            }
+            patterns[count] = pattern;
+            count += 1;
+        }
+        i += 1;
+    }
+    if (count == 0) { return false; }
+    u64 mut chosen = 0;
+    while (chosen < (cast(1, u64) << used)) {
+        bool mut selected = false;
+        i = 0;
+        while (i < count && !selected) {
+            if (!ownership_summary_model.work(ctx, proof, 1)) { return false; }
+            selected = (chosen & patterns[i].mask) == (patterns[i].value & patterns[i].mask);
+            i += 1;
+        }
+        if (!selected) { return false; }
+        chosen += 1;
+    }
+    return true;
 }
 
 // A possible case that the caller cannot decide adds its captured value atoms to the state.
