@@ -906,6 +906,104 @@ fn branch_join() void {
     ownership_flow.free(&result);
 }
 
+// A W refusal stops this function computation. Its entry facts and charged W stay.
+fn canonical_facts_survive_work_failure() void {
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    u64 mut refused = 0;
+    u64 mut limited = 0;
+    u64 mut w = 1;
+    bool mut finished = false;
+    while (!finished) {
+        fixture mut f = fixture{};
+        fir.func* function = open(&f, "let _2: i32;", blocks[..]);
+        ownership_state.state mut entry = ownership_state.empty();
+        ownership_state.append_allocations(&entry, ownership_api.allocation_fact{
+            .key = id(ownership_api.entity_kind.allocation, 1),
+            .validity = ownership_api.validity_kind.live,
+            .count = ownership_api.multiplicity{.one = true}, .obligation = true,
+            .owner = ownership_api.owner_location{.place = slot(2)}});
+        ownership_state.state mut canonical = ownership_state.clone(&entry);
+        f.limits.w = w;
+        assert(ownership_limits.configure(&f.meter, &f.limits));
+        ownership_flow.program mut input = input_of(&f, function, &entry);
+        // One charged step stands in each block, and each step binds its work-failure event.
+        ownership_flow.step[4] mut steps = {};
+        ownership_flow.event_binding[4] mut events = {};
+        u32 mut block = 0;
+        while (block < 4) {
+            steps[block].kind = ownership_flow.step_kind.invalidate_value;
+            steps[block].block = block;
+            steps[block].operation.block = block;
+            events[block] = flow_event(steps[block].operation,
+                ownership_api.event_kind.work_failure, ownership_api.entity_id{}, block + 1);
+            block += 1;
+        }
+        input.steps = steps[..];
+        input.events = events[..];
+        ownership_flow.analysis mut result = ownership_flow.solve(&input);
+        assert(ownership_state.equal(&entry, &canonical));
+        if (result.failures == 0) {
+            finished = true;
+            assert(result.normal_returns > 0 && f.meter.used.w <= w);
+        } else {
+            // A refusal at an operation without a bound event reports its missing map.
+            ownership_api.incomplete_reason reason = result.first_failure.terminal.reason;
+            assert(!ownership_api.successful(result.first_failure) && f.meter.used.w == w);
+            assert(reason == ownership_api.incomplete_reason.work_limit ||
+                reason == ownership_api.incomplete_reason.missing_correspondence);
+            if (reason == ownership_api.incomplete_reason.work_limit) {
+                assert(result.first_failure.terminal.limit.bound == w);
+                limited += 1;
+            }
+            refused += 1;
+        }
+        ownership_flow.free(&result);
+        ownership_state.free(&canonical);
+        ownership_state.free(&entry);
+        close(&f);
+        w += 1;
+        assert(w < 256);
+    }
+    assert(refused > 1 && limited > 0);
+}
+
+// Two paths reach one block. They are two exclusive alternatives: G = 1 widens them into one.
+fn one_alternative_widens() void {
+    fixture mut f = fixture{};
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    f.limits.g = 1;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.edge_fact[2] edge = {
+        ownership_flow.edge_fact{0, 0, id(ownership_api.entity_kind.value, 1), false},
+        ownership_flow.edge_fact{0, 1, id(ownership_api.entity_kind.value, 1), true},
+    };
+    input.edges = edge[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.blocks[3].len == 1 && result.blocks[3].widened);
+    assert(result.blocks[3].paths.len == ownership_state.alternatives_within(1));
+    ownership_flow.free(&result);
+    f.limits.g = 2;
+    assert(ownership_limits.configure(&f.meter, &f.limits));
+    result = ownership_flow.solve(&input);
+    assert(result.failures == 0 && result.blocks[3].len == 2 && !result.blocks[3].widened);
+    ownership_flow.free(&result);
+}
+
 fn null_correlation_after_write() void {
     fixture mut f = fixture{};
     string[4] blocks = {
@@ -2543,6 +2641,8 @@ fn main() i32 {
     zero_constant_edge();
     constant_shared_target();
     branch_join();
+    canonical_facts_survive_work_failure();
+    one_alternative_widens();
     null_correlation_after_write();
     loop_paths();
     early_return();

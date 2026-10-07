@@ -30,7 +30,7 @@ CATEGORY_SCOPES = dict(
             "state",
             "state",
             "state",
-            "computation",
+            "state",
             "call",
             "function",
             "computation",

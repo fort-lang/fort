@@ -11,6 +11,7 @@
 //| retained map keys keep original sources
 //| cleared elements and earlier views
 //| aliased writes and failed updates
+//| guard rows share one meter
 /// Tests dynamic slots, retained sources, and backing replacement.
 import ast;
 import check_env;
@@ -428,6 +429,43 @@ fn unknown_selection() void {
     ownership_state.free(&before);
     ownership_local_env.free(&e);
     print("unknown selection and guarded obligations\n");
+}
+
+// Choice guards are rows of conditions. They add no guarded alternative, so separate choice
+// states on one meter fit G = 1. The result keeps one state for each choice up to its own G.
+fn guard_rows_share_one_meter() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.projection[1] mut a = {};
+    ownership_api.projection[1] mut b = {};
+    ownership_api.place_path left = element(1, 10, 0, a[..]);
+    ownership_api.place_path right = element(1, 11, 1, b[..]);
+    seed_owner(&e, left, 50, 60);
+    seed_owner(&e, right, 51, 61);
+    ownership_limits.meter mut budget = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.g = 1;
+    assert(ownership_limits.configure(&budget, &limits));
+    e.service.budget_context = cast(&budget, void mut*);
+    e.service.budget = ownership_limits.callback;
+    ownership_api.place_path[1] l = {left};
+    ownership_api.place_path[1] r = {right};
+    ownership_regions.choice[2] mut choices = {};
+    choices[0].guard = id(ownership_api.entity_kind.guard, 1);
+    choices[0].source = selection(left, l[..]);
+    choices[0].destination = selection(left, l[..]);
+    choices[1].guard = id(ownership_api.entity_kind.guard, 2);
+    choices[1].source = selection(right, r[..]);
+    choices[1].destination = selection(right, r[..]);
+    ownership_regions.request mut release = req(&e, ownership_regions.action.release_value);
+    release.choices = choices[..];
+    ownership_regions.result mut out = ownership_regions.apply(&e.state, &e.service, &release);
+    assert(ownership_api.successful(out.proof) && out.len == 2 && !out.widened);
+    assert(out.states[0].guards_len == 1 && out.states[1].guards_len == 1);
+    assert(budget.used.g == 0 && budget.used.w > 0);
+    ownership_regions.free(&out);
+    ownership_local_env.free(&e);
+    print("guard rows share one meter\n");
 }
 
 struct history_budget {
@@ -1592,6 +1630,15 @@ fn three_choice_moves() void {
         i += 1;
     }
     ownership_regions.free(&out);
+    // Three choices are three exclusive alternatives: G = 3 keeps them, G = 2 widens them.
+    move.limits.g = 3;
+    out = ownership_regions.apply(&e.state, &e.service, &move);
+    assert(ownership_api.successful(out.proof) && out.len == 3 && !out.widened);
+    ownership_regions.free(&out);
+    move.limits.g = 2;
+    out = ownership_regions.apply(&e.state, &e.service, &move);
+    assert(ownership_api.successful(out.proof) && out.len == 1 && out.widened);
+    ownership_regions.free(&out);
     move.limits.g = 1;
     move.limits.r = 1;
     out = ownership_regions.apply(&e.state, &e.service, &move);
@@ -2066,5 +2113,6 @@ fn main() i32 {
     cleared_element();
     damaged_and_budget();
     aliased_write();
+    guard_rows_share_one_meter();
     return 0;
 }

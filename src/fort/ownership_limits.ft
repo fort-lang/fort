@@ -100,14 +100,15 @@ fn used(ownership_api.used_counts* t, ownership_api.limit_category c) u64 {
     }
 }
 
+// Content categories keep the greatest accepted amount. Work and report counters accumulate.
 fn add(ownership_api.used_counts mut* t, ownership_api.limit_category c, u64 n) void {
     switch (c) {
     case ownership_api.limit_category.d: if (n > t->d) { t->d = n; }
     case ownership_api.limit_category.r: if (n > t->r) { t->r = n; }
     case ownership_api.limit_category.p: if (n > t->p) { t->p = n; }
-    case ownership_api.limit_category.g: t->g += n;
-    case ownership_api.limit_category.h: t->h += n;
-    case ownership_api.limit_category.t: t->t += n;
+    case ownership_api.limit_category.g: if (n > t->g) { t->g = n; }
+    case ownership_api.limit_category.h: if (n > t->h) { t->h = n; }
+    case ownership_api.limit_category.t: if (n > t->t) { t->t = n; }
     case ownership_api.limit_category.e: if (n > t->e) { t->e = n; }
     case ownership_api.limit_category.w: t->w += n;
     case ownership_api.limit_category.v: t->v += n;
@@ -117,6 +118,9 @@ fn add(ownership_api.used_counts mut* t, ownership_api.limit_category c, u64 n) 
 fn precision(ownership_api.limit_category c) bool {
     return c != ownership_api.limit_category.w && c != ownership_api.limit_category.v;
 }
+
+/// Returns true for the categories that count the content of their scope.
+fn content(ownership_api.limit_category c) bool { return precision(c); }
 
 fn invalid(ownership_api.charge_request* req) ownership_api.charge_result {
     ownership_api.charge_result mut out = ownership_api.charge_result{};
@@ -137,7 +141,7 @@ fn valid_request(ownership_api.charge_request* req) bool {
 }
 
 /// Checks each item before it changes a counter. A precision refusal is not a verdict.
-/// D, R, P, and E store their greatest permitted absolute amounts. Other counters accumulate.
+/// A content item names the prospective amount in its scope, never an increment.
 fn try_charge(meter mut* m, ownership_api.charge_request* req) ownership_api.charge_result {
     if (!m->configured || !ownership_api.valid_limits(&m->bounds) ||
         !valid_request(req)) { return invalid(req); }
@@ -146,10 +150,9 @@ fn try_charge(meter mut* m, ownership_api.charge_request* req) ownership_api.cha
         ownership_api.charge_item item = req->items[i];
         u64 count = used(&m->used, item.category);
         u64 max = bound(&m->bounds, item.category);
-        bool retained_amount = item.category == ownership_api.limit_category.r ||
-            item.category == ownership_api.limit_category.p ||
-            item.category == ownership_api.limit_category.e;
-        bool absolute = item.category == ownership_api.limit_category.d || retained_amount;
+        bool retained_amount = content(item.category) &&
+            item.category != ownership_api.limit_category.d;
+        bool absolute = content(item.category);
         bool saturated = retained_amount ? count == ownership_api.U64_MAX :
             !absolute && item.amount > ownership_api.U64_MAX - count;
         bool exceeds = absolute ? saturated || item.amount > max ||

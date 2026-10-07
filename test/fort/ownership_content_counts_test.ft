@@ -1,0 +1,810 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| guard units ok
+//| filling cost ok
+//| shape units ok
+//| count refusals ok
+//| counts match the pairwise reference
+//| sort boundaries ok
+//| content requests ok
+//| joint boundaries ok
+//| raw rows ok
+/// Tests the boundaries of the content count functions and the joint row construction.
+import ownership_api;
+import ownership_combinations;
+import ownership_limits;
+import ownership_raw;
+import ownership_state;
+
+struct fixture { ownership_limits.meter meter; ownership_api.services service; }
+
+fn event(void mut* opaque, ownership_api.event_request* request) ownership_api.event_result {
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+
+fn configure(fixture mut* f, ownership_api.limit_table limits) void {
+    assert(ownership_limits.configure(&f->meter, &limits));
+    f->service.budget_context = cast(&f->meter, void mut*);
+    f->service.budget = ownership_limits.callback;
+    f->service.event = event;
+}
+
+fn production(fixture mut* f) void { configure(f, ownership_limits.production()); }
+
+fn key(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{.function = ownership_api.function_id{
+        .declaration = ownership_api.declaration_id{2, 3}}, .kind = kind, .ordinal = ordinal};
+}
+
+fn place(u32 ordinal) ownership_api.place_path {
+    return ownership_api.place_path{.root = key(ownership_api.entity_kind.slot, ordinal)};
+}
+
+fn fact(u32 slot, u32 version) ownership_api.contents_fact {
+    return ownership_api.contents_fact{.place = place(slot),
+        .kind = ownership_api.contents_kind.reference,
+        .value_version = key(ownership_api.entity_kind.value, version)};
+}
+
+fn link(u32 guard, u32 version, u32 slot) ownership_api.correlation {
+    return ownership_api.correlation{key(ownership_api.entity_kind.guard, guard),
+        key(ownership_api.entity_kind.value, version), place(slot).root};
+}
+
+fn guards(ownership_state.state* s, fixture mut* f, ownership_state.guard_candidate c) u64 {
+    ownership_state.region_measurement measured = ownership_state.guard_units(s, &f->service, c,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(measured.proof));
+    return measured.amount;
+}
+
+fn shapes(ownership_state.state* s, fixture mut* f, ownership_state.shape_candidate c) u64 {
+    ownership_state.region_measurement measured = ownership_state.shape_units(s, &f->service, c,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    assert(ownership_api.successful(measured.proof));
+    return measured.amount;
+}
+
+fn guard_cases() void {
+    fixture mut f = fixture{};
+    production(&f);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_state.guard_candidate none = ownership_state.guard_candidate{};
+    // A count without rows pays no W unit. A count that reads rows pays one.
+    assert(guards(&s, &f, none) == 0 && f.meter.used.w == 0);
+    ownership_state.append_contents(&s, fact(1, 1));
+    // One fact is unconditional.
+    assert(guards(&s, &f, none) == 0 && f.meter.used.w == 1);
+    // A correlation for the same version but another root does not attach to it.
+    ownership_state.append_correlations(&s, link(7, 1, 2));
+    assert(guards(&s, &f, none) == 0);
+    // A correlation that names its version and root makes it a conditional singleton.
+    ownership_api.correlation[1] attach = {link(7, 1, 1)};
+    assert(guards(&s, &f, ownership_state.guard_candidate{.correlations = attach[..]}) == 1);
+    ownership_state.append_correlations(&s, attach[0]);
+    assert(guards(&s, &f, none) == 1);
+    // A second distinct fact at the place makes two alternatives. An equal third adds none.
+    ownership_state.append_contents(&s, fact(1, 2));
+    assert(guards(&s, &f, none) == 2);
+    ownership_state.append_contents(&s, fact(1, 2));
+    assert(guards(&s, &f, none) == 2);
+    // Unconditional facts at other places add none.
+    ownership_state.append_contents(&s, fact(2, 3));
+    ownership_state.append_contents(&s, fact(3, 4));
+    assert(guards(&s, &f, none) == 2);
+    // A strong replacement removes both alternatives and adds one unconditional fact.
+    ownership_api.contents_fact[1] replacement = {fact(1, 9)};
+    ownership_api.place_path[1] slot = {place(1)};
+    assert(guards(&s, &f, ownership_state.guard_candidate{.contents = replacement[..],
+        .places = slot[..], .removed = slot[..]}) == 0);
+    // Copies at places 1 and 2 add a third fact at place 1 and a second at place 2.
+    ownership_api.place_path[2] slots = {place(1), place(2)};
+    assert(guards(&s, &f, ownership_state.guard_candidate{.contents = replacement[..],
+        .places = slots[..]}) == 5);
+    // Without places the candidate adds its own facts at their own places.
+    ownership_api.contents_fact[2] added = {fact(4, 5), fact(4, 6)};
+    assert(guards(&s, &f, ownership_state.guard_candidate{.contents = added[..]}) == 4);
+    // Candidate places without contents add nothing.
+    assert(guards(&s, &f, ownership_state.guard_candidate{.places = slots[..]}) == 2);
+    // Guard rows give no unit of their own.
+    ownership_state.append_guards(&s, ownership_api.guard_fact{
+        .key = key(ownership_api.entity_kind.guard, 7)});
+    assert(guards(&s, &f, none) == 2);
+    // The correlation that names a singleton can stand anywhere among the correlations.
+    ownership_state.state mut spread = ownership_state.empty();
+    defer ownership_state.free(&spread);
+    ownership_state.append_contents(&spread, fact(5, 1));
+    u32[5] versions = {9, 7, 5, 3, 1};
+    u64 mut v = 0;
+    while (v < versions.len) {
+        ownership_state.append_correlations(&spread,
+            link(8, versions[v], versions[v] == 1 ? 5 : 6));
+        v += 1;
+    }
+    assert(guards(&spread, &f, none) == 1);
+    println("guard units ok");
+}
+
+// The W of a mutation was that of the region measurement plus the check. The guard count adds
+// one unit for each 64 facts it reads. For n scalar facts at separate places, the region
+// measurement and the check cost n * (n - 1) / 2 + 3 * n before: 5250 for 100, 31875 for 250.
+// The guard count adds 136 and 616: the fill costs 5386 and 32491.
+fn filling_cost() void {
+    u64[2] sizes = {100, 250};
+    u64 mut i = 0;
+    while (i < sizes.len) {
+        fixture mut f = fixture{};
+        production(&f);
+        ownership_state.state mut s = ownership_state.empty();
+        u64 n = sizes[i];
+        u64 mut k = 0;
+        while (k < n) {
+            ownership_api.contents_fact mut value = fact(cast(k + 1, u32), cast(k + 1, u32));
+            value.kind = ownership_api.contents_kind.scalar;
+            assert(ownership_state.add_contents(&s, &f.service, value,
+                ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+            k += 1;
+        }
+        u64 before = n * (n - 1) / 2 + 3 * n;
+        u64 mut counted = 0;
+        u64 mut rows = 1;
+        while (rows <= n) { counted += (rows + 63) / 64; rows += 1; }
+        assert(counted == (n == 100 ? 136 : 616));
+        assert(f.meter.used.w == before + counted);
+        assert(f.meter.used.g == 0 && s.contents_len == n);
+        ownership_state.free(&s);
+        i += 1;
+    }
+    // A count of 64 rows pays one unit; 65 rows pay two. Shape rows pay in the same way.
+    u64[3] edges = {64, 65, 128};
+    u64[3] units = {1, 2, 2};
+    i = 0;
+    while (i < edges.len) {
+        fixture mut f = fixture{};
+        production(&f);
+        ownership_state.state mut s = ownership_state.empty();
+        u64 mut k = 0;
+        while (k < edges[i]) {
+            ownership_state.append_edges(&s, ownership_api.graph_edge{
+                .key = key(ownership_api.entity_kind.relation, cast(k + 1, u32))});
+            ownership_state.append_contents(&s, fact(cast(k + 1, u32), 1));
+            k += 1;
+        }
+        assert(shapes(&s, &f, ownership_state.shape_candidate{}) == edges[i]);
+        assert(f.meter.used.w == units[i]);
+        assert(guards(&s, &f, ownership_state.guard_candidate{}) == 0);
+        assert(f.meter.used.w == 2 * units[i]);
+        ownership_state.free(&s);
+        i += 1;
+    }
+    println("filling cost ok");
+}
+
+fn template(u32 ordinal, u64 parameters, u64 clauses, u64 descendants,
+    ownership_api.entity_id mut@ entries) ownership_api.shape_description {
+    ownership_api.shape_description mut out = ownership_api.shape_description{
+        .key = key(ownership_api.entity_kind.template, ordinal)};
+    u64 mut i = 0;
+    while (i < entries.len) {
+        entries[i] = key(ownership_api.entity_kind.allocation, cast(i + 1, u32));
+        i += 1;
+    }
+    out.parameters = entries[0..parameters];
+    out.clauses = entries[parameters..parameters + clauses];
+    out.descendants = entries[parameters + clauses..parameters + clauses + descendants];
+    return out;
+}
+
+fn shape_cases() void {
+    fixture mut f = fixture{};
+    production(&f);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_state.shape_candidate none = ownership_state.shape_candidate{};
+    assert(shapes(&s, &f, none) == 0 && f.meter.used.w == 0);
+    ownership_api.graph_edge mut edge = ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 1),
+        .to = key(ownership_api.entity_kind.graph_node, 2)};
+    ownership_state.append_edges(&s, edge);
+    assert(shapes(&s, &f, none) == 1);
+    // An equal edge is one entry. The same key with another endpoint is a second entry.
+    ownership_state.append_edges(&s, edge);
+    assert(shapes(&s, &f, none) == 1);
+    edge.to.ordinal = 3;
+    ownership_state.append_edges(&s, edge);
+    assert(shapes(&s, &f, none) == 2);
+    // A template counts its key and each parameter, clause, and descendant.
+    ownership_api.entity_id[6] mut entries = {};
+    ownership_api.shape_description full = template(4, 2, 1, 3, entries[..]);
+    ownership_api.shape_description[1] added = {full};
+    assert(shapes(&s, &f, ownership_state.shape_candidate{.shapes = added[..]}) == 9);
+    ownership_state.append_shapes(&s, full);
+    assert(shapes(&s, &f, none) == 9);
+    ownership_state.append_shapes(&s, full);
+    assert(shapes(&s, &f, none) == 9);
+    ownership_api.entity_id[1] mut one = {};
+    ownership_api.shape_description bare = template(5, 0, 0, 0, one[0..0]);
+    ownership_api.graph_edge[1] more = {ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 9)}};
+    ownership_api.shape_description[1] extra = {bare};
+    assert(shapes(&s, &f, ownership_state.shape_candidate{.edges = more[..],
+        .shapes = extra[..]}) == 11);
+    // A candidate edge equal to a retained edge adds nothing.
+    ownership_api.graph_edge[1] same = {s.edges[0]};
+    assert(shapes(&s, &f, ownership_state.shape_candidate{.edges = same[..]}) == 9);
+    // Graph nodes give no unit.
+    ownership_state.append_nodes(&s, ownership_api.graph_node{
+        .key = key(ownership_api.entity_kind.graph_node, 2)});
+    assert(shapes(&s, &f, none) == 9);
+    // An equal edge or template that stands after other keys is still one entry.
+    ownership_state.state mut apart = ownership_state.empty();
+    defer ownership_state.free(&apart);
+    ownership_api.graph_edge[3] spaced = {
+        ownership_api.graph_edge{.key = key(ownership_api.entity_kind.relation, 5)},
+        ownership_api.graph_edge{.key = key(ownership_api.entity_kind.relation, 1)},
+        ownership_api.graph_edge{.key = key(ownership_api.entity_kind.relation, 5)}};
+    u64 mut i = 0;
+    while (i < spaced.len) { ownership_state.append_edges(&apart, spaced[i]); i += 1; }
+    ownership_api.shape_description[3] spread = {bare, full, bare};
+    assert(shapes(&apart, &f, ownership_state.shape_candidate{.shapes = spread[..]}) == 10);
+    println("shape units ok");
+}
+
+fn count_refusals() void {
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_state.append_contents(&s, fact(1, 1));
+    ownership_state.append_contents(&s, fact(1, 2));
+    ownership_state.append_edges(&s, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 1)});
+    ownership_state.append_edges(&s, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 2)});
+    ownership_state.state mut before = ownership_state.clone(&s);
+    defer ownership_state.free(&before);
+    // An exhausted meter stops the count with a work limit and no amount. One unit suffices.
+    u64 mut kind = 0;
+    while (kind < 2) {
+        u64 mut w = 1;
+        while (w <= 2) {
+            fixture mut f = fixture{};
+            ownership_api.limit_table mut limits = ownership_limits.production();
+            limits.w = 2;
+            configure(&f, limits);
+            f.meter.used.w = 2 - w + 1;
+            ownership_state.region_measurement measured = kind == 0 ?
+                ownership_state.guard_units(&s, &f.service, ownership_state.guard_candidate{},
+                    ownership_api.work_kind.join, ownership_api.operation_position{},
+                    ownership_api.source_position{}) :
+                ownership_state.shape_units(&s, &f.service, ownership_state.shape_candidate{},
+                    ownership_api.work_kind.widening, ownership_api.operation_position{},
+                    ownership_api.source_position{});
+            assert(ownership_state.equal(&s, &before));
+            if (w == 2) {
+                assert(ownership_api.successful(measured.proof));
+                assert(measured.amount == 2 && f.meter.used.w == 2);
+            } else {
+                assert(measured.amount == 0 && f.meter.used.w == 2);
+                assert(measured.proof.terminal.reason ==
+                    ownership_api.incomplete_reason.work_limit);
+                assert(measured.proof.terminal.limit.work == (kind == 0 ?
+                    ownership_api.work_kind.join : ownership_api.work_kind.widening));
+            }
+            w += 1;
+        }
+        kind += 1;
+    }
+    // A state without complete proof counts nothing and returns its own status.
+    fixture mut f = fixture{};
+    production(&f);
+    ownership_state.state mut unknown = ownership_state.unknown();
+    defer ownership_state.free(&unknown);
+    ownership_state.region_measurement measured = ownership_state.guard_units(&unknown,
+        &f.service, ownership_state.guard_candidate{}, ownership_api.work_kind.join,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!ownership_api.successful(measured.proof) && measured.amount == 0);
+    assert(f.meter.used.w == 0);
+    println("count refusals ok");
+}
+
+// A deterministic generator of small states with repeated places, versions, and links.
+struct generator { u64 seed; }
+
+// Park-Miller: each product stays below 2^47, so checked arithmetic never traps.
+fn next(generator mut* g, u64 range) u64 {
+    g->seed = g->seed * 48271 % 2147483647;
+    return g->seed % range;
+}
+
+fn reference_fact(ownership_state.state* s, ownership_state.guard_candidate* c, u64 index,
+    ownership_api.contents_fact mut* out) bool {
+    return ownership_state.guard_fact_at(s, c, index, out);
+}
+
+// The pairwise count that guard_units replaced: every distinct fact with a distinct peer at its
+// place gives one unit; a fact without a peer gives one when a correlation names it.
+fn reference_guards(ownership_state.state* s, ownership_state.guard_candidate* c) u64 {
+    u64 total = s->contents_len + ownership_state.guard_added(c);
+    u64 mut units = 0;
+    u64 mut k = 0;
+    while (k < total) {
+        ownership_api.contents_fact mut fact = ownership_api.contents_fact{};
+        if (!reference_fact(s, c, k, &fact)) { k += 1; continue; }
+        bool mut repeated = false;
+        bool mut peer = false;
+        u64 mut t = 0;
+        while (t < total) {
+            ownership_api.contents_fact mut other = ownership_api.contents_fact{};
+            if (t != k && reference_fact(s, c, t, &other) &&
+                ownership_state.same_place(other.place, fact.place)) {
+                bool equal = ownership_state.same_contents(other, fact);
+                if (equal && t < k) { repeated = true; }
+                if (!equal) { peer = true; }
+            }
+            t += 1;
+        }
+        if (!repeated) {
+            bool mut guarded = peer;
+            u64 links = s->correlations_len + c->correlations.len;
+            u64 mut i = 0;
+            while (!guarded && i < links) {
+                ownership_api.correlation link = i < s->correlations_len ? s->correlations[i] :
+                    c->correlations[i - s->correlations_len];
+                guarded = ownership_state.same_entity(link.value_version, fact.value_version) &&
+                    ownership_state.same_entity(link.relation, fact.place.root);
+                i += 1;
+            }
+            if (guarded) { units += 1; }
+        }
+        k += 1;
+    }
+    return units;
+}
+
+fn reference_shapes(ownership_state.state* s) u64 {
+    u64 mut units = 0;
+    u64 mut k = 0;
+    while (k < s->edges_len) {
+        bool mut repeated = false;
+        u64 mut t = 0;
+        while (t < k) {
+            if (ownership_state.same_edge(s->edges[t], s->edges[k])) { repeated = true; }
+            t += 1;
+        }
+        if (!repeated) { units += 1; }
+        k += 1;
+    }
+    k = 0;
+    while (k < s->shapes_len) {
+        bool mut repeated = false;
+        u64 mut t = 0;
+        while (t < k) {
+            if (ownership_state.same_shape(s->shapes[t], s->shapes[k])) { repeated = true; }
+            t += 1;
+        }
+        if (!repeated) { units += ownership_state.shape_entries(s->shapes[k]); }
+        k += 1;
+    }
+    return units;
+}
+
+// Sizes from 0 to 39 use the insertion sort; every fifth round uses 60 to 139 rows, which
+// cross the 64-row limit into the merge sort. The sizes cover empty, odd, and power-of-two
+// merge widths, all-equal keys, and keys in reverse order.
+fn counts_match_reference() void {
+    fixture mut f = fixture{};
+    production(&f);
+    generator mut g = generator{12345};
+    ownership_api.entity_id[3] mut entries = {};
+    u64 mut round = 0;
+    while (round < 200) {
+        ownership_state.state mut s = ownership_state.empty();
+        u64 facts = round % 5 == 4 ? 60 + round % 80 : round % 40;
+        u64 places = 1 + next(&g, 4);
+        u64 mut i = 0;
+        while (i < facts) {
+            u32 slot = cast(round % 7 == 0 ? places - i % places : 1 + next(&g, places), u32);
+            ownership_api.contents_fact mut value = fact(slot, cast(1 + next(&g, 3), u32));
+            if (next(&g, 2) == 0) { value.kind = ownership_api.contents_kind.scalar; }
+            ownership_state.append_contents(&s, value);
+            // Large rounds hold more than 64 correlations, so their binary search reads a merge.
+            if (facts > 64 || next(&g, 3) == 0) {
+                ownership_state.append_correlations(&s, link(cast(next(&g, 4), u32),
+                    cast(1 + next(&g, 3), u32), cast(1 + next(&g, places), u32)));
+            }
+            if (next(&g, 4) == 0) {
+                ownership_state.append_edges(&s, ownership_api.graph_edge{
+                    .key = key(ownership_api.entity_kind.relation, cast(1 + next(&g, 3), u32)),
+                    .to = key(ownership_api.entity_kind.graph_node, cast(next(&g, 2), u32))});
+            }
+            if (next(&g, 6) == 0) {
+                ownership_state.append_shapes(&s, template(cast(1 + next(&g, 3), u32),
+                    next(&g, 2), next(&g, 2), 0, entries[..]));
+            }
+            i += 1;
+        }
+        ownership_api.contents_fact[1] added = {fact(1, cast(1 + next(&g, 3), u32))};
+        ownership_api.place_path[2] targets = {place(1), place(cast(1 + next(&g, places), u32))};
+        ownership_api.correlation[1] attach = {link(9, added[0].value_version.ordinal, 1)};
+        ownership_state.guard_candidate[4] candidates = {
+            ownership_state.guard_candidate{},
+            ownership_state.guard_candidate{.contents = added[..]},
+            ownership_state.guard_candidate{.contents = added[..], .places = targets[..],
+                .removed = targets[0..1]},
+            ownership_state.guard_candidate{.contents = added[..], .places = targets[1..2],
+                .correlations = attach[..]}};
+        u64 mut c = 0;
+        while (c < candidates.len) {
+            assert(guards(&s, &f, candidates[c]) == reference_guards(&s, &candidates[c]));
+            c += 1;
+        }
+        assert(shapes(&s, &f, ownership_state.shape_candidate{}) == reference_shapes(&s));
+        ownership_state.free(&s);
+        round += 1;
+    }
+    println("counts match the pairwise reference");
+}
+
+// A count sorts up to 64 rows by insertion in a fixed array and more rows by a merge with heap
+// scratch. Each size puts its rows in reverse key order, and the last row repeats the key of the
+// first row, so the sort must move the last row past every other row.
+fn sort_boundaries() void {
+    u32[6] sizes = {3, 63, 64, 65, 66, 129};
+    ownership_api.entity_id[1] mut nothing = {};
+    ownership_api.shape_description bare = template(1, 0, 0, 0, nothing[0..0]);
+    u64 mut i = 0;
+    while (i < sizes.len) {
+        fixture mut f = fixture{};
+        production(&f);
+        ownership_state.state mut s = ownership_state.empty();
+        u32 n = sizes[i];
+        u32 middle = n / 2;
+        u32 mut k = 0;
+        while (k < n) {
+            // Rows 0 and n - 1 use key n. Each other row k uses key n - k.
+            u32 ordinal = k == n - 1 ? n : n - k;
+            ownership_state.append_contents(&s, fact(ordinal, k + 1));
+            // Only the last correlation names a fact: the fact of the middle row.
+            ownership_state.append_correlations(&s, k == n - 1 ?
+                link(1, middle + 1, n - middle) : link(1, 1000 + n - k, n - k));
+            ownership_state.append_edges(&s, ownership_api.graph_edge{
+                .key = key(ownership_api.entity_kind.relation, ordinal)});
+            ownership_api.shape_description mut shape = bare;
+            shape.key.ordinal = ordinal;
+            ownership_state.append_shapes(&s, shape);
+            k += 1;
+        }
+        // Place n holds two distinct facts, and the middle fact is a conditional singleton.
+        ownership_state.guard_candidate none = ownership_state.guard_candidate{};
+        assert(guards(&s, &f, none) == 3 && reference_guards(&s, &none) == 3);
+        // A candidate fact at the free place 1 adds one row and no unit: 64 rows become 65.
+        ownership_api.contents_fact[1] added = {fact(1, n + 1)};
+        ownership_state.guard_candidate one =
+            ownership_state.guard_candidate{.contents = added[..]};
+        assert(guards(&s, &f, one) == 3 && reference_guards(&s, &one) == 3);
+        // The last edge and the last template repeat the first, so each sort keeps n - 1 keys.
+        u64 expected = 2 * cast(n, u64) - 2;
+        assert(shapes(&s, &f, ownership_state.shape_candidate{}) == expected);
+        assert(reference_shapes(&s) == expected);
+        ownership_state.free(&s);
+        i += 1;
+    }
+    println("sort boundaries ok");
+}
+
+fn content_requests() void {
+    fixture mut f = fixture{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.g = 1;
+    configure(&f, limits);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    // G and H have count functions. A direct request for them is invalid input.
+    ownership_api.limit_category[3] direct = {ownership_api.limit_category.g,
+        ownership_api.limit_category.h, ownership_api.limit_category.t};
+    u64 mut i = 0;
+    while (i < direct.len) {
+        ownership_api.mutation_result denied = ownership_state.require_charge(&s, &f.service,
+            direct[i], 1, ownership_api.operation_position{}, ownership_api.source_position{});
+        assert(!denied.applied && !denied.precision_lost);
+        assert(denied.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+        i += 1;
+    }
+    // A correlation turns a singleton into one guarded alternative. A second one adds no unit.
+    assert(ownership_state.add_contents(&s, &f.service, fact(1, 1),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(f.meter.used.g == 0);
+    assert(ownership_state.add_correlation(&s, &f.service, link(3, 1, 1),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(f.meter.used.g == 1);
+    assert(ownership_state.add_correlation(&s, &f.service, link(4, 1, 1),
+        ownership_api.operation_position{}, ownership_api.source_position{}).applied);
+    assert(f.meter.used.g == 1 && s.correlations_len == 2);
+    // A second fact at the place makes two alternatives above G = 1.
+    ownership_state.state mut before = ownership_state.clone(&s);
+    defer ownership_state.free(&before);
+    ownership_api.mutation_result refused = ownership_state.add_contents(&s, &f.service,
+        fact(1, 2), ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(!refused.applied && refused.precision_lost && ownership_state.equal(&s, &before));
+    assert(refused.loss.category == ownership_api.limit_category.g);
+    // A saturated content counter refuses without wrapping.
+    f.meter.used.g = ownership_api.U64_MAX;
+    f.meter.bounds.g = ownership_api.U64_MAX;
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.g, ownership_api.limit_scope.state, 1}};
+    ownership_api.charge_request req = ownership_api.charge_request{.items = item[..]};
+    ownership_api.charge_result saturated = ownership_limits.try_charge(&f.meter, &req);
+    assert(!saturated.allowed && saturated.limit.saturated);
+    assert(f.meter.used.g == ownership_api.U64_MAX);
+    println("content requests ok");
+}
+
+fn query(fixture mut* f) ownership_combinations.query {
+    return ownership_combinations.query{.services = &f->service,
+        .work = ownership_api.work_kind.substitution,
+        .limits = ownership_combinations.defaults()};
+}
+
+fn number(u64 value) ownership_combinations.key_component {
+    return ownership_combinations.key_component{
+        .kind = ownership_combinations.component_kind.unsigned_number, .unsigned_value = value};
+}
+
+fn decision(u64 identity, ownership_combinations.key_component mut@ parts)
+    ownership_combinations.variable {
+    parts[0] = number(identity);
+    return ownership_combinations.variable{
+        .identity = ownership_combinations.semantic_key{parts[0..1]},
+        .kind = ownership_combinations.predicate_kind.opaque};
+}
+
+// A context of one binding for subject `subject`, with one row for each payload and condition.
+fn context(u64 subject, u64@ payloads, ownership_combinations.condition@ conditions,
+    ownership_combinations.query* req) ownership_combinations.map {
+    ownership_combinations.candidate mut out = ownership_combinations.candidate{};
+    out.prospective = ownership_combinations.start(req);
+    ownership_combinations.key_component[1] who = {number(subject)};
+    u64 mut i = 0;
+    while (i < payloads.len) {
+        ownership_combinations.key_component[1] what = {number(payloads[i])};
+        ownership_combinations.binding[1] row = {ownership_combinations.binding{1,
+            ownership_combinations.semantic_key{who[..]},
+            ownership_combinations.semantic_key{what[..]}}};
+        assert(ownership_combinations.include_input(&out.prospective, &conditions[i].store, req));
+        u64 root = ownership_combinations.import_root(&out.prospective, &conditions[i].store,
+            conditions[i].root, req);
+        ownership_combinations.insert_row(&out.prospective, row[..], root, req);
+        i += 1;
+    }
+    ownership_combinations.finish(&out, req);
+    assert(out.exact);
+    return move(out.prospective);
+}
+
+fn joint_boundaries() void {
+    fixture mut f = fixture{};
+    production(&f);
+    ownership_combinations.query req = query(&f);
+    ownership_combinations.map@ nothing = {};
+    // No context gives one unconditional empty row and no G request.
+    ownership_combinations.joint mut rows = ownership_combinations.joint_rows(nothing, &req);
+    assert(ownership_api.successful(rows.proof) && rows.rows.g == 0);
+    assert(rows.rows.prospective.rows_len == 1 && rows.peak == 0 && f.meter.used.g == 0);
+    ownership_combinations.free_joint(&rows);
+    ownership_combinations.condition mut truth = ownership_combinations.truth(true, &req);
+    defer ownership_combinations.free_condition(&truth);
+    ownership_combinations.key_component[1] mut x_parts = {};
+    ownership_combinations.key_component[1] mut y_parts = {};
+    ownership_combinations.key_component[1] mut z_parts = {};
+    ownership_combinations.condition[2] mut x = {
+        ownership_combinations.positive(decision(1, x_parts[..]), &req),
+        ownership_combinations.negative(decision(1, x_parts[..]), &req)};
+    ownership_combinations.condition[2] mut y = {
+        ownership_combinations.positive(decision(2, y_parts[..]), &req),
+        ownership_combinations.negative(decision(2, y_parts[..]), &req)};
+    ownership_combinations.condition[1] mut z = {
+        ownership_combinations.positive(decision(3, z_parts[..]), &req)};
+    defer ownership_combinations.free_condition(&x[0]);
+    defer ownership_combinations.free_condition(&x[1]);
+    defer ownership_combinations.free_condition(&y[0]);
+    defer ownership_combinations.free_condition(&y[1]);
+    defer ownership_combinations.free_condition(&z[0]);
+    u64[2] two = {10, 20};
+    u64[1] single = {30};
+    ownership_combinations.condition[1] mut always = {ownership_combinations.truth(true, &req)};
+    defer ownership_combinations.free_condition(&always[0]);
+    // Two unconditional contexts give one combined unconditional row: G = 0.
+    ownership_combinations.map[2] mut plain = {context(1, single[..], always[..], &req),
+        context(2, single[..], always[..], &req)};
+    rows = ownership_combinations.joint_rows(plain[..], &req);
+    assert(ownership_api.successful(rows.proof) && rows.rows.g == 0 && rows.peak == 1);
+    assert(rows.rows.prospective.rows[0].bindings.len == 2);
+    ownership_combinations.free_joint(&rows);
+    ownership_combinations.free(&plain[0]);
+    ownership_combinations.free(&plain[1]);
+    // One unconditional and one conditional context keep the conditional decisions.
+    ownership_combinations.map[2] mut mixed = {context(1, single[..], always[..], &req),
+        context(2, two[..], x[..], &req)};
+    rows = ownership_combinations.joint_rows(mixed[..], &req);
+    assert(ownership_api.successful(rows.proof) && rows.rows.g == 2 && f.meter.used.g == 2);
+    ownership_combinations.free_joint(&rows);
+    ownership_combinations.free(&mixed[0]);
+    ownership_combinations.free(&mixed[1]);
+    // An intermediate above G refuses, although the third context would leave one row.
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.g = 3;
+    configure(&f, limits);
+    ownership_combinations.map[3] mut three = {context(1, two[..], x[..], &req),
+        context(2, two[..], y[..], &req), context(3, single[..], z[..], &req)};
+    rows = ownership_combinations.joint_rows(three[..], &req);
+    assert(!ownership_api.successful(rows.proof));
+    assert(rows.proof.terminal.limit.category == ownership_api.limit_category.g);
+    assert(rows.proof.terminal.limit.attempted == 4 && rows.peak == 4);
+    assert(rows.rows.prospective.rows_len == 0 && rows.rows.prospective.bytes == 0);
+    ownership_combinations.free_joint(&rows);
+    // A context without a feasible alternative leaves no joint row and no G request.
+    ownership_combinations.condition[1] mut never = {ownership_combinations.truth(false, &req)};
+    defer ownership_combinations.free_condition(&never[0]);
+    ownership_combinations.map[2] mut dead = {context(1, two[..], x[..], &req),
+        context(2, single[..], never[..], &req)};
+    production(&f);
+    rows = ownership_combinations.joint_rows(dead[..], &req);
+    assert(ownership_api.successful(rows.proof) && rows.rows.prospective.rows_len == 0);
+    assert(rows.rows.g == 0 && f.meter.used.g == 2);
+    ownership_combinations.free_joint(&rows);
+    ownership_combinations.free(&dead[0]);
+    ownership_combinations.free(&dead[1]);
+    // Two contexts that bind one subject to different payloads are invalid input.
+    ownership_combinations.map[2] mut clash = {context(1, single[..], always[..], &req),
+        context(1, two[0..1], always[..], &req)};
+    rows = ownership_combinations.joint_rows(clash[..], &req);
+    assert(rows.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    ownership_combinations.free_joint(&rows);
+    ownership_combinations.free(&clash[0]);
+    ownership_combinations.free(&clash[1]);
+    // Each W bound below the full construction stops it with no retained row.
+    u64 mut w = 1;
+    bool mut built = false;
+    while (!built) {
+        limits = ownership_limits.production();
+        limits.w = w;
+        configure(&f, limits);
+        rows = ownership_combinations.joint_rows(three[0..2], &req);
+        if (ownership_api.successful(rows.proof)) {
+            built = true;
+            assert(rows.rows.g == 4);
+        } else {
+            assert(rows.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(rows.rows.prospective.rows_len == 0 && f.meter.used.w == w);
+        }
+        ownership_combinations.free_joint(&rows);
+        w += 1;
+        assert(w < 100000);
+    }
+    ownership_combinations.free(&three[0]);
+    ownership_combinations.free(&three[1]);
+    ownership_combinations.free(&three[2]);
+    println("joint boundaries ok");
+}
+
+fn address(u32 source, u64 alignment, ownership_raw.term@ terms) ownership_raw.address {
+    ownership_raw.expression mut offset = ownership_raw.literal(4);
+    offset.terms = terms;
+    return ownership_raw.address{key(ownership_api.entity_kind.source, source), offset,
+        ownership_raw.literal(0), ownership_raw.literal(8), null, alignment, true};
+}
+
+fn raw_rows(ownership_raw.address@ values, ownership_combinations.condition@ conditions,
+    ownership_combinations.query* req) ownership_combinations.candidate {
+    ownership_raw.result mut raw = ownership_raw.result{};
+    raw.proof.kind = ownership_api.proof_kind.complete;
+    raw.addresses = new(ownership_raw.address, values.len);
+    u64 mut i = 0;
+    while (i < values.len) { raw.addresses[i] = values[i]; i += 1; }
+    ownership_combinations.candidate out = ownership_raw.alternatives(&raw, conditions, 4, req);
+    del(raw.addresses);
+    return out;
+}
+
+fn raw_cases() void {
+    fixture mut f = fixture{};
+    production(&f);
+    ownership_combinations.query req = query(&f);
+    ownership_combinations.key_component[1] mut parts = {};
+    ownership_combinations.condition[2] mut x = {
+        ownership_combinations.positive(decision(1, parts[..]), &req),
+        ownership_combinations.negative(decision(1, parts[..]), &req)};
+    defer ownership_combinations.free_condition(&x[0]);
+    defer ownership_combinations.free_condition(&x[1]);
+    // Terms in another order name the same address. Complementary conditions then merge.
+    ownership_raw.term[2] forward = {
+        ownership_raw.term{key(ownership_api.entity_kind.value, 1), ownership_raw.natural(2)},
+        ownership_raw.term{key(ownership_api.entity_kind.value, 2), ownership_raw.natural(3)}};
+    ownership_raw.term[2] backward = {forward[1], forward[0]};
+    ownership_raw.address[2] same = {address(1, 8, forward[..]), address(1, 8, backward[..])};
+    ownership_combinations.candidate mut merged = raw_rows(same[..], x[..], &req);
+    assert(merged.exact && merged.g == 0 && merged.prospective.rows_len == 1);
+    ownership_combinations.free_candidate(&merged);
+    // Another alignment, coefficient, or source is another payload.
+    ownership_raw.term[2] mut scaled = forward;
+    scaled[1].coefficient = ownership_raw.natural(4);
+    ownership_raw.address[2] aligned = {address(1, 8, forward[..]), address(1, 16, forward[..])};
+    ownership_raw.address[2] weighted = {address(1, 8, forward[..]), address(1, 8, scaled[..])};
+    ownership_raw.address[2] sources = {address(1, 8, forward[..]), address(2, 8, forward[..])};
+    ownership_combinations.candidate mut rows = raw_rows(aligned[..], x[..], &req);
+    assert(rows.exact && rows.g == 2);
+    ownership_combinations.free_candidate(&rows);
+    rows = raw_rows(weighted[..], x[..], &req);
+    assert(rows.exact && rows.g == 2);
+    ownership_combinations.free_candidate(&rows);
+    rows = raw_rows(sources[..], x[..], &req);
+    assert(rows.exact && rows.g == 2);
+    ownership_combinations.free_candidate(&rows);
+    // A missing source, an incomplete expression, or a missing condition is invalid input.
+    ownership_raw.address[2] mut broken = sources;
+    broken[1].source = ownership_api.entity_id{};
+    rows = raw_rows(broken[..], x[..], &req);
+    assert(!rows.exact && rows.prospective.proof.terminal.reason ==
+        ownership_api.incomplete_reason.invalid_input);
+    ownership_combinations.free_candidate(&rows);
+    broken = sources;
+    broken[0].end.complete = false;
+    rows = raw_rows(broken[..], x[..], &req);
+    assert(!rows.exact);
+    ownership_combinations.free_candidate(&rows);
+    rows = raw_rows(sources[..], x[0..1], &req);
+    assert(!rows.exact);
+    ownership_combinations.free_candidate(&rows);
+    ownership_raw.address@ empty = {};
+    ownership_combinations.condition@ unused = {};
+    rows = raw_rows(empty, unused, &req);
+    assert(!rows.exact);
+    ownership_combinations.free_candidate(&rows);
+    // A failed raw result supplies no alternative.
+    ownership_raw.result mut failed = ownership_raw.result{};
+    failed.addresses = new(ownership_raw.address, 2);
+    failed.addresses[0] = sources[0];
+    failed.addresses[1] = sources[1];
+    rows = ownership_raw.alternatives(&failed, x[..], 4, &req);
+    assert(!rows.exact);
+    ownership_combinations.free_candidate(&rows);
+    del(failed.addresses);
+    // P counts each captured bound and each distinct relation once.
+    ownership_raw.captured_bound[2] bounds = {
+        ownership_raw.captured_bound{key(ownership_api.entity_kind.value, 1),
+            ownership_raw.natural(0), ownership_raw.natural(4)},
+        ownership_raw.captured_bound{key(ownership_api.entity_kind.value, 2),
+            ownership_raw.natural(1), ownership_raw.natural(9)}};
+    ownership_raw.expression mut left = ownership_raw.literal(0);
+    left.terms = forward[0..1];
+    ownership_raw.expression mut flipped = ownership_raw.literal(0);
+    flipped.terms = backward[..];
+    ownership_raw.relation[4] relations = {
+        ownership_raw.relation{left, ownership_raw.literal(8)},
+        ownership_raw.relation{left, ownership_raw.literal(8)},
+        ownership_raw.relation{flipped, ownership_raw.literal(8)},
+        ownership_raw.relation{ownership_raw.literal(8), left}};
+    ownership_raw.captured_bound@ no_bounds = {};
+    ownership_raw.relation@ no_relations = {};
+    assert(ownership_raw.captured_predicates(no_bounds, no_relations) == 0);
+    assert(ownership_raw.captured_predicates(bounds[..], no_relations) == 2);
+    assert(ownership_raw.captured_predicates(no_bounds, relations[0..2]) == 1);
+    assert(ownership_raw.captured_predicates(bounds[..], relations[..]) == 5);
+    println("raw rows ok");
+}
+
+fn main() i32 {
+    guard_cases();
+    filling_cost();
+    shape_cases();
+    count_refusals();
+    counts_match_reference();
+    sort_boundaries();
+    content_requests();
+    joint_boundaries();
+    raw_cases();
+    return 0;
+}

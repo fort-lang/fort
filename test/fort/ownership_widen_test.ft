@@ -328,6 +328,18 @@ fn guard_bound(ownership_api.services* svc) void {
     bound.g = 1;
     ownership_api.operation_position at = op(50);
     ownership_api.source_position source = ownership_api.source_position{};
+    // One unconditional fact and a guard row hold no guarded alternative.
+    ownership_state.state mut single = ownership_join.widen(&exact, &exact, svc,
+        &bound, at, source);
+    assert(!has_loss(&single, ownership_api.limit_category.g) && single.guards_len == 1);
+    assert(single.contents_len == 1 && !single.contents[0].place.residual);
+    ownership_state.free(&single);
+    // A weak update leaves the old and the guarded new contents: two alternatives above G = 1.
+    ownership_api.contents_fact mut chosen = contents;
+    chosen.value_version = id(ownership_api.entity_kind.value, 51);
+    ownership_state.append_contents(&exact, chosen);
+    ownership_state.append_correlations(&exact, ownership_api.correlation{guard.key,
+        chosen.value_version, chosen.place.root});
     ownership_state.state mut residual = ownership_join.widen(&exact, &exact, svc,
         &bound, at, source);
     assert(has_loss(&residual, ownership_api.limit_category.g));
@@ -379,16 +391,15 @@ fn shape_bound(ownership_api.services* svc) void {
     ownership_api.source_position source = ownership_api.source_position{};
     ownership_state.state mut residual = ownership_join.widen(&exact, &exact, svc,
         &bound, at, source);
+    // The template holds only structural proofs, so the cover drops it and keeps the obligation.
     assert(has_loss(&residual, ownership_api.limit_category.h));
-    assert(residual.allocations[0].obligation && residual.shapes[0].residual);
-    assert(!residual.shapes[0].acyclic_proved && !residual.shapes[0].separation_proved);
+    assert(residual.allocations[0].obligation && residual.shapes_len == 0);
     ownership_state.state mut released = ownership_state.clone(&exact);
     assert(ownership_state.release_member(&released, svc, a.key, true, at, source).applied);
     ownership_state.state mut next = ownership_join.widen(&residual, &released, svc,
         &bound, at, source);
     assert(next.allocations[0].obligation && next.allocations[0].history.len == 1);
-    assert(next.shapes[0].residual && !next.shapes[0].acyclic_proved);
-    assert(has_loss(&next, ownership_api.limit_category.h));
+    assert(next.shapes_len == 0 && has_loss(&next, ownership_api.limit_category.h));
     ownership_state.state mut fixed = ownership_join.widen(&next, &released, svc,
         &bound, at, source);
     assert(ownership_state.equal(&next, &fixed));
@@ -396,6 +407,60 @@ fn shape_bound(ownership_api.services* svc) void {
     ownership_state.free(&next);
     ownership_state.free(&released);
     ownership_state.free(&residual);
+    ownership_state.free(&exact);
+}
+
+// Widening above H drops templates and merges edges. Obligations, node identities, and the
+// borrow sources of contents stay, and the third step reaches a fixed point.
+fn shape_cover_keeps_obligations(ownership_api.services* svc) void {
+    ownership_state.state mut exact = ownership_state.empty();
+    ownership_api.allocation_fact a = allocation(70, 70, 4);
+    ownership_state.append_allocations(&exact, a);
+    ownership_state.append_nodes(&exact, ownership_api.graph_node{
+        .key = id(ownership_api.entity_kind.graph_node, 70), .allocation = a.key,
+        .structural_template = id(ownership_api.entity_kind.template, 70)});
+    ownership_state.append_shapes(&exact, ownership_api.shape_description{
+        .key = id(ownership_api.entity_kind.template, 70), .acyclic_proved = true});
+    u32 mut i = 0;
+    while (i < 3) {
+        ownership_state.append_edges(&exact, ownership_api.graph_edge{
+            .key = id(ownership_api.entity_kind.relation, 71 + i),
+            .from = id(ownership_api.entity_kind.graph_node, 70),
+            .kind = ownership_api.edge_kind.owned});
+        i += 1;
+    }
+    ownership_api.borrow_relation[1] mut borrows = {};
+    borrows[0].key = id(ownership_api.entity_kind.relation, 79);
+    borrows[0].source = id(ownership_api.entity_kind.source, 79);
+    ownership_api.contents_fact mut held = ownership_api.contents_fact{};
+    held.place = place(70);
+    held.kind = ownership_api.contents_kind.reference;
+    held.borrows = borrows[..];
+    ownership_state.append_contents(&exact, held);
+    ownership_api.limit_table mut bound = limits(4, 4);
+    bound.h = 1;
+    ownership_api.operation_position at = op(70);
+    ownership_api.source_position source = ownership_api.source_position{};
+    ownership_state.state mut covered = ownership_join.widen(&exact, &exact, svc, &bound, at,
+        source);
+    assert(covered.shapes_len == 0 && covered.edges_len == 1);
+    assert(covered.edges[0].kind == ownership_api.edge_kind.residual);
+    assert(covered.nodes_len == 1 && covered.nodes[0].allocation.ordinal == 70);
+    assert(covered.nodes[0].residual);
+    assert(covered.nodes[0].structural_template.kind == ownership_api.entity_kind.none);
+    assert(covered.allocations[0].obligation && covered.contents_len == 1);
+    assert(covered.contents[0].borrows.len == 1);
+    assert(covered.contents[0].borrows[0].source.ordinal == 79);
+    // The next step adds the key conflicts with the exact state; the step after it is fixed.
+    ownership_state.state mut next = ownership_join.widen(&covered, &exact, svc, &bound, at,
+        source);
+    assert(next.shapes_len == 0 && next.edges_len == 1 && next.allocations[0].obligation);
+    ownership_state.state mut fixed = ownership_join.widen(&next, &exact, svc, &bound, at,
+        source);
+    assert(ownership_state.equal(&next, &fixed));
+    ownership_state.free(&fixed);
+    ownership_state.free(&next);
+    ownership_state.free(&covered);
     ownership_state.free(&exact);
 }
 
@@ -549,6 +614,7 @@ fn main() i32 {
     predicate_bound(&svc);
     guard_bound(&svc);
     shape_bound(&svc);
+    shape_cover_keeps_obligations(&svc);
     println("R P G H residuals");
     history_fixed_point(&svc);
     println("trimmed history fixed point");

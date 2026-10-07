@@ -1,0 +1,820 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| H-01 edge and template
+//| G-02 two alternatives
+//| RAW-01 teardown
+//| raw alternatives
+//| G insert and remove
+//| H insert and remove
+//| T meter keeps the greatest amount
+//| check and commit
+//| W prefixes keep inputs
+//| service failures keep inputs
+//| tentative cleanup
+//| joint raw rows
+/// Tests limits counted from the content of their scope, and the check-and-commit step.
+import ownership_api;
+import ownership_combinations;
+import ownership_join;
+import ownership_keys;
+import ownership_limits;
+import ownership_local_env;
+import ownership_raw;
+import ownership_raw_env;
+import ownership_state;
+import types;
+
+struct fixture {
+    ownership_limits.meter meter;
+    ownership_api.services service;
+    u64 events;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* request) ownership_api.event_result {
+    u64 mut* count = cast(opaque, u64 mut*);
+    *count += 1;
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+
+fn configure(fixture mut* f, ownership_api.limit_table limits) void {
+    assert(ownership_limits.configure(&f->meter, &limits));
+    f->service.budget_context = cast(&f->meter, void mut*);
+    f->service.budget = ownership_limits.callback;
+    f->service.event_context = cast(&f->events, void mut*);
+    f->service.event = event;
+}
+
+fn key(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{.function = ownership_api.function_id{
+        .declaration = ownership_api.declaration_id{1, 1}}, .kind = kind, .ordinal = ordinal};
+}
+
+fn place(u32 ordinal) ownership_api.place_path {
+    return ownership_api.place_path{.root = key(ownership_api.entity_kind.slot, ordinal)};
+}
+
+fn scalar(u32 slot, u32 version) ownership_api.contents_fact {
+    return ownership_api.contents_fact{.place = place(slot),
+        .kind = ownership_api.contents_kind.scalar,
+        .value_version = key(ownership_api.entity_kind.value, version)};
+}
+
+fn op() ownership_api.operation_position { return ownership_api.operation_position{}; }
+fn at() ownership_api.source_position { return ownership_api.source_position{}; }
+
+fn has_loss(ownership_state.state* s, ownership_api.limit_category category, u64 bound,
+    ownership_api.entity_id relation) bool {
+    u64 mut i = 0;
+    while (i < s->losses_len) {
+        if (s->losses[i].category == category && s->losses[i].bound == bound &&
+            s->losses[i].reason == ownership_api.incomplete_reason.work_limit &&
+            ownership_keys.entity(s->losses[i].relation, relation) == 0) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn any_loss(ownership_state.state* s, ownership_api.limit_category category) bool {
+    u64 mut i = 0;
+    while (i < s->losses_len) {
+        if (s->losses[i].category == category) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn units(ownership_state.state* s, fixture mut* f, bool guards) u64 {
+    ownership_state.region_measurement measured = guards ?
+        ownership_state.guard_units(s, &f->service, ownership_state.guard_candidate{},
+            ownership_api.work_kind.join, op(), at()) :
+        ownership_state.shape_units(s, &f->service, ownership_state.shape_candidate{},
+            ownership_api.work_kind.join, op(), at());
+    assert(ownership_api.successful(measured.proof));
+    return measured.amount;
+}
+
+// Insertion and join count edge 3 and template 4 as two H units. Under H = 1 both lose them.
+fn h01() void {
+    fixture mut f = fixture{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.h = 1;
+    configure(&f, limits);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.graph_edge edge = ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 3), .kind = ownership_api.edge_kind.owned};
+    assert(ownership_state.add_edge(&s, &f.service, edge, op(), at()).applied);
+    assert(f.meter.used.h == 1);
+    ownership_api.shape_description template = ownership_api.shape_description{
+        .key = key(ownership_api.entity_kind.template, 4), .acyclic_proved = true,
+        .separation_proved = true};
+    ownership_state.state mut before = ownership_state.clone(&s);
+    defer ownership_state.free(&before);
+    ownership_api.mutation_result denied = ownership_state.add_shape(&s, &f.service, template,
+        op(), at());
+    assert(!denied.applied && denied.precision_lost);
+    assert(denied.loss.category == ownership_api.limit_category.h && denied.loss.bound == 1);
+    assert(denied.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(denied.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(denied.proof.terminal.limit.category == ownership_api.limit_category.h);
+    assert(denied.proof.terminal.limit.scope == ownership_api.limit_scope.state);
+    assert(denied.proof.terminal.limit.attempted == 2);
+    assert(ownership_state.equal(&s, &before) && f.meter.used.h == 1);
+    limits.h = 2;
+    configure(&f, limits);
+    assert(ownership_state.add_shape(&s, &f.service, template, op(), at()).applied);
+    assert(f.meter.used.h == 2 && units(&s, &f, false) == 2);
+    ownership_api.limit_table mut bound = ownership_limits.production();
+    bound.h = 1;
+    // The join counts the same two units, drops the template, and keeps the edge within H = 1.
+    assert(units(&s, &f, false) == 2);
+    ownership_state.state mut joined = ownership_join.join(&s, &s, &f.service, &bound, op(), at());
+    defer ownership_state.free(&joined);
+    assert(has_loss(&joined, ownership_api.limit_category.h, 1, template.key));
+    assert(!has_loss(&joined, ownership_api.limit_category.h, 1, edge.key));
+    assert(joined.shapes_len == 0 && units(&joined, &f, false) == 1);
+    assert(joined.edges_len == 1 && joined.edges[0].kind == ownership_api.edge_kind.owned);
+    // The loss is a precision loss. Independent facts keep the state proof complete.
+    assert(ownership_api.successful(joined.proof));
+    bound.h = 2;
+    ownership_state.state mut kept = ownership_join.join(&s, &s, &f.service, &bound, op(), at());
+    defer ownership_state.free(&kept);
+    assert(!any_loss(&kept, ownership_api.limit_category.h) && kept.shapes[0].acyclic_proved);
+    assert(kept.edges[0].kind == ownership_api.edge_kind.owned);
+    h_cover_reduces();
+    println("H-01 edge and template");
+}
+
+// The H cover leaves content within H, so later insertions fit again.
+fn h_cover_reduces() void {
+    fixture mut f = fixture{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.h = 2;
+    configure(&f, limits);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.entity_id[2] parameters = {key(ownership_api.entity_kind.allocation, 1),
+        key(ownership_api.entity_kind.allocation, 2)};
+    ownership_state.append_shapes(&s, ownership_api.shape_description{
+        .key = key(ownership_api.entity_kind.template, 8), .parameters = parameters[..],
+        .acyclic_proved = true});
+    ownership_state.append_nodes(&s, ownership_api.graph_node{
+        .key = key(ownership_api.entity_kind.graph_node, 1),
+        .structural_template = key(ownership_api.entity_kind.template, 8)});
+    ownership_state.append_edges(&s, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 3), .kind = ownership_api.edge_kind.owned});
+    assert(units(&s, &f, false) == 4);
+    ownership_state.state mut joined = ownership_join.join(&s, &s, &f.service, &limits, op(),
+        at());
+    defer ownership_state.free(&joined);
+    assert(joined.shapes_len == 0 && joined.edges_len == 1 && units(&joined, &f, false) == 1);
+    assert(joined.nodes[0].structural_template.kind == ownership_api.entity_kind.none);
+    // The edges stay exact, so the node stays exact.
+    assert(!joined.nodes[0].residual);
+    assert(joined.edges[0].kind == ownership_api.edge_kind.owned);
+    assert(ownership_state.add_edge(&joined, &f.service, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 4)}, op(), at()).applied);
+    // Edges alone above H merge into one residual edge under the least key.
+    ownership_state.state mut wide = ownership_state.empty();
+    defer ownership_state.free(&wide);
+    ownership_state.append_nodes(&wide, ownership_api.graph_node{
+        .key = key(ownership_api.entity_kind.graph_node, 7),
+        .allocation = key(ownership_api.entity_kind.allocation, 7)});
+    u32[3] keys = {7, 5, 9};
+    u64 mut i = 0;
+    while (i < keys.len) {
+        ownership_state.append_edges(&wide, ownership_api.graph_edge{
+            .key = key(ownership_api.entity_kind.relation, keys[i]),
+            .from = key(ownership_api.entity_kind.graph_node, keys[i]),
+            .kind = ownership_api.edge_kind.borrowed});
+        i += 1;
+    }
+    ownership_state.state mut merged = ownership_join.join(&wide, &wide, &f.service, &limits,
+        op(), at());
+    defer ownership_state.free(&merged);
+    assert(merged.edges_len == 1 && units(&merged, &f, false) == 1);
+    assert(merged.edges[0].key.ordinal == 5 && merged.edges[0].kind ==
+        ownership_api.edge_kind.residual);
+    assert(merged.edges[0].from.kind == ownership_api.entity_kind.none);
+    assert(merged.edges[0].place.residual && merged.edges[0].range.residual);
+    // No walk can read owned descendants from the merged edge: each node becomes residual.
+    assert(merged.nodes_len == 1 && merged.nodes[0].residual);
+    assert(merged.nodes[0].allocation.ordinal == 7);
+    i = 0;
+    while (i < keys.len) {
+        assert(has_loss(&merged, ownership_api.limit_category.h, 2,
+            key(ownership_api.entity_kind.relation, keys[i])));
+        i += 1;
+    }
+    assert(ownership_state.add_edge(&merged, &f.service, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 6)}, op(), at()).applied);
+    // Later widening keeps the cover within H, and a second step reaches a fixed point.
+    ownership_state.state mut again = ownership_join.widen(&merged, &wide, &f.service, &limits,
+        op(), at());
+    defer ownership_state.free(&again);
+    assert(units(&again, &f, false) <= 2 && ownership_api.successful(again.proof));
+    ownership_state.state mut fixed = ownership_join.widen(&again, &wide, &f.service, &limits,
+        op(), at());
+    defer ownership_state.free(&fixed);
+    assert(ownership_state.equal(&again, &fixed));
+}
+
+// Insertion and join count the old and the guarded new contents as two G units.
+fn g02() void {
+    fixture mut f = fixture{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.g = 1;
+    configure(&f, limits);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    assert(ownership_state.add_contents(&s, &f.service, scalar(2, 10), op(), at()).applied);
+    ownership_api.entity_id guard = key(ownership_api.entity_kind.guard, 30);
+    assert(ownership_state.add_guard(&s, &f.service, ownership_api.guard_fact{.key = guard},
+        op(), at()).applied);
+    assert(f.meter.used.g == 0 && units(&s, &f, true) == 0);
+    ownership_api.place_path[1] selected = {place(2)};
+    ownership_state.state mut before = ownership_state.clone(&s);
+    defer ownership_state.free(&before);
+    ownership_api.mutation_result denied = ownership_state.weak_contents(&s, &f.service,
+        scalar(2, 11), selected[..], guard, op(), at());
+    assert(!denied.applied && denied.precision_lost && ownership_state.equal(&s, &before));
+    assert(denied.loss.category == ownership_api.limit_category.g);
+    assert(denied.proof.terminal.limit.attempted == 2);
+    limits.g = 2;
+    configure(&f, limits);
+    assert(ownership_state.weak_contents(&s, &f.service, scalar(2, 11), selected[..], guard,
+        op(), at()).applied);
+    assert(s.contents_len == 2 && s.guards_len == 1 && s.correlations_len == 1);
+    assert(f.meter.used.g == 2 && units(&s, &f, true) == 2);
+    // A correlation that names no retained alternative adds no unit.
+    ownership_api.correlation stray = ownership_api.correlation{guard,
+        key(ownership_api.entity_kind.value, 99), place(2).root};
+    assert(ownership_state.add_correlation(&s, &f.service, stray, op(), at()).applied);
+    assert(units(&s, &f, true) == 2 && f.meter.used.g == 2);
+    ownership_state.state mut bottom = ownership_state.bottom();
+    defer ownership_state.free(&bottom);
+    ownership_api.limit_table mut bound = ownership_limits.production();
+    bound.g = 2;
+    ownership_state.state mut joined = ownership_join.join(&s, &bottom, &f.service, &bound,
+        op(), at());
+    defer ownership_state.free(&joined);
+    assert(!any_loss(&joined, ownership_api.limit_category.g) && units(&joined, &f, true) == 2);
+    assert(joined.contents_len == 2 && joined.guards_len == 1 && joined.correlations_len == 2);
+    bound.g = 1;
+    ownership_state.state mut covered = ownership_join.join(&s, &bottom, &f.service, &bound,
+        op(), at());
+    defer ownership_state.free(&covered);
+    assert(has_loss(&covered, ownership_api.limit_category.g, 1, guard));
+    assert(covered.guards_len == 0 && covered.correlations_len == 0);
+    assert(covered.contents_len == 1 && covered.contents[0].place.residual);
+    assert(covered.contents[0].kind == ownership_api.contents_kind.unknown);
+    assert(ownership_api.successful(covered.proof));
+    println("G-02 two alternatives");
+}
+
+// After teardown, the context counts nothing, and a second capture fits R = P = G = 1.
+fn raw01() void {
+    ownership_raw_env.env mut e = ownership_raw_env.env{};
+    ownership_raw_env.open(&e);
+    defer ownership_raw_env.close(&e);
+    ownership_local_env.add_stack(&e.local, 1);
+    ownership_raw.origin input = ownership_raw_env.origin(&e, 1, e.byte,
+        ownership_raw.literal(1), ownership_raw.literal(1), false);
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.r = 1;
+    limits.p = 1;
+    limits.g = 1;
+    assert(ownership_limits.configure(&e.budget.meter, &limits));
+    ownership_raw.request mut req = ownership_raw_env.request(&e);
+    req.limits = limits;
+    ownership_state.state mut core = ownership_state.clone(&e.local.state);
+    defer ownership_state.free(&core);
+    u64 mut round = 0;
+    while (round < 3) {
+        ownership_raw.result mut captured = ownership_raw.capture_origin(&e.local.state,
+            &e.local.service, &input, ownership_raw_env.NO_BOUNDS,
+            ownership_raw_env.NO_RELATIONS, &req);
+        assert(ownership_api.successful(captured.proof) && captured.storage.leaves_len == 1);
+        ownership_raw.units held = ownership_raw.content(&captured.storage);
+        assert(held.r == 1 && held.p == 0 && held.g == 0);
+        assert(e.budget.meter.used.r == 1 && e.budget.meter.used.p == 0);
+        assert(e.budget.meter.used.g == 0);
+        ownership_raw.free_result(&captured);
+        ownership_raw.units left = ownership_raw.content(&captured.storage);
+        assert(left.r == 0 && left.p == 0 && left.g == 0 && captured.storage.core == null);
+        assert(ownership_state.equal(&e.local.state, &core));
+        round += 1;
+    }
+    println("RAW-01 teardown");
+}
+
+fn capture(ownership_raw_env.env mut* e, u64 origins, ownership_raw.relation@ relations,
+    ownership_api.limit_table table, ownership_api.limit_table meter) ownership_raw.result {
+    assert(ownership_limits.configure(&e->budget.meter, &meter));
+    ownership_raw.origin[2] mut inputs = {};
+    u64 mut i = 0;
+    while (i < origins) {
+        inputs[i] = ownership_raw_env.origin(e, cast(i + 1, u32), e->byte,
+            ownership_raw.literal(1), ownership_raw.literal(1), false);
+        i += 1;
+    }
+    ownership_raw.request mut req = ownership_raw_env.request(e);
+    req.limits = table;
+    return ownership_raw.capture_origins(&e->local.state, &e->local.service, inputs[0..origins],
+        ownership_raw_env.NO_BOUNDS, relations, &req);
+}
+
+// Origins are unconditional facts. The addresses of the result are exclusive alternatives,
+// so two origins give two G units, one origin none. Equal relations are one atom.
+fn raw_alternatives() void {
+    assert(ownership_state.alternative_units(0) == 0 && ownership_state.alternative_units(1) == 0);
+    assert(ownership_state.alternative_units(2) == 2 && ownership_state.alternative_units(7) == 7);
+    assert(ownership_state.alternatives_within(1) == 1);
+    assert(ownership_state.alternatives_within(2) == 2);
+    assert(ownership_state.alternatives_within(5) == 5);
+    ownership_raw_env.env mut e = ownership_raw_env.env{};
+    ownership_raw_env.open(&e);
+    defer ownership_raw_env.close(&e);
+    ownership_local_env.add_stack(&e.local, 1);
+    ownership_local_env.add_stack(&e.local, 2);
+    ownership_api.limit_table production = ownership_limits.production();
+    ownership_api.limit_table mut one = production;
+    one.g = 1;
+    ownership_raw.relation@ none = {};
+    ownership_raw.result mut single = capture(&e, 1, none, one, one);
+    assert(ownership_api.successful(single.proof) && e.budget.meter.used.g == 0);
+    ownership_raw.units held = ownership_raw.result_content(&single);
+    assert(held.g == 0 && ownership_raw.content(&single.storage).g == 0);
+    ownership_raw.free_result(&single);
+    // The explicit table and the meter both refuse two alternatives under G = 1.
+    ownership_raw.result mut table = capture(&e, 2, none, one, production);
+    assert(!ownership_api.successful(table.proof) && table.addresses.len == 0);
+    ownership_raw.free_result(&table);
+    ownership_raw.result mut metered = capture(&e, 2, none, production, one);
+    assert(!ownership_api.successful(metered.proof));
+    assert(metered.proof.terminal.limit.category == ownership_api.limit_category.g);
+    assert(metered.proof.terminal.limit.attempted == 2);
+    ownership_raw.free_result(&metered);
+    ownership_api.limit_table mut two = production;
+    two.g = 2;
+    ownership_raw.result mut pair = capture(&e, 2, none, two, two);
+    assert(ownership_api.successful(pair.proof) && pair.addresses.len == 2);
+    assert(ownership_raw.result_content(&pair).g == 2 && e.budget.meter.used.g == 2);
+    assert(ownership_raw.content(&pair.storage).g == 0);
+    // Start and access count the same two alternatives against the explicit table.
+    ownership_raw.request mut narrow = ownership_raw_env.request(&e);
+    narrow.limits = one;
+    ownership_raw.result mut cut = ownership_raw.derive_address(&pair.storage, &e.local.service,
+        pair.addresses[..], ownership_raw.literal(0), ownership_raw.literal(1), e.byte, &narrow);
+    assert(!ownership_api.successful(cut.proof) && cut.addresses.len == 0);
+    ownership_raw.free_result(&cut);
+    assert(!ownership_api.successful(ownership_raw.access(&pair.storage, &e.local.service,
+        pair.addresses[..], e.byte, &narrow)));
+    assert(ownership_api.successful(ownership_raw.access(&pair.storage, &e.local.service,
+        pair.addresses[0..1], e.byte, &narrow)));
+    ownership_raw.request mut wide = ownership_raw_env.request(&e);
+    wide.limits = two;
+    ownership_raw.result mut kept = ownership_raw.derive_address(&pair.storage, &e.local.service,
+        pair.addresses[..], ownership_raw.literal(0), ownership_raw.literal(1), e.byte, &wide);
+    assert(ownership_api.successful(kept.proof) && ownership_raw.result_content(&kept).g == 2);
+    ownership_raw.free_result(&kept);
+    assert(ownership_api.successful(ownership_raw.access(&pair.storage, &e.local.service,
+        pair.addresses[..], e.byte, &wide)));
+    ownership_raw.free_result(&pair);
+    // Two equal relations are one P atom, so P = 1 accepts them.
+    ownership_raw.relation[2] equal = {
+        ownership_raw.relation{ownership_raw.literal(0), ownership_raw.literal(8)},
+        ownership_raw.relation{ownership_raw.literal(0), ownership_raw.literal(8)}};
+    ownership_api.limit_table mut atom = production;
+    atom.p = 1;
+    ownership_raw.result mut related = capture(&e, 1, equal[..], atom, atom);
+    assert(ownership_api.successful(related.proof) && e.budget.meter.used.p == 1);
+    assert(ownership_raw.result_content(&related).p == 1);
+    ownership_raw.free_result(&related);
+    println("raw alternatives");
+}
+
+// Ten guarded alternatives enter and leave one state. At most two are live under G = 2.
+fn guards_come_and_go() void {
+    fixture mut f = fixture{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.g = 2;
+    configure(&f, limits);
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    assert(ownership_state.add_contents(&s, &f.service, scalar(1, 1), op(), at()).applied);
+    ownership_api.place_path[1] selected = {place(1)};
+    u32 mut i = 0;
+    u64 mut inserted = 0;
+    while (i < 5) {
+        ownership_api.entity_id guard = key(ownership_api.entity_kind.guard, 40 + i);
+        assert(ownership_state.weak_contents(&s, &f.service, scalar(1, 100 + i), selected[..],
+            guard, op(), at()).applied);
+        assert(units(&s, &f, true) == 2);
+        inserted += 2;
+        assert(ownership_state.strong_contents(&s, &f.service, scalar(1, 200 + i), selected[..],
+            true, op(), at()).applied);
+        assert(units(&s, &f, true) == 0 && s.contents_len == 1);
+        i += 1;
+    }
+    assert(inserted == 10 && inserted > limits.g && f.meter.used.g == 2);
+    println("G insert and remove");
+}
+
+// Four edges enter scopes one after another, and two states hold one edge at once, under H = 1.
+fn shapes_come_and_go() void {
+    fixture mut f = fixture{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.h = 1;
+    configure(&f, limits);
+    u32 mut i = 0;
+    while (i < 4) {
+        ownership_state.state mut s = ownership_state.empty();
+        ownership_api.graph_edge edge = ownership_api.graph_edge{
+            .key = key(ownership_api.entity_kind.relation, 50 + i)};
+        assert(ownership_state.add_edge(&s, &f.service, edge, op(), at()).applied);
+        assert(units(&s, &f, false) == 1);
+        ownership_state.free(&s);
+        i += 1;
+    }
+    ownership_state.state mut a = ownership_state.empty();
+    ownership_state.state mut b = ownership_state.empty();
+    defer ownership_state.free(&a);
+    defer ownership_state.free(&b);
+    ownership_api.shape_description template = ownership_api.shape_description{
+        .key = key(ownership_api.entity_kind.template, 60)};
+    assert(ownership_state.add_shape(&a, &f.service, template, op(), at()).applied);
+    assert(ownership_state.add_shape(&b, &f.service, template, op(), at()).applied);
+    assert(f.meter.used.h == 1);
+    println("H insert and remove");
+}
+
+// No module charges T through the meter: the call graph compares the live targets of one call
+// with T. ownership_graph_test G13 inserts and removes targets at real calls. This case shows
+// that the meter keeps the greatest T amount and does not accumulate.
+fn targets_come_and_go() void {
+    ownership_limits.meter mut calls = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.t = 1;
+    assert(ownership_limits.configure(&calls, &limits));
+    ownership_api.charge_item[1] mut item = {ownership_api.charge_item{
+        ownership_api.limit_category.t, ownership_api.limit_scope.call, 1}};
+    ownership_api.charge_request req = ownership_api.charge_request{
+        ownership_api.work_kind.substitution, op(), at(), item[..]};
+    u64 mut i = 0;
+    while (i < 5) {
+        assert(ownership_limits.try_charge(&calls, &req).allowed && calls.used.t == 1);
+        i += 1;
+    }
+    item[0].amount = 2;
+    ownership_api.charge_result refused = ownership_limits.try_charge(&calls, &req);
+    assert(!refused.allowed && refused.limit.category == ownership_api.limit_category.t);
+    assert(refused.limit.used == 1 && refused.limit.bound == 1 && refused.limit.attempted == 2);
+    println("T meter keeps the greatest amount");
+}
+
+// The budget callback sees the state before each charge, including the precision check.
+struct audit {
+    ownership_limits.meter meter;
+    ownership_state.state* watched;
+    ownership_state.state snapshot;
+    u64 calls;
+    u64 check_call;
+    bool unchanged;
+}
+
+fn audited(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    audit mut* a = cast(opaque, audit mut*);
+    a->calls += 1;
+    a->unchanged = a->unchanged && ownership_state.equal(a->watched, &a->snapshot);
+    u64 mut i = 0;
+    while (i < req->items.len) {
+        if (ownership_limits.precision(req->items[i].category)) { a->check_call = a->calls; }
+        i += 1;
+    }
+    return ownership_limits.try_charge(&a->meter, req);
+}
+
+fn watch(audit mut* a, ownership_state.state* s) void {
+    ownership_state.free(&a->snapshot);
+    a->snapshot = ownership_state.clone(s);
+    a->watched = s;
+    a->calls = 0;
+    a->check_call = 0;
+    a->unchanged = true;
+}
+
+fn committed(audit* a, ownership_api.mutation_result result) void {
+    assert(result.applied && a->unchanged && a->calls > 1);
+    assert(a->check_call == a->calls);
+}
+
+fn check_then_commit() void {
+    audit mut a = audit{};
+    defer ownership_state.free(&a.snapshot);
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_limits.configure(&a.meter, &limits));
+    u64 mut events = 0;
+    ownership_api.services svc = ownership_api.services{
+        .budget_context = cast(&a, void mut*), .budget = audited,
+        .event_context = cast(&events, void mut*), .event = event};
+    ownership_state.state mut s = ownership_state.empty();
+    defer ownership_state.free(&s);
+    ownership_api.contents_fact mut first = scalar(3, 1);
+    ownership_api.projection[1] parts = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 2}};
+    first.place.projections = parts[..];
+    watch(&a, &s);
+    committed(&a, ownership_state.add_contents(&s, &svc, first, op(), at()));
+    assert(s.contents_len == a.snapshot.contents_len + 1);
+    ownership_api.place_path[1] selected = {first.place};
+    ownership_api.entity_id guard = key(ownership_api.entity_kind.guard, 5);
+    watch(&a, &s);
+    committed(&a, ownership_state.weak_contents(&s, &svc, scalar(3, 2), selected[..], guard,
+        op(), at()));
+    assert(s.contents_len == a.snapshot.contents_len + 1);
+    assert(s.correlations_len == a.snapshot.correlations_len + 1);
+    watch(&a, &s);
+    committed(&a, ownership_state.add_edge(&s, &svc, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 7)}, op(), at()));
+    assert(s.edges_len == a.snapshot.edges_len + 1);
+    watch(&a, &s);
+    committed(&a, ownership_state.add_shape(&s, &svc, ownership_api.shape_description{
+        .key = key(ownership_api.entity_kind.template, 8)}, op(), at()));
+    assert(s.shapes_len == a.snapshot.shapes_len + 1 && events == 0);
+    // A refusal at the check leaves the state as the callback saw it.
+    a.meter.bounds.g = 1;
+    watch(&a, &s);
+    ownership_api.mutation_result refused = ownership_state.weak_contents(&s, &svc, scalar(3, 3),
+        selected[..], key(ownership_api.entity_kind.guard, 6), op(), at());
+    assert(!refused.applied && refused.precision_lost && a.check_call == a.calls);
+    assert(a.unchanged && ownership_state.equal(&s, &a.snapshot));
+    println("check and commit");
+}
+
+fn two_states(ownership_state.state mut* a, ownership_state.state mut* b) void {
+    ownership_api.allocation_fact owned = ownership_api.allocation_fact{
+        .key = key(ownership_api.entity_kind.allocation, 1),
+        .validity = ownership_api.validity_kind.live,
+        .count = ownership_api.multiplicity{.one = true}, .obligation = true,
+        .owner = ownership_api.owner_location{.place = place(1)}};
+    ownership_state.append_allocations(a, owned);
+    ownership_state.append_allocations(b, owned);
+    ownership_state.append_contents(a, scalar(2, 1));
+    ownership_state.append_contents(b, scalar(2, 2));
+    ownership_state.append_edges(a, ownership_api.graph_edge{
+        .key = key(ownership_api.entity_kind.relation, 3)});
+}
+
+// Each refused prefix of the join and widening work keeps both inputs and the charged W.
+fn work_prefixes() void {
+    ownership_state.state mut a = ownership_state.empty();
+    ownership_state.state mut b = ownership_state.empty();
+    defer ownership_state.free(&a);
+    defer ownership_state.free(&b);
+    two_states(&a, &b);
+    ownership_state.state mut a_before = ownership_state.clone(&a);
+    ownership_state.state mut b_before = ownership_state.clone(&b);
+    defer ownership_state.free(&a_before);
+    defer ownership_state.free(&b_before);
+    ownership_api.limit_table bound = ownership_limits.production();
+    u64 mut refused = 0;
+    u64 mut kind = 0;
+    while (kind < 2) {
+        u64 mut w = 1;
+        bool mut finished = false;
+        while (!finished) {
+            fixture mut f = fixture{};
+            ownership_api.limit_table mut limits = ownership_limits.production();
+            limits.w = w;
+            configure(&f, limits);
+            ownership_state.state mut out = kind == 0 ?
+                ownership_join.join(&a, &b, &f.service, &bound, op(), at()) :
+                ownership_join.widen(&a, &b, &f.service, &bound, op(), at());
+            assert(ownership_state.equal(&a, &a_before) && ownership_state.equal(&b, &b_before));
+            if (ownership_api.successful(out.proof)) {
+                finished = true;
+                assert(f.meter.used.w <= w && out.allocations[0].obligation);
+            } else {
+                assert(out.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+                assert(out.proof.terminal.limit.category == ownership_api.limit_category.w);
+                assert(out.proof.terminal.limit.bound == w && f.meter.used.w == w);
+                assert(out.allocations_len == 1 && out.allocations[0].obligation);
+                refused += 1;
+            }
+            ownership_state.free(&out);
+            w += 1;
+            assert(w < 4096);
+        }
+        kind += 1;
+    }
+    assert(refused > 2);
+    println("W prefixes keep inputs");
+}
+
+fn service_failures() void {
+    ownership_state.state mut a = ownership_state.empty();
+    ownership_state.state mut b = ownership_state.empty();
+    defer ownership_state.free(&a);
+    defer ownership_state.free(&b);
+    two_states(&a, &b);
+    ownership_state.state mut a_before = ownership_state.clone(&a);
+    defer ownership_state.free(&a_before);
+    fixture mut f = fixture{};
+    configure(&f, ownership_limits.production());
+    ownership_api.limit_table bound = ownership_limits.production();
+    ownership_api.services mut missing = f.service;
+    missing.budget = null;
+    ownership_state.state mut out = ownership_join.join(&a, &b, &missing, &bound, op(), at());
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_budget);
+    assert(out.allocations[0].obligation && ownership_state.equal(&a, &a_before));
+    ownership_state.free(&out);
+    missing = f.service;
+    missing.event = null;
+    out = ownership_join.widen(&a, &b, &missing, &bound, op(), at());
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_events);
+    assert(ownership_state.equal(&a, &a_before));
+    ownership_state.free(&out);
+    ownership_api.limit_table mut stale = bound;
+    stale.version = 0;
+    out = ownership_join.join(&a, &b, &f.service, &stale, op(), at());
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(ownership_state.equal(&a, &a_before));
+    ownership_state.free(&out);
+    missing = f.service;
+    missing.budget = null;
+    ownership_api.mutation_result denied = ownership_state.add_contents(&a, &missing,
+        scalar(9, 9), op(), at());
+    assert(!denied.applied && ownership_state.equal(&a, &a_before));
+    assert(denied.proof.terminal.reason == ownership_api.incomplete_reason.missing_budget);
+    println("service failures keep inputs");
+}
+
+struct gate { ownership_limits.meter meter; u64 calls; u64 deny_at; }
+
+fn gated(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    gate mut* g = cast(opaque, gate mut*);
+    g->calls += 1;
+    if (g->calls == g->deny_at) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.limit = ownership_api.exhaustion{true, ownership_api.limit_category.w,
+            ownership_api.limit_scope.computation, req->work, 1, 1, 1, req->operation,
+            req->source, false};
+        return out;
+    }
+    return ownership_limits.try_charge(&g->meter, req);
+}
+
+// A refused transfer frees its tentative state and keeps the input storage and its facts.
+fn tentative_cleanup() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    assert(ownership_api.successful(ownership_local_env.alloc(&e, 1, 1, 1, 4)));
+    gate mut g = gate{};
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_limits.configure(&g.meter, &limits));
+    e.service.budget_context = cast(&g, void mut*);
+    e.service.budget = gated;
+    u64 mut deny = 1;
+    bool mut copied = false;
+    while (!copied) {
+        g.calls = 0;
+        g.deny_at = deny;
+        ownership_state.state mut before = ownership_state.clone(&e.state);
+        ownership_api.contents_fact mut* storage = &e.state.contents[0];
+        ownership_api.proof_status proof = ownership_local_env.copy(&e, 1, 2, false);
+        if (ownership_api.successful(proof)) {
+            copied = true;
+            assert(e.state.contents_len == before.contents_len + 1);
+        } else {
+            assert(ownership_state.equal(&e.state, &before) && &e.state.contents[0] == storage);
+            assert(e.state.allocations[0].obligation);
+        }
+        ownership_state.free(&before);
+        deny += 1;
+        assert(deny < 512);
+    }
+    assert(deny > 3);
+    println("tentative cleanup");
+}
+
+fn conditions(ownership_combinations.query* req, u64 variable, bool flip,
+    ownership_combinations.condition mut@ out) void {
+    ownership_combinations.key_component[1] parts = {ownership_combinations.key_component{
+        .kind = ownership_combinations.component_kind.unsigned_number,
+        .unsigned_value = variable}};
+    ownership_combinations.variable decision = ownership_combinations.variable{
+        .identity = ownership_combinations.semantic_key{parts[..]},
+        .kind = ownership_combinations.predicate_kind.opaque};
+    out[0] = ownership_combinations.literal(decision, !flip, req);
+    out[1] = ownership_combinations.literal(decision, flip, req);
+}
+
+fn address(u32 source, u64 begin) ownership_raw.address {
+    return ownership_raw.address{key(ownership_api.entity_kind.source, source),
+        ownership_raw.literal(begin), ownership_raw.literal(begin), ownership_raw.literal(8),
+        null, 8, true};
+}
+
+struct contexts {
+    ownership_raw.result mut@ own raw;
+    ownership_combinations.condition mut@ own decisions;
+    ownership_combinations.map mut@ own rows;
+}
+
+fn free_contexts(contexts mut* c) void {
+    u64 mut i = 0;
+    while (i < c->raw.len) { del(c->raw[i].addresses); i += 1; }
+    i = 0;
+    while (i < c->decisions.len) {
+        ownership_combinations.free_condition(&c->decisions[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < c->rows.len) { ownership_combinations.free(&c->rows[i]); i += 1; }
+    del(c->raw);
+    del(c->decisions);
+    del(c->rows);
+}
+
+// Builds two simultaneous raw contexts. Each points at sources 1 or 2 under one decision.
+fn simultaneous(ownership_combinations.query* req, u64 second, bool same_payload) contexts {
+    contexts mut out = contexts{};
+    out.raw = new(ownership_raw.result, 2);
+    out.decisions = new(ownership_combinations.condition, 4);
+    out.rows = new(ownership_combinations.map, 2);
+    u64 mut i = 0;
+    while (i < 2) {
+        out.raw[i].proof.kind = ownership_api.proof_kind.complete;
+        out.raw[i].addresses = new(ownership_raw.address, 2);
+        out.raw[i].addresses[0] = address(1, 0);
+        out.raw[i].addresses[1] = address(same_payload && i == 1 ? 1 : 2, 0);
+        conditions(req, i == 0 ? 1 : second, false, out.decisions[i * 2..i * 2 + 2]);
+        ownership_combinations.candidate mut rows = ownership_raw.alternatives(&out.raw[i],
+            out.decisions[i * 2..i * 2 + 2], i, req);
+        assert(rows.exact);
+        out.rows[i] = move(rows.prospective);
+        i += 1;
+    }
+    return out;
+}
+
+fn joint(ownership_combinations.query* req, u64 second, bool same_payload, u64 g,
+    fixture mut* f) ownership_combinations.joint {
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.g = g;
+    configure(f, limits);
+    contexts mut c = simultaneous(req, second, same_payload);
+    ownership_combinations.joint out = ownership_combinations.joint_rows(c.rows[..], req);
+    free_contexts(&c);
+    return out;
+}
+
+fn joint_raw_rows() void {
+    fixture mut f = fixture{};
+    configure(&f, ownership_limits.production());
+    ownership_combinations.query req = ownership_combinations.query{.services = &f.service,
+        .work = ownership_api.work_kind.substitution,
+        .limits = ownership_combinations.defaults()};
+    // Independent decisions give four joint rows. G = 3 refuses after the second conjunction.
+    ownership_combinations.joint mut rows = joint(&req, 2, false, 4, &f);
+    assert(ownership_api.successful(rows.proof) && rows.rows.g == 4 && rows.peak == 4);
+    assert(f.meter.used.g == 4);
+    ownership_combinations.free_joint(&rows);
+    rows = joint(&req, 2, false, 3, &f);
+    assert(!ownership_api.successful(rows.proof) && rows.rows.prospective.rows_len == 0);
+    assert(rows.proof.terminal.limit.category == ownership_api.limit_category.g);
+    assert(rows.proof.terminal.limit.attempted == 4 && rows.proof.terminal.limit.bound == 3);
+    ownership_combinations.free_joint(&rows);
+    // A common decision removes the contradictory products: two rows fit G = 2.
+    rows = joint(&req, 1, false, 2, &f);
+    assert(ownership_api.successful(rows.proof) && rows.rows.g == 2 && rows.peak == 2);
+    ownership_combinations.free_joint(&rows);
+    // Equal payloads under complementary conditions merge into one unconditional row.
+    contexts mut c = simultaneous(&req, 2, true);
+    assert(c.rows[0].rows_len == 2 && c.rows[1].rows_len == 1);
+    assert(c.rows[1].rows[0].condition == 1);
+    free_contexts(&c);
+    rows = joint(&req, 2, true, 2, &f);
+    assert(ownership_api.successful(rows.proof) && rows.rows.g == 2 && rows.peak == 2);
+    ownership_combinations.free_joint(&rows);
+    println("joint raw rows");
+}
+
+fn main() i32 {
+    h01();
+    g02();
+    raw01();
+    raw_alternatives();
+    guards_come_and_go();
+    shapes_come_and_go();
+    targets_come_and_go();
+    check_then_commit();
+    work_prefixes();
+    service_failures();
+    tentative_cleanup();
+    joint_raw_rows();
+    return 0;
+}

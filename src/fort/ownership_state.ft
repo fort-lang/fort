@@ -698,24 +698,343 @@ fn measure_regions(state* s, ownership_api.services* svc, region_candidate candi
 }
 
 fn require_regions(state mut* s, ownership_api.services* svc, region_candidate candidate,
-    charge_counts mut counts, ownership_api.operation_position op,
+    charge_counts counts, ownership_api.operation_position op,
     ownership_api.source_position at) ownership_api.mutation_result {
-    region_measurement measured = measure_regions(s, svc, candidate,
-        ownership_api.work_kind.transfer, op, at);
-    if (!ownership_api.successful(measured.proof)) {
-        ownership_api.mutation_result mut out = {};
-        out.proof = ownership_api.successful(s->proof) ?
-            report_failure(svc, measured.proof, op, at) : s->proof;
-        return out;
+    content_candidate mut content = content_candidate{};
+    content.regions = candidate;
+    content.count_regions = true;
+    return require_content(s, svc, content, counts, op, at);
+}
+
+// The prospective contents keep the state facts outside `removed` and add the candidate facts.
+// With places, the candidate adds one copy of contents[0] at each place.
+struct guard_candidate {
+    ownership_api.contents_fact@ contents;
+    ownership_api.place_path@ places;
+    ownership_api.place_path@ removed;
+    ownership_api.correlation@ correlations;
+}
+struct shape_candidate {
+    ownership_api.graph_edge@ edges;
+    ownership_api.shape_description@ shapes;
+}
+// One mutator measures the content it changes, then checks it in one request.
+struct content_candidate {
+    region_candidate regions;
+    guard_candidate guards;
+    shape_candidate shapes;
+    bool count_regions;
+    bool count_guards;
+    bool count_shapes;
+}
+struct unit_counter {
+    ownership_api.services* service;
+    ownership_api.work_kind kind;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.proof_status proof;
+}
+
+// A sorted count of n rows compares O(n log n) pairs. It pays one W unit for each 64 rows it
+// reads, so its W grows with its work, and at least one unit when it reads any row.
+u64 ROWS_PER_UNIT = 64;
+
+fn rows_spend(unit_counter mut* paid, u64 rows) bool {
+    u64 units = rows / ROWS_PER_UNIT + (rows % ROWS_PER_UNIT == 0 ? 0 : 1);
+    u64 mut i = 0;
+    while (i < units) {
+        if (!unit_spend(paid)) { return false; }
+        i += 1;
     }
-    counts.r = measured.amount;
-    return require_counts(s, svc, counts, op, at);
+    return true;
+}
+
+// Each counting step pays one W unit before it runs.
+fn unit_spend(unit_counter mut* paid) bool {
+    if (!ownership_api.successful(paid->proof)) { return false; }
+    ownership_api.charge_result charged = ownership_api.charge_work(paid->service,
+        paid->kind, paid->operation, paid->source);
+    if (!charged.allowed) { paid->proof = charged.proof; }
+    return charged.allowed;
+}
+
+fn guard_added(guard_candidate* c) u64 {
+    if (c->contents.len == 0) { return 0; }
+    return c->places.len > 0 ? c->places.len : c->contents.len;
+}
+
+// Returns false for a state fact that the candidate removes.
+fn guard_fact_at(state* s, guard_candidate* c, u64 index,
+    ownership_api.contents_fact mut* out) bool {
+    if (index < s->contents_len) {
+        *out = s->contents[index];
+        return !selected(out->place, c->removed);
+    }
+    u64 added = index - s->contents_len;
+    if (c->places.len == 0) { *out = c->contents[added]; return true; }
+    *out = c->contents[0];
+    out->place = c->places[added];
+    return true;
+}
+
+/// Returns the G units of `count` exclusive alternatives of one place, value, or path.
+/// One alternative is unconditional and gives none. Two or more give one unit each.
+fn alternative_units(u64 count) u64 { return count >= 2 ? count : 0; }
+
+/// Returns the largest number of exclusive alternatives whose G units fit `bound`.
+fn alternatives_within(u64 bound) u64 { return bound >= 2 ? bound : 1; }
+
+// The kinds of index that one merge sort orders.
+enum sort_kind { contents_place, correlation_key, edge_key, shape_key }
+
+fn edge_at(state* s, shape_candidate* c, u64 index) ownership_api.graph_edge {
+    return index < s->edges_len ? s->edges[index] : c->edges[index - s->edges_len];
+}
+
+fn shape_at(state* s, shape_candidate* c, u64 index) ownership_api.shape_description {
+    return index < s->shapes_len ? s->shapes[index] : c->shapes[index - s->shapes_len];
+}
+
+fn correlation_at(state* s, guard_candidate* c, u64 index) ownership_api.correlation {
+    return index < s->correlations_len ? s->correlations[index] :
+        c->correlations[index - s->correlations_len];
+}
+
+fn correlation_order(ownership_api.correlation a, ownership_api.correlation b) i32 {
+    i32 c = ownership_keys.entity(a.value_version, b.value_version);
+    if (c != 0) { return c; }
+    return ownership_keys.entity(a.relation, b.relation);
+}
+
+// Equal keys keep their index order, so each count is deterministic.
+fn index_order(state* s, guard_candidate* g, shape_candidate* h, sort_kind kind, u64 a, u64 b)
+    i32 {
+    i32 mut c = 0;
+    if (kind == sort_kind.contents_place) {
+        ownership_api.contents_fact mut x = ownership_api.contents_fact{};
+        ownership_api.contents_fact mut y = ownership_api.contents_fact{};
+        guard_fact_at(s, g, a, &x);
+        guard_fact_at(s, g, b, &y);
+        c = place_order(x.place, y.place);
+    } else if (kind == sort_kind.correlation_key) {
+        c = correlation_order(correlation_at(s, g, a), correlation_at(s, g, b));
+    } else if (kind == sort_kind.edge_key) {
+        c = ownership_keys.entity(edge_at(s, h, a).key, edge_at(s, h, b).key);
+    } else {
+        c = ownership_keys.entity(shape_at(s, h, a).key, shape_at(s, h, b).key);
+    }
+    if (c != 0) { return c; }
+    return order_number(a, b);
+}
+
+// Index storage of one count. A count of up to 64 rows uses the fixed array and allocates
+// nothing: a scratch block for each mutation reorders the allocator's free lists, so a program
+// that repeats one round sees its blocks at changing addresses.
+u64 LOCAL_INDICES = 64;
+
+struct index_store {
+    u64[LOCAL_INDICES] local;
+    u64 mut@ own heap;
+}
+
+fn index_view(index_store mut* store, u64 count) u64 mut@ {
+    if (count <= store->local.len) { return store->local[0..count]; }
+    store->heap = new(u64, count);
+    return store->heap[..];
+}
+
+// Sorts in place by insertion up to 64 items, and by a bottom-up merge sort above that.
+// Both are stable and compare O(n log n) pairs for large n.
+fn sort_indices(state* s, guard_candidate* g, shape_candidate* h, sort_kind kind,
+    u64 mut@ items) void {
+    if (items.len < 2) { return; }
+    if (items.len <= LOCAL_INDICES) {
+        u64 mut k = 1;
+        while (k < items.len) {
+            u64 item = items[k];
+            u64 mut at = k;
+            while (at > 0 && index_order(s, g, h, kind, item, items[at - 1]) < 0) {
+                items[at] = items[at - 1];
+                at -= 1;
+            }
+            items[at] = item;
+            k += 1;
+        }
+        return;
+    }
+    u64 mut@ own scratch = new(u64, items.len);
+    u64 mut width = 1;
+    while (width < items.len) {
+        u64 mut low = 0;
+        while (low < items.len) {
+            u64 middle = items.len - low < width ? items.len : low + width;
+            u64 high = items.len - middle < width ? items.len : middle + width;
+            u64 mut left = low;
+            u64 mut right = middle;
+            u64 mut out = low;
+            while (out < high) {
+                bool take_left = right >= high || (left < middle &&
+                    index_order(s, g, h, kind, items[left], items[right]) <= 0);
+                if (take_left) { scratch[out] = items[left]; left += 1; }
+                else { scratch[out] = items[right]; right += 1; }
+                out += 1;
+            }
+            low = high;
+        }
+        u64 mut i = 0;
+        while (i < items.len) { items[i] = scratch[i]; i += 1; }
+        width = width > items.len / 2 ? items.len : width * 2;
+    }
+    del(scratch);
+}
+
+// Finds a correlation that names this version at this root in the sorted correlations.
+fn correlated(state* s, guard_candidate* c, u64@ sorted, ownership_api.contents_fact fact)
+    bool {
+    ownership_api.correlation wanted = ownership_api.correlation{.value_version =
+        fact.value_version, .relation = fact.place.root};
+    u64 mut low = 0;
+    u64 mut high = sorted.len;
+    while (low < high) {
+        u64 middle = low + (high - low) / 2;
+        ownership_api.correlation probe = correlation_at(s, c, sorted[middle]);
+        i32 mut order = ownership_keys.entity(probe.value_version, wanted.value_version);
+        if (order == 0) { order = ownership_keys.entity(probe.relation, wanted.relation); }
+        if (order == 0) { return true; }
+        if (order < 0) { low = middle + 1; } else { high = middle; }
+    }
+    return false;
+}
+
+/// Counts guarded alternatives of one prospective state. Insertion, join, and widening use it.
+/// A place with k >= 2 distinct contents facts gives k units. A place with one fact gives one
+/// unit when a correlation names its value version and root, and none otherwise.
+/// Guard and correlation rows give no unit of their own.
+/// A count pays one W unit for each 64 rows it reads, before it reads them; without rows it pays
+/// none. It sorts the facts by place, so it compares O(n log n) pairs, plus the pairs inside one
+/// place.
+fn guard_units(state* s, ownership_api.services* svc, guard_candidate c,
+    ownership_api.work_kind kind, ownership_api.operation_position op,
+    ownership_api.source_position at) region_measurement {
+    unit_counter mut paid = unit_counter{svc, kind, op, at, s->proof};
+    if (!ownership_api.successful(paid.proof)) { return region_measurement{paid.proof, 0}; }
+    u64 total = plus_count(s->contents_len, guard_added(&c));
+    u64 links = plus_count(s->correlations_len, c.correlations.len);
+    if (total == 0 && links == 0) { return region_measurement{paid.proof, 0}; }
+    if (!rows_spend(&paid, plus_count(total, links))) { return region_measurement{paid.proof, 0}; }
+    u64 mut live = 0;
+    index_store mut fact_store = index_store{};
+    defer del(fact_store.heap);
+    u64 mut@ facts = index_view(&fact_store, total);
+    u64 mut k = 0;
+    while (k < total) {
+        ownership_api.contents_fact mut fact = ownership_api.contents_fact{};
+        if (guard_fact_at(s, &c, k, &fact)) { facts[live] = k; live += 1; }
+        k += 1;
+    }
+    sort_indices(s, &c, null, sort_kind.contents_place, facts[0..live]);
+    index_store mut link_store = index_store{};
+    defer del(link_store.heap);
+    u64 mut@ sorted = index_view(&link_store, links);
+    k = 0;
+    while (k < links) { sorted[k] = k; k += 1; }
+    sort_indices(s, &c, null, sort_kind.correlation_key, sorted[0..links]);
+    u64 mut units = 0;
+    u64 mut first = 0;
+    while (first < live) {
+        ownership_api.contents_fact mut head = ownership_api.contents_fact{};
+        guard_fact_at(s, &c, facts[first], &head);
+        u64 mut end = first + 1;
+        u64 mut distinct = 1;
+        while (end < live) {
+            ownership_api.contents_fact mut fact = ownership_api.contents_fact{};
+            guard_fact_at(s, &c, facts[end], &fact);
+            if (!same_place(fact.place, head.place)) { break; }
+            bool mut repeated = false;
+            u64 mut t = first;
+            while (t < end && !repeated) {
+                ownership_api.contents_fact mut other = ownership_api.contents_fact{};
+                guard_fact_at(s, &c, facts[t], &other);
+                repeated = same_contents(other, fact);
+                t += 1;
+            }
+            if (!repeated) { distinct += 1; }
+            end += 1;
+        }
+        u64 mut group = alternative_units(distinct);
+        if (group == 0 && correlated(s, &c, sorted[0..links], head)) { group = 1; }
+        units = plus_count(units, group);
+        first = end;
+    }
+    return region_measurement{paid.proof, units};
+}
+
+fn shape_entries(ownership_api.shape_description shape) u64 {
+    return plus_count(1, plus_count(shape.parameters.len,
+        plus_count(shape.clauses.len, shape.descendants.len)));
+}
+
+/// Counts structural units of one prospective state. Insertion, join, and widening use it.
+/// A distinct edge gives one unit. A distinct template gives one unit and one for each
+/// parameter, clause, and descendant. Graph nodes give no unit.
+/// A count pays for its rows as guard_units does. It sorts edges and templates by key and
+/// compares equal keys.
+fn shape_units(state* s, ownership_api.services* svc, shape_candidate c,
+    ownership_api.work_kind kind, ownership_api.operation_position op,
+    ownership_api.source_position at) region_measurement {
+    unit_counter mut paid = unit_counter{svc, kind, op, at, s->proof};
+    if (!ownership_api.successful(paid.proof)) { return region_measurement{paid.proof, 0}; }
+    u64 mut units = 0;
+    u64 edges = plus_count(s->edges_len, c.edges.len);
+    u64 shapes = plus_count(s->shapes_len, c.shapes.len);
+    if (edges == 0 && shapes == 0) { return region_measurement{paid.proof, 0}; }
+    if (!rows_spend(&paid, plus_count(edges, shapes))) { return region_measurement{paid.proof, 0}; }
+    index_store mut edge_store = index_store{};
+    defer del(edge_store.heap);
+    u64 mut@ order = index_view(&edge_store, edges);
+    u64 mut k = 0;
+    while (k < edges) { order[k] = k; k += 1; }
+    sort_indices(s, null, &c, sort_kind.edge_key, order[0..edges]);
+    k = 0;
+    while (k < edges) {
+        ownership_api.graph_edge edge = edge_at(s, &c, order[k]);
+        bool mut repeated = false;
+        u64 mut t = k;
+        while (t > 0 && !repeated) {
+            ownership_api.graph_edge other = edge_at(s, &c, order[t - 1]);
+            if (!same_entity(other.key, edge.key)) { break; }
+            repeated = same_edge(other, edge);
+            t -= 1;
+        }
+        if (!repeated) { units = plus_count(units, 1); }
+        k += 1;
+    }
+    index_store mut shape_store = index_store{};
+    defer del(shape_store.heap);
+    u64 mut@ templates = index_view(&shape_store, shapes);
+    k = 0;
+    while (k < shapes) { templates[k] = k; k += 1; }
+    sort_indices(s, null, &c, sort_kind.shape_key, templates[0..shapes]);
+    k = 0;
+    while (k < shapes) {
+        ownership_api.shape_description shape = shape_at(s, &c, templates[k]);
+        bool mut repeated = false;
+        u64 mut t = k;
+        while (t > 0 && !repeated) {
+            ownership_api.shape_description other = shape_at(s, &c, templates[t - 1]);
+            if (!same_entity(other.key, shape.key)) { break; }
+            repeated = same_shape(other, shape);
+            t -= 1;
+        }
+        if (!repeated) { units = plus_count(units, shape_entries(shape)); }
+        k += 1;
+    }
+    return region_measurement{paid.proof, units};
 }
 
 fn contents_counts(ownership_api.contents_fact fact) charge_counts {
     charge_counts mut c = charge_counts{};
     c.d = place_depth(fact.place);
-    c.g = fact.kind == ownership_api.contents_kind.scalar ? 0 : 1;
     c.w = 1;
     u64 mut i = 0;
     while (i < fact.borrows.len) {
@@ -764,10 +1083,37 @@ fn history_permission(state* s, ownership_api.services* svc, u64 incoming,
 fn require_counts(state mut* s, ownership_api.services* svc,
     charge_counts counts, ownership_api.operation_position op,
     ownership_api.source_position at) ownership_api.mutation_result {
+    return require_content(s, svc, content_candidate{}, counts, op, at);
+}
+
+fn measurement_failure(state* s, ownership_api.services* svc, ownership_api.proof_status proof,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.mutation_result {
+    ownership_api.mutation_result mut out = ownership_api.mutation_result{};
+    out.proof = ownership_api.successful(s->proof) ? report_failure(svc, proof, op, at) :
+        s->proof;
+    return out;
+}
+
+/// Pays the work of a mutation, measures the content it changes, and checks the result.
+/// The caller commits at once after an applied result. No callback or write runs between.
+fn require_content(state mut* s, ownership_api.services* svc,
+    content_candidate content, charge_counts counts, ownership_api.operation_position op,
+    ownership_api.source_position at) ownership_api.mutation_result {
     ownership_api.mutation_result mut out = ownership_api.mutation_result{};
     out.proof = s->proof;
     if (!ownership_api.successful(s->proof)) { return out; }
     charge_counts mut prospective = counts;
+    ownership_api.charge_result mut charged = ownership_api.charge_result{.allowed = true};
+    u64 mut remaining = counts.w;
+    while (remaining > 1) {
+        charged = ownership_api.charge_work(svc, ownership_api.work_kind.transfer, op, at);
+        if (!charged.allowed) {
+            out.proof = report_failure(svc, charged.proof, op, at);
+            return out;
+        }
+        remaining -= 1;
+    }
     if (counts.e > 0) {
         ownership_api.charge_result measured = history_permission(s, svc, counts.e,
             ownership_api.work_kind.transfer,
@@ -777,58 +1123,75 @@ fn require_counts(state mut* s, ownership_api.services* svc,
             return out;
         }
     }
-    if (counts.d == 0 && counts.r == 0 && counts.p == 0 && counts.g == 0 &&
-        counts.h == 0 && counts.e == 0 && counts.w == 0) {
+    if (content.count_regions) {
+        region_measurement measured = measure_regions(s, svc, content.regions,
+            ownership_api.work_kind.transfer, op, at);
+        if (!ownership_api.successful(measured.proof)) {
+            return measurement_failure(s, svc, measured.proof, op, at);
+        }
+        prospective.r = measured.amount;
+    }
+    if (content.count_guards) {
+        region_measurement measured = guard_units(s, svc, content.guards,
+            ownership_api.work_kind.transfer, op, at);
+        if (!ownership_api.successful(measured.proof)) {
+            return measurement_failure(s, svc, measured.proof, op, at);
+        }
+        prospective.g = measured.amount;
+    }
+    if (content.count_shapes) {
+        region_measurement measured = shape_units(s, svc, content.shapes,
+            ownership_api.work_kind.transfer, op, at);
+        if (!ownership_api.successful(measured.proof)) {
+            return measurement_failure(s, svc, measured.proof, op, at);
+        }
+        prospective.h = measured.amount;
+    }
+    if (prospective.d == 0 && prospective.r == 0 && prospective.p == 0 && prospective.g == 0 &&
+        prospective.h == 0 && prospective.e == 0 && prospective.w == 0) {
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input, op, at);
         return out;
     }
     ownership_api.charge_item[7] mut items = {};
     u64 mut count = 0;
-    if (counts.d > 0) {
+    if (prospective.d > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.d,
-            ownership_api.limit_scope.path, counts.d};
+            ownership_api.limit_scope.path, prospective.d};
         count += 1;
     }
-    if (counts.r > 0) {
+    if (prospective.r > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.r,
-            ownership_api.limit_scope.state, counts.r};
+            ownership_api.limit_scope.state, prospective.r};
         count += 1;
     }
-    if (counts.p > 0) {
+    if (prospective.p > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.p,
-            ownership_api.limit_scope.state, counts.p};
+            ownership_api.limit_scope.state, prospective.p};
         count += 1;
     }
-    if (counts.g > 0) {
+    if (prospective.g > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.g,
-            ownership_api.limit_scope.state, counts.g};
+            ownership_api.limit_scope.state, prospective.g};
         count += 1;
     }
-    if (counts.h > 0) {
+    if (prospective.h > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.h,
-            ownership_api.limit_scope.computation, counts.h};
+            ownership_api.limit_scope.state, prospective.h};
         count += 1;
     }
-    if (counts.e > 0) {
+    if (prospective.e > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.e,
             ownership_api.limit_scope.function, prospective.e};
         count += 1;
     }
-    if (counts.w > 0) {
+    if (prospective.w > 0) {
         items[count] = ownership_api.charge_item{ownership_api.limit_category.w,
             ownership_api.limit_scope.computation, 1};
         count += 1;
     }
     ownership_api.charge_request req = ownership_api.charge_request{
         ownership_api.work_kind.transfer, op, at, items[0..count]};
-    ownership_api.charge_result mut charged = ownership_api.charge_result{.allowed = true};
-    u64 mut remaining = counts.w;
-    while (remaining > 1) {
-        charged = ownership_api.charge_work(svc, ownership_api.work_kind.transfer, op, at);
-        if (!charged.allowed) { break; }
-        remaining -= 1;
-    }
-    if (charged.allowed) { charged = ownership_api.charge(svc, &req); }
+    charged = ownership_api.charge(svc, &req);
     if (!charged.allowed) {
         out.proof = charged.proof;
         if (charged.limit.present &&
@@ -856,21 +1219,16 @@ fn require_charge(state mut* s, ownership_api.services* svc,
     ownership_api.limit_category category, u64 amount,
     ownership_api.operation_position op, ownership_api.source_position at)
     ownership_api.mutation_result {
+    // Guarded alternatives and shapes have their own count functions. Other categories are invalid.
     charge_counts mut counts = charge_counts{};
-    if (amount == 0 || category == ownership_api.limit_category.t ||
-        category == ownership_api.limit_category.v) {
-        return require_counts(s, svc, counts, op, at);
-    }
-    switch (category) {
-    case ownership_api.limit_category.d: counts.d = amount; break;
-    case ownership_api.limit_category.r: counts.r = amount; break;
-    case ownership_api.limit_category.p: counts.p = amount; break;
-    case ownership_api.limit_category.g: counts.g = amount; break;
-    case ownership_api.limit_category.h: counts.h = amount; break;
-    case ownership_api.limit_category.e: counts.e = amount; break;
-    case ownership_api.limit_category.w: break;
-    case ownership_api.limit_category.t, ownership_api.limit_category.v: break;
-    }
+    bool known = category == ownership_api.limit_category.d ||
+        category == ownership_api.limit_category.r || category == ownership_api.limit_category.p ||
+        category == ownership_api.limit_category.e || category == ownership_api.limit_category.w;
+    if (amount == 0 || !known) { return require_counts(s, svc, counts, op, at); }
+    if (category == ownership_api.limit_category.d) { counts.d = amount; }
+    if (category == ownership_api.limit_category.r) { counts.r = amount; }
+    if (category == ownership_api.limit_category.p) { counts.p = amount; }
+    if (category == ownership_api.limit_category.e) { counts.e = amount; }
     counts.w = category == ownership_api.limit_category.w ? amount : 1;
     return require_counts(s, svc, counts, op, at);
 }
@@ -912,8 +1270,11 @@ fn add_contents(state mut* s, ownership_api.services* svc,
     ownership_api.contents_fact fact, ownership_api.operation_position op,
     ownership_api.source_position at) ownership_api.mutation_result {
     ownership_api.contents_fact[1] added = {fact};
-    region_candidate candidate = region_candidate{.contents = added[..], .copies = 1};
-    ownership_api.mutation_result result = require_regions(s, svc, candidate,
+    content_candidate mut content = content_candidate{.count_regions = true,
+        .count_guards = true};
+    content.regions = region_candidate{.contents = added[..], .copies = 1};
+    content.guards = guard_candidate{.contents = added[..]};
+    ownership_api.mutation_result result = require_content(s, svc, content,
         contents_counts(fact), op, at);
     if (!result.applied) { return result; }
     append_contents(s, fact);
@@ -991,11 +1352,13 @@ fn add_edge(state mut* s, ownership_api.services* svc,
     charge_counts mut counts = charge_counts{};
     counts.d = place_depth(fact.place);
     counts.r = region_count(fact.range);
-    counts.h = 1;
     counts.w = 1;
     ownership_api.graph_edge[1] added = {fact};
-    region_candidate candidate = region_candidate{.edges = added[..]};
-    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
+    content_candidate mut content = content_candidate{.count_regions = true,
+        .count_shapes = true};
+    content.regions = region_candidate{.edges = added[..]};
+    content.shapes = shape_candidate{.edges = added[..]};
+    ownership_api.mutation_result result = require_content(s, svc, content, counts, op, at);
     if (!result.applied) { return result; }
     append_edges(s, fact);
     return result;
@@ -1009,11 +1372,11 @@ fn add_shape(state mut* s, ownership_api.services* svc,
         if (same_entity(s->shapes[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
         i += 1;
     }
-    charge_counts mut counts = charge_counts{};
-    counts.h = plus_count(1, plus_count(fact.parameters.len,
-        plus_count(fact.clauses.len, fact.descendants.len)));
-    counts.w = 1;
-    ownership_api.mutation_result result = require_counts(s, svc, counts, op, at);
+    charge_counts counts = charge_counts{.w = 1};
+    ownership_api.shape_description[1] added = {fact};
+    content_candidate mut content = content_candidate{.count_shapes = true};
+    content.shapes = shape_candidate{.shapes = added[..]};
+    ownership_api.mutation_result result = require_content(s, svc, content, counts, op, at);
     if (!result.applied) { return result; }
     append_shapes(s, fact);
     return result;
@@ -1042,8 +1405,10 @@ fn add_guard(state mut* s, ownership_api.services* svc,
         if (same_entity(s->guards[i].key, fact.key)) { return bad_selection(s, svc, op, at); }
         i += 1;
     }
-    ownership_api.mutation_result result = require_charge(
-        s, svc, ownership_api.limit_category.g, 1, op, at);
+    // A guard row adds no guarded alternative. It still pays its work and the current count.
+    content_candidate content = content_candidate{.count_guards = true};
+    ownership_api.mutation_result result = require_content(s, svc, content,
+        charge_counts{.w = 1}, op, at);
     if (!result.applied) { return result; }
     append_guards(s, fact);
     return result;
@@ -1052,8 +1417,11 @@ fn add_guard(state mut* s, ownership_api.services* svc,
 fn add_correlation(state mut* s, ownership_api.services* svc,
     ownership_api.correlation fact, ownership_api.operation_position op,
     ownership_api.source_position at) ownership_api.mutation_result {
-    ownership_api.mutation_result result = require_charge(
-        s, svc, ownership_api.limit_category.g, 1, op, at);
+    ownership_api.correlation[1] added = {fact};
+    content_candidate mut content = content_candidate{.count_guards = true};
+    content.guards = guard_candidate{.correlations = added[..]};
+    ownership_api.mutation_result result = require_content(s, svc, content,
+        charge_counts{.w = 1}, op, at);
     if (!result.applied) { return result; }
     append_correlations(s, fact);
     return result;
@@ -1071,6 +1439,45 @@ fn add_loss(state mut* s, ownership_api.services* svc,
 
 fn same_entity(ownership_api.entity_id a, ownership_api.entity_id b) bool {
     return ownership_keys.entity(a, b) == 0;
+}
+
+fn order_number(u64 a, u64 b) i32 {
+    if (a < b) { return -1; }
+    if (a > b) { return 1; }
+    return 0;
+}
+
+fn scalar_order(ownership_api.scalar_fact a, ownership_api.scalar_fact b) i32 {
+    i32 c = order_number(cast(a.kind, u64), cast(b.kind, u64));
+    if (c != 0) { return c; }
+    if (a.value < b.value) { return -1; }
+    if (a.value > b.value) { return 1; }
+    return ownership_keys.entity(a.symbol, b.symbol);
+}
+
+fn projection_order(ownership_api.projection a, ownership_api.projection b) i32 {
+    i32 mut c = order_number(cast(a.kind, u64), cast(b.kind, u64));
+    if (c != 0) { return c; }
+    c = order_number(cast(a.field, u64), cast(b.field, u64));
+    if (c != 0) { return c; }
+    c = scalar_order(a.index, b.index);
+    if (c != 0) { return c; }
+    return ownership_keys.entity(a.captured_version, b.captured_version);
+}
+
+/// Orders places canonically. Equal order means `same_place`.
+fn place_order(ownership_api.place_path a, ownership_api.place_path b) i32 {
+    i32 mut c = ownership_keys.entity(a.root, b.root);
+    if (c != 0) { return c; }
+    u64 mut i = 0;
+    while (i < a.projections.len && i < b.projections.len) {
+        c = projection_order(a.projections[i], b.projections[i]);
+        if (c != 0) { return c; }
+        i += 1;
+    }
+    c = order_number(a.projections.len, b.projections.len);
+    if (c != 0) { return c; }
+    return order_number(cast(a.residual, u64), cast(b.residual, u64));
 }
 
 fn same_scalar(ownership_api.scalar_fact a, ownership_api.scalar_fact b) bool {
@@ -1510,7 +1917,6 @@ fn strong_contents(state mut* s, ownership_api.services* svc,
         i += 1;
     }
     charge_counts mut counts = contents_counts(fact);
-    counts.g = 0;
     counts.d = 0;
     counts.r = 0;
     i = 0;
@@ -1523,9 +1929,13 @@ fn strong_contents(state mut* s, ownership_api.services* svc,
         i += 1;
     }
     ownership_api.contents_fact[1] added = {fact};
-    region_candidate candidate = region_candidate{.contents = added[..],
-        .copies = aliases.len, .removed = aliases};
-    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
+    content_candidate mut content = content_candidate{.count_regions = true,
+        .count_guards = true};
+    content.regions = region_candidate{.contents = added[..], .copies = aliases.len,
+        .removed = aliases};
+    content.guards = guard_candidate{.contents = added[..], .places = aliases,
+        .removed = aliases};
+    ownership_api.mutation_result result = require_content(s, svc, content, counts, op, at);
     if (!result.applied) { return result; }
     i = 0;
     while (i < s->contents_len) {
@@ -1554,8 +1964,9 @@ fn weak_contents(state mut* s, ownership_api.services* svc,
         return bad_selection(s, svc, op, at);
     }
     charge_counts mut counts = charge_counts{};
-    counts.g = selections.len;
     counts.w = 1;
+    ownership_api.correlation mut@ own links = new(ownership_api.correlation, selections.len);
+    defer del(links);
     u64 mut j = 0;
     while (j < selections.len) {
         ownership_api.contents_fact mut selected = fact;
@@ -1563,11 +1974,16 @@ fn weak_contents(state mut* s, ownership_api.services* svc,
         charge_counts part = contents_counts(selected);
         counts.d = max_count(counts.d, part.d);
         counts.r = plus_count(counts.r, part.r);
+        links[j] = ownership_api.correlation{guard, fact.value_version, selections[j].root};
         j += 1;
     }
     ownership_api.contents_fact[1] added = {fact};
-    region_candidate candidate = region_candidate{.contents = added[..], .copies = selections.len};
-    ownership_api.mutation_result result = require_regions(s, svc, candidate, counts, op, at);
+    content_candidate mut content = content_candidate{.count_regions = true,
+        .count_guards = true};
+    content.regions = region_candidate{.contents = added[..], .copies = selections.len};
+    content.guards = guard_candidate{.contents = added[..], .places = selections,
+        .correlations = links[..]};
+    ownership_api.mutation_result result = require_content(s, svc, content, counts, op, at);
     if (!result.applied) { return result; }
     u64 mut i = 0;
     while (i < selections.len) {
