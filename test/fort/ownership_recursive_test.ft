@@ -48,6 +48,23 @@ string[2] MUTUAL_REVERSED = {
     "fn f(i32* p, bool b) i32* { if (b) { return p; } return g(p); }",
 };
 
+// In round 1 the provisional summary of `f` has only its case of `b == 1`, and the `false` of
+// `g` refutes it. Flow ends that path of `g` for the round, so the read of `*v` does not run
+// there; extraction must not reject it. `user` reads the view that it released.
+string[3] REFUTED_PAIR = {
+    "fn f(i32* p, bool b) i32* { if (b) { return p; } i32 z = g(p, true); return p; }",
+    "fn g(i32* p, bool c) i32 { if (c) { return 0; } i32* v = f(p, false); return *v; }",
+    "fn user(i32 mut* own a) i32 { i32* v = f(a, false); del(a); return *v; }",
+};
+
+// The same shape with two views: `g` passes them to `f` swapped, so `f(q, p, false)` returns
+// the `p` of `g`.
+string[3] REFUTED_SWAP = {
+    "fn f(i32* p, i32* q, bool b) i32* { if (b) { return q; } i32 z = g(p, q, true); return q; }",
+    "fn g(i32* p, i32* q, bool c) i32 { if (c) { return 0; }",
+    "    i32* v = f(q, p, false); return *v; }",
+};
+
 string[2] MUTUAL_SPIN = {
     "fn f(bool b) void { if (b) { return; } g(false); }",
     "fn g(bool b) void { f(b); }",
@@ -66,33 +83,45 @@ string[2] LAST = {
 };
 
 // The recursive call swaps its arguments, so its frame binds `q` to the formal `p`: the self
-// call needs its own keys for the callee frame.
-string[4] SWAP = {
+// call needs its own keys for the callee frame. `sw(r, a, false)` returns `a`. The exact
+// arguments of `rot(r, a, false, true)` select its case that returns `a`, and those of
+// `rot(r, a, false, false)` its second case that returns `r`.
+string[7] SWAP = {
     "fn sw(i32* p, i32* q, bool b) i32* { if (b) { return p; } return sw(q, p, true); }",
     "fn same(i32 mut* own a) i32 { i32* v = sw(a, a, false); del(a); return *v; }",
     "fn rot(i32* p, i32* q, bool b, bool c) i32* { if (b) { return p; }",
     "    if (c) { return rot(q, p, true, false); } return rot(q, p, false, true); }",
+    "fn other(i32 mut* own a, i32* r) i32 { i32* v = sw(r, a, false); del(a); return *v; }",
+    "fn turn(i32 mut* own a, i32* r) i32 { i32* v = rot(r, a, false, true); del(a); return *v; }",
+    "fn back(i32 mut* own a, i32* r) i32 { i32* v = rot(r, a, false, false); del(a); return *v; }",
 };
 
 // Two self calls in one body: each applies its own renamed copy, and the second takes the
 // result of the first. `two(q, p, true)` returns `q`, so the case of `b == 0` returns `q`.
-string[3] TWO_CALLS = {
+string[5] TWO_CALLS = {
     "fn two(i32* p, i32* q, bool b) i32* { if (b) { return p; }",
     "    i32* x = two(q, p, true); return two(x, p, true); }",
     "fn same(i32 mut* own a) i32 { i32* v = two(a, a, false); del(a); return *v; }",
+    "fn other(i32 mut* own a, i32* r) i32 { i32* v = two(r, a, false); del(a); return *v; }",
+    "fn kept(i32 mut* own a, i32* r) i32 { i32* v = two(a, r, false); del(a); return *v; }",
 };
 
-// The self call passes `p` twice, so the inner `q` is the outer `p`.
-string[2] ALIASED = {
+// The self call passes `p` twice, so the inner `q` is the outer `p`. `false` selects the
+// case that returns `p`, and `true` the case that returns `q`.
+string[4] ALIASED = {
     "fn al(i32* p, i32* q, bool b) i32* { if (b) { return q; } return al(p, p, true); }",
     "fn same(i32 mut* own a) i32 { i32* v = al(a, a, false); del(a); return *v; }",
+    "fn other(i32 mut* own a, i32* r) i32 { i32* v = al(a, r, false); del(a); return *v; }",
+    "fn kept(i32 mut* own a, i32* r) i32 { i32* v = al(a, r, true); del(a); return *v; }",
 };
 
 // Mutual recursion that swaps the arguments: `g(q, p)` returns its `p`, the outer `q`.
-string[3] MUTUAL_SWAP = {
+string[5] MUTUAL_SWAP = {
     "fn f(i32* p, i32* q, bool b) i32* { if (b) { return p; } return g(q, p); }",
     "fn g(i32* p, i32* q) i32* { return f(p, q, true); }",
     "fn same(i32 mut* own a) i32 { i32* v = f(a, a, false); del(a); return *v; }",
+    "fn other(i32 mut* own a, i32* r) i32 { i32* v = f(r, a, false); del(a); return *v; }",
+    "fn kept(i32 mut* own a, i32* r) i32 { i32* v = f(a, r, false); del(a); return *v; }",
 };
 
 // The prefix reads `*q`. The self call then passes a view of `p` after its release, but
@@ -219,6 +248,57 @@ fn formal_source(ownership_recursive_env.closure* c, u64 index) ownership_api.en
     return formal_at(c, index, 1);
 }
 
+// The number of recorded events of `kind` with unconditional evidence in body `name`.
+fn unconditional(ownership_recursive_env.closure* c, ownership_api.event_kind kind,
+    string name) u64 {
+    u32 declaration = cast(ownership_recursive_env.index(c, name) + 1, u32);
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        ownership_recursive_env.event_row row = c->counts.rows[i];
+        if (row.kind == kind && row.evidence == ownership_api.evidence_kind.unconditional &&
+            row.operation.function.declaration.declaration == declaration) { found += 1; }
+        i += 1;
+    }
+    return found;
+}
+
+// The live-source requirements of case `index` of `s` on the caller source `source`.
+fn live_requirements(ownership_summary_model.summary* s, u64 index,
+    ownership_api.entity_id source) u64 {
+    u64 mut found = 0;
+    u64 mut k = 0;
+    while (k < s->cases[index].requirements.len) {
+        u64 mut r = 0;
+        while (r < s->requirements.len) {
+            ownership_summary_model.requirement row = s->requirements[r];
+            if (ownership_summary_model.same(row.key, s->cases[index].requirements[k]) &&
+                row.kind == ownership_summary_model.requirement_kind.live_source &&
+                ownership_summary_model.same(row.source, source)) { found += 1; }
+            r += 1;
+        }
+        k += 1;
+    }
+    return found;
+}
+
+// A caller passes two different views, and the exact arguments select a case that returns
+// the view it releases. Its read is then one invalid use (D17.18). The caller has one reaching
+// path, so the validated witness is unconditional (`spec/toolchain.md` 4.2).
+fn released_read(ownership_recursive_env.closure* c, string name) void {
+    ownership_recursive_env.failed(c, name);
+    assert(ownership_recursive_env.saw(c, ownership_api.event_kind.invalid_use, name) == 1);
+    assert(unconditional(c, ownership_api.event_kind.invalid_use, name) == 1);
+}
+
+// The exact arguments select a case that returns the view that stays live, so the caller
+// proves its read and records no event.
+fn live_read(ownership_recursive_env.closure* c, string name) void {
+    ownership_recursive_env.complete(c, name, 1);
+    assert(ownership_recursive_env.saw(c, ownership_api.event_kind.invalid_use, name) == 0);
+    assert(ownership_recursive_env.saw(c, ownership_api.event_kind.incomplete_proof, name) == 0);
+}
+
 // The fixed point takes three rounds: bottom gives the returning case, the next round adds
 // the case through the recursive call, and the third changes nothing. The call passes true,
 // so the case of `b == 1` holds and covers it.
@@ -262,6 +342,44 @@ fn self_recursion() void {
     assert(spin.counts.events == 1 && ownership_recursive_env.saw(&spin,
         ownership_api.event_kind.incomplete_proof, "user") == 1);
     println("R01 self recursion");
+}
+
+// The requirements of `kind` of `s` on the caller source `source`, over each case.
+fn requirements_on(ownership_summary_model.summary* s,
+    ownership_summary_model.requirement_kind kind, ownership_api.entity_id source) u64 {
+    u64 mut found = 0;
+    u64 mut r = 0;
+    while (r < s->requirements.len) {
+        if (s->requirements[r].kind == kind &&
+            ownership_summary_model.same(s->requirements[r].source, source)) { found += 1; }
+        r += 1;
+    }
+    return found;
+}
+
+// A member call whose exact argument refutes each case of the provisional callee in an early
+// round. The origin of its result then reads each normal case, so extraction keeps the read
+// after it. Both members reach a fixed point with 2 cases in 3 rounds. The case `c == 0` of
+// `g` exports the read of `*v` as one extent requirement on the `p` of `g`, beside three live
+// requirements on it, and none on its `q`.
+fn refuted_round(string@ text, string@ names) void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    ownership_recursive_env.open(&c, text, names);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "f", 2);
+    ownership_recursive_env.complete(&c, "g", 2);
+    assert(ownership_recursive_env.rounds(&c, "f") == 3);
+    ownership_summary_model.summary* g = ownership_recursive_env.summary(&c, "g");
+    assert(requirements_on(g, ownership_summary_model.requirement_kind.extent,
+        formal_at(&c, 1, 1)) == 1);
+    assert(requirements_on(g, ownership_summary_model.requirement_kind.live_source,
+        formal_at(&c, 1, 1)) == 3);
+    assert(requirements_on(g, ownership_summary_model.requirement_kind.live_source,
+        formal_at(&c, 1, 2)) == 0);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.incomplete_proof, "f") == 0);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.incomplete_proof, "g") == 0);
+    if (names.len == 3) { released_read(&c, "user"); }
 }
 
 fn mutual_recursion() void {
@@ -309,6 +427,9 @@ fn mutual_recursion() void {
     ownership_recursive_env.solve(&spin);
     ownership_recursive_env.incomplete(&spin, "f", ownership_api.incomplete_reason.unknown_effect);
     ownership_recursive_env.incomplete(&spin, "g", ownership_api.incomplete_reason.unknown_effect);
+    string[3] refuted_names = {"f", "g", "user"};
+    refuted_round(REFUTED_PAIR[..], refuted_names[..]);
+    refuted_round(REFUTED_SWAP[..], refuted_names[..2]);
     println("R02 mutual recursion");
 }
 
@@ -329,7 +450,7 @@ fn recursive_borrow_return() void {
     assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use,
         "dangling") == 1);
     ownership_recursive_env.closure mut swap = ownership_recursive_env.closure{};
-    string[3] swap_names = {"sw", "same", "rot"};
+    string[6] swap_names = {"sw", "same", "rot", "other", "turn", "back"};
     ownership_recursive_env.open(&swap, SWAP[..], swap_names[..]);
     defer ownership_recursive_env.close(&swap);
     ownership_recursive_env.solve(&swap);
@@ -348,6 +469,9 @@ fn recursive_borrow_return() void {
     ownership_recursive_env.failed(&swap, "same");
     assert(ownership_recursive_env.saw(&swap, ownership_api.event_kind.invalid_use,
         "same") == 1);
+    released_read(&swap, "other");
+    released_read(&swap, "turn");
+    live_read(&swap, "back");
     ownership_recursive_env.closure mut casts = ownership_recursive_env.closure{};
     string[4] cast_names = {"widen", "reader", "top", "local"};
     ownership_recursive_env.open(&casts, CASTS[..], cast_names[..]);
@@ -495,22 +619,33 @@ fn incomplete_recursive_exit() void {
 
 // Each renamed frame keeps the formals of its call apart: two self calls in one body, a self
 // call with one argument twice, and two members that swap the arguments. Each caller that
-// passes one owner twice reads its released view.
+// passes one owner twice reads its released view. A caller that passes two different views
+// reads the view of the case that its exact arguments select.
 fn renamed_frames() void {
     ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
-    string[2] names = {"two", "same"};
+    string[4] names = {"two", "same", "other", "kept"};
     ownership_recursive_env.open(&c, TWO_CALLS[..], names[..]);
     defer ownership_recursive_env.close(&c);
     ownership_recursive_env.solve(&c);
     ownership_recursive_env.complete(&c, "two", 2);
-    assert(ownership_recursive_env.rounds(&c, "two") == 4);
+    // The exact `true` of each self call selects one case from the second round on, so each
+    // call result keeps the origin `q`, and the third round changes nothing. The copies of the
+    // two call results into `x` and into the result then add two live requirements on `q`
+    // to the two that the calls export (D17.18).
+    assert(ownership_recursive_env.rounds(&c, "two") == 3);
+    ownership_summary_model.summary* needs = ownership_recursive_env.summary(&c, "two");
+    assert(needs->requirements.len == 5);
+    assert(live_requirements(needs, 0, formal_at(&c, 0, 1)) == 1);
+    assert(live_requirements(needs, 1, formal_at(&c, 0, 2)) == 4);
     ownership_summary_model.summary* two = ownership_recursive_env.summary(&c, "two");
     assert(ownership_summary_model.same(result_source(two, 0), formal_at(&c, 0, 1)));
     assert(ownership_summary_model.same(result_source(two, 1), formal_at(&c, 0, 2)));
     ownership_recursive_env.failed(&c, "same");
     assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use, "same") == 1);
+    released_read(&c, "other");
+    live_read(&c, "kept");
     ownership_recursive_env.closure mut aliased = ownership_recursive_env.closure{};
-    string[2] aliased_names = {"al", "same"};
+    string[4] aliased_names = {"al", "same", "other", "kept"};
     ownership_recursive_env.open(&aliased, ALIASED[..], aliased_names[..]);
     defer ownership_recursive_env.close(&aliased);
     ownership_recursive_env.solve(&aliased);
@@ -521,8 +656,10 @@ fn renamed_frames() void {
     ownership_recursive_env.failed(&aliased, "same");
     assert(ownership_recursive_env.saw(&aliased, ownership_api.event_kind.invalid_use,
         "same") == 1);
+    released_read(&aliased, "other");
+    live_read(&aliased, "kept");
     ownership_recursive_env.closure mut swap = ownership_recursive_env.closure{};
-    string[3] swap_names = {"f", "g", "same"};
+    string[5] swap_names = {"f", "g", "same", "other", "kept"};
     ownership_recursive_env.open(&swap, MUTUAL_SWAP[..], swap_names[..]);
     defer ownership_recursive_env.close(&swap);
     ownership_recursive_env.solve(&swap);
@@ -536,6 +673,8 @@ fn renamed_frames() void {
     ownership_recursive_env.failed(&swap, "same");
     assert(ownership_recursive_env.saw(&swap, ownership_api.event_kind.invalid_use,
         "same") == 1);
+    released_read(&swap, "other");
+    live_read(&swap, "kept");
 }
 
 // The withdrawal of a divergent prefix records no event. The read of the released view gets

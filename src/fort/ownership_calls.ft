@@ -2357,9 +2357,87 @@ fn guard_record(ownership_summary_model.summary_view* summary,
     return ownership_api.U64_MAX;
 }
 
+/// A by-value scalar formal at an operand of a call with `operands` operands (D17.18). The
+/// call binds operand `formal - 1` to it as a capture (`ownership_summary.bind_call`), and
+/// `refuted` reads the same operand.
+fn scalar_formal(ownership_summary_model.symbolic_root row, u64 operands) bool {
+    return row.kind == ownership_summary_model.root_kind.by_value_slot && row.formal > 0 &&
+        cast(row.formal, u64) <= operands && row.ty != null &&
+        row.ty->kind != types.type_kind.k_ptr && row.ty->kind != types.type_kind.k_span &&
+        row.ty->kind != types.type_kind.k_string && !fir.type_aggregate(row.ty);
+}
+
+/// The value key of a formal root. A guard atom names a formal by this key.
+fn formal_value(ownership_summary_model.symbolic_root row) ownership_api.entity_id {
+    return ownership_api.entity_id{row.slot.function, ownership_api.entity_kind.value,
+        row.formal + 1};
+}
+
+// The fact of the operand that binds the scalar formal with value key `formal`, or an
+// unknown fact when no scalar formal has that key.
+fn argument_value(ownership_summary_model.summary_view* summary,
+    ownership_summary_model.context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id formal, ownership_api.scalar_fact@ arguments)
+    ownership_api.scalar_fact {
+    u64 mut i = 0;
+    while (i < summary->roots.len) {
+        if (!ownership_summary_model.work(ctx, proof, 1)) { return ownership_api.scalar_fact{}; }
+        ownership_summary_model.symbolic_root row = summary->roots[i];
+        if (scalar_formal(row, arguments.len) &&
+            ownership_summary_model.same(formal, formal_value(row))) {
+            return arguments[cast(row.formal - 1, u64)];
+        }
+        i += 1;
+    }
+    return ownership_api.scalar_fact{};
+}
+
+/// The refutation rule of a case guard (D17.18): an exact fact of the formal of an equality
+/// atom refutes the atom when its value differs. Then no execution of the call runs the case.
+/// `case_answer` applies the rule to a capture or a caller equality, and `refuted` applies it
+/// to a call operand.
+fn contradicts(ownership_api.predicate_atom atom, ownership_api.scalar_fact known) bool {
+    return atom.kind == ownership_api.predicate_kind.equality &&
+        atom.lower.kind == ownership_api.fact_kind.exact &&
+        known.kind == ownership_api.fact_kind.exact && known.value != atom.lower.value;
+}
+
+/// True when an exact call operand refutes an atom of the guard of case `index` by
+/// `contradicts` (D17.18). Extraction removes that case from the origin of the call result
+/// (`ownership_summary_body.call_origin`). `ownership_summary.bind_call` copies the same
+/// operand into the capture of the formal through `scalar_formal` and `formal_value`, and
+/// `case_answer` applies `contradicts` to that capture. So flow fails each case that this
+/// function refutes. A guard with a negative atom, or a guard without a record, is not
+/// refuted here; `case_answer` reads such a guard as unbound.
+fn refuted(ownership_summary_model.summary_view* summary, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, u64 index, ownership_api.scalar_fact@ arguments)
+    bool {
+    ownership_summary_model.case_record row = summary->cases[index];
+    if (row.guard.kind == ownership_api.entity_kind.none || arguments.len == 0) {
+        return false;
+    }
+    u64 at = guard_record(summary, ctx, proof, row.guard);
+    if (at == ownership_api.U64_MAX || summary->guards[at].negative.len != 0) { return false; }
+    ownership_api.entity_id@ keys = summary->guards[at].positive;
+    u64 mut k = 0;
+    while (k < keys.len) {
+        ownership_api.predicate_atom atom = guard_atom(summary, ctx, proof, keys[k]);
+        if (atom.kind == ownership_api.predicate_kind.equality &&
+            atom.lower.kind == ownership_api.fact_kind.exact &&
+            contradicts(atom, argument_value(summary, ctx, proof, atom.left, arguments))) {
+            return true;
+        }
+        if (!ownership_api.successful(*proof)) { return false; }
+        k += 1;
+    }
+    return false;
+}
+
 /// Decides the guard of case `index` from the call captures and the caller facts (D17.18).
-/// An exact capture or a caller equality decides one atom. A symbolic capture keeps the case
-/// possible. An atom without a capture is unbound. Formal identity alone decides nothing.
+/// An exact capture or a caller equality decides one atom by `contradicts`. The capture of a
+/// scalar formal holds its call operand, so each case that `refuted` refutes fails here. A
+/// symbolic capture keeps the case possible. An atom without a capture is unbound. Formal
+/// identity alone decides nothing.
 fn case_answer(request* req, ownership_summary_model.context* ctx,
     ownership_api.proof_status mut* proof, u64 index) guard_answer {
     ownership_summary_model.case_record row = req->summary->cases[index];
@@ -2382,7 +2460,7 @@ fn case_answer(request* req, ownership_summary_model.context* ctx,
             req->captures[c].value.kind == ownership_api.fact_kind.exact ? req->captures[c].value :
             caller_value(req, ctx, proof, req->captures[c].actual);
         if (known.kind == ownership_api.fact_kind.exact) {
-            if (known.value != atom.lower.value) { return guard_answer.fails; }
+            if (contradicts(atom, known)) { return guard_answer.fails; }
         } else if (unbound) {
             answer = guard_answer.unbound;
         } else {

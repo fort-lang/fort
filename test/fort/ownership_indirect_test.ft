@@ -37,6 +37,16 @@ string[6] TWO = {
     "    i32* v = p; del(p); (fn (i32*) i32) mut f = reader; f = zero; return f(v); }",
 };
 
+// Both stored functions are targets of `f`. `false` selects the case of `second` that returns
+// `q` and the case of `first` that returns `p`, so the call result has two origins.
+string[5] TWO_ORIGINS = {
+    "fn second(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn first(i32* p, i32* q, bool b) i32* { if (b) { return q; } return p; }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    (fn (i32*, i32*, bool) i32*) mut f = second; f = first;",
+    "    i32* v = f(r, a, false); del(a); return *v; }",
+};
+
 // Each target stores its borrowed argument into caller storage.
 string[7] STORES = {
     "struct view_box { i32* ptr; }",
@@ -146,6 +156,20 @@ fn two_targets() void {
     assert(ownership_recursive_env.summary(&stores, "single")->retained.len == 1);
     ownership_recursive_env.incomplete(&stores, "store",
         ownership_api.incomplete_reason.unknown_effect);
+    // The origin of a call result reads each target. Two origins keep it unknown, so the read
+    // of `top` stays incomplete in extraction, before flow records an event.
+    ownership_recursive_env.closure mut origins = ownership_recursive_env.closure{};
+    string[3] origin_names = {"second", "first", "top"};
+    ownership_recursive_env.open(&origins, TWO_ORIGINS[..], origin_names[..]);
+    defer ownership_recursive_env.close(&origins);
+    ownership_recursive_env.solve(&origins);
+    u64 two = ownership_recursive_env.call_of(&origins, "top", 0);
+    assert(origins.graph.calls[two].fort_len == 2 && !origins.graph.calls[two].residual_fort);
+    ownership_recursive_env.complete(&origins, "second", 2);
+    ownership_recursive_env.complete(&origins, "first", 2);
+    ownership_recursive_env.incomplete(&origins, "top",
+        ownership_api.incomplete_reason.missing_path);
+    assert(origins.counts.events == 0);
     println("R06 two fort targets");
 }
 
