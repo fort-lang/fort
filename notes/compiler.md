@@ -1361,6 +1361,25 @@ came here.
 - **A body applies the summary of each direct call at the gap of the call** (D17.18).
   Extraction records each call site, its event key, and fresh keys for the callee allocation
   templates. A call depth creates no key.
+  `ownership_join` and `ownership_state` name a failure by its statement index, and a body key
+  can take that ordinal. The event store keeps one event for each key. So a client that passes
+  services to `ownership_join` or `ownership_state` must route their events to a key of its
+  own. `ownership_flow` routes them to its event bindings. `ownership_transfer`,
+  `ownership_places` and `ownership_regions` route them to the transfer request's binding.
+  `ownership_raw`, `ownership_raw_join` and `ownership_raw_bytes` route them to the cached raw
+  key. `ownership_summary`, `ownership_calls` and the `ownership_ffi` hook route them to an
+  update key (`ownership_summary_model.update_services`). `ownership_globals` only measures
+  history, which records no event. A failed join of the cases, a failed end of a callee slot,
+  and a failed state update of a foreign boundary take the update key: the ordinal of the call's
+  event key plus `UPDATE_BASE` (2^31) (`ownership_summary_model.update_key`). A body key ordinal
+  is at most `BODY_LIMIT` (2^31 - 2), and the stop key is U32_MAX (`ownership_recursive.stop`).
+  `ownership_calls.bind` and the `ownership_ffi` boundary refuse an event key that is not a body
+  key with `missing_correspondence` and record no event, because that key can equal an update
+  key or the stop key in a shared store.
+  `test/fort/ownership_event_keys_test.ft` and `test/fort/ownership_ffi_hook_adapter_test.ft`
+  hold this.
+  Every other failure of one call application keeps the call's event key. The first failure
+  stops the application, and a forward tree reaches each call once, so one key is enough.
   The flow `direct_call` step runs `ownership_summary.call_step`. It binds the callee roots to the
   current path facts and runs `ownership_calls.apply`.
   An output root binds to a whole caller root only. An argument such as `&t->b` designates a
@@ -1413,8 +1432,8 @@ came here.
   of the component FIR size. A refused W charge stops it for each member. The stop records one
   `work_failure` event when no event of the computation names the W exhaustion, as in a round
   that records no event (`spec/fir.md` 14.1). An event store keeps one event for each key, so
-  the stop event names the first member and the ordinal U32_MAX; a body key stops before that
-  ordinal (`ownership_summary_body.next`). Each inference gets the services of its round
+  the stop event names the first member and the ordinal U32_MAX; a body key stops below the
+  update keys (`ownership_summary_body.next`). Each inference gets the services of its round
   through a copy of its input, so no input names the services of an ended computation.
   A withdrawal records no event. A divergent prefix that reads a released view (`PREFIX` in
   `test/fort/ownership_recursive_test.ft`) gets no error of its own: the published summary

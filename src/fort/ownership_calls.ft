@@ -815,8 +815,9 @@ fn bind(request* req) frame {
 
         }
     }
+    // The event key is a body key, so a failed update of the call has an update key.
     if (!req->event_map_complete || matches != 1 ||
-        ctx.event.kind != ownership_api.entity_kind.event ||
+        ownership_summary_model.update_key(ctx.event).kind != ownership_api.entity_kind.event ||
         ownership_keys.function(ctx.event.function, ctx.operation.function) != 0 ||
         !ownership_api.valid_limits(&req->limits) || !req->correspondence_complete) {
         out.proof = ownership_summary_model.fail(&ctx,
@@ -2287,8 +2288,13 @@ fn end_locals(request* req, application mut* out, ownership_summary_model.contex
             u64 source = ownership_state.source_index(&out->state, row.source);
             if (source != ownership_api.U64_MAX &&
                 out->state.sources[source].validity == ownership_api.validity_kind.live) {
+                // A failed update takes the update key of the call, not a body key.
+                ownership_summary_model.update_route mut route =
+                    ownership_summary_model.update_route{};
+                ownership_api.services keyed = ownership_summary_model.update_services(&route,
+                    req->services, ctx->event);
                 ownership_api.mutation_result ended = ownership_state.end_source(&out->state,
-                    req->services, row.source, req->operation, req->source);
+                    &keyed, row.source, req->operation, req->source);
                 out->proof = ended.proof;
                 if (!ended.applied) { return false; }
             }

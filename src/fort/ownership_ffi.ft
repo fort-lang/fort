@@ -2,6 +2,7 @@
 import ownership_api;
 import ownership_keys;
 import ownership_state;
+import ownership_summary_model;
 import ast;
 import types;
 
@@ -742,6 +743,8 @@ struct preparation_context {
     ownership_api.event_kind kind;
     ownership_api.entity_id relation;
     bool possible;
+    // The boundary event key is no body key, so the refusal records no event.
+    bool unkeyed;
 }
 struct checked_place {
     types.node* ty;
@@ -778,7 +781,7 @@ fn preparation_fail(preparation_context mut* c, string text,
     return false;
 }
 fn preparation_report(preparation_context mut* c) void {
-    if (ownership_api.successful(c->copy.proof)) { return; }
+    if (ownership_api.successful(c->copy.proof) || c->unkeyed) { return; }
     ownership_api.terminal_failure first = c->copy.proof.terminal;
     ownership_api.event_descriptor mut event = {};
     event.key = c->metadata.event;
@@ -1039,6 +1042,16 @@ fn preparation_metadata(preparation_context mut* c) bool {
         if (ownership_keys.operation(event.operation, r->call.operation) == 0) {
             matches += 1;
             c->metadata.event = event.key;
+            // A failed state update of the boundary takes the update key of this event key.
+            // A key that is no body key can equal an update key or the stop key in a shared
+            // store, so the refusal records no event, as `ownership_calls.bind` does.
+            if (ownership_summary_model.update_key(event.key).kind !=
+                ownership_api.entity_kind.event) {
+                c->unkeyed = true;
+                failed(&c->copy, ownership_api.incomplete_reason.missing_correspondence,
+                    event.key);
+                return false;
+            }
             if (!r->source_map_complete ||
                 ownership_keys.source(event.source, r->call.source) != 0) {
                 return preparation_fail(c, "The supplied source correspondence is missing.",
@@ -1935,7 +1948,11 @@ fn hook_source(hook_context mut* h, ownership_api.entity_id allocation) ownershi
 fn hook_transfers(hook_context mut* h) bool {
     boundary_plan* plan = h->plan;
     ownership_state.state mut* t = &h->transferred;
-    ownership_api.services* svc = h->prep.copy.services;
+    // A failed state update takes the update key of the boundary event, not a body key.
+    ownership_summary_model.update_route mut route = ownership_summary_model.update_route{};
+    ownership_api.services keyed = ownership_summary_model.update_services(&route,
+        h->prep.copy.services, h->prep.metadata.event);
+    ownership_api.services* svc = &keyed;
     ownership_api.operation_position op = h->prep.metadata.operation;
     ownership_api.source_position at = h->prep.metadata.source;
     if (!array_permission(&h->prep.copy, plan->selected_len)) { return false; }
@@ -2041,7 +2058,11 @@ fn hook_destinations(hook_context mut* h) bool {
 // receives one fresh obligation with an unknown length. No nullness fact appears.
 fn hook_write(hook_context mut* h, ownership_state.state mut* s, result_choice choice) bool {
     hook_request* r = h->request;
-    ownership_api.services* svc = h->prep.copy.services;
+    // A failed state update takes the update key of the boundary event, not a body key.
+    ownership_summary_model.update_route mut route = ownership_summary_model.update_route{};
+    ownership_api.services keyed = ownership_summary_model.update_services(&route,
+        h->prep.copy.services, h->prep.metadata.event);
+    ownership_api.services* svc = &keyed;
     ownership_api.operation_position op = h->prep.metadata.operation;
     ownership_api.source_position at = h->prep.metadata.source;
     ownership_api.contents_fact mut value = {};
