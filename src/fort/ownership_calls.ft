@@ -985,7 +985,14 @@ fn copy_caller(request* req, application mut* out, ownership_summary_model.conte
         ownership_state.append_shapes(&out->state, shape);
         i += 1;
     }
-    if (req->before.predicates.len != 0 || req->before.guards.len != 0 ||
+    // A predicate describes a caller value version. The callee cannot change that version.
+    i = 0;
+    while (i < req->before.predicates.len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
+        ownership_state.append_predicates(&out->state, req->before.predicates[i]);
+        i += 1;
+    }
+    if (req->before.guards.len != 0 ||
         req->before.correlations.len != 0 || req->before.losses.len != 0) {
         out->proof = caller_failure(req, out, ownership_api.entity_id{}, req->operation,
             ownership_api.incomplete_reason.unknown_effect,
@@ -2250,7 +2257,137 @@ fn end_locals(request* req, application mut* out, ownership_summary_model.contex
     return true;
 }
 
-fn apply(request* req) application {
+// One guard of a case. `fails` excludes the case. `unknown` keeps it possible for a symbolic
+// caller value. `unbound` names an atom with no capture, so no caller value decides it.
+enum guard_answer { holds, fails, unknown, unbound }
+
+fn capture_of(request* req, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, ownership_api.entity_id formal) u64 {
+    u64 mut i = 0;
+    while (i < req->captures.len) {
+        if (!ownership_summary_model.work(ctx, proof, 1)) { return ownership_api.U64_MAX; }
+        if (ownership_summary_model.same(req->captures[i].formal, formal)) { return i; }
+        i += 1;
+    }
+    return ownership_api.U64_MAX;
+}
+
+// The exact value that a caller predicate proves for a version, if one does.
+fn caller_value(request* req, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, ownership_api.entity_id version)
+    ownership_api.scalar_fact {
+    u64 mut i = 0;
+    while (version.kind == ownership_api.entity_kind.value && i < req->before.predicates.len) {
+        if (!ownership_summary_model.work(ctx, proof, 1)) { return ownership_api.scalar_fact{}; }
+        ownership_api.predicate_atom atom = req->before.predicates[i];
+        if (atom.kind == ownership_api.predicate_kind.equality &&
+            atom.right.kind == ownership_api.entity_kind.none &&
+            atom.lower.kind == ownership_api.fact_kind.exact &&
+            ownership_summary_model.same(atom.left, version)) { return atom.lower; }
+        i += 1;
+    }
+    return ownership_api.scalar_fact{};
+}
+
+// The guard atom of one positive key, or a record with no key.
+fn guard_atom(ownership_summary_model.summary_view* summary, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, ownership_api.entity_id key)
+    ownership_api.predicate_atom {
+    u64 mut i = 0;
+    while (i < summary->predicates.len) {
+        if (!ownership_summary_model.work(ctx, proof, 1)) { return ownership_api.predicate_atom{}; }
+        if (ownership_summary_model.same(summary->predicates[i].key, key)) {
+            return summary->predicates[i];
+        }
+        i += 1;
+    }
+    return ownership_api.predicate_atom{};
+}
+
+fn guard_record(ownership_summary_model.summary_view* summary,
+    ownership_summary_model.context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < summary->guards.len) {
+        if (!ownership_summary_model.work(ctx, proof, 1)) { return ownership_api.U64_MAX; }
+        if (ownership_summary_model.same(summary->guards[i].key, key)) { return i; }
+        i += 1;
+    }
+    return ownership_api.U64_MAX;
+}
+
+/// Decides the guard of case `index` from the call captures and the caller facts (D17.18).
+/// An exact capture or a caller equality decides one atom. A symbolic capture keeps the case
+/// possible. An atom without a capture is unbound. Formal identity alone decides nothing.
+fn case_answer(request* req, ownership_summary_model.context* ctx,
+    ownership_api.proof_status mut* proof, u64 index) guard_answer {
+    ownership_summary_model.case_record row = req->summary->cases[index];
+    if (row.guard.kind == ownership_api.entity_kind.none) { return guard_answer.holds; }
+    u64 at = guard_record(req->summary, ctx, proof, row.guard);
+    if (at == ownership_api.U64_MAX || req->summary->guards[at].negative.len != 0) {
+        return guard_answer.unbound;
+    }
+    guard_answer mut answer = guard_answer.holds;
+    ownership_api.entity_id@ keys = req->summary->guards[at].positive;
+    u64 mut k = 0;
+    while (k < keys.len) {
+        ownership_api.predicate_atom atom = guard_atom(req->summary, ctx, proof, keys[k]);
+        u64 c = atom.kind == ownership_api.predicate_kind.equality &&
+            atom.lower.kind == ownership_api.fact_kind.exact ?
+            capture_of(req, ctx, proof, atom.left) : ownership_api.U64_MAX;
+        if (!ownership_api.successful(*proof)) { return guard_answer.unknown; }
+        bool unbound = c == ownership_api.U64_MAX;
+        ownership_api.scalar_fact known = unbound ? ownership_api.scalar_fact{} :
+            req->captures[c].value.kind == ownership_api.fact_kind.exact ? req->captures[c].value :
+            caller_value(req, ctx, proof, req->captures[c].actual);
+        if (known.kind == ownership_api.fact_kind.exact) {
+            if (known.value != atom.lower.value) { return guard_answer.fails; }
+        } else if (unbound) {
+            answer = guard_answer.unbound;
+        } else if (answer == guard_answer.holds) { answer = guard_answer.unknown; }
+        k += 1;
+    }
+    return answer;
+}
+
+// A possible case that the caller cannot decide adds its captured value atoms to the state.
+// A later test of the same version then sees the case condition.
+fn guard_facts(request* req, application mut* out, ownership_summary_model.context* ctx,
+    u64 index) bool {
+    ownership_summary_model.case_record row = req->summary->cases[index];
+    if (row.guard.kind == ownership_api.entity_kind.none) { return true; }
+    u64 at = guard_record(req->summary, ctx, &out->proof, row.guard);
+    if (at == ownership_api.U64_MAX) { return ownership_api.successful(out->proof); }
+    ownership_api.entity_id@ keys = req->summary->guards[at].positive;
+    u64 mut k = 0;
+    while (k < keys.len) {
+        ownership_api.predicate_atom atom = guard_atom(req->summary, ctx, &out->proof, keys[k]);
+        u64 c = capture_of(req, ctx, &out->proof, atom.left);
+        if (!ownership_api.successful(out->proof)) { return false; }
+        if (c != ownership_api.U64_MAX &&
+            req->captures[c].value.kind != ownership_api.fact_kind.exact &&
+            req->captures[c].actual.kind == ownership_api.entity_kind.value &&
+            caller_value(req, ctx, &out->proof, req->captures[c].actual).kind !=
+                ownership_api.fact_kind.exact) {
+            ownership_api.predicate_atom mut known = ownership_api.predicate_atom{};
+            known.kind = ownership_api.predicate_kind.equality;
+            known.left = req->captures[c].actual;
+            known.lower = atom.lower;
+            known.upper = atom.lower;
+            ownership_state.append_predicates(&out->state, known);
+        }
+        k += 1;
+    }
+    return ownership_api.successful(out->proof);
+}
+
+/// Applies the only case of an unguarded summary.
+fn apply(request* req) application { return apply_selected(req, 0, false); }
+
+/// Applies case `index`, which the caller found possible. Its guard may stay unknown.
+fn apply_case(request* req, u64 index) application { return apply_selected(req, index, true); }
+
+fn apply_selected(request* req, u64 index, bool guarded) application {
     application mut out = application{};
     out.outcome = ownership_api.outcome_fact{.kind = ownership_api.outcome_kind.unknown_fort,
         .possible_caller_return = true, .cleanup_required = true};
@@ -2259,10 +2396,12 @@ fn apply(request* req) application {
     if (!ownership_api.successful(out.proof)) { return out; }
     ownership_summary_model.context mut ctx = ownership_summary_model.context{req->services,
         req->operation, req->source, out.bound.model.event, req->summary->source};
-    ownership_api.outcome_kind ending = out.bound.model.cases.len == 1 ?
-        out.bound.model.cases[0].outcome.kind : ownership_api.outcome_kind.unknown_fort;
-    if (out.bound.model.residual_effects || out.bound.model.cases.len != 1 ||
-        out.bound.model.cases[0].guard.kind != ownership_api.entity_kind.none ||
+    bool selectable = index < out.bound.model.cases.len &&
+        (guarded || (out.bound.model.cases.len == 1 &&
+        out.bound.model.cases[0].guard.kind == ownership_api.entity_kind.none));
+    ownership_api.outcome_kind ending = selectable ?
+        out.bound.model.cases[index].outcome.kind : ownership_api.outcome_kind.unknown_fort;
+    if (out.bound.model.residual_effects || !selectable ||
         (ending != ownership_api.outcome_kind.function_return &&
         ending != ownership_api.outcome_kind.abort) ||
         out.bound.model.retained.len != 0) {
@@ -2294,7 +2433,7 @@ fn apply(request* req) application {
         req->operation, out.bound.model.event}};
     // Only the effects of the applied case need their requirements. An effect after an abort
     // never runs, so its requirement cannot fail the call.
-    ownership_api.entity_id@ sequence = out.bound.model.cases[0].effects;
+    ownership_api.entity_id@ sequence = out.bound.model.cases[index].effects;
     u64 mut preflight = 0;
     while (preflight < sequence.len) {
         u64 mut at = 0;
@@ -2339,7 +2478,8 @@ fn apply(request* req) application {
     if (ending == ownership_api.outcome_kind.function_return && !end_locals(req, &out, &ctx)) {
         return out;
     }
-    out.outcome = out.bound.model.cases[0].outcome;
+    if (!guard_facts(req, &out, &ctx, index)) { return out; }
+    out.outcome = out.bound.model.cases[index].outcome;
     out.normal_continuation = ending == ownership_api.outcome_kind.function_return;
     return out;
 }

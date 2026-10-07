@@ -3,6 +3,7 @@ import fir;
 import ownership_api;
 import ownership_calls;
 import ownership_flow;
+import ownership_join;
 import ownership_keys;
 import ownership_state;
 import ownership_summary_body;
@@ -68,9 +69,16 @@ fn copy_state(ownership_api.state_view* input, ownership_summary_model.context* 
         ownership_state.append_allocations(&out, item);
         i += 1;
     }
-    // Linear extraction creates no projected, guarded, shape, or heap-graph records.
+    // Value atoms record the guard of a path. The extractor creates no projected, guarded,
+    // shape, or heap-graph records.
+    i = 0;
+    while (i < input->predicates.len) {
+        if (!ownership_summary_model.work(ctx, proof, 1)) { out.proof = *proof; return out; }
+        ownership_state.append_predicates(&out, input->predicates[i]);
+        i += 1;
+    }
     if (input->regions.len != 0 || input->nodes.len != 0 || input->edges.len != 0 ||
-        input->shapes.len != 0 || input->predicates.len != 0 || input->guards.len != 0 ||
+        input->shapes.len != 0 || input->guards.len != 0 ||
         input->correlations.len != 0 || input->losses.len != 0) {
         *proof = ownership_summary_model.fail(ctx,
             ownership_api.incomplete_reason.unknown_effect, ctx->event);
@@ -280,6 +288,19 @@ fn bind_call(call_context* c, ownership_summary_body.call_site site, fir.stateme
         } else if (row.kind == ownership_summary_model.root_kind.global) {
             out->unknown = true;
             return true;
+        } else if (row.kind == ownership_summary_model.root_kind.by_value_slot &&
+            row.formal > 0 && row.formal <= site.args_len && row.ty != null &&
+            !ownership_summary_body.reference(row.ty) && !fir.type_aggregate(row.ty)) {
+            // A scalar formal is a capture. Its value decides the guards of callee cases.
+            ownership_api.scalar_fact value = c->program->call_args[site.args_first +
+                cast(row.formal - 1, u64)];
+            if (value.kind == ownership_api.fact_kind.exact ||
+                value.kind == ownership_api.fact_kind.symbolic) {
+                out->captures[out->captures_len] = ownership_calls.capture_binding{
+                    ownership_api.entity_id{row.slot.function, ownership_api.entity_kind.value,
+                        row.formal + 1}, value.symbol, value};
+                out->captures_len += 1;
+            }
         }
         i += 1;
     }
@@ -352,11 +373,11 @@ fn listed(ownership_api.entity_id@ keys, ownership_api.entity_id key) bool {
 // Exports the callee requirements and the call result of this body (D17.14, D17.17).
 // Any other caller-visible callee effect keeps the published summary incomplete.
 fn export_call(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
-    ownership_flow.step* s, ownership_calls.application* applied) bool {
+    ownership_flow.step* s, ownership_calls.application* applied, u64 index) bool {
     ownership_summary_body.body_program mut* program = c->program;
     ownership_summary_model.summary* bound = &applied->bound.model;
     // Only the applied case runs. A requirement or effect after its abort is not exported.
-    ownership_summary_model.case_record applied_case = bound->cases[0];
+    ownership_summary_model.case_record applied_case = bound->cases[index];
     u64 mut i = 0;
     while (i < bound->requirements.len) {
         if (!call_work(c, 2) || !call_work(c, applied_case.requirements.len)) { return false; }
@@ -404,17 +425,29 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
         }
         op += 1;
     }
+    return ownership_api.successful(program->proof);
+}
+
+// The call result becomes one write of the one normal continuation. Two normal cases give two
+// values at one position, which this summary cannot export, so it stays incomplete.
+fn export_call_result(call_context* c, fir.statement* call, ownership_flow.step* s,
+    ownership_state.state* continuation, u64 normals) bool {
+    ownership_summary_body.body_program mut* program = c->program;
     types.node* result = fir.local_at(c->in->function.body, call->place.local)->ty;
     if (!ownership_summary_body.reference(result)) { return true; }
+    if (normals != 1) {
+        program->call_residual = true;
+        return true;
+    }
     ownership_api.place_path destination = ownership_summary_body.slot(c->in,
         call->place.local);
-    if (!call_work(c, applied->state.contents_len)) { return false; }
-    u64 at = ownership_transfer.contents_index(&applied->state, destination);
+    if (!call_work(c, continuation->contents_len)) { return false; }
+    u64 at = ownership_transfer.contents_index(continuation, destination);
     if (at == ownership_api.U64_MAX) {
         program->call_residual = true;
         return true;
     }
-    ownership_api.contents_fact value = applied->state.contents[at];
+    ownership_api.contents_fact value = continuation->contents[at];
     u64 mut b = 0;
     while (b < value.borrows.len) {
         if (!call_work(c, 1)) { return false; }
@@ -449,8 +482,73 @@ fn unresolved_call(call_context* c, fir.statement* call, ownership_state.state m
     return verdict;
 }
 
-// Applies the published callee summary at one call (D17.18). A proved abort ends the path.
-// An unresolved summary keeps a possible return with its obligations.
+// The normal continuations of one call. The first is kept; each later one widens it.
+struct continuation {
+    ownership_state.state facts;
+    u64 normals;
+}
+
+// Applies one possible case. An abort records its exit. A normal return joins the
+// continuation. `stop` names a verdict that ends the path.
+fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
+    ownership_flow.step* s, ownership_calls.request* req, u64 index,
+    continuation mut* kept, ownership_flow.call_verdict mut* verdict) bool {
+    ownership_calls.application mut applied = ownership_calls.apply_case(req, index);
+    defer ownership_calls.free(&applied);
+    // A refused charge stops this computation, whatever reason the application reports.
+    if (c->watch != null && c->watch->refused) {
+        verdict->proof = c->watch->refusal.proof;
+        return false;
+    }
+    if (!ownership_api.successful(applied.proof)) {
+        if (applied.proof.kind == ownership_api.proof_kind.incomplete &&
+            applied.proof.terminal.reason != ownership_api.incomplete_reason.work_limit &&
+            applied.proof.terminal.reason != ownership_api.incomplete_reason.report_limit) {
+            verdict->unknown = true;
+            return false;
+        }
+        verdict->proof = applied.proof;
+        return false;
+    }
+    if (!export_call(c, site, call, s, &applied, index)) {
+        verdict->proof = c->program->proof;
+        return false;
+    }
+    if (!applied.normal_continuation) {
+        if (applied.outcome.kind != ownership_api.outcome_kind.abort) {
+            verdict->unknown = true;
+            return false;
+        }
+        ownership_api.state_view ended = ownership_state.view(&applied.state);
+        verdict->proof = observe(cast(c->observations, void mut*), &ended, applied.outcome,
+            s->operation, s->source);
+        return ownership_api.successful(verdict->proof);
+    }
+    if (kept->normals == 0) {
+        kept->facts = move(applied.state);
+    } else {
+        if (!call_work(c, 1)) {
+            verdict->proof = c->program->proof;
+            return false;
+        }
+        ownership_state.state mut joined = ownership_join.widen(&kept->facts, &applied.state,
+            c->in->services, &c->in->limits, s->operation, s->source);
+        ownership_state.free(&kept->facts);
+        kept->facts = move(joined);
+        if (!ownership_api.successful(kept->facts.proof)) {
+            verdict->proof = kept->facts.proof;
+            return false;
+        }
+    }
+    kept->normals += 1;
+    return true;
+}
+
+// Applies the published callee summary at one call (D17.18). Each case whose guard does not
+// fail runs. A proved abort records an abort exit and needs no cleanup. Two normal cases join
+// into one continuation. When only aborts run, the path ends. An unresolved summary keeps a
+// possible return with its obligations. So does a summary whose guards all fail: such guards
+// cover no caller value, and they prove no absence of return.
 fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut* facts)
     ownership_flow.call_verdict {
     call_context* c = cast(opaque, call_context*);
@@ -492,37 +590,50 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
         .coverage = ownership_summary_model.coverage_status{true, true, false},
         .correspondence_complete = true, .event_map_complete = true};
     req.result.actual_slot = ownership_summary_body.slot(c->in, call->place.local);
-    ownership_calls.application mut applied = ownership_calls.apply(&req);
-    defer ownership_calls.free(&applied);
-    // A refused charge stops this computation, whatever reason the application reports.
-    if (c->watch != null && c->watch->refused) {
-        verdict.proof = c->watch->refusal.proof;
-        return verdict;
-    }
-    if (!ownership_api.successful(applied.proof)) {
-        if (applied.proof.kind == ownership_api.proof_kind.incomplete &&
-            applied.proof.terminal.reason != ownership_api.incomplete_reason.work_limit &&
-            applied.proof.terminal.reason != ownership_api.incomplete_reason.report_limit) {
+    ownership_summary_model.context guard_context = ownership_summary_model.context{
+        c->in->services, s->operation, s->source, site.event, summary->source};
+    // Each guard is decided before any case runs. No caller value decides an unbound guard,
+    // so the call stays unresolved (D17.18).
+    u64 mut possible = 0;
+    u64 mut i = 0;
+    while (i < summary->cases.len) {
+        ownership_calls.guard_answer answer = ownership_calls.case_answer(&req, &guard_context,
+            &c->program->proof, i);
+        if (answer == ownership_calls.guard_answer.unbound) {
             return unresolved_call(c, call, facts);
         }
-        verdict.proof = applied.proof;
-        return verdict;
+        if (!ownership_api.successful(c->program->proof)) {
+            verdict.proof = c->program->proof;
+            return verdict;
+        }
+        if (answer != ownership_calls.guard_answer.fails) { possible += 1; }
+        i += 1;
     }
-    if (!export_call(c, site, call, s, &applied)) {
+    if (possible == 0) { return unresolved_call(c, call, facts); }
+    continuation mut kept = continuation{.facts = ownership_state.empty()};
+    defer ownership_state.free(&kept.facts);
+    i = 0;
+    while (i < summary->cases.len) {
+        ownership_calls.guard_answer answer = ownership_calls.case_answer(&req, &guard_context,
+            &c->program->proof, i);
+        if (!ownership_api.successful(c->program->proof)) {
+            verdict.proof = c->program->proof;
+            return verdict;
+        }
+        if (answer != ownership_calls.guard_answer.fails &&
+            !apply_one(c, site, call, s, &req, i, &kept, &verdict)) {
+            if (verdict.unknown) { return unresolved_call(c, call, facts); }
+            return verdict;
+        }
+        i += 1;
+    }
+    if (kept.normals == 0) { return verdict; }
+    if (!export_call_result(c, call, s, &kept.facts, kept.normals)) {
         verdict.proof = c->program->proof;
         return verdict;
     }
-    if (!applied.normal_continuation) {
-        if (applied.outcome.kind != ownership_api.outcome_kind.abort) {
-            return unresolved_call(c, call, facts);
-        }
-        ownership_api.state_view ended = ownership_state.view(&applied.state);
-        verdict.proof = observe(cast(c->observations, void mut*), &ended, applied.outcome,
-            s->operation, s->source);
-        return verdict;
-    }
     ownership_state.free(facts);
-    *facts = move(applied.state);
+    *facts = move(kept.facts);
     verdict.continues = true;
     return verdict;
 }
@@ -558,10 +669,22 @@ fn failed(ownership_summary_body.body_program* program) ownership_summary_model.
     return out;
 }
 
+// A block is on the path to an exit when it is the exit block or one of its parents.
+fn on_path(ownership_summary_body.body_program mut* program, u32 block, u32 exit_block) bool {
+    u32 mut at = exit_block;
+    while (at != ownership_summary_body.U32_MAX && cast(at, u64) < program->parents.len) {
+        if (!ownership_summary_body.work(program, 1)) { return false; }
+        if (at == block) { return true; }
+        at = program->parents[at];
+    }
+    return false;
+}
+
 // A position precedes an exit on its path. A call export shares the position of its call.
-fn before_exit(ownership_api.operation_position at, ownership_api.operation_position exit)
-    bool {
-    return at.block < exit.block || (at.block == exit.block && at.operation <= exit.operation);
+fn before_exit(ownership_summary_body.body_program mut* program,
+    ownership_api.operation_position at, ownership_api.operation_position exit) bool {
+    if (at.block == exit.block) { return at.operation <= exit.operation; }
+    return at.block < exit.block && on_path(program, at.block, exit.block);
 }
 
 fn position_less(ownership_api.operation_position a, ownership_api.operation_position b) bool {
@@ -578,7 +701,7 @@ fn exit_sequence(ownership_summary_body.body_program mut* program, exit_snapshot
     while (i < program->effects_len) {
         if (!ownership_summary_body.work(program, 1)) { return 0; }
         ownership_api.operation_position at = program->effects[i].effect.operation;
-        if (before_exit(at, exit->operation)) {
+        if (before_exit(program, at, exit->operation)) {
             u64 mut j = count;
             while (j > 0 && position_less(at, program->effects[index[j - 1]].effect.operation)) {
                 if (!ownership_summary_body.work(program, 1)) { return 0; }
@@ -700,7 +823,7 @@ fn released_views(ownership_summary_body.body_program mut* program, exit_snapsho
                     ownership_summary_model.requirement row = program->requirements[r];
                     if (ownership_summary_model.same(row.source, view) &&
                         position_less(release.effect.operation, row.operation) &&
-                        before_exit(row.operation, exit->operation)) {
+                        before_exit(program, row.operation, exit->operation)) {
                         intrinsic_use(program, row.operation,
                             position_source(program, row.operation, exit->source), view,
                             "view of an owner field is used after its release");
@@ -732,128 +855,306 @@ fn released_views(ownership_summary_body.body_program mut* program, exit_snapsho
     return true;
 }
 
+// A guard atom tests one exact value of a captured scalar formal of this body.
+fn formal_atom(ownership_summary_body.body_input* in, ownership_api.predicate_atom atom) bool {
+    u64 locals = cast(fir.local_count(in->function.body), u64);
+    return atom.kind == ownership_api.predicate_kind.equality &&
+        atom.left.kind == ownership_api.entity_kind.value &&
+        ownership_keys.function(atom.left.function, in->function.key) == 0 &&
+        atom.right.kind == ownership_api.entity_kind.none &&
+        atom.lower.kind == ownership_api.fact_kind.exact && atom.left.ordinal > 0 &&
+        cast(atom.left.ordinal - 1, u64) < locals &&
+        fir.local_at(in->function.body, atom.left.ordinal - 1)->kind ==
+            fir.local_kind.lk_param &&
+        !ownership_summary_body.reference(fir.local_at(in->function.body,
+            atom.left.ordinal - 1)->ty);
+}
+
+fn exit_less(exit_snapshot* a, exit_snapshot* b) bool {
+    return position_less(a->operation, b->operation);
+}
+
+// The exits of the observer list, sorted by FIR position. Two exits at one position, or an
+// exit that is neither a return nor an abort, leave the summary without a proof.
+fn sorted_exits(ownership_summary_body.body_program mut* program, exits* observations,
+    exit_snapshot* mut@ out) bool {
+    exit_snapshot* mut item = observations->first;
+    u64 mut count = 0;
+    while (item != null && count < out.len) {
+        if (!ownership_summary_body.work(program, 1 + count)) { return false; }
+        if (item->outcome.kind != ownership_api.outcome_kind.function_return &&
+            item->outcome.kind != ownership_api.outcome_kind.abort) { return false; }
+        u64 mut j = count;
+        while (j > 0 && exit_less(item, out[j - 1])) {
+            out[j] = out[j - 1];
+            j -= 1;
+        }
+        if (j > 0 && ownership_keys.operation(out[j - 1]->operation, item->operation) == 0) {
+            return false;
+        }
+        out[j] = item;
+        count += 1;
+        item = item->next;
+    }
+    return count == out.len && item == null;
+}
+
+// The owned records of one publication. The summary view borrows these slices.
+struct publication {
+    ownership_api.entity_id mut@ own case_effects;
+    ownership_api.entity_id mut@ own case_requirements;
+    ownership_api.entity_id mut@ own case_results;
+    ownership_api.entity_id mut@ own guard_keys;
+    ownership_api.predicate_atom mut@ own predicates;
+    ownership_api.guard_fact mut@ own guards;
+    ownership_summary_model.case_record mut@ own cases;
+    ownership_summary_model.relation mut@ own relations;
+    ownership_api.ordering_constraint mut@ own order;
+    u64 predicates_len;
+    u64 guards_len;
+    u64 relations_len;
+    u64 order_len;
+    u64 results_len;
+    u64 guard_keys_len;
+}
+
+fn free_publication(publication mut* out) void {
+    publication mut owned = move(*out);
+    del(owned.case_effects);
+    del(owned.case_requirements);
+    del(owned.case_results);
+    del(owned.guard_keys);
+    del(owned.predicates);
+    del(owned.guards);
+    del(owned.cases);
+    del(owned.relations);
+    del(owned.order);
+    *out = publication{};
+}
+
+// The guard of one exit is the conjunction of its formal value atoms. Equal atoms of two exits
+// share one predicate record.
+fn exit_guard(ownership_summary_body.body_input* in,
+    ownership_summary_body.body_program mut* program, exit_snapshot* exit,
+    publication mut* out) ownership_api.entity_id {
+    u64 first = out->guard_keys_len;
+    u64 mut i = 0;
+    while (i < exit->facts.predicates_len) {
+        if (!ownership_summary_body.work(program, 1 + out->predicates_len)) {
+            return ownership_api.entity_id{};
+        }
+        ownership_api.predicate_atom atom = exit->facts.predicates[i];
+        if (formal_atom(in, atom) && out->guard_keys_len < out->guard_keys.len) {
+            u64 mut found = out->predicates_len;
+            u64 mut k = 0;
+            while (k < out->predicates_len) {
+                if (ownership_summary_model.same(out->predicates[k].left, atom.left) &&
+                    out->predicates[k].lower.value == atom.lower.value) { found = k; }
+                k += 1;
+            }
+            if (found == out->predicates_len) {
+                ownership_api.predicate_atom mut stored = atom;
+                stored.key = ownership_summary_body.next(program,
+                    ownership_api.entity_kind.predicate);
+                out->predicates[out->predicates_len] = stored;
+                out->predicates_len += 1;
+            }
+            out->guard_keys[out->guard_keys_len] = out->predicates[found].key;
+            out->guard_keys_len += 1;
+        }
+        i += 1;
+    }
+    if (out->guard_keys_len == first) { return ownership_api.entity_id{}; }
+    if (!ownership_summary_model.effect_charge(&program->context, &program->proof,
+        &program->relations)) { return ownership_api.entity_id{}; }
+    ownership_api.entity_id key = ownership_summary_body.next(program,
+        ownership_api.entity_kind.guard);
+    ownership_api.entity_id@ none = {};
+    out->guards[out->guards_len] = ownership_api.guard_fact{key,
+        out->guard_keys[first..out->guard_keys_len], none};
+    out->guards_len += 1;
+    return key;
+}
+
+// One case for each exit (D17.18). A case keeps the requirements and the effects on the path
+// to its exit, in FIR order, and the result relations of a normal return.
+fn exit_case(ownership_summary_body.body_input* in,
+    ownership_summary_body.body_program mut* program, exit_snapshot* exit, u64 index,
+    publication mut* out) bool {
+    bool returns = exit->outcome.kind == ownership_api.outcome_kind.function_return;
+    u64 stride = program->effects_len;
+    ownership_api.entity_id mut@ effects = out->case_effects[index * stride..(index + 1) * stride];
+    u64 sequence = exit_sequence(program, exit, effects);
+    if (!ownership_api.successful(program->proof) ||
+        !released_views(program, exit, effects[..sequence], returns,
+            ownership_summary_body.slot(in, 0))) { return false; }
+    u64 mut i = 0;
+    while (i + 1 < sequence) {
+        if (!ownership_summary_body.work(program, 1) ||
+            !ownership_summary_model.effect_charge(&program->context, &program->proof,
+            &program->relations) || out->order_len >= out->order.len) { return false; }
+        out->order[out->order_len] = ownership_api.ordering_constraint{effects[i],
+            effects[i + 1], true};
+        out->order_len += 1;
+        i += 1;
+    }
+    u64 rows = program->requirements_len;
+    ownership_api.entity_id mut@ needed = out->case_requirements[index * rows..(index + 1) * rows];
+    u64 mut kept = 0;
+    i = 0;
+    while (i < rows) {
+        if (!ownership_summary_body.work(program, 1)) { return false; }
+        if (before_exit(program, program->requirements[i].operation, exit->operation)) {
+            needed[kept] = program->requirements[i].key;
+            kept += 1;
+        }
+        i += 1;
+    }
+    u64 results_first = out->results_len;
+    i = 0;
+    while (returns && i < exit->facts.contents_len) {
+        if (!ownership_summary_body.work(program, 1)) { return false; }
+        ownership_api.contents_fact contents = exit->facts.contents[i];
+        u64 mut b = 0;
+        while (ownership_summary_model.same(contents.place.root,
+            ownership_summary_body.slot(in, 0).root) && b < contents.borrows.len) {
+            if (!ownership_summary_body.work(program, 1) ||
+                !ownership_summary_model.effect_charge(&program->context, &program->proof,
+                &program->relations) || out->relations_len >= out->relations.len) {
+                return false;
+            }
+            ownership_api.entity_id key = ownership_summary_body.next(program,
+                ownership_api.entity_kind.relation);
+            out->relations[out->relations_len] = ownership_summary_model.relation{.key = key,
+                .borrow = contents.borrows[b]};
+            out->relations_len += 1;
+            out->case_results[out->results_len] = key;
+            out->results_len += 1;
+            b += 1;
+        }
+        i += 1;
+    }
+    ownership_api.entity_id guard = exit_guard(in, program, exit, out);
+    // A refused key fails the proof. Each later charge then fails, so this check also covers
+    // a refused result relation key.
+    ownership_api.entity_id case_key = ownership_summary_body.next(program,
+        ownership_api.entity_kind.guard);
+    if (!ownership_api.successful(program->proof)) { return false; }
+    ownership_api.outcome_fact mut outcome = exit->outcome;
+    outcome.guard = guard;
+    out->cases[index] = ownership_summary_model.case_record{.key = case_key, .guard = guard,
+        .requirements = needed[..kept], .effects = effects[..sequence],
+        .results = out->case_results[results_first..out->results_len], .outcome = outcome,
+        .coverage = program->coverage};
+    return true;
+}
+
+fn result_capacity(ownership_summary_body.body_input* in,
+    ownership_summary_body.body_program mut* program, exits* observations) u64 {
+    u64 mut total = 0;
+    exit_snapshot* mut item = observations->first;
+    while (item != null) {
+        u64 mut i = 0;
+        while (i < item->facts.contents_len) {
+            if (!ownership_summary_body.work(program, 1)) { return 0; }
+            ownership_api.contents_fact contents = item->facts.contents[i];
+            if (ownership_summary_model.same(contents.place.root,
+                ownership_summary_body.slot(in, 0).root)) {
+                if (contents.borrows.len > types.TYPE_MAX_SIZE /
+                    sizeof(ownership_summary_model.relation) - total) {
+                    ownership_summary_body.reject(program,
+                        ownership_api.incomplete_reason.invalid_input);
+                    return 0;
+                }
+                total += contents.borrows.len;
+            }
+            i += 1;
+        }
+        item = item->next;
+    }
+    return total;
+}
+
 fn publish(ownership_summary_body.body_input* in,
     ownership_summary_body.body_program mut* program, exits* observations)
     ownership_summary_model.summary {
     ownership_summary_model.summary mut out = failed(program);
-    if (observations->count != 1 || observations->first == null ||
-        (observations->first->outcome.kind != ownership_api.outcome_kind.function_return &&
-        observations->first->outcome.kind != ownership_api.outcome_kind.abort)) {
-        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
-            program->context.operation, program->context.source);
-        return out;
-    }
-    if (program->call_residual) {
+    u64 count = observations->count;
+    if (count == 0 || program->call_residual) {
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
             program->context.operation, program->context.source);
         return out;
     }
     if (!sort_roots(program)) { return failed(program); }
-    exit_snapshot* exit = observations->first;
-    bool returns = exit->outcome.kind == ownership_api.outcome_kind.function_return;
-    u64 mut result_count = 0;
-    u64 mut i = 0;
-    while (returns && i < exit->facts.contents_len) {
-        if (!ownership_summary_body.work(program, 1)) { return failed(program); }
-        ownership_api.contents_fact contents = exit->facts.contents[i];
-        if (ownership_summary_model.same(contents.place.root,
-            ownership_summary_body.slot(in, 0).root)) {
-            if (contents.borrows.len > ownership_api.U64_MAX - result_count) {
-                ownership_summary_body.reject(program,
-                    ownership_api.incomplete_reason.invalid_input);
-                return failed(program);
-            }
-            result_count += contents.borrows.len;
-        }
-        i += 1;
+    u64 effects_len = program->effects_len;
+    u64 rows = program->requirements_len;
+    u64 limit = types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id);
+    if (count > limit / 4 || (effects_len != 0 && count > limit / effects_len) ||
+        (rows != 0 && count > limit / rows) || effects_len > limit / 2 ||
+        count > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.case_record) ||
+        !ownership_summary_body.work(program, count * (effects_len + rows + 4))) {
+        ownership_summary_body.reject(program, ownership_api.incomplete_reason.invalid_input);
+        return failed(program);
     }
-    if (result_count > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.relation) ||
-        !ownership_summary_body.work(program, result_count) ||
-        !ownership_summary_body.work(program, program->effects_len) ||
-        !ownership_summary_body.work(program, program->requirements_len) ||
-        !ownership_summary_body.work(program, 5)) { return failed(program); }
-    ownership_summary_model.relation mut@ own relations =
-        new(ownership_summary_model.relation, result_count);
-    defer del(relations);
-    ownership_api.entity_id mut@ own result_keys = new(ownership_api.entity_id, result_count);
-    defer del(result_keys);
-    ownership_api.entity_id mut@ own effects = new(ownership_api.entity_id, program->effects_len);
-    defer del(effects);
-    ownership_api.entity_id mut@ own requirements =
-        new(ownership_api.entity_id, program->requirements_len);
-    defer del(requirements);
-    u64 sequence = exit_sequence(program, exit, effects[..]);
+    exit_snapshot* mut@ own ordered = new(exit_snapshot*, count);
+    defer del(ordered);
+    if (!sorted_exits(program, observations, ordered[..])) {
+        if (!ownership_api.successful(program->proof)) { return failed(program); }
+        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            program->context.operation, program->context.source);
+        return out;
+    }
+    u64 results = result_capacity(in, program, observations);
+    exit_snapshot* mut item = observations->first;
+    u64 mut predicate_count = 0;
+    while (item != null) {
+        predicate_count += item->facts.predicates_len;
+        item = item->next;
+    }
     if (!ownership_api.successful(program->proof) ||
-        !released_views(program, exit, effects[..sequence], returns,
-            ownership_summary_body.slot(in, 0))) { return failed(program); }
-    u64 order_count = sequence == 0 ? 0 : sequence - 1;
-    ownership_api.ordering_constraint mut@ own order =
-        new(ownership_api.ordering_constraint, order_count);
-    defer del(order);
-    u64 mut ordered = 0;
-    while (ordered < order_count) {
-        if (!ownership_summary_body.work(program, 1) ||
-            !ownership_summary_model.effect_charge(&program->context, &program->proof,
-            &program->relations)) {
-            return failed(program);
-        }
-        order[ordered] = ownership_api.ordering_constraint{effects[ordered],
-            effects[ordered + 1], true};
-        ordered += 1;
+        predicate_count > types.TYPE_MAX_SIZE / sizeof(ownership_api.predicate_atom)) {
+        return failed(program);
     }
-    if (!sort_order(program, order[..])) { return failed(program); }
-    u64 mut r = 0;
+    publication mut built = publication{};
+    defer free_publication(&built);
+    built.case_effects = new(ownership_api.entity_id, count * effects_len);
+    built.case_requirements = new(ownership_api.entity_id, count * rows);
+    built.case_results = new(ownership_api.entity_id, results);
+    built.guard_keys = new(ownership_api.entity_id, predicate_count);
+    built.predicates = new(ownership_api.predicate_atom, predicate_count);
+    built.guards = new(ownership_api.guard_fact, count);
+    built.cases = new(ownership_summary_model.case_record, count);
+    built.relations = new(ownership_summary_model.relation, results);
+    built.order = new(ownership_api.ordering_constraint, count * effects_len);
+    u64 mut i = 0;
+    while (i < count) {
+        if (!exit_case(in, program, ordered[i], i, &built)) { return failed(program); }
+        i += 1;
+    }
+    if (!sort_order(program, built.order[..built.order_len])) { return failed(program); }
+    u64 mut unique = 0;
     i = 0;
-    while (returns && i < exit->facts.contents_len) {
-        if (!ownership_summary_body.work(program, 1)) { return failed(program); }
-        ownership_api.contents_fact contents = exit->facts.contents[i];
-        if (ownership_summary_model.same(contents.place.root,
-            ownership_summary_body.slot(in, 0).root)) {
-            u64 mut b = 0;
-            while (b < contents.borrows.len) {
-                if (!ownership_summary_body.work(program, 1) ||
-                    !ownership_summary_model.effect_charge(&program->context, &program->proof,
-                    &program->relations)) { return failed(program); }
-                ownership_api.entity_id key = ownership_summary_body.next(program,
-                    ownership_api.entity_kind.relation);
-                relations[r] = ownership_summary_model.relation{.key = key,
-                    .borrow = contents.borrows[b]};
-                result_keys[r] = key;
-                r += 1;
-                b += 1;
-            }
+    while (i < built.order_len) {
+        if (unique == 0 || !ownership_summary_model.same(built.order[unique - 1].before,
+            built.order[i].before) || !ownership_summary_model.same(built.order[unique - 1].after,
+            built.order[i].after)) {
+            built.order[unique] = built.order[i];
+            unique += 1;
         }
         i += 1;
     }
-    u64 mut needed = 0;
-    i = 0;
-    while (i < program->requirements_len) {
-        if (!ownership_summary_body.work(program, 1)) { return failed(program); }
-        if (before_exit(program->requirements[i].operation, exit->operation)) {
-            requirements[needed] = program->requirements[i].key;
-            needed += 1;
-        }
-        i += 1;
-    }
-    // A refused key fails the proof. Each later charge then fails, so this check also covers
-    // a refused result relation key.
-    ownership_api.entity_id case_key = ownership_summary_body.next(program,
-        ownership_api.entity_kind.guard);
-    if (!ownership_api.successful(program->proof)) { return failed(program); }
-    ownership_summary_model.case_record[1] cases = {ownership_summary_model.case_record{
-        .key = case_key,
-        .requirements = requirements[..needed], .effects = effects[..sequence],
-        .results = result_keys[..], .outcome = exit->outcome, .coverage = program->coverage}};
+    exit_snapshot* first = ordered[0];
     ownership_summary_model.summary_view input = ownership_summary_model.summary_view{
         .roots = program->roots[..program->roots_len],
         .requirements = program->requirements[..program->requirements_len],
-        .effects = program->effects[..program->effects_len], .order = order[..],
-        .results = relations[..],
-        .cases = cases[..],
-            .provenance_records = program->provenance_records[..program->provenance_len],
+        .effects = program->effects[..program->effects_len], .order = built.order[..unique],
+        .predicates = built.predicates[..built.predicates_len],
+        .guards = built.guards[..built.guards_len],
+        .results = built.relations[..built.relations_len], .cases = built.cases[..],
+        .provenance_records = program->provenance_records[..program->provenance_len],
         .coverage = program->coverage, .proof = program->proof,
-        .operation = exit->operation, .source = exit->source,
-        .event = program->context.event, .callee_source = exit->source};
+        .operation = first->operation, .source = first->source,
+        .event = program->context.event, .callee_source = first->source};
     return ownership_summary_model.clone(&input, in->services);
 }
 

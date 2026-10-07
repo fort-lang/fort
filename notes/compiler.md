@@ -1269,6 +1269,22 @@ came here.
   The handler checks no collection loan, so a direct call inside an open loan fails before it.
   A callee summary without a proof keeps the call unknown. Its body reported its own error, so
   the call does not fail the caller for it.
+- **A branch on a captured formal gives guarded cases** (D17.18).
+  Extraction walks each reached block of a forward tree and keeps the origins and scalars at each
+  block entry. A back edge or a second parent keeps the body unsupported, so an `if` whose
+  branches meet again before an exit stays incomplete.
+  A bool switch on a scalar formal value adds a flow value edge. Flow records an equality atom on
+  that path and does not reach a path that contradicts an atom.
+  Each exit gives one case. Its guard holds the formal value atoms of its path. It keeps only the
+  effects and requirements of its path, in FIR order.
+  At a call, an exact argument or a caller atom decides a case guard. A symbolic formal argument
+  keeps the case possible and adds its atom to the continuation. An atom with no capture keeps
+  the call unresolved. Each guard is decided before any case runs. When each guard fails, the
+  call also stays unresolved. A formal whose address the body takes has no symbol, so its branch
+  adds no value edge and its argument gives no capture.
+  An abort case records an abort exit. Normal cases join into one continuation. With two of them,
+  the summary does not export the call result and stays incomplete.
+  A projected effect on the caller storage of a symbolic caller stays incomplete in this unit.
 - **A view loaded from an owner field ends when the same body releases that field** (D17.14).
   Flow models a caller owner field as a private empty slot, so its release does not end the
   loaded source. `ownership_summary.publish` checks the exit sequence instead. A later

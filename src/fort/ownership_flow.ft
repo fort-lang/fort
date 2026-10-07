@@ -52,6 +52,15 @@ struct edge_fact {
     bool is_null;
 }
 
+// The producer establishes that one edge of a switch selects one exact value of a version.
+// The edge adds an equality predicate. A path that contradicts it is not reached.
+struct value_edge {
+    u32 block;
+    u32 target_index;
+    ownership_api.entity_id value_version;
+    i64 value;
+}
+
 // A by-value parameter slot ends at normal return. Its caller source does not end.
 struct parameter {
     ownership_api.entity_id slot;
@@ -98,6 +107,7 @@ struct program {
     step@ steps;
     place_binding@ places;
     edge_fact@ edges;
+    value_edge@ values;
     parameter@ parameters;
     event_binding@ events;
     source_file_binding@ source_files;
@@ -395,6 +405,17 @@ fn valid(program* in) bool {
     i = 0;
     while (i < in->edges.len) {
         edge_fact edge = in->edges[i];
+        if (edge.block >= fir.block_count(in->function) ||
+            edge.value_version.kind != ownership_api.entity_kind.value) { return false; }
+        fir.block* from = fir.block_at(in->function, edge.block);
+        u32 mut target = 0;
+        if (!from->terminated || !fir.term_targets(in->function, &from->term,
+            edge.target_index, &target)) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < in->values.len) {
+        value_edge edge = in->values[i];
         if (edge.block >= fir.block_count(in->function) ||
             edge.value_version.kind != ownership_api.entity_kind.value) { return false; }
         fir.block* from = fir.block_at(in->function, edge.block);
@@ -1424,8 +1445,57 @@ fn parameter_return(program* in, analysis mut* out, path mut* p, u32 block) void
     out->normal_returns += 1;
 }
 
+// An equal exact value on one version keeps the path. A different value refutes it.
+fn equal_value(program* in, path mut* p, u32 block, value_edge fact)
+    ownership_api.proof_status {
+    u64 mut j = 0;
+    while (j < p->facts.predicates_len) {
+        ownership_api.predicate_atom previous = p->facts.predicates[j];
+        if (previous.kind == ownership_api.predicate_kind.equality &&
+            same_entity(previous.left, fact.value_version) &&
+            previous.right.kind == ownership_api.entity_kind.none &&
+            previous.lower.kind == ownership_api.fact_kind.exact) {
+            if (previous.lower.value != fact.value) {
+                ownership_api.proof_status mut bottom = ownership_api.proof_status{};
+                bottom.kind = ownership_api.proof_kind.bottom;
+                return bottom;
+            }
+            return complete();
+        }
+        j += 1;
+    }
+    if (p->facts.predicates_len >= in->limits->p) {
+        ownership_api.source_position at = return_source(in, block);
+        ownership_api.lost_fact record = ownership_api.lost_fact{
+            ownership_api.limit_category.p, in->limits->p, at, fact.value_version,
+            ownership_api.incomplete_reason.work_limit};
+        event_bridge mut bridge = event_bridge{};
+        ownership_api.services mapped = mapped_services(in, &bridge);
+        ownership_api.mutation_result added = ownership_state.add_loss(&p->facts,
+            &mapped, record, return_position(in, block), at);
+        return added.proof;
+    }
+    ownership_api.predicate_atom mut atom = ownership_api.predicate_atom{};
+    atom.kind = ownership_api.predicate_kind.equality;
+    atom.left = fact.value_version;
+    atom.lower = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+        .value = fact.value};
+    atom.upper = atom.lower;
+    ownership_state.append_predicates(&p->facts, atom);
+    return complete();
+}
+
 fn refine_edge(program* in, path mut* p, u32 block, u32 index)
     ownership_api.proof_status {
+    u64 mut v = 0;
+    while (v < in->values.len) {
+        value_edge fact = in->values[v];
+        if (fact.block == block && fact.target_index == index) {
+            ownership_api.proof_status kept = equal_value(in, p, block, fact);
+            if (!ownership_api.successful(kept)) { return kept; }
+        }
+        v += 1;
+    }
     u64 mut i = 0;
     while (i < in->edges.len) {
         edge_fact fact = in->edges[i];
