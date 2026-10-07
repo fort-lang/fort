@@ -1199,6 +1199,106 @@ fn noreturn_is_a_return_type_and_nothing_else() void {
     assert(check_env.said(&e, "'noreturn' is a return type"));
 }
 
+// Checks `decls` in a fresh environment. The check must fail with one
+// diagnostic, `message` at `pos` (`<line>:<col>`).
+fn reported_once(check_env.env mut* e, string decls, string pos, string message) void {
+    check_env.reopen(e);
+    assert(!check_env.check_decls(e, decls));
+    assert(check_env.reports(e) == 1);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, pos);
+    strbuf.append(&want, ": ");
+    strbuf.append(&want, message);
+    assert(check_env.report_text(e, 0) == strbuf.view(&want));
+}
+
+// A group, a suffix or a `mut` on `noreturn` gives one report and not two
+// (D8.5, D14.2). In a group with a suffix, `noreturn` is not the return type,
+// so base_type reports the keyword and the suffix outside says nothing more. A
+// `mut` on a `noreturn` return type gets the message of `i32 mut` there, and
+// not the message of the `void` that the checker builds for `noreturn`.
+fn a_grouped_or_marked_noreturn_is_reported_once() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string nr = "'noreturn' is a return type";
+    string nb = "a return type has no binding: remove the outermost 'mut'";
+    reported_once(&e, "fn f() (noreturn*) {\n    return null;\n}\n", "1:9", nr);
+    reported_once(&e, "fn f() ((noreturn)*) {\n    return null;\n}\n", "1:10", nr);
+    reported_once(&e, "fn f() (noreturn[2]) {\n    panic(\"x\");\n}\n", "1:9", nr);
+    reported_once(&e, "fn f() (noreturn mut*) {\n    return null;\n}\n", "1:9", nr);
+    reported_once(&e, "fn f() (noreturn* own) {\n    return null;\n}\n", "1:9", nr);
+    reported_once(&e, "fn () (noreturn*) V = null;\n", "1:8", nr);
+    // A suffix on a group of a bare `noreturn` is the error of the whole type.
+    reported_once(&e, "fn f() (noreturn mut)* {\n    return null;\n}\n", "1:8", nr);
+    reported_once(&e, "fn f() noreturn mut {\n    panic(\"x\");\n}\n", "1:8", nb);
+    reported_once(&e, "fn f() (noreturn) mut {\n    panic(\"x\");\n}\n", "1:8", nb);
+    // The outermost type reports a `mut` in any of its groups, at its own position.
+    reported_once(&e, "fn f() (noreturn mut) {\n    panic(\"x\");\n}\n", "1:8", nb);
+    reported_once(&e, "fn f() ((noreturn) mut) {\n    panic(\"x\");\n}\n", "1:8", nb);
+    // The return type of a function type follows the same rule.
+    reported_once(&e, "fn () noreturn mut P = null;\n", "1:7", nb);
+    reported_once(&e, "(fn () noreturn mut) Q = null;\n", "1:8", nb);
+    // The groups that hold a bare `noreturn` stay a return type.
+    check_env.reopen(&e);
+    assert(check_env.check_decls(&e, "fn f() ((noreturn)) {\n    panic(\"x\");\n}\n"));
+}
+
+// A `mut` at any depth of the groups of a `noreturn` return type is the `mut`
+// of the return type. A suffix outside the groups makes the whole type the
+// error. A suffix inside makes `noreturn` the base of a value type, which
+// base_type reports at the keyword.
+fn a_deeper_group_of_noreturn_is_reported_once() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string nr = "'noreturn' is a return type";
+    string nb = "a return type has no binding: remove the outermost 'mut'";
+    reported_once(&e, "fn f() ((noreturn mut)) {\n    panic(\"x\");\n}\n", "1:8", nb);
+    reported_once(&e, "fn f() ((noreturn)) mut {\n    panic(\"x\");\n}\n", "1:8", nb);
+    reported_once(&e, "fn () ((noreturn) mut) R = null;\n", "1:7", nb);
+    reported_once(&e, "fn f() ((noreturn) mut)* {\n    return null;\n}\n", "1:8", nr);
+    reported_once(&e, "fn f() ((noreturn))[2] {\n    panic(\"x\");\n}\n", "1:8", nr);
+    reported_once(&e, "fn () (noreturn mut)* S = null;\n", "1:7", nr);
+    reported_once(&e, "fn f() ((noreturn mut)*) {\n    return null;\n}\n", "1:10", nr);
+    // A local function type follows the same rule.
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    fn () noreturn mut p = null;"));
+    assert(check_env.reports(&e) == 1);
+    assert(check_env.report_text(&e, 0)
+           == "2:11: a return type has no binding: remove the outermost 'mut'");
+}
+
+// The outermost type checks the groups of a `noreturn` return type itself. It
+// gives each group and the keyword the `void` that `noreturn` builds, as a
+// check of each group did, and the function type is the ungrouped one.
+fn each_group_of_a_noreturn_return_type_has_the_type_of_noreturn() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "fn die() (((noreturn))) {\n    panic(\"x\");\n}\n");
+    strbuf.append(&source, "fn main() i32 {\n    fn () ((noreturn)) f = die;\n");
+    strbuf.append(&source, "    println(f);\n    return 0;\n}\n");
+    assert(check_env.check_src(&e, strbuf.view(&source)));
+    assert(check_env.type_text(&e, check_env.sym_main(&e, "die")->ty) == "fn () noreturn");
+    assert(check_env.decl_type(&e, "f") == "fn () noreturn");
+    ast.node mut* decl = check_env.node_in_main(&e, ast.ast_kind.k_fn_decl, "die");
+    assert(decl != null);
+    u64 mut depth = 0;
+    ast.node mut* mut t = decl->a;
+    while (t != null) {
+        assert(t->ty != null);
+        assert(check_env.type_text(&e, t->ty) == "void");
+        depth = depth + 1;
+        t = t->a;
+    }
+    // The wrapper of the return type, three groups and the keyword.
+    assert(depth == 5);
+}
+
 fn an_array_length_is_a_constant_expression_greater_than_zero() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -1611,6 +1711,9 @@ fn main() i32 {
     an_unknown_type_name_is_one_error();
     a_value_is_not_a_type();
     noreturn_is_a_return_type_and_nothing_else();
+    a_grouped_or_marked_noreturn_is_reported_once();
+    a_deeper_group_of_noreturn_is_reported_once();
+    each_group_of_a_noreturn_return_type_has_the_type_of_noreturn();
     an_array_length_is_a_constant_expression_greater_than_zero();
     a_struct_records_the_byte_offset_of_every_field();
     a_struct_of_mixed_alignment_pads_to_the_widest_member();

@@ -449,6 +449,20 @@ static bool is_void_group(const ast_node_t* t) {
 
 static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos, bool in_storage);
 
+// Gives each node of a group of a bare `noreturn` the `void` that `noreturn` builds, and returns
+// whether a group in it carries a `mut`. The parser refuses an `own` there.
+static bool noreturn_group_marked(check_t* ck, ast_node_t* t) {
+    const type_t* v = type_void(&ck->types);
+    bool marked = false;
+    while (t->kind == AST_TYPE) {
+        marked = marked || ast_is_mut(t);
+        t->type = v;
+        t = t->a;
+    }
+    t->type = v;
+    return marked;
+}
+
 // The base type of a written type: a primitive, `string`, `void`,
 // `noreturn`, a qualified name or a function type.
 static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn, bool stores_base) {
@@ -551,12 +565,19 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
     const bool stores_base = in_storage && suffixes_store_base(node);
     check_type_t grouped = type_result(type_error(&ck->types), false);
     const bool has_group = base->kind == AST_TYPE;
+    // `noreturn`, bare or in groups with no suffix, as the return type itself. This node is the
+    // outermost one of that return type, so it checks the groups and reports for all of them.
+    const bool return_noreturn = allow_noreturn && is_noreturn(base);
+    bool group_mut = false;
     const type_t* b = NULL;
-    if (has_group) {
-        const bool return_group = is_noreturn(base) || is_void_group(base);
+    if (has_group && return_noreturn) {
+        group_mut = noreturn_group_marked(ck, base);
+        b = base->type;
+    } else if (has_group) {
         grouped = check_type_at(ck,
                                 base,
-                                return_group && allow_noreturn ? TYPE_POS_RETURN : TYPE_POS_BINDING,
+                                is_void_group(base) && allow_noreturn ? TYPE_POS_RETURN
+                                                                      : TYPE_POS_BINDING,
                                 stores_base);
         b = grouped.type;
         // A group of a bare `void` is a complete return type and nothing else, as `void` needs its
@@ -569,9 +590,20 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
     } else {
         b = base_type(ck, base, allow_noreturn, stores_base);
     }
-    if (is_noreturn(base) && wrapped && ast_len(node) > 0) {
-        check_error(ck, node->loc, "'noreturn' is a return type");
-        b = type_error(&ck->types);
+    // A `noreturn` return type takes no suffix (D8.5): `noreturn*` would be `void*`. A `mut` on
+    // it gets the message of `i32 mut` there. In any other position base_type reported the
+    // keyword, so `return_noreturn` keeps this from a second report.
+    if (return_noreturn && wrapped) {
+        const char* what = NULL;
+        if (ast_len(node) > 0) {
+            what = "'noreturn' is a return type";
+        } else if (ast_is_mut(node) || group_mut) {
+            what = "a return type has no binding: remove the outermost 'mut'";
+        }
+        if (what != NULL) {
+            check_error(ck, node->loc, what);
+            b = type_error(&ck->types);
+        }
     }
     type_suffix_t suffixes[CHECK_MAX_SUFFIXES];
     const uint64_t count = wrapped ? ast_len(node) : 0;
