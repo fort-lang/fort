@@ -1,0 +1,528 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| private storage end
+//| temporal dereference
+//| opaque store
+//| symbolic lengths
+//| escape
+//| outside effects
+//| combined effects
+/// Tests the transfer effects that the local source producer adds.
+import ownership_api;
+import ownership_local_env;
+import ownership_state;
+import ownership_transfer;
+
+fn succeeded(ownership_api.proof_status proof) void {
+    assert(ownership_api.successful(proof));
+    assert(proof.kind == ownership_api.proof_kind.complete);
+    assert(!proof.failed && !proof.terminal.present);
+}
+
+// A violation: a failed verdict with no terminal record, so the proof itself is complete.
+fn violated(ownership_api.proof_status proof) void {
+    assert(!ownership_api.successful(proof));
+    assert(proof.failed && !proof.terminal.present);
+    assert(proof.kind == ownership_api.proof_kind.complete);
+}
+
+fn incomplete(ownership_api.proof_status proof) void {
+    assert(!ownership_api.successful(proof));
+    assert(proof.failed && proof.terminal.present);
+    assert(proof.kind == ownership_api.proof_kind.incomplete);
+}
+
+fn allocation(ownership_local_env.env* e, u32 key) ownership_api.allocation_fact {
+    u64 index = ownership_state.allocation_index(&e->state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, key));
+    assert(index != ownership_state.U64_MAX);
+    return e->state.allocations[index];
+}
+
+fn source(ownership_local_env.env* e, u32 key) ownership_api.source_fact {
+    u64 index = ownership_state.source_index(&e->state,
+        ownership_local_env.id(ownership_api.entity_kind.source, key));
+    assert(index != ownership_state.U64_MAX);
+    return e->state.sources[index];
+}
+
+fn contents(ownership_local_env.env* e, u32 slot) ownership_api.contents_fact {
+    u64 index = ownership_transfer.contents_index(&e->state, ownership_local_env.place(slot));
+    assert(index != ownership_transfer.U64_MAX);
+    return e->state.contents[index];
+}
+
+fn unchanged(ownership_local_env.env* e, ownership_state.state* before) void {
+    assert(ownership_state.equal(&e->state, before));
+}
+
+fn private_end(ownership_local_env.env mut* e, u32 slot) ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.dead, slot, slot);
+    r.private_slot_proved = true;
+    return ownership_local_env.apply(e, &r);
+}
+
+fn temporal_use(ownership_local_env.env mut* e, u32 slot) ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.use, slot, slot);
+    r.temporal_use = true;
+    return ownership_local_env.apply(e, &r);
+}
+
+fn opaque_store(ownership_local_env.env mut* e, u32 slot) ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.assignment, slot, slot);
+    r.opaque_value = true;
+    return ownership_local_env.apply(e, &r);
+}
+
+fn escape(ownership_local_env.env mut* e, u32 slot) ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.escape, slot, slot);
+    return ownership_local_env.apply(e, &r);
+}
+
+fn outside(ownership_local_env.env mut* e) ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.outside, 0, 0);
+    return ownership_local_env.apply(e, &r);
+}
+
+fn add_source(ownership_local_env.env mut* e, u32 key, ownership_api.source_kind kind) void {
+    ownership_api.operation_position op = ownership_api.operation_position{};
+    ownership_api.source_position at = ownership_api.source_position{};
+    ownership_api.source_fact fact = ownership_local_env.source(key, kind,
+        ownership_api.entity_id{});
+    assert(ownership_state.add_source(&e->state, &e->service, fact, op, at).applied);
+}
+
+// Puts a borrow of source `key` in `slot` with the given length, outside any transfer step.
+fn borrow_in(ownership_local_env.env mut* e, u32 slot, u32 key, ownership_api.scalar_fact length)
+    void {
+    ownership_api.entity_id source_key = ownership_local_env.id(ownership_api.entity_kind.source,
+        key);
+    ownership_api.borrow_relation[1] borrows = {ownership_local_env.borrow(source_key, 900 + slot,
+        ownership_local_env.place(slot))};
+    ownership_api.contents_fact mut value = ownership_local_env.reference(900 + slot, source_key,
+        borrows[..]);
+    value.span_length = length;
+    value.place = ownership_local_env.place(slot);
+    ownership_state.append_contents(&e->state, value);
+}
+
+fn symbolic(u32 version) ownership_api.scalar_fact {
+    return ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
+        .symbol = ownership_local_env.id(ownership_api.entity_kind.value, version)};
+}
+
+// An allocation into `slot` whose length is the value version `version`.
+fn symbolic_alloc(ownership_local_env.env mut* e, u32 slot, u32 key, u32 source_key,
+    ownership_api.scalar_fact allocated, ownership_api.scalar_fact held)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.allocation, slot, slot);
+    r.allocation = ownership_local_env.allocation(key, 100, slot, 0);
+    r.allocation.logical_length = allocated;
+    r.fresh_source = ownership_local_env.source(source_key, ownership_api.source_kind.heap,
+        r.allocation.key);
+    ownership_api.borrow_relation[1] borrows = {ownership_local_env.borrow(r.fresh_source.key,
+        key, ownership_local_env.place(slot))};
+    r.value = ownership_local_env.reference(key, r.fresh_source.key, borrows[..]);
+    r.value.span_length = held;
+    r.source_key = r.fresh_source.key;
+    return ownership_local_env.apply(e, &r);
+}
+
+fn private_storage_end() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    // A private slot that owns a live allocation loses it at its end.
+    succeeded(ownership_local_env.alloc(&e, 1, 10, 20, 1));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    violated(private_end(&e, 1));
+    assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    assert(e.counts.last_relation.ordinal == 1);
+    unchanged(&e, &before);
+    ownership_state.free(&before);
+    // After release the end needs no stack source and changes no source.
+    succeeded(ownership_local_env.release(&e, 1, true));
+    u64 sources = e.state.sources_len;
+    succeeded(private_end(&e, 1));
+    assert(e.state.sources_len == sources);
+    assert(source(&e, 20).validity == ownership_api.validity_kind.released);
+    // An empty slot with no facts at all also ends.
+    succeeded(private_end(&e, 7));
+    // Without the private proof the end still needs its stack source.
+    ownership_transfer.request mut plain = ownership_local_env.req(&e,
+        ownership_transfer.action.dead, 1, 1);
+    plain.liveness_proved = true;
+    plain.source_correspondence_proved = true;
+    incomplete(ownership_local_env.apply(&e, &plain));
+    // A named stack source keeps the old rule even when the slot is private.
+    ownership_local_env.add_stack(&e, 30);
+    ownership_transfer.request mut named = ownership_local_env.req(&e,
+        ownership_transfer.action.dead, 1, 1);
+    named.private_slot_proved = true;
+    named.source_key = ownership_local_env.id(ownership_api.entity_kind.source, 30);
+    incomplete(ownership_local_env.apply(&e, &named));
+    assert(source(&e, 30).validity == ownership_api.validity_kind.live);
+    ownership_local_env.free(&e);
+}
+
+fn possible_owner_end_stays_incomplete() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    succeeded(ownership_local_env.alloc(&e, 1, 11, 21, 1));
+    // A join keeps zero and one: the slot can own the allocation or not.
+    u64 index = ownership_state.allocation_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, 11));
+    e.state.allocations[index].count.zero = true;
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    incomplete(private_end(&e, 1));
+    assert(e.counts.last_kind == ownership_api.event_kind.incomplete_proof);
+    unchanged(&e, &before);
+    ownership_state.free(&before);
+    ownership_local_env.free(&e);
+}
+
+fn temporal_dereference() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    add_source(&e, 40, ownership_api.source_kind.symbolic_caller);
+    borrow_in(&e, 1, 40, symbolic(40));
+    // The exact length rule refuses a symbolic length. The temporal rule needs only the source.
+    incomplete(ownership_local_env.use(&e, 1));
+    succeeded(temporal_use(&e, 1));
+    // An unknown length passes too: span bounds keep their runtime check.
+    borrow_in(&e, 2, 40, ownership_api.scalar_fact{});
+    succeeded(temporal_use(&e, 2));
+    // An exact zero length has no element even under the temporal rule.
+    borrow_in(&e, 3, 40, ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact});
+    violated(temporal_use(&e, 3));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    // An empty owner has no element.
+    succeeded(ownership_local_env.assign_empty(&e, 4));
+    violated(temporal_use(&e, 4));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    // A released source is no longer live.
+    succeeded(ownership_local_env.alloc(&e, 5, 12, 22, 3));
+    succeeded(ownership_local_env.copy(&e, 5, 6, false));
+    succeeded(ownership_local_env.release(&e, 5, true));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    violated(temporal_use(&e, 6));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    unchanged(&e, &before);
+    ownership_state.free(&before);
+    // An unknown source validity is no proof.
+    u64 caller = ownership_state.source_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.source, 40));
+    e.state.sources[caller].validity = ownership_api.validity_kind.unknown;
+    incomplete(temporal_use(&e, 1));
+    // A slot with no facts or with a scalar has no reference to read through.
+    incomplete(temporal_use(&e, 9));
+    ownership_local_env.free(&e);
+}
+
+fn opaque_stores() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    // The store needs no readable value. Its contents become unknown.
+    succeeded(opaque_store(&e, 1));
+    assert(contents(&e, 1).kind == ownership_api.contents_kind.unknown);
+    assert(contents(&e, 1).borrows.len == 0);
+    // A later read of unknown contents is no proof.
+    incomplete(ownership_local_env.inspect(&e, 1));
+    incomplete(temporal_use(&e, 1));
+    // An unknown slot holds no owner, so its end has nothing to check.
+    succeeded(private_end(&e, 1));
+    // The destination check stays: a live owner cannot be overwritten.
+    succeeded(ownership_local_env.alloc(&e, 2, 13, 23, 1));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    violated(opaque_store(&e, 2));
+    assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    unchanged(&e, &before);
+    ownership_state.free(&before);
+    // A possible owner gives incomplete proof.
+    u64 index = ownership_state.allocation_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, 13));
+    e.state.allocations[index].count.zero = true;
+    incomplete(opaque_store(&e, 2));
+    // A store into a released owner is legal.
+    e.state.allocations[index].count.zero = false;
+    succeeded(ownership_local_env.release(&e, 2, true));
+    succeeded(opaque_store(&e, 2));
+    assert(contents(&e, 2).kind == ownership_api.contents_kind.unknown);
+    ownership_local_env.free(&e);
+}
+
+fn symbolic_lengths() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    // One captured value version gives the allocation and the reference one length.
+    succeeded(symbolic_alloc(&e, 1, 14, 24, symbolic(7), symbolic(7)));
+    assert(allocation(&e, 14).logical_length.kind == ownership_api.fact_kind.symbolic);
+    succeeded(ownership_local_env.move_owner(&e, 1, 2));
+    succeeded(temporal_use(&e, 2));
+    succeeded(ownership_local_env.release(&e, 2, true));
+    assert(source(&e, 24).validity == ownership_api.validity_kind.released);
+    // Different versions prove no equal length, so the owner reference is unproved.
+    succeeded(symbolic_alloc(&e, 3, 15, 25, symbolic(8), symbolic(8)));
+    u64 held = ownership_transfer.contents_index(&e.state, ownership_local_env.place(3));
+    e.state.contents[held].span_length = symbolic(9);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    incomplete(ownership_local_env.move_owner(&e, 3, 4));
+    unchanged(&e, &before);
+    incomplete(ownership_local_env.release(&e, 3, true));
+    unchanged(&e, &before);
+    ownership_state.free(&before);
+    // A symbolic length never equals an exact one.
+    e.state.contents[held].span_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 8};
+    incomplete(ownership_local_env.release(&e, 3, true));
+    // A symbol must name a value version.
+    ownership_api.scalar_fact mut odd = symbolic(8);
+    odd.symbol.kind = ownership_api.entity_kind.relation;
+    e.state.contents[held].span_length = odd;
+    u64 owned = ownership_state.allocation_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, 15));
+    e.state.allocations[owned].logical_length = odd;
+    incomplete(ownership_local_env.release(&e, 3, true));
+    // Equal exact lengths keep the existing rule.
+    e.state.contents[held].span_length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.exact, .value = 5};
+    e.state.allocations[owned].logical_length = e.state.contents[held].span_length;
+    succeeded(ownership_local_env.release(&e, 3, true));
+    // Two unknown lengths are not equal either.
+    assert(!ownership_transfer.same_length(ownership_api.scalar_fact{},
+        ownership_api.scalar_fact{}));
+    assert(ownership_transfer.same_length(symbolic(3), symbolic(3)));
+    assert(!ownership_transfer.same_length(symbolic(3), symbolic(4)));
+    ownership_local_env.free(&e);
+}
+
+fn escape_owner() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    succeeded(ownership_local_env.alloc(&e, 1, 16, 26, 2));
+    succeeded(ownership_local_env.copy(&e, 1, 2, false));
+    succeeded(escape(&e, 1));
+    // The slot is empty. The allocation keeps its obligation outside local proof.
+    assert(contents(&e, 1).owner_empty);
+    ownership_api.allocation_fact moved = allocation(&e, 16);
+    assert(moved.obligation && moved.owner.detached);
+    assert(moved.owner.place.root.kind == ownership_api.entity_kind.none);
+    assert(moved.validity == ownership_api.validity_kind.live);
+    assert(moved.history.len == 1);
+    assert(moved.history[0].kind == ownership_api.effect_kind.transfer);
+    assert(source(&e, 26).validity == ownership_api.validity_kind.live);
+    // The borrow stays usable until an outside effect.
+    succeeded(temporal_use(&e, 2));
+    // The empty slot needs no cleanup and escapes again as empty.
+    succeeded(private_end(&e, 1));
+    succeeded(escape(&e, 1));
+    assert(contents(&e, 1).owner_empty);
+    ownership_local_env.free(&e);
+}
+
+fn escape_without_proof() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    // No facts: nothing proves what leaves.
+    incomplete(escape(&e, 1));
+    // A borrow owns nothing, so its move is no transfer.
+    add_source(&e, 41, ownership_api.source_kind.symbolic_caller);
+    borrow_in(&e, 2, 41, symbolic(41));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    incomplete(escape(&e, 2));
+    unchanged(&e, &before);
+    ownership_state.free(&before);
+    // Unknown contents.
+    succeeded(opaque_store(&e, 3));
+    incomplete(escape(&e, 3));
+    // A possible owner.
+    succeeded(ownership_local_env.alloc(&e, 4, 17, 27, 1));
+    u64 index = ownership_state.allocation_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, 17));
+    e.state.allocations[index].count.zero = true;
+    incomplete(escape(&e, 4));
+    e.state.allocations[index].count.zero = false;
+    // A residual owner path can name the same root.
+    succeeded(ownership_local_env.alloc(&e, 5, 18, 28, 1));
+    u64 other = ownership_state.allocation_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, 18));
+    e.state.allocations[other].owner.place.residual = true;
+    incomplete(escape(&e, 4));
+    ownership_local_env.free(&e);
+}
+
+fn outside_effects() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    add_source(&e, 50, ownership_api.source_kind.static_storage);
+    add_source(&e, 51, ownership_api.source_kind.trusted_foreign);
+    add_source(&e, 52, ownership_api.source_kind.symbolic_caller);
+    add_source(&e, 53, ownership_api.source_kind.unknown_fort);
+    ownership_local_env.add_stack(&e, 54);
+    borrow_in(&e, 1, 50, symbolic(50));
+    borrow_in(&e, 2, 51, symbolic(51));
+    borrow_in(&e, 3, 52, symbolic(52));
+    // A slot owner, its borrow, an escaped allocation and its borrow, and a released one.
+    succeeded(ownership_local_env.alloc(&e, 4, 19, 29, 1));
+    succeeded(ownership_local_env.copy(&e, 4, 5, false));
+    succeeded(ownership_local_env.alloc(&e, 6, 20, 30, 1));
+    succeeded(ownership_local_env.copy(&e, 6, 7, false));
+    succeeded(escape(&e, 6));
+    succeeded(ownership_local_env.alloc(&e, 8, 21, 31, 1));
+    succeeded(ownership_local_env.copy(&e, 8, 9, false));
+    succeeded(ownership_local_env.release(&e, 8, true));
+    u64 charges = e.counts.charges;
+    succeeded(outside(&e));
+    assert(e.counts.charges > charges);
+    // Static storage, foreign storage and the slot owner keep their facts (D17.13).
+    assert(source(&e, 50).validity == ownership_api.validity_kind.live);
+    assert(source(&e, 51).validity == ownership_api.validity_kind.live);
+    assert(source(&e, 29).validity == ownership_api.validity_kind.live);
+    assert(allocation(&e, 19).validity == ownership_api.validity_kind.live);
+    succeeded(temporal_use(&e, 1));
+    succeeded(temporal_use(&e, 2));
+    succeeded(temporal_use(&e, 5));
+    succeeded(ownership_local_env.release(&e, 4, true));
+    // Caller storage, an unknown fort source, a stack source and an escape become unknown.
+    assert(source(&e, 52).validity == ownership_api.validity_kind.unknown);
+    assert(source(&e, 53).validity == ownership_api.validity_kind.unknown);
+    assert(source(&e, 54).validity == ownership_api.validity_kind.unknown);
+    assert(source(&e, 30).validity == ownership_api.validity_kind.unknown);
+    assert(allocation(&e, 20).validity == ownership_api.validity_kind.unknown);
+    assert(allocation(&e, 20).obligation);
+    incomplete(temporal_use(&e, 3));
+    incomplete(temporal_use(&e, 7));
+    // A released allocation stays released: its old borrow is still invalid.
+    assert(source(&e, 31).validity == ownership_api.validity_kind.released);
+    assert(allocation(&e, 21).validity == ownership_api.validity_kind.released);
+    violated(temporal_use(&e, 9));
+    ownership_local_env.free(&e);
+}
+
+fn outside_refusal_keeps_facts() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    add_source(&e, 60, ownership_api.source_kind.symbolic_caller);
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    e.counts.deny = true;
+    incomplete(outside(&e));
+    unchanged(&e, &before);
+    assert(source(&e, 60).validity == ownership_api.validity_kind.live);
+    e.counts.deny = false;
+    ownership_state.free(&before);
+    // A slot owner whose owner path is residual is no slot owner.
+    succeeded(ownership_local_env.alloc(&e, 1, 22, 32, 1));
+    u64 index = ownership_state.allocation_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, 22));
+    e.state.allocations[index].owner.place.residual = true;
+    succeeded(outside(&e));
+    assert(allocation(&e, 22).validity == ownership_api.validity_kind.unknown);
+    assert(source(&e, 32).validity == ownership_api.validity_kind.unknown);
+    ownership_local_env.free(&e);
+}
+
+// Two slot owners, one escape and two outside effects in a row keep each fact apart.
+fn combined_effects() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    succeeded(ownership_local_env.alloc(&e, 1, 70, 80, 1));
+    succeeded(ownership_local_env.alloc(&e, 2, 71, 81, 1));
+    succeeded(ownership_local_env.copy(&e, 1, 3, false));
+    succeeded(ownership_local_env.copy(&e, 2, 4, false));
+    succeeded(escape(&e, 2));
+    // A second outside effect changes nothing that the first did not change.
+    succeeded(outside(&e));
+    ownership_state.state mut once = ownership_state.clone(&e.state);
+    succeeded(outside(&e));
+    assert(ownership_state.equal(&e.state, &once));
+    ownership_state.free(&once);
+    // Slot 1 still owns its allocation; its borrow in slot 3 is still live.
+    succeeded(temporal_use(&e, 3));
+    assert(source(&e, 80).validity == ownership_api.validity_kind.live);
+    // The escaped allocation's borrow in slot 4 is unknown now.
+    incomplete(temporal_use(&e, 4));
+    assert(source(&e, 81).validity == ownership_api.validity_kind.unknown);
+    // The escaped slot is empty, so it ends and escapes again without a fact.
+    succeeded(private_end(&e, 2));
+    succeeded(escape(&e, 2));
+    // The live owner can move on and its new slot keeps it across another effect.
+    succeeded(ownership_local_env.move_owner(&e, 1, 5));
+    succeeded(outside(&e));
+    succeeded(temporal_use(&e, 3));
+    succeeded(ownership_local_env.release(&e, 5, true));
+    violated(temporal_use(&e, 3));
+    succeeded(private_end(&e, 5));
+    succeeded(private_end(&e, 1));
+    ownership_local_env.free(&e);
+}
+
+// An escape keeps its allocation's history and makes later ends of the slot trivial.
+fn escape_history() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    succeeded(ownership_local_env.alloc(&e, 1, 72, 82, 1));
+    succeeded(ownership_local_env.move_owner(&e, 1, 2));
+    succeeded(escape(&e, 2));
+    ownership_api.allocation_fact moved = allocation(&e, 72);
+    assert(moved.history.len == 2);
+    assert(moved.history[0].after.place.root.ordinal == 2);
+    assert(moved.history[1].after.detached);
+    assert(moved.history[1].before.place.root.ordinal == 2);
+    // No slot owns the allocation, so storing a new value into slot 2 discards nothing.
+    succeeded(ownership_local_env.alloc(&e, 2, 73, 83, 1));
+    succeeded(ownership_local_env.release(&e, 2, true));
+    succeeded(private_end(&e, 2));
+    // A copy of an escaped owner's empty slot holds no borrow.
+    succeeded(ownership_local_env.copy(&e, 1, 6, false));
+    assert(contents(&e, 6).owner_empty);
+    ownership_local_env.free(&e);
+}
+
+// A refused charge stops each new effect before it reads or changes the state.
+fn opaque_refusal() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    succeeded(opaque_store(&e, 1));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    u64 events = e.counts.events;
+    e.counts.deny = true;
+    incomplete(opaque_store(&e, 2));
+    incomplete(escape(&e, 1));
+    incomplete(private_end(&e, 1));
+    incomplete(outside(&e));
+    e.counts.deny = false;
+    unchanged(&e, &before);
+    ownership_state.free(&before);
+    // The budget refused each attempt before its effect, so no effect reported an event.
+    assert(e.counts.events == events);
+    ownership_local_env.free(&e);
+}
+
+fn main() i32 {
+    private_storage_end();
+    possible_owner_end_stays_incomplete();
+    println("private storage end");
+    temporal_dereference();
+    println("temporal dereference");
+    opaque_stores();
+    println("opaque store");
+    symbolic_lengths();
+    println("symbolic lengths");
+    escape_owner();
+    escape_without_proof();
+    println("escape");
+    outside_effects();
+    outside_refusal_keeps_facts();
+    println("outside effects");
+    combined_effects();
+    escape_history();
+    opaque_refusal();
+    println("combined effects");
+    return 0;
+}
