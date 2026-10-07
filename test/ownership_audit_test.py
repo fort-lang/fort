@@ -354,6 +354,9 @@ if mode == "version_mismatch":
 if mode.startswith("local_"):
     from ownership_audit_test import localize
     localize(report, root, mode[len("local_"):])
+if mode.startswith("stored_"):
+    from ownership_audit_test import localize
+    localize(report, root, mode[len("stored_"):], stage=3)
 if mode.startswith("raw_"):
     from ownership_audit_test import localize
     localize(report, root, mode[len("raw_"):], stage=4)
@@ -2318,6 +2321,7 @@ class RunnerTests(RepositoryFixture):
 class EnforcementTests(RepositoryFixture):
     def enforce(self, mode, scope="local"):
         self.executable(mode)
+        # Each run writes fresh report paths, so a second run in one test takes its own output.
         output = f"{mode}-{scope}"
         result, errors = self.run_fixture(output=output)
         self.assertEqual(errors, [])
@@ -2354,6 +2358,22 @@ class EnforcementTests(RepositoryFixture):
         self.assertEqual(problems, ["src/fort/shared.ft:1: shared: 1 local violation(s)"])
         self.assertEqual(summary["problems"], 1)
 
+    def test_stored_scope_rejects_violations_and_incomplete_declared_bodies(self):
+        summary, problems = self.enforce("stored_clean", "stored_borrows")
+        self.assertEqual(problems, [])
+        self.assertEqual(summary["scope"], "stored_borrows")
+        self.assertGreater(summary["declared_context_bodies"], 0)
+        self.assertLess(summary["declared_context_bodies"], summary["context_bodies"])
+        summary, problems = self.enforce("stored_violation", "stored_borrows")
+        self.assertEqual(problems, ["src/fort/main.ft:1: main: 1 stored_borrows violation(s)"])
+        summary, problems = self.enforce("stored_incomplete", "stored_borrows")
+        expected = (
+            "src/fort/main.ft:1: main: incomplete declared stored_borrows obligation (incomplete)"
+        )
+        self.assertEqual(problems, [expected])
+        summary, problems = self.enforce("stored_shared_violation", "stored_borrows")
+        self.assertEqual(problems, ["src/fort/shared.ft:1: shared: 1 stored_borrows violation(s)"])
+
     def test_raw_scope_rejects_violations_and_incomplete_declared_obligations(self):
         summary, problems = self.enforce("raw_clean", scope="raw")
         self.assertEqual((problems, summary["scope"]), ([], "raw"))
@@ -2369,11 +2389,19 @@ class EnforcementTests(RepositoryFixture):
         self.assertEqual(summary["problems"], 1)
 
     def test_each_scope_reads_only_its_own_row(self):
-        # A local problem declares nothing in the raw scope, and the reverse.
-        summary, problems = self.enforce("local_violation", scope="raw")
-        self.assertEqual((problems, summary["declared_context_bodies"]), ([], 0))
-        summary, problems = self.enforce("raw_violation", scope="local")
-        self.assertEqual((problems, summary["declared_context_bodies"]), ([], 0))
+        # A problem of one scope declares nothing in another scope.
+        pairs = (
+            ("local_violation", "raw"),
+            ("raw_violation", "local"),
+            ("local_violation", "stored_borrows"),
+            ("stored_violation", "local"),
+            ("stored_violation", "raw"),
+            ("raw_violation", "stored_borrows"),
+        )
+        for mode, scope in pairs:
+            with self.subTest(mode=mode, scope=scope):
+                summary, problems = self.enforce(mode, scope=scope)
+                self.assertEqual((problems, summary["declared_context_bodies"]), ([], 0))
 
     def test_unavailable_local_rows_declare_nothing(self):
         summary, problems = self.enforce("valid")
@@ -2395,7 +2423,7 @@ class EnforcementTests(RepositoryFixture):
                 compiler_provenance=self.provenance,
             )
         with self.assertRaisesRegex(audit.InvalidEvidence, "unknown scope"):
-            audit.enforce_audit(self.base / "out/audit.json", scope="stored_borrows")
+            audit.enforce_audit(self.base / "out/audit.json", scope="calls_heap")
 
     def test_cli_returns_one_for_problems_and_zero_for_a_clean_scope(self):
         common = [
@@ -2406,7 +2434,13 @@ class EnforcementTests(RepositoryFixture):
             "--compiler-provenance",
             str(self.provenance),
         ]
-        for mode, status in (("local_clean", 0), ("local_violation", 1)):
+        cases = (
+            ("local_clean", "local", 0),
+            ("local_violation", "local", 1),
+            ("stored_clean", "stored_borrows", 0),
+            ("stored_violation", "stored_borrows", 1),
+        )
+        for mode, scope, status in cases:
             with self.subTest(mode=mode):
                 self.executable(mode)
                 self.run_fixture(output=mode)
@@ -2416,7 +2450,7 @@ class EnforcementTests(RepositoryFixture):
                         [
                             "enforce",
                             "--scope",
-                            "local",
+                            scope,
                             *common,
                             str(self.base / mode / "audit.json"),
                         ]
@@ -2425,7 +2459,7 @@ class EnforcementTests(RepositoryFixture):
                 self.assertEqual(json.loads(stdout.getvalue())["problems"], status)
                 self.assertEqual(len(errors.getvalue().splitlines()), status)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            audit.main(["enforce", "--scope", "stored_borrows", *common, str(self.base / "x.json")])
+            audit.main(["enforce", "--scope", "calls_heap", *common, str(self.base / "x.json")])
 
 
 class AttestationTests(RepositoryFixture):

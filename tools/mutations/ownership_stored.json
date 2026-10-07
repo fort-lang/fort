@@ -1,0 +1,327 @@
+{
+  "comment": [
+    "One row for each check that the stored-borrow increment adds. The sources are the",
+    "four files of that increment. A row names the line that holds the check and the",
+    "text that breaks it.",
+    "The build compiles working-tree HEAD with the mutant. The module tests compile",
+    "src/fort with the mutant too. The stages run from the narrowest tests to the",
+    "driver test. The table runs in the Linux VM with the debug preset.",
+    "The md5 guard reads the product compiler that the build links.",
+    "Run it with a --runner that calls tools/vm run and then waits 2 s after each ninja",
+    "build; without that pause a first row can read stale (notes/testing.md)."
+  ],
+  "sources": [
+    "src/fort/ownership_transfer.ft",
+    "src/fort/ownership_source_local.ft",
+    "src/fort/ownership_source_leaves.ft",
+    "src/fort/ownership_report.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "stored module tests",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_transfer_stored ownership_transfer_local ownership_source_stored ownership_source_local_stored ownership_source_leaves ownership_report_stored"
+    },
+    {
+      "name": "ownership driver",
+      "command": "python3 test/ownership_driver_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --opt /usr/bin/opt-18"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.15-field-separation",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        if (x.kind == ownership_api.projection_kind.field && x.field != y.field) {\n            return region_relation.disjoint;",
+      "new": "        if (x.kind == ownership_api.projection_kind.field && x.field != y.field) {\n            return region_relation.possible;",
+      "what": "two fields of one slot may overlap"
+    },
+    {
+      "decision": "D17.15-index-separation",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "            x.index.value != y.index.value) { return region_relation.disjoint; }",
+      "new": "            x.index.value != y.index.value) { return region_relation.possible; }",
+      "what": "two constant elements of one slot may overlap"
+    },
+    {
+      "decision": "D17.15-leaf-proof",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        (projected && (!req->leaf_places_proved || !leaf_path(req->source) ||",
+      "new": "        (projected && (false || !leaf_path(req->source) ||",
+      "what": "a projected place needs no leaf proof"
+    },
+    {
+      "decision": "D17.15-leaf-path",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        bool field = part.kind == ownership_api.projection_kind.field;",
+      "new": "        bool field = part.kind != ownership_api.projection_kind.fixed_index;",
+      "what": "a dereference counts as a leaf projection"
+    },
+    {
+      "decision": "D17.14-outside-stack",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "            source.kind == ownership_api.source_kind.trusted_foreign ||\n            source.kind == ownership_api.source_kind.stack;",
+      "new": "            source.kind == ownership_api.source_kind.trusted_foreign;",
+      "what": "an unknown call makes a stack source unknown"
+    },
+    {
+      "decision": "D17.14-outside-leaf-owner",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        a.owner.place.root.kind == ownership_api.entity_kind.slot &&\n        leaf_path(a.owner.place);",
+      "new": "        a.owner.place.root.kind == ownership_api.entity_kind.slot &&\n        a.owner.place.projections.len == 0;",
+      "what": "an unknown call makes a leaf owner unknown"
+    },
+    {
+      "decision": "fir-14-stack-retire",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "            retire_borrows(s, i, req->source_key, retired);",
+      "new": "            i += 0;",
+      "what": "a new stack instance revives the old borrows"
+    },
+    {
+      "decision": "D17.14-stack-end",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    if (s->sources[source].validity == ownership_api.validity_kind.ended) { return complete(); }\n    return ownership_state.end_source(",
+      "new": "    if (true) { return complete(); }\n    return ownership_state.end_source(",
+      "what": "a storage end does not end the stack source"
+    },
+    {
+      "decision": "D17.15-weak-empty",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "                if (req->destination_owns && !empty_owner_proved(s->contents[i])) {",
+      "new": "                if (false) {",
+      "what": "a weak owning store needs no empty element"
+    },
+    {
+      "decision": "D17.15-weak-repeat",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        if (!held) {\n            ownership_api.mutation_result added = ownership_state.weak_contents(",
+      "new": "        if (true) {\n            ownership_api.mutation_result added = ownership_state.weak_contents(",
+      "what": "a repeated weak value adds another alternative"
+    },
+    {
+      "decision": "D17.11-weak-second-owner",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        if (!req->weak_moves) {\n            return invalid(svc, req, ownership_api.event_kind.lost_ownership,",
+      "new": "        if (false) {\n            return invalid(svc, req, ownership_api.event_kind.lost_ownership,",
+      "what": "a copied owner into owning elements makes no second owner"
+    },
+    {
+      "decision": "D17.14-stack-escape",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        // A stack borrow in storage that the run does not track can outlive its local.\n        note_gap(c, missing.escape, source(c, s->loc));",
+      "new": "        // A stack borrow in storage that the run does not track can outlive its local.\n        c->gap = c->gap;",
+      "what": "a stack borrow stored through a pointer stays in scope"
+    },
+    {
+      "decision": "D17.15-dynamic-move",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        // A move empties an element that the run cannot select, so the path stops there.\n        if (moved) {\n            unsupported_at(c, block, gap, whole(l.local), missing.dynamic_element);",
+      "new": "        // A move empties an element that the run cannot select, so the path stops there.\n        if (moved) {\n            note_gap(c, missing.dynamic_element, source(c, location(c, block, gap)));",
+      "what": "a move through a variable index does not stop its path"
+    },
+    {
+      "decision": "D17.10-loan-region",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "                (!bind_collection(c, s) || !loan_region_checkable(c, b, i, s->loan))) {",
+      "new": "                (!bind_collection(c, s))) {",
+      "what": "a loan region with a projected write keeps its loan in scope"
+    },
+    {
+      "decision": "toolchain-1.1-exclusion",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        a->text == b->text && a->leaf == WHOLE && b->leaf == WHOLE && a->name == b->name;",
+      "new": "        a->text == b->text && a->leaf == WHOLE && b->leaf == WHOLE && false;",
+      "what": "a local violation counts again in the stored row"
+    },
+    {
+      "decision": "toolchain-4.2-leaf-witness",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (l.kind == ownership_source_leaves.access_kind.leaf) { return w->leaf_values[l.first]; }",
+      "new": "    if (l.kind == ownership_source_leaves.access_kind.leaf) { return witness_value{}; }",
+      "what": "the witness walk knows no leaf value"
+    },
+    {
+      "decision": "D17.14-return-storage",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (c->stored) { return_storage(c, block, gap); }",
+      "new": "        if (false) { return_storage(c, block, gap); }",
+      "what": "a return ends no stack source and no TA owner"
+    },
+    {
+      "decision": "D17.14-dead-storage",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (c->stored) { end_storage(c, block, gap, s->local); }",
+      "new": "        if (false) { end_storage(c, block, gap, s->local); }",
+      "what": "a dead marker ends no stack source and no TA leaf"
+    },
+    {
+      "decision": "D17.15-untaken-aggregate",
+      "file": "src/fort/ownership_source_leaves.ft",
+      "old": "        if (!taken[n] && !reference(t) && (t->kind == types.type_kind.k_struct ||",
+      "new": "        if (!reference(t) && (t->kind == types.type_kind.k_struct ||",
+      "what": "a taken aggregate local is tracked"
+    },
+    {
+      "decision": "D17.15-one-write-index",
+      "file": "src/fort/ownership_source_leaves.ft",
+      "old": "        if (writes[n] != 1 || l->kind != fir.local_kind.lk_temp || taken[n]) { out[n] = NONE; }",
+      "new": "        if (l->kind != fir.local_kind.lk_temp || taken[n]) { out[n] = NONE; }",
+      "what": "an index temporary with two writes is a constant"
+    },
+    {
+      "decision": "toolchain-1.1-stored-ledger",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    next = write_flow_meters(j, row, &row->stored, next, \"stored_borrows\",\n        \"stored_borrows_classification\");",
+      "new": "    next = next + 0;",
+      "what": "the report writes no stored ledger"
+    },
+    {
+      "decision": "toolchain-4.2-stored-repeat",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    if (!same_refusal(stored, local) && !same_refusal(stored, local_second) &&",
+      "new": "    if (true &&",
+      "what": "a stored refusal of a reported local refusal is a second error"
+    },
+    {
+      "decision": "toolchain-4.2-leaf-name",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    if (v->quoted && v->leaf != ownership_source_local.WHOLE) {",
+      "new": "    if (false) {",
+      "what": "a leaf message names the aggregate only"
+    },
+    {
+      "decision": "toolchain-4.2-merge-order",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        if (item != null && (best == null || ownership_source_raw.before(item, best))) {",
+      "new": "        if (item != null && best == null) {",
+      "what": "each list of a body renders before the next list"
+    },
+    {
+      "decision": "D17.14-untracked-load",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (through && !tracked_reference(c, p, i)) { return true; }",
+      "new": "        if (through && false) { return true; }",
+      "what": "a use through an untracked reference is no gap"
+    },
+    {
+      "decision": "D17.14-untracked-leaves",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    return a.kind == ownership_source_leaves.access_kind.leaf ||\n        a.kind == ownership_source_leaves.access_kind.pointer ||\n        a.kind == ownership_source_leaves.access_kind.dynamic;",
+      "new": "    return a.kind == ownership_source_leaves.access_kind.pointer ||\n        a.kind == ownership_source_leaves.access_kind.dynamic;",
+      "what": "a use through a TA leaf is the gap"
+    },
+    {
+      "decision": "D17.14-untracked-statement-reads",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            while (fir.stmt_read(f, s, k, &got)) {\n                note_untracked_read(c, got.place, s->loc);",
+      "new": "            while (fir.stmt_read(f, s, k, &got)) {\n                if (false) { note_untracked_read(c, got.place, s->loc); }",
+      "what": "no statement read through or out of untracked storage is a gap"
+    },
+    {
+      "decision": "D17.14-untracked-slice-place",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            while (fir.stmt_read(f, s, k, &got)) {\n                note_untracked_read(c, got.place, s->loc);",
+      "new": "            while (fir.stmt_read(f, s, k, &got)) {\n                if (s->kind != fir.stmt_kind.st_assign || s->value.kind != fir.rvalue_kind.rv_slice || !fir.same_base(got.place, s->value.place) || got.place.proj_len != s->value.place.proj_len) { note_untracked_read(c, got.place, s->loc); }",
+      "what": "the place of a slice of a span or a string is no read"
+    },
+    {
+      "decision": "D17.14-untracked-use-through",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    note_untracked(c, p, at);\n    note_untracked_value(c, p, at);",
+      "new": "    note_untracked_value(c, p, at);",
+      "what": "a read place that goes through an untracked reference is no gap"
+    },
+    {
+      "decision": "D17.14-untracked-is-use",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            if (value.is_use) { note_untracked_read(c, value.place, t->loc); }",
+      "new": "            if (true) { note_untracked_read(c, value.place, t->loc); }",
+      "what": "the test of an overwrite check counts as a use (fir.md 14)"
+    },
+    {
+      "decision": "D17.14-untracked-terminator",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            if (value.is_use) { note_untracked_read(c, value.place, t->loc); }\n            else { note_untracked(c, value.place, t->loc); }",
+      "new": "            if (false) { note_untracked_read(c, value.place, t->loc); }\n            else if (false) { note_untracked(c, value.place, t->loc); }",
+      "what": "a terminator read through a taken local is no gap"
+    },
+    {
+      "decision": "D17.14-untracked-dynamic",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    return a.kind == ownership_source_leaves.access_kind.leaf ||\n        a.kind == ownership_source_leaves.access_kind.pointer ||\n        a.kind == ownership_source_leaves.access_kind.dynamic;",
+      "new": "    return a.kind == ownership_source_leaves.access_kind.leaf ||\n        a.kind == ownership_source_leaves.access_kind.pointer;",
+      "what": "a use through a variable index is unknown_source, not dynamic_element"
+    },
+    {
+      "decision": "D17.14-untracked-heap",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (!c->stored || !c->leaves.aggregate[n]) { return false; }\n    ownership_source_leaves.access a = leaf_access(c, prefix);",
+      "new": "    if (!c->stored || !c->leaves.aggregate[n]) { return true; }\n    ownership_source_leaves.access a = leaf_access(c, prefix);",
+      "what": "a reference loaded from the heap or caller storage is followed"
+    },
+    {
+      "decision": "D17.14-untracked-mutable-global",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        return !p.global->mut0 && !fir.place_indirect(c->function, prefix);",
+      "new": "        return !fir.place_indirect(c->function, prefix);",
+      "what": "a reference in a mutable global is followed"
+    },
+    {
+      "decision": "D17.14-untracked-constant-global",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        return !p.global->mut0 && !fir.place_indirect(c->function, prefix);",
+      "new": "        return false;",
+      "what": "a reference in a constant global is the gap"
+    },
+    {
+      "decision": "D17.14-untracked-constant-global-depth",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        return !p.global->mut0 && !fir.place_indirect(c->function, prefix);",
+      "new": "        return !p.global->mut0;",
+      "what": "a reference behind a constant global's address is followed"
+    },
+    {
+      "decision": "D17.14-untracked-pointer-field",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (c->tracked[n]) { return place_access(c, prefix).pointer; }",
+      "new": "    if (c->tracked[n]) { return false; }",
+      "what": "the pointer field of a span TL is no tracked reference"
+    },
+    {
+      "decision": "D17.14-untracked-leaf-pointer",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    return a.kind == ownership_source_leaves.access_kind.leaf ||\n        a.kind == ownership_source_leaves.access_kind.pointer ||\n        a.kind == ownership_source_leaves.access_kind.dynamic;",
+      "new": "    return a.kind == ownership_source_leaves.access_kind.leaf ||\n        a.kind == ownership_source_leaves.access_kind.dynamic;",
+      "what": "the pointer field of a TA leaf is no tracked reference"
+    },
+    {
+      "decision": "D17.14-untracked-value",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (reference_leaf(fir.place_type(c->function, p)) && untracked_storage(c, p)) {",
+      "new": "    if (false && reference_leaf(fir.place_type(c->function, p)) && untracked_storage(c, p)) {",
+      "what": "a read of a reference value out of untracked storage is no gap"
+    },
+    {
+      "decision": "D17.14-untracked-global-slice",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (r.place.base == fir.base_kind.bk_global && (names_storage(f, r.place, r.kind) ||",
+      "new": "        if (r.place.base == fir.base_kind.bk_global && (!fir.place_indirect(f, r.place) ||",
+      "what": "a slice of a mutable global span is static storage"
+    },
+    {
+      "decision": "D17.14-untracked-argument-global",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (p.base == fir.base_kind.bk_global) { return p.global->mut0; }",
+      "new": "    if (p.base == fir.base_kind.bk_global) { return false; }",
+      "what": "a call argument copied out of a mutable global is no gap"
+    },
+    {
+      "decision": "D17.14-untracked-argument-local",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    return !c->tracked[n] && !(c->stored && c->leaves.aggregate[n]);",
+      "new": "    return false;",
+      "what": "a call argument copied out of an untracked local is no gap"
+    }
+  ]
+}

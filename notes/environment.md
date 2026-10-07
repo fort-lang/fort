@@ -333,7 +333,10 @@ without a rewrite.
   new bytes and dropping the caches does not help, because it is the timestamp and not the
   content that is stale. Delete that target's object
   (`build/<Host>/<preset>/CMakeFiles/<target>.dir/<path>.o`; a target of `bootstrap0/CMakeLists.txt`
-  keeps it in `build/<Host>/<preset>/bootstrap/CMakeFiles`) and build again. A mutation experiment
+  keeps it in `build/<Host>/<preset>/bootstrap/CMakeFiles`) and build again. A `git checkout`
+  between commits gives the same stale mtime: on 2026-10-08, 3 of 6 per-commit builds of one
+  branch ran no stage build until the guest ran `touch src/fort/*.ft` before `ninja`; the binary
+  `md5sum` of each build shows which commits built. A mutation experiment
   -- break a rule in the compiler, watch the test go red, restore it, watch it go green -- runs into
   this more than anything else, because every step rewrites a file the last step just built from,
   and a stale mtime makes the next step report the previous binary's colours. Edit and restore
