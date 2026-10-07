@@ -1,0 +1,584 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| observed attempts
+//| unknown calls
+//| stopped paths
+//| step index
+//| grown buckets
+//| escaped site identities
+//| loop attempts
+//| direct stops
+//| uncertain returns
+/// Checks the path observer, the stop positions and the step index of the flow solver.
+import fir;
+import fir_env;
+import fir_parse;
+import fir_verify;
+import ownership_api;
+import ownership_flow;
+import ownership_limits;
+import ownership_local_env;
+import ownership_state;
+import ownership_transfer;
+import std.strbuf;
+
+fn open(fir_env.env mut* environment, fir.module mut* parsed, string lets, string@ blocks)
+    fir.func* {
+    fir_env.open(environment);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn main.f(_1 (c): bool) -> i32 {\n");
+    strbuf.append(&text, lets);
+    strbuf.push(&text, '\n');
+    u64 mut i = 0;
+    while (i < blocks.len) {
+        strbuf.append(&text, blocks[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    strbuf.append(&text, "}\n");
+    u64 before = fir_env.errors(environment);
+    *parsed = fir_parse.parse_module(&environment->c.m.s, "observer.fir", strbuf.view(&text),
+        fir_env.prelude(environment));
+    assert(fir_env.errors(environment) == before);
+    fir.func* function = fir.module_function_at(parsed, 0);
+    fir_verify.runtime rt = fir_verify.runtime_of(&environment->c.ck);
+    strbuf.str_buf mut report = strbuf.create();
+    defer strbuf.free(&report);
+    assert(fir_verify.verify_report(function, &rt, &report));
+    return function;
+}
+
+fn close(fir_env.env mut* environment, fir.module mut* parsed) void {
+    fir.module_free(parsed);
+    fir_env.close(environment);
+}
+
+fn slot(u32 ordinal) ownership_api.place_path { return ownership_local_env.place(ordinal); }
+
+fn step_at(ownership_local_env.env mut* e, ownership_transfer.action kind, u32 slot_number,
+    u32 block, u32 gap, u32 order) ownership_flow.step {
+    ownership_flow.step mut out = ownership_flow.step{};
+    out.kind = ownership_flow.step_kind.local_effect;
+    out.block = block;
+    out.gap = gap;
+    out.order = order;
+    out.local = ownership_local_env.req(e, kind, slot_number, slot_number);
+    out.local.operation.block = block;
+    e->event_bindings[e->event_bindings_len - 1].operation = out.local.operation;
+    out.operation = out.local.operation;
+    out.source = out.local.source_position;
+    return out;
+}
+
+fn allocation_at(ownership_local_env.env mut* e, u32 slot_number, u32 block, u32 gap,
+    u32 key) ownership_flow.step {
+    ownership_flow.step mut out = step_at(e, ownership_transfer.action.allocation, slot_number,
+        block, gap, 0);
+    out.local.allocation = ownership_local_env.allocation(key, 100, slot_number, 1);
+    out.local.fresh_source = ownership_local_env.source(key + 1000,
+        ownership_api.source_kind.heap, out.local.allocation.key);
+    out.local.source_key = out.local.fresh_source.key;
+    return out;
+}
+
+fn link_allocation(ownership_flow.step mut* s, ownership_api.borrow_relation mut@ borrow,
+    u32 slot_number) void {
+    borrow[0] = ownership_local_env.borrow(s->local.fresh_source.key,
+        s->local.allocation.key.ordinal, slot(slot_number));
+    s->local.value = ownership_local_env.reference(s->local.allocation.key.ordinal,
+        s->local.fresh_source.key, borrow);
+}
+
+fn program(ownership_local_env.env mut* e, fir.func* function, ownership_limits.meter mut* m,
+    ownership_api.limit_table mut* limits, ownership_flow.source_file_binding mut@ files)
+    ownership_flow.program {
+    *limits = ownership_limits.production();
+    assert(ownership_limits.configure(m, limits));
+    // FIR text gives its terminators no file, so the map stays empty unless one has a file.
+    string file = fir.block_at(function, 0)->term.loc.file;
+    files[0] = ownership_flow.source_file_binding{1, 1, file};
+    ownership_flow.program mut input = ownership_flow.program{};
+    input.function = function;
+    input.entry = &e->state;
+    input.services = &e->service;
+    input.limits = limits;
+    input.source_files = file.len > 0 ? files[0..1] : files[0..0];
+    input.supplied_complete = true;
+    input.verified_fir = true;
+    return input;
+}
+
+fn empty_slot(ownership_local_env.env mut* e, u32 n) void {
+    ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+    empty.place = slot(n);
+    ownership_state.append_contents(&e->state, empty);
+}
+
+// Two paths with different facts reach the release and the return. Each path counts once.
+fn observed_attempts() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = alloc<i32>(const u64 1); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { del(move _2); _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&environment, &parsed, "let _2 (x): i32 mut* own;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    empty_slot(&e, 2);
+    ownership_flow.step[2] mut steps = {};
+    steps[0] = allocation_at(&e, 2, 1, 0, 1);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    link_allocation(&steps[0], borrow[..], 2);
+    steps[1] = step_at(&e, ownership_transfer.action.release, 2, 3, 0, 0);
+    steps[1].local.leaves_empty_proved = true;
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = steps[..];
+    u64[2] mut attempts = {};
+    u64[2] mut uncertain = {};
+    u64[4] mut returns = {};
+    u64[4] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 0 && result.stops_len == 0 && !result.stops_lost);
+    // One path allocates. Two distinct paths reach the release and the return.
+    assert(attempts[0] == 1 && attempts[1] == 2);
+    assert(uncertain[0] == 0 && uncertain[1] == 0);
+    assert(returns[3] == 2 && returns[0] == 0 && returns[1] == 0 && returns[2] == 0);
+    assert(return_uncertain[3] == 0);
+    assert(result.normal_returns == 2);
+    // Without an observer the solver keeps the same result.
+    input.observed = null;
+    ownership_flow.analysis mut plain = ownership_flow.solve(&input);
+    defer ownership_flow.free(&plain);
+    assert(plain.failures == 0 && plain.normal_returns == 2);
+    assert(attempts[1] == 2 && returns[3] == 2);
+    // An observer with empty slices records nothing and changes nothing.
+    ownership_flow.observer mut none = ownership_flow.observer{};
+    input.observed = &none;
+    ownership_flow.analysis mut quiet = ownership_flow.solve(&input);
+    defer ownership_flow.free(&quiet);
+    assert(quiet.failures == 0 && quiet.normal_returns == 2);
+}
+
+// An unknown fort call marks the later attempts of a path and the return it reaches.
+fn unknown_call_marks_later_attempts() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    strbuf.str_buf mut first = strbuf.create();
+    defer strbuf.free(&first);
+    strbuf.append(&first, "bb0: { _2 = alloc<i32>(const u64 1); ");
+    strbuf.append(&first, "_3 = call fn main.add(const i32 1, const i64 2); goto bb1; }");
+    string[2] blocks = {strbuf.view(&first), "bb1: { del(move _2); _0 = const i32 0; return; }"};
+    fir.func* function = open(&environment, &parsed,
+        "let _2 (x): i32 mut* own; let _3: u64;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    empty_slot(&e, 2);
+    ownership_flow.step[3] mut steps = {};
+    steps[0] = allocation_at(&e, 2, 0, 0, 1);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    link_allocation(&steps[0], borrow[..], 2);
+    steps[1].kind = ownership_flow.step_kind.call_outcome;
+    steps[1].block = 0;
+    steps[1].gap = 1;
+    steps[1].operation = ownership_api.operation_position{.block = 0, .operation = 1};
+    steps[2] = step_at(&e, ownership_transfer.action.release, 2, 1, 0, 0);
+    steps[2].local.leaves_empty_proved = true;
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = steps[..];
+    u64[3] mut attempts = {};
+    u64[3] mut uncertain = {};
+    u64[2] mut returns = {};
+    u64[2] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    // The call is no local step, so the observer counts only the two local steps.
+    assert(attempts[0] == 1 && uncertain[0] == 0);
+    assert(attempts[1] == 0 && uncertain[1] == 0);
+    assert(attempts[2] == 1 && uncertain[2] == 1);
+    // The release after the unknown call has no live owner proof, so the path stops there.
+    assert(result.failures == 1 && result.normal_returns == 0);
+    assert(returns[1] == 0 && return_uncertain[1] == 0);
+    assert(result.stops_len == 1);
+    assert(result.stops[0].block == 1 && result.stops[0].gap == 0 && result.stops[0].rank == 1);
+}
+
+// Each distinct stop position is kept once. A full list reports a lost record.
+fn stopped_paths() void {
+    ownership_flow.analysis mut a = ownership_flow.analysis{};
+    a.stops = new(ownership_flow.stop, 3);
+    ownership_flow.note_stop(&a, 2, 1, 0);
+    ownership_flow.note_stop(&a, 2, 1, 0);
+    assert(a.stops_len == 1 && !a.stops_lost);
+    ownership_flow.note_stop(&a, 2, 1, 1);
+    ownership_flow.note_stop(&a, 3, 1, 1);
+    assert(a.stops_len == 3 && !a.stops_lost);
+    ownership_flow.note_stop(&a, 3, 1, 1);
+    assert(a.stops_len == 3 && !a.stops_lost);
+    ownership_flow.note_stop(&a, 4, 0, ownership_flow.STOP_AFTER);
+    assert(a.stops_len == 3 && a.stops_lost);
+    assert(a.stops[0].block == 2 && a.stops[1].rank == 1 && a.stops[2].block == 3);
+    ownership_flow.free(&a);
+    assert(a.stops.len == 0 && a.stops_len == 0 && !a.stops_lost);
+}
+
+// A failed local step stops its path at the step's rank: its order plus one.
+fn failed_step_stops_at_its_rank() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    string[1] blocks = {"bb0: { del(move _2); _0 = const i32 0; return; }"};
+    fir.func* function = open(&environment, &parsed, "let _2 (x): i32 mut* own;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_flow.step[2] mut steps = {};
+    // The first step needs facts the entry state lacks, so the path stops before the second.
+    steps[0] = step_at(&e, ownership_transfer.action.inspect, 2, 0, 0, 3);
+    steps[1] = step_at(&e, ownership_transfer.action.release, 2, 0, 0, 4);
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = steps[..];
+    u64[2] mut attempts = {};
+    u64[2] mut uncertain = {};
+    u64[1] mut returns = {};
+    u64[1] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 1 && result.normal_returns == 0);
+    assert(attempts[0] == 1 && attempts[1] == 0 && returns[0] == 0);
+    assert(result.stops_len == 1);
+    assert(result.stops[0].block == 0 && result.stops[0].gap == 0 && result.stops[0].rank == 4);
+}
+
+// step_first holds the first step of each block and of each later block.
+fn step_index() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    string[4] blocks = {
+        "bb0: { _2 = alloc<i32>(const u64 1); goto bb1; }",
+        "bb1: { goto bb2; }",
+        "bb2: { goto bb3; }",
+        "bb3: { del(move _2); _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&environment, &parsed, "let _2 (x): i32 mut* own;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    empty_slot(&e, 2);
+    ownership_flow.step[3] mut steps = {};
+    steps[0] = allocation_at(&e, 2, 0, 0, 1);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    link_allocation(&steps[0], borrow[..], 2);
+    steps[1] = step_at(&e, ownership_transfer.action.inspect, 2, 3, 0, 0);
+    steps[2] = step_at(&e, ownership_transfer.action.release, 2, 3, 0, 1);
+    steps[2].local.leaves_empty_proved = true;
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = steps[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 0 && result.normal_returns == 1);
+    assert(result.step_first.len == 5);
+    assert(result.step_first[0] == 0 && result.step_first[1] == 1);
+    assert(result.step_first[2] == 1 && result.step_first[3] == 1);
+    assert(result.step_first[4] == 3);
+    // The stop list has room for each position: one per gap, step and block.
+    assert(result.stops.len == ownership_limits.fir_size(function) + 3 + 4);
+    // A rejected program allocates no index.
+    input.verified_fir = false;
+    ownership_flow.analysis mut refused = ownership_flow.solve(&input);
+    defer ownership_flow.free(&refused);
+    assert(refused.failures == 1 && refused.step_first.len == 0 && refused.blocks.len == 0);
+}
+
+// A bucket grows with its paths up to G, then widens to one path.
+fn grown_buckets() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    string[6] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = alloc<i32>(const u64 1); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { switch(copy _1) -> [true: bb4, otherwise: bb5]; }",
+        "bb4: { _3 = alloc<i32>(const u64 1); goto bb5; }",
+        "bb5: { del(move _2); del(move _3); _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&environment, &parsed,
+        "let _2 (x): i32 mut* own; let _3 (y): i32 mut* own;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    empty_slot(&e, 2);
+    empty_slot(&e, 3);
+    ownership_flow.step[2] mut steps = {};
+    steps[0] = allocation_at(&e, 2, 1, 0, 1);
+    ownership_api.borrow_relation[1] mut first = {};
+    link_allocation(&steps[0], first[..], 2);
+    steps[1] = allocation_at(&e, 3, 4, 0, 2);
+    ownership_api.borrow_relation[1] mut second = {};
+    link_allocation(&steps[1], second[..], 3);
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = steps[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    // The production G keeps four alternatives at bb5 in a bucket of four, not of G.
+    assert(result.blocks[5].len == 4 && !result.blocks[5].widened);
+    assert(result.blocks[5].paths.len == 4);
+    assert(result.blocks[0].paths.len == 2 && result.blocks[0].len == 1);
+    ownership_flow.free(&result);
+    // With G = 3 the fourth alternative widens the bucket. Its capacity stays at G.
+    limits.g = 3;
+    assert(ownership_limits.configure(&m, &limits));
+    result = ownership_flow.solve(&input);
+    assert(result.blocks[5].len == 1 && result.blocks[5].widened);
+    assert(result.blocks[5].paths.len == 3);
+    ownership_flow.free(&result);
+    // With G = 1 the second path widens at once, and the bucket holds one path.
+    limits.g = 1;
+    assert(ownership_limits.configure(&m, &limits));
+    result = ownership_flow.solve(&input);
+    assert(result.blocks[3].len == 1 && result.blocks[3].widened);
+    assert(result.blocks[3].paths.len == 1);
+    ownership_flow.free(&result);
+}
+
+// A loop that moves each new allocation out of local proof reuses its site identity.
+fn escaped_site_identity(bool retained) void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    strbuf.str_buf mut body = strbuf.create();
+    defer strbuf.free(&body);
+    string[4] mut blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { _2 = alloc<i32>(const u64 1); _3 = move _2; goto bb1; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    if (retained) {
+        strbuf.append(&body, "bb2: { _2 = alloc<i32>(const u64 1); _4 = copy _2; ");
+        strbuf.append(&body, "_3 = move _2; goto bb1; }");
+        blocks[2] = strbuf.view(&body);
+    }
+    fir.func* function = open(&environment, &parsed,
+        "let _2 (x): i32 mut* own; let _3 (y): i32 mut* own; let _4 (v): i32 mut*;",
+        blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    empty_slot(&e, 2);
+    ownership_flow.step[3] mut steps = {};
+    steps[0] = allocation_at(&e, 2, 2, 0, 1);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    link_allocation(&steps[0], borrow[..], 2);
+    if (retained) {
+        steps[1] = step_at(&e, ownership_transfer.action.copy, 2, 2, 1, 0);
+        steps[1].local.destination = slot(4);
+        steps[2] = step_at(&e, ownership_transfer.action.escape, 2, 2, 2, 0);
+    } else {
+        steps[1] = step_at(&e, ownership_transfer.action.escape, 2, 2, 1, 0);
+    }
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = retained ? steps[..] : steps[0..2];
+    ownership_flow.event_binding[1] events = {ownership_flow.event_binding{steps[0].operation,
+        ownership_api.event_kind.incomplete_proof, steps[0].local.allocation.key,
+        ownership_local_env.id(ownership_api.entity_kind.event, 900)}};
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    if (retained) {
+        // The borrow in _4 keeps the escaped identity, so the site cannot take a new one.
+        assert(result.failures == 1);
+        assert(result.first_failure.terminal.reason ==
+            ownership_api.incomplete_reason.missing_path);
+        assert(result.stops_len == 1 && result.stops[0].block == 2 &&
+            result.stops[0].gap == 0 && result.stops[0].rank == 1);
+        return;
+    }
+    assert(result.failures == 0 && result.normal_returns >= 1);
+    bool mut retired = false;
+    u64 mut i = 0;
+    while (i < result.blocks[3].len) {
+        ownership_state.state* old = &result.blocks[3].paths[i].retired;
+        if (old->allocations_len == 1 && old->allocations[0].obligation &&
+            old->allocations[0].owner.detached) { retired = true; }
+        i += 1;
+    }
+    assert(retired);
+}
+
+// Each distinct state at the loop body applies its steps once. The fixed point ends the run.
+fn loop_attempts() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    string[4] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { _2 = alloc<i32>(const u64 1); del(move _2); goto bb1; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&environment, &parsed, "let _2 (x): i32 mut* own;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    empty_slot(&e, 2);
+    ownership_flow.step[2] mut steps = {};
+    steps[0] = allocation_at(&e, 2, 2, 0, 1);
+    ownership_api.borrow_relation[1] mut borrow = {};
+    link_allocation(&steps[0], borrow[..], 2);
+    steps[1] = step_at(&e, ownership_transfer.action.release, 2, 2, 1, 0);
+    steps[1].local.leaves_empty_proved = true;
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = steps[..];
+    u64[2] mut attempts = {};
+    u64[2] mut uncertain = {};
+    u64[4] mut returns = {};
+    u64[4] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 0 && result.stops_len == 0);
+    // The entry state and the state after an iteration differ in their retired site.
+    assert(attempts[0] >= 2 && attempts[0] == attempts[1]);
+    assert(returns[3] >= 2 && returns[3] == result.normal_returns);
+    assert(uncertain[0] == 0 && return_uncertain[3] == 0);
+    println("loop attempts");
+}
+
+// A refused direct effect stops its path before the steps of its gap: rank 0.
+fn direct_stops() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    string[1] blocks = {"bb0: { _2 = addr(_3); _4 = addr(_3); _0 = const i32 0; return; }"};
+    fir.func* function = open(&environment, &parsed,
+        "let _2: i32*; let _3 (x): i32; let _4: i32*;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    // Each address charges one W unit. One unit lets the first through and refuses the next.
+    limits.w = 1;
+    assert(ownership_limits.configure(&m, &limits));
+    input.services = &budgeted;
+    budgeted.budget_context = cast(&m, void mut*);
+    budgeted.budget = ownership_limits.callback;
+    budgeted.event_context = e.service.event_context;
+    budgeted.event = e.service.event;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 1 && result.normal_returns == 0);
+    assert(result.stops_len == 1);
+    assert(result.stops[0].block == 0 && result.stops[0].gap == 1 && result.stops[0].rank == 0);
+    // The refusal has no event binding here, so flow keeps it as missing correspondence.
+    assert(result.first_failure.terminal.present);
+    assert(m.used.w == 1);
+    println("direct stops");
+}
+
+ownership_api.services mut budgeted = ownership_api.services{};
+
+// A return after an unknown call counts as an uncertain return.
+fn uncertain_returns() void {
+    fir_env.env mut environment = fir_env.env{};
+    fir.module mut parsed = fir.module{};
+    string[2] blocks = {
+        "bb0: { _2 = call fn main.add(const i32 1, const i64 2); goto bb1; }",
+        "bb1: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&environment, &parsed, "let _2: u64;", blocks[..]);
+    defer close(&environment, &parsed);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_flow.step[1] mut steps = {};
+    steps[0].kind = ownership_flow.step_kind.call_outcome;
+    steps[0].block = 0;
+    steps[0].operation = ownership_api.operation_position{.block = 0};
+    ownership_limits.meter mut m = ownership_limits.meter{};
+    ownership_api.limit_table mut limits = ownership_api.limit_table{};
+    ownership_flow.source_file_binding[1] mut files = {};
+    ownership_flow.program mut input = program(&e, function, &m, &limits, files[..]);
+    input.steps = steps[..];
+    u64[1] mut attempts = {};
+    u64[1] mut uncertain = {};
+    u64[2] mut returns = {};
+    u64[2] mut return_uncertain = {};
+    ownership_flow.observer mut seen = ownership_flow.observer{attempts[..], uncertain[..],
+        returns[..], return_uncertain[..]};
+    input.observed = &seen;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    // No obligation remains, so the unknown call leaves the return proved.
+    assert(result.failures == 0 && result.normal_returns == 1);
+    assert(returns[1] == 1 && return_uncertain[1] == 1);
+    // A call step is no local step: the observer counts no attempt for it.
+    assert(attempts[0] == 0 && uncertain[0] == 0);
+    println("uncertain returns");
+}
+
+fn main() i32 {
+    observed_attempts();
+    println("observed attempts");
+    unknown_call_marks_later_attempts();
+    println("unknown calls");
+    stopped_paths();
+    failed_step_stops_at_its_rank();
+    println("stopped paths");
+    step_index();
+    println("step index");
+    grown_buckets();
+    println("grown buckets");
+    escaped_site_identity(false);
+    escaped_site_identity(true);
+    println("escaped site identities");
+    loop_attempts();
+    direct_stops();
+    uncertain_returns();
+    return 0;
+}

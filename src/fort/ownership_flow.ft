@@ -8,6 +8,7 @@ import ownership_join;
 import ownership_places;
 import types;
 import ownership_keys;
+import ownership_limits;
 import ownership_state;
 import ownership_transfer;
 
@@ -98,6 +99,15 @@ struct loan_state {
     bool known;
 }
 
+// A producer counts the path states that reach each local step and each return block.
+// Each slice is empty or has one entry for each step or block. The caller owns the counts.
+struct observer {
+    u64 mut@ step_attempts;
+    u64 mut@ step_uncertain;
+    u64 mut@ return_attempts;
+    u64 mut@ return_uncertain;
+}
+
 struct program {
     fir.func* function;
     ownership_api.function_id identity;
@@ -122,6 +132,7 @@ struct program {
     // The direct-call handler owns its context. It replaces the facts only on a continuation.
     void mut* call_context;
     fn (void mut*, step*, ownership_state.state mut*) call_verdict call_handler;
+    observer mut* observed;
 }
 
 struct path {
@@ -141,12 +152,29 @@ struct bucket {
     bool widened;
 }
 
+// A path stopped at this position. Rank 0 is before the steps of the gap, rank k + 1 is the
+// step of order k, and STOP_AFTER is after all steps of the block, at its terminator edges.
+struct stop {
+    u32 block;
+    u32 gap;
+    u64 rank;
+}
+
+u64 STOP_AFTER = 18446744073709551615;
+
 struct analysis {
     bucket mut@ own blocks;
     u64 failures;
     u64 normal_returns;
     u64 transfers;
     ownership_api.proof_status first_failure;
+    // Distinct positions where a failure stopped a path, in the order of the first stop.
+    // The capacity counts every position, so a full list means a missing record.
+    stop mut@ own stops;
+    u64 stops_len;
+    bool stops_lost;
+    // step_first[b] is the index of the first step of block b or a later block.
+    u64 mut@ own step_first;
 }
 
 fn complete() ownership_api.proof_status {
@@ -206,6 +234,8 @@ fn free(analysis mut* r) void {
         b += 1;
     }
     del(r->blocks);
+    del(r->stops);
+    del(r->step_first);
     *r = analysis{};
 }
 
@@ -234,6 +264,24 @@ fn note_failure(analysis mut* out, ownership_api.proof_status proof) void {
     if (out->failures == 0) { out->first_failure = proof; }
     out->failures += 1;
 }
+
+// Records a stopped path once for each position.
+fn note_stop(analysis mut* out, u32 block, u32 gap, u64 rank) void {
+    u64 mut i = 0;
+    while (i < out->stops_len) {
+        stop at = out->stops[i];
+        if (at.block == block && at.gap == gap && at.rank == rank) { return; }
+        i += 1;
+    }
+    if (out->stops_len == out->stops.len) {
+        out->stops_lost = true;
+        return;
+    }
+    out->stops[out->stops_len] = stop{block, gap, rank};
+    out->stops_len += 1;
+}
+
+fn rank_of(step* s) u64 { return cast(s->order, u64) + 1; }
 
 fn event_key(program* in, ownership_api.operation_position op,
     ownership_api.event_kind kind, ownership_api.entity_id relation)
@@ -1056,10 +1104,13 @@ fn retire_released_site(program* in, path mut* p, step* s)
     u64 a = ownership_state.allocation_index(&p->facts, selected->allocation.key);
     u64 source = ownership_state.source_index(&p->facts, selected->fresh_source.key);
     if (a == U64_MAX && source == U64_MAX) { return complete(); }
-    if (a == U64_MAX || source == U64_MAX ||
-        p->facts.allocations[a].obligation ||
-        p->facts.allocations[a].validity != ownership_api.validity_kind.released ||
-        p->facts.sources[source].validity != ownership_api.validity_kind.released ||
+    // A detached allocation escaped from local proof: storage outside it owns its obligation.
+    bool escaped = a != U64_MAX && p->facts.allocations[a].obligation &&
+        p->facts.allocations[a].owner.detached;
+    bool released = a != U64_MAX && source != U64_MAX && !p->facts.allocations[a].obligation &&
+        p->facts.allocations[a].validity == ownership_api.validity_kind.released &&
+        p->facts.sources[source].validity == ownership_api.validity_kind.released;
+    if (a == U64_MAX || source == U64_MAX || !(escaped || released) ||
         p->facts.nodes_len > 0 || p->facts.edges_len > 0 ||
         p->facts.regions_len > 0 || p->facts.shapes_len > 0) {
         return failure(in, s->operation, s->source,
@@ -1135,11 +1186,14 @@ fn retire_released_site(program* in, path mut* p, step* s)
 
 fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
     u32 count = fir.block_statement_count(in->function, block);
+    u64 first = out->step_first[cast(block, u64)];
+    u64 last = out->step_first[cast(block, u64) + 1];
     u32 mut gap = 0;
     while (gap <= count) {
         ownership_api.proof_status direct = direct_effect(in, p, block, gap);
         if (!ownership_api.successful(direct)) {
             note_failure(out, direct);
+            note_stop(out, block, gap, 0);
             return false;
         }
         if (gap < count) {
@@ -1147,11 +1201,12 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
             if (operation_value->kind == fir.stmt_kind.st_assign &&
                 operation_value->value.kind == fir.rvalue_kind.rv_call) {
                 bool mut found = false;
-                u64 mut call_i = 0;
-                while (call_i < in->steps.len) {
+                u64 mut call_i = first;
+                while (call_i < last) {
                     step supplied = in->steps[call_i];
-                    if (supplied.block == block && supplied.gap == gap &&
-                        supplied.kind == step_kind.call_outcome) { found = true; }
+                    if (supplied.gap == gap && supplied.kind == step_kind.call_outcome) {
+                        found = true;
+                    }
                     call_i += 1;
                 }
                 if (!found && !active_loans(p)) {
@@ -1166,14 +1221,15 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                         ownership_api.event_kind.incomplete_proof,
                         ownership_api.incomplete_reason.unknown_effect, ownership_api.entity_id{},
                         "call preserves collection storage"));
+                    note_stop(out, block, gap, 0);
                     return false;
                 }
             }
         }
-        u64 mut i = 0;
-        while (i < in->steps.len) {
+        u64 mut i = first;
+        while (i < last) {
             step mut s = in->steps[i];
-            if (s.block == block && s.gap == gap) {
+            if (s.gap == gap) {
                 ownership_api.proof_status mut proof = complete();
                 if (s.kind != step_kind.local_effect) {
                     ownership_api.charge_result charged = ownership_api.charge_work(
@@ -1182,15 +1238,21 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                     if (!charged.allowed) {
                         note_failure(out, charged_failure(in, charged.proof,
                             s.operation, s.source));
+                        note_stop(out, block, gap, rank_of(&s));
                         return false;
                     }
                 }
                 if (s.kind == step_kind.local_effect) {
+                    if (in->observed != null && i < in->observed->step_attempts.len) {
+                        in->observed->step_attempts[i] += 1;
+                        if (p->uncertain_return) { in->observed->step_uncertain[i] += 1; }
+                    }
                     if (s.local.kind == ownership_transfer.action.allocation) {
                         proof = retire_released_site(in, p, &s);
                     }
                     if (!ownership_api.successful(proof)) {
                         note_failure(out, proof);
+                        note_stop(out, block, gap, rank_of(&s));
                         return false;
                     }
                     proof = ownership_transfer.apply(&p->facts, in->services, &s.local);
@@ -1200,13 +1262,22 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                 } else if (s.kind == step_kind.invalidate_value) {
                     invalidate_version(p, s.invalidates);
                 } else if (s.kind == step_kind.direct_call) {
-                    if (!direct_call(in, out, p, &s)) { return false; }
+                    // A failed application stops the path, so it records the stop too.
+                    u64 before = out->failures;
+                    if (!direct_call(in, out, p, &s)) {
+                        if (out->failures > before) { note_stop(out, block, gap, rank_of(&s)); }
+                        return false;
+                    }
                 } else {
                     invalidate_version(p, s.invalidates);
-                    if (!call_continues(in, p, &s, out)) { return false; }
+                    if (!call_continues(in, p, &s, out)) {
+                        note_stop(out, block, gap, rank_of(&s));
+                        return false;
+                    }
                 }
                 if (!ownership_api.successful(proof)) {
                     note_failure(out, proof);
+                    note_stop(out, block, gap, rank_of(&s));
                     return false;
                 }
             }
@@ -1586,6 +1657,19 @@ fn widen_path(program* in, path* a, path* b,
     return out;
 }
 
+// A bucket grows on demand, so a block with one path holds one path.
+fn grow_bucket(bucket mut* b, u64 g) void {
+    u64 limit = ownership_state.alternatives_within(g);
+    u64 mut cap = b->paths.len * 2;
+    if (cap < 2) { cap = 2; }
+    if (cap > limit) { cap = limit; }
+    path mut@ own bigger = new(path, cap);
+    u64 mut i = 0;
+    while (i < b->len) { bigger[i] = move(b->paths[i]); i += 1; }
+    del(b->paths);
+    b->paths = move(bigger);
+}
+
 fn add_path(program* in, analysis mut* out, fir_flow.bits mut* pending,
     u32 target, path* selected) void {
     bucket mut* bucket_at = &out->blocks[cast(target, u64)];
@@ -1594,7 +1678,10 @@ fn add_path(program* in, analysis mut* out, fir_flow.bits mut* pending,
         if (path_equal(&bucket_at->paths[i], selected)) { return; }
         i += 1;
     }
-    if (!bucket_at->widened && bucket_at->len < bucket_at->paths.len) {
+    // The paths of one block are its exclusive alternatives, at most G of them.
+    if (!bucket_at->widened &&
+        bucket_at->len < ownership_state.alternatives_within(in->limits->g)) {
+        if (bucket_at->len == bucket_at->paths.len) { grow_bucket(bucket_at, in->limits->g); }
         bucket_at->paths[bucket_at->len] = clone_path(selected);
         bucket_at->len += 1;
         fir_flow.bits_set(pending, target);
@@ -1634,10 +1721,12 @@ fn process(program* in, analysis mut* out, fir_flow.bits mut* pending,
     out->transfers += 1;
     if (!ownership_api.successful(p->facts.proof)) {
         note_failure(out, p->facts.proof);
+        note_stop(out, block, 0, 0);
         return;
     }
     if (!ownership_api.successful(p->retired.proof)) {
         note_failure(out, p->retired.proof);
+        note_stop(out, block, 0, 0);
         return;
     }
     u64 mut captured = 0;
@@ -1645,14 +1734,25 @@ fn process(program* in, analysis mut* out, fir_flow.bits mut* pending,
         if (fir_flow.bits_get(&p->loans, cast(captured, u32)) &&
             !ownership_api.successful(p->held[captured].facts.proof)) {
             note_failure(out, p->held[captured].facts.proof);
+            note_stop(out, block, 0, 0);
             return;
         }
         captured += 1;
     }
     if (!apply_steps(in, out, p, block)) { return; }
     fir.block* current = fir.block_at(in->function, block);
-    if (!current->terminated) { note_failure(out, invalid_input(in)); return; }
+    if (!current->terminated) {
+        note_failure(out, invalid_input(in));
+        note_stop(out, block, fir.block_statement_count(in->function, block), STOP_AFTER);
+        return;
+    }
     if (current->term.kind == fir.term_kind.tk_return) {
+        if (in->observed != null && cast(block, u64) < in->observed->return_attempts.len) {
+            in->observed->return_attempts[cast(block, u64)] += 1;
+            if (p->uncertain_return) {
+                in->observed->return_uncertain[cast(block, u64)] += 1;
+            }
+        }
         u64 failures = out->failures;
         parameter_return(in, out, p, block);
         if (out->failures == failures) {
@@ -1681,7 +1781,11 @@ fn process(program* in, analysis mut* out, fir_flow.bits mut* pending,
         if (proof.kind != ownership_api.proof_kind.bottom) {
             if (ownership_api.successful(proof)) {
                 add_path(in, out, pending, target, &outgoing);
-            } else { note_failure(out, proof); }
+            } else {
+                note_failure(out, proof);
+                note_stop(out, block, fir.block_statement_count(in->function, block),
+                    STOP_AFTER);
+            }
         }
         free_path(&outgoing);
         index += 1;
@@ -1706,14 +1810,21 @@ fn solve(program* in) analysis {
     analysis mut out = analysis{};
     if (!valid(in)) { note_failure(&out, invalid_input(in)); return out; }
     u32 count = fir.block_count(in->function);
-    out.blocks = new(bucket, cast(count, u64));
-    u32 mut block = 0;
-    while (block < count) {
-        // The paths of one block are its exclusive alternatives.
-        out.blocks[cast(block, u64)].paths = new(path,
-            ownership_state.alternatives_within(in->limits->g));
-        block += 1;
+    out.step_first = new(u64, cast(count, u64) + 1);
+    u64 mut step_at = 0;
+    u32 mut first_block = 0;
+    while (first_block <= count) {
+        while (step_at < in->steps.len && in->steps[step_at].block < first_block) {
+            step_at += 1;
+        }
+        out.step_first[cast(first_block, u64)] = step_at;
+        first_block += 1;
     }
+    out.blocks = new(bucket, cast(count, u64));
+    // Rank 0 at each gap, one rank for each step, and STOP_AFTER for each block.
+    out.stops = new(stop, ownership_limits.saturating_sum(ownership_limits.saturating_sum(
+        ownership_limits.fir_size(in->function), in->steps.len), cast(count, u64)));
+    u32 mut block = 0;
     fir_flow.bits mut pending = fir_flow.bits_new(count);
     path mut initial = path{};
     initial.facts = ownership_state.clone(in->entry);
