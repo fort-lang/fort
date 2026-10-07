@@ -910,8 +910,9 @@ bullet at a time and without a rewrite.
   its `binary` is that test program; the md5 of a mutant then differs. Run it on a darwin
   host with `--runner 'bash -c'`.
   `tools/mutations/ownership_summary.json` holds `ownership_summary_body.ft`,
-  `ownership_summary.ft` and 9 rows for the unknown origin of a call result and the join of
-  call results. The product compiler imports neither module, so a
+  `ownership_summary.ft` and 10 rows: 9 for the unknown origin of a call result and the join
+  of call results, and 1 for the check kind that is true on success. The product compiler
+  imports neither module, so a
   table whose binary is `build/<host>/debug/fort` reads `stale` on each of its rows. Its build
   writes the LLVM IR of `test/fort/ownership_calls_origins_test.ft`, and the runner compares
   that file. Run it on a Darwin host with `--runner 'bash -c'` after

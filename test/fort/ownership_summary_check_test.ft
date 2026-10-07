@@ -1,0 +1,113 @@
+//! run
+//! flags: -I ../../src/fort -I support
+/// Checks the outcome of a `check` in summary extraction (spec/fir.md 8). The condition of a check
+/// is true on failure, except for the kind `user`, where it is true on success.
+import consts;
+import fir;
+import fir_verify;
+import ownership_api;
+import ownership_calls_fixtures;
+import ownership_summary_body;
+import prim;
+import types;
+
+// The callee reads 8 bytes from a 4-byte allocation after one `assert`. When the check passes on
+// every path, the read is a definite error. Otherwise extraction cannot prove the read reached.
+string[5] WIDE_READ = {
+    "fn callee() i64 {",
+    "    i32 mut* own p = new(i32); i64* view = cast(p, i64*);",
+    "    assert(true); i64 value = *view; del(p); return value;",
+    "}",
+    "fn caller() i64 { return callee(); }",
+};
+
+// Pushes one constant for each operand that a check of `kind` reports (spec/fir.md 8), and
+// returns the index of the first. `count` takes the number of operands.
+fn reported(fir.func mut* f, fir.check_kind kind, u32 mut* count) u32 {
+    fir.reported_form[fir.CHECK_REPORTED_MAX] mut forms = {};
+    *count = fir.check_reported_forms(kind, forms[..]);
+    u32 first = cast(f->ops.len, u32);
+    u32 mut i = 0;
+    while (i < *count) {
+        fir.constant mut k = fir.const_bytes("reported");
+        if (forms[cast(i, u64)] == fir.reported_form.rf_i64) {
+            k = fir.const_int(types.type_prim(f->tt, prim.prim_kind.prim_i64),
+                consts.cv_from_i64(1));
+        } else if (forms[cast(i, u64)] == fir.reported_form.rf_u64) {
+            k = fir.const_int(types.type_prim(f->tt, prim.prim_kind.prim_u64),
+                consts.cv_from_u64(1));
+        }
+        assert(fir.operand_push(f, fir.operand_const(k)) == first + i);
+        i += 1;
+    }
+    return first;
+}
+
+// No source program gives a check other than `user` an exact condition today. The condition of
+// such a check is the result of a binary rvalue, and extraction keeps no fact for one. So the
+// test lowers the `assert` of WIDE_READ and then writes the kind, the condition and the reported
+// operands of its check into the FIR directly. The verifier accepts the FIR that results. The
+// result is true when extraction reports the read as a definite error.
+fn definite(fir.check_kind kind, bool holds) bool {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, WIDE_READ[..]);
+    defer ownership_calls_fixtures.close(&f);
+    u32 mut checks = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(&f.functions[0])) {
+        fir.block mut* current = fir.block_mut(&f.functions[0], b);
+        if (current->term.kind == fir.term_kind.tk_check) {
+            assert(current->term.check == fir.check_kind.chk_user);
+            assert(current->term.cond.kind == fir.operand_kind.ok_const);
+            u32 mut count = 0;
+            u32 first = reported(&f.functions[0], kind, &count);
+            // The push writes the function, so read the block again after it.
+            fir.block mut* rewritten = fir.block_mut(&f.functions[0], b);
+            rewritten->term.check = kind;
+            rewritten->term.cond = fir.operand_const(fir.const_bool(holds));
+            rewritten->term.args_first = first;
+            rewritten->term.args_len = count;
+            checks += 1;
+        }
+        b += 1;
+    }
+    assert(checks == 1);
+    fir_verify.violation mut failure = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f.functions[0], &f.checked.rt, &failure));
+    ownership_calls_fixtures.computation(&f, 0);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    // A definite error and an unproved path both fail the proof. Only the error is complete.
+    assert(body.proof.failed);
+    if (body.proof.kind == ownership_api.proof_kind.complete) {
+        assert(f.services.counts.events == 1);
+        assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+        assert(f.services.counts.last.text == "typed read exceeds its original storage window");
+        return true;
+    }
+    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(f.services.counts.events == 0);
+    return false;
+}
+
+fn main() i32 {
+    // A `user` check passes on every path only when its condition is true.
+    assert(definite(fir.check_kind.chk_user, true));
+    assert(!definite(fir.check_kind.chk_user, false));
+    // Each other kind passes on every path only when its condition is false. A check of the kind
+    // `overwrite` has the place form alone (spec/fir.md 8), so it is no `tk_check` here.
+    u32 mut tested = 0;
+    u32 mut k = 0;
+    while (k <= cast(fir.check_kind.chk_panic, u32)) {
+        fir.check_kind kind = cast(k, fir.check_kind);
+        if (kind != fir.check_kind.chk_user && kind != fir.check_kind.chk_overwrite) {
+            assert(!definite(kind, true));
+            assert(definite(kind, false));
+            tested += 1;
+        }
+        k += 1;
+    }
+    assert(tested == 9);
+    return 0;
+}
