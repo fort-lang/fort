@@ -4,9 +4,16 @@
 //| summary values ok
 /// Checks the scalar facts that select an index window in an inferred summary. A local that the
 /// body addresses keeps no fact (D17.14). A cast keeps only a value that its type holds (D17.17).
+/// A constant has an exact fact only when its integer value is known; a precision loss is never
+/// a crash (D17.18).
+import consts;
+import fir;
 import ownership_api;
 import ownership_calls_fixtures;
+import ownership_summary_body;
 import ownership_summary_model;
+import prim;
+import types;
 
 // The fixture lowers `callee` and `caller`. Each test reads only the callee summary.
 string CALLER = "fn caller(i32@ s) i32 { return callee(s); }";
@@ -116,11 +123,161 @@ fn element_index() void {
     element("    i32 big = 255; u8 k = cast(big, u8);", true, 255);
 }
 
+// A `char` constant holds its code point, so it is an exact fact. A cast keeps the code point
+// when the destination type holds it. Before this rule, each body below panicked in
+// `consts.cv_to_i64` with "consts: constant folding on a non-integer".
+fn char_index() void {
+    window("    char c = 'A'; i32 k = cast(c, i32);", true, 264);
+    window("    char c = '\\xC8'; u8 k = cast(c, u8);", true, 804);
+    window("    char c = '\\xFF'; u64 k = cast(c, u64);", true, 1024);
+    window("    char c = '\\x00'; i32 k = cast(c, i32);", true, 4);
+    window("    char c = '\\xC8'; i8 k = cast(c, i8);", false, 0);
+    window("    char c = '\\x80'; i8 k = cast(c, i8);", false, 0);
+    window("    char c = '\\x7F'; i8 k = cast(c, i8);", true, 512);
+}
+
+// A `char` argument of a call, as `std.strbuf.append_u64` passes '0' to `push`. Extraction
+// gives each call argument its fact before it binds the call. The fixture lowers no `push`,
+// so the summary stays incomplete, but extraction ends without a panic.
+fn char_argument() void {
+    string[3] source = {"fn push(char c) void {}",
+        "fn callee(i32@ s) i32 { push('0'); push(cast(65, char)); return s[1]; }", CALLER};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+// The extent of the one span read of a body in `source`.
+fn source_extent(string@ source) i64 {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source);
+    defer ownership_calls_fixtures.close(&f);
+    return extent(&f);
+}
+
+// The zero of an enum is the integer 0, even when 0 is not a member (D3.9). The member `c` is
+// the integer 2. A member of -1 gives a negative index, which selects no window.
+fn enum_index() void {
+    string decl = "enum E { a, b, c }";
+    string[4] zero = {decl, "fn callee(i32@ s) i32 { E e = {}; i32 k = cast(e, i32);",
+        "    return s[k]; }", CALLER};
+    assert(source_extent(zero[..]) == 4);
+    string[4] absent = {"enum E { a = 5, b }",
+        "fn callee(i32@ s) i32 { E e = {}; i32 k = cast(e, i32);", "    return s[k]; }", CALLER};
+    assert(source_extent(absent[..]) == 4);
+    string[4] member = {decl, "fn callee(i32@ s) i32 { E e = E.c; i32 k = cast(e, i32);",
+        "    return s[k]; }", CALLER};
+    assert(source_extent(member[..]) == 12);
+    string[4] negative = {"enum E { a = -1 }",
+        "fn callee(i32@ s) i32 { E e = E.a; i32 k = cast(e, i32);", "    return s[k]; }", CALLER};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, negative[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+}
+
+// A float constant has no exact fact. The first body passes without this rule too, since `_0`
+// has no fact there. Only the second body holds the rule: its deferred read runs after
+// `_0 = 1`. Before this rule, the float constant read the fact of `_0`, so the summary proved
+// the window of `s[1]` and not the window of `s[2]` that the program reads.
+fn float_index() void {
+    window("    f64 x = 2.0; i32 k = cast(x, i32);", false, 0);
+    string[3] source = {"fn callee(i32@ s) i32 { defer { f64 x = 2.0; i32 j = cast(x, i32);",
+        "    i32 v = s[j]; } return 1; }", CALLER};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+}
+
+// The fact of one constant operand.
+fn fact(ownership_summary_body.body_program* out, fir.constant c) ownership_api.scalar_fact {
+    ownership_summary_body.body_input input = ownership_summary_body.body_input{};
+    return ownership_summary_body.constant(&input, out, fir.operand_const(c));
+}
+
+fn exact(ownership_summary_body.body_program* out, fir.constant c, i64 value) void {
+    ownership_api.scalar_fact got = fact(out, c);
+    assert(got.kind == ownership_api.fact_kind.exact && got.value == value);
+}
+
+fn unknown(ownership_summary_body.body_program* out, fir.constant c) void {
+    ownership_api.scalar_fact got = fact(out, c);
+    assert(got.kind == ownership_api.fact_kind.unknown && got.value == 0);
+}
+
+// Each of the 9 kinds of `fir.const_kind` reaches `constant` as an operand. Local 0 holds the
+// exact fact 7, which no constant may read.
+fn constant_kinds() void {
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node* u64t = types.type_prim(&tt, prim.prim_kind.prim_u64);
+    types.node* chart = types.type_prim(&tt, prim.prim_kind.prim_char);
+    types.node* boolt = types.type_prim(&tt, prim.prim_kind.prim_bool);
+    types.node* f64t = types.type_prim(&tt, prim.prim_kind.prim_f64);
+    types.node* ptrt = types.type_ptr(&tt, i32t, false, false);
+    types.node* strt = types.type_string(&tt, false);
+    types.node enumt = types.node{.kind = types.type_kind.k_enum};
+    ownership_summary_body.body_program mut out = ownership_summary_body.body_program{};
+    defer ownership_summary_body.free(&out);
+    out.scalars = new(ownership_api.scalar_fact, 1);
+    out.scalars[0] = ownership_summary_body.integer(7);
+    // ck_int: an integer or a `char` value. An i64 holds the value, or the fact is unknown.
+    exact(&out, fir.const_int(i32t, consts.cv_from_i64(-3)), -3);
+    exact(&out, fir.const_int(u64t, consts.cv_from_u64(9223372036854775807)),
+        9223372036854775807);
+    unknown(&out, fir.const_int(u64t, consts.cv_from_u64(9223372036854775808)));
+    exact(&out, fir.const_int(chart, consts.cv_from_char(0)), 0);
+    exact(&out, fir.const_int(chart, consts.cv_from_char(48)), 48);
+    exact(&out, fir.const_int(chart, consts.cv_from_char(255)), 255);
+    exact(&out, fir.const_int(&enumt, consts.cv_from_u64(2)), 2);
+    unknown(&out, fir.const_int(i32t, consts.cv_none()));
+    unknown(&out, fir.const_int(i32t, consts.cv_from_bool(true)));
+    // ck_bool
+    exact(&out, fir.const_bool(true), 1);
+    exact(&out, fir.const_bool(false), 0);
+    // ck_float and ck_null
+    unknown(&out, fir.const_float(f64t, consts.cv_from_float(4611686018427387904)));
+    unknown(&out, fir.const_null(ptrt));
+    // ck_zero: 0 of an integer, `char`, bool or enum type, else unknown.
+    exact(&out, fir.const_zero(i32t), 0);
+    exact(&out, fir.const_zero(chart), 0);
+    exact(&out, fir.const_zero(boolt), 0);
+    exact(&out, fir.const_zero(&enumt), 0);
+    unknown(&out, fir.const_zero(f64t));
+    unknown(&out, fir.const_zero(ptrt));
+    unknown(&out, fir.const_zero(strt));
+    unknown(&out, fir.const_zero(null));
+    // ck_string, ck_bytes, ck_enum_table and ck_fn
+    unknown(&out, fir.const_string("7"));
+    unknown(&out, fir.const_bytes("7"));
+    unknown(&out, fir.const_enum_table(null, ptrt));
+    unknown(&out, fir.const_fn(null));
+    // A copy of local 0 reads its fact. A local outside the table has no fact.
+    ownership_summary_body.body_input input = ownership_summary_body.body_input{};
+    ownership_api.scalar_fact local = ownership_summary_body.constant(&input, &out,
+        fir.operand_copy(fir.place_local(0)));
+    assert(local.kind == ownership_api.fact_kind.exact && local.value == 7);
+    ownership_api.scalar_fact outside = ownership_summary_body.constant(&input, &out,
+        fir.operand_copy(fir.place_local(1)));
+    assert(outside.kind == ownership_api.fact_kind.unknown);
+}
+
 fn main() i32 {
     formal_index();
     addressed_index();
     cast_index();
     element_index();
+    char_index();
+    char_argument();
+    enum_index();
+    float_index();
+    constant_kinds();
     println("summary values ok");
     return 0;
 }
