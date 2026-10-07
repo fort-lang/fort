@@ -378,6 +378,7 @@ came here.
   Foreign trust supplies no static extent or alignment.
   Endpoint proof charges and releases scratch expressions.
   Type casts pay iterative comparison work before they use the existing reference conversion matrix.
+  A reference cast never adds own (D3.14). The kernel refuses that cast as the checker does.
   Header reads pay for their delegated borrow and source walks before transfer inspection.
   Cleanup requires no work permission after the first terminal refusal.
   Its producer validates actual source correspondence before driver integration.

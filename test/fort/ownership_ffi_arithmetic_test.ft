@@ -7,6 +7,7 @@
 //| reject F02-I
 //| complete checked foreign declaration
 //| reject missing fort alignment
+//| reject P26
 //| complete symbolic endpoint refusal sweep
 //| complete successful scratch cleanup
 //| complete early refusal scratch cleanup
@@ -259,6 +260,48 @@ fn scratch_cleanup(u32 mode) void {
     assert(best_live < bound);
     assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
 }
+// A cast never adds own (D3.14). Foreign trust does not change that rule.
+fn cast_case(u32 number, types.node* from, types.node* to, bool permitted) void {
+    ownership_ffi_arithmetic_env.env mut e = {};
+    ownership_ffi_arithmetic_env.open(&e, number, 2000 + number, ownership_raw_env.NO_BOUNDS);
+    defer ownership_ffi_arithmetic_env.close(&e);
+    ownership_state.state mut before = ownership_state.clone(&e.raw.local.state);
+    defer ownership_state.free(&before);
+    ownership_raw.request mut req = ownership_ffi_arithmetic_env.request(&e, number + 1,
+        2001 + number);
+    ownership_raw.result mut out = ownership_raw.cast_reference(&e.raw.root.storage,
+        &e.raw.local.service, e.raw.root.addresses[..], from, to, &req);
+    if (permitted) {
+        ownership_raw_env.accepts(&out);
+        ownership_raw.free_result(&out);
+        assert(e.observed.events == 0);
+    } else {
+        ownership_ffi_arithmetic_env.incomplete(&e, out.proof, &req);
+        ownership_raw_env.rejects(&out);
+        assert(e.observed.events == 1);
+    }
+    assert(e.raw.local.state.allocations_len == 0);
+    assert(ownership_state.equal(&before, &e.raw.local.state));
+}
+fn cast_adds_own() void {
+    types.table mut t = {};
+    types.type_table_init(&t);
+    defer types.type_table_free(&t);
+    types.node* byte = types.type_prim(&t, prim.prim_kind.prim_u8);
+    types.node* view = types.type_ptr(&t, byte, false, false);
+    types.node* owned = types.type_ptr(&t, byte, true, false);
+    types.node* opaque = types.type_voidptr(&t, false, false);
+    types.node* owned_view = types.type_ptr(&t, owned, false, false);
+    cast_case(131, view, owned, false);
+    // The added own mark may stand one level down or behind a void pointer.
+    cast_case(133, types.type_ptr(&t, view, false, false), owned_view, false);
+    cast_case(135, opaque, owned_view, false);
+    // Keeping or dropping own stays permitted. Only adding it refuses.
+    cast_case(137, types.type_voidptr(&t, true, false), owned, true);
+    cast_case(139, owned, view, true);
+    cast_case(141, view, opaque, true);
+    println("reject P26");
+}
 fn main() i32 {
     slice_endpoint_overflow();
     endpoint_overflow();
@@ -266,6 +309,7 @@ fn main() i32 {
     negative_offset();
     checked_foreign_declaration();
     fort_alignment_remains_required();
+    cast_adds_own();
     refusal_sweep();
     scratch_cleanup(0);
     println("complete successful scratch cleanup");
