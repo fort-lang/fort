@@ -13,6 +13,7 @@
 /// Pins the ordered local steps that the producer reads from the FIR of small bodies.
 /// A step reads `block.gap.order action from->to` and then its flags.
 import fir;
+import fir_flow;
 import flag_steps;
 import ownership_api;
 import ownership_flow;
@@ -23,7 +24,7 @@ import ownership_source_local;
 import ownership_transfer;
 import std.strbuf;
 
-string[14] SOURCE = {
+string[17] SOURCE = {
     "extern fn foreign_text() char*;",
     "fn helper(i32* p) i32 { return *p; }",
     "fn take(i32 mut* own p) void { del(p); }",
@@ -38,6 +39,9 @@ string[14] SOURCE = {
     "fn compared(i32* p) bool { return p == null; }",
     "fn root() i32 { return 0; }",
     "fn owned_view() i32* { i32 mut* own p = new(i32); i32* q = p; del(p); return q; }",
+    "fn constant_branch() i32 { i32 mut i = 0; if (false) { i = 1; } return i; }",
+    "fn constant_later(bool c) i32 { i32 mut i = 0; if (c) { i = 2; } if (false) { i = 1; }",
+    "    return i; }",
 };
 
 fn action_name(ownership_transfer.action effect) string {
@@ -410,7 +414,38 @@ fn paths_between_positions(ownership_source_env.env mut* e) void {
     bool mut quoted = false;
     assert(ownership_source_local.name_of(c, 1, &quoted) == "p" && quoted);
     assert(ownership_source_local.name_of(c, 2, &quoted) == "a temporary value" && !quoted);
+    // A branch on a constant reaches only its selected arm. The search skips the arm that
+    // the switch does not select and still finds the return after it: from the switch block
+    // itself, and from bb0 when the switch ends a later block.
+    constant_arm(e, "constant_branch", false);
+    constant_arm(e, "constant_later", true);
     println("paths between positions ok");
+}
+
+// Body `name` holds one branch on a constant, whose first arm the switch does not select.
+// With `later` the search starts at bb0, before that switch; otherwise at the switch block.
+fn constant_arm(ownership_source_env.env mut* e, string name, bool later) void {
+    ownership_source.body* branchy = ownership_source_env.find(e, "main", name);
+    fir.func* f = branchy->local.function;
+    u32 mut from = fir.block_count(f);
+    u32 mut to = fir.block_count(f);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_switch && t->cond.kind == fir.operand_kind.ok_const) {
+            from = b;
+        }
+        if (t->kind == fir.term_kind.tk_return) { to = b; }
+        b += 1;
+    }
+    assert(from < fir.block_count(f) && to < fir.block_count(f));
+    u32 mut first = 0;
+    assert(!fir_flow.reachable_target(f, &fir.block_at(f, from)->term, 0, &first));
+    if (later) {
+        assert(from != 0);
+        from = 0;
+    }
+    assert(ownership_source_local.reaches(f, from, to));
 }
 
 string[6] EXITS = {

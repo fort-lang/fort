@@ -17,7 +17,7 @@
   "stages": [
     {
       "name": "local module tests",
-      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_transfer_local ownership_flow_observer ownership_flow_flags ownership_source_local ownership_report_local ownership_report_test"
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_transfer_local ownership_flow_observer ownership_flow_separate ownership_flow_flags ownership_source_local ownership_report_local ownership_report_test"
     },
     {
       "name": "ownership driver",
@@ -91,8 +91,8 @@
     {
       "decision": "D17.18-stop",
       "file": "src/fort/ownership_flow.ft",
-      "old": "                if (!ownership_api.successful(proof)) {\n                    note_failure(out, proof);\n                    note_stop(out, block, gap, rank_of(&s));\n                    return false;\n                }\n            }\n            i += 1;",
-      "new": "                if (!ownership_api.successful(proof)) {\n                    note_failure(out, proof);\n                    return false;\n                }\n            }\n            i += 1;",
+      "old": "                    if (!continues_after(in, out, p, &s, proof)) {\n                        note_stop(out, block, gap, rank_of(&s));\n                        return false;\n                    }",
+      "new": "                    if (!continues_after(in, out, p, &s, proof)) {\n                        return false;\n                    }",
       "what": "a failed local step records no stop"
     },
     {
@@ -486,6 +486,265 @@
       "old": "    if (names_entity(&p->facts, e.allocation) || names_entity(&p->facts, e.source) ||\n        names_entity(&p->facts, e.value) || names_entity(&p->facts, e.relation)) {",
       "new": "    if (false) {",
       "what": "a fact that already names an earlier identity keeps that name after the rename"
+    },
+    {
+      "decision": "toolchain-4.2-separate-option",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        .observed = &seen, .continue_separate = true};",
+      "new": "        .observed = &seen, .continue_separate = false};",
+      "what": "the local run stops each path at its first failure"
+    },
+    {
+      "decision": "toolchain-4.2-separate-definite",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (!in->continue_separate || s->kind != step_kind.local_effect ||\n        failed.kind != ownership_api.proof_kind.complete || !failed.failed ||\n        failed.terminal.present || in->edges.len > 0",
+      "new": "    if (!in->continue_separate || s->kind != step_kind.local_effect ||\n        in->edges.len > 0",
+      "what": "an incomplete failure lets its path go on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-cycle",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        fir.loan_count(in->function) > 0 || on_cycle(in, out, s->block)) { return false; }",
+      "new": "        fir.loan_count(in->function) > 0) { return false; }",
+      "what": "a failure in a loop lets its path go on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-loan",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        fir.loan_count(in->function) > 0 || on_cycle(in, out, s->block)) { return false; }",
+      "new": "        on_cycle(in, out, s->block)) { return false; }",
+      "what": "a failure inside a range loan lets its path go on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-edges",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        failed.terminal.present || in->edges.len > 0 || in->values.len > 0 ||",
+      "new": "        failed.terminal.present || in->values.len > 0 ||",
+      "what": "a path with null edges goes on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-values",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        failed.terminal.present || in->edges.len > 0 || in->values.len > 0 ||",
+      "new": "        failed.terminal.present || in->edges.len > 0 ||",
+      "what": "a path with value edges goes on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-parameters",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        in->parameters.len > 0 || in->call_handler != null || in->exit_observer != null ||",
+      "new": "        in->call_handler != null || in->exit_observer != null ||",
+      "what": "a path with parameter checks goes on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-handler",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        in->parameters.len > 0 || in->call_handler != null || in->exit_observer != null ||",
+      "new": "        in->parameters.len > 0 || in->exit_observer != null ||",
+      "what": "a path with a call handler goes on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-observer",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        in->parameters.len > 0 || in->call_handler != null || in->exit_observer != null ||",
+      "new": "        in->parameters.len > 0 || in->call_handler != null ||",
+      "what": "a path with an exit observer goes on"
+    },
+    {
+      "decision": "toolchain-4.2-separate-skip",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (!is_settled(p, from) && !is_settled(p, to)) { return settling.run; }",
+      "new": "    if (true) { return settling.run; }",
+      "what": "a step on a settled slot runs and reports a related failure again"
+    },
+    {
+      "decision": "toolchain-4.2-separate-taint",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (is_settled(p, from) && is_settled(p, to)) { return settling.skip; }",
+      "new": "    if (true) { return settling.skip; }",
+      "what": "a skipped copy or move leaves its other slot unrelated"
+    },
+    {
+      "decision": "toolchain-4.2-separate-invalidate",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    invalidate_version(p, s->invalidates);\n    if (is_settled(p, from) && is_settled(p, to)) { return settling.skip; }",
+      "new": "    if (is_settled(p, from) && is_settled(p, to)) { return settling.skip; }",
+      "what": "a skipped write keeps the null fact of its value version"
+    },
+    {
+      "decision": "toolchain-4.2-separate-seeds",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    fir_flow.bits_set(&grown, from);\n    fir_flow.bits_set(&grown, to);",
+      "new": "    fir_flow.bits_set(&grown, to);",
+      "what": "the source slot of a failed step stays unrelated"
+    },
+    {
+      "decision": "toolchain-4.2-separate-owned",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                if (fir_flow.bits_get(grown, owner) && !allocations[a]) {",
+      "new": "                if (false) {",
+      "what": "an allocation that a settled slot owns stays unrelated"
+    },
+    {
+      "decision": "toolchain-4.2-separate-kinds",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                if (stops_settled(p, &s)) {",
+      "new": "                if (false && stops_settled(p, &s)) {",
+      "what": "a settled path runs a direct call"
+    },
+    {
+      "decision": "toolchain-4.2-separate-owner",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                } else if (allocations[a] && !fir_flow.bits_get(grown, owner)) {",
+      "new": "                } else if (false) {",
+      "what": "the owner of a related allocation stays unrelated"
+    },
+    {
+      "decision": "toolchain-4.2-separate-borrower",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                    } else if (!held && sources[source]) {",
+      "new": "                    } else if (false) {",
+      "what": "another view of a related source stays unrelated"
+    },
+    {
+      "decision": "toolchain-4.2-separate-region",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (facts->regions_len > 0 || facts->nodes_len > 0 || facts->edges_len > 0 ||",
+      "new": "    if (facts->nodes_len > 0 || facts->edges_len > 0 ||",
+      "what": "a state with regions relates its slots"
+    },
+    {
+      "decision": "toolchain-4.2-separate-source",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                if (source == U64_MAX) { return false; }\n                if (relates(facts->sources[source])) {",
+      "new": "                if (source == U64_MAX) { b += 1; continue; }\n                if (relates(facts->sources[source])) {",
+      "what": "a borrow of a source that the facts lack relates nothing"
+    },
+    {
+      "decision": "toolchain-4.2-separate-work",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        if (!paid.allowed) {\n            *charged = charged_failure(in, paid.proof, s->operation, s->source);",
+      "new": "        if (false) {\n            *charged = charged_failure(in, paid.proof, s->operation, s->source);",
+      "what": "the relation goes on past a W refusal"
+    },
+    {
+      "decision": "toolchain-4.2-separate-join",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    fir_flow.bits_copy(&out.settled, &a->settled);\n    fir_flow.bits_union(&out.settled, &b->settled);",
+      "new": "    fir_flow.bits_copy(&out.settled, &b->settled);",
+      "what": "a joined path keeps the settled slots of its second side only"
+    },
+    {
+      "decision": "toolchain-4.2-separate-equal",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        fir_flow.bits_equal(&a->settled, &b->settled) &&\n",
+      "new": "",
+      "what": "two paths with different settled slots are equal"
+    },
+    {
+      "decision": "toolchain-4.2-separate-result",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (!settled_result(in, p)) { check_returned_borrows(in, out, p, op); }",
+      "new": "    check_returned_borrows(in, out, p, op);",
+      "what": "the return checks a settled result slot"
+    },
+    {
+      "decision": "toolchain-4.2-separate-cycle-edge",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "            if (target == b) { found = true; }",
+      "new": "            if (false) { found = true; }",
+      "what": "no block is on a cycle"
+    },
+    {
+      "decision": "toolchain-4.2-separate-cycle-cache",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    out->cycles[cast(b, u64)] = found ? 2 : 1;",
+      "new": "    out->cycles[cast(b, u64)] = 0;",
+      "what": "the cycle answer of a block is not kept"
+    },
+    {
+      "decision": "toolchain-4.2-separate-cycle-skip",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        while (at->terminated && fir_flow.next_reachable_target(in->function, &at->term,\n            &index, &target)) {",
+      "new": "        while (at->terminated && fir_flow.reachable_target(in->function, &at->term, index,\n            &target)) {",
+      "what": "the cycle search stops at an unselected arm of a constant switch"
+    },
+    {
+      "decision": "toolchain-4.2-stop-skip-start",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    while (start->terminated && fir_flow.next_reachable_target(f, &start->term, &index,\n        &target)) {",
+      "new": "    while (start->terminated && fir_flow.reachable_target(f, &start->term, index, &target)) {",
+      "what": "the stop search stops at an unselected arm of its first block"
+    },
+    {
+      "decision": "toolchain-4.2-stop-skip-later",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        while (at->terminated && fir_flow.next_reachable_target(f, &at->term, &index,\n            &target)) {",
+      "new": "        while (at->terminated && fir_flow.reachable_target(f, &at->term, index, &target)) {",
+      "what": "the stop search stops at an unselected arm of a later block"
+    },
+    {
+      "decision": "toolchain-4.2-separate-flag-kind",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        s->kind == step_kind.call_outcome || s->kind == step_kind.flag) { return false; }",
+      "new": "        s->kind == step_kind.call_outcome) { return false; }",
+      "what": "a flag step stops a settled path"
+    },
+    {
+      "decision": "toolchain-4.2-separate-null-test",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                    if (stale_null_test(in, p, &s)) { forget_flag(p, s.flag.flag); }",
+      "new": "                    if (false) { forget_flag(p, s.flag.flag); }",
+      "what": "a null test reads the stale contents of a settled slot"
+    },
+    {
+      "decision": "toolchain-4.2-separate-overwrite",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (is_settled(p, from)) {\n        if (to == NO_LOCAL) { return settling.stop; }\n        settle_overwritten(in, p, to);",
+      "new": "    if (false) {\n        if (to == NO_LOCAL) { return settling.stop; }\n        settle_overwritten(in, p, to);",
+      "what": "an overwritten slot keeps the relations of its old value"
+    },
+    {
+      "decision": "toolchain-4.2-separate-unknown",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "            p->facts.contents[c] = ownership_api.contents_fact{.place = place,\n                .kind = ownership_api.contents_kind.unknown};",
+      "new": "            p->facts.contents[c] = p->facts.contents[c];",
+      "what": "an overwritten slot keeps its old contents"
+    },
+    {
+      "decision": "toolchain-4.2-separate-failed-version",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        invalidate_version(p, s->invalidates);\n        return true;",
+      "new": "        return true;",
+      "what": "a continued failure keeps the null fact of its value version"
+    },
+    {
+      "decision": "toolchain-4.2-separate-copy-into-view",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (copies_into_view(p, s, from, to)) {",
+      "new": "    if (false && copies_into_view(p, s, from, to)) {",
+      "what": "a copy into a settled view relates its source"
+    },
+    {
+      "decision": "toolchain-4.2-separate-view-unsettle",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        fir_flow.bits_clear(&p->settled, to);\n        return settling.run;",
+      "new": "        return settling.run;",
+      "what": "a view keeps its settled mark after a copy of a known value"
+    },
+    {
+      "decision": "toolchain-4.2-separate-view-owning",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    return s->local.kind == ownership_transfer.action.copy && !s->local.destination_owns &&",
+      "new": "    return s->local.kind == ownership_transfer.action.copy &&",
+      "what": "a copy into a settled owner runs"
+    },
+    {
+      "decision": "toolchain-4.2-separate-overwrite-function",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "        if (place.root.kind == ownership_api.entity_kind.slot && place.root.ordinal == local &&\n            ownership_keys.function(place.root.function, in->identity) == 0) {",
+      "new": "        if (place.root.kind == ownership_api.entity_kind.slot && place.root.ordinal == local) {",
+      "what": "an overwritten slot clears a slot of another function"
     }
   ]
 }

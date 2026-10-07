@@ -634,10 +634,10 @@ fn f053() void {
     proved(&e, "main");
 }
 
-// The corpus expects errors on lines 11 and 12. Line 11 is validated. The flow stops the
-// path at that failure, so it never examines the leak of b on line 12: no record and no
-// incomplete reason name it. The body stays rejected. Even with the record, no witness
-// crosses the print call before line 12.
+// The corpus expects errors on lines 11 and 12. Line 11 is validated. The read does not
+// relate b, so the path goes on and examines the leak of b on line 12 (toolchain 4.2). The
+// print calls of line 11 are fort calls: no witness crosses them, so line 12 stays an
+// unvalidated record and the first incomplete reason. The body stays rejected.
 fn f054() void {
     string[13] lines = {
         "",
@@ -661,8 +661,11 @@ fn f054() void {
     defer ownership_source_env.close(&e);
     violated(&e, "main", ownership_api.event_kind.invalid_use, "a", 11);
     ownership_source.body* row = ownership_source_env.find(&e, "main", "main");
-    assert(row->local.unvalidated == 0);
-    assert(!row->local.first_incomplete.terminal.present);
+    assert(row->local.unvalidated == 1);
+    assert(row->local.first_incomplete.terminal.present);
+    assert(row->local.first_incomplete.terminal.source.line == 12);
+    assert(row->local.first_incomplete.terminal.reason ==
+        ownership_api.incomplete_reason.missing_path);
     assert(row->local.proof.failed);
 }
 

@@ -13,6 +13,8 @@ import ownership_state;
 import ownership_transfer;
 
 u64 U64_MAX = 18446744073709551615;
+// No FIR local has this number.
+u32 NO_LOCAL = 4294967295;
 
 enum step_kind {
     local_effect,
@@ -189,6 +191,10 @@ struct program {
     void mut* call_context;
     fn (void mut*, step*, ownership_state.state mut*) call_verdict call_handler;
     observer mut* observed;
+    // A definite failure of a local step need not stop its path. With this option the path
+    // settles the slots that the failure relates to, and continues to check the other owners
+    // (toolchain 4.2). `continues_after` names the cases that still stop the path.
+    bool continue_separate;
 }
 
 struct path {
@@ -199,6 +205,10 @@ struct path {
     ownership_state.state aliases;
     bool uncertain_return;
     bool loan_sources_unknown;
+    // The FIR locals that a failure on this path relates to. The path no longer knows their
+    // values, so it skips each later local step on them. Without `continue_separate` the set
+    // has no members and a count of zero.
+    fir_flow.bits settled;
 }
 
 struct bucket {
@@ -231,6 +241,9 @@ struct analysis {
     bool stops_lost;
     // step_first[b] is the index of the first step of block b or a later block.
     u64 mut@ own step_first;
+    // cycles[b] is 0 until `on_cycle` reads block b, then 1 when no path leads from b back to
+    // b, and 2 when one does. Only `continue_separate` allocates it.
+    u8 mut@ own cycles;
 }
 
 fn complete() ownership_api.proof_status {
@@ -264,6 +277,8 @@ fn clone_path(path* program) path {
     out.aliases = ownership_state.clone(&program->aliases);
     out.uncertain_return = program->uncertain_return;
     out.loan_sources_unknown = program->loan_sources_unknown;
+    out.settled = fir_flow.bits_new(program->settled.count);
+    fir_flow.bits_copy(&out.settled, &program->settled);
     return out;
 }
 
@@ -275,6 +290,7 @@ fn free_path(path mut* p) void {
     while (i < p->held.len) { ownership_state.free(&p->held[i].facts); i += 1; }
     del(p->held);
     ownership_state.free(&p->aliases);
+    fir_flow.bits_free(&p->settled);
     *p = path{};
 }
 
@@ -292,6 +308,7 @@ fn free(analysis mut* r) void {
     del(r->blocks);
     del(r->stops);
     del(r->step_first);
+    del(r->cycles);
     *r = analysis{};
 }
 
@@ -311,6 +328,7 @@ fn path_equal(path* a, path* b) bool {
     }
     return a->uncertain_return == b->uncertain_return &&
         fir_flow.bits_equal(&a->loans, &b->loans) &&
+        fir_flow.bits_equal(&a->settled, &b->settled) &&
         ownership_state.equal(&a->facts, &b->facts) &&
         ownership_state.equal(&a->retired, &b->retired);
 }
@@ -1497,6 +1515,10 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
             step mut s = in->steps[i];
             if (s.gap == gap) {
                 ownership_api.proof_status mut proof = complete();
+                if (stops_settled(p, &s)) {
+                    note_stop(out, block, gap, rank_of(&s));
+                    return false;
+                }
                 if (s.kind != step_kind.local_effect) {
                     ownership_api.charge_result charged = ownership_api.charge_work(
                         in->services, ownership_api.work_kind.transfer,
@@ -1513,6 +1535,16 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                         in->observed->step_attempts[i] += 1;
                         if (p->uncertain_return) { in->observed->step_uncertain[i] += 1; }
                     }
+                    // A step on a settled slot counts as an attempt and does not run.
+                    settling kept = skip_settled(in, out, p, &s);
+                    if (kept == settling.stop) {
+                        note_stop(out, block, gap, rank_of(&s));
+                        return false;
+                    }
+                    if (kept == settling.skip) {
+                        i += 1;
+                        continue;
+                    }
                     if (s.local.kind == ownership_transfer.action.allocation) {
                         proof = retire_released_site(in, p, &s);
                     }
@@ -1528,7 +1560,8 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                 } else if (s.kind == step_kind.invalidate_value) {
                     invalidate_version(p, s.invalidates);
                 } else if (s.kind == step_kind.flag) {
-                    proof = apply_flag(in, p, &s);
+                    if (stale_null_test(in, p, &s)) { forget_flag(p, s.flag.flag); }
+                    else { proof = apply_flag(in, p, &s); }
                 } else if (s.kind == step_kind.direct_call) {
                     // A failed application stops the path, so it records the stop too.
                     u64 before = out->failures;
@@ -1545,8 +1578,10 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                 }
                 if (!ownership_api.successful(proof)) {
                     note_failure(out, proof);
-                    note_stop(out, block, gap, rank_of(&s));
-                    return false;
+                    if (!continues_after(in, out, p, &s, proof)) {
+                        note_stop(out, block, gap, rank_of(&s));
+                        return false;
+                    }
                 }
             }
             i += 1;
@@ -1689,7 +1724,8 @@ fn check_returned_borrows(program* in, analysis mut* out, path* p,
 fn parameter_return(program* in, analysis mut* out, path mut* p, u32 block) void {
     ownership_api.operation_position op = return_position(in, block);
     ownership_api.source_position at = return_source(in, block);
-    check_returned_borrows(in, out, p, op);
+    // A settled result slot holds a value that the path does not know.
+    if (!settled_result(in, p)) { check_returned_borrows(in, out, p, op); }
     u64 mut i = 0;
     while (i < in->parameters.len) {
         parameter param = in->parameters[i];
@@ -2067,6 +2103,10 @@ fn widen_path(program* in, path* a, path* b,
     }
     out.uncertain_return = a->uncertain_return || b->uncertain_return;
     out.loan_sources_unknown = a->loan_sources_unknown || b->loan_sources_unknown;
+    // A joined path does not know a slot that either side settled.
+    out.settled = fir_flow.bits_new(a->settled.count);
+    fir_flow.bits_copy(&out.settled, &a->settled);
+    fir_flow.bits_union(&out.settled, &b->settled);
     return out;
 }
 
@@ -2245,6 +2285,9 @@ fn solve(program* in) analysis {
     initial.loans = fir_flow.bits_new(fir.loan_count(in->function));
     initial.held = new(loan_state, cast(initial.loans.count, u64));
     initial.aliases = ownership_state.empty();
+    initial.settled = fir_flow.bits_new(in->continue_separate ? fir.local_count(in->function) :
+        0);
+    if (in->continue_separate) { out.cycles = new(u8, cast(count, u64)); }
     add_path(in, &out, &pending, 0, &initial);
     free_path(&initial);
     block = 0;
@@ -2262,4 +2305,292 @@ fn solve(program* in) analysis {
     }
     fir_flow.bits_free(&pending);
     return out;
+}
+
+// ---- separate owners after a failure ------------------------------------------------------
+//
+// Toolchain 4.2 says that a failure must not silence a separate owner. After a definite
+// failure of a local step, the path settles the slots that the failure relates to and
+// continues. A transfer that fails leaves its facts unchanged, so the facts of each other
+// slot still describe that slot. The path skips each later local step that names a settled
+// slot, so it never reports a related owner again. One step is an exception: a copy of an
+// unsettled slot into a settled view runs (`copies_into_view`). A skipped step still counts
+// as an attempt: no other path validates a failure of it.
+
+// What a path does with one local step.
+enum settling {
+    run,
+    skip,
+    stop,
+}
+
+// The FIR local of `place` when it is a whole slot of this function, or NO_LOCAL.
+fn settled_index(program* in, ownership_api.place_path place) u32 {
+    if (place.root.kind != ownership_api.entity_kind.slot || place.projections.len != 0 ||
+        ownership_state.has_residual(place) ||
+        ownership_keys.function(place.root.function, in->identity) != 0 ||
+        place.root.ordinal >= fir.local_count(in->function)) { return NO_LOCAL; }
+    return place.root.ordinal;
+}
+
+fn is_settled(path* p, u32 local) bool {
+    return local < p->settled.count && fir_flow.bits_get(&p->settled, local);
+}
+
+fn settled_result(program* in, path* p) bool {
+    if (in->result_slot.kind != ownership_api.entity_kind.slot) { return false; }
+    ownership_api.place_path result = ownership_api.place_path{.root = in->result_slot};
+    return is_settled(p, settled_index(in, result));
+}
+
+// Static and trusted foreign storage never ends under a local effect (D17.13), so two slots
+// that view it are not related through it.
+fn relates(ownership_api.source_fact source) bool {
+    return source.kind != ownership_api.source_kind.static_storage &&
+        source.kind != ownership_api.source_kind.trusted_foreign;
+}
+
+// Adds to `grown` each slot that its members relate to through the facts of `p`: an owned
+// allocation and each source of it, a borrowed source and its allocation, the owner of that
+// allocation, and each other slot that borrows one of those sources. A slot that a settled
+// slot can reach in memory is related, so no skipped step changes the facts of an unrelated
+// slot. Each round charges one W unit. False when a fact names storage that is not a whole
+// slot of this function: then no owner is proved unrelated. A W refusal also sets `charged`.
+fn relate(program* in, path* p, fir_flow.bits mut* grown, step* s,
+    ownership_api.proof_status mut* charged) bool {
+    ownership_state.state* facts = &p->facts;
+    if (facts->regions_len > 0 || facts->nodes_len > 0 || facts->edges_len > 0 ||
+        facts->shapes_len > 0 || facts->guards_len > 0 || facts->correlations_len > 0) {
+        return false;
+    }
+    bool mut@ own sources = new(bool, facts->sources_len);
+    defer del(sources);
+    bool mut@ own allocations = new(bool, facts->allocations_len);
+    defer del(allocations);
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        ownership_api.charge_result paid = ownership_api.charge_work(in->services,
+            ownership_api.work_kind.transfer, s->operation, s->source);
+        if (!paid.allowed) {
+            *charged = charged_failure(in, paid.proof, s->operation, s->source);
+            return false;
+        }
+        u64 mut c = 0;
+        while (c < facts->contents_len) {
+            ownership_api.contents_fact value = facts->contents[c];
+            u32 holder = settled_index(in, value.place);
+            if (holder == NO_LOCAL) { return false; }
+            u64 mut b = 0;
+            while (b < value.borrows.len) {
+                u64 source = ownership_state.source_index(facts, value.borrows[b].source);
+                if (source == U64_MAX) { return false; }
+                if (relates(facts->sources[source])) {
+                    bool held = fir_flow.bits_get(grown, holder);
+                    if (held && !sources[source]) {
+                        sources[source] = true;
+                        changed = true;
+                    } else if (!held && sources[source]) {
+                        fir_flow.bits_set(grown, holder);
+                        changed = true;
+                    }
+                }
+                b += 1;
+            }
+            c += 1;
+        }
+        u64 mut a = 0;
+        while (a < facts->allocations_len) {
+            ownership_api.allocation_fact alloc = facts->allocations[a];
+            if (alloc.obligation && !alloc.owner.detached) {
+                u32 owner = settled_index(in, alloc.owner.place);
+                if (owner == NO_LOCAL) { return false; }
+                if (fir_flow.bits_get(grown, owner) && !allocations[a]) {
+                    allocations[a] = true;
+                    changed = true;
+                } else if (allocations[a] && !fir_flow.bits_get(grown, owner)) {
+                    fir_flow.bits_set(grown, owner);
+                    changed = true;
+                }
+            }
+            if (allocations[a]) {
+                u64 mut source = 0;
+                while (source < facts->sources_len) {
+                    if (!sources[source] && relates(facts->sources[source]) &&
+                        same_entity(facts->sources[source].allocation, alloc.key)) {
+                        sources[source] = true;
+                        changed = true;
+                    }
+                    source += 1;
+                }
+            }
+            a += 1;
+        }
+        u64 mut source = 0;
+        while (source < facts->sources_len) {
+            if (sources[source]) {
+                u64 held = ownership_state.allocation_index(facts,
+                    facts->sources[source].allocation);
+                if (held != U64_MAX && !allocations[held]) {
+                    allocations[held] = true;
+                    changed = true;
+                }
+            }
+            source += 1;
+        }
+    }
+    return true;
+}
+
+// Adds the slots of `s` and each slot that they relate to. `stop` when the path cannot prove
+// that the other slots are unrelated, or when W refuses the work: `charged` then holds the
+// refusal.
+fn settle(program* in, path mut* p, step* s, ownership_api.proof_status mut* charged)
+    settling {
+    u32 from = settled_index(in, s->local.source);
+    u32 to = settled_index(in, s->local.destination);
+    if (p->settled.count == 0 || from == NO_LOCAL || to == NO_LOCAL) { return settling.stop; }
+    fir_flow.bits mut grown = fir_flow.bits_new(p->settled.count);
+    defer fir_flow.bits_free(&grown);
+    fir_flow.bits_copy(&grown, &p->settled);
+    fir_flow.bits_set(&grown, from);
+    fir_flow.bits_set(&grown, to);
+    if (!relate(in, p, &grown, s, charged)) { return settling.stop; }
+    fir_flow.bits_copy(&p->settled, &grown);
+    return settling.run;
+}
+
+// A local step that names a settled slot does not run, except a copy into a settled view
+// (`copies_into_view`): the path does not know the value that the step reads or replaces.
+// A copy or a move between a settled slot and another slot can give the other slot a
+// settled value, or a settled slot the other slot's storage, so the other slot becomes
+// settled too, with each slot that it relates to.
+fn skip_settled(program* in, analysis mut* out, path mut* p, step* s) settling {
+    if (p->settled.count == 0 || s->kind != step_kind.local_effect ||
+        s->local.kind == ownership_transfer.action.outside) { return settling.run; }
+    u32 from = settled_index(in, s->local.source);
+    u32 to = settled_index(in, s->local.destination);
+    if (!is_settled(p, from) && !is_settled(p, to)) { return settling.run; }
+    if (copies_into_view(p, s, from, to)) {
+        fir_flow.bits_clear(&p->settled, to);
+        return settling.run;
+    }
+    invalidate_version(p, s->invalidates);
+    if (is_settled(p, from) && is_settled(p, to)) { return settling.skip; }
+    if (is_settled(p, from)) {
+        if (to == NO_LOCAL) { return settling.stop; }
+        settle_overwritten(in, p, to);
+        return settling.skip;
+    }
+    ownership_api.proof_status mut charged = complete();
+    if (settle(in, p, s, &charged) == settling.run) { return settling.skip; }
+    if (!ownership_api.successful(charged)) { note_failure(out, charged); }
+    return settling.stop;
+}
+
+// Whether `s` copies the unsettled slot `from` into the settled view `to`. The copy writes a
+// value that the path knows over the view, and it changes neither the source nor its
+// allocation. A view releases no storage, so no step through it changed other facts. So the
+// copy runs, and the view is no longer settled: the path reports a later failure on it. A
+// move or an owning destination keeps the relation of the source (`settle`).
+fn copies_into_view(path* p, step* s, u32 from, u32 to) bool {
+    return s->local.kind == ownership_transfer.action.copy && !s->local.destination_owns &&
+        from != NO_LOCAL && !is_settled(p, from) && is_settled(p, to);
+}
+
+// A skipped copy or move from a settled slot writes a settled value over `local`. The slot
+// loses its old value, so its old relations do not count: it is settled alone, and its
+// contents become unknown, so no later relation reads them (toolchain 4.2: a slot that the
+// old value related to stays a separate owner). The new value reaches only what the settled
+// source reaches, and those slots are settled already.
+fn settle_overwritten(program* in, path mut* p, u32 local) void {
+    fir_flow.bits_set(&p->settled, local);
+    u64 mut c = 0;
+    while (c < p->facts.contents_len) {
+        ownership_api.place_path place = p->facts.contents[c].place;
+        if (place.root.kind == ownership_api.entity_kind.slot && place.root.ordinal == local &&
+            ownership_keys.function(place.root.function, in->identity) == 0) {
+            p->facts.contents[c] = ownership_api.contents_fact{.place = place,
+                .kind = ownership_api.contents_kind.unknown};
+        }
+        c += 1;
+    }
+}
+
+// Whether flag step `s` tests a settled slot for null. The path does not know the value of
+// that slot, so the flag takes no value: a stale empty owner would refute the branch that
+// the program takes. A flag of another kind reads only flags, which no skipped step writes.
+fn stale_null_test(program* in, path* p, step* s) bool {
+    if (s->flag.kind != flag_kind.null_test) { return false; }
+    return is_settled(p, settled_index(in, ownership_api.place_path{.root = s->flag.from}));
+}
+
+// A settled path runs local effects, value invalidations, call outcomes and flag steps.
+// These read no fact of a settled slot outside `skip_settled` and `stale_null_test`. Another
+// step kind can read a settled slot through a fact that the path does not know, so it stops
+// the path: a direct call can apply a summary to settled facts.
+fn stops_settled(path* p, step* s) bool {
+    if (s->kind == step_kind.local_effect || s->kind == step_kind.invalidate_value ||
+        s->kind == step_kind.call_outcome || s->kind == step_kind.flag) { return false; }
+    u64 mut w = 0;
+    while (w < p->settled.words.len) {
+        if (p->settled.words[w] != 0) { return true; }
+        w += 1;
+    }
+    return false;
+}
+
+// Whether a path leads from block `b` back to `b`. The analysis keeps each answer.
+fn on_cycle(program* in, analysis mut* out, u32 b) bool {
+    if (out->cycles[cast(b, u64)] != 0) { return out->cycles[cast(b, u64)] == 2; }
+    u32 count = fir.block_count(in->function);
+    fir_flow.bits mut seen = fir_flow.bits_new(count);
+    defer fir_flow.bits_free(&seen);
+    u32 mut@ own work = new(u32, cast(count, u64));
+    defer del(work);
+    u64 mut len = 0;
+    work[0] = b;
+    len = 1;
+    bool mut found = false;
+    while (len > 0 && !found) {
+        len -= 1;
+        fir.block* at = fir.block_at(in->function, work[len]);
+        u32 mut index = 0;
+        u32 mut target = 0;
+        while (at->terminated && fir_flow.next_reachable_target(in->function, &at->term,
+            &index, &target)) {
+            if (target == b) { found = true; }
+            if (!fir_flow.bits_get(&seen, target)) {
+                fir_flow.bits_set(&seen, target);
+                work[len] = target;
+                len += 1;
+            }
+            index += 1;
+        }
+    }
+    out->cycles[cast(b, u64)] = found ? 2 : 1;
+    return found;
+}
+
+// Whether path `p` continues after the failure `failed` of local step `s`. Only a definite
+// failure continues: an incomplete failure has no effect that the path can apply. The step must
+// stand on no cycle, so no settled path comes back to it and hides its failure. A loan, a
+// value edge, a parameter check, a call handler or an exit observer reads facts that a
+// settled slot can make stale, so each of them keeps the stop.
+fn continues_after(program* in, analysis mut* out, path mut* p, step* s,
+    ownership_api.proof_status failed) bool {
+    if (!in->continue_separate || s->kind != step_kind.local_effect ||
+        failed.kind != ownership_api.proof_kind.complete || !failed.failed ||
+        failed.terminal.present || in->edges.len > 0 || in->values.len > 0 ||
+        in->parameters.len > 0 || in->call_handler != null || in->exit_observer != null ||
+        fir.loan_count(in->function) > 0 || on_cycle(in, out, s->block)) { return false; }
+    ownership_api.proof_status mut charged = complete();
+    if (settle(in, p, s, &charged) == settling.run) {
+        // The program can write the value version of the failed step, so the path drops
+        // what it knew about that version, as a skipped step does.
+        invalidate_version(p, s->invalidates);
+        return true;
+    }
+    if (!ownership_api.successful(charged)) { note_failure(out, charged); }
+    return false;
 }

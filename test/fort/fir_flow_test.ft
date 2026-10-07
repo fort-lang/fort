@@ -6,6 +6,7 @@
 //| diamond ok
 //| loop ok
 //| edges ok
+//| targets ok
 //| release ok
 /// Checks the bit sets and the forward dataflow of fir_flow: the sets at the ends of their
 /// words, a diamond and a loop under each join, the in-set of a block that nothing reaches and of
@@ -581,6 +582,60 @@ fn nested_loops_carry_the_inner_back_edge_to_the_outer_head() void {
     expect_block(&some, 5, " 0 1 2 3 4", " 0 1 2 3 4 5");
 }
 
+// The targets of `term` that next_reachable_target finds from number 0, in order, each as
+// " index:block".
+fn reachable_targets(fir.func* f, fir.terminator* term, strbuf.str_buf mut* out) void {
+    u32 mut index = 0;
+    u32 mut target = 0;
+    while (fir_flow.next_reachable_target(f, term, &index, &target)) {
+        strbuf.push(out, ' ');
+        strbuf.append_u64(out, cast(index, u64));
+        strbuf.push(out, ':');
+        strbuf.append_u64(out, cast(target, u64));
+        index += 1;
+    }
+}
+
+fn expect_targets(fir.func* f, u32 b, string want) void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    reachable_targets(f, &fir.block_at(f, b)->term, &got);
+    if (strbuf.view(&got) != want) {
+        eprintln("bb", b, ": got '", strbuf.view(&got), "', want '", want, "'");
+        assert(false);
+    }
+}
+
+// A constant switch reaches only the arm it selects. reachable_target refuses the first arm
+// of `switch(const false)`, and next_reachable_target skips it and finds the otherwise target,
+// so a loop over the targets does not stop at the refused arm.
+fn the_next_reachable_target_skips_an_unselected_arm() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[6] blocks = {
+        "bb0: { switch(const false) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { switch(const true) -> [true: bb3, otherwise: bb4]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { goto bb5; }",
+        "bb4: { unreachable; }",
+        "bb5: { unreachable; }",
+    };
+    fir.func* f = parse(&e, "", blocks[..]);
+    u32 mut target = 0;
+    assert(!fir_flow.reachable_target(f, &fir.block_at(f, 0)->term, 0, &target));
+    expect_targets(f, 0, " 1:2");
+    expect_targets(f, 1, " 0:3");
+    expect_targets(f, 2, " 0:3 1:4");
+    expect_targets(f, 3, " 0:5");
+    expect_targets(f, 4, "");
+    // A start past the last target finds nothing and leaves the number unchanged.
+    u32 mut index = 2;
+    target = 99;
+    assert(!fir_flow.next_reachable_target(f, &fir.block_at(f, 2)->term, &index, &target));
+    assert(index == 2);
+}
+
 // The chain of the release probe, a chain of 199 diamonds with a back edge from its end to bb1,
 // as one function.
 fn chain_func(env mut* e) fir.func* {
@@ -712,6 +767,8 @@ fn main() i32 {
     an_irreducible_loop_reaches_its_fixpoint();
     nested_loops_carry_the_inner_back_edge_to_the_outer_head();
     println("edges ok");
+    the_next_reachable_target_skips_an_unselected_arm();
+    println("targets ok");
     the_transfers_stay_linear_in_the_blocks();
     two_hundred_rounds_leave_the_heap_where_it_was();
     println("release ok");
