@@ -732,7 +732,46 @@ fn application_count() void {
     assert(f.application.outcome.possible_caller_return && f.application.outcome.cleanup_required);
 }
 
+fn loaded_model() void {
+    string[2] source = {
+        "fn callee(i32** p) i32 { return **p; }",
+        "fn caller(i32** p) i32 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    u64 mut roots = 0;
+    u64 mut i = 0;
+    while (i < f.summary.roots.len) {
+        ownership_summary_model.symbolic_root root = f.summary.roots[i];
+        if (root.kind == ownership_summary_model.root_kind.loaded_source) {
+            roots += 1;
+            assert(root.formal == 0 && root.ty != null);
+            u64 mut loads = 0;
+            u64 mut e = 0;
+            while (e < f.summary.effects.len) {
+                ownership_summary_model.effect_node node = f.summary.effects[e];
+                if (node.payload == ownership_summary_model.payload_kind.reference_load &&
+                    ownership_summary_model.same(node.effect.place.root, root.slot)) {
+                    loads += 1;
+                    assert(node.value.borrows.len == 1);
+                    assert(ownership_summary_model.same(node.value.borrows[0].source, root.source));
+                    assert(ownership_summary_model.same(node.value.value_version,
+                        root.value_version));
+                    assert(node.effect.source.kind == ownership_api.entity_kind.source);
+                }
+                e += 1;
+            }
+            assert(loads == 1);
+        }
+        i += 1;
+    }
+    assert(roots == 1);
+}
+
 fn main() i32 {
+    loaded_model();
     string@ args = sys.args();
     if (args.len > 1 && args[1] == "--allocator-success") { allocator_probe(false); return 0; }
     if (args.len > 1 && args[1] == "--allocator-failure") { allocator_probe(true); return 0; }

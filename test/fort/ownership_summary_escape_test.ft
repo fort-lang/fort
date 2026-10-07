@@ -10,6 +10,7 @@
 /// Checks body-derived linear call effects and their source boundaries.
 import fir;
 import ownership_api;
+import ownership_calls_env;
 import ownership_calls_fixtures;
 import ownership_flow;
 import ownership_keys;
@@ -384,6 +385,39 @@ string[3] CLEARED_INLINE_ADDRESS = {
     "fn callee(inline_box p) i32* { i32* mut q = &p.value; q = null; return q; }",
     "fn caller(inline_box p) i32* { return callee(p); }",
 };
+fn loaded_body() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, LOADED_POINTER[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof) && !f.summary.residual_effects);
+    u64 mut loads = 0;
+    u64 mut i = 0;
+    while (i < f.summary.effects.len) {
+        if (f.summary.effects[i].payload == ownership_summary_model.payload_kind.reference_load) {
+            loads += 1;
+        }
+        i += 1;
+    }
+    assert(loads == 1 && f.summary.cases.len == 1);
+    string[6] live = {
+        "fn callee(i32** p) i32 { return **p; }",
+        "fn caller() i32 {",
+        "i32 mut* own owner = new(i32); *owner = 7;",
+        "i32* inner = owner; i32 value = callee(&inner);",
+        "del(owner); return value;",
+        "}",
+    };
+    ownership_calls_fixtures.fixture mut caller = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&caller, live[..]);
+    defer ownership_calls_fixtures.close(&caller);
+    ownership_calls_fixtures.prepare(&caller);
+    ownership_calls_env.reset(&caller.services);
+    ownership_calls_fixtures.apply(&caller, 92);
+    successful(&caller);
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&caller)));
+    assert(ownership_calls_fixtures.outstanding(&caller.caller) == 0);
+}
+
 fn incomplete_body(string@ text) void {
     ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
     ownership_calls_fixtures.open(&f, text);
@@ -789,7 +823,7 @@ fn main() i32 {
     body_availability();
     incomplete_body(NESTED_OWNER[..]);
     incomplete_body(NESTED_POINTER[..]);
-    incomplete_body(LOADED_POINTER[..]);
+    loaded_body();
     designated_body(true);
     designated_body(false);
     incomplete_body(HELD_INLINE_ADDRESS[..]);
