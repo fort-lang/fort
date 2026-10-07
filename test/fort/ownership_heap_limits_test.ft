@@ -1,0 +1,249 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| A05 work exhaustion
+//| H covers the shapes and keeps the loss
+//| R covers the atoms
+//| P covers the refined roots
+//| production bounds
+//| repeated solves agree
+//| the interface bit set
+//| heap limits ok
+/// Checks the finite bounds of the heap proof (D17.18, `spec/fir.md` 14.1): W per computation,
+/// H and R per state, and the interface bit set.
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+import ownership_limits;
+
+string[14] CHAIN = {
+    "struct heap_node { heap_node mut* own next; u8 mut@ own bytes; }",
+    "fn drop_chain(heap_node mut* own mut current) void {",
+    "    while (current != null) {",
+    "        heap_node mut* own next = move(current->next);",
+    "        del(current->bytes);",
+    "        del(current);",
+    "        current = move(next);",
+    "    }",
+    "}",
+    "fn build(u64 n) heap_node mut* own { heap_node mut* own mut head = null; u64 mut i = 0;",
+    "    while (i < n) { heap_node mut* own f = new(heap_node); f->bytes = new(u8, 2);",
+    "        f->next = move(head); head = move(f); i += 1; } return head; }",
+    "fn use(u64 n) void { drop_chain(build(n)); }",
+    "fn leak(u64 n) void { heap_node mut* own h = build(n); }",
+};
+
+// A05: a refused W unit stops the computation. The analysis does not pretend that the
+// remaining operations ran: it publishes incomplete proof with the exhaustion, records one
+// budget event for each stopped computation, and claims no invalid use and no lost ownership.
+fn work() void {
+    println("A05 work exhaustion");
+    string[4] names = {"drop_chain", "build", "use", "leak"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.open(&c, CHAIN[..], names[..]);
+    c.counts.work = 20;
+    ownership_heap_env.solve(&c);
+    for (string name : names) {
+        ownership_heap.summary* s = ownership_heap_env.summary(&c, name);
+        assert(ownership_heap_env.unproved(&c, name, ownership_api.incomplete_reason.work_limit));
+        assert(s->residual && s->proof.terminal.limit.present);
+        assert(s->proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(s->proof.terminal.limit.bound == 20);
+        assert(ownership_heap_env.saw(&c, name, ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.unconditional) == 0);
+    }
+    assert(ownership_heap_env.budget_events(&c) == 4);
+    assert(c.counts.events == 4);
+    // At 40 units `use` ends within its bound. Its callees have no proof, so their calls stay
+    // unknown: the callees reported their own errors, and the summary of `use` is residual.
+    c.counts.work = 40;
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.unproved(&c, "drop_chain",
+        ownership_api.incomplete_reason.work_limit));
+    assert(!ownership_heap_env.proved(&c, "use"));
+    assert(ownership_heap_env.summary(&c, "use")->residual);
+    assert(ownership_heap_env.events(&c, "use") == 0);
+    // The same closure fits the production bound of each computation.
+    c.counts.work = 0;
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.proved(&c, "drop_chain"));
+    assert(ownership_heap_env.proved(&c, "use"));
+    assert(ownership_heap_env.budget_events(&c) == 0);
+    ownership_heap_env.within_limits(&c);
+}
+
+// A refused H request covers the state: shapes become opaque and keep their obligations, and
+// a later operation that needs a shape reports incomplete proof with the lost category and
+// bound, the precision reason of `spec/toolchain.md` 4.2.
+fn shapes() void {
+    println("H covers the shapes and keeps the loss");
+    string[4] names = {"drop_chain", "build", "use", "leak"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.open(&c, CHAIN[..], names[..]);
+    c.counts.h = 3;
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.summary(&c, "drop_chain")->proof.kind ==
+        ownership_api.proof_kind.incomplete);
+    ownership_heap_env.event_row row = ownership_heap_env.first(&c, "drop_chain");
+    assert(row.kind == ownership_api.event_kind.incomplete_proof);
+    assert(row.lossy && row.lost == ownership_api.limit_category.h && row.lost_bound == 3);
+    assert(ownership_heap_env.budget_events(&c) == 0);
+    // No precision loss supplies success.
+    assert(!ownership_heap_env.proved(&c, "use"));
+    assert(!ownership_heap_env.proved(&c, "leak"));
+    assert(c.counts.most_h > 3);
+    // The production H bound keeps each shape of this closure.
+    c.counts.h = 0;
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.proved(&c, "drop_chain"));
+    assert(c.counts.most_h <= ownership_limits.PRODUCTION_H);
+}
+
+// A refused R request merges atoms into opaque owners. When even the covered state exceeds R,
+// the computation stops with incomplete proof and records the loss.
+fn atoms() void {
+    println("R covers the atoms");
+    string[4] names = {"drop_chain", "build", "use", "leak"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.open(&c, CHAIN[..], names[..]);
+    c.counts.r = 2;
+    ownership_heap_env.solve(&c);
+    assert(!ownership_heap_env.proved(&c, "drop_chain"));
+    assert(ownership_heap_env.summary(&c, "drop_chain")->proof.kind ==
+        ownership_api.proof_kind.incomplete);
+    ownership_heap_env.event_row row = ownership_heap_env.first(&c, "drop_chain");
+    assert(row.lossy && row.lost == ownership_api.limit_category.r && row.lost_bound == 2);
+    c.counts.r = 0;
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.proved(&c, "drop_chain"));
+    assert(c.counts.most_r <= ownership_limits.PRODUCTION_R);
+}
+
+// A refused P request joins each refined root. An operation that needs a null root then gives
+// incomplete proof with the lost category; the production P keeps both facts.
+fn roots() void {
+    println("P covers the refined roots");
+    string[4] text = {
+        "fn pair_null(i32 mut* own a, i32 mut* own b) void {",
+        "    if (a == null) { if (b == null) { return; } }",
+        "    del(a); del(b);",
+        "}",
+    };
+    string[1] names = {"pair_null"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.open(&c, text[..], names[..]);
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.proved(&c, "pair_null"));
+    assert(c.counts.most_p == 2);
+    c.counts.p = 1;
+    ownership_heap_env.solve(&c);
+    assert(!ownership_heap_env.proved(&c, "pair_null"));
+    ownership_heap_env.event_row row = ownership_heap_env.first(&c, "pair_null");
+    assert(row.kind == ownership_api.event_kind.incomplete_proof);
+    assert(row.lossy && row.lost == ownership_api.limit_category.p && row.lost_bound == 1);
+}
+
+// The W of each computation stays below its bound 65536 + 64 S, and that bound grows with the
+// FIR size S of the computation (D17.18).
+fn production() void {
+    println("production bounds");
+    string[4] names = {"drop_chain", "build", "use", "leak"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, CHAIN[..], names[..]);
+    u64 most = ownership_heap_env.within_limits(&c);
+    assert(most > 0 && most < 65536);
+    assert(c.counts.computations == 4);
+    u64 mut i = 0;
+    while (i < c.counts.computations) {
+        assert(c.counts.bounds[i] > 65536 && (c.counts.bounds[i] - 65536) % 64 == 0);
+        i += 1;
+    }
+    assert(ownership_heap_env.unproved(&c, "leak", ownership_api.incomplete_reason.missing_path));
+}
+
+// Canonical scheduling gives the same verdicts and the same events in each solve.
+fn deterministic() void {
+    println("repeated solves agree");
+    string[4] names = {"drop_chain", "build", "use", "leak"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, CHAIN[..], names[..]);
+    ownership_heap_env.event_row[4] mut first = {};
+    u64 count = c.counts.events;
+    assert(count >= 1 && count <= first.len);
+    u64 mut i = 0;
+    while (i < count) { first[i] = c.counts.rows[i]; i += 1; }
+    u64[16] mut used = {};
+    i = 0;
+    while (i < c.counts.computations) { used[i] = c.counts.used[i]; i += 1; }
+    ownership_heap_env.solve(&c);
+    assert(c.counts.events == count);
+    i = 0;
+    while (i < count) {
+        ownership_heap_env.event_row a = first[i];
+        ownership_heap_env.event_row b = c.counts.rows[i];
+        assert(a.kind == b.kind && a.evidence == b.evidence && a.reason == b.reason);
+        assert(a.line == b.line && a.col == b.col && a.text_len == b.text_len);
+        i += 1;
+    }
+    i = 0;
+    while (i < c.counts.computations) { assert(used[i] == c.counts.used[i]); i += 1; }
+}
+
+// An origin set has one bit for each interface atom. A body with more owned interface leaves
+// publishes incomplete proof at its entry.
+fn interface_bits() void {
+    println("the interface bit set");
+    string[21] text = {
+        "struct wide {",
+        "    i32 mut* own g0; i32 mut* own g1; i32 mut* own g2; i32 mut* own g3;",
+        "    i32 mut* own g4; i32 mut* own g5; i32 mut* own g6; i32 mut* own g7;",
+        "    i32 mut* own g8; i32 mut* own g9; i32 mut* own g10; i32 mut* own g11;",
+        "    i32 mut* own g12; i32 mut* own g13; i32 mut* own g14; i32 mut* own g15;",
+        "    i32 mut* own g16; i32 mut* own g17; i32 mut* own g18; i32 mut* own g19;",
+        "    i32 mut* own g20; i32 mut* own g21; i32 mut* own g22; i32 mut* own g23;",
+        "    i32 mut* own g24; i32 mut* own g25; i32 mut* own g26; i32 mut* own g27;",
+        "    i32 mut* own g28; i32 mut* own g29; i32 mut* own g30; i32 mut* own g31;",
+        "    i32 mut* own g32; i32 mut* own g33; i32 mut* own g34; i32 mut* own g35;",
+        "    i32 mut* own g36; i32 mut* own g37; i32 mut* own g38; i32 mut* own g39;",
+        "    i32 mut* own g40; i32 mut* own g41; i32 mut* own g42; i32 mut* own g43;",
+        "    i32 mut* own g44; i32 mut* own g45; i32 mut* own g46; i32 mut* own g47;",
+        "    i32 mut* own g48; i32 mut* own g49; i32 mut* own g50; i32 mut* own g51;",
+        "    i32 mut* own g52; i32 mut* own g53; i32 mut* own g54; i32 mut* own g55;",
+        "    i32 mut* own g56; i32 mut* own g57; i32 mut* own g58; i32 mut* own g59;",
+        "    i32 mut* own g60; i32 mut* own g61; i32 mut* own g62; i32 mut* own g63;",
+        "    i32 mut* own g64;",
+        "}",
+        "fn clear_all(wide mut* w) void { }",
+        "fn small(wide mut* w) void { del(w->g0); w->g0 = new(i32); }",
+    };
+    string[2] names = {"clear_all", "small"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.unproved(&c, "clear_all",
+        ownership_api.incomplete_reason.missing_graph));
+    // The incomplete result records its event at the entry of the body (`spec/fir.md` 14.1).
+    ownership_heap_env.event_row wide = ownership_heap_env.first(&c, "clear_all");
+    assert(wide.kind == ownership_api.event_kind.incomplete_proof && wide.line == 20);
+    assert(ownership_heap_env.events(&c, "clear_all") == 1);
+    assert(ownership_heap_env.events(&c, "small") == 1);
+    assert(ownership_heap_env.unproved(&c, "small", ownership_api.incomplete_reason.missing_graph));
+}
+
+fn main() i32 {
+    work();
+    shapes();
+    atoms();
+    roots();
+    production();
+    deterministic();
+    interface_bits();
+    println("heap limits ok");
+    return 0;
+}

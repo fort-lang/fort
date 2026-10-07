@@ -1,0 +1,391 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| rejected examples get no proof
+//| accepted examples
+//| heap approved ok
+/// Runs the heap proof over the approved ownership examples (D17.14, D17.16). An example that
+/// the approved design rejects must never get a heap proof in the body that holds its error: the
+/// module may prove less than the design, never more. Each array below copies one file of
+/// `test/ownership/approved`, whose manifests freeze each file by its SHA-256 digest; the test
+/// program runs in a temporary directory, so it cannot read that directory.
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+
+// One approved example, its bodies, and the body of its error.
+struct example {
+    string file;
+    string@ lines;
+    string error_body;
+    u64 bodies;
+    string[4] names;
+}
+
+string[6] EX01_LOCAL_VIEW = {
+    "fn demo() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* q = p;",
+    "    del(p);",
+    "    return *q;",
+    "}",
+};
+
+string[10] EX02_TRANSFER = {
+    "fn demo() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    *p = 7;",
+    "    i32* view = p;",
+    "    i32 mut* own next = move(p);",
+    "    i32 value = *view;",
+    "    bool empty = p == null;",
+    "    del(next);",
+    "    return empty ? value : 0;",
+    "}",
+};
+
+string[9] EX03_CONSUMING_CALL = {
+    "fn drop(i32* own p) void {",
+    "    del(p);",
+    "}",
+    "fn demo() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* view = p;",
+    "    drop(move(p));",
+    "    return *view;",
+    "}",
+};
+
+string[9] EX04_REFILL = {
+    "fn demo() i32 {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32* old = p;",
+    "    del(p);",
+    "    p = new(i32);",
+    "    i32 value = *old;",
+    "    del(move(p));",
+    "    return value;",
+    "}",
+};
+
+string[4] EX05_LOCAL_ADDRESS = {
+    "fn bad() i32* {",
+    "    i32 value = 7;",
+    "    return &value;",
+    "}",
+};
+
+string[4] EX06_LOCAL_SPAN = {
+    "fn bad() u8@ {",
+    "    u8[4] bytes = {1, 2, 3, 4};",
+    "    return bytes[..];",
+    "}",
+};
+
+string[11] EX07_BORROWED_RETURN = {
+    "fn identity(i32* p) i32* {",
+    "    return p;",
+    "}",
+    "fn demo() i32 {",
+    "    i32 mut* own owner = new(i32);",
+    "    *owner = 9;",
+    "    i32* view = identity(owner);",
+    "    i32 value = *view;",
+    "    del(owner);",
+    "    return value;",
+    "}",
+};
+
+string[6] EX08_DEFERRED_RETURN = {
+    "fn bad() i32* {",
+    "    i32 mut* own p = new(i32);",
+    "    defer del(p);",
+    "    i32* view = p;",
+    "    return view;",
+    "}",
+};
+
+string[13] EX09_RETAINED_FIELD = {
+    "struct view_box {",
+    "    i32* ptr;",
+    "}",
+    "fn remember(view_box mut* out, i32* value) void {",
+    "    out->ptr = value;",
+    "}",
+    "fn demo() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    view_box mut saved = {};",
+    "    remember(&saved, p);",
+    "    del(p);",
+    "    return *saved.ptr;",
+    "}",
+};
+
+string[11] EX10_CALL_ALIAS = {
+    "struct box {",
+    "    i32 mut* own item;",
+    "}",
+    "fn release_then_read(box mut* a, box* b) i32 {",
+    "    del(a->item);",
+    "    return *b->item;",
+    "}",
+    "fn demo() i32 {",
+    "    box mut value = {new(i32)};",
+    "    return release_then_read(&value, &value);",
+    "}",
+};
+
+string[11] EX11_OUTPUT_OWNER = {
+    "fn fill(i32 mut* own mut* out) void {",
+    "    *out = new(i32);",
+    "    **out = 11;",
+    "}",
+    "fn demo() i32 {",
+    "    i32 mut* own mut p = null;",
+    "    fill(&p);",
+    "    i32 value = *p;",
+    "    del(p);",
+    "    return value;",
+    "}",
+};
+
+string[14] EX12_PARTIAL_MOVE = {
+    "struct inner {",
+    "    i32 mut* own ptr;",
+    "}",
+    "struct outer {",
+    "    inner part;",
+    "    i32 tag;",
+    "}",
+    "fn demo() i32 {",
+    "    outer mut value = {inner{new(i32)}, 3};",
+    "    i32 mut* own taken = move(value.part.ptr);",
+    "    i32 result = *value.part.ptr;",
+    "    del(taken);",
+    "    return result;",
+    "}",
+};
+
+string[8] EX13_OWNED_CHILD = {
+    "struct node {",
+    "    i32 mut* own child;",
+    "}",
+    "fn demo() void {",
+    "    node mut* own parent = new(node);",
+    "    parent->child = new(i32);",
+    "    del(parent);",
+    "}",
+};
+
+string[8] EX14_AGGREGATE_OVERWRITE = {
+    "struct box {",
+    "    i32 mut* own ptr;",
+    "}",
+    "fn demo() void {",
+    "    box mut value = {new(i32)};",
+    "    value = box{new(i32)};",
+    "    del(value.ptr);",
+    "}",
+};
+
+string[10] EX15_CONDITIONAL_RELEASE = {
+    "fn demo(bool release) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* view = p;",
+    "    if (release) {",
+    "        del(p);",
+    "    }",
+    "    i32 value = *view;",
+    "    del(p);",
+    "    return value;",
+    "}",
+};
+
+string[7] EX16_LOOP_LEAK = {
+    "fn bad(u64 n) void {",
+    "    u64 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own p = new(i32);",
+    "        i += 1;",
+    "    }",
+    "}",
+};
+
+string[13] EX16_LOOP_TRANSFER = {
+    "fn demo(u64 n) i32 {",
+    "    i32 mut* own mut current = null;",
+    "    u64 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own next = new(i32);",
+    "        del(current);",
+    "        current = move(next);",
+    "        i += 1;",
+    "    }",
+    "    i32 value = current == null ? 0 : *current;",
+    "    del(current);",
+    "    return value;",
+    "}",
+};
+
+string[16] EX17_STORAGE_GROWTH = {
+    "struct buffer {",
+    "    u8 mut@ own data;",
+    "}",
+    "fn grow(buffer mut* b) void {",
+    "    u8 mut@ own next = new(u8, b->data.len + 1);",
+    "    del(b->data);",
+    "    b->data = move(next);",
+    "}",
+    "fn demo() u8 {",
+    "    buffer mut b = {new(u8, 1)};",
+    "    u8@ view = b.data;",
+    "    grow(&b);",
+    "    u8 value = view[0];",
+    "    del(b.data);",
+    "    return value;",
+    "}",
+};
+
+string[13] EX18_RETAINED_KEY = {
+    "struct entry {",
+    "    string key;",
+    "}",
+    "fn put(entry mut* e, string key) void {",
+    "    e->key = key;",
+    "}",
+    "fn demo() u8 {",
+    "    u8 mut@ own bytes = new(u8, 2);",
+    "    entry mut e = {};",
+    "    put(&e, cast(bytes, string));",
+    "    del(bytes);",
+    "    return cast(e.key[0], u8);",
+    "}",
+};
+
+string[4] EX19_CALL_ONLY = {
+    "extern fn foreign_view() u8*;",
+    "fn demo() void {",
+    "    foreign_view();",
+    "}",
+};
+
+string[11] EX19_KNOWN_ALIAS = {
+    "extern fn copy_bytes(u8 mut* dst, u8* src, u64 n) u8 mut*;",
+    "fn demo() u8 {",
+    "    u8 mut@ own dst = new(u8, 1);",
+    "    u8 mut@ own src = new(u8, 1);",
+    "    src[0] = 5;",
+    "    u8 mut* result = copy_bytes(dst.ptr, src.ptr, 1);",
+    "    u8 value = *result;",
+    "    del(src);",
+    "    del(dst);",
+    "    return value;",
+    "}",
+};
+
+string[5] EX19_UNKNOWN_EXTERN = {
+    "extern fn foreign_view() u8*;",
+    "fn demo() u8 {",
+    "    u8* p = foreign_view();",
+    "    return *p;",
+    "}",
+};
+
+string[4] EX20_RAW_LOST = {
+    "fn bad(u64 bits) u8 {",
+    "    u8* p = cast(bits, u8*);",
+    "    return *p;",
+    "}",
+};
+
+string[10] EX20_RAW_PRESERVED = {
+    "fn demo() u8 {",
+    "    u8 mut@ own bytes = new(u8, 4);",
+    "    void mut* raw = cast(bytes.ptr, void mut*);",
+    "    u8 mut* p = cast(raw, u8 mut*);",
+    "    u8 mut@ view = p[0..4];",
+    "    view[0] = 6;",
+    "    u8 value = view[0];",
+    "    del(bytes);",
+    "    return value;",
+    "}",
+};
+
+fn run(example* e, ownership_heap_env.closure mut* c) void {
+    ownership_heap_env.run(c, e->lines, e->names[0..e->bodies]);
+}
+
+fn rejected() void {
+    println("rejected examples get no proof");
+    example[16] all = {
+        example{"ex01", EX01_LOCAL_VIEW[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex03", EX03_CONSUMING_CALL[..], "demo", 2, {"drop", "demo", "", ""}},
+        example{"ex04", EX04_REFILL[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex05", EX05_LOCAL_ADDRESS[..], "bad", 1, {"bad", "", "", ""}},
+        example{"ex06", EX06_LOCAL_SPAN[..], "bad", 1, {"bad", "", "", ""}},
+        example{"ex08", EX08_DEFERRED_RETURN[..], "bad", 1, {"bad", "", "", ""}},
+        example{"ex09", EX09_RETAINED_FIELD[..], "demo", 2, {"remember", "demo", "", ""}},
+        example{"ex10", EX10_CALL_ALIAS[..], "demo", 2, {"release_then_read", "demo", "", ""}},
+        example{"ex12", EX12_PARTIAL_MOVE[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex13", EX13_OWNED_CHILD[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex14", EX14_AGGREGATE_OVERWRITE[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex15", EX15_CONDITIONAL_RELEASE[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex16", EX16_LOOP_LEAK[..], "bad", 1, {"bad", "", "", ""}},
+        example{"ex17", EX17_STORAGE_GROWTH[..], "demo", 2, {"grow", "demo", "", ""}},
+        example{"ex18", EX18_RETAINED_KEY[..], "demo", 2, {"put", "demo", "", ""}},
+        example{"ex20", EX20_RAW_LOST[..], "bad", 1, {"bad", "", "", ""}},
+    };
+    u64 mut definite = 0;
+    u64 mut i = 0;
+    while (i < all.len) {
+        ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+        run(&all[i], &c);
+        assert(!ownership_heap_env.proved(&c, all[i].error_body));
+        assert(ownership_heap_env.events(&c, all[i].error_body) >= 1);
+        if (ownership_heap_env.failed(&c, all[i].error_body)) { definite += 1; }
+        ownership_heap_env.close(&c);
+        i += 1;
+    }
+    // Twelve of the sixteen give a definite violation here. Four give incomplete proof: ex10
+    // (one storage passed twice), ex15 (one branch releases), ex16 (an untracked loop
+    // condition), and ex20 (integer bits name no source).
+    assert(definite == 12);
+}
+
+fn accepted() void {
+    println("accepted examples");
+    example[8] all = {
+        example{"ex02", EX02_TRANSFER[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex07", EX07_BORROWED_RETURN[..], "demo", 2, {"identity", "demo", "", ""}},
+        example{"ex11", EX11_OUTPUT_OWNER[..], "demo", 2, {"fill", "demo", "", ""}},
+        example{"ex16", EX16_LOOP_TRANSFER[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex19", EX19_CALL_ONLY[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex19", EX19_KNOWN_ALIAS[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex19", EX19_UNKNOWN_EXTERN[..], "demo", 1, {"demo", "", "", ""}},
+        example{"ex20", EX20_RAW_PRESERVED[..], "demo", 1, {"demo", "", "", ""}},
+    };
+    // The module proves the examples that use only its forms. A foreign call or a raw pointer
+    // range is outside it: incomplete proof, never a violation.
+    bool[8] proves = {true, true, true, true, true, false, false, false};
+    u64 mut i = 0;
+    while (i < all.len) {
+        ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+        run(&all[i], &c);
+        if (proves[i]) {
+            if (!ownership_heap_env.proved(&c, all[i].error_body)) { ownership_heap_env.dump(&c); }
+            assert(ownership_heap_env.proved(&c, all[i].error_body));
+        } else {
+            assert(!ownership_heap_env.proved(&c, all[i].error_body));
+            assert(!ownership_heap_env.failed(&c, all[i].error_body));
+        }
+        ownership_heap_env.close(&c);
+        i += 1;
+    }
+}
+
+fn main() i32 {
+    rejected();
+    accepted();
+    println("heap approved ok");
+    return 0;
+}

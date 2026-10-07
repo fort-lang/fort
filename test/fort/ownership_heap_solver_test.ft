@@ -1,0 +1,207 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| callee components first
+//| refused computations
+//| recursive rounds
+//| summaries of each body
+//| a member without a proof withdraws the component
+//| heap solver ok
+/// Checks the closure solver of the heap proof (D17.18, `spec/fir.md` 14.1): component order,
+/// one computation for each component, provisional rounds, and published summaries.
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+
+string[14] CLOSURE = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn top() void { node mut* own a = new(node); a->next = new(node); middle(move(a)); }",
+    "fn middle(node mut* own n) void { bottom(move(n)); }",
+    "fn bottom(node mut* own n) void { if (n == null) { return; } node mut* own r = move(n->next);",
+    "    del(n); bottom(move(r)); }",
+    "fn ping(node mut* own n) void { if (n == null) { return; } node mut* own r = move(n->next);",
+    "    del(n); pong(move(r)); }",
+    "fn pong(node mut* own n) void { if (n == null) { return; } node mut* own r = move(n->next);",
+    "    del(n); ping(move(r)); }",
+    "fn ring() void { node mut* own a = new(node); ping(move(a)); }",
+    "fn alone() i32 { return 1; }",
+    "fn leaf_call() i32 { return alone(); }",
+    "fn unused() void { }",
+    "fn again() void { }",
+};
+
+string[8] BODIES = {"top", "middle", "bottom", "ping", "pong", "ring", "alone", "leaf_call"};
+
+// Each caller reads a published summary: a callee component is solved first.
+fn order() void {
+    println("callee components first");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, CLOSURE[..], BODIES[..]);
+    for (string name : BODIES) {
+        if (!ownership_heap_env.proved(&c, name)) { ownership_heap_env.dump(&c); }
+        assert(ownership_heap_env.proved(&c, name));
+    }
+    // Seven components: ping and pong share one; each gets one computation and one meter.
+    assert(c.counts.computations == 7);
+    ownership_heap_env.within_limits(&c);
+    // A body without recursion takes no round; a recursive one takes rounds to its fixed point.
+    assert(ownership_heap_env.rounds(&c, "top") == 0);
+    assert(ownership_heap_env.rounds(&c, "bottom") == 3);
+    assert(ownership_heap_env.rounds(&c, "ping") == ownership_heap_env.rounds(&c, "pong"));
+    assert(ownership_heap_env.rounds(&c, "ping") >= 2);
+    // The wrapper passes the shape need of its callee on to its own caller.
+    assert(ownership_heap_env.summary(&c, "middle")->interface[0].needs_shape);
+    assert((ownership_heap_env.summary(&c, "middle")->post.released & 1) == 1);
+}
+
+// A refused computation publishes incomplete proof for each of its members, and each caller
+// then treats its call as unknown.
+fn refusals() void {
+    println("refused computations");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.open(&c, CLOSURE[..], BODIES[..]);
+    c.counts.refuse_begin = true;
+    ownership_heap_env.solve(&c);
+    for (string name : BODIES) {
+        assert(ownership_heap_env.unproved(&c, name,
+            ownership_api.incomplete_reason.missing_budget));
+        assert(ownership_heap_env.summary(&c, name)->residual);
+        // Each refused member records its own event (`spec/fir.md` 14.1).
+        assert(ownership_heap_env.events(&c, name) == 1);
+        assert(ownership_heap_env.first(&c, name).reason ==
+            ownership_api.incomplete_reason.missing_budget);
+    }
+    assert(c.counts.events == BODIES.len);
+    // A W bound that only small bodies fit stops the larger computations alone.
+    c.counts.refuse_begin = false;
+    c.counts.work = 120;
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.proved(&c, "alone"));
+    assert(ownership_heap_env.unproved(&c, "bottom", ownership_api.incomplete_reason.work_limit));
+    assert(ownership_heap_env.unproved(&c, "ping", ownership_api.incomplete_reason.work_limit));
+    assert(ownership_heap_env.unproved(&c, "pong", ownership_api.incomplete_reason.work_limit));
+    // A stopped recursive component records one budget event for the whole component.
+    u64 budget = ownership_heap_env.budget_events(&c);
+    assert(budget >= 2 && budget == c.counts.events);
+}
+
+// The rounds of a recursive component record no event; the publication round records each.
+fn rounds() void {
+    println("recursive rounds");
+    string[6] text = {
+        "struct node { node mut* own next; u8 mut@ own bytes; }",
+        "fn half(node mut* own n) void { if (n == null) { return; } half(move(n->next)); del(n); }",
+        "fn lost_in(node mut* own n) void { if (n == null) { return; }",
+        "    node mut* own k = new(node); lost_in(move(n->next)); del(n->bytes); del(n); }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[2] bodies = {"half", "lost_in"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    // `half` releases its node with the payload still owned, an input choice of the caller: one
+    // loss on a validated path, recorded once in the publication round.
+    assert(ownership_heap_env.failed(&c, "half"));
+    assert(ownership_heap_env.events(&c, "half") == 1);
+    assert(ownership_heap_env.first(&c, "half").line == 2);
+    assert(ownership_heap_env.first_text(&c, "half") == "n->bytes");
+    // `lost_in` loses a fresh node in each frame: one event at its scope end.
+    assert(ownership_heap_env.failed(&c, "lost_in"));
+    assert(ownership_heap_env.events(&c, "lost_in") == 1);
+    assert(ownership_heap_env.first_text(&c, "lost_in") == "k");
+}
+
+// A summary keeps the interface of its body: one entry for each owned leaf of a by-value
+// parameter or of caller storage, in parameter order.
+fn summaries() void {
+    println("summaries of each body");
+    string[8] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct holder { node mut* own first; node mut* own second; i32 count; }",
+        "fn wide(node mut* own a, holder mut* h, i32 x, node mut* own b) void { del(a); del(b); }",
+        "fn none(i32 x) i32 { return x; }",
+        "fn reader(holder* h) i32 { return h->count; }",
+        "fn forever(node mut* own n) void { while (true) { } }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[4] bodies = {"wide", "none", "reader", "forever"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    ownership_heap.summary* w = ownership_heap_env.summary(&c, "wide");
+    assert(w->interface.len == 4 && w->callers.len == 1);
+    assert(w->interface[0].key.base == ownership_heap.base_kind.local);
+    assert(w->interface[0].key.id == 1);
+    assert(w->interface[1].key.id == 4);
+    assert(w->interface[2].key.base == ownership_heap.base_kind.caller);
+    assert(w->interface[3].key.base == ownership_heap.base_kind.caller);
+    assert(w->callers[0].param == 2);
+    // `del(a)` of a free region loses its next field: an error of the body, not a requirement.
+    // The caller storage stays free.
+    assert(ownership_heap_env.failed(&c, "wide"));
+    assert(w->interface[0].require_fields == 0 && w->interface[1].require_fields == 0);
+    assert(!w->interface[2].needs_shape && !w->interface[3].needs_shape);
+    assert(ownership_heap_env.summary(&c, "none")->interface.len == 0);
+    assert(ownership_heap_env.proved(&c, "reader"));
+    assert((ownership_heap_env.summary(&c, "reader")->view_reads & 2) == 2);
+    // A body with no normal return publishes no return: each caller path ends at its call.
+    assert(!ownership_heap_env.summary(&c, "forever")->returns);
+    assert(ownership_heap_env.proved(&c, "forever"));
+}
+
+// The members of a recursive component rest on each other's summaries. A member without a
+// proof withdraws the proof of each other member, and each withdrawn member records its own
+// event (`spec/fir.md` 14.1).
+fn withdrawal() void {
+    println("a member without a proof withdraws the component");
+    string[13] text = {
+        "struct tree { tree mut* own l; tree mut* own r; u8 mut@ own bytes; }",
+        "fn even(tree mut* own t) void { if (t == null) { return; } odd(move(t->l));",
+        "    odd(move(t->r)); del(t->bytes); del(t); }",
+        "fn odd(tree mut* own t) void { if (t == null) { return; } even(move(t->l));",
+        "    del(t->bytes); del(t); }",
+        "fn ping(tree mut* own t) void { if (t == null) { return; } pong(move(t->l), true);",
+        "    pong(move(t->r), false); del(t->bytes); del(t); }",
+        "fn pong(tree mut* own t, bool k) void { if (t == null) { return; }",
+        "    u8 mut@ own extra = new(u8, 1); if (k) { del(extra); } ping(move(t->l));",
+        "    ping(move(t->r)); del(t->bytes); del(t); }",
+        "fn unused_too() void { }",
+        "fn use_even(tree mut* own t) void { even(move(t)); }",
+        "fn unused() void { }",
+    };
+    string[5] bodies = {"even", "odd", "ping", "pong", "use_even"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    // `odd` loses its right subtree: its own error stays its verdict.
+    assert(ownership_heap_env.failed(&c, "odd"));
+    assert(ownership_heap_env.first_text(&c, "odd") == "t->r");
+    // `even` used the summary of `odd`, so its proof goes.
+    assert(ownership_heap_env.unproved(&c, "even", ownership_api.incomplete_reason.missing_graph));
+    assert(ownership_heap_env.events(&c, "even") == 1);
+    assert(ownership_heap_env.first_text(&c, "even") ==
+        "a recursive component in which a member has no proof");
+    // An incomplete member withdraws the other member in the same way. `pong` can lose `extra`
+    // on a path that no witness validates.
+    assert(ownership_heap_env.unproved(&c, "pong", ownership_api.incomplete_reason.missing_path));
+    assert(!ownership_heap_env.summary(&c, "pong")->residual);
+    assert(ownership_heap_env.unproved(&c, "ping", ownership_api.incomplete_reason.missing_graph));
+    assert(ownership_heap_env.events(&c, "ping") == 1);
+    // A caller of a withdrawn member keeps the call unknown and records nothing itself.
+    assert(!ownership_heap_env.proved(&c, "use_even"));
+    assert(ownership_heap_env.events(&c, "use_even") == 0);
+}
+
+fn main() i32 {
+    order();
+    refusals();
+    rounds();
+    summaries();
+    withdrawal();
+    println("heap solver ok");
+    return 0;
+}

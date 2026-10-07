@@ -1,0 +1,202 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| null tests and known values
+//| casts and addresses
+//| allocations of each kind
+//| aggregate values
+//| heap values ok
+/// Checks the values that the heap proof gives to FIR rvalues (`spec/fir.md` 6): null tests,
+/// known integers, casts, addresses, slices, allocations, and aggregates.
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+
+fn is(ownership_heap_env.event_row row, ownership_api.event_kind kind,
+    ownership_api.evidence_kind evidence) bool {
+    return row.kind == kind && row.evidence == evidence;
+}
+
+// A comparison with null tests the root of an atom; a known value selects one edge.
+fn tests() void {
+    println("null tests and known values");
+    // The node owns no field, so a release of a parameter loses nothing (`spec/fir.md` 14.1).
+    string[20] text = {
+        "struct node { node* next; i32 v; }",
+        "fn by_view(node mut* own a) void { node* v = a; if (v == null) { return; } del(a); }",
+        "fn by_not(node mut* own a) void { bool none = a == null; if (!none) { del(a); } }",
+        "fn reversed(node mut* own a) void { if (null != a) { del(a); } }",
+        "fn fresh_known() void { node mut* own a = new(node); if (a == null) { return; } del(a); }",
+        "fn empty_known() void { node mut* own mut a = null; if (a != null) { return; }",
+        "    a = new(node); del(a); }",
+        "fn address_known() void { i32 x = 1; i32* p = &x; node mut* own a = new(node);",
+        "    if (p == null) { return; } del(a); }",
+        "fn sums() void { node mut* own a = new(node); i32 n = 1 + 2; i64 m = cast(n, i64) - 4;",
+        "    if (n == 3) { if (m < 0) { del(a); } } }",
+        "fn widths() void { node mut* own a = new(node); u8 x = 200; i32 y = cast(x, i32);",
+        "    if (y > 100) { del(a); } }",
+        "fn unknown_int(i32 k) void { node mut* own a = new(node); if (k > 3) { del(a); } }",
+        "fn both_ways(node mut* own a) void { if (a == null) { return; }",
+        "    if (a != null) { del(a); } }",
+        "fn same_twice(node mut* own a) void { if (a != null) { if (a == null) { return; }",
+        "    del(a); } }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[12] bodies = {"by_view", "by_not", "reversed", "fresh_known", "empty_known",
+        "address_known", "sums", "widths", "unknown_int", "both_ways", "same_twice", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    // A view designates the root of its one source, so its test refines that root.
+    assert(ownership_heap_env.proved(&c, "by_view"));
+    // A negated test refines the opposite edge.
+    assert(ownership_heap_env.proved(&c, "by_not"));
+    assert(ownership_heap_env.proved(&c, "reversed"));
+    // A fresh allocation is never null, an empty owner always is, and an address is nonnull.
+    assert(ownership_heap_env.proved(&c, "fresh_known"));
+    assert(ownership_heap_env.proved(&c, "empty_known"));
+    assert(ownership_heap_env.proved(&c, "address_known"));
+    // Known integers decide their comparisons through additions and casts that keep the value.
+    assert(ownership_heap_env.proved(&c, "sums"));
+    assert(ownership_heap_env.proved(&c, "widths"));
+    // An integer that the proof does not know leaves both edges: a possible loss.
+    assert(ownership_heap_env.unproved(&c, "unknown_int",
+        ownership_api.incomplete_reason.missing_path));
+    // A second test of one refined root has one feasible edge.
+    assert(ownership_heap_env.proved(&c, "both_ways"));
+    assert(ownership_heap_env.proved(&c, "same_twice"));
+}
+
+// A cast keeps the value of a reference; integer bits name no source; an address designates
+// its slot until that slot's scope ends.
+fn casts() void {
+    println("casts and addresses");
+    string[15] text = {
+        "fn scoped_address() i32 { i32* mut p = null; { i32 x = 3; p = &x; i32 y = *p; }",
+        "    return 0; }",
+        "fn after_scope() i32 { i32* mut p = null; { i32 x = 3; p = &x; } return *p; }",
+        "fn maybe_scope(bool c) i32 { i32 z = 2; i32* mut p = &z; if (c) { i32 x = 3; p = &x; }",
+        "    return *p; }",
+        "fn bits_round(i32 mut* own a) void { u64 b = cast(cast(a, i32*), u64);",
+        "    i32* p = cast(b, i32*); i32 x = *p; del(a); }",
+        "fn array_view() u8 { u8[4] mut a = {}; a[1] = 3; u8 mut@ s = a[0..4]; return s[1]; }",
+        "fn array_escape() u8@ { u8[4] mut a = {}; return a[0..4]; }",
+        "fn span_view() u8 { u8 mut@ own b = new(u8, 4); u8@ s = b[1..3]; u8 x = s[0]; del(b);",
+        "    return x; }",
+        "fn raw_range(u8 mut@ own b) u8 { u8* p = b.ptr; u8@ s = p[0..1]; u8 x = s[0]; del(b);",
+        "    return x; }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[8] bodies = {"scoped_address", "after_scope", "maybe_scope", "bits_round",
+        "array_view", "array_escape", "span_view", "raw_range"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    assert(ownership_heap_env.proved(&c, "scoped_address"));
+    assert(ownership_heap_env.failed(&c, "after_scope"));
+    assert(is(ownership_heap_env.first(&c, "after_scope"), ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    // The join of two addresses keeps neither: the read through it is unproved, never passed.
+    assert(ownership_heap_env.unproved(&c, "maybe_scope",
+        ownership_api.incomplete_reason.unknown_effect));
+    // An exact integer round trip supplies no source (D17.17).
+    assert(ownership_heap_env.unproved(&c, "bits_round",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.proved(&c, "array_view"));
+    assert(ownership_heap_env.failed(&c, "array_escape"));
+    assert(ownership_heap_env.proved(&c, "span_view"));
+    // A raw pointer range has no proved extent here: incomplete proof.
+    assert(!ownership_heap_env.proved(&c, "raw_range"));
+    assert(!ownership_heap_env.failed(&c, "raw_range"));
+}
+
+// One struct is a cell; an allocation without owned leaves is flat; an array of structs with
+// owned leaves is opaque.
+fn allocations() void {
+    println("allocations of each kind");
+    string[11] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct plain { i32 a; i32 b; }",
+        "fn one_cell() void { node mut* own a = new(node); del(a); }",
+        "fn plain_one() void { plain mut* own a = new(plain); a->a = 1; del(a); }",
+        "fn plain_many() void { plain mut@ own a = new(plain, 3); a[1].b = 2; del(a); }",
+        "fn owners_many() void { node mut@ own a = new(node, 2); del(a); }",
+        "fn ints() void { i32 mut@ own a = new(i32, 8); a[7] = 1; del(a); }",
+        "fn owner_array() void { node mut* own mut@ own a = new(node mut* own, 2); del(a); }",
+        "fn void_owner() void { void mut* own v = cast(new(i32), void mut* own); del(v); }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[7] bodies = {"one_cell", "plain_one", "plain_many", "owners_many", "ints",
+        "owner_array", "void_owner"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    assert(ownership_heap_env.proved(&c, "one_cell"));
+    assert(ownership_heap_env.proved(&c, "plain_one"));
+    assert(ownership_heap_env.proved(&c, "plain_many"));
+    assert(ownership_heap_env.proved(&c, "ints"));
+    // Two structs with owned leaves, or two owners: the release cannot prove empty leaves.
+    assert(ownership_heap_env.unproved(&c, "owners_many",
+        ownership_api.incomplete_reason.missing_graph));
+    assert(ownership_heap_env.unproved(&c, "owner_array",
+        ownership_api.incomplete_reason.missing_graph));
+    // A void owner of a fresh flat allocation is the same flat atom.
+    assert(ownership_heap_env.proved(&c, "void_owner"));
+}
+
+// A struct value moves each owned leaf and lends each borrowed one; a literal writes each leaf;
+// a call result binds to its destination.
+fn aggregates() void {
+    println("aggregate values");
+    string[18] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct pair { node mut* own a; node* view; }",
+        "struct outer { pair p; i32 tag; }",
+        "struct vbox { node* view; }",
+        "fn literal() void { node mut* own n = new(node); node* v = n;",
+        "    pair mut p = {move(n), v}; del(p.a); }",
+        "fn moved_whole() void { pair mut p = {new(node), null}; pair mut q = move(p); del(q.a);",
+        "    del(p.a); }",
+        "fn copied_view() i32 { node mut* own n = new(node); vbox mut p = {n};",
+        "    vbox mut q = p; del(n); return q.view == null ? 0 : q.view->v; }",
+        "fn nested_literal() void { outer mut o = {pair{new(node), null}, 1}; del(o.p.a); }",
+        "fn nested_lost() void { outer mut o = {pair{new(node), null}, 1}; o.tag = 2; }",
+        "fn make() pair { return pair{new(node), null}; }",
+        "fn taken() void { pair mut p = make(); del(p.a); }",
+        "fn overwritten() void { pair mut p = make(); p = make(); del(p.a); }",
+        "fn zeroed() void { pair mut p = make(); del(p.a); p = pair{}; }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[9] bodies = {"literal", "moved_whole", "copied_view", "nested_literal", "nested_lost",
+        "make", "taken", "overwritten", "zeroed"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    assert(ownership_heap_env.proved(&c, "literal"));
+    // A whole move empties each owned leaf of its source.
+    assert(ownership_heap_env.proved(&c, "moved_whole"));
+    // A copied view keeps its source: its read after the release is invalid.
+    assert(ownership_heap_env.failed(&c, "copied_view"));
+    assert(ownership_heap_env.proved(&c, "nested_literal"));
+    assert(ownership_heap_env.failed(&c, "nested_lost"));
+    assert(ownership_heap_env.first_text(&c, "nested_lost") == "o.p.a");
+    assert(ownership_heap_env.proved(&c, "make"));
+    assert(ownership_heap_env.proved(&c, "taken"));
+    // A whole store over a struct checks each old owned leaf (D17.11, ex14).
+    assert(ownership_heap_env.failed(&c, "overwritten"));
+    assert(ownership_heap_env.first_text(&c, "overwritten") == "p.a");
+    assert(ownership_heap_env.proved(&c, "zeroed"));
+}
+
+fn main() i32 {
+    tests();
+    casts();
+    allocations();
+    aggregates();
+    println("heap values ok");
+    return 0;
+}

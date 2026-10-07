@@ -867,8 +867,8 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
-  **Six tables exist today**, and they cover 18 files:
-  `ls tools/mutations/*.json | wc -l` prints 6.
+  **Seven tables exist today**, and they cover 19 files:
+  `ls tools/mutations/*.json | wc -l` prints 7.
   `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
   the four files of the C emitter, and the same command over
   `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`.
@@ -885,6 +885,10 @@ bullet at a time and without a rewrite.
   Over `tools/mutations/ownership_graph.json` it prints `ownership_graph.ft`: 4 rows on the
   edges and the fact flow of a call with a residual fort target. That table runs on a darwin
   host with `--runner 'bash -c'`; one run took 72 s.
+  `tools/mutations/ownership_heap.json` prints `ownership_heap.ft`, with 69 rows of the heap
+  proof. No compiler binary holds that module, so its `build` compiles the case-group test and
+  its `binary` is that test program; the md5 of a mutant then differs. Run it on a darwin
+  host with `--runner 'bash -c'`.
   Each list is the `"sources"` list the runner saves. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. No table covers the fort checker today.

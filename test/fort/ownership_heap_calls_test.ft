@@ -1,0 +1,386 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| caller storage takes the exit facts
+//| separate instances stay apart
+//| shape requirements bind at the call
+//| recursive calls need strict parts and a covered return
+//| unknown effects keep obligations unproved
+//| views at a call
+//| aggregates and pointers to owners
+//| heap calls ok
+/// Checks heap summaries at calls (D17.16, D17.18, `spec/fir.md` 14 Calls).
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+
+string[11] LIST = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "struct holder { node mut* own first; node mut* own second; i32 count; }",
+    "fn push(holder mut* h, node mut* own n) void {",
+    "    n->next = move(h->first); h->first = move(n); }",
+    "fn clear(holder mut* h) void { drop_list(move(h->first)); drop_list(move(h->second)); }",
+    "fn take(holder mut* h) node mut* own { return move(h->first); }",
+    "fn stash(holder mut* h, node mut* own n) void {",
+    "    drop_list(move(h->second)); h->second = move(n); }",
+    "fn pick(node mut* own a, node mut* own b) node mut* own { drop_list(move(b)); return a; }",
+};
+
+fn with_list(string@ tail, string mut@ out) u64 {
+    u64 mut n = 0;
+    while (n < LIST.len) { out[n] = LIST[n]; n += 1; }
+    u64 mut i = 0;
+    while (i < tail.len) { out[n] = tail[i]; n += 1; i += 1; }
+    return n;
+}
+
+fn names_with(string@ tail, string mut@ out) u64 {
+    string[6] base = {"drop_list", "push", "clear", "take", "stash", "pick"};
+    u64 mut n = 0;
+    while (n < base.len) { out[n] = base[n]; n += 1; }
+    u64 mut i = 0;
+    while (i < tail.len) { out[n] = tail[i]; n += 1; i += 1; }
+    return n;
+}
+
+fn base_proved(ownership_heap_env.closure* c) void {
+    assert(ownership_heap_env.proved(c, "drop_list"));
+    assert(ownership_heap_env.proved(c, "push"));
+    assert(ownership_heap_env.proved(c, "clear"));
+    assert(ownership_heap_env.proved(c, "take"));
+    assert(ownership_heap_env.proved(c, "stash"));
+    assert(ownership_heap_env.proved(c, "pick"));
+}
+
+// A callee that writes caller storage hands its exit facts to the caller storage that each
+// argument designates (`spec/fir.md` 14 Calls).
+fn caller_storage() void {
+    println("caller storage takes the exit facts");
+    string[10] tail = {
+        "fn filled() void { holder mut h = holder{}; push(&h, new(node)); push(&h, new(node));",
+        "    clear(&h); }",
+        "fn half_cleared() void { holder mut h = holder{}; push(&h, new(node));",
+        "    h.second = new(node);",
+        "    node mut* own t = take(&h); drop_list(move(t)); }",
+        "fn taken_back() void { holder mut h = holder{}; push(&h, new(node));",
+        "    node mut* own t = take(&h); drop_list(move(t)); clear(&h); }",
+        "fn stashed() void { holder mut h = holder{}; stash(&h, new(node)); clear(&h); }",
+        "fn stash_twice() void { holder mut h = holder{}; stash(&h, new(node));",
+        "    stash(&h, new(node)); clear(&h); }",
+    };
+    string[30] mut text = {};
+    u64 n = with_list(tail[..], text[..]);
+    string[16] mut names = {};
+    string[5] more = {"filled", "half_cleared", "taken_back", "stashed", "stash_twice"};
+    u64 m = names_with(more[..], names[..]);
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[0..n], names[0..m]);
+    base_proved(&c);
+    assert(ownership_heap_env.proved(&c, "filled"));
+    assert(ownership_heap_env.proved(&c, "taken_back"));
+    assert(ownership_heap_env.proved(&c, "stashed"));
+    assert(ownership_heap_env.proved(&c, "stash_twice"));
+    // The second owner of the holder stays full when the holder ends.
+    assert(ownership_heap_env.failed(&c, "half_cleared"));
+    ownership_heap_env.event_row row = ownership_heap_env.first(&c, "half_cleared");
+    assert(row.kind == ownership_api.event_kind.lost_ownership);
+    assert(ownership_heap_env.text(&row) == "h.second");
+    // The summary of clear releases both caller owners and leaves them empty.
+    ownership_heap.summary* s = ownership_heap_env.summary(&c, "clear");
+    assert(s->interface.len == 2 && (s->post.released & 3) == 3);
+    assert(s->interface[0].needs_shape && s->interface[1].needs_shape);
+}
+
+// Each argument binds its own atom. Two arguments that designate one caller storage cannot
+// prove separate effects (D17.16).
+fn separate_instances() void {
+    println("separate instances stay apart");
+    string[12] tail = {
+        "fn pair_ok() i32 { node mut* own a = new(node); node mut* own b = new(node);",
+        "    node* va = a;",
+        "    node mut* own kept = pick(move(a), move(b)); i32 x = va->v; drop_list(move(kept));",
+        "    return x; }",
+        "fn pair_bad() i32 { node mut* own a = new(node); node mut* own b = new(node);",
+        "    node* vb = b;",
+        "    node mut* own kept = pick(move(a), move(b)); i32 x = vb->v; drop_list(move(kept));",
+        "    return x; }",
+        "fn both(holder mut* x, holder mut* y) void { clear(x); clear(y); }",
+        "fn same_twice() void { holder mut h = holder{}; both(&h, &h); }",
+        "fn two_holders() void { holder mut h = holder{}; holder mut k = holder{};",
+        "    push(&h, new(node)); push(&k, new(node)); both(&h, &k); }",
+    };
+    string[30] mut text = {};
+    u64 n = with_list(tail[..], text[..]);
+    string[16] mut names = {};
+    string[5] more = {"pair_ok", "pair_bad", "both", "same_twice", "two_holders"};
+    u64 m = names_with(more[..], names[..]);
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[0..n], names[0..m]);
+    base_proved(&c);
+    // The view of the kept argument stays live; the view of the released one does not.
+    assert(ownership_heap_env.proved(&c, "pair_ok"));
+    assert(ownership_heap_env.failed(&c, "pair_bad"));
+    ownership_heap_env.event_row bad = ownership_heap_env.first(&c, "pair_bad");
+    assert(bad.kind == ownership_api.event_kind.invalid_use && bad.line == 18);
+    assert(ownership_heap_env.proved(&c, "both"));
+    assert(ownership_heap_env.proved(&c, "two_holders"));
+    assert(ownership_heap_env.unproved(&c, "same_twice",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.first(&c, "same_twice").line == 21);
+}
+
+// A caller proves the shape that the callee needs: a fresh cell folds, an owned cycle and an
+// opaque owner do not (`spec/memory-model.md` 2.7).
+fn shape_requirements() void {
+    println("shape requirements bind at the call");
+    string[12] tail = {
+        "fn fresh_cells() void { node mut* own a = new(node); a->next = new(node);",
+        "    a->next->next = new(node); drop_list(move(a)); }",
+        "fn cyclic() void { node mut* own a = new(node); a->next = new(node);",
+        "    node mut* v = a->next;",
+        "    node mut* own w = new(node); w->next = move(a); v->next = move(w); }",
+        "struct wide { node mut* own mut@ own kids; }",
+        "fn kids_free(wide mut* own w) void { del(w->kids); del(w); }",
+        "fn kids_made() void { wide mut* own w = new(wide); w->kids = new(node mut* own, 2);",
+        "    kids_free(move(w)); }",
+        "fn owner_slot(node mut* own mut* slot) void { drop_list(move(*slot)); }",
+        "fn through_slot() void { node mut* own mut a = new(node); owner_slot(&a);",
+        "    owner_slot(&a); }",
+    };
+    string[30] mut text = {};
+    u64 n = with_list(tail[..], text[..]);
+    string[16] mut names = {};
+    string[6] more = {"fresh_cells", "cyclic", "kids_free", "kids_made", "owner_slot",
+        "through_slot"};
+    u64 m = names_with(more[..], names[..]);
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[0..n], names[0..m]);
+    assert(ownership_heap_env.proved(&c, "fresh_cells"));
+    // An owned cycle with no external owner is lost at the return.
+    assert(ownership_heap_env.failed(&c, "cyclic"));
+    // An owned collection of owners is an opaque atom: its release cannot prove empty leaves.
+    assert(ownership_heap_env.unproved(&c, "kids_free",
+        ownership_api.incomplete_reason.missing_graph));
+    ownership_heap.summary* kids = ownership_heap_env.summary(&c, "kids_free");
+    assert(kids->interface.len == 1 && kids->interface[0].kind == ownership_heap.atom_kind.opaque);
+    // A pointer to an owner designates caller storage with one owned leaf.
+    assert(ownership_heap_env.proved(&c, "owner_slot"));
+    assert(ownership_heap_env.proved(&c, "through_slot"));
+    ownership_heap.summary* slot_summary = ownership_heap_env.summary(&c, "owner_slot");
+    assert(slot_summary->callers.len == 1 && slot_summary->interface.len == 1);
+    assert(slot_summary->interface[0].key.base == ownership_heap.base_kind.caller);
+}
+
+// Recursion needs strict parts of the input and a covered return (`spec/fir.md` 14.1; the ratified
+// reading of the recursive solver): a call on the whole input or a call without a return publishes
+// no proof.
+fn recursion() void {
+    println("recursive calls need strict parts and a covered return");
+    string[19] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "fn same(node mut* own n) void { if (n == null) { return; } same(move(n)); }",
+        "fn whole(node mut* own n) void { if (n == null) { return; }",
+        "    node mut* own k = move(n->next); del(k); n->next = null; whole(move(n)); }",
+        "fn even(node mut* own n) void { if (n == null) { return; }",
+        "    node mut* own r = move(n->next); del(n); odd(move(r)); }",
+        "fn odd(node mut* own n) void { if (n == null) { return; }",
+        "    node mut* own r = move(n->next); del(n); even(move(r)); }",
+        "fn use_even() void { node mut* own a = new(node); a->next = new(node); even(move(a)); }",
+        "fn spin(node mut* own n) void { spin(move(n)); }",
+        "fn rebuild(node mut* own n) void { if (n == null) { return; }",
+        "    node mut* own r = move(n->next); del(n); node mut* own f = new(node);",
+        "    f->next = move(r); rebuild(move(f)); }",
+        "fn leaf_first(node mut* own n) void { if (n == null) { return; }",
+        "    leaf_first(move(n->next)); del(n); }",
+        "fn drop_list(node mut* own n) void { if (n == null) { return; } drop_list(move(n->next));",
+        "    del(n); }",
+        "fn flip(node mut* own n, bool again) void { if (again) { flip(move(n), false); return; }",
+        "    drop_list(move(n)); }",
+    };
+    string[10] names = {"same", "whole", "even", "odd", "use_even", "spin", "rebuild",
+        "leaf_first", "drop_list", "flip"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.unproved(&c, "same", ownership_api.incomplete_reason.unknown_effect));
+    assert(!ownership_heap_env.proved(&c, "whole"));
+    assert(ownership_heap_env.proved(&c, "even"));
+    assert(ownership_heap_env.proved(&c, "odd"));
+    assert(ownership_heap_env.rounds(&c, "even") == ownership_heap_env.rounds(&c, "odd"));
+    assert(ownership_heap_env.proved(&c, "use_even"));
+    assert(!ownership_heap_env.proved(&c, "spin"));
+    // A fresh node around the tail is no strict part of the input.
+    assert(!ownership_heap_env.proved(&c, "rebuild"));
+    assert(ownership_heap_env.saw(&c, "rebuild", ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility) >= 1);
+    assert(ownership_heap_env.proved(&c, "leaf_first"));
+    // `flip` passes its whole input to itself once. Its recursion ends, but the input is no
+    // strict part, so the recursive cleanup has no proof (memory model 2.7).
+    assert(ownership_heap_env.proved(&c, "drop_list"));
+    assert(!ownership_heap_env.proved(&c, "flip"));
+    assert(ownership_heap_env.first(&c, "flip").kind == ownership_api.event_kind.incomplete_proof);
+    assert(ownership_heap_env.first(&c, "flip").line == 18);
+    assert(ownership_heap_env.first(&c, "flip").reason ==
+        ownership_api.incomplete_reason.missing_graph);
+}
+
+// A call without a complete summary takes owned arguments and can change each storage that a
+// reference argument designates, each caller storage, and each exposed atom (D17.13, D17.18).
+fn unknown_effects() void {
+    println("unknown effects keep obligations unproved");
+    string[15] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "extern fn touch(node* n) void;",
+        "extern fn keep(node mut* own n) void;",
+        "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+        "    drop_list(move(n->next)); del(n); }",
+        "fn touched() void { node mut* own a = new(node); touch(a); drop_list(move(a)); }",
+        "fn kept() void { node mut* own a = new(node); keep(move(a)); }",
+        "fn scalar_only(i32 x) i32 { node mut* own a = new(node); i32 y = abs(x); del(a);",
+        "    return y; }",
+        "fn abs(i32 x) i32 { return x < 0 ? -x : x; }",
+        "fn bad_callee(node mut* own n) void { }",
+        "fn after_bad() void { node mut* own a = new(node); bad_callee(move(a)); }",
+        "fn by_value(node mut* own n) void { fnptr(move(n)); }",
+        "fn fnptr(node mut* own n) void { fn (node mut* own) void f = drop_list; f(move(n)); }",
+        "fn unused() void { }",
+    };
+    string[9] names = {"drop_list", "touched", "kept", "scalar_only", "abs", "bad_callee",
+        "after_bad", "by_value", "fnptr"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // The extern receives a view of the node, so its fields can change.
+    assert(ownership_heap_env.unproved(&c, "touched",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "kept", ownership_api.incomplete_reason.unknown_effect));
+    // A call with scalar arguments reaches no tracked obligation.
+    assert(ownership_heap_env.proved(&c, "scalar_only"));
+    // The callee reports its own loss. Its caller records no event at the call, but its own
+    // summary cannot use the callee's.
+    assert(ownership_heap_env.failed(&c, "bad_callee"));
+    assert(ownership_heap_env.events(&c, "after_bad") == 0);
+    assert(ownership_heap_env.summary(&c, "after_bad")->residual);
+    // A call of a function value is unknown to this module.
+    assert(ownership_heap_env.unproved(&c, "fnptr",
+        ownership_api.incomplete_reason.unknown_effect));
+}
+
+// A callee that reads storage that an argument designates needs that storage live at the call.
+// A callee that releases an interface atom cannot also read a view of that atom (D17.14, D17.15).
+fn views_at_call() void {
+    println("views at a call");
+    // The node owns no field, so each release here loses nothing (`spec/fir.md` 14.1).
+    string[25] text = {
+        "struct node { node* next; i32 v; }",
+        "fn read(node* n) i32 { return n->v; }",
+        "fn ignore(node* n) i32 { return 1; }",
+        "fn live_read() i32 { node mut* own a = new(node); i32 x = read(a); del(a); return x; }",
+        "fn stale_read() i32 { node mut* own a = new(node); node* v = a; del(a); return read(v); }",
+        "fn stale_pass() i32 { node mut* own a = new(node); node* v = a; del(a);",
+        "    return ignore(v); }",
+        "fn eat_and_read(node mut* own n, node* m) i32 { del(n); return m->v; }",
+        "fn self_view() i32 { node mut* own a = new(node); node* v = a;",
+        "    return eat_and_read(move(a), v); }",
+        "fn other_view() i32 { node mut* own a = new(node); node mut* own b = new(node);",
+        "    node* v = b;",
+        "    i32 r = eat_and_read(move(a), v); del(b); return r; }",
+        "fn identity(i32* p) i32* { return p; }",
+        "fn returned_view() i32 { i32 mut* own owner = new(i32); i32* view = identity(owner);",
+        "    del(owner); return *view; }",
+        "fn returned_live() i32 { i32 mut* own owner = new(i32); i32* view = identity(owner);",
+        "    i32 x = *view; del(owner); return x; }",
+        "fn keep(u8@ s) u8@ { return s[1..2]; }",
+        "fn returned_span() u8 { u8 mut@ own b = new(u8, 2); u8@ v = keep(b); del(b);",
+        "    return v[0]; }",
+        "fn text() string { return \"fixed\"; }",
+        "fn static_text() u64 { string t = text(); return t.len; }",
+        "fn returned_local() i32 { i32 x = 1; i32* p = identity(&x); return *p; }",
+        "fn returned_escape() i32* { i32 x = 1; return identity(&x); }",
+    };
+    string[19] names = {"read", "ignore", "live_read", "stale_read", "stale_pass", "eat_and_read",
+        "self_view", "other_view", "identity", "returned_view", "returned_live", "keep",
+        "returned_span", "text", "static_text", "returned_local", "returned_escape", "read",
+        "read"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[0..17]);
+    assert(ownership_heap_env.proved(&c, "read"));
+    assert((ownership_heap_env.summary(&c, "read")->view_reads & 2) == 2);
+    assert(ownership_heap_env.summary(&c, "ignore")->view_reads == 0);
+    assert(ownership_heap_env.proved(&c, "live_read"));
+    assert(ownership_heap_env.failed(&c, "stale_read"));
+    assert(ownership_heap_env.first(&c, "stale_read").kind == ownership_api.event_kind.invalid_use);
+    // Passing a dangling view to a callee that never reads it is no use (D17.14).
+    assert(ownership_heap_env.proved(&c, "stale_pass"));
+    assert(ownership_heap_env.proved(&c, "eat_and_read"));
+    assert(!ownership_heap_env.proved(&c, "self_view"));
+    assert(ownership_heap_env.proved(&c, "other_view"));
+    // A returned view of a parameter designates the caller's argument, not storage that stays
+    // live: its release invalidates the view (D17.14).
+    assert(ownership_heap_env.proved(&c, "identity"));
+    assert(ownership_heap_env.failed(&c, "returned_view"));
+    assert(is_invalid(ownership_heap_env.first(&c, "returned_view")));
+    assert(ownership_heap_env.proved(&c, "returned_live"));
+    assert(ownership_heap_env.failed(&c, "returned_span"));
+    assert(is_invalid(ownership_heap_env.first(&c, "returned_span")));
+    // A string constant is static storage on each side of the call.
+    assert(ownership_heap_env.proved(&c, "static_text"));
+    // An address of a local returns through the call as that address.
+    assert(ownership_heap_env.proved(&c, "returned_local"));
+    assert(ownership_heap_env.failed(&c, "returned_escape"));
+}
+
+fn is_invalid(ownership_heap_env.event_row row) bool {
+    return row.kind == ownership_api.event_kind.invalid_use &&
+        row.evidence == ownership_api.evidence_kind.unconditional;
+}
+
+// Aggregates carry their owned leaves through by-value parameters and results; a pointer to an
+// owner designates caller storage (`spec/fir.md` 14 Calls).
+fn aggregates() void {
+    println("aggregates and pointers to owners");
+    string[12] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct pair { node mut* own a; node mut* own b; }",
+        "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+        "    drop_list(move(n->next)); del(n); }",
+        "fn make_pair() pair { return pair{new(node), new(node)}; }",
+        "fn drop_pair(pair p) void { drop_list(move(p.a)); drop_list(move(p.b)); }",
+        "fn half_pair(pair p) void { drop_list(move(p.a)); }",
+        "fn round_trip() void { pair p = make_pair(); drop_pair(move(p)); }",
+        "fn swap(node mut* own mut* x, node mut* own mut* y) void { node mut* own t = move(*x);",
+        "    *x = move(*y); *y = move(t); }",
+        "fn swapped() void { node mut* own mut a = new(node); node mut* own mut b = null;",
+        "    swap(&a, &b); drop_list(move(b)); }",
+    };
+    string[7] names = {"drop_list", "make_pair", "drop_pair", "half_pair", "round_trip", "swap",
+        "swapped"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "make_pair"));
+    assert(ownership_heap_env.proved(&c, "drop_pair"));
+    assert(ownership_heap_env.failed(&c, "half_pair"));
+    assert(ownership_heap_env.first_text(&c, "half_pair") == "p.b");
+    assert(ownership_heap_env.proved(&c, "round_trip"));
+    assert(ownership_heap_env.proved(&c, "swap"));
+    assert(ownership_heap_env.proved(&c, "swapped"));
+}
+
+fn main() i32 {
+    caller_storage();
+    separate_instances();
+    shape_requirements();
+    recursion();
+    unknown_effects();
+    views_at_call();
+    aggregates();
+    println("heap calls ok");
+    return 0;
+}

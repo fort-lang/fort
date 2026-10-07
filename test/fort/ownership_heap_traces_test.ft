@@ -1,0 +1,495 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| H01 empty chain
+//| H02 one node
+//| H03 partial traversal
+//| H04 branching tree
+//| H05 owned cycle
+//| H06 borrowed cycle
+//| H07 two live allocations at one site
+//| H08 transferred child
+//| H09 leaked child
+//| H10 view after pool release
+//| boundaries of single operations
+//| heap traces ok
+/// Checks the ten finite traces of `spec/memory-model.md` 2.7 against the heap proof
+/// (D17.16). Each trace states the required result; each test compiles programs that follow it.
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+
+string[12] CHAIN = {
+    "struct heap_node { heap_node mut* own next; u8 mut@ own bytes; }",
+    "fn drop_chain(heap_node mut* own mut current) void {",
+    "    while (current != null) {",
+    "        heap_node mut* own next = move(current->next);",
+    "        del(current->bytes);",
+    "        del(current);",
+    "        current = move(next);",
+    "    }",
+    "}",
+    "fn build(u64 n) heap_node mut* own { heap_node mut* own mut head = null; u64 mut i = 0;",
+    "    while (i < n) { heap_node mut* own f = new(heap_node); f->next = move(head);",
+    "        head = move(f); i += 1; } return head; }",
+};
+
+fn joined(string@ tail, string mut@ out) u64 {
+    u64 mut n = 0;
+    while (n < CHAIN.len) { out[n] = CHAIN[n]; n += 1; }
+    u64 mut i = 0;
+    while (i < tail.len) { out[n] = tail[i]; n += 1; i += 1; }
+    return n;
+}
+
+fn is(ownership_heap_env.event_row row, ownership_api.event_kind kind,
+    ownership_api.evidence_kind evidence) bool {
+    return row.kind == kind && row.evidence == evidence;
+}
+
+// H01: an empty root takes the zero-iteration path and needs no release, twice.
+fn h01() void {
+    println("H01 empty chain");
+    string[3] tail = {
+        "fn empty_root() void { heap_node mut* own root = null; drop_chain(move(root));",
+        "    drop_chain(move(root)); }",
+        "fn null_del() void { heap_node mut* own root = null; del(root); del(root); }",
+    };
+    string[16] mut text = {};
+    u64 n = joined(tail[..], text[..]);
+    string[4] names = {"drop_chain", "build", "empty_root", "null_del"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[0..n], names[..]);
+    assert(ownership_heap_env.proved(&c, "empty_root"));
+    assert(ownership_heap_env.proved(&c, "null_del"));
+    assert(ownership_heap_env.events(&c, "empty_root") == 0);
+}
+
+// H02: one node with an empty successor and payload; with a payload deleted first; with a
+// payload moved to a surviving output owner; and with a payload that the release loses.
+fn h02() void {
+    println("H02 one node");
+    string[13] tail = {
+        "fn empty_node() void { heap_node mut* own a = new(heap_node);",
+        "    heap_node mut* own s = move(a->next); del(a->bytes); del(a); del(s); }",
+        "fn payload_first() void { heap_node mut* own a = new(heap_node);",
+        "    a->bytes = new(u8, 3); del(a->bytes); del(a); }",
+        "fn payload_out(u8 mut@ own mut* out) void { heap_node mut* own a = new(heap_node);",
+        "    a->bytes = new(u8, 3); u8@ v = a->bytes; del(*out); *out = move(a->bytes); del(a);",
+        "    u8 x = v[0]; }",
+        "fn payload_lost() void { heap_node mut* own a = new(heap_node);",
+        "    a->bytes = new(u8, 3); del(a); }",
+        "fn zero_payload() void { heap_node mut* own a = new(heap_node);",
+        "    a->bytes = new(u8, 0); del(a->bytes); del(a); }",
+        "fn zero_lost() void { heap_node mut* own a = new(heap_node); a->bytes = new(u8, 0);",
+        "    del(a); }",
+    };
+    string[30] mut text = {};
+    u64 n = joined(tail[..], text[..]);
+    string[7] names = {"drop_chain", "empty_node", "payload_first", "payload_out",
+        "payload_lost", "zero_payload", "zero_lost"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[0..n], names[..]);
+    assert(ownership_heap_env.proved(&c, "empty_node"));
+    assert(ownership_heap_env.proved(&c, "payload_first"));
+    // The payload stays live at the output owner, so the view after `del(a)` reads it.
+    assert(ownership_heap_env.proved(&c, "payload_out"));
+    ownership_heap.summary* out = ownership_heap_env.summary(&c, "payload_out");
+    assert(out->interface.len == 1 && out->interface[0].kind == ownership_heap.atom_kind.flat);
+    assert(ownership_heap_env.failed(&c, "payload_lost"));
+    ownership_heap_env.event_row lost = ownership_heap_env.first(&c, "payload_lost");
+    assert(is(lost, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+    assert(ownership_heap_env.text(&lost) == "a->bytes");
+    // A zero-element allocation keeps its obligation (D17.17).
+    assert(ownership_heap_env.proved(&c, "zero_payload"));
+    assert(ownership_heap_env.failed(&c, "zero_lost"));
+}
+
+// H03: a partial traversal keeps its remaining chain. One node release cannot clear `many`.
+fn h03() void {
+    println("H03 partial traversal");
+    string[10] tail = {
+        "fn drop_head(heap_node mut* own n) heap_node mut* own { if (n == null) { return n; }",
+        "    heap_node mut* own rest = move(n->next); del(n->bytes); del(n); return rest; }",
+        "fn rest_kept(u64 k) void { heap_node mut* own rest = drop_head(build(k));",
+        "    drop_chain(move(rest)); }",
+        "fn rest_lost(u64 k) void { heap_node mut* own rest = drop_head(build(k)); }",
+        "fn stop_early(heap_node mut* own mut current) void {",
+        "    while (current != null) { heap_node mut* own next = move(current->next);",
+        "        del(current->bytes); del(current); current = move(next); break; }",
+        "    drop_chain(move(current)); }",
+        "fn early_lost(heap_node mut* own mut current) void { while (current != null) { break; } }",
+    };
+    string[30] mut text = {};
+    u64 n = joined(tail[..], text[..]);
+    string[7] names = {"drop_chain", "build", "drop_head", "rest_kept", "rest_lost", "stop_early",
+        "early_lost"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[0..n], names[..]);
+    assert(ownership_heap_env.proved(&c, "drop_head"));
+    assert(ownership_heap_env.proved(&c, "rest_kept"));
+    assert(ownership_heap_env.unproved(&c, "rest_lost",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.proved(&c, "stop_early"));
+    // A break out of the loop leaves the input chain at a storage end: a free input choice
+    // validates the loss of a nonnull remainder.
+    assert(ownership_heap_env.failed(&c, "early_lost"));
+    assert(ownership_heap_env.saw(&c, "early_lost", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.validated_path) == 1);
+    // The result of drop_head keeps a member of the input: the fate of the input is mixed.
+    ownership_heap.summary* head = ownership_heap_env.summary(&c, "drop_head");
+    assert((head->post.released & 1) == 1);
+    u64 kept = cast(head->post.slots[0].v.atom, u64);
+    assert((head->post.atoms[kept].origin & 1) == 1);
+}
+
+// H04: each disjoint subtree takes its own recursive cleanup; the empty parent goes last.
+// Children that an unknown effect sets give no separation, so their cleanup stays unproved.
+fn h04() void {
+    println("H04 branching tree");
+    string[12] text = {
+        "struct tnode { tnode mut* own left; tnode mut* own right; }",
+        "fn drop_tree(tnode mut* own t) void { if (t == null) { return; }",
+        "    drop_tree(move(t->left)); drop_tree(move(t->right)); del(t); }",
+        "fn parent_first(tnode mut* own t) void { if (t == null) { return; }",
+        "    tnode mut* own l = move(t->left); tnode mut* own r = move(t->right); del(t);",
+        "    parent_first(move(l)); parent_first(move(r)); }",
+        "extern fn fill(tnode mut* t) void;",
+        "fn unknown_kids() void { tnode mut* own t = new(tnode); fill(t); drop_tree(move(t)); }",
+        "fn three() void { tnode mut* own t = new(tnode); t->left = new(tnode);",
+        "    t->right = new(tnode); t->right->left = new(tnode); drop_tree(move(t)); }",
+        "fn one_side() void { tnode mut* own t = new(tnode); t->left = new(tnode);",
+        "    tnode mut* own l = move(t->left); drop_tree(move(t)); }",
+    };
+    string[5] names = {"drop_tree", "parent_first", "unknown_kids", "three", "one_side"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "drop_tree"));
+    assert(ownership_heap_env.proved(&c, "parent_first"));
+    assert(ownership_heap_env.rounds(&c, "parent_first") == 3);
+    assert(ownership_heap_env.proved(&c, "three"));
+    assert(ownership_heap_env.unproved(&c, "unknown_kids",
+        ownership_api.incomplete_reason.unknown_effect));
+    // The moved left child keeps its obligation after the parent cleanup.
+    assert(ownership_heap_env.failed(&c, "one_side"));
+    assert(ownership_heap_env.first_text(&c, "one_side") == "l");
+}
+
+// H05: an uncut owned cycle keeps its obligation; a proved cut permits release; a later use of
+// the view that made the cycle is invalid.
+fn h05() void {
+    println("H05 owned cycle");
+    string[11] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "fn uncut() void { node mut* own a = new(node); node mut* view = a;",
+        "    view->next = move(a); }",
+        "fn release_through_cycle() void { node mut* own a = new(node); node mut* view = a;",
+        "    view->next = move(a); del(view->next); }",
+        "fn proved_cut() i32 { node mut* own a = new(node); node mut* view = a;",
+        "    view->next = move(a); node mut* own out = move(view->next); i32 x = view->v;",
+        "    del(out); return x; }",
+        "fn late_use() i32 { node mut* own a = new(node); node mut* view = a;",
+        "    view->next = move(a); node mut* own out = move(view->next); del(out);",
+        "    return view->v; }",
+    };
+    string[4] names = {"uncut", "release_through_cycle", "proved_cut", "late_use"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.failed(&c, "uncut"));
+    assert(is(ownership_heap_env.first(&c, "uncut"), ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+    // `del(view->next)` cannot release A while A holds that live owned leaf.
+    assert(ownership_heap_env.failed(&c, "release_through_cycle"));
+    assert(ownership_heap_env.first(&c, "release_through_cycle").kind ==
+        ownership_api.event_kind.lost_ownership);
+    assert(ownership_heap_env.proved(&c, "proved_cut"));
+    assert(ownership_heap_env.failed(&c, "late_use"));
+    ownership_heap_env.event_row late = ownership_heap_env.first(&c, "late_use");
+    assert(is(late, ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    assert(late.line == 11);
+}
+
+// H06: two owners with borrowed back edges keep two obligations. A read through a back edge
+// to a released source is invalid; deleting without that read is not.
+fn h06() void {
+    println("H06 borrowed cycle");
+    string[9] text = {
+        "struct cyc { cyc mut* own next; cyc* back; i32 v; }",
+        "fn both() void { cyc mut* own a = new(cyc); cyc mut* own b = new(cyc);",
+        "    a->back = b; b->back = a; del(a); del(b); }",
+        "fn read_back() i32 { cyc mut* own a = new(cyc); cyc mut* own b = new(cyc);",
+        "    a->back = b; b->back = a; del(a); i32 x = b->back->v; del(b); return x; }",
+        "fn keep_one() void { cyc mut* own a = new(cyc); cyc mut* own b = new(cyc);",
+        "    a->back = b; b->back = a; del(a); }",
+        "fn through_owned() void { cyc mut* own a = new(cyc); a->next = new(cyc);",
+        "    a->next->back = a; del(a->next); del(a); }",
+    };
+    string[4] names = {"both", "read_back", "keep_one", "through_owned"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "both"));
+    assert(ownership_heap_env.proved(&c, "through_owned"));
+    assert(ownership_heap_env.failed(&c, "read_back"));
+    assert(is(ownership_heap_env.first(&c, "read_back"), ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    assert(ownership_heap_env.failed(&c, "keep_one"));
+    assert(ownership_heap_env.first_text(&c, "keep_one") == "b");
+}
+
+// H07: the second allocation of one expression survives the release of the first, and a
+// third allocation does not repair a view of the first.
+fn h07() void {
+    println("H07 two live allocations at one site");
+    string[8] text = {
+        "fn make() i32 mut* own { return new(i32); }",
+        "fn keeps_b() i32 { i32 mut* own a = make(); i32 mut* own b = make(); i32* vb = b;",
+        "    del(a); i32 x = *vb; del(b); return x; }",
+        "fn revive() i32 { i32 mut* own a = make(); i32* va = a; del(a);",
+        "    i32 mut* own c = make(); i32 x = *va; del(c); return x; }",
+        "fn loop_site(u64 n) void { u64 mut i = 0; i32 mut* own mut keep = null;",
+        "    while (i < n) { i32 mut* own p = make(); del(keep); keep = move(p); i += 1; }",
+        "    del(keep); }",
+    };
+    string[4] names = {"make", "keeps_b", "revive", "loop_site"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "keeps_b"));
+    assert(ownership_heap_env.failed(&c, "revive"));
+    assert(is(ownership_heap_env.first(&c, "revive"), ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    assert(ownership_heap_env.proved(&c, "loop_site"));
+}
+
+// H08: the released parent and the transferred child form separate parts of the partition.
+fn h08() void {
+    println("H08 transferred child");
+    string[11] text = {
+        "struct item { item mut* own child; u8 mut@ own bytes; }",
+        "fn moved() u8 { item mut* own parent = new(item); parent->child = new(item);",
+        "    parent->child->bytes = new(u8, 4); u8@ view = parent->child->bytes;",
+        "    item mut* own out = move(parent->child); del(parent); u8 x = view[0];",
+        "    del(out->bytes); del(out); return x; }",
+        "fn released_first() u8 { item mut* own parent = new(item); parent->child = new(item);",
+        "    parent->child->bytes = new(u8, 4); u8@ view = parent->child->bytes;",
+        "    item mut* own out = move(parent->child); del(parent); del(out->bytes); del(out);",
+        "    return view[0]; }",
+        "fn out_lost() void { item mut* own p = new(item); p->child = new(item);",
+        "    item mut* own out = move(p->child); del(p); }",
+    };
+    string[3] names = {"moved", "released_first", "out_lost"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "moved"));
+    assert(ownership_heap_env.failed(&c, "released_first"));
+    ownership_heap_env.event_row late = ownership_heap_env.first(&c, "released_first");
+    assert(is(late, ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    assert(late.line == 9 && ownership_heap_env.text(&late) == "view");
+    assert(ownership_heap_env.failed(&c, "out_lost"));
+    assert(ownership_heap_env.first_text(&c, "out_lost") == "out");
+}
+
+// H09: a release with a live owned leaf supplies no discharge of that leaf.
+fn h09() void {
+    println("H09 leaked child");
+    string[11] text = {
+        "struct node { i32 mut* own child; }",
+        "fn demo() void { node mut* own parent = new(node);",
+        "    parent->child = new(i32); del(parent); }",
+        "fn moved_out() void { node mut* own parent = new(node); parent->child = new(i32);",
+        "    i32 mut* own b = move(parent->child); del(parent); del(b); }",
+        "fn moved_lost() void { node mut* own parent = new(node); parent->child = new(i32);",
+        "    i32 mut* own b = move(parent->child); del(parent); }",
+        "fn param_child(node mut* own parent) void { del(parent); }",
+        "fn full_child() void { node mut* own p = new(node); p->child = new(i32);",
+        "    param_child(move(p)); }",
+        "fn empty_child() void { node mut* own p = new(node); param_child(move(p)); }",
+    };
+    string[6] names = {"demo", "moved_out", "moved_lost", "param_child", "full_child",
+        "empty_child"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.failed(&c, "demo"));
+    ownership_heap_env.event_row row = ownership_heap_env.first(&c, "demo");
+    assert(is(row, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+    // The approved diagnostic of ex13 names this line, column, and owner.
+    assert(row.line == 3 && row.col == 31 && ownership_heap_env.text(&row) == "parent->child");
+    assert(ownership_heap_env.events(&c, "demo") == 1);
+    assert(ownership_heap_env.proved(&c, "moved_out"));
+    assert(ownership_heap_env.failed(&c, "moved_lost"));
+    // A parameter's child is a free input choice, so its release loses that child on a validated
+    // path. A caller requirement cannot repair this error of the body (`spec/fir.md` 14.1).
+    assert(ownership_heap_env.failed(&c, "param_child"));
+    ownership_heap_env.event_row lost = ownership_heap_env.first(&c, "param_child");
+    assert(is(lost, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.validated_path));
+    assert(ownership_heap_env.text(&lost) == "parent->child");
+    ownership_heap.summary* s = ownership_heap_env.summary(&c, "param_child");
+    assert(s->interface[0].require_fields == 0 && !s->interface[0].require_null);
+    // The callee reported its own error, so each caller keeps the call unknown and adds none.
+    assert(!ownership_heap_env.proved(&c, "full_child"));
+    assert(ownership_heap_env.summary(&c, "full_child")->residual);
+    assert(ownership_heap_env.events(&c, "full_child") == 0);
+    assert(!ownership_heap_env.proved(&c, "empty_child"));
+    assert(ownership_heap_env.events(&c, "empty_child") == 0);
+}
+
+// H10: pool growth keeps a payload view; pool cleanup invalidates it; deleting only the blocks
+// cannot prove the payload cleanup.
+fn h10() void {
+    println("H10 view after pool release");
+    string[27] text = {
+        "struct block { u8 mut@ own bytes; block mut* own next; }",
+        "fn add(block mut* own mut* head) void { block mut* own b = new(block);",
+        "    b->bytes = new(u8, 8); b->next = move(*head); *head = move(b); }",
+        "fn cleanup(block mut* own mut* head) void { block mut* own mut b = move(*head);",
+        "    while (b != null) { block mut* own next = move(b->next); del(b->bytes); del(b);",
+        "        b = move(next); } }",
+        "fn blocks_only(block mut* own mut* head) void { block mut* own mut b = move(*head);",
+        "    while (b != null) { block mut* own next = move(b->next); del(b);",
+        "        b = move(next); } }",
+        "fn grown() u8 { block mut* own mut head = null; add(&head); u8@ v = head->bytes;",
+        "    add(&head); u8 x = v[0]; cleanup(&head); return x; }",
+        "fn stale() u8 { block mut* own mut head = null; add(&head); u8@ v = head->bytes;",
+        "    add(&head); cleanup(&head); return v[0]; }",
+        "fn four() void { block mut* own mut head = null; add(&head); add(&head);",
+        "    cleanup(&head); }",
+        "fn half(block mut* own mut* head) void { block mut* own mut b = move(*head);",
+        "    while (b != null) { block mut* own next = move(b->next); del(b->bytes); del(b);",
+        "        b = move(next); } *head = move(b); }",
+        "fn kept_head(block mut* own mut* head) void { if (*head == null) { return; }",
+        "    block mut* own mut rest = move((*head)->next); cleanup(&rest); }",
+        "fn kept_view() u8 { block mut* own mut head = null; add(&head); add(&head);",
+        "    u8@ v = head->next->bytes; u8@ w = head->bytes; kept_head(&head); u8 x = w[0];",
+        "    cleanup(&head); return x; }",
+        "fn rest_view() u8 { block mut* own mut head = null; add(&head); add(&head);",
+        "    u8@ v = head->next->bytes; kept_head(&head); u8 x = v[0];",
+        "    cleanup(&head); return x; }",
+        "fn unused() void { }",
+    };
+    string[10] names = {"add", "cleanup", "blocks_only", "grown", "stale", "four", "half",
+        "kept_head", "kept_view", "rest_view"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "add"));
+    assert(ownership_heap_env.proved(&c, "cleanup"));
+    assert(ownership_heap_env.proved(&c, "grown"));
+    assert(ownership_heap_env.proved(&c, "four"));
+    assert(ownership_heap_env.proved(&c, "half"));
+    assert(ownership_heap_env.failed(&c, "stale"));
+    assert(is(ownership_heap_env.first(&c, "stale"), ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    // Counting only block allocations gives no proof of pool cleanup.
+    assert(ownership_heap_env.failed(&c, "blocks_only"));
+    assert(ownership_heap_env.first_text(&c, "blocks_only") == "b->bytes");
+    // kept_head keeps the head block and releases the rest: the head payload view stays
+    // proved only through the kept cell, and a view into the released rest cannot pass.
+    assert(ownership_heap_env.proved(&c, "kept_head"));
+    assert(!ownership_heap_env.proved(&c, "rest_view"));
+}
+
+// The operations that each trace uses, at their boundaries: a store over a live owner
+// (D17.11), a dereference of an empty owner, a returned view of released storage, and a
+// returned address of local storage (D17.14).
+fn operations() void {
+    println("boundaries of single operations");
+    string[22] text = {
+        "struct node { node mut* own next; i32 mut* own child; i32 v; }",
+        "fn overwrite() void { node mut* own a = new(node); a->child = new(i32);",
+        "    a->child = new(i32); del(a->child); del(a); }",
+        "fn overwrite_empty() void { node mut* own a = new(node); a->child = new(i32);",
+        "    del(a->child); a->child = new(i32); del(a->child); del(a); }",
+        "fn empty_deref() i32 { node mut* own a = new(node); node mut* own b = move(a);",
+        "    i32 x = a->v; del(b); return x; }",
+        "fn dangling() node* { node mut* own a = new(node); node* v = a; del(a); return v; }",
+        "fn local_address() i32* { i32 x = 1; return &x; }",
+        "fn kept_view(node* p) node* { return p; }",
+        "fn require_out(node mut* own mut* out) void { *out = new(node); }",
+        "fn fill_out() void { node mut* own mut a = null; require_out(&a); del(a); }",
+        "fn full_out() void { node mut* own mut a = new(node); require_out(&a); del(a); }",
+        "fn scoped() void {",
+        "    { node mut* own a = new(node); }",
+        "    node mut* own b = new(node); del(b);",
+        "}",
+        "fn stale_local() i32 { i32* mut p = null; { i32 x = 1; p = &x; } return *p; }",
+        "fn maybe_leak(bool c) void { node mut* own mut a = null; if (c) { a = new(node); } }",
+        "fn maybe_free(bool c) void { node mut* own a = new(node); if (c) { del(a); } }",
+        "fn both_free(bool c) void { node mut* own a = new(node);",
+        "    if (c) { del(a); } else { del(a); } }",
+    };
+    string[14] names = {"overwrite", "overwrite_empty", "empty_deref", "dangling",
+        "local_address", "kept_view", "require_out", "fill_out", "full_out", "scoped",
+        "stale_local", "maybe_leak", "maybe_free", "both_free"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.failed(&c, "overwrite"));
+    ownership_heap_env.event_row row = ownership_heap_env.first(&c, "overwrite");
+    assert(is(row, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+    assert(row.line == 3 && ownership_heap_env.text(&row) == "a->child");
+    assert(ownership_heap_env.proved(&c, "overwrite_empty"));
+    assert(ownership_heap_env.failed(&c, "empty_deref"));
+    assert(is(ownership_heap_env.first(&c, "empty_deref"), ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    assert(ownership_heap_env.failed(&c, "dangling"));
+    assert(is(ownership_heap_env.first(&c, "dangling"), ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    assert(ownership_heap_env.failed(&c, "local_address"));
+    assert(ownership_heap_env.proved(&c, "kept_view"));
+    // An output owner that the callee overwrites must be empty at the call (`spec/fir.md` 14
+    // Calls).
+    assert(ownership_heap_env.proved(&c, "require_out"));
+    assert(ownership_heap_env.summary(&c, "require_out")->interface[0].require_null);
+    assert(ownership_heap_env.proved(&c, "fill_out"));
+    assert(ownership_heap_env.failed(&c, "full_out"));
+    assert(is(ownership_heap_env.first(&c, "full_out"), ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.unconditional));
+    // The dead marker of an inner scope ends its owner there, before the return (D17.14).
+    assert(ownership_heap_env.failed(&c, "scoped"));
+    ownership_heap_env.event_row inner = ownership_heap_env.first(&c, "scoped");
+    assert(is(inner, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+    assert(inner.line == 15 && ownership_heap_env.text(&inner) == "a");
+    assert(ownership_heap_env.events(&c, "scoped") == 1);
+    // An address of a local after its scope ends designates no live storage.
+    assert(ownership_heap_env.failed(&c, "stale_local"));
+    assert(is(ownership_heap_env.first(&c, "stale_local"), ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional));
+    // A join keeps the obligation that one path holds; the untracked branch gives no witness.
+    assert(ownership_heap_env.unproved(&c, "maybe_leak",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.first_text(&c, "maybe_leak") == "a");
+    assert(ownership_heap_env.unproved(&c, "maybe_free",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.proved(&c, "both_free"));
+}
+
+fn main() i32 {
+    h01();
+    h02();
+    h03();
+    h04();
+    h05();
+    h06();
+    h07();
+    h08();
+    h09();
+    h10();
+    operations();
+    println("heap traces ok");
+    return 0;
+}

@@ -810,9 +810,93 @@ came here.
   A transferred child keeps its identity and obligation outside the old container's cleanup region.
   Retained pool views preserve their payload sources through pool growth and lose validity at
   payload release. A refilled pool cannot revive an earlier view.
-  These are analysis invariants. The current compiler does not implement this complete heap proof.
-  The ten H01-H10 specification traces have read evidence, not compiler-probe evidence.
-  T-286 implements the heap analysis. Keep `del` shallow and add no runtime identity data.
+  `src/fort/ownership_heap.ft` implements this proof over verified FIR. The driver does not
+  select it yet. Its tests lower fort source and solve the closure through the call graph.
+  A state maps slots (the reference leaves of locals, of caller storage, and of heap cells) to
+  values, and keeps atoms: a cell, a region of a template, a flat allocation, or an opaque one.
+  A template is a struct whose owned fields are its own pointer type or flat references.
+  An owned span of owners, a nested owning struct, and a type-erased owner are opaque, so their
+  cleanup is incomplete proof (`missing_graph`).
+  A dereference of a region root unfolds it; a null dereference is undefined behavior outside
+  the proof, so the unfold assumes a nonnull root. A join folds a cell into a region of its
+  template. After four joins at a block, each later join folds each cell or makes it opaque, so
+  loops converge.
+  A stable loop head is the inductive invariant: `ownership_heap_test.ft` holds nine case
+  groups, and no group unrolls a fixed depth. Recursion starts at bottom; a member call needs a
+  strict part of the input and a covered return.
+  A root nullness is null, nonnull, free (an input choice), or joined. A definite violation on a
+  witnessed path is unconditional, a free choice gives a validated path, and anything else is
+  incomplete proof. A branch whose paths all reach one block with no call and no cycle restores
+  the witness there (post-dominators over a virtual exit after each return and abort). The
+  branch gives the witness that it holds at its terminator, after the calls of its own block:
+  a call before the branch that can fail to return clears it (`after_spin`).
+  `del` frees and then zeroes its place (`spec/toolchain.md` 6 item 17), so the release sees the
+  place full: `del(view->next)` of an owned self-cycle loses a live leaf (H05).
+  A summary keeps the exit state of the result and of caller storage. An owner whose entry value
+  is a free choice and that a store would lose becomes a caller requirement: the caller supplies
+  it empty (`spec/fir.md` 14 "empty output owners"). So `push` with `n->next = move(l->head)`
+  proves with a requirement, and its callers prove it. A release that loses a live owned field
+  stays an error of the body, because an inferred caller requirement cannot repair an intrinsic
+  callee error (`spec/fir.md` 14.1): `del(n)` of a parameter node with an owned field fails.
+  A failed requirement reports the owner, marks it lost, and applies the call: the callee
+  stores over the owner and returns, so a later independent error keeps its own event.
+  The entry record of an interface atom describes the entry value on each path or on none. A
+  join keeps a record that one side split as a split record, so a loop that drains caller
+  storage gives no null root and its callers go on after the call (`drained_storage`).
+  A region keeps `empty_leaves` when its fold found no owned child, so the node that `pop`
+  returns owns nothing and `while (l->head != null) { del(pop(l)); }` proves (`pops`).
+  A callee view of a parameter is, in the caller, a view of the argument: its sources or its
+  address. An earlier build kept it live and accepted a read after the argument's release.
+  At a call, the storage that the callee reads through an argument (a view, an address, or a
+  reference leaf of a by-value aggregate) and the caller storage of a heap cell must lie
+  outside the bound interface atoms that the callee releases or owns. An owned edge from such
+  an atom to that storage gives incomplete proof (`ownership_heap_aliases_test.ft`). The
+  summary does not order a read and a release, so a read before the release is unproved too.
+  Reads through parameter 64 or later share one bit (`reads_high`).
+  An unknown reference value is external (an input of the caller, or a field of a region whose
+  fold found only external references), the work of an unknown effect (`exact`), or a
+  reference whose facts the body lost, for example in a join of a local address with a view.
+  The entry value of a caller slot names that slot (`target`), so a caller of the body reads
+  its own value of the slot from before the call (`keep_dangling`); any other external value
+  of a callee is a lost reference in its caller. A callee that reads through an unknown
+  argument gives incomplete proof, as a read in the body does. A lost reference in the result
+  or in caller storage at a return gives incomplete proof. An effect reference needs no second
+  event when its call recorded one; a call that records none makes its effect references lost.
+  A borrowed field without a slot (a field of a region, flat, or opaque atom) keeps its
+  references in two facts of the atom: `borrows` (a reference of the body, a view of a heap
+  atom included) and `params` (a reference of the body's inputs). The facts are sound by
+  construction: `new_atom` sets both, and only an operation that proves the stored references
+  sets them from that proof. An allocation clears them (zero storage); a fold, a cover, a flat
+  conversion, and a graft read each slot that they drop (`member_refs`); an unfold copies them
+  to the children; a join and an absorb take the union. A store through a view of a member
+  marks the atoms of the view; a store into storage without a slot or fact gives incomplete
+  proof; a store into a fixed array of references joins into its one slot. An unknown effect
+  marks each atom that it reaches. At a call, `params` of the callee becomes `borrows` in the
+  caller when a reference of the caller reaches the arguments: an argument, an owned argument
+  whose members keep one, or caller storage that keeps one (`arguments_reach_body`). A
+  caller-visible atom with `borrows` at a return gives incomplete proof (`loop_ret`). An
+  unfold makes the root's fields external when the region had no `borrows` (`names_walk`).
+  D counts the deepest slot path, R the atoms, P the refined roots, and H the edges and
+  templates of one state, after each statement, edge, and join. A refused R or H request makes
+  each shape opaque, a refused P request joins each refined root, and later events keep the
+  lost fact. W pays each statement, scanned slot, and atom.
+  Each incomplete result records an event. A precision stop in a round that records no event
+  records one at the stop; a refused computation, a round bound, and a withdrawn member each
+  record one for each member. A recursive member without a proof withdraws the proof of each
+  other member, because their summaries rest on each other.
+  A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
+  lost owner of unknown status becomes escaped, so a read through its views stays unproved.
+  `tools/mutations/ownership_heap.json` holds 69 rows of the core rules.
+  Precision limits (measured in the heap tests): a mixed callee fate (some members released,
+  some kept) makes each member view of the caller atom unproved (`rest_view`, H10); a loop on an
+  untracked scalar clears the witness, so a leak in its body is incomplete proof (`loop_leak`,
+  G7); a view of a heap atom in a borrowed field of a returned region is incomplete proof, so
+  a doubly linked list that a loop builds and returns (`dlist`) and a tree whose nodes keep a
+  parent pointer are incomplete proof. The coordinator ratified this limit in review round 3.
+  A fact that names the outside atoms of each region would prove them; atoms change their
+  numbers in each canonical form, join, and graft, so that fact needs its own renaming there.
+  Extern calls are unknown effects in this module, with no D17.13 trust.
+  Keep `del` shallow and add no runtime identity data.
 - **Finite ownership proof preserves obligations when precision ends** (T-276, D17.18).
   `spec/fir.md` 14.1 defines the finite domain, canonical solving, and counted budgets.
   Publish numeric limits and reproduction commands before qualification. This rule ticket chooses
