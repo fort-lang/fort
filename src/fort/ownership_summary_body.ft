@@ -1066,6 +1066,47 @@ fn output_ready(body_input* in, body_program mut* out, selected_storage mut* sel
     return ownership_api.successful(out->proof);
 }
 
+// A borrowed reference store into caller storage retains its source (D17.14). The caller
+// storage keeps the source after this body returns, so the summary exports the store as one
+// copy from the stored local. Flow copies into a private slot, which checks the stored value.
+// A null store clears the field. Any other stored value stays unsupported.
+fn retain(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap,
+    selected_storage* selected) void {
+    fir.func* f = in->function.body;
+    if (stmt->value.kind != fir.rvalue_kind.rv_use || stmt->value.ops_len != 1) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    requirement(in, out, selected->source, selected->path, selected->offset + selected->bytes,
+        ownership_summary_model.requirement_kind.extent, types.type_alignof(selected->ty));
+    fir.operand input_operand = fir.rvalue_operand(f, stmt->value, 0);
+    ownership_api.place_path private = ownership_api.place_path{
+        .root = next(out, ownership_api.entity_kind.slot)};
+    ownership_transfer.request mut req = ownership_transfer.request{
+        .kind = ownership_transfer.action.assignment, .source = selected->path,
+        .destination = selected->path, .source_key = selected->source,
+        .value = empty(selected->path, false)};
+    ownership_summary_model.payload_kind mut payload =
+        ownership_summary_model.payload_kind.replacement;
+    if (input_operand.kind == fir.operand_kind.ok_copy && direct(input_operand.place) &&
+        reference(fir.local_at(f, input_operand.place.local)->ty)) {
+        u32 src = input_operand.place.local;
+        requirement(in, out, out->origins[src], slot(in, src), 0,
+            ownership_summary_model.requirement_kind.live_source, 1);
+        req.kind = ownership_transfer.action.copy;
+        req.source = slot(in, src);
+        req.source_key = out->origins[src];
+        payload = ownership_summary_model.payload_kind.copy;
+    } else if (input_operand.kind != fir.operand_kind.ok_const ||
+        (input_operand.value.kind != fir.const_kind.ck_zero &&
+            input_operand.value.kind != fir.const_kind.ck_null)) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    if (!ownership_api.successful(out->proof)) { return; }
+    emit(in, out, req, block, gap, 1, payload, stmt->loc, stmt->exit_loc, stmt->stmt, private);
+}
+
 fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
     u32 block, u32 gap) void {
     selected_storage mut selected = select_storage(in, out, stmt->place);
@@ -1081,6 +1122,11 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
             .destination = slot(in, stmt->place.local), .source_key = selected.source};
         emit(in, out, req, block, gap, 0, ownership_summary_model.payload_kind.read,
             stmt->loc, stmt->exit_loc, stmt->stmt, req.destination);
+        return;
+    }
+    if (selected.proved && selected.indirect && selected.caller && reference(selected.ty) &&
+        !selected.ty->is_own) {
+        retain(in, out, stmt, block, gap, &selected);
         return;
     }
     if (!output_ready(in, out, &selected, false)) { return; }
