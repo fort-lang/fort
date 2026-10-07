@@ -867,7 +867,7 @@ bullet at a time and without a rewrite.
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6
   spec sections they cited with a rule that no decision row breaks (`grammar.md 4`,
   `module-system.md 8.1`, `module-system.md 8.3`, `toolchain.md 7.3`, `toolchain.md 9.2`,
-  `toolchain.md 6 item 3`), and three second-facet rows: 87 rows.
+  `toolchain.md 6 item 3`), and six second-facet rows: 90 rows.
   `grep -cE 'D[0-9]+\.[0-9]+' bootstrap0/src/*.c` prints 0 for each file, so the coupling rule
   above has no citation to read in `bootstrap0/src`. A bug fix that moves a rule edits the row's
   anchor, and `--check` finds the row that it breaks. No gate runs `--check`: run it by hand
