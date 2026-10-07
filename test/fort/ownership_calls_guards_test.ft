@@ -93,6 +93,14 @@ string[2] OTHER_RESULT = {
     "fn caller(i32* p, i32* q, bool b) i32* { return callee(p, q, b); }",
 };
 
+// The call result goes straight to `use`, so no copy of it needs its origin. Only the join of
+// the two results in flow keeps `caller` from one requirement on `p` (D17.18).
+string[3] USED_RESULT = {
+    "fn callee(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn use(i32* p) i32 { return *p; }",
+    "fn caller(i32* p, i32* q, bool b) i32 { return use(callee(p, q, b)); }",
+};
+
 // Both cases return a field of `s`: one source with two windows.
 string[3] OTHER_WINDOW = {
     "struct pair { i32 a; i32 b; }",
@@ -590,7 +598,8 @@ fn repeated_guard() void {
 // Two normal cases reach one call result. They cover each value of `b`, so their join drops
 // the case atoms, and both write the source of `p`: the call result has one value, and the
 // caller publishes it (D17.18). Two results of two sources keep two values, and normal cases
-// that leave a value pair to an abort keep their atoms. Both callers stay incomplete.
+// that leave a value pair to an abort keep their atoms. Both callers stay incomplete. A result
+// of two sources that goes straight to another call keeps its two values in flow too.
 fn joined_result() void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[2] names = {"callee", "caller"};
@@ -610,6 +619,14 @@ fn joined_result() void {
     ownership_summary_model.summary* two = ownership_call_bodies.summary(&other, 1);
     assert(two->proof.kind == ownership_api.proof_kind.incomplete && two->cases.len == 0);
     assert(two->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    ownership_call_bodies.bodies mut used = ownership_call_bodies.bodies{};
+    string[3] used_names = {"callee", "use", "caller"};
+    bodies(&used, USED_RESULT[..], used_names[..]);
+    defer ownership_call_bodies.close(&used);
+    ownership_summary_model.summary* passed = ownership_call_bodies.summary(&used, 2);
+    assert(passed->proof.kind == ownership_api.proof_kind.incomplete && passed->cases.len == 0);
+    assert(passed->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(passed->requirements.len == 0);
     ownership_call_bodies.bodies mut partial = ownership_call_bodies.bodies{};
     bodies(&partial, PARTIAL_RESULT[..], names[..]);
     defer ownership_call_bodies.close(&partial);
