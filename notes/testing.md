@@ -698,6 +698,15 @@ bullet at a time and without a rewrite.
   `tools/ir_snapshot.sh --fir-stats <fort> <std-dir> <out-dir>` also passes `--fir-stats`
   (D14.1) and writes the line `<mode> <test> lowered N of M` of each module to
   `<out-dir>/stats.txt`, with the sums of each mode at the end (T-253).
+- **`tools/ownership_ir_compare.py --fort <fort> --std-dir <std> <entry.ft>...` holds that the
+  ownership proof changes no IR** (D17.14, D19.8). For each entry and each of four modes
+  (`default`, `release`, `nobounds`, `release-nobounds`) it runs two `-S` builds that differ
+  only in `--ownership-check`, and it prints `equal`, `differ` with a diff, or `rejected`. A
+  `--flag` that selects the analysis or names its report is a usage error. It exits 0 only
+  when every case is `equal`. A selected build writes IR only at exit 0, so a `rejected` case
+  measures nothing and is no equality. On 2026-10-07 no selected build exits 0, so the tool
+  can give `equal` only once the proof accepts a program
+  (`test/ownership_ir_compare_test.py` holds each verdict with a stand-in compiler).
 - **The oracle of the FIR migration is `tools/fir_diff.py <before> <after> <out>`, and not
   `llvm-diff` alone** (T-253, `spec/fir.md` 16.2). It compares a snapshot of a compiler before
   T-253, whose direct path wrote every function, with a snapshot of a later compiler. Since T-255
