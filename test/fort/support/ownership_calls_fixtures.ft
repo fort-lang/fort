@@ -1,0 +1,383 @@
+/// Checks supplied caller states against summaries from actual lowered bodies.
+import ast;
+import check_env;
+import diag;
+import fir;
+import fir_lower;
+import fir_verify;
+import lower_env;
+import modules_env;
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_flow;
+import ownership_graph;
+import ownership_limits;
+import ownership_state;
+import ownership_summary;
+import ownership_summary_body;
+import ownership_summary_model;
+import ownership_transfer;
+import std.strbuf;
+
+struct fixture {
+    lower_env.env checked;
+    fir.func[2] functions;
+    ownership_summary_body.body_input[2] inputs;
+    ownership_flow.source_file_binding[2] files;
+    ownership_calls_env.env services;
+    ownership_summary_model.summary summary;
+    ownership_summary_body.body_program caller_program;
+    ownership_state.state caller;
+    ownership_state.state before;
+    ownership_calls.application application;
+    ownership_api.alias_binding[16] aliases;
+    ownership_calls.source_binding[16] sources;
+    ownership_calls.allocation_binding[16] allocations;
+    ownership_calls.capture_binding[16] captures;
+    ownership_calls.event_binding[1] events;
+    ownership_calls.request call_request;
+    u64 aliases_len;
+    u64 sources_len;
+    u64 allocations_len;
+    u64 captures_len;
+    u32 call_block;
+    u32 call_gap;
+    u64 foreign_calls;
+}
+
+fn open(fixture mut* f, string@ text) void {
+    ownership_calls_env.open(&f->services);
+    lower_env.open(&f->checked);
+    lower_env.check_lines(&f->checked, text, true);
+    f->files[0] = ownership_flow.source_file_binding{1, 1,
+        ""};
+    string[2] names = {"callee", "caller"};
+    u64 mut i = 0;
+    while (i < 2) {
+        fir_lower.report mut lower_report = fir_lower.report{};
+        assert(fir_lower.lower_function(&f->checked.c.ck, lower_env.decl(&f->checked, names[i]),
+            &f->functions[i], &lower_report));
+        fir_verify.violation mut verifier_failure = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&f->functions[i], &f->checked.rt, &verifier_failure));
+        if (fir.block_count(&f->functions[i]) > 0) {
+            f->files[0].filename = fir.block_at(&f->functions[i], 0)->term.loc.file;
+        }
+        f->inputs[i] = ownership_summary_body.body_input{
+            ownership_graph_input(cast(i + 1, u32), &f->functions[i]), f->files[..1],
+            &f->services.services, f->services.limits,
+            ownership_summary_model.coverage_status{true, true, false}, true};
+        i += 1;
+    }
+    ownership_summary_model.summary_view@ none = {};
+    computation(f, 0);
+    f->summary = ownership_summary.infer(&f->inputs[0], none);
+}
+
+// The caller imports the last callee declaration. Both filenames come from the checker.
+fn open_named(fixture mut* f, string@ text, string caller_import) void {
+    ownership_calls_env.open(&f->services);
+    lower_env.open(&f->checked);
+    strbuf.str_buf mut buffer = strbuf.create();
+    defer strbuf.free(&buffer);
+    for (string line : lower_env.RUNTIME) {
+        strbuf.append(&buffer, line);
+        strbuf.push(&buffer, '\n');
+    }
+    check_env.add(&f->checked.c, "std/rt.ft", strbuf.view(&buffer));
+    modules_env.std_dir_without_runtime(&f->checked.c.m, "std");
+    strbuf.clear(&buffer);
+    u64 mut line = 0;
+    while (line + 1 < text.len) {
+        strbuf.append(&buffer, text[line]);
+        strbuf.push(&buffer, '\n');
+        line += 1;
+    }
+    check_env.add(&f->checked.c, "callee.ft", strbuf.view(&buffer));
+    strbuf.clear(&buffer);
+    strbuf.append(&buffer, caller_import);
+    strbuf.push(&buffer, '\n');
+    strbuf.append(&buffer, text[text.len - 1]);
+    strbuf.push(&buffer, '\n');
+    check_env.add(&f->checked.c, "caller.ft", strbuf.view(&buffer));
+    f->checked.c.want_main = false;
+    assert(check_env.check_entry(&f->checked.c, "caller.ft"));
+    f->checked.rt = fir_verify.runtime_of(&f->checked.c.ck);
+    string[2] names = {"callee", "caller"};
+    u64 mut i = 0;
+    while (i < 2) {
+        ast.sym* symbol = check_env.sym_of(&f->checked.c, names[i], names[i]);
+        assert(symbol != null && symbol->node != null);
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function(&f->checked.c.ck, symbol->node, &f->functions[i], &why));
+        fir_verify.violation mut verifier_failure = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&f->functions[i], &f->checked.rt, &verifier_failure));
+        f->files[i] = ownership_flow.source_file_binding{1, cast(i + 1, u32),
+            fir.block_at(&f->functions[i], 0)->term.loc.file};
+        f->inputs[i] = ownership_summary_body.body_input{
+            ownership_graph_input(cast(i + 1, u32), &f->functions[i]), f->files[..],
+            &f->services.services, f->services.limits,
+            ownership_summary_model.coverage_status{true, true, false}, true};
+        i += 1;
+    }
+    ownership_summary_model.summary_view@ none = {};
+    computation(f, 0);
+    f->summary = ownership_summary.infer(&f->inputs[0], none);
+}
+
+// One computation is the summary solver of one body or the flow of one caller (spec/fir.md 14.1).
+// Each starts a fresh meter. Its W bound scales with the FIR size of that body.
+fn computation(fixture mut* f, u64 body) void {
+    f->services.limits = ownership_limits.computation(
+        ownership_limits.fir_size(&f->functions[body]));
+    f->inputs[body].limits = f->services.limits;
+    ownership_calls_env.reset(&f->services);
+}
+
+fn ownership_graph_input(u32 declaration, fir.func* body) ownership_graph.body_input {
+    return ownership_graph.body_input{ownership_calls_env.function(1, declaration), body, true};
+}
+
+fn close(fixture mut* f) void {
+    ownership_calls.free(&f->application);
+    ownership_state.free(&f->before);
+    ownership_state.free(&f->caller);
+    ownership_summary_body.free(&f->caller_program);
+    ownership_summary_model.free(&f->summary);
+    fir.func_free(&f->functions[0]);
+    fir.func_free(&f->functions[1]);
+    lower_env.close(&f->checked);
+    ownership_calls_env.close(&f->services);
+}
+
+fn prepare(fixture mut* f) void {
+    computation(f, 1);
+    f->caller_program = ownership_summary_body.extract(&f->inputs[1]);
+    assert(f->caller_program.proof.kind == ownership_api.proof_kind.incomplete);
+    f->caller = ownership_state.clone(&f->caller_program.entry);
+    u32 mut block = 0;
+    bool mut found = false;
+    while (block < fir.block_count(&f->functions[1])) {
+        u32 mut gap = 0;
+        while (gap < fir.block_statement_count(&f->functions[1], block)) {
+            fir.statement* instruction = fir.block_statement(&f->functions[1], block, gap);
+            if (instruction->kind == fir.stmt_kind.st_assign &&
+                instruction->value.kind == fir.rvalue_kind.rv_call) {
+                assert(!found && instruction->value.callee == fir.callee_kind.cl_fn);
+                f->call_block = block;
+                f->call_gap = gap;
+                found = true;
+            }
+            gap += 1;
+        }
+        block += 1;
+    }
+    assert(found);
+    u64 mut i = 0;
+    while (i < f->caller_program.steps_len) {
+        ownership_transfer.request mut call_request = f->caller_program.steps[i].local;
+        assert(ownership_api.successful(ownership_transfer.apply(&f->caller,
+            &f->services.services, &call_request)));
+        i += 1;
+    }
+}
+
+fn contents(fixture* f, u32 local) ownership_api.contents_fact {
+    u64 index = ownership_transfer.contents_index(&f->caller,
+        ownership_summary_body.slot(&f->inputs[1], local));
+    assert(index != ownership_api.U64_MAX);
+    return f->caller.contents[index];
+}
+
+fn configure_source(fixture mut* f, ownership_api.source_kind kind,
+    ownership_api.validity_kind validity, i64 bytes) void {
+    ownership_api.contents_fact input = contents(f, 1);
+    assert(input.borrows.len == 1);
+    ownership_api.entity_id key = input.borrows[0].source;
+    u64 index = ownership_state.source_index(&f->caller, key);
+    assert(index != ownership_api.U64_MAX);
+    f->caller.sources[index].kind = kind;
+    f->caller.sources[index].validity = validity;
+    // The supplied caller range is separate from the inferred required range.
+    ownership_api.contents_fact mut replacement = input;
+    ownership_api.borrow_relation[1] mut relations = {input.borrows[0]};
+    relations[0].range.extent = ownership_summary_body.integer(bytes);
+    relations[0].range.access.end = ownership_summary_body.integer(bytes);
+    replacement.borrows = relations[..];
+    u64 contents_index = ownership_transfer.contents_index(&f->caller, replacement.place);
+    assert(contents_index != ownership_api.U64_MAX);
+    f->caller.contents[contents_index] = ownership_state.copy_contents(&f->caller, replacement);
+}
+
+fn location(fixture* f, diag.loc where) ownership_api.source_position {
+    u64 mut i = 0;
+    while (i < f->files.len) {
+        if (f->files[i].filename == where.file) {
+            return ownership_api.source_position{f->files[i].module, f->files[i].file,
+                where.line, where.col, where.end_line, where.end_col, true};
+        }
+        i += 1;
+    }
+    return ownership_api.source_position{};
+}
+
+fn call_request(fixture mut* f, ownership_summary_model.summary_view* summary, u32 instance)
+    ownership_calls.request {
+    fir.statement* call = fir.block_statement(&f->functions[1], f->call_block, f->call_gap);
+    f->aliases_len = 0;
+    f->sources_len = 0;
+    f->allocations_len = 0;
+    f->captures_len = 0;
+    u64 mut i = 0;
+    while (i < summary->roots.len) {
+        ownership_summary_model.symbolic_root row = summary->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.caller_source) {
+            assert(row.formal > 0 && row.formal <= call->value.ops_len);
+            fir.operand input_operand = fir.rvalue_operand(&f->functions[1], call->value,
+                row.formal - 1);
+            assert(input_operand.kind != fir.operand_kind.ok_const
+                && ownership_summary_body.direct(input_operand.place));
+            ownership_api.contents_fact input = contents(f, input_operand.place.local);
+            assert(input.borrows.len == 1);
+            f->aliases[f->aliases_len] = ownership_api.alias_binding{row.slot, input.place,
+                input.value_version};
+            f->aliases_len += 1;
+            u64 source = ownership_state.source_index(&f->caller, input.borrows[0].source);
+            assert(source != ownership_api.U64_MAX);
+            f->sources[f->sources_len] = ownership_calls.source_binding{row.source,
+                f->caller.sources[source], input.borrows[0].range, input.value_version,
+                ownership_api.entity_id{row.source.function, ownership_api.entity_kind.region,
+                    row.source.ordinal}};
+            f->sources_len += 1;
+            f->captures[f->captures_len] = ownership_calls.capture_binding{
+                ownership_api.entity_id{row.source.function, ownership_api.entity_kind.value,
+                    row.formal + 1}, input.value_version, input.span_length};
+            f->captures_len += 1;
+            if (row.allocation.kind != ownership_api.entity_kind.none) {
+                u64 allocation = ownership_transfer.owner_index(&f->caller, input.place);
+                assert(allocation != ownership_api.U64_MAX);
+                assert(input_operand.kind == fir.operand_kind.ok_move);
+                f->allocations[f->allocations_len] = ownership_calls.allocation_binding{
+                    row.allocation, f->caller.allocations[allocation], false};
+                f->allocations_len += 1;
+            }
+        } else if (row.kind == ownership_summary_model.root_kind.allocation_template) {
+            ownership_api.entity_id key = ownership_api.entity_id{f->inputs[1].function.key,
+                ownership_api.entity_kind.allocation, 100 + instance};
+            f->allocations[f->allocations_len] = ownership_calls.allocation_binding{
+                row.allocation, ownership_api.allocation_fact{.key = key,
+                    .validity = ownership_api.validity_kind.live,
+                    .count = ownership_api.multiplicity{false, true, false},
+                        .obligation = true}, true};
+            f->allocations_len += 1;
+        }
+        i += 1;
+    }
+    ownership_api.operation_position operation = ownership_summary_body.position(&f->inputs[1],
+        f->call_block, f->call_gap, false);
+    f->events[0] = ownership_calls.event_binding{operation,
+        ownership_api.entity_id{operation.function, ownership_api.entity_kind.event,
+            100 + instance}};
+    ownership_calls.request mut req = ownership_calls.request{
+        .summary = summary, .before = ownership_state.view(&f->caller), .operation = operation,
+        .source = location(f, call->loc),
+        .aliases = f->aliases[..f->aliases_len], .sources = f->sources[..f->sources_len],
+        .allocations = f->allocations[..f->allocations_len],
+            .captures = f->captures[..f->captures_len],
+        .events = f->events[..], .services = &f->services.services, .limits = f->services.limits,
+        .coverage = ownership_summary_model.coverage_status{true, true, false},
+        .correspondence_complete = true, .event_map_complete = true};
+    req.result.actual_slot = ownership_summary_body.slot(&f->inputs[1], call->place.local);
+    return req;
+}
+
+fn apply(fixture mut* f, u32 instance) void {
+    ownership_summary_model.summary_view summary = ownership_summary_model.view(&f->summary);
+    ownership_state.free(&f->before);
+    f->before = ownership_state.clone(&f->caller);
+    ownership_calls.request req = call_request(f, &summary, instance);
+    f->application = ownership_calls.apply(&req);
+    assert(ownership_state.equal(&f->before, &f->caller));
+    assert(!f->application.bound.coverage.actual_source_complete);
+}
+
+fn caller_operation(fixture mut* f, fir.statement* instruction, u32 block, u32 gap)
+    ownership_api.proof_status {
+    ownership_summary_body.body_input* input = &f->inputs[1];
+    ownership_api.operation_position operation = ownership_summary_body.position(input, block,
+        gap, false);
+    ownership_transfer.event_binding[1] events = {ownership_transfer.event_binding{operation,
+        ownership_api.entity_id{operation.function, ownership_api.entity_kind.event, 200 + gap}}};
+    u32 local = instruction->kind == fir.stmt_kind.st_dead ? instruction->local
+        : instruction->place.local;
+    ownership_transfer.request mut req = ownership_summary_body.basic(input, local, local,
+        ownership_transfer.action.assignment);
+    req.operation = operation;
+    req.source_position = location(f, instruction->loc);
+    req.direct_source_proved = true;
+    req.direct_destination_proved = true;
+    req.event_map_complete_proved = true;
+    req.event_bindings = events[..];
+    if (instruction->kind == fir.stmt_kind.st_del) {
+        req.kind = ownership_transfer.action.release;
+        req.leaves_empty_proved = true;
+    } else if (instruction->kind == fir.stmt_kind.st_dead) {
+        req.kind = ownership_transfer.action.dead;
+        req.source_correspondence_proved = true;
+        req.liveness_proved = true;
+    } else if (instruction->kind == fir.stmt_kind.st_live) {
+        return ownership_summary_model.complete();
+    } else {
+        assert(instruction->value.kind == fir.rvalue_kind.rv_use);
+        fir.operand input_operand = fir.rvalue_operand(&f->functions[1], instruction->value, 0);
+        if (input_operand.kind != fir.operand_kind.ok_const) {
+            req.source = ownership_summary_body.slot(input, input_operand.place.local);
+            req.kind = input_operand.kind == fir.operand_kind.ok_move ?
+                ownership_transfer.action.move_owner : ownership_transfer.action.copy;
+            if (input_operand.place.proj_len != 0) {
+                req.kind = ownership_transfer.action.use;
+                return ownership_transfer.apply(&f->caller, &f->services.services, &req);
+            }
+        } else {
+            req.value = ownership_summary_body.empty(req.destination, req.destination_owns);
+        }
+    }
+    return ownership_transfer.apply(&f->caller, &f->services.services, &req);
+}
+
+fn suffix(fixture mut* f) ownership_api.proof_status {
+    ownership_state.free(&f->caller);
+    f->caller = ownership_state.clone(&f->application.state);
+    u32 mut block = f->call_block;
+    u32 mut gap = f->call_gap + 1;
+    while (block < fir.block_count(&f->functions[1])) {
+        while (gap < fir.block_statement_count(&f->functions[1], block)) {
+            fir.statement* instruction = fir.block_statement(&f->functions[1], block, gap);
+            ownership_api.proof_status result = caller_operation(f, instruction, block, gap);
+            if (!ownership_api.successful(result)) { return result; }
+            gap += 1;
+        }
+        fir.terminator term = fir.block_at(&f->functions[1], block)->term;
+        if (term.kind == fir.term_kind.tk_return) { return ownership_summary_model.complete(); }
+        assert(term.kind == fir.term_kind.tk_goto || term.kind == fir.term_kind.tk_check ||
+            term.kind == fir.term_kind.tk_check_overwrite);
+        assert(term.target > block);
+        block = term.target;
+        gap = 0;
+    }
+    panic("ownership_calls_fixtures: missing normal return");
+}
+
+fn outstanding(ownership_state.state* facts) u64 {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < facts->allocations_len) {
+        if (facts->allocations[i].obligation) { n += 1; }
+        i += 1;
+    }
+    return n;
+}
+
+fn boundary(string key, string hash, string failure) void {
+    ownership_calls_env.boundary(key, hash, failure);
+}

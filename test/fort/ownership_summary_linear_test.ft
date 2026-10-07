@@ -1,0 +1,760 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary G01.1
+//| boundary G01.2
+//| boundary G01.3
+//| boundary G01.4
+//| boundary G03.1
+//| boundary G03.2
+//| boundary G03.3
+//| boundary G03.4
+//| boundary G04.1
+//| boundary G04.2
+//| boundary G04.3
+//| boundary G04.4
+//| boundary X06
+//| boundary X07
+//| boundary X09
+//| boundary X20
+/// Checks body-derived linear call effects and their source boundaries.
+import fir;
+import heap;
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_calls_fixtures;
+import ownership_limits;
+import ownership_state;
+import ownership_summary;
+import ownership_summary_body;
+import ownership_summary_model;
+import ownership_transfer;
+import std.sys;
+
+string[9] SOURCE_1 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32* p) i32* { return p; }",
+    "fn caller(i32* p) i32 { return *callee(p); }",
+};
+
+string[9] SOURCE_2 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32* p) i32* { return p; }",
+    "fn caller(i32* p) i32 { return *callee(p); }",
+};
+
+string[9] SOURCE_3 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32* p) i32* { return p; }",
+    "fn caller(i32* p) i32 { return *callee(p); }",
+};
+
+string[9] SOURCE_4 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32* p) i32* { return p; }",
+    "fn caller(i32* p) i32 { return *callee(p); }",
+};
+
+string[9] SOURCE_5 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32 mut* own p) void { del(p); }",
+    "fn caller(i32 mut* own p) void { callee(move(p)); }",
+};
+
+string[12] SOURCE_6 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32 mut* own p) i32 mut* own { return move(p); }",
+    "fn caller(i32 mut* own p) void {",
+    "    i32 mut* own q = callee(move(p));",
+    "    del(q);",
+    "}",
+};
+
+string[9] SOURCE_7 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32 mut* own p) void {}",
+    "fn caller(i32 mut* own p) void { callee(move(p)); }",
+};
+
+string[13] SOURCE_8 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32 mut* own p) void { del(p); }",
+    "fn caller(i32 mut* own p) i32 {",
+    "    i32* view = p;",
+    "    callee(move(p));",
+    "    return *view;",
+    "}",
+};
+
+string[9] SOURCE_9 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee() i32 mut* own { return new(i32); }",
+    "fn caller() void { i32 mut* own p = callee(); del(p); }",
+};
+
+string[9] SOURCE_10 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee() i32 mut* own { return new(i32); }",
+    "fn caller() i32 mut* own { return callee(); }",
+};
+
+string[9] SOURCE_11 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee() i32 mut* own { return new(i32); }",
+    "fn caller() void { i32 mut* own p = callee(); }",
+};
+
+string[14] SOURCE_12 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee() i32 mut* own { return new(i32); }",
+    "fn caller() void {",
+    "    i32 mut* own p = callee();",
+    "    i32* view = p;",
+    "    del(p);",
+    "    i32 value = *view;",
+    "}",
+};
+
+string[9] SOURCE_13 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee() i32 mut* own { return new(i32); }",
+    "fn caller() void { i32 mut* own p = callee(); del(p); }",
+};
+
+string[2] SOURCE_14 = {
+    "fn callee() i32 mut@ own { return new(i32, 0); }",
+    "fn caller() void { i32 mut@ own p = callee(); del(p); }",
+};
+
+string[2] SOURCE_15 = {
+    "fn callee(i32@ p) i32 { return p[1]; }",
+    "fn caller(i32@ p) i32 { return callee(p); }",
+};
+
+string[9] SOURCE_16 = {
+    "struct owner_box {",
+    "    i32 mut* own item;",
+    "    i32 tag;",
+    "}",
+    "struct view_box { i32* ptr; }",
+    "struct inline_box { i32 value; }",
+    "struct inline_view { i32 value; i32* ptr; }",
+    "fn callee(i32 mut* own p) void { del(p); }",
+    "fn caller(i32 mut* own p) void { callee(move(p)); }",
+};
+
+fn successful(ownership_calls_fixtures.fixture* f) void {
+    assert(ownership_api.successful(f->summary.proof));
+    assert(!f->summary.residual_effects && !f->summary.coverage.actual_source_complete);
+    assert(f->summary.cases.len == 1);
+    assert(f->summary.cases[0].outcome.kind == ownership_api.outcome_kind.function_return);
+    assert(ownership_api.successful(f->application.proof));
+    assert(f->application.normal_continuation);
+    assert(f->application.outcome.kind == ownership_api.outcome_kind.function_return);
+}
+
+fn original(ownership_calls_fixtures.fixture* f) ownership_api.entity_id {
+    return ownership_calls_fixtures.contents(f, 1).borrows[0].source;
+}
+
+fn result(ownership_calls_fixtures.fixture* f) ownership_api.contents_fact {
+    fir.statement* call = fir.block_statement(&f->functions[1], f->call_block, f->call_gap);
+    ownership_api.place_path place = ownership_summary_body.slot(&f->inputs[1], call->place.local);
+    u64 index = ownership_transfer.contents_index(&f->application.state, place);
+    assert(index != ownership_api.U64_MAX);
+    return f->application.state.contents[index];
+}
+
+fn case_g01_1() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_1[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.heap,
+        ownership_api.validity_kind.live, 4);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(result(&f).borrows.len == 1);
+    assert(ownership_summary_model.same(result(&f).borrows[0].source, original(&f)));
+    assert(result(&f).borrows[0].range.extent.value == 4);
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&f)));
+    ownership_calls_fixtures.boundary("G01.1",
+        "87ecd84fbbb9090d4cb40193fb8618a9263ea13bcb0682dfd9d95cf427eaeaf9", "none");
+}
+
+fn case_g01_2() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_2[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.trusted_foreign,
+        ownership_api.validity_kind.live, 4);
+    ownership_api.source_fact unrelated = ownership_api.source_fact{
+        .key = ownership_api.entity_id{f.inputs[1].function.key,
+            ownership_api.entity_kind.source, 90},
+        .kind = ownership_api.source_kind.unknown_fort,
+            .validity = ownership_api.validity_kind.unknown};
+    ownership_state.append_sources(&f.caller, unrelated);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(result(&f).borrows.len == 1);
+    assert(ownership_summary_model.same(result(&f).borrows[0].source, original(&f)));
+    assert(result(&f).borrows[0].range.extent.value == 4);
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&f)));
+    u64 source = ownership_state.source_index(&f.caller, unrelated.key);
+    assert(source != ownership_api.U64_MAX);
+    assert(f.caller.sources[source].kind == ownership_api.source_kind.unknown_fort);
+    assert(f.foreign_calls == 0 && f.services.services.ffi == null);
+    ownership_calls_fixtures.boundary("G01.2",
+        "87ecd84fbbb9090d4cb40193fb8618a9263ea13bcb0682dfd9d95cf427eaeaf9", "none");
+}
+
+fn case_g01_3() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_3[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.heap,
+        ownership_api.validity_kind.released, 4);
+    ownership_calls_fixtures.apply(&f, 1);
+    assert(f.application.proof.failed && !f.application.normal_continuation);
+    assert(f.application.outcome.possible_caller_return && f.application.outcome.cleanup_required);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.caller_requirement);
+    assert(f.services.counts.last.operation.function.declaration.declaration == 2);
+    assert(f.application.bound.model.results.len == 1);
+    assert(ownership_summary_model.same(f.application.bound.model.results[0].borrow.source,
+        original(&f)));
+    assert(ownership_state.equal(&f.before, &f.caller));
+    ownership_calls_fixtures.boundary("G01.3",
+        "87ecd84fbbb9090d4cb40193fb8618a9263ea13bcb0682dfd9d95cf427eaeaf9", "caller_requirement");
+}
+
+fn case_g01_4() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_4[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.unknown_fort,
+        ownership_api.validity_kind.unknown, 4);
+    ownership_calls_fixtures.apply(&f, 1);
+    assert(f.application.proof.failed && !f.application.normal_continuation);
+    assert(f.application.outcome.possible_caller_return && f.application.outcome.cleanup_required);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.incomplete_proof);
+    assert(f.services.counts.last.operation.function.declaration.declaration == 2);
+    assert(f.application.bound.model.results.len == 1);
+    assert(ownership_summary_model.same(f.application.bound.model.results[0].borrow.source,
+        original(&f)));
+    assert(ownership_state.equal(&f.before, &f.caller));
+    ownership_calls_fixtures.boundary("G01.4",
+        "87ecd84fbbb9090d4cb40193fb8618a9263ea13bcb0682dfd9d95cf427eaeaf9", "incomplete_proof");
+}
+
+fn case_g03_1() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_5[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 0);
+    assert(f.application.state.allocations[0].validity == ownership_api.validity_kind.released);
+    u64 owner = ownership_transfer.contents_index(&f.application.state,
+        ownership_summary_body.slot(&f.inputs[1], 1));
+    assert(f.application.state.contents[owner].owner_empty);
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&f)));
+    ownership_calls_fixtures.boundary("G03.1",
+        "7951f42e5aaa57d9db530cc1248407a246f2c65e4beb6d935bf1cec7a53f1e74", "none");
+}
+
+fn case_g03_2() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_6[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    assert(result(&f).borrows.len == 1);
+    assert(ownership_summary_model.same(result(&f).borrows[0].source, original(&f)));
+    assert(!ownership_summary_model.same(result(&f).borrows[0].source,
+        ownership_summary_body.source(&f.inputs[0], 1)));
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&f)));
+    assert(ownership_calls_fixtures.outstanding(&f.caller) == 0);
+    ownership_calls_fixtures.boundary("G03.2",
+        "bccf785b684cf59a5eca27f73b997e438ae129652b6e64c3f007ebcd99a58b3d", "none");
+}
+
+fn case_g03_3() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_7[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.failed && !ownership_api.successful(f.summary.proof));
+    assert(f.services.counts.last.kind == ownership_api.event_kind.lost_ownership);
+    assert(f.services.counts.last.operation.function.declaration.declaration == 1);
+    assert(f.services.counts.last.kind != ownership_api.event_kind.caller_requirement);
+    assert(f.summary.requirements.len == 0 && f.summary.residual_effects);
+    ownership_calls_fixtures.boundary("G03.3",
+        "54b6e74e98bd10f414045240c8c514f3bd42d9847de37c100898d55297e2441e", "lost_ownership");
+}
+
+fn case_g03_4() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_8[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(f.application.state.allocations[0].validity == ownership_api.validity_kind.released);
+    ownership_api.proof_status suffix = ownership_calls_fixtures.suffix(&f);
+    assert(!ownership_api.successful(suffix) && suffix.failed);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+    assert(f.services.counts.last.operation.function.declaration.declaration == 2);
+    ownership_calls_fixtures.boundary("G03.4",
+        "be77dea569e35a9c14f813c26c37ebfeb7869b63f50349b589c9c18fcb7d7dbc", "invalid_use");
+}
+
+fn case_g04_1() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_9[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    assert(result(&f).borrows.len == 1);
+    assert(result(&f).borrows[0].source.kind == ownership_api.entity_kind.source);
+    assert(!ownership_summary_model.same(result(&f).borrows[0].source, result(&f).place.root));
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&f)));
+    assert(ownership_calls_fixtures.outstanding(&f.caller) == 0);
+    ownership_calls_fixtures.boundary("G04.1",
+        "e33242a990f37441baed7f67d4b457de6e7f96213033d29eb0fbfd2dbdd7fe8c", "none");
+}
+
+fn case_g04_2() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_10[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    assert(result(&f).borrows.len == 1);
+    assert(result(&f).borrows[0].source.kind == ownership_api.entity_kind.source);
+    assert(!ownership_summary_model.same(result(&f).borrows[0].source, result(&f).place.root));
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&f)));
+    assert(ownership_calls_fixtures.outstanding(&f.caller) == 1);
+    ownership_calls_fixtures.boundary("G04.2",
+        "fefecd3c6b24993a0db8e21cc98dea9409cc273ec937de143c07ec5ac013c7e7", "none");
+}
+
+fn case_g04_3() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_11[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    assert(result(&f).borrows.len == 1);
+    assert(result(&f).borrows[0].source.kind == ownership_api.entity_kind.source);
+    assert(!ownership_summary_model.same(result(&f).borrows[0].source, result(&f).place.root));
+    ownership_api.proof_status suffix = ownership_calls_fixtures.suffix(&f);
+    assert(!ownership_api.successful(suffix) && suffix.failed);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.lost_ownership);
+    ownership_calls_fixtures.boundary("G04.3",
+        "ac9acaa78ff6af82ecb8d953867afab7eb068f59ace9dbcd81e0463ef31b11c2", "lost_ownership");
+}
+
+fn case_g04_4() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_12[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    assert(result(&f).borrows.len == 1);
+    assert(result(&f).borrows[0].source.kind == ownership_api.entity_kind.source);
+    assert(!ownership_summary_model.same(result(&f).borrows[0].source, result(&f).place.root));
+    ownership_api.proof_status suffix = ownership_calls_fixtures.suffix(&f);
+    assert(!ownership_api.successful(suffix) && suffix.failed);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+    ownership_calls_fixtures.boundary("G04.4",
+        "ef6aed20f2d19fb0ba47468faaeafe82d65de2c65a6dfa918b15f539b55887a6", "invalid_use");
+}
+
+fn case_x06() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_13[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    ownership_api.entity_id first = result(&f).borrows[0].source;
+    ownership_state.free(&f.caller);
+    f.caller = ownership_state.clone(&f.application.state);
+    ownership_calls.free(&f.application);
+    ownership_summary_model.summary_view summary = ownership_summary_model.view(&f.summary);
+    ownership_calls.request mut req = ownership_calls_fixtures.call_request(&f, &summary, 2);
+    req.result.actual_slot = ownership_summary_body.slot(&f.inputs[1], 1);
+    f.application = ownership_calls.apply(&req);
+    successful(&f);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 2);
+    u64 second = ownership_transfer.contents_index(&f.application.state, req.result.actual_slot);
+    assert(!ownership_summary_model.same(first,
+        f.application.state.contents[second].borrows[0].source));
+    ownership_state.free(&f.caller);
+    f.caller = ownership_state.clone(&f.application.state);
+    fir.statement* call = fir.block_statement(&f.functions[1], f.call_block, f.call_gap);
+    fir.statement release = fir.stmt_del(call->place, call->loc, 0);
+    assert(ownership_api.successful(ownership_calls_fixtures.caller_operation(&f, &release,
+        f.call_block, f.call_gap + 1)));
+    assert(ownership_calls_fixtures.outstanding(&f.caller) == 1);
+    ownership_calls_fixtures.boundary("X06",
+        "48f3814118fcb94a26843ca26d1df9b34ecedb081b652381930d952c83d92a17", "none");
+}
+
+fn case_x07() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_14[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(result(&f).span_length.value == 0);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    assert(ownership_api.successful(ownership_calls_fixtures.suffix(&f)));
+    assert(ownership_calls_fixtures.outstanding(&f.caller) == 0);
+    ownership_calls_fixtures.boundary("X07",
+        "2a9cb43199810ff52214c23d7eff993c05dc26e2036cac0b4505f20a404c4b8b", "none");
+}
+
+fn case_x09() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_15[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.symbolic_caller,
+        ownership_api.validity_kind.live, 4);
+    bool mut required = false;
+    u64 mut r = 0;
+    while (r < f.summary.requirements.len) {
+        ownership_summary_model.requirement item = f.summary.requirements[r];
+        if (item.kind == ownership_summary_model.requirement_kind.extent) {
+            assert(item.range.access.end.value == 8);
+            required = true;
+        }
+        r += 1;
+    }
+    assert(required);
+    ownership_calls_fixtures.apply(&f, 1);
+    assert(f.application.proof.failed && !f.application.normal_continuation);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.caller_requirement);
+    assert(f.services.counts.last.operation.function.declaration.declaration == 2);
+    assert(ownership_state.equal(&f.before, &f.caller));
+    ownership_calls_fixtures.boundary("X09",
+        "946ca8bbf4b598c7d72c4a4be132d56957817a04248105f5e652933cb1b47028", "caller_requirement");
+}
+
+fn case_x20() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_16[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_state.state mut before = ownership_state.clone(&f.caller);
+    defer ownership_state.free(&before);
+    ownership_calls_env.reset(&f.services);
+    f.services.counts.deny_at = 1;
+    ownership_summary_model.summary_view@ none = {};
+    ownership_summary_model.summary mut refused = ownership_summary.infer(&f.inputs[0], none);
+    defer ownership_summary_model.free(&refused);
+    assert(refused.proof.failed && refused.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(refused.proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(refused.residual_effects && refused.cases.len == 0);
+    assert(ownership_state.equal(&before, &f.caller));
+    ownership_summary_model.free(&refused);
+    ownership_calls_fixtures.boundary("X20",
+        "a9a9032989cac5726e82d6ce1d2520ea4a5f382cc62f544362f8916f3a6eecbb", "work_failure");
+}
+
+string[2] PROBE_SOURCE = {
+    "fn callee(i32 mut* own p) i32 mut* own { return move(p); }",
+    "fn caller(i32 mut* own p) void { i32* v = p; i32 mut* own q = callee(move(p)); del(q); }",
+};
+
+fn allocator_probe(bool failure) void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, PROBE_SOURCE[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_summary_model.summary_view summary = ownership_summary_model.view(&f.summary);
+    ownership_calls.request req = ownership_calls_fixtures.call_request(&f, &summary, 1);
+    ownership_summary_model.summary_view@ no_callees = {};
+    ownership_calls_env.reset(&f.services);
+    ownership_summary_model.summary mut first = ownership_summary.infer(&f.inputs[0], no_callees);
+    assert(ownership_api.successful(first.proof));
+    u64 infer_calls = f.services.counts.calls;
+    ownership_summary_model.free(&first);
+    ownership_calls_env.reset(&f.services);
+    ownership_calls.application mut first_call = ownership_calls.apply(&req);
+    assert(ownership_api.successful(first_call.proof));
+    u64 apply_calls = f.services.counts.calls;
+    ownership_calls.free(&first_call);
+    assert(infer_calls > 10 && apply_calls > 10);
+    u64 mut early_system = 0;
+    u64 mut early_block = 0;
+    u64 mut system_distance = ownership_api.U64_MAX;
+    u64 mut block_distance = ownership_api.U64_MAX;
+    u64 mut round = 0;
+    while (round < 32) {
+        u64 mut index = 0;
+        while (index < 512) {
+            ownership_calls_env.reset(&f.services);
+            f.services.counts.deny_at = failure ? infer_calls - 1 : 0;
+            ownership_summary_model.summary mut inferred =
+                ownership_summary.infer(&f.inputs[0], no_callees);
+            assert(failure ? inferred.proof.failed : ownership_api.successful(inferred.proof));
+            if (failure) {
+                assert(inferred.roots.len > 0 && inferred.effects.len > 0);
+                assert(inferred.metadata.blocks != null);
+                assert(inferred.residual_effects);
+                assert(inferred.proof.terminal.reason ==
+                    ownership_api.incomplete_reason.work_limit);
+            } else {
+                assert(inferred.results.len == 1 && inferred.effects.len > 0);
+                assert(inferred.order.len + 1 == inferred.effects.len);
+                assert(inferred.metadata.blocks != null);
+            }
+            ownership_summary_model.free(&inferred);
+            ownership_summary_model.free(&inferred);
+            ownership_calls_env.reset(&f.services);
+            f.services.counts.deny_at = failure ? apply_calls - 1 : 0;
+            ownership_calls.application mut applied = ownership_calls.apply(&req);
+            assert(failure ? applied.proof.failed : ownership_api.successful(applied.proof));
+            if (failure) {
+                assert(applied.bound.model.roots.len > 0 && applied.state.contents_len > 0);
+                assert(applied.bound.model.metadata.blocks != null);
+                assert(applied.outcome.possible_caller_return && applied.outcome.cleanup_required);
+                assert(applied.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            } else {
+                assert(applied.normal_continuation && applied.state.contents_len > 0);
+            }
+            ownership_calls.free(&applied);
+            ownership_calls.free(&applied);
+            index += 1;
+        }
+        u64 system_value = heap.system_view();
+        u64 block_value = heap.block_view();
+        if (round == 4) { early_system = system_value; early_block = block_value; }
+        if (round >= 16) {
+            u64 distance_value = heap.distance(early_system, system_value);
+            if (distance_value < system_distance) { system_distance = distance_value; }
+            u64 block_value_distance = heap.distance(early_block, block_value);
+            if (block_value_distance < block_distance) { block_distance = block_value_distance; }
+        }
+        round += 1;
+    }
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 8192 : 1024;
+    println("ALLOCATOR_RECEIPT {\"path\":\"", failure ? "failure" : "success",
+        "\",\"rounds\":32,\"calls\":512,\"late_start\":16,\"system_distance\":", system_distance,
+        ",\"block_distance\":", block_distance, ",\"bound\":", bound,
+        ",\"infer_calls\":", infer_calls, ",\"apply_calls\":", apply_calls,
+        ",\"address_is_a_view\":", heap.ADDRESS_IS_A_VIEW, "}");
+    assert(system_distance < bound);
+    assert(!heap.ADDRESS_IS_A_VIEW || block_distance < bound);
+    f.services.counts.deny_at = 0;
+}
+
+// E names the relations that one function retains now: three roots, one requirement, one
+// effect, one exit, and one result relation. The published clone retains four of them.
+// Bound 5 refuses the exit and bound 6 refuses the result relation.
+fn function_count() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_1[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    assert(f.services.counts.meter.used.e == 7 && f.summary.relations == 4);
+    u64 mut bound = 5;
+    while (bound <= 7) {
+        f.services.limits.e = bound;
+        ownership_calls_env.reset(&f.services);
+        ownership_summary_model.summary_view@ none = {};
+        ownership_summary_model.summary mut again = ownership_summary.infer(&f.inputs[0], none);
+        if (bound == 7) {
+            assert(ownership_api.successful(again.proof) && again.relations == 4);
+        } else {
+            ownership_calls_env.rejected(again.proof, ownership_api.incomplete_reason.work_limit);
+            assert(again.proof.terminal.limit.category == ownership_api.limit_category.e);
+            assert(again.proof.terminal.limit.bound == bound);
+            assert(again.proof.terminal.limit.attempted == bound + 1);
+            assert(again.residual_effects && again.cases.len == 0);
+        }
+        ownership_summary_model.free(&again);
+        bound += 1;
+    }
+}
+
+// The summary solver of the callee and the flow of the caller are two computations. Each meter
+// has the W bound of its own FIR size (spec/fir.md 14.1).
+fn computation_bounds() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_1[..]);
+    defer ownership_calls_fixtures.close(&f);
+    u64 callee_size = ownership_limits.fir_size(&f.functions[0]);
+    u64 caller_size = ownership_limits.fir_size(&f.functions[1]);
+    assert(callee_size == 2 && caller_size > callee_size);
+    assert(f.services.counts.meter.bounds.w == ownership_limits.work_bound(callee_size));
+    u64 callee_work = f.services.counts.meter.used.w;
+    assert(callee_work > 0 && callee_work < f.services.counts.meter.bounds.w);
+    ownership_calls_fixtures.prepare(&f);
+    assert(f.services.counts.meter.bounds.w == ownership_limits.work_bound(caller_size));
+    assert(f.inputs[1].limits.w == ownership_limits.work_bound(caller_size));
+    assert(f.inputs[0].limits.w == ownership_limits.work_bound(callee_size));
+    assert(f.services.counts.meter.used.e < 7);
+}
+
+// A call application continues the E count of its frame: four model relations and one applied
+// effect node. Bound 4 refuses that node and keeps the caller input.
+fn application_count() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, SOURCE_1[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.heap,
+        ownership_api.validity_kind.live, 4);
+    ownership_calls_fixtures.apply(&f, 1);
+    successful(&f);
+    assert(f.application.bound.relations == 5 && f.application.bound.model.relations == 4);
+    ownership_calls.free(&f.application);
+    f.services.limits.e = 4;
+    ownership_calls_env.reset(&f.services);
+    ownership_calls_fixtures.apply(&f, 2);
+    ownership_calls_env.rejected(f.application.proof, ownership_api.incomplete_reason.work_limit);
+    assert(f.application.proof.terminal.limit.category == ownership_api.limit_category.e);
+    assert(f.application.proof.terminal.limit.attempted == 5);
+    assert(f.application.bound.relations == 4 && !f.application.normal_continuation);
+    assert(f.application.outcome.possible_caller_return && f.application.outcome.cleanup_required);
+}
+
+fn main() i32 {
+    string@ args = sys.args();
+    if (args.len > 1 && args[1] == "--allocator-success") { allocator_probe(false); return 0; }
+    if (args.len > 1 && args[1] == "--allocator-failure") { allocator_probe(true); return 0; }
+
+    case_g01_1();
+    case_g01_2();
+    case_g01_3();
+    case_g01_4();
+    case_g03_1();
+    case_g03_2();
+    case_g03_3();
+    case_g03_4();
+    case_g04_1();
+    case_g04_2();
+    case_g04_3();
+    case_g04_4();
+    case_x06();
+    case_x07();
+    case_x09();
+    case_x20();
+    function_count();
+    computation_bounds();
+    application_count();
+    return 0;
+}

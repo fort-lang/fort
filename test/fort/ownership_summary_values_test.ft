@@ -1,0 +1,81 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary values ok
+/// Checks the scalar facts that select an index window in an inferred summary. A local that the
+/// body addresses keeps no fact (D17.14). A cast keeps only a value that its type holds (D17.17).
+import ownership_api;
+import ownership_calls_fixtures;
+import ownership_summary_model;
+
+// The fixture lowers `callee` and `caller`. Each test reads only the callee summary.
+string CALLER = "fn caller(i32@ s) i32 { return callee(s); }";
+
+// The extent requirement of the one span read, or a failure of the test.
+fn extent(ownership_calls_fixtures.fixture* f) i64 {
+    assert(ownership_api.successful(f->summary.proof) && f->summary.cases.len == 1);
+    i64 mut end = -1;
+    u64 mut r = 0;
+    while (r < f->summary.requirements.len) {
+        if (f->summary.requirements[r].kind ==
+            ownership_summary_model.requirement_kind.extent) {
+            assert(end == -1);
+            end = f->summary.requirements[r].range.access.end.value;
+        }
+        r += 1;
+    }
+    assert(end >= 0);
+    return end;
+}
+
+// One callee body that sets `k` and then reads `s[k]`.
+fn window(string set, bool proved, i64 end) void {
+    string[4] source = {"fn callee(i32@ s) i32 {", set, "    return s[k]; }", CALLER};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    if (proved) {
+        assert(extent(&f) == end);
+        return;
+    }
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(f.summary.cases.len == 0 && f.summary.residual_effects);
+}
+
+// A formal index has no exact value, so the read has no proved window.
+fn formal_index() void {
+    string[2] source = {"fn callee(i32@ s, i32 n) i32 { return s[n]; }",
+        "fn caller(i32@ s, i32 n) i32 { return callee(s, n); }"};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+}
+
+// A store through `kp` could make `k` 5, so the body keeps no fact for `k`, even after a plain
+// assignment. Without the address, the assignment keeps the exact value 5.
+fn addressed_index() void {
+    window("    i32 mut k = 0; i32 mut* kp = &k; k = 5;", false, 0);
+    window("    i32 mut k = 0; k = 5;", true, 24);
+}
+
+// A narrowing cast keeps the largest value of its type and loses the next one, which wraps.
+// A widening cast keeps its exact value. A char is not an integer type.
+fn cast_index() void {
+    window("    i32 big = 255; u8 k = cast(big, u8);", true, 1024);
+    window("    i32 big = 256; u8 k = cast(big, u8);", false, 0);
+    window("    i32 big = 127; i8 k = cast(big, i8);", true, 512);
+    window("    i32 big = 128; i8 k = cast(big, i8);", false, 0);
+    window("    u8 small = 7; u64 k = cast(small, u64);", true, 32);
+    window("    i32 big = 65; char c = cast(big, char); i32 k = 2;", true, 12);
+}
+
+fn main() i32 {
+    formal_index();
+    addressed_index();
+    cast_index();
+    println("summary values ok");
+    return 0;
+}
