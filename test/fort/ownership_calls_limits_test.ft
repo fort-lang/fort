@@ -1,0 +1,186 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| direct-call limits ok
+/// Checks the numeric limits of direct-call inference at each charge (`spec/fir.md` 14.1).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_model;
+
+string[2] MAYBE_ABORT = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); del(p); }",
+};
+
+string[2] JOINED = {
+    "fn callee(i32* p, bool b) i32* { if (b) { return p; } return p; }",
+    "fn caller(i32* p, bool b) i32* { return callee(p, b); }",
+};
+
+string[2] CORRELATED = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); if (fail) { return; } del(p); }",
+};
+
+string[3] RETAINS = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, i32* p) void { out->ptr = p; }",
+    "fn caller(view_box mut* out, i32* p) void { callee(out, p); }",
+};
+
+string[3] WRAPPED = {
+    "fn inner(i32* p) i32* { return p; }",
+    "fn middle(i32* p) i32* { return inner(p); }",
+    "fn outer(i32* p) i32 { return *middle(p); }",
+};
+
+string[6] TWO_SWITCHES = {
+    "fn callee(bool a, bool b) i32 {",
+    "    if (a) { return 1; }",
+    "    if (b) { return 2; }",
+    "    return 3;",
+    "}",
+    "fn caller(bool a) i32 { return callee(a, true); }",
+};
+
+// 49 scalar declarations and one read: about 50 FIR statements in one body.
+string[11] DECLARED = {
+    "fn callee(i32* p) i32 {",
+    "    i32 v0 = 0; i32 v1 = 1; i32 v2 = 2; i32 v3 = 3; i32 v4 = 4;",
+    "    i32 v5 = 5; i32 v6 = 6; i32 v7 = 7; i32 v8 = 8; i32 v9 = 9;",
+    "    i32 v10 = 10; i32 v11 = 11; i32 v12 = 12; i32 v13 = 13; i32 v14 = 14;",
+    "    i32 v15 = 15; i32 v16 = 16; i32 v17 = 17; i32 v18 = 18; i32 v19 = 19;",
+    "    i32 v20 = 20; i32 v21 = 21; i32 v22 = 22; i32 v23 = 23; i32 v24 = 24;",
+    "    i32 v25 = 25; i32 v26 = 26; i32 v27 = 27; i32 v28 = 28; i32 v29 = 29;",
+    "    i32 v30 = 30; i32 v31 = 31; i32 v32 = 32; i32 v33 = 33; i32 v34 = 34;",
+    "    i32 v35 = 35; i32 v36 = 36; i32 v37 = 37; i32 v38 = 38; i32 v39 = 39;",
+    "    i32 v40 = 40; i32 v41 = 41; i32 v42 = 42; i32 v43 = 43; i32 v44 = 44;",
+    "    i32 v45 = 45; i32 v46 = 46; i32 v47 = 47; i32 v48 = 48;",
+};
+
+// Each refused charge in the computation of body `index` stops it with the refusal. No
+// refusal becomes an unknown continuation, a different reason, or a success.
+fn work_sweep(string@ text, string@ names, u64 index) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, text, names);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* full = ownership_call_bodies.summary(&b, index);
+    bool complete = ownership_api.successful(full->proof);
+    ownership_call_bodies.infer(&b, index);
+    u64 total = b.services.counts.calls;
+    assert(total > 50);
+    u64 mut at = 1;
+    while (at <= total) {
+        b.services.counts.deny_at = at;
+        ownership_call_bodies.infer(&b, index);
+        ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, index);
+        assert(!ownership_api.successful(s->proof) && s->residual_effects);
+        if (complete) {
+            assert(s->proof.terminal.reason == ownership_api.incomplete_reason.work_limit ||
+                s->proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+        }
+        at += 1;
+    }
+    b.services.counts.deny_at = 0;
+    ownership_call_bodies.infer(&b, index);
+    assert(ownership_api.successful(ownership_call_bodies.summary(&b, index)->proof) == complete);
+}
+
+// The E count of each owner grows by one relation at a time. A bound below the greatest count
+// refuses the relation one above it, with that prospective count. The greatest count passes.
+fn relation_sweep(string@ text, string@ names, u64 index) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, text, names);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.infer(&b, index);
+    assert(ownership_api.successful(ownership_call_bodies.summary(&b, index)->proof));
+    u64 needed = b.services.counts.meter.used.e;
+    assert(needed > 2);
+    u64 mut bound = 1;
+    while (bound < needed) {
+        b.services.limits.e = bound;
+        b.inputs[index].limits.e = bound;
+        ownership_call_bodies.infer_with(&b, index);
+        ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, index);
+        assert(!ownership_api.successful(s->proof));
+        assert(s->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(s->proof.terminal.limit.category == ownership_api.limit_category.e);
+        assert(s->proof.terminal.limit.bound == bound);
+        assert(s->proof.terminal.limit.attempted == bound + 1);
+        bound += 1;
+    }
+    b.services.limits.e = needed;
+    b.inputs[index].limits.e = needed;
+    ownership_call_bodies.infer_with(&b, index);
+    assert(ownership_api.successful(ownership_call_bodies.summary(&b, index)->proof));
+    assert(b.services.counts.meter.used.e == needed);
+}
+
+// One predicate fits the path of the first switch. The second switch would add a second
+// atom, so flow records a precision loss, and an exit with a loss has no published guard.
+fn predicate_bound() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, TWO_SWITCHES[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_summary_model.summary* full = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(full->proof) && full->cases.len == 3);
+    assert(full->predicates.len == 4);
+    b.services.limits.p = 1;
+    b.inputs[0].limits.p = 1;
+    ownership_call_bodies.infer_with(&b, 0);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 0);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+// The summary of 49 declarations completes under the production bounds for its FIR size. Its
+// W use stays below half of the W bound, because each effect lookup is a key search and not a
+// scan of all effects. The E bound of 256 relations refuses first, at 50 declarations.
+fn declared(bool fifty) void {
+    string[12] mut text = {};
+    u64 mut i = 0;
+    while (i < DECLARED.len) {
+        text[i] = DECLARED[i];
+        i += 1;
+    }
+    text[11] = fifty ? "    i32 v49 = 49; return *p; }" : "    return *p; }";
+    string[1] names = {"callee"};
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, text[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 0);
+    if (fifty) {
+        assert(s->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(s->proof.terminal.limit.category == ownership_api.limit_category.e);
+        assert(s->proof.terminal.limit.bound == 256);
+        return;
+    }
+    assert(ownership_api.successful(s->proof) && s->cases.len == 1 && s->effects.len == 100);
+    assert(b.services.counts.meter.used.e == 254);
+    assert(b.services.counts.meter.used.w * 2 < b.services.limits.w);
+}
+
+fn main() i32 {
+    string[2] two = {"callee", "caller"};
+    string[3] three = {"inner", "middle", "outer"};
+    work_sweep(MAYBE_ABORT[..], two[..], 1);
+    work_sweep(JOINED[..], two[..], 1);
+    work_sweep(CORRELATED[..], two[..], 1);
+    work_sweep(RETAINS[..], two[..], 1);
+    work_sweep(WRAPPED[..], three[..], 1);
+    work_sweep(WRAPPED[..], three[..], 2);
+    relation_sweep(MAYBE_ABORT[..], two[..], 0);
+    relation_sweep(MAYBE_ABORT[..], two[..], 1);
+    relation_sweep(RETAINS[..], two[..], 1);
+    relation_sweep(WRAPPED[..], three[..], 1);
+    predicate_bound();
+    declared(false);
+    declared(true);
+    println("direct-call limits ok");
+    return 0;
+}

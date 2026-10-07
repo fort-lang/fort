@@ -1248,6 +1248,9 @@ came here.
   flow of one caller with its call applications. Its W bound is `ownership_limits.computation`
   of that body's FIR size. The function E count continues from the body through each exit.
   These modules do not select a new compiler driver. (D17.18)
+  Measured on a body of N scalar declarations and one read: at N = 49 the summary completes
+  under the production bounds and uses 29461 of its 75072 W units. At N = 50 the E bound of
+  256 refuses first (`test/fort/ownership_calls_limits_test.ft`).
 - **A body applies the summary of each direct call at the gap of the call** (D17.18).
   Extraction records each call site, its event key, and fresh keys for the callee allocation
   templates. A call depth creates no key.
