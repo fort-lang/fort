@@ -107,8 +107,9 @@ documentation) keeps its individual commits.
 GitHub PR CI supplies the merge gate (2026-10-01, T-306). Local final gates are not required.
 Push the branch and open a PR against `main`. Require green PR `ci-status` and the merge queue.
 Never merge or push `main` locally. Permit no ruleset bypass actors; never bypass the ruleset.
-`gh pr merge <number> --rebase --match-head-commit <reviewed-head-sha>` queues the PR; never add
-`--admin`. The ruleset's merge method decides the merge; `--match-head-commit` pins the head. The
+Never use `--admin`. Queue the PR with `tools/queue_pr.sh <number> <reviewed-head-sha>`. It runs
+GraphQL `enqueuePullRequest` with `expectedHeadOid` set to that head. `gh pr merge` cannot queue: it
+enables auto-merge, which the repository disables. The ruleset's merge method decides the merge. The
 queue tests `main` plus the queued PRs as one commit, merges them in order and moves `main` to that
 commit, so `main` gets no push run. A nightly run of the full matrix tests `main`. Queue no PR while
 the latest `ci-status` on `main` (the queue run of its head or the nightly run) is red.
@@ -202,8 +203,7 @@ the latest `ci-status` on `main` (the queue run of its head or the nightly run) 
   Read `git diff --stat main...HEAD` and new files. Then queue the PR as above. Record merged SHA
   and agent tokens. Tick merge criteria after GitHub reports merged state. Move the ticket to
   `done/`. Remove its worktree and branch. Assign newly ready tickets. Preserve CI evidence before
-  removal. Record job results, self-hosted counts, and ctest totals. Re-read each count constant
-  that two branches change. Run the tool that owns each count.
+  removal. Record job results, self-hosted counts, and ctest totals.
 
 ### Self-Updating Context (the routing rule)
 
