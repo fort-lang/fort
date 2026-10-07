@@ -1,0 +1,206 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| rewrites ok
+//| charges ok
+//| refusals ok
+//| no copy ok
+/// Checks how a direct call binds a fresh callee allocation to its actual source (D17.15,
+/// D17.18). Each summary row that names the formal source takes the actual one. A row whose
+/// value borrows the formal source gets its own copy of those borrows, with the new value
+/// version. The copies live in the bound frame's metadata. Other rows keep their borrows.
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_keys;
+import ownership_summary_model;
+
+fn formal() ownership_api.entity_id {
+    return ownership_calls_env.id(ownership_api.entity_kind.source, 40);
+}
+
+fn other() ownership_api.entity_id {
+    return ownership_calls_env.id(ownership_api.entity_kind.source, 41);
+}
+
+fn fresh() ownership_api.entity_id {
+    return ownership_calls_env.actual(ownership_api.entity_kind.source, 50);
+}
+
+fn version() ownership_api.entity_id {
+    return ownership_calls_env.actual(ownership_api.entity_kind.value, 50);
+}
+
+fn same(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    return ownership_keys.entity(a, b) == 0;
+}
+
+fn borrow(ownership_api.entity_id source, u32 key) ownership_api.borrow_relation {
+    return ownership_api.borrow_relation{
+        .key = ownership_calls_env.id(ownership_api.entity_kind.relation, key),
+        .value_version = ownership_calls_env.id(ownership_api.entity_kind.value, key),
+        .source = source,
+        .range = ownership_api.region{.key = ownership_calls_env.id(
+            ownership_api.entity_kind.region, key), .source = source},
+        .representation_complete = true};
+}
+
+// The borrows that the summary rows view. The call never writes them.
+struct rows {
+    ownership_api.borrow_relation[2] mixed;
+    ownership_api.borrow_relation[1] unrelated;
+    ownership_api.borrow_relation[1] single;
+}
+
+fn fill(rows mut* r) void {
+    r->mixed[0] = borrow(formal(), 1);
+    r->mixed[1] = borrow(other(), 2);
+    r->unrelated[0] = borrow(other(), 3);
+    r->single[0] = borrow(formal(), 4);
+}
+
+// Four effect rows and two result rows. Rows 1 and 3 borrow the formal source.
+fn frame_of(rows* r, bool copies) ownership_calls.application {
+    ownership_calls.application mut out = ownership_calls.application{};
+    out.bound.model.effects = new(ownership_summary_model.effect_node, 4);
+    out.bound.model.effects[0].effect.source = formal();
+    out.bound.model.effects[0].range.source = formal();
+    out.bound.model.effects[1].effect.source = other();
+    out.bound.model.effects[1].value.borrows = r->mixed[..];
+    out.bound.model.effects[2].value.borrows = r->unrelated[..];
+    out.bound.model.effects[3].range.source = formal();
+    out.bound.model.effects[3].value.borrows = r->single[..];
+    if (!copies) {
+        out.bound.model.effects[1].value.borrows = r->unrelated[..];
+        out.bound.model.effects[3].value.borrows = r->unrelated[..];
+    }
+    out.bound.model.results = new(ownership_summary_model.relation, 2);
+    out.bound.model.results[0].borrow = borrow(formal(), 5);
+    out.bound.model.results[1].borrow = borrow(other(), 6);
+    out.proof = ownership_summary_model.complete();
+    return out;
+}
+
+fn context(ownership_calls_env.env* e) ownership_summary_model.context {
+    return ownership_summary_model.context{.services = &e->services};
+}
+
+fn bind(ownership_calls_env.env mut* e, ownership_calls.application mut* out) bool {
+    ownership_summary_model.context ctx = context(e);
+    return ownership_calls.bind_fresh_source(out, &ctx, formal(), fresh(), version());
+}
+
+fn rewrites(ownership_calls_env.env mut* e) void {
+    rows mut r = rows{};
+    fill(&r);
+    ownership_calls.application mut out = frame_of(&r, true);
+    defer ownership_calls.free(&out);
+    ownership_calls_env.reset(e);
+    assert(bind(e, &out));
+    assert(ownership_api.successful(out.proof));
+    ownership_summary_model.effect_node* row0 = &out.bound.model.effects[0];
+    ownership_summary_model.effect_node* row1 = &out.bound.model.effects[1];
+    ownership_summary_model.effect_node* row2 = &out.bound.model.effects[2];
+    ownership_summary_model.effect_node* row3 = &out.bound.model.effects[3];
+    // A row that names the formal source takes the actual one. Its value has no borrow.
+    assert(same(row0->effect.source, fresh()) && same(row0->range.source, fresh()));
+    assert(row0->value.borrows.len == 0);
+    // A copied row: the formal borrow takes the actual source and the new version. The
+    // other borrow keeps its source. The value takes the new version.
+    assert(same(row1->effect.source, other()));
+    assert(row1->value.borrows.len == 2);
+    assert(same(row1->value.borrows[0].source, fresh()));
+    assert(same(row1->value.borrows[0].range.source, fresh()));
+    assert(same(row1->value.borrows[0].value_version, version()));
+    assert(row1->value.borrows[0].key.ordinal == 1);
+    assert(same(row1->value.borrows[1].source, other()));
+    assert(row1->value.borrows[1].key.ordinal == 2);
+    assert(same(row1->value.value_version, version()));
+    // A row without the formal source keeps its borrows and its version.
+    assert(row2->value.borrows.len == 1 && same(row2->value.borrows[0].source, other()));
+    assert(!same(row2->value.value_version, version()));
+    // The last row is copied as well, and its range takes the actual source.
+    assert(same(row3->range.source, fresh()));
+    assert(row3->value.borrows.len == 1 && same(row3->value.borrows[0].source, fresh()));
+    assert(row3->value.borrows[0].key.ordinal == 4);
+    assert(same(row3->value.value_version, version()));
+    // The copies are new storage. The arrays that the rows viewed keep the formal source.
+    assert(same(r.mixed[0].source, formal()) && same(r.single[0].source, formal()));
+    assert(out.bound.model.metadata.blocks != null);
+    // A result row that names the formal source takes the actual source and version.
+    assert(same(out.bound.model.results[0].borrow.source, fresh()));
+    assert(same(out.bound.model.results[0].borrow.range.source, fresh()));
+    assert(same(out.bound.model.results[0].borrow.value_version, version()));
+    assert(same(out.bound.model.results[1].borrow.source, other()));
+    println("rewrites ok");
+}
+
+// The work does not depend on where the copies live. Each result row and each effect row
+// pays one W unit, and each borrow one unit to scan it. A copied row of N borrows pays N + 2
+// units and one E charge, and N units to copy. Here 2 result rows, 4 effect rows and 4
+// borrows pay 10 units; rows 1 and 3 pay (2 + 2 + 2) and (1 + 2 + 1). That is 20 W units and
+// 2 E charges: 22 charges and an E count of 2.
+fn charges(ownership_calls_env.env mut* e) void {
+    rows mut r = rows{};
+    fill(&r);
+    ownership_calls.application mut out = frame_of(&r, true);
+    defer ownership_calls.free(&out);
+    ownership_calls_env.reset(e);
+    assert(bind(e, &out));
+    assert(e->counts.calls == 22);
+    assert(e->counts.meter.used.w == 20);
+    assert(e->counts.meter.used.e == 2);
+    assert(out.bound.relations == 2);
+    println("charges ok");
+}
+
+// A refused charge fails the binding with the refusal. The first and the last charge refuse
+// at the same position whatever order the copies take.
+fn refusals(ownership_calls_env.env mut* e) void {
+    u64[2] at = {1, 22};
+    u64 mut i = 0;
+    while (i < at.len) {
+        rows mut r = rows{};
+        fill(&r);
+        ownership_calls.application mut out = frame_of(&r, true);
+        ownership_calls_env.reset(e);
+        e->counts.deny_at = at[i];
+        assert(!bind(e, &out));
+        assert(!ownership_api.successful(out.proof));
+        assert(e->counts.calls == at[i]);
+        if (at[i] == 1) {
+            // Nothing changed before the first charge.
+            assert(same(out.bound.model.results[0].borrow.source, formal()));
+        }
+        e->counts.deny_at = 0;
+        ownership_calls.free(&out);
+        i += 1;
+    }
+    println("refusals ok");
+}
+
+// Without a row that borrows the formal source, the binding allocates nothing.
+fn no_copy(ownership_calls_env.env mut* e) void {
+    rows mut r = rows{};
+    fill(&r);
+    ownership_calls.application mut out = frame_of(&r, false);
+    defer ownership_calls.free(&out);
+    ownership_calls_env.reset(e);
+    assert(bind(e, &out));
+    assert(out.bound.model.metadata.blocks == null);
+    assert(e->counts.meter.used.e == 0);
+    assert(same(out.bound.model.effects[0].effect.source, fresh()));
+    assert(same(out.bound.model.effects[1].value.borrows[0].source, other()));
+    println("no copy ok");
+}
+
+fn main() i32 {
+    ownership_calls_env.env mut environment = ownership_calls_env.env{};
+    ownership_calls_env.open(&environment);
+    defer ownership_calls_env.close(&environment);
+    rewrites(&environment);
+    charges(&environment);
+    refusals(&environment);
+    no_copy(&environment);
+    return 0;
+}
