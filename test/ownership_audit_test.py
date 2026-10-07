@@ -33,6 +33,8 @@ LIMITS = {
     "v": 512,
 }
 TARGET = "x86_64-linux-gnu"
+# The analyses that version 4 integrates in each report, beside the graph and liveness.
+PRODUCERS = ("local", "raw")
 
 
 def incomplete(stage="graph", code="missing_producer", source=None, limit=None):
@@ -92,7 +94,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
             )
     report = {
         "kind": "fort-ownership-report",
-        "version": 3,
+        "version": 4,
         "complete": True,
         "compiler_version": "fort synthetic 1",
         "invocation": {
@@ -116,7 +118,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
         "analyses": [
             {
                 "name": name,
-                "producer": "integrated" if accepted or name == "local" else "unavailable",
+                "producer": "integrated" if accepted or name in PRODUCERS else "unavailable",
                 "status": "complete" if accepted else "incomplete",
             }
             for name in audit.ANALYSES
@@ -151,11 +153,11 @@ def owner_key(owner):
 
 
 def fit_local_ledgers(report):
-    """Give each verified body of a report its service ledger and one local ledger.
+    """Give each verified body of a report its service ledger, one local and one raw ledger.
 
     A body ledger of a key that names no verified body goes. A verified body without a service
-    ledger gets a pair of FIR size 0, so a graph sum keeps its value. The other meters keep
-    their order, and the IDs follow it.
+    ledger gets one of FIR size 0, so a graph sum keeps its value. The other meters keep their
+    order, and the IDs follow it.
     """
     verified = [
         body["key"]
@@ -166,38 +168,39 @@ def fit_local_ledgers(report):
     meters = [
         meter
         for meter in report["meters"]
-        if meter["name"] not in ("services", "local")
+        if meter["name"] not in ("services", "local", "raw")
         or meter["owner"] is None
         or owner_key(meter["owner"]) in keys
     ]
-    local = {owner_key(m["owner"]) for m in meters if m["name"] == "local" and m["owner"]}
     services = {
         owner_key(m["owner"]): m["fir_size"]
         for m in meters
         if m["name"] == "services" and m["owner"] is not None
     }
-    for key in verified:
-        if owner_key(key) in local:
-            continue
-        if owner_key(key) not in services:
-            meters.append(body_ledger(0, "services", key, 0, report["limits"]))
-            services[owner_key(key)] = 0
-        meters.append(body_ledger(0, "local", key, services[owner_key(key)], report["limits"]))
+    for name in ("local", "raw"):
+        owned = {owner_key(m["owner"]) for m in meters if m["name"] == name and m["owner"]}
+        for key in verified:
+            if owner_key(key) in owned:
+                continue
+            if owner_key(key) not in services:
+                meters.append(body_ledger(0, "services", key, 0, report["limits"]))
+                services[owner_key(key)] = 0
+            meters.append(body_ledger(0, name, key, services[owner_key(key)], report["limits"]))
     for index, meter in enumerate(meters):
         meter["id"] = index
     report["meters"] = meters
 
 
-def localize(report, root, kind):
-    """Give the synthetic report an integrated local analysis.
+def localize(report, root, kind, stage=2):
+    """Give the synthetic report an integrated local or raw analysis at `stage`.
 
     Even bodies declare their obligations and prove them. Odd bodies have incomplete
     correspondence. `kind` puts a violation or an incomplete declared obligation into the
     first body of main.ft, or into the shared body of every root.
     """
-    report["analyses"][2].update(producer="integrated", status="incomplete")
+    report["analyses"][stage].update(producer="integrated", status="incomplete")
     for index, body in enumerate(report["bodies"]):
-        row = body["analyses"][2]
+        row = body["analyses"][stage]
         if index % 2 == 0:
             row.update(correspondence="complete", solver="complete", proof="complete")
         else:
@@ -351,6 +354,9 @@ if mode == "version_mismatch":
 if mode.startswith("local_"):
     from ownership_audit_test import localize
     localize(report, root, mode[len("local_"):])
+if mode.startswith("raw_"):
+    from ownership_audit_test import localize
+    localize(report, root, mode[len("raw_"):], stage=4)
 if mode == "incomplete":
     report["enumeration"]["complete"] = False
     report["first_incomplete"] = {{"stage": "enumeration", "code": "source_coverage",
@@ -451,8 +457,8 @@ class SchemaTests(RepositoryFixture):
                 self.reject(lambda value, select=select: select(value).update(extra=0))
 
     def test_unknown_versions_and_invalid_complete_types(self):
-        # Version 3 adds local ledgers. Versions 1 and 2 have no local ledger.
-        for version in (0, 1, 2, 4, True, -1, 3.0, "3", audit.U64_MAX + 1):
+        # Version 3 adds local ledgers and version 4 raw ledgers. Earlier versions lack them.
+        for version in (0, 1, 2, 3, 5, True, -1, 4.0, "4", audit.U64_MAX + 1):
             with self.subTest(version=version):
                 self.reject(lambda value: value.update(version=version))
         for complete in (False, 0, 1, "true", None):
@@ -746,9 +752,9 @@ class SchemaTests(RepositoryFixture):
         self.report["meters"].pop()
         self.report["meters"][1]["fir_size"] = sizes[2]
         self.report["meters"][1]["counts"][0]["bound"] = 65536 + 64 * sizes[2]
-        # The local ledger of that body follows its service ledger.
+        # The local and raw ledgers of that body follow its service ledger.
         for meter in self.report["meters"]:
-            if meter["name"] == "local" and meter["owner"] == bodies[0]["key"]:
+            if meter["name"] in ("local", "raw") and meter["owner"] == bodies[0]["key"]:
                 meter["fir_size"] = sizes[2]
                 meter["counts"][0]["bound"] = 65536 + 64 * sizes[2]
         with self.assertRaisesRegex(audit.InvalidEvidence, "graph FIR size differs"):
@@ -780,13 +786,15 @@ class SchemaTests(RepositoryFixture):
                 "first_refusal": refusal,
             }
 
-        def build(local_sizes, owners=None):
+        def build(local_sizes, owners=None, name="local"):
             owners = owners or [dict(body["key"]) for body in bodies]
+            other = "raw" if name == "local" else "local"
             meters = [ledger(0, "graph_private", None, sum(sizes))]
             for index, body in enumerate(bodies):
                 meters.append(ledger(len(meters), "services", dict(body["key"]), sizes[index]))
                 if index < len(local_sizes):
-                    meters.append(ledger(len(meters), "local", owners[index], local_sizes[index]))
+                    meters.append(ledger(len(meters), name, owners[index], local_sizes[index]))
+                meters.append(ledger(len(meters), other, dict(body["key"]), sizes[index]))
             self.report["meters"] = meters
 
         # The local ledgers repeat the FIR size of their body. The graph sums services only.
@@ -834,6 +842,75 @@ class SchemaTests(RepositoryFixture):
         self.validate()
         self.reject(lambda value: value["analyses"][2].update(status="complete"))
         self.reject(lambda value: value["meters"][2].update(name="other"))
+
+    def test_raw_ledgers_follow_the_service_ledger_of_their_body(self):
+        sizes = [3, 5]
+        bodies = self.report["bodies"][:2]
+
+        def ledger(index, name, owner, size, refusal=None):
+            bound = 65536 + 64 * size
+            used = bound if refusal else 0
+            return {
+                "id": index,
+                "name": name,
+                "owner": owner,
+                "fir_size": size,
+                "counts": [{"category": "W", "scope": "computation", "used": used, "bound": bound}],
+                "first_refusal": refusal,
+            }
+
+        def build(raw_sizes, owners=None):
+            owners = owners or [dict(body["key"]) for body in bodies]
+            meters = [ledger(0, "graph_private", None, sum(sizes))]
+            for index, body in enumerate(bodies):
+                meters.append(ledger(len(meters), "services", dict(body["key"]), sizes[index]))
+                meters.append(ledger(len(meters), "local", dict(body["key"]), sizes[index]))
+                if index < len(raw_sizes):
+                    meters.append(ledger(len(meters), "raw", owners[index], raw_sizes[index]))
+            self.report["meters"] = meters
+
+        # The raw ledger is the raw computation of its body: the FIR size of that body.
+        build(sizes)
+        self.validate()
+        # Version 4 gives each verified body one raw ledger, and no other body one.
+        build(sizes[:1])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "exactly one raw ledger"):
+            self.validate()
+        build([sizes[0], sizes[0]])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "raw ledger: FIR size differs"):
+            self.validate()
+        build(sizes, owners=[None, dict(bodies[1]["key"])])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "raw ledger: missing owner"):
+            self.validate()
+        build(sizes, owners=[dict(bodies[1]["key"]), dict(bodies[1]["key"])])
+        with self.assertRaisesRegex(audit.InvalidEvidence, "raw ledger: duplicate owner"):
+            self.validate()
+        # Version 4 integrates the raw producer, even where no body proves anything.
+        report = make_report(self.argv, self.checkout)
+        self.validate(report)
+        report["analyses"][4]["producer"] = "unavailable"
+        with self.assertRaisesRegex(audit.InvalidEvidence, "raw analysis: producer"):
+            self.validate(report)
+        # A raw W refusal needs an incomplete raw closure and body row.
+        bound = 65536 + 64 * sizes[0]
+        refusal = incomplete(
+            "raw", "work_limit", limit={"category": "W", "used": bound, "bound": bound}
+        )
+        build(sizes)
+        self.report["analyses"][4].update(producer="integrated", status="incomplete")
+        for body in self.report["bodies"]:
+            body["analyses"][4].update(correspondence="complete", solver="incomplete")
+        self.report["totals"] = audit.derived_totals(self.report["bodies"])
+        self.report["meters"][3] = ledger(3, "raw", dict(bodies[0]["key"]), sizes[0], refusal)
+        self.validate()
+        self.reject(lambda value: value["analyses"][4].update(status="complete"))
+
+        def complete_solver(value):
+            value["bodies"][0]["analyses"][4].update(solver="complete")
+            value["totals"] = audit.derived_totals(value["bodies"])
+
+        self.reject(complete_solver, "complete affected computation")
+        self.reject(lambda value: value["meters"][3].update(name="other"))
 
     def test_meter_w_bound_scales_with_its_fir_size(self):
         def grow_graph(report, size):
@@ -1349,6 +1426,16 @@ class StageTests(RepositoryFixture):
                 )
 
         self.reject(unverified_ledgers, "exactly one local ledger")
+
+        # A body that verification never reached has no raw ledger either.
+        def unverified_raw(report):
+            key = report["bodies"][0]["key"]
+            for name in ("services", "raw"):
+                report["meters"].append(
+                    body_ledger(len(report["meters"]), name, key, 0, report["limits"])
+                )
+
+        self.reject(unverified_raw, "exactly one raw ledger")
 
     def test_verifier_failure_requires_exit_two_and_fails_audit(self):
         self.block("verification")

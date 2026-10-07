@@ -39,11 +39,15 @@ fn zero_bodies_retain_missing_producers_and_no_body_meter() void {
     ownership_source.analyze(&e.source);
     assert(e.source.bodies.len == 0);
     assert(ownership_report.verdict(&e.source) == 1);
-    // The local analysis has no closure facts outside bodies, so no body means no local gap.
+    // The local and raw analyses have no closure facts outside bodies, so no body means no
+    // gap of theirs. Each analysis without a producer stays incomplete.
     assert(ownership_report.closure_status(&e.source, ownership_report.LOCAL) == "complete");
-    u64 mut stage = ownership_report.INTEGRATED;
+    assert(ownership_report.closure_status(&e.source, ownership_report.RAW) == "complete");
+    u64 mut stage = ownership_report.STORED_BORROWS;
     while (stage < ownership_report.ANALYSIS_COUNT) {
-        assert(ownership_report.closure_status(&e.source, stage) == "incomplete");
+        if (!ownership_report.integrated(stage)) {
+            assert(ownership_report.closure_status(&e.source, stage) == "incomplete");
+        }
         stage += 1;
     }
     diag.sink mut diagnostics = diag.sink{};
@@ -375,7 +379,7 @@ fn computation_bounds_are_published() void {
     ownership_report.build(&out, &e.source, &call, 1);
     strbuf.str_buf mut expected = strbuf.create();
     defer strbuf.free(&expected);
-    strbuf.append(&expected, "{\"kind\":\"fort-ownership-report\",\"version\":3,");
+    strbuf.append(&expected, "{\"kind\":\"fort-ownership-report\",\"version\":4,");
     contains(&out, strbuf.view(&expected));
     strbuf.clear(&expected);
     strbuf.append(&expected, "\"limits\":{\"version\":2,");

@@ -110,13 +110,16 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["enumeration"]["selected_bodies"], 0)
         self.assertEqual(len(document["analyses"]), 7)
-        # The local analysis has no closure facts outside bodies, so no body leaves no gap.
+        # The local and raw analyses have no closure facts outside bodies, so no body leaves
+        # no gap of theirs.
         self.assertEqual(document["analyses"][2], {"name": "local", "producer": "integrated",
                                                    "status": "complete"})
+        self.assertEqual(document["analyses"][4], {"name": "raw", "producer": "integrated",
+                                                   "status": "complete"})
         self.assertEqual([row["producer"] for row in document["analyses"]][3:],
-                         ["unavailable"] * 4)
+                         ["unavailable", "integrated", "unavailable", "unavailable"])
         self.assertEqual([row["status"] for row in document["analyses"]][3:],
-                         ["incomplete"] * 4)
+                         ["incomplete", "complete", "incomplete", "incomplete"])
         self.assertEqual([row["name"] for row in document["meters"]], ["graph_private"])
 
     def test_diagnostic_document_stays_version_one(self):
@@ -128,8 +131,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(diagnostic["symbols"], [])
         self.assertIn("ownership proof is incomplete", diagnostic["diagnostics"][0]["message"])
         self.assertEqual(coverage["kind"], "fort-ownership-report")
-        # Version 2 added the W scale and FIR sizes. Version 3 adds the local ledgers.
-        self.assertEqual(coverage["version"], 3)
+        # Version 2 added the W scale and FIR sizes, version 3 the local ledgers and version 4
+        # the raw ledgers.
+        self.assertEqual(coverage["version"], 4)
         self.assertIn("w_scale", coverage["limits"])
 
     def test_index_still_populates_identifier_records(self):
@@ -379,8 +383,8 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["meters"], [])
         self.assertEqual([row["status"] for row in document["analyses"]][3:],
-                         ["incomplete"] * 4)
-        # The local analysis ran on no body and the denominator is incomplete.
+                         ["incomplete", "unexecuted", "incomplete", "incomplete"])
+        # The local and raw analyses ran on no body and the denominator is incomplete.
         self.assertEqual(document["analyses"][2]["status"], "unexecuted")
 
     def test_actual_verifier_failure_exits_two_and_retains_unexecuted_rows(self):
@@ -571,6 +575,115 @@ class OwnershipDriverTest(unittest.TestCase):
         caller = self.local_row(document, "caller_storage")
         self.assertEqual((caller["correspondence"], caller["proof"]),
                          ("incomplete", "incomplete"))
+
+    RAW_CASES = (
+        "fn reconstruct() i32 {\n"
+        "    i32 x = 5;\n"
+        "    u64 bits = cast(&x, u64);\n"
+        "    i32* q = cast(bits, i32*);\n"
+        "    return *q;\n"
+        "}\n"
+        "fn end_pointer() u8 {\n"
+        "    u8 mut@ own bytes = new(u8, 4);\n"
+        "    defer del(bytes);\n"
+        "    u8* tail = bytes[4..4].ptr;\n"
+        "    return *tail;\n"
+        "}\n"
+        "fn symbolic(u64 n) u8 {\n"
+        "    u8 mut@ own s = new(u8, n);\n"
+        "    defer del(s);\n"
+        "    u8* p = s.ptr;\n"
+        "    return *p;\n"
+        "}\n"
+        "fn through_parameter(i32* p) i32 { return *p; }\n"
+        "fn safe() i32 {\n"
+        "    i32 x = 3;\n"
+        "    i32* p = &x;\n"
+        "    return *p;\n"
+        "}\n"
+        "fn main() i32 { return 0; }\n"
+    )
+
+    def raw_row(self, document, name):
+        return self.body(document, name)["analyses"][4]
+
+    def test_raw_violations_and_failures_are_rendered_and_counted(self):
+        self.entry.write_text(self.RAW_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        self.assertIn("main.ft:5:12: error: invalid use of 'q'", stderr)
+        self.assertIn("main.ft:5:12: note: raw access needs a proved original source", stderr)
+        self.assertIn("main.ft:11:12: error: invalid use of 'tail'", stderr)
+        self.assertIn("main.ft:11:12: note: typed access exceeds its inherited window", stderr)
+        self.assertIn("main.ft:17:12: error: cannot prove that 'p' designates the accessed "
+                      "storage", stderr)
+        # A failure without a witness names its reason as possible (toolchain 4.2).
+        self.assertIn("main.ft:17:12: note: typed access window remains unproved", stderr)
+        # Raw records come before the one closure reason, in body order.
+        self.assertLess(stderr.index("invalid use of 'q'"), stderr.index("invalid use of 'tail'"))
+        self.assertLess(stderr.index("cannot prove that"),
+                        stderr.index("ownership proof is incomplete"))
+        self.assertEqual(document["totals"]["analyses"][4]["violations"], 2)
+        self.assertEqual(document["totals"]["violations"], 2)
+        for name in ("reconstruct", "end_pointer"):
+            with self.subTest(name=name):
+                self.assertEqual(self.raw_row(document, name),
+                                 {"name": "raw", "correspondence": "complete",
+                                  "solver": "complete", "proof": "violated", "violations": 1})
+        self.assertEqual(self.raw_row(document, "symbolic")["proof"], "incomplete")
+        self.assertEqual(self.raw_row(document, "symbolic")["correspondence"], "complete")
+        parameter = self.raw_row(document, "through_parameter")
+        self.assertEqual((parameter["correspondence"], parameter["proof"]),
+                         ("incomplete", "incomplete"))
+        self.assertEqual(self.raw_row(document, "safe")["proof"], "complete")
+        self.assertEqual(document["analyses"][4]["producer"], "integrated")
+        self.assertEqual(document["analyses"][4]["status"], "incomplete")
+
+    def test_raw_ledgers_pair_with_service_ledgers(self):
+        self.entry.write_text(self.RAW_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        services = {json.dumps(row["owner"], sort_keys=True): row
+                    for row in document["meters"] if row["name"] == "services"}
+        raw = [row for row in document["meters"] if row["name"] == "raw"]
+        self.assertEqual(len(raw), len(services))
+        for row in raw:
+            paired = services[json.dumps(row["owner"], sort_keys=True)]
+            self.assertEqual(row["fir_size"], paired["fir_size"])
+            self.assertIsNone(row["first_refusal"])
+        # The violated body retained one kernel event and rendered an error and a note.
+        key = self.body(document, "reconstruct")["key"]
+        ledger = next(row for row in raw if row["owner"] == key)
+        used = {count["category"]: count["used"] for count in ledger["counts"]}
+        self.assertEqual(used["V"], 3)
+        self.assertGreater(used["W"], 0)
+
+    def test_raw_diagnostics_keep_json_version_one(self):
+        self.entry.write_text(self.RAW_CASES)
+        self.assertEqual(self.invoke("--json", standard=Path(OPTIONS.std_dir)).returncode, 1)
+        self.evidence()
+        diagnostic = json.loads(self.result.stdout)
+        self.assertEqual(diagnostic["version"], 1)
+        messages = [(row["line"], row["message"]) for row in diagnostic["diagnostics"]]
+        self.assertIn((5, "invalid use of 'q'"), messages)
+        self.assertIn((11, "invalid use of 'tail'"), messages)
+        self.assertIn((17, "cannot prove that 'p' designates the accessed storage"), messages)
+
+    def test_raw_verdicts_stay_identical_in_every_mode(self):
+        self.entry.write_text(self.RAW_CASES)
+        projections = []
+        for flags in ((), ("--release",), ("--no-bounds-check",),
+                      ("--release", "--no-bounds-check")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.invoke(*flags, standard=Path(OPTIONS.std_dir)).returncode,
+                                 1)
+                document = self.evidence()
+                projections.append(([row["analyses"][4] for row in document["bodies"]],
+                                    document["totals"]["violations"],
+                                    self.result.stderr))
+        self.assertTrue(all(value == projections[0] for value in projections))
+        self.assertEqual(projections[0][1], 2)
 
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")
