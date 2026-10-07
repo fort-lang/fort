@@ -1,0 +1,1763 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| required B23.join_agreeing_representations accept
+//| required B23.join_distinct_complete_guarded_versions accept
+//| required B23.join_missing_fragment_then_use reject
+//| required B23.join_incoherent_versions_then_use reject
+//| required B23.join_live_released_source_then_use reject
+//| required B23.widen_retains_live_owner accept
+//| required B23.widen_independent_facts_still_prove_access accept
+//| required B23.widen_lost_correspondence_then_use reject
+//| required B26.late_join_failure_retains_both_inputs reject
+//| required B26.late_widen_failure_retains_input reject
+//| unit-join split_same_bytes_keep_correspondence
+//| unit-join g_bound_two_keeps_alternatives
+//| unit-join g_bound_one_merges_versions
+//| unit-join bottom_input_gives_other
+//| unit-join both_bottom_give_bottom
+//| unit-join incomplete_input_keeps_its_proof
+//| unit-join missing_event_map_refuses
+//| unit-join unpaired_context 0
+//| unit-join unpaired_context 1
+//| unit-join unpaired_context 2
+//| unit-join one_sided_representation_keeps_no_fragment
+//| unit-join stored_window_conflict 0
+//| unit-join stored_window_conflict 1
+//| unit-join stored_window_conflict 2
+//| unit-join stored_window_conflict 3
+//| unit-join stored_window_conflict 4
+//| unit-join stored_window_conflict 5
+//| unit-join distinct_types_keep_alternatives
+//| unit-join foreign_alternative_creates_no_trust
+//| unit-join larger_origin_window_does_not_survive
+//| unit-join one_sided_origin_dropped 0
+//| unit-join one_sided_origin_dropped 1
+//| unit-join captured_fact 0
+//| unit-join captured_fact 1
+//| unit-join captured_fact 2
+//| unit-join captured_fact 3
+//| unit-join captured_fact 4
+//| unit-join snapshot_parts_merge_by_byte
+//| unit-join empty_owner_facts_need_both_inputs
+//| unit-join dependent_row_places
+//| unit-join repeated_join_is_deterministic
+//| unit-join origin_fact 0
+//| unit-join origin_fact 1
+//| unit-join origin_fact 2
+//| unit-join origin_fact 3
+//| unit-join origin_fact 4
+//| unit-join origin_fact 5
+//| unit-join origin_fact 6
+//| unit-join origin_fact 7
+//| unit-join origin_fact 8
+//| unit-join origin_fact 9
+//| unit-join origin_fact 10
+//| unit-join origin_fact 11
+//| unit-join origin_fact 12
+//| unit-join origin_fact 13
+//| unit-join origin_fact 14
+//| unit-join origin_fact 15
+//| unit-join origin_fact 16
+//| unit-join snapshot_storage_bound_refuses
+//| unit-join joined_state_outlives_inputs
+//| unit-join copy_charged_before_core
+//| unit-join unknown_bytes_never_agree
+//| unit-join same_incoherent_bytes 0
+//| unit-join same_incoherent_bytes 1
+//| unit-join same_incoherent_bytes 2
+//| unit-join same_incoherent_bytes 3
+//| unit-join swapped_halves_lose_correspondence
+//| unit-join mixed_original_types join
+//| unit-join mixed_original_types widen
+//| unit-join aggregate_state_outlives_inputs
+//| unit-join overlapping_fragments_refuse 0
+//| unit-join overlapping_fragments_refuse 1
+//| unit-join equal_inputs_keep_rows
+//| unit-join empty_rows_stay_empty
+//| unit-join origin_place_forgets_rows
+//| unit-join unproved_window_conflict
+//| unit-join guarded_cores_fit_g
+//| unit-join guarded_cores_merge_above_g
+//| unit-join guarded_cores_refuse_at_meter_g
+//| unit-join wide_snapshot_passes
+//| unit-join wide_snapshot_overlap_refuses
+//| unit-join guarded_count_refusal
+/// Tests conservative joins and widening of paired core, raw, and byte-ledger states (D17.17,
+/// D17.18).
+import ownership_api;
+import ownership_raw;
+import ownership_raw_bytes;
+import ownership_raw_bytes_env;
+import ownership_raw_join;
+import ownership_raw_join_cleanup_env;
+import ownership_state;
+import ownership_transfer;
+import types;
+
+// Copies the environment state as the shared prefix or as one finished path.
+fn branch(ownership_raw_bytes_env.env mut* e) ownership_raw_bytes.result {
+    ownership_raw_bytes.result out = ownership_raw_bytes_env.clone_input(e);
+    assert(ownership_api.successful(out.proof) && out.states.len == 1);
+    return out;
+}
+// Starts the next path of the environment from a saved prefix.
+fn resume(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.result* prefix) void {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, 1);
+    ownership_raw_bytes.result mut next = ownership_raw_bytes.clone(&prefix->states[0],
+        &e->service, &req);
+    assert(ownership_api.successful(next.proof));
+    ownership_raw_bytes.free_result(&e->paired);
+    e->paired = move(next);
+}
+fn same_state(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* left,
+    ownership_raw_bytes.state* right) bool {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, 1);
+    ownership_api.proof_status mut proof = {};
+    bool same = ownership_raw_bytes.equal(left, right, &e->service, &req, &proof);
+    assert(ownership_api.successful(proof) || !same);
+    return same;
+}
+// Joins or widens the left path with the environment state and checks both inputs stay equal.
+fn combine(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* left, bool widening,
+    u32 line) ownership_raw_bytes.result {
+    ownership_raw_bytes.result mut left_before = branch_of(e, left);
+    defer ownership_raw_bytes.free_result(&left_before);
+    ownership_raw_bytes.result mut right_before = ownership_raw_bytes_env.clone_input(e);
+    defer ownership_raw_bytes.free_result(&right_before);
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, line);
+    ownership_raw_bytes.result out = widening ? ownership_raw_join.widen(left,
+        &e->paired.states[0], &e->service, &req) : ownership_raw_join.join(left,
+        &e->paired.states[0], &e->service, &req);
+    ownership_api.used_counts used = e->budget.meter.used;
+    u64 events = e->budget.events;
+    assert(used.w > 0);
+    assert(same_state(e, &left_before.states[0], left));
+    assert(same_state(e, &right_before.states[0], &e->paired.states[0]));
+    e->budget.meter.used = used;
+    assert(e->budget.events == events);
+    return out;
+}
+fn branch_of(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input)
+    ownership_raw_bytes.result {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, 1);
+    ownership_raw_bytes.result out = ownership_raw_bytes.clone(input, &e->service, &req);
+    assert(ownership_api.successful(out.proof) && out.states.len == 1);
+    return out;
+}
+fn read_at(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input, u32 slot,
+    types.node* ty, u32 line) ownership_raw_bytes.reference_result {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, line);
+    u64 bytes = ty == e->span || ty == e->string_type ? 16 : 8;
+    return ownership_raw_bytes.read_reference(input, &e->service,
+        ownership_raw_bytes_env.window(e, slot, 0, bytes, ty), &req);
+}
+fn accepted(ownership_raw_bytes.reference_result* out, u32 source, u32 version) void {
+    assert(ownership_api.successful(out->proof));
+    assert(out->value.kind == ownership_api.contents_kind.reference);
+    assert(out->value.borrows.len == 1 && out->value.value_version.ordinal == version);
+    assert(out->value.borrows[0].source.ordinal == source);
+    assert(out->value.borrows[0].representation_complete);
+}
+// Each core row at the slot place refuses a typed read through the core transfer helper.
+fn rows_refuse(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input, u32 slot,
+    u32 line) u64 {
+    u64 mut rows = 0;
+    u64 mut i = 0;
+    while (i < input->core->contents_len) {
+        ownership_api.contents_fact row = input->core->contents[i];
+        if (ownership_state.same_place(row.place, ownership_raw_bytes_env.place(e, slot))) {
+            assert(row.kind == ownership_api.contents_kind.unknown);
+            ownership_raw.request mut req = ownership_raw_bytes_env.request(e, line);
+            req.base.source = row.place;
+            ownership_api.proof_status proof = ownership_transfer.check_read(input->core,
+                &e->service, &req.base, row, false);
+            assert(!ownership_api.successful(proof) && proof.failed);
+            rows += 1;
+        }
+        i += 1;
+    }
+    return rows;
+}
+fn lost(ownership_raw_bytes.state* input, u32 source) bool {
+    u64 mut i = 0;
+    while (i < input->core->losses_len) {
+        ownership_api.lost_fact item = input->core->losses[i];
+        if (item.category == ownership_api.limit_category.r && item.relation.ordinal == source &&
+            item.relation.kind == ownership_api.entity_kind.source &&
+            item.reason == ownership_api.incomplete_reason.unknown_effect) { return true; }
+        i += 1;
+    }
+    return false;
+}
+fn fragments(ownership_raw_bytes.state* input, u32 slot) u64 {
+    u64 mut i = 0;
+    while (i < input->bytes.representations_len) {
+        ownership_raw_bytes.representation* item = &input->bytes.representations[i];
+        if (item->selected.source.ordinal == 100 + slot && item->selected.begin == 0) {
+            return item->fragments_len;
+        }
+        i += 1;
+    }
+    return ownership_raw_bytes.U64_MAX;
+}
+// Copies slot `from` into slot 2 in two four-byte halves, each through its own snapshot.
+fn halves(ownership_raw_bytes_env.env mut* e, u32 first, u32 second, u32 line) void {
+    ownership_raw_bytes_env.read(e, first, 0, 4, 11, line);
+    ownership_raw_bytes_env.read(e, second, 4, 8, 12, line);
+    ownership_raw_bytes_env.write(e, 2, 0, 4, 11, 0, line);
+    ownership_raw_bytes_env.write(e, 2, 4, 8, 12, 0, line);
+}
+// Copies the complete pointer of slot `from` into slot 2.
+fn copy_from(ownership_raw_bytes_env.env mut* e, u32 from, u32 line) void {
+    ownership_raw_bytes_env.read(e, from, 0, 8, 1, line);
+    ownership_raw_bytes_env.write(e, 2, 0, 8, 1, 0, line);
+}
+// Applies one byte effect to any paired state and gives its owned result.
+fn apply_on(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input,
+    ownership_raw_bytes.byte_effect mut change, u32 line) ownership_raw_bytes.result {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, line);
+    change.operation = req.base.operation;
+    change.source_position = req.base.source_position;
+    ownership_raw_bytes.byte_effect[1] effects = {change};
+    return ownership_raw_bytes.apply_ordered(input, &e->service, effects[..], &req);
+}
+// Joins without the equality checks, for inputs that a test changed by hand.
+fn join_raw(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* left,
+    ownership_raw_bytes.state* right, bool widening, u32 line) ownership_raw_bytes.result {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, line);
+    return widening ? ownership_raw_join.widen(left, right, &e->service, &req) :
+        ownership_raw_join.join(left, right, &e->service, &req);
+}
+fn window_of(ownership_raw_bytes.state* input, u32 slot)
+    ownership_raw_bytes.representation mut* {
+    u64 mut i = 0;
+    while (i < input->bytes.representations_len) {
+        if (input->bytes.representations[i].selected.source.ordinal == 100 + slot) {
+            return &input->bytes.representations[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+fn origin_of(ownership_raw_bytes.state* input, u32 source) u64 {
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (input->raw.origins[i].source.ordinal == source) { return i; }
+        i += 1;
+    }
+    return ownership_raw_bytes.U64_MAX;
+}
+// Prepares two paths from setup and initial seeds. The left path is returned and the right path
+// stays in the environment.
+fn two_paths(ownership_raw_bytes_env.env mut* e, u32 function, u32 left_from, u32 right_from,
+    ownership_raw_bytes.result mut* left) void {
+    ownership_raw_bytes_env.setup(e, function, 0, false);
+    ownership_raw_bytes_env.initial(e, 0, 400);
+    ownership_raw_bytes.result mut prefix = branch(e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    if (left_from != 0) { copy_from(e, left_from, 404); }
+    *left = branch(e);
+    resume(e, &prefix);
+    if (right_from != 0) { copy_from(e, right_from, 407); }
+}
+
+fn split_same_bytes_keep_correspondence() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4101, 1, 0, &left);
+    halves(&e, 1, 1, 416);
+    assert(fragments(&left.states[0], 2) == 1 && fragments(&e.paired.states[0], 2) == 2);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 418);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(fragments(&joined.states[0], 2) == 1 && !lost(&joined.states[0], 102));
+    ownership_raw_bytes.reference_result mut copied = read_at(&e, &joined.states[0], 2,
+        e.pointer, 422);
+    defer ownership_raw_bytes.free_reference(&copied);
+    accepted(&copied, 1, 1);
+    // The joined state stays a valid kernel input: a later complete copy publishes version 2.
+    ownership_raw_bytes.byte_effect mut read = ownership_raw_bytes_env.effect(&e,
+        ownership_raw_bytes.effect_kind.read, ownership_raw_bytes_env.window(&e, 3, 0, 8,
+        e.byte));
+    read.snapshot_key = 9;
+    ownership_raw_bytes.result mut saved = apply_on(&e, &joined.states[0], read, 430);
+    defer ownership_raw_bytes.free_result(&saved);
+    assert(ownership_api.successful(saved.proof));
+    ownership_raw_bytes.byte_effect mut write = ownership_raw_bytes_env.effect(&e,
+        ownership_raw_bytes.effect_kind.write, ownership_raw_bytes_env.window(&e, 2, 0, 8,
+        e.byte));
+    write.snapshot_key = 9;
+    ownership_raw_bytes.result mut written = apply_on(&e, &saved.states[0], write, 437);
+    defer ownership_raw_bytes.free_result(&written);
+    assert(ownership_api.successful(written.proof));
+    ownership_raw_bytes.reference_result mut later = read_at(&e, &written.states[0], 2,
+        e.pointer, 441);
+    defer ownership_raw_bytes.free_reference(&later);
+    accepted(&later, 2, 2);
+    println("unit-join split_same_bytes_keep_correspondence");
+}
+// G bounds the alternatives that one join keeps. Two fit exactly at G = 2; G = 1 merges them.
+fn g_bound(u64 bound) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4102 + cast(bound, u32), 1, 3, &left);
+    e.limits.g = bound;
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 455);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof));
+    if (bound == 2) {
+        assert(ownership_state.alternatives_within(bound) == 2);
+        assert(joined.states.len == 2 && e.budget.meter.used.g == 2);
+        println("unit-join g_bound_two_keeps_alternatives");
+        return;
+    }
+    // One alternative fits G = 1, so the join merges and charges no G content of its own.
+    assert(ownership_state.alternatives_within(bound) == 1);
+    assert(joined.states.len == 1 && e.budget.meter.used.g == 0);
+    assert(fragments(&joined.states[0], 2) == 0 && lost(&joined.states[0], 102));
+    assert(lost_g(&joined.states[0], 102));
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2,
+        e.pointer, 465);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    // The core join also covers its contents rows with G, so each row becomes residual.
+    u64 mut row = 0;
+    while (row < joined.states[0].core->contents_len) {
+        assert(joined.states[0].core->contents[row].kind == ownership_api.contents_kind.unknown);
+        assert(joined.states[0].core->contents[row].place.residual);
+        row += 1;
+    }
+    assert(row == 4);
+    ownership_raw_bytes.reference_result mut kept = read_at(&e, &joined.states[0], 3,
+        e.pointer, 470);
+    defer ownership_raw_bytes.free_reference(&kept);
+    accepted(&kept, 2, 2);
+    println("unit-join g_bound_one_merges_versions");
+}
+// A bottom input represents no execution, so a join or widen gives a clone of the other input.
+fn bottom_input(bool both) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, both ? 4106 : 4105, 1, 3, &left);
+    left.states[0].core->proof.kind = ownership_api.proof_kind.bottom;
+    if (both) {
+        e.paired.states[0].core->proof.kind = ownership_api.proof_kind.bottom;
+        ownership_raw_bytes.result mut none = join_raw(&e, &left.states[0], &e.paired.states[0],
+            false, 486);
+        defer ownership_raw_join.free_result(&none);
+        assert(none.proof.kind == ownership_api.proof_kind.bottom && none.states.len == 0);
+        assert(e.budget.calls == 0 && e.budget.events == 0);
+        println("unit-join both_bottom_give_bottom");
+        return;
+    }
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 493);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(same_state(&e, &joined.states[0], &e.paired.states[0]));
+    ownership_raw_bytes.result mut widened = join_raw(&e, &e.paired.states[0], &left.states[0],
+        true, 497);
+    defer ownership_raw_join.free_result(&widened);
+    assert(ownership_api.successful(widened.proof) && widened.states.len == 1);
+    assert(same_state(&e, &widened.states[0], &e.paired.states[0]));
+    println("unit-join bottom_input_gives_other");
+}
+// An input whose core proof is incomplete keeps that proof. No join work or event follows it.
+fn incomplete_input() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4107, 1, 1, &left);
+    ownership_raw.request marker = ownership_raw_bytes_env.request(&e, 512);
+    ownership_api.proof_status unproved = ownership_api.incomplete(
+        ownership_api.incomplete_reason.unknown_effect, marker.base.operation,
+        marker.base.source_position);
+    u64 mut side = 0;
+    while (side < 2) {
+        ownership_raw_bytes.state mut* changed = side == 0 ? &left.states[0] :
+            &e.paired.states[0];
+        ownership_api.proof_status prior = changed->core->proof;
+        changed->core->proof = unproved;
+        ownership_raw_bytes.result mut out = join_raw(&e, &left.states[0], &e.paired.states[0],
+            side == 1, 522);
+        defer ownership_raw_join.free_result(&out);
+        assert(out.states.len == 0 && ownership_state.same_proof(out.proof, unproved));
+        // An incomplete left core stops before any charge. An incomplete right core stops after
+        // the one charge that validates the event route.
+        assert(e.budget.events == 0 && e.budget.calls == side);
+        changed->core->proof = prior;
+        side += 1;
+    }
+    // A state without a core proves nothing and gives an unknown proof before any charge.
+    ownership_raw_bytes.state hollow = {};
+    ownership_raw_bytes.result mut none = join_raw(&e, &hollow, &e.paired.states[0], false, 531);
+    defer ownership_raw_join.free_result(&none);
+    assert(none.proof.kind == ownership_api.proof_kind.unknown && none.states.len == 0);
+    ownership_raw_bytes.result mut other = join_raw(&e, &left.states[0], &hollow, true, 534);
+    defer ownership_raw_join.free_result(&other);
+    assert(other.proof.kind == ownership_api.proof_kind.unknown && other.states.len == 0);
+    assert(e.budget.calls == 0 && e.budget.events == 0);
+    println("unit-join incomplete_input_keeps_its_proof");
+}
+fn missing_event_map() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4108, 1, 3, &left);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw.request mut req = ownership_raw_bytes_env.request(&e, 538);
+    req.base.event_map_complete_proved = false;
+    ownership_raw_bytes.result mut out = ownership_raw_join.join(&left.states[0],
+        &e.paired.states[0], &e.service, &req);
+    defer ownership_raw_join.free_result(&out);
+    assert(out.states.len == 0 && out.proof.terminal.reason ==
+        ownership_api.incomplete_reason.missing_events);
+    assert(e.budget.events == 0 && e.budget.calls == 0);
+    println("unit-join missing_event_map_refuses");
+}
+// A context bound to another core refuses before any copy, and so does an unproved capture. Mode
+// 0 binds the left context to the right core; modes 1 and 2 clear the left and right raw proofs.
+fn unpaired_context(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4109 + mode, 1, 1, &left);
+    if (mode == 0) {
+        left.states[0].raw.core = cast(e.paired.states[0].core, ownership_state.state*);
+    }
+    if (mode == 1) { left.states[0].raw.proof.kind = ownership_api.proof_kind.incomplete; }
+    if (mode == 2) { e.paired.states[0].raw.proof.kind = ownership_api.proof_kind.incomplete; }
+    ownership_raw_bytes.result mut out = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 560);
+    defer ownership_raw_join.free_result(&out);
+    assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(e.budget.events == 1 && !e.budget.witness_validated);
+    assert(e.budget.last_event.text == (mode != 0 ? "paired raw context proof remains unproved" :
+        "paired byte storage is invalid"));
+    left.states[0].raw.core = cast(left.states[0].core, ownership_state.state*);
+    println("unit-join unpaired_context ", mode);
+}
+// Slots 1 and 2 hold representations on the left path only. The joined ledger keeps their
+// windows with no fragments, and their core rows become unknown.
+fn one_sided_representation() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4111, 0, false);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    ownership_raw_bytes_env.initial(&e, 0, 582);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    ownership_raw_bytes_env.seed(&e, 3, 0, 8, e.selected_type, e.second, true, 587);
+    assert(e.paired.states[0].bytes.representations_len == 1);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 589);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(joined.states[0].bytes.representations_len == 3);
+    assert(fragments(&joined.states[0], 1) == 0 && fragments(&joined.states[0], 2) == 0);
+    assert(fragments(&joined.states[0], 3) == 1);
+    assert(rows_refuse(&e, &joined.states[0], 1, 595) == 1);
+    assert(lost(&joined.states[0], 101) && !lost(&joined.states[0], 102));
+    ownership_raw_bytes.reference_result mut first = read_at(&e, &joined.states[0], 1,
+        e.pointer, 598);
+    defer ownership_raw_bytes.free_reference(&first);
+    ownership_raw_bytes_env.rejects(&first);
+    ownership_raw_bytes.reference_result mut third = read_at(&e, &joined.states[0], 3,
+        e.pointer, 602);
+    defer ownership_raw_bytes.free_reference(&third);
+    accepted(&third, 2, 2);
+    ownership_raw_bytes.result mut reversed = join_raw(&e, &e.paired.states[0], &left.states[0],
+        false, 605);
+    defer ownership_raw_join.free_result(&reversed);
+    assert(reversed.states[0].bytes.representations_len == 3);
+    assert(fragments(&reversed.states[0], 1) == 0 && fragments(&reversed.states[0], 3) == 1);
+    assert(lost(&reversed.states[0], 101) && !lost(&reversed.states[0], 103));
+    println("unit-join one_sided_representation_keeps_no_fragment");
+}
+// Different stored facts of one window drop the window in both join orders and record a lost
+// fact. Both inputs proved slot 2, so the rows of both stored places become unknown. Mode 0 raises
+// the left alignment and mode 1 the right one. Modes 2, 3, and 4 change the right type, place,
+// and correspondence flag; mode 5 clears the left flag.
+fn stored_window_conflict(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4130 + mode, 1, 1, &left);
+    ownership_raw_bytes.representation mut* changed = mode == 0 || mode == 5 ?
+        window_of(&left.states[0], 2) : window_of(&e.paired.states[0], 2);
+    if (mode < 2) { changed->selected.alignment = 16; }
+    if (mode == 2) { changed->selected.ty = e.string_type; }
+    if (mode == 3) { changed->selected.place = ownership_raw_bytes_env.place(&e, 1); }
+    if (mode >= 4) { changed->selected.correspondence = false; }
+    u64 mut order = 0;
+    while (order < 2) {
+        ownership_raw_bytes.result mut joined = order == 0 ? join_raw(&e, &left.states[0],
+            &e.paired.states[0], false, 620) : join_raw(&e, &e.paired.states[0], &left.states[0],
+            false, 621);
+        defer ownership_raw_join.free_result(&joined);
+        assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+        assert(joined.states[0].bytes.representations_len == 2);
+        assert(fragments(&joined.states[0], 2) == ownership_raw_bytes.U64_MAX);
+        assert(lost(&joined.states[0], 102) && !lost(&joined.states[0], 101));
+        assert(fragments(&joined.states[0], 1) == 1 && fragments(&joined.states[0], 3) == 1);
+        assert(rows_refuse(&e, &joined.states[0], 2, 628) == 1);
+        // Mode 3 names slot 1 as a stored place, so its row becomes unknown as well.
+        assert(unknown_rows(&joined.states[0], ownership_raw_bytes_env.place(&e, 1)) ==
+            (mode == 3 ? 1 : 0));
+        order += 1;
+    }
+    println("unit-join stored_window_conflict ", mode);
+}
+fn unknown_rows(ownership_raw_bytes.state* input, ownership_api.place_path path) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < input->core->contents_len) {
+        if (ownership_state.same_place(input->core->contents[i].place, path) &&
+            input->core->contents[i].kind == ownership_api.contents_kind.unknown) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+// Equal complete values of two original types are distinct versions.
+fn distinct_types() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4136, 0, false);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    ownership_raw_bytes_env.seed(&e, 2, 0, 8, e.pointer, e.first, true, 641);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    ownership_raw_bytes_env.seed(&e, 2, 0, 8, types.type_ptr(&e.table, e.byte, false, true),
+        e.first, true, 646);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 648);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 2);
+    println("unit-join distinct_types_keep_alternatives");
+}
+// A trusted foreign alternative of source 1 makes the joined source unknown fort storage.
+fn foreign_alternative() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4113, 1, 1, &left);
+    ownership_state.state mut* right_core = e.paired.states[0].core;
+    u64 source = ownership_state.source_index(right_core, ownership_raw_bytes_env.id(&e,
+        ownership_api.entity_kind.source, 1));
+    right_core->sources[source].kind = ownership_api.source_kind.trusted_foreign;
+    assert(raw_access(&e, &left.states[0], 1, 0, 12, 642));
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 644);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(joined.states[0].core->sources[source].kind ==
+        ownership_api.source_kind.unknown_fort);
+    assert(!raw_access(&e, &joined.states[0], 1, 0, 12, 649));
+    assert(raw_access(&e, &joined.states[0], 4, 0, 12, 650));
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2,
+        e.pointer, 652);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    println("unit-join foreign_alternative_creates_no_trust");
+}
+// The right path claims 16 bytes for source 1. The joined context keeps no window for it.
+fn larger_origin_window() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4114, 1, 1, &left);
+    u64 index = origin_of(&e.paired.states[0], 1);
+    e.paired.states[0].raw.origins[index].count = ownership_raw.literal(16);
+    e.paired.states[0].raw.origins[index].end = ownership_raw.literal(16);
+    assert(raw_access(&e, &e.paired.states[0], 1, 12, 16, 667));
+    assert(!raw_access(&e, &left.states[0], 1, 12, 16, 668));
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 670);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(origin_of(&joined.states[0], 1) == ownership_raw_bytes.U64_MAX);
+    assert(joined.states[0].raw.origins.len == 6);
+    assert(!raw_access(&e, &joined.states[0], 1, 12, 16, 675));
+    assert(!raw_access(&e, &joined.states[0], 1, 0, 4, 676));
+    assert(raw_access(&e, &joined.states[0], 2, 0, 12, 677));
+    println("unit-join larger_origin_window_does_not_survive");
+}
+fn drop_origin(ownership_raw_bytes.state mut* input, u32 source) void {
+    u64 index = origin_of(input, source);
+    assert(index != ownership_raw_bytes.U64_MAX);
+    ownership_raw.origin mut@ own fewer = new(ownership_raw.origin, input->raw.origins.len - 1);
+    u64 mut i = 0;
+    u64 mut j = 0;
+    while (i < input->raw.origins.len) {
+        if (i != index) { fewer[j] = input->raw.origins[i]; j += 1; }
+        i += 1;
+    }
+    del(input->raw.origins);
+    input->raw.origins = move(fewer);
+}
+// An origin of one input proves nothing about the other path, so the joined context drops it in
+// each order and in a widen. Mode 0: the right path never captured source 5. Mode 1: the right
+// allocation of source 1 holds 4 bytes and the right path never captured source 1, so bytes
+// [8, 12) exist only on the left path.
+fn one_sided_origin(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4115 + mode * 100, 1, 1, &left);
+    ownership_raw_bytes.state mut* right = &e.paired.states[0];
+    u32 source = mode == 0 ? 5 : 1;
+    u64 begin = mode == 0 ? 0 : 8;
+    u64 end = mode == 0 ? 1 : 12;
+    if (mode == 1) {
+        u64 a = ownership_state.allocation_index(right->core, ownership_raw_bytes_env.id(&e,
+            ownership_api.entity_kind.allocation, 1));
+        right->core->allocations[a].logical_length = ownership_raw_bytes_env.exact(4);
+    }
+    drop_origin(right, source);
+    assert(raw_access(&e, &left.states[0], source, begin, end, 696));
+    assert(!raw_access(&e, right, source, begin, end, 697));
+    u64 mut order = 0;
+    while (order < 3) {
+        ownership_raw_bytes.result mut joined = order == 0 ? join_raw(&e, &left.states[0], right,
+            false, 700) : (order == 1 ? join_raw(&e, right, &left.states[0], false, 701) :
+            join_raw(&e, right, &left.states[0], true, 702));
+        defer ownership_raw_join.free_result(&joined);
+        assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+        assert(joined.states[0].raw.origins.len == 6);
+        assert(origin_of(&joined.states[0], source) == ownership_raw_bytes.U64_MAX);
+        assert(!raw_access(&e, &joined.states[0], source, begin, end, 707));
+        assert(raw_access(&e, &joined.states[0], 103, 0, 8, 708));
+        order += 1;
+    }
+    println("unit-join one_sided_origin_dropped ", mode);
+}
+// A captured bound or relation stays only when both inputs hold it, so access through a dropped
+// bound needs a new proof. Modes 0, 1, and 2 change the version, lower, and upper value of the
+// right bound of v31; modes 3 and 4 change the left and right side of the right relation.
+fn captured_fact(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4116 + mode, 0, false);
+    u64 mut i = 0;
+    while (i < 2) {
+        e.core.allocations[i].logical_length.kind = ownership_api.fact_kind.symbolic;
+        e.core.allocations[i].logical_length.symbol = ownership_raw_bytes_env.id(&e,
+            ownership_api.entity_kind.value, 31 + cast(i, u32));
+        i += 1;
+    }
+    ownership_raw_bytes_env.recapture(&e, e.selected_type, 8);
+    ownership_raw.context mut* right = &e.paired.states[0].raw;
+    assert(right->bounds.len == 2 && right->relations.len == 1);
+    assert(right->bounds[0].version.ordinal == 31);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut same = combine(&e, &left.states[0], false, 734);
+    defer ownership_raw_join.free_result(&same);
+    assert(same.states[0].raw.bounds.len == 2 && same.states[0].raw.relations.len == 1);
+    assert(raw_access(&e, &same.states[0], 1, 0, 12, 737));
+    if (mode == 0) {
+        right->bounds[0].version = ownership_raw_bytes_env.id(&e, ownership_api.entity_kind.value,
+            33);
+    }
+    if (mode == 1) { right->bounds[0].lower = ownership_raw.natural(11); }
+    if (mode == 2) { right->bounds[0].upper = ownership_raw.natural(13); }
+    if (mode == 3) { right->relations[0].left = ownership_raw.literal(12); }
+    if (mode == 4) { right->relations[0].right = ownership_raw.literal(12); }
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 749);
+    defer ownership_raw_join.free_result(&joined);
+    ownership_raw.context* kept = &joined.states[0].raw;
+    if (mode < 3) {
+        assert(kept->bounds.len == 1 && kept->relations.len == 1);
+        assert(kept->bounds[0].version.ordinal == 32);
+        assert(!raw_access(&e, &joined.states[0], 1, 0, 12, 756));
+        assert(raw_access(&e, &joined.states[0], 2, 0, 12, 757));
+    } else {
+        assert(kept->bounds.len == 2 && kept->relations.len == 0);
+    }
+    println("unit-join captured_fact ", mode);
+}
+fn snapshot_effect(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input,
+    u64 key, u32 line) ownership_raw_bytes.result {
+    ownership_raw_bytes.byte_effect mut write = ownership_raw_bytes_env.effect(e,
+        ownership_raw_bytes.effect_kind.write, ownership_raw_bytes_env.window(e, 2, 0, 8,
+        e->byte));
+    write.snapshot_key = key;
+    return apply_on(e, input, write, line);
+}
+// Snapshot 5 read slot 1 on the left path and slot 3 on the right path, so each of its bytes
+// becomes unknown. Snapshot 6 exists on the left path only, and snapshot 7 has two sizes.
+fn snapshot_parts(bool agree) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, agree ? 4118 : 4117, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 769);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    ownership_raw_bytes_env.read(&e, 1, 0, 8, 5, 772);
+    ownership_raw_bytes_env.read(&e, 1, 0, 8, 6, 773);
+    ownership_raw_bytes_env.read(&e, 1, 0, 8, 7, 774);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    ownership_raw_bytes_env.read(&e, agree ? 1 : 3, 0, 8, 5, 778);
+    ownership_raw_bytes_env.read(&e, 1, 0, 4, 7, 779);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 780);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    ownership_raw_bytes.ledger* saved = &joined.states[0].bytes;
+    assert(saved->snapshots_len == 1 && saved->snapshots[0].key == 5);
+    assert(saved->snapshots[0].bytes == 8 && saved->snapshots[0].fragments_len == 1);
+    ownership_raw_bytes.fragment part = saved->snapshots[0].fragments[0];
+    assert(part.begin == 0 && part.end == 8 && part.known == agree);
+    ownership_raw_bytes.result mut missing = snapshot_effect(&e, &joined.states[0], 6, 788);
+    defer ownership_raw_bytes.free_result(&missing);
+    assert(!ownership_api.successful(missing.proof));
+    assert(e.budget.last_event.text == "byte snapshot is missing");
+    ownership_raw_bytes.result mut written = snapshot_effect(&e, &joined.states[0], 5, 792);
+    defer ownership_raw_bytes.free_result(&written);
+    assert(ownership_api.successful(written.proof));
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &written.states[0], 2,
+        e.pointer, 796);
+    defer ownership_raw_bytes.free_reference(&out);
+    if (agree) { accepted(&out, 1, 1); return; }
+    ownership_raw_bytes_env.rejects(&out);
+    println("unit-join snapshot_parts_merge_by_byte");
+}
+// A proved empty owner fact of the ledger stays only when both inputs prove it.
+fn empty_owner_facts() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_setup(&e, 4119, false);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    ownership_raw_bytes_env.zero(&e, 2, 0, 8, 811);
+    assert(e.paired.states[0].bytes.facts.contents_len == 1);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut both = combine(&e, &left.states[0], false, 815);
+    defer ownership_raw_join.free_result(&both);
+    assert(both.states.len == 1 && both.states[0].bytes.facts.contents_len == 1);
+    resume(&e, &prefix);
+    assert(e.paired.states[0].bytes.facts.contents_len == 0);
+    ownership_raw_bytes.result mut one = combine(&e, &left.states[0], false, 820);
+    defer ownership_raw_join.free_result(&one);
+    assert(ownership_api.successful(one.proof) && one.states.len == 1);
+    assert(one.states[0].bytes.facts.contents_len == 0);
+    println("unit-join empty_owner_facts_need_both_inputs");
+}
+// A row at, below, or above the held place in one storage depends on its bytes.
+fn dependent_row_places() void {
+    ownership_raw_bytes_env.env mut e = {};
+    ownership_raw_bytes_env.open(&e, 4120, 1);
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_api.place_path slot = ownership_raw_bytes_env.place(&e, 1);
+    ownership_api.place_path first = ownership_raw_bytes_env.field(&e, 1, 0);
+    ownership_api.place_path second = ownership_raw_bytes_env.field(&e, 1, 1);
+    ownership_api.place_path behind = ownership_raw_bytes_env.pointee(&e, 1);
+    ownership_api.place_path owner = ownership_raw_bytes_env.place(&e, 10);
+    ownership_api.place_path buffer = ownership_raw_bytes_env.pointee(&e, 10);
+    ownership_api.projection[1] mut tail = {};
+    tail[0].kind = ownership_api.projection_kind.residual;
+    ownership_api.place_path mut residual = ownership_raw_bytes_env.place(&e, 1);
+    residual.projections = tail[..];
+    assert(ownership_raw_join.depends(slot, slot));
+    assert(ownership_raw_join.depends(first, slot));
+    assert(ownership_raw_join.depends(behind, slot));
+    assert(ownership_raw_join.depends(slot, first));
+    assert(!ownership_raw_join.depends(owner, buffer));
+    assert(ownership_raw_join.depends(buffer, owner));
+    assert(!ownership_raw_join.depends(second, first));
+    assert(!ownership_raw_join.depends(ownership_raw_bytes_env.place(&e, 2), slot));
+    assert(ownership_raw_join.depends(residual, first));
+    assert(ownership_raw_join.depends(second, residual));
+    // A residual row or held place can reach past a dereference, so it depends.
+    ownership_api.place_path mut unknown_tail = ownership_raw_bytes_env.place(&e, 1);
+    unknown_tail.residual = true;
+    assert(ownership_raw_join.depends(unknown_tail, behind));
+    ownership_api.projection[2] mut past = {};
+    past[0].kind = ownership_api.projection_kind.dereference;
+    past[1].kind = ownership_api.projection_kind.residual;
+    ownership_api.place_path mut beyond = ownership_raw_bytes_env.place(&e, 1);
+    beyond.projections = past[..];
+    assert(ownership_raw_join.depends(slot, beyond));
+    assert(!ownership_raw_join.depends(slot, behind));
+    // Aliases are substituted, so a pointee row of another root names other storage.
+    assert(!ownership_raw_join.depends(ownership_raw_bytes_env.pointee(&e, 2), slot));
+    println("unit-join dependent_row_places");
+}
+// One input pair and one source position give equal merged states in two joins. The lost facts
+// keep their source position, so a join at another position differs.
+fn repeated_join() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4121, 1, 1, &left);
+    ownership_raw_bytes_env.unknown(&e, 2, 3, 4, 856);
+    ownership_raw_bytes.result mut first = combine(&e, &left.states[0], true, 857);
+    defer ownership_raw_join.free_result(&first);
+    ownership_raw_bytes.result mut second = combine(&e, &left.states[0], true, 857);
+    defer ownership_raw_join.free_result(&second);
+    ownership_raw_bytes.result mut moved = combine(&e, &left.states[0], true, 861);
+    defer ownership_raw_join.free_result(&moved);
+    assert(first.states.len == 1 && second.states.len == 1 && moved.states.len == 1);
+    assert(same_state(&e, &first.states[0], &second.states[0]));
+    assert(!same_state(&e, &first.states[0], &moved.states[0]));
+    assert(first.states[0].core != second.states[0].core);
+    println("unit-join repeated_join_is_deterministic");
+}
+
+// Each origin and leaf fact takes part in the comparison. Changing one fact of the right origin of
+// slot 1 drops that origin and its leaf from the joined context.
+fn origin_fact(u32 fact) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4160 + fact, 1, 1, &left);
+    ownership_raw.context mut* right = &e.paired.states[0].raw;
+    u64 index = origin_of(&e.paired.states[0], 101);
+    ownership_raw.origin mut* item = &right->origins[index];
+    assert(item->leaf_count == 1);
+    ownership_raw.storage_leaf mut* leaf = &right->leaves[item->first_leaf];
+    if (fact == 0) { item->allocation = ownership_raw_bytes_env.id(&e,
+        ownership_api.entity_kind.allocation, 9); }
+    if (fact == 1) { item->layout = e.byte; }
+    if (fact == 2) { item->alignment = 4; }
+    if (fact == 3) { item->repeated = true; }
+    if (fact == 4) { item->correspondence = false; }
+    if (fact == 5) { item->residual = true; }
+    if (fact == 6) { item->leaf_count = 0; }
+    if (fact == 7) { item->place = ownership_raw_bytes_env.place(&e, 9); }
+    if (fact == 8) { item->count = ownership_raw.literal(2); }
+    if (fact == 9) { item->begin = ownership_raw.literal(1); }
+    if (fact == 10) { item->end = ownership_raw.literal(9); }
+    if (fact == 11) { leaf->begin = 1; }
+    if (fact == 12) { leaf->end = 7; }
+    if (fact == 13) { leaf->ty = e.byte; }
+    if (fact == 14) { leaf->owning = true; }
+    if (fact == 15) { leaf->padding = true; }
+    if (fact == 16) { leaf->place = ownership_raw_bytes_env.place(&e, 9); }
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 900);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(origin_of(&joined.states[0], 101) == ownership_raw_bytes.U64_MAX);
+    assert(joined.states[0].raw.origins.len == 6);
+    assert(joined.states[0].raw.leaves_len == left.states[0].raw.leaves_len - 1);
+    assert(!raw_access(&e, &joined.states[0], 101, 0, 8, 907));
+    assert(raw_access(&e, &joined.states[0], 103, 0, 8, 908));
+    println("unit-join origin_fact ", fact);
+}
+// Four one-byte parts with gaps cannot fit the storage of a merged snapshot, which holds the
+// fragment count of both inputs. The merge refuses and frees its tentative state.
+fn snapshot_storage_bound() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4180, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 916);
+    ownership_raw_bytes_env.read(&e, 1, 0, 8, 5, 917);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.snapshot mut* saved = &left.states[0].bytes.snapshots[0];
+    ownership_raw_bytes.snapshot* other = &e.paired.states[0].bytes.snapshots[0];
+    assert(other->fragments_len == 1 && other->fragments[0].known);
+    ownership_raw_bytes.fragment mut@ own parts = new(ownership_raw_bytes.fragment, 4);
+    u64 mut k = 0;
+    while (k < 4) {
+        parts[k] = ownership_raw_bytes.clipped(other->fragments[0], k * 2, k * 2 + 1);
+        k += 1;
+    }
+    del(saved->fragments);
+    saved->fragments = move(parts);
+    saved->fragments_len = 4;
+    u64 events = e.budget.events;
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 935);
+    defer ownership_raw_join.free_result(&joined);
+    assert(!ownership_api.successful(joined.proof) && joined.states.len == 0);
+    assert(joined.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(e.budget.events == events + 1);
+    assert(e.budget.last_event.text == "joined byte fragments exceed their storage");
+    println("unit-join snapshot_storage_bound_refuses");
+}
+// The joined state owns each copied record. It stays equal to an earlier clone after both inputs
+// are freed and their storage is reused.
+fn joined_state_outlives_inputs() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4181, 0, false);
+    u64 mut i = 0;
+    while (i < 2) {
+        e.core.allocations[i].logical_length.kind = ownership_api.fact_kind.symbolic;
+        e.core.allocations[i].logical_length.symbol = ownership_raw_bytes_env.id(&e,
+            ownership_api.entity_kind.value, 31 + cast(i, u32));
+        i += 1;
+    }
+    e.inline_container = true;
+    ownership_raw_bytes_env.recapture(&e, e.selected_type, 8);
+    ownership_raw_bytes_env.initial(&e, 0, 956);
+    ownership_raw_bytes_env.read(&e, 1, 0, 8, 5, 957);
+    copy_from(&e, 1, 958);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes_env.unknown(&e, 3, 3, 4, 961);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 962);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    ownership_raw_bytes.state* kept = &joined.states[0];
+    assert(kept->raw.bounds.len == 2 && kept->raw.relations.len == 1);
+    assert(kept->raw.origins[6].place.projections.len == 1 && kept->bytes.snapshots_len == 2);
+    ownership_raw_bytes.result mut copy = branch_of(&e, kept);
+    defer ownership_raw_bytes.free_result(&copy);
+    ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.free_result(&e.paired);
+    u8 mut@ own[64] mut junk = {};
+    i = 0;
+    while (i < junk.len) {
+        junk[i] = new(u8, 8 + (i % 16) * 16);
+        u64 mut j = 0;
+        while (j < junk[i].len) { junk[i][j] = 170; j += 1; }
+        i += 1;
+    }
+    assert(same_state(&e, &copy.states[0], kept));
+    ownership_raw_bytes.reference_result mut first = read_at(&e, kept, 1, e.pointer, 984);
+    defer ownership_raw_bytes.free_reference(&first);
+    accepted(&first, 1, 1);
+    assert(raw_access(&e, kept, 5, 0, 1, 987));
+    i = 0;
+    while (i < junk.len) { del(junk[i]); i += 1; }
+    println("unit-join joined_state_outlives_inputs");
+}
+fn clone_calls(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input) u64 {
+    ownership_raw_bytes.result mut copy = branch_of(e, input);
+    ownership_raw_bytes.free_result(&copy);
+    return e->budget.calls;
+}
+// Before the first core charge, the join pays the copy work of both inputs, which equals the
+// work of two clones, and then compares the ledgers.
+fn copy_charged_before_core() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4182, 1, 1, &left);
+    ownership_raw_bytes_env.unknown(&e, 2, 3, 4, 1006);
+    u64 left_calls = clone_calls(&e, &left.states[0]);
+    u64 right_calls = clone_calls(&e, &e.paired.states[0]);
+    ownership_raw_join_cleanup_env.positions at = ownership_raw_join_cleanup_env.discover(&e,
+        &left.states[0], false, 1009);
+    assert(at.first_core > left_calls + right_calls);
+    assert(at.first_core < left_calls + right_calls + 200);
+    println("unit-join copy_charged_before_core");
+}
+
+// Unknown bytes never agree, so a merged window keeps no fragment for them.
+fn unknown_bytes_never_agree() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4190, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 1101);
+    ownership_raw_bytes_env.unknown(&e, 1, 3, 4, 1102);
+    copy_from(&e, 1, 1103);
+    assert(fragments(&e.paired.states[0], 2) == 3);
+    assert(!window_of(&e.paired.states[0], 2)->fragments[1].known);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 1108);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(fragments(&joined.states[0], 2) == 2);
+    assert(window_of(&joined.states[0], 2)->fragments[0].known);
+    assert(window_of(&joined.states[0], 2)->fragments[1].known);
+    println("unit-join unknown_bytes_never_agree");
+}
+// Both paths hold the same incoherent bytes in slot 2, so the merge keeps two fragments and no
+// complete reference. Mode 0 mixes two values, mode 1 repeats the first half, mode 2 swaps the
+// halves, and mode 3 mixes two original types of one value.
+fn same_incoherent_bytes(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4191 + mode, 0, false);
+    ownership_raw_bytes_env.seed(&e, 1, 0, 8, e.pointer, e.first, true, 1122);
+    ownership_api.contents_fact blank = {};
+    ownership_raw_bytes_env.seed(&e, 2, 0, 8, e.pointer, blank, false, 1124);
+    if (mode == 3) {
+        ownership_raw_bytes_env.seed(&e, 3, 0, 8, types.type_ptr(&e.table, e.byte, false, true),
+            e.first, true, 1127);
+    } else {
+        ownership_raw_bytes_env.seed(&e, 3, 0, 8, e.pointer, e.second, true, 1129);
+    }
+    if (mode == 0 || mode == 3) { halves(&e, 1, 3, 1131); }
+    if (mode == 1) {
+        ownership_raw_bytes_env.read(&e, 1, 0, 4, 11, 1133);
+        ownership_raw_bytes_env.write(&e, 2, 0, 4, 11, 0, 1134);
+        ownership_raw_bytes_env.write(&e, 2, 4, 8, 11, 0, 1135);
+    }
+    if (mode == 2) {
+        ownership_raw_bytes_env.read(&e, 1, 4, 8, 11, 1138);
+        ownership_raw_bytes_env.read(&e, 1, 0, 4, 12, 1139);
+        ownership_raw_bytes_env.write(&e, 2, 0, 4, 11, 0, 1140);
+        ownership_raw_bytes_env.write(&e, 2, 4, 8, 12, 0, 1141);
+    }
+    assert(fragments(&e.paired.states[0], 2) == 2);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 1146);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(fragments(&joined.states[0], 2) == 2 && !lost(&joined.states[0], 102));
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2,
+        e.pointer, 1151);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    println("unit-join same_incoherent_bytes ", mode);
+}
+// The left path rebuilds slot 2 in order and the right path swaps its halves. The values and
+// types agree, but the original byte positions do not.
+fn swapped_halves() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4196, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 1161);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    halves(&e, 1, 1, 1164);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    ownership_raw_bytes_env.read(&e, 1, 4, 8, 11, 1168);
+    ownership_raw_bytes_env.read(&e, 1, 0, 4, 12, 1169);
+    ownership_raw_bytes_env.write(&e, 2, 0, 4, 11, 0, 1170);
+    ownership_raw_bytes_env.write(&e, 2, 4, 8, 12, 0, 1171);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 1172);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(fragments(&joined.states[0], 2) == 0 && lost(&joined.states[0], 102));
+    println("unit-join swapped_halves_lose_correspondence");
+}
+// Slot 2 copies one value from slot 1 on the left path and from slot 3 on the right path, under
+// two original types. A join keeps both versions; a widen loses the correspondence.
+fn mixed_original_types(bool widening) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, widening ? 4198 : 4197, 0, false);
+    ownership_raw_bytes_env.seed(&e, 1, 0, 8, e.pointer, e.first, true, 1185);
+    ownership_api.contents_fact blank = {};
+    ownership_raw_bytes_env.seed(&e, 2, 0, 8, e.pointer, blank, false, 1187);
+    ownership_raw_bytes_env.seed(&e, 3, 0, 8, types.type_ptr(&e.table, e.byte, false, true),
+        e.first, true, 1188);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    copy_from(&e, 1, 1192);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    copy_from(&e, 3, 1196);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], widening, 1197);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof));
+    if (!widening) {
+        assert(joined.states.len == 2);
+        println("unit-join mixed_original_types join");
+        return;
+    }
+    assert(joined.states.len == 1 && fragments(&joined.states[0], 2) == 0);
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2,
+        e.pointer, 1205);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    println("unit-join mixed_original_types widen");
+}
+
+// The joined state owns its copied window places and canonical empty facts. Both live at field
+// places here, so freed input storage cannot hide behind them.
+fn aggregate_state_outlives_inputs() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.aggregate_setup(&e, 4199, false, false);
+    ownership_raw_bytes_env.zero(&e, 2, 0, 16, 1260);
+    ownership_raw_bytes.state* prior = &e.paired.states[0];
+    assert(prior->bytes.facts.contents_len == 1);
+    assert(prior->bytes.facts.contents[0].place.projections.len == 1);
+    assert(window_of(prior, 1)->selected.place.projections.len == 1);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 1267);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(joined.states[0].bytes.facts.contents_len == 1);
+    ownership_raw_bytes.result mut copy = branch_of(&e, &joined.states[0]);
+    defer ownership_raw_bytes.free_result(&copy);
+    ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.free_result(&e.paired);
+    u8 mut@ own[64] mut junk = {};
+    u64 mut i = 0;
+    while (i < junk.len) {
+        junk[i] = new(u8, 8 + (i % 16) * 16);
+        u64 mut j = 0;
+        while (j < junk[i].len) { junk[i][j] = 85; j += 1; }
+        i += 1;
+    }
+    assert(same_state(&e, &copy.states[0], &joined.states[0]));
+    i = 0;
+    while (i < junk.len) { del(junk[i]); i += 1; }
+    println("unit-join aggregate_state_outlives_inputs");
+}
+
+// Overlapping fragments give one byte two answers, so the paired state refuses them before a
+// join copies anything. Mode 0 puts an unknown fragment over a known window fragment on both
+// paths, where each input's reference read refuses. Mode 1 overlaps two left snapshot parts.
+fn overlapping_fragments(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4240 + mode, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 1301);
+    copy_from(&e, 1, 1302);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    u64 mut side = 0;
+    while (side < 2 - cast(mode, u64)) {
+        ownership_raw_bytes.state* changed = side == 0 ? &left.states[0] : &e.paired.states[0];
+        ownership_raw_bytes.fragment mut@ own parts = new(ownership_raw_bytes.fragment, 2);
+        if (mode == 0) {
+            ownership_raw_bytes.representation mut* item = window_of(changed, 2);
+            assert(item->fragments_len == 1 && item->fragments[0].known);
+            parts[0].begin = 0;
+            parts[0].end = 8;
+            parts[1] = item->fragments[0];
+            del(item->fragments);
+            item->fragments = move(parts);
+            item->fragments_len = 2;
+            ownership_raw_bytes.reference_result mut out = read_at(&e, changed, 2, e.pointer,
+                1318);
+            defer ownership_raw_bytes.free_reference(&out);
+            ownership_raw_bytes_env.rejects(&out);
+        } else {
+            ownership_raw_bytes.snapshot mut* saved = &changed->bytes.snapshots[0];
+            assert(saved->fragments_len == 1 && saved->fragments[0].known);
+            parts[0] = ownership_raw_bytes.clipped(saved->fragments[0], 0, 6);
+            parts[1] = ownership_raw_bytes.clipped(saved->fragments[0], 2, 8);
+            del(saved->fragments);
+            saved->fragments = move(parts);
+            saved->fragments_len = 2;
+        }
+        side += 1;
+    }
+    u64 mut order = 0;
+    while (order < 2) {
+        u64 events = e.budget.events;
+        ownership_raw_bytes.result mut joined = join_raw(&e, order == 0 ? &left.states[0] :
+            &e.paired.states[0], order == 0 ? &e.paired.states[0] : &left.states[0], order == 1,
+            1336);
+        defer ownership_raw_join.free_result(&joined);
+        assert(!ownership_api.successful(joined.proof) && joined.states.len == 0);
+        assert(e.budget.events == events + 1);
+        assert(e.budget.last_event.text == "byte fragments overlap");
+        order += 1;
+    }
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(&e, 1344);
+    ownership_raw_bytes.result mut copy = ownership_raw_bytes.clone(&left.states[0], &e.service,
+        &req);
+    defer ownership_raw_bytes.free_result(&copy);
+    assert(!ownership_api.successful(copy.proof) && copy.states.len == 0);
+    assert(e.budget.last_event.text == "byte fragments overlap");
+    println("unit-join overlapping_fragments_refuse ", mode);
+}
+fn typed_read(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input, u32 slot,
+    u32 line) bool {
+    u64 row = ownership_transfer.contents_index(input->core, ownership_raw_bytes_env.place(e,
+        slot));
+    if (row == ownership_raw_bytes.U64_MAX) { return false; }
+    ownership_raw.request mut req = ownership_raw_bytes_env.request(e, line);
+    req.base.source = input->core->contents[row].place;
+    return ownership_api.successful(ownership_transfer.check_read(input->core, &e->service,
+        &req.base, input->core->contents[row], false));
+}
+// A join or widen of two equal states loses no correspondence, so it keeps each core row. Slot 1
+// holds an unchecked window whose typed core row stays proved.
+fn equal_inputs_keep_rows() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4242, 0, false);
+    ownership_raw_bytes_env.seed(&e, 1, 0, 8, e.pointer, e.first, false, 1361);
+    assert(fragments(&e.paired.states[0], 1) == 0);
+    assert(typed_read(&e, &e.paired.states[0], 1, 1363));
+    ownership_raw_bytes.result mut copy = branch(&e);
+    defer ownership_raw_bytes.free_result(&copy);
+    u64 mut widening = 0;
+    while (widening < 2) {
+        ownership_raw_bytes.result mut joined = combine(&e, &copy.states[0], widening == 1, 1368);
+        defer ownership_raw_join.free_result(&joined);
+        assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+        assert(typed_read(&e, &joined.states[0], 1, 1371));
+        assert(joined.states[0].core->losses_len == 0);
+        assert(same_state(&e, &joined.states[0], &copy.states[0]));
+        widening += 1;
+    }
+    println("unit-join equal_inputs_keep_rows");
+}
+// A widen of an owner path and a moved path loses the correspondence of slots 1 and 2. Rows that
+// held a reference become unknown; canonical empty rows stay empty, as in byte publication.
+fn empty_rows_stay_empty() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_setup(&e, 4243, false);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut moved = ownership_raw_bytes_env.try_move(&e, 1, 2, 8, 1386);
+    ownership_raw_bytes_env.take(&e, &moved);
+    ownership_raw_bytes.result mut widened = combine(&e, &left.states[0], true, 1388);
+    defer ownership_raw_join.free_result(&widened);
+    assert(ownership_api.successful(widened.proof) && widened.states.len == 1);
+    u64 mut slot = 1;
+    while (slot < 3) {
+        ownership_api.place_path path = ownership_raw_bytes_env.place(&e, cast(slot, u32));
+        u64 mut empty = 0;
+        u64 mut unknown = 0;
+        u64 mut i = 0;
+        while (i < widened.states[0].core->contents_len) {
+            ownership_api.contents_fact row = widened.states[0].core->contents[i];
+            if (ownership_state.same_place(row.place, path)) {
+                if (row.kind == ownership_api.contents_kind.empty_owner) { empty += 1; }
+                if (row.kind == ownership_api.contents_kind.unknown) { unknown += 1; }
+            }
+            i += 1;
+        }
+        assert(empty == 1 && unknown == 1);
+        assert(lost(&widened.states[0], 100 + cast(slot, u32)));
+        slot += 1;
+    }
+    println("unit-join empty_rows_stay_empty");
+}
+// Both paths store a wrong place for slot 2. The origin place of source 102 still names slot 2,
+// so a lost correspondence makes its rows unknown.
+fn origin_place_forgets_rows() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4244, 1, 3, &left);
+    window_of(&left.states[0], 2)->selected.place = ownership_raw_bytes_env.place(&e, 9);
+    window_of(&e.paired.states[0], 2)->selected.place = ownership_raw_bytes_env.place(&e, 9);
+    ownership_raw_bytes.result mut widened = join_raw(&e, &left.states[0], &e.paired.states[0],
+        true, 1420);
+    defer ownership_raw_join.free_result(&widened);
+    assert(ownership_api.successful(widened.proof) && widened.states.len == 1);
+    assert(fragments(&widened.states[0], 2) == 0 && lost(&widened.states[0], 102));
+    assert(rows_refuse(&e, &widened.states[0], 2, 1424) == 2);
+    println("unit-join origin_place_forgets_rows");
+}
+
+// Slot 2 holds an unproved window on both paths, with two stored alignments. The pair drops and
+// records a lost fact, but no input proved the window, so no row changes.
+fn unproved_window_conflict() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4245, 0, 0, &left);
+    assert(fragments(&left.states[0], 2) == 0);
+    window_of(&e.paired.states[0], 2)->selected.alignment = 16;
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 1442);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(joined.states[0].bytes.representations_len == 2);
+    assert(lost(&joined.states[0], 102) && joined.states[0].core->losses_len == 1);
+    assert(typed_read(&e, &joined.states[0], 1, 1447) && typed_read(&e, &joined.states[0], 3,
+        1447));
+    println("unit-join unproved_window_conflict");
+}
+
+// Gives true when the core records the lost G fact of a window whose versions did not stay.
+fn lost_g(ownership_raw_bytes.state* input, u32 source) bool {
+    u64 mut i = 0;
+    while (i < input->core->losses_len) {
+        ownership_api.lost_fact item = input->core->losses[i];
+        if (item.category == ownership_api.limit_category.g && item.relation.ordinal == source &&
+            item.relation.kind == ownership_api.entity_kind.source &&
+            item.reason == ownership_api.incomplete_reason.unknown_effect) { return true; }
+        i += 1;
+    }
+    return false;
+}
+// Each core holds two exclusive contents facts at slot 5, so each gives two guarded units. Two
+// alternative states of distinct versions then hold 6 units of G content. Mode 0: G = 6 keeps
+// them. Mode 1: G = 5 cannot hold them, so the join merges the inputs and records a lost G fact;
+// G is a precision bound (FIR 14.1). Mode 2: the request allows 6 but the meter bound is 5, so
+// the charge refuses before either copy exists.
+fn guarded_cores(u32 mode) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4250 + mode, 1, 3, &left);
+    u64 mut side = 0;
+    while (side < 2) {
+        ownership_state.state mut* core = side == 0 ? left.states[0].core : e.paired.states[0].core;
+        ownership_state.append_contents(core, ownership_raw_bytes_env.value(&e, 5, 50, 5, 0, 1, 1));
+        ownership_state.append_contents(core, ownership_raw_bytes_env.value(&e, 5, 51, 5, 0, 1, 1));
+        side += 1;
+    }
+    e.limits.g = mode == 1 ? 5 : 6;
+    u64 events = e.budget.events;
+    if (mode == 2) {
+        ownership_raw_bytes_env.reset_budget(&e);
+        e.budget.meter.bounds.g = 5;
+        ownership_raw.request req = ownership_raw_bytes_env.request(&e, 1459);
+        ownership_raw_bytes.result mut refused = ownership_raw_join.join(&left.states[0],
+            &e.paired.states[0], &e.service, &req);
+        defer ownership_raw_join.free_result(&refused);
+        assert(!ownership_api.successful(refused.proof) && refused.states.len == 0);
+        assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        ownership_api.exhaustion limit = refused.proof.terminal.limit;
+        assert(limit.present && limit.category == ownership_api.limit_category.g);
+        assert(limit.attempted == 6 && limit.bound == 5 && e.budget.meter.used.g == 0);
+        assert(e.budget.events == events + 1);
+        println("unit-join guarded_cores_refuse_at_meter_g");
+        return;
+    }
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 1474);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof));
+    if (mode == 0) {
+        assert(joined.states.len == 2 && e.budget.meter.used.g == 6);
+        println("unit-join guarded_cores_fit_g");
+        return;
+    }
+    assert(joined.states.len == 1 && e.budget.meter.used.g == 0);
+    assert(lost_g(&joined.states[0], 102) && lost(&joined.states[0], 102));
+    assert(fragments(&joined.states[0], 2) == 0);
+    assert(rows_refuse(&e, &joined.states[0], 2, 1484) == 2);
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2, e.pointer,
+        1486);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    println("unit-join guarded_cores_merge_above_g");
+}
+// A snapshot of 80 one-byte parts passes its overlap check from heap storage, and the merge keeps
+// one unknown part. The same snapshot with its last part over its first part refuses.
+fn wide_snapshot(bool overlap) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, overlap ? 4261 : 4260, 0, false);
+    ownership_raw_bytes_env.read(&e, 1, 0, 8, 5, 1490);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    u64 mut side = 0;
+    while (side < 2) {
+        ownership_raw_bytes.snapshot mut* saved = side == 0 ? &left.states[0].bytes.snapshots[0] :
+            &e.paired.states[0].bytes.snapshots[0];
+        ownership_raw_bytes.fragment mut@ own parts = new(ownership_raw_bytes.fragment, 80);
+        u64 mut k = 0;
+        while (k < 80) { parts[k].begin = k; parts[k].end = k + 1; k += 1; }
+        if (overlap && side == 0) { parts[79].begin = 0; parts[79].end = 1; }
+        del(saved->fragments);
+        saved->fragments = move(parts);
+        saved->fragments_len = 80;
+        saved->bytes = 80;
+        side += 1;
+    }
+    ownership_raw_bytes.result mut joined = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 1510);
+    defer ownership_raw_join.free_result(&joined);
+    if (overlap) {
+        assert(!ownership_api.successful(joined.proof) && joined.states.len == 0);
+        assert(e.budget.last_event.text == "byte fragments overlap");
+        println("unit-join wide_snapshot_overlap_refuses");
+        return;
+    }
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(joined.states[0].bytes.snapshots_len == 1);
+    assert(joined.states[0].bytes.snapshots[0].fragments_len == 1);
+    assert(!joined.states[0].bytes.snapshots[0].fragments[0].known);
+    println("unit-join wide_snapshot_passes");
+}
+// A refusal inside the guarded-unit count of the two cores reports its exact exhaustion through
+// the mapped event route and publishes no state.
+fn guarded_count_refusal() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    two_paths(&e, 4262, 1, 3, &left);
+    ownership_raw_join_cleanup_env.watcher mut seen = ownership_raw_join_cleanup_env.watcher{
+        &e.budget, 0, 0};
+    e.service.budget_context = cast(&seen, void mut*);
+    e.service.budget = ownership_raw_join_cleanup_env.watched;
+    ownership_raw_bytes.result mut control = join_raw(&e, &left.states[0], &e.paired.states[0],
+        false, 1534);
+    defer ownership_raw_join.free_result(&control);
+    assert(ownership_api.successful(control.proof) && control.states.len == 2);
+    assert(seen.first_core > 1 && seen.first_core < e.budget.calls);
+    u64 deny_at = seen.first_core;
+    u64 events = e.budget.events;
+    ownership_raw_bytes_env.reset_budget(&e);
+    e.budget.deny_at = deny_at;
+    ownership_raw.request mut req = ownership_raw_bytes_env.request(&e, 1543);
+    e.bindings[0].key.ordinal += 5000;
+    ownership_raw_bytes.result mut refused = ownership_raw_join.join(&left.states[0],
+        &e.paired.states[0], &e.service, &req);
+    defer ownership_raw_join.free_result(&refused);
+    assert(!ownership_api.successful(refused.proof) && refused.states.len == 0);
+    assert(refused.proof.terminal.limit.work == ownership_api.work_kind.join);
+    assert(refused.proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(e.budget.calls == deny_at && e.budget.events == events + 1);
+    assert(e.budget.last_event.key.ordinal == req.base.event_bindings[0].key.ordinal);
+    assert(e.budget.meter.used.g == 0);
+    println("unit-join guarded_count_refusal");
+}
+
+fn b23_join_agreeing_representations() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4001, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 101);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    copy_from(&e, 1, 104);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    copy_from(&e, 1, 109);
+    ownership_raw_bytes_env.unknown(&e, 3, 3, 4, 110);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 111);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    ownership_raw_bytes.reference_result mut copied = read_at(&e, &joined.states[0], 2,
+        e.pointer, 114);
+    defer ownership_raw_bytes.free_reference(&copied);
+    accepted(&copied, 1, 1);
+    ownership_raw_bytes.reference_result mut original = read_at(&e, &joined.states[0], 1,
+        e.pointer, 118);
+    defer ownership_raw_bytes.free_reference(&original);
+    accepted(&original, 1, 1);
+    ownership_raw_bytes.reference_result mut partial = read_at(&e, &joined.states[0], 3,
+        e.pointer, 122);
+    defer ownership_raw_bytes.free_reference(&partial);
+    ownership_raw_bytes_env.rejects(&partial);
+    assert(rows_refuse(&e, &joined.states[0], 3, 125) == 2);
+    assert(lost(&joined.states[0], 103) && !lost(&joined.states[0], 102));
+    assert(joined.states[0].core->allocations_len == 2);
+    assert(joined.states[0].core->allocations[0].obligation);
+    println("required B23.join_agreeing_representations accept");
+}
+fn b23_join_distinct_complete_guarded_versions() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4002, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 135);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    copy_from(&e, 1, 138);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    copy_from(&e, 3, 143);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 144);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 2);
+    // G counts content: neither core holds a guarded alternative, so the two states give 2.
+    assert(e.budget.meter.used.g == ownership_state.alternative_units(2));
+    assert(!lost_g(&joined.states[0], 102) && !lost_g(&joined.states[1], 102));
+    assert(same_state(&e, &joined.states[0], &left.states[0]));
+    assert(same_state(&e, &joined.states[1], &e.paired.states[0]));
+    ownership_raw_bytes.reference_result mut first = read_at(&e, &joined.states[0], 2,
+        e.pointer, 150);
+    defer ownership_raw_bytes.free_reference(&first);
+    accepted(&first, 1, 1);
+    ownership_raw_bytes.reference_result mut second = read_at(&e, &joined.states[1], 2,
+        e.pointer, 154);
+    defer ownership_raw_bytes.free_reference(&second);
+    accepted(&second, 2, 2);
+    assert(joined.states[0].raw.core ==
+        cast(joined.states[0].core, ownership_state.state*));
+    assert(joined.states[1].raw.core ==
+        cast(joined.states[1].core, ownership_state.state*));
+    assert(joined.states[0].core != left.states[0].core);
+    println("required B23.join_distinct_complete_guarded_versions accept");
+}
+fn b23_join_missing_fragment_then_use() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4003, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 170);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    copy_from(&e, 1, 173);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    resume(&e, &prefix);
+    copy_from(&e, 1, 178);
+    ownership_raw_bytes_env.unknown(&e, 2, 3, 4, 179);
+    assert(fragments(&e.paired.states[0], 2) == 2);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 181);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(fragments(&joined.states[0], 2) == 2);
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2,
+        e.pointer, 186);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    assert(rows_refuse(&e, &joined.states[0], 2, 189) == 2);
+    assert(lost(&joined.states[0], 102));
+    println("required B23.join_missing_fragment_then_use reject");
+}
+fn b23_join_incoherent_versions_then_use() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4004, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 197);
+    ownership_raw_bytes.result mut prefix = branch(&e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    halves(&e, 1, 1, 200);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.reference_result mut coherent = read_at(&e, &left.states[0], 2,
+        e.pointer, 204);
+    defer ownership_raw_bytes.free_reference(&coherent);
+    accepted(&coherent, 1, 1);
+    resume(&e, &prefix);
+    halves(&e, 1, 3, 209);
+    // Both paths hold two fragments of slot 2, and their first fragments are equal.
+    assert(fragments(&left.states[0], 2) == 2 && fragments(&e.paired.states[0], 2) == 2);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 212);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    assert(fragments(&joined.states[0], 2) == 1);
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2,
+        e.pointer, 217);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    assert(rows_refuse(&e, &joined.states[0], 2, 220) >= 1);
+    assert(lost(&joined.states[0], 102));
+    println("required B23.join_incoherent_versions_then_use reject");
+}
+fn b23_join_live_released_source_then_use() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.setup(&e, 4005, 0, false);
+    ownership_raw_bytes_env.initial(&e, 0, 228);
+    copy_from(&e, 1, 229);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes_env.release_original(&e, 232);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], false, 233);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    ownership_state.state* core = joined.states[0].core;
+    u64 allocation = ownership_state.allocation_index(core, ownership_raw_bytes_env.id(&e,
+        ownership_api.entity_kind.allocation, 1));
+    assert(allocation != ownership_raw_bytes.U64_MAX);
+    assert(core->allocations[allocation].obligation);
+    assert(core->allocations[allocation].validity == ownership_api.validity_kind.unknown);
+    bool mut released = false;
+    u64 mut i = 0;
+    while (i < core->allocations[allocation].history.len) {
+        if (core->allocations[allocation].history[i].kind == ownership_api.effect_kind.release) {
+            released = true;
+        }
+        i += 1;
+    }
+    assert(released);
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &joined.states[0], 2,
+        e.pointer, 251);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    assert(!e.budget.witness_validated);
+    ownership_raw_bytes.reference_result mut live = read_at(&e, &left.states[0], 2,
+        e.pointer, 256);
+    defer ownership_raw_bytes.free_reference(&live);
+    accepted(&live, 1, 1);
+    println("required B23.join_live_released_source_then_use reject");
+}
+fn b23_widen_retains_live_owner() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_setup(&e, 4006, false);
+    ownership_raw_bytes.result mut left = branch(&e);
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut moved = ownership_raw_bytes_env.try_move(&e, 1, 2, 8, 266);
+    ownership_raw_bytes_env.take(&e, &moved);
+    ownership_raw_bytes.result mut joined = combine(&e, &left.states[0], true, 268);
+    defer ownership_raw_join.free_result(&joined);
+    assert(ownership_api.successful(joined.proof) && joined.states.len == 1);
+    ownership_state.state* core = joined.states[0].core;
+    assert(core->allocations[0].obligation && core->allocations[0].count.one);
+    assert(core->allocations[0].validity == ownership_api.validity_kind.live);
+    assert(ownership_state.has_residual(core->allocations[0].owner.place));
+    assert(core->allocations[0].history.len == 2);
+    // No unknown representation fact discharges the owner: an overlapping zero write refuses.
+    ownership_raw_bytes.byte_effect mut change = ownership_raw_bytes_env.zero_change(&e, 1, 0, 8);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(&e, 279);
+    change.operation = req.base.operation;
+    change.source_position = req.base.source_position;
+    ownership_raw_bytes.byte_effect[1] effects = {change};
+    ownership_raw_bytes.result mut zeroed = ownership_raw_bytes.apply_ordered(&joined.states[0],
+        &e.service, effects[..], &req);
+    defer ownership_raw_bytes.free_result(&zeroed);
+    assert(!ownership_api.successful(zeroed.proof) && zeroed.states.len == 0);
+    assert(e.budget.last_event.text == "owner overlap remains unproved");
+    ownership_raw_bytes.reference_result mut owner = read_at(&e, &joined.states[0], 2,
+        e.selected_type, 290);
+    defer ownership_raw_bytes.free_reference(&owner);
+    ownership_raw_bytes_env.rejects(&owner);
+    println("required B23.widen_retains_live_owner accept");
+}
+// Widens a slot 2 that holds version 1 on the left path and version 2 on the right path.
+fn widened_versions(ownership_raw_bytes_env.env mut* e, u32 function,
+    ownership_raw_bytes.result mut* left) ownership_raw_bytes.result {
+    ownership_raw_bytes_env.setup(e, function, 0, false);
+    ownership_raw_bytes_env.initial(e, 0, 300);
+    ownership_raw_bytes.result mut prefix = branch(e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    copy_from(e, 1, 303);
+    *left = branch(e);
+    resume(e, &prefix);
+    copy_from(e, 3, 306);
+    ownership_raw_bytes.result out = combine(e, &left->states[0], true, 307);
+    assert(ownership_api.successful(out.proof) && out.states.len == 1);
+    return out;
+}
+fn b23_widen_independent_facts_still_prove_access() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut widened = widened_versions(&e, 4007, &left);
+    defer ownership_raw_join.free_result(&widened);
+    ownership_raw_bytes.reference_result mut first = read_at(&e, &widened.states[0], 1,
+        e.pointer, 319);
+    defer ownership_raw_bytes.free_reference(&first);
+    accepted(&first, 1, 1);
+    ownership_raw_bytes.reference_result mut third = read_at(&e, &widened.states[0], 3,
+        e.pointer, 323);
+    defer ownership_raw_bytes.free_reference(&third);
+    accepted(&third, 2, 2);
+    assert(raw_access(&e, &widened.states[0], 1, 0, 12, 326));
+    assert(raw_access(&e, &widened.states[0], 101, 0, 8, 327));
+    println("required B23.widen_independent_facts_still_prove_access accept");
+}
+fn b23_widen_lost_correspondence_then_use() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    ownership_raw_bytes.result mut widened = widened_versions(&e, 4008, &left);
+    defer ownership_raw_join.free_result(&widened);
+    assert(fragments(&widened.states[0], 2) == 0);
+    ownership_raw_bytes.reference_result mut out = read_at(&e, &widened.states[0], 2,
+        e.pointer, 339);
+    defer ownership_raw_bytes.free_reference(&out);
+    ownership_raw_bytes_env.rejects(&out);
+    assert(rows_refuse(&e, &widened.states[0], 2, 342) == 2);
+    assert(lost(&widened.states[0], 102));
+    assert(!lost_g(&widened.states[0], 102));
+    ownership_raw_bytes.reference_result mut prior = read_at(&e, &left.states[0], 2,
+        e.pointer, 345);
+    defer ownership_raw_bytes.free_reference(&prior);
+    accepted(&prior, 1, 1);
+    println("required B23.widen_lost_correspondence_then_use reject");
+}
+// Proves one live access of `bytes` bytes at `begin` through a source of the state.
+fn raw_access(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input, u32 source,
+    u64 begin, u64 end, u32 line) bool {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, line);
+    types.node* bytes = types.type_array(&e->table, e->byte, end - begin);
+    ownership_raw.address[1] values = {ownership_raw.address{ownership_raw_bytes_env.id(e,
+        ownership_api.entity_kind.source, source), ownership_raw.literal(begin),
+        ownership_raw.literal(0), ownership_raw.literal(end), e->byte, 8, true}};
+    ownership_api.proof_status proof = ownership_raw.access(&input->raw, &e->service,
+        values[..], bytes, &req);
+    return ownership_api.successful(proof);
+}
+
+fn main() i32 {
+    b23_join_agreeing_representations();
+    b23_join_distinct_complete_guarded_versions();
+    b23_join_missing_fragment_then_use();
+    b23_join_incoherent_versions_then_use();
+    b23_join_live_released_source_then_use();
+    b23_widen_retains_live_owner();
+    b23_widen_independent_facts_still_prove_access();
+    b23_widen_lost_correspondence_then_use();
+    ownership_raw_join_cleanup_env.b26_late_join_failure_retains_both_inputs();
+    ownership_raw_join_cleanup_env.b26_late_widen_failure_retains_input();
+    split_same_bytes_keep_correspondence();
+    g_bound(2);
+    g_bound(1);
+    bottom_input(false);
+    bottom_input(true);
+    incomplete_input();
+    missing_event_map();
+    u32 mut unpaired = 0;
+    while (unpaired < 3) { unpaired_context(unpaired); unpaired += 1; }
+    one_sided_representation();
+    u32 mut stored = 0;
+    while (stored < 6) { stored_window_conflict(stored); stored += 1; }
+    distinct_types();
+    foreign_alternative();
+    larger_origin_window();
+    one_sided_origin(0);
+    one_sided_origin(1);
+    u32 mut captured = 0;
+    while (captured < 5) { captured_fact(captured); captured += 1; }
+    snapshot_parts(true);
+    snapshot_parts(false);
+    empty_owner_facts();
+    dependent_row_places();
+    repeated_join();
+    u32 mut fact = 0;
+    while (fact < 17) { origin_fact(fact); fact += 1; }
+    snapshot_storage_bound();
+    joined_state_outlives_inputs();
+    copy_charged_before_core();
+    unknown_bytes_never_agree();
+    u32 mut incoherent = 0;
+    while (incoherent < 4) { same_incoherent_bytes(incoherent); incoherent += 1; }
+    swapped_halves();
+    mixed_original_types(false);
+    mixed_original_types(true);
+    aggregate_state_outlives_inputs();
+    overlapping_fragments(0);
+    overlapping_fragments(1);
+    equal_inputs_keep_rows();
+    empty_rows_stay_empty();
+    origin_place_forgets_rows();
+    unproved_window_conflict();
+    u32 mut guarded = 0;
+    while (guarded < 3) { guarded_cores(guarded); guarded += 1; }
+    wide_snapshot(false);
+    wide_snapshot(true);
+    guarded_count_refusal();
+    return 0;
+}

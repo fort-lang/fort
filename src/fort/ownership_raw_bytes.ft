@@ -510,6 +510,41 @@ fn captured_part(work mut* current, ledger* saved, window selected, u64 cursor,
     else { part->known = false; }
     return true;
 }
+// Two fragments that share a byte give that byte two answers, so a paired state refuses them.
+// The check sorts the intervals once and scans them once. It pays one W unit for each 64
+// intervals, as partition_settle does, and uses stack storage up to 64 intervals.
+fn disjoint(work mut* current, fragment@ values, ownership_api.entity_id source) bool {
+    if (values.len < 2) { return true; }
+    u64 rows = ownership_state.ROWS_PER_UNIT;
+    if (!spend(current, values.len / rows + (values.len % rows == 0 ? 0 : 1))) { return false; }
+    byte_partition[64] mut local = {};
+    byte_partition mut@ own mut heap = {};
+    byte_partition mut@ mut spans = {};
+    if (values.len <= local.len) { spans = local[0..values.len]; }
+    else {
+        heap = new(byte_partition, values.len);
+        spans = heap[..];
+    }
+    u64 mut i = 0;
+    while (i < values.len) {
+        spans[i] = byte_partition{.begin = values[i].begin, .end = values[i].end};
+        i += 1;
+    }
+    // After the sort, an overlap shows between two neighbouring nonempty intervals.
+    sort_partitions(spans);
+    u64 mut reach = 0;
+    bool mut shared = false;
+    i = 0;
+    while (i < spans.len && !shared) {
+        if (spans[i].begin < spans[i].end) {
+            shared = spans[i].begin < reach;
+            reach = spans[i].end;
+        }
+        i += 1;
+    }
+    del(heap);
+    return !shared || stop(current, source, false, "byte fragments overlap");
+}
 fn paired_regions(work mut* current, ownership_state.state* core, ownership_raw.context* raw,
     ledger* saved, retained_edit edit, u64 mut* amount) bool {
     *amount = 0;
@@ -543,6 +578,9 @@ fn paired_regions(work mut* current, ownership_state.state* core, ownership_raw.
             return stop(current, item->selected.source, false,
                 "paired representation count remains unproved");
         }
+        if (!disjoint(current, item->fragments[..item->fragments_len], item->selected.source)) {
+            return false;
+        }
         if (edit.kind == retained_edit_kind.replacement && item == edit.target) {
             replaced = true;
             if (!retained_replacement(current, &borrowed, &partitions, item, edit)) {
@@ -573,7 +611,8 @@ fn paired_regions(work mut* current, ownership_state.state* core, ownership_raw.
             return stop(current, ownership_api.entity_id{}, false,
                 "paired snapshot count remains unproved");
         }
-        if (!borrowed_core(current, &borrowed, &item->facts, retained_edit{})) { return false; }
+        if (!disjoint(current, item->fragments[..item->fragments_len], ownership_api.entity_id{}) ||
+            !borrowed_core(current, &borrowed, &item->facts, retained_edit{})) { return false; }
         u64 mut j = 0;
         while (j < item->fragments_len) {
             if (!spend(current, 1) || !retained_fragment(current, &borrowed, &partitions,

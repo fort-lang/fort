@@ -1,0 +1,263 @@
+/// Tests late join and widen refusals and separately measures the teardown of their records.
+import heap;
+import ownership_api;
+import ownership_keys;
+import ownership_raw;
+import ownership_raw_bytes;
+import ownership_raw_bytes_cleanup_env;
+import ownership_raw_bytes_env;
+import ownership_raw_join;
+import ownership_state;
+import ownership_transfer;
+
+// Records the first and last charges of the core join or widen in the shared charge counter.
+struct watcher {
+    ownership_raw_bytes_env.counts mut* counts;
+    u64 first_core;
+    u64 last_core;
+}
+fn watched(void mut* opaque, ownership_api.charge_request* request) ownership_api.charge_result {
+    watcher mut* seen = cast(opaque, watcher mut*);
+    ownership_api.charge_result out = ownership_raw_bytes_env.budget(
+        cast(seen->counts, void mut*), request);
+    if (request->work != ownership_api.work_kind.transfer) {
+        if (seen->first_core == 0) { seen->first_core = seen->counts->calls; }
+        seen->last_core = seen->counts->calls;
+    }
+    return out;
+}
+// The charge positions of one control run: the core join span and the last charge.
+struct positions { u64 first_core; u64 last_core; u64 total; }
+
+fn symbolic_lengths(ownership_raw_bytes_env.env mut* e) void {
+    u64 mut i = 0;
+    while (i < 2) {
+        e->core.allocations[i].logical_length.kind = ownership_api.fact_kind.symbolic;
+        e->core.allocations[i].logical_length.symbol = ownership_raw_bytes_env.id(e,
+            ownership_api.entity_kind.value, 31 + cast(i, u32));
+        i += 1;
+    }
+}
+// Builds two paths that fill each record class a merged join copies. Both paths hold an owner,
+// captured bounds and a relation, an origin at a field place, a snapshot, and an empty-owner
+// fact. The right path, left in the environment, also writes one unknown byte into slot 2.
+fn rich_paths(ownership_raw_bytes_env.env mut* e, u32 function,
+    ownership_raw_bytes.result mut* left) void {
+    ownership_raw_bytes_env.setup(e, function, 0, true);
+    e->inline_container = true;
+    e->core.contents[2] = ownership_state.copy_contents(&e->core,
+        ownership_transfer.empty_value(ownership_raw_bytes_env.place(e, 2)));
+    symbolic_lengths(e);
+    ownership_raw_bytes_env.recapture(e, e->selected_type, 8);
+    ownership_raw_bytes_env.seed(e, 1, 0, 8, e->selected_type, e->first, true, 50);
+    ownership_raw_bytes_env.seed(e, 2, 0, 8, e->selected_type, e->core.contents[2], true, 51);
+    ownership_raw_bytes_env.seed(e, 3, 0, 8, e->selected_type, e->second, true, 52);
+    ownership_raw_bytes_env.zero(e, 2, 0, 8, 53);
+    ownership_raw_bytes_env.read(e, 1, 0, 8, 1, 54);
+    ownership_raw_bytes.state* prior = &e->paired.states[0];
+    assert(prior->raw.bounds.len == 2 && prior->raw.relations.len == 1);
+    assert(prior->raw.origins[6].place.projections.len == 1);
+    assert(prior->bytes.facts.contents_len == 1 && prior->bytes.snapshots_len == 1);
+    *left = ownership_raw_bytes_env.clone_input(e);
+    ownership_raw_bytes_env.unknown(e, 2, 3, 4, 56);
+}
+// Builds two paths whose slot 2 holds two distinct complete versions.
+fn distinct_paths(ownership_raw_bytes_env.env mut* e, u32 function,
+    ownership_raw_bytes.result mut* left) void {
+    ownership_raw_bytes_env.setup(e, function, 0, false);
+    ownership_raw_bytes_env.initial(e, 0, 60);
+    ownership_raw_bytes.result mut prefix = ownership_raw_bytes_env.clone_input(e);
+    defer ownership_raw_bytes.free_result(&prefix);
+    ownership_raw_bytes_env.copy_complete(e, 8, 63);
+    *left = ownership_raw_bytes_env.clone_input(e);
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, 66);
+    ownership_raw_bytes.result mut right = ownership_raw_bytes.clone(&prefix.states[0],
+        &e->service, &req);
+    ownership_raw_bytes_env.take(e, &right);
+    ownership_raw_bytes_env.read(e, 3, 0, 8, 1, 70);
+    ownership_raw_bytes_env.write(e, 2, 0, 8, 1, 0, 71);
+}
+fn run(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* left, bool widening,
+    ownership_raw.request* req) ownership_raw_bytes.result {
+    return widening ? ownership_raw_join.widen(left, &e->paired.states[0], &e->service, req) :
+        ownership_raw_join.join(left, &e->paired.states[0], &e->service, req);
+}
+// Finds the charge positions of one successful control run. The inputs stay unchanged.
+fn discover(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* left, bool widening,
+    u32 line) positions {
+    watcher mut seen = watcher{&e->budget, 0, 0};
+    ownership_api.services prior = e->service;
+    e->service.budget_context = cast(&seen, void mut*);
+    e->service.budget = watched;
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, line);
+    ownership_raw_bytes.result mut control = run(e, left, widening, &req);
+    assert(ownership_api.successful(control.proof) && control.states.len == 1);
+    ownership_raw_join.free_result(&control);
+    e->service = prior;
+    assert(1 < seen.first_core && seen.first_core <= seen.last_core);
+    assert(seen.last_core < e->budget.calls);
+    return positions{seen.first_core, seen.last_core, e->budget.calls};
+}
+fn same_state(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* left,
+    ownership_raw_bytes.state* right) bool {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, 1);
+    ownership_api.proof_status mut proof = {};
+    bool same = ownership_raw_bytes.equal(left, right, &e->service, &req, &proof);
+    return same && ownership_api.successful(proof);
+}
+// Refuses one join or widen at charge `deny_at`. The refusal publishes no state, keeps its exact
+// exhaustion record, its meter charge, and one mapped event, and changes neither input.
+fn refuse_at(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* left,
+    ownership_raw_bytes.state* left_before, ownership_raw_bytes.state* right_before,
+    bool widening, u64 deny_at, u32 line) ownership_api.exhaustion {
+    ownership_raw_bytes_env.reset_budget(e);
+    e->budget.deny_at = deny_at;
+    u64 events = e->budget.events;
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, line);
+    // The mapped key differs from the operation number, so an unmapped core event is seen.
+    e->bindings[0].key.ordinal += 5000;
+    ownership_raw_bytes.result mut refused = run(e, left, widening, &req);
+    defer ownership_raw_join.free_result(&refused);
+    assert(!ownership_api.successful(refused.proof) && refused.states.len == 0);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(e->budget.calls == deny_at && e->budget.denied.present);
+    ownership_api.exhaustion limit = refused.proof.terminal.limit;
+    assert(limit.present && limit.category == e->budget.denied.category);
+    assert(limit.used == e->budget.denied.used && limit.bound == e->budget.denied.bound);
+    assert(limit.attempted == e->budget.denied.attempted);
+    assert(ownership_keys.operation(refused.proof.terminal.operation, req.base.operation) == 0);
+    assert(ownership_keys.source(refused.proof.terminal.source, req.base.source_position) == 0);
+    assert(e->budget.meter.used.w > 0);
+    assert(e->budget.events == events + 1);
+    assert(e->budget.last_event.kind == ownership_api.event_kind.work_failure);
+    assert(ownership_keys.operation(e->budget.last_event.operation, req.base.operation) == 0);
+    assert(e->budget.last_event.key.ordinal == req.base.event_bindings[0].key.ordinal);
+    assert(same_state(e, left_before, left));
+    assert(same_state(e, right_before, &e->paired.states[0]));
+    return limit;
+}
+// Refuses at the last charge, at each edge of the core span, and at every `stride` charges from
+// the second charge on. The first charge validates the event map and has no route yet.
+fn late_refusals(u32 function, bool widening, u64 stride, string receipt) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    rich_paths(&e, function, &left);
+    ownership_raw_bytes.result mut left_before = clone_state(&e, &left.states[0]);
+    defer ownership_raw_bytes.free_result(&left_before);
+    ownership_raw_bytes.result mut right_before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&right_before);
+    positions at = discover(&e, &left.states[0], widening, 150);
+    ownership_api.exhaustion last = refuse_at(&e, &left.states[0], &left_before.states[0],
+        &right_before.states[0], widening, at.total, 152);
+    assert(last.category == ownership_api.limit_category.r && last.attempted > 0);
+    u64[4] edges = {at.first_core, at.first_core + 1, at.last_core, at.last_core + 1};
+    u64 mut i = 0;
+    while (i < edges.len) {
+        ownership_api.exhaustion edge = refuse_at(&e, &left.states[0], &left_before.states[0],
+            &right_before.states[0], widening, edges[i], 159);
+        assert(i == 3 || edge.work == (widening ? ownership_api.work_kind.widening :
+            ownership_api.work_kind.join));
+        i += 1;
+    }
+    u64 mut deny_at = 2;
+    u64 mut tried = 0;
+    while (deny_at < at.total) {
+        refuse_at(&e, &left.states[0], &left_before.states[0], &right_before.states[0],
+            widening, deny_at, 165);
+        deny_at += stride;
+        tried += 1;
+    }
+    assert(tried >= 32);
+    println(receipt);
+}
+fn clone_state(ownership_raw_bytes_env.env mut* e, ownership_raw_bytes.state* input)
+    ownership_raw_bytes.result {
+    ownership_raw_bytes_env.reset_budget(e);
+    ownership_raw.request req = ownership_raw_bytes_env.request(e, 1);
+    ownership_raw_bytes.result out = ownership_raw_bytes.clone(input, &e->service, &req);
+    assert(ownership_api.successful(out.proof) && out.states.len == 1);
+    return out;
+}
+fn b26_late_join_failure_retains_both_inputs() void {
+    late_refusals(4201, false, 61, "required B26.late_join_failure_retains_both_inputs reject");
+}
+fn b26_late_widen_failure_retains_input() void {
+    late_refusals(4202, true, 61, "required B26.late_widen_failure_retains_input reject");
+}
+
+// Mode 0 publishes a merged join and mode 1 publishes two alternatives. Modes 2 and 3 refuse a
+// join and a widen at their last charge. Mode 4 refuses at the first core join charge and mode 5
+// halfway through the paired merge.
+fn mode_input(ownership_raw_bytes_env.env mut* e, u32 mode,
+    ownership_raw_bytes.result mut* left) void {
+    if (mode == 1) { distinct_paths(e, 4300 + mode, left); return; }
+    rich_paths(e, 4300 + mode, left);
+}
+fn mode_position(u32 mode) u64 {
+    if (mode < 2) { return 0; }
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    mode_input(&e, mode, &left);
+    positions at = discover(&e, &left.states[0], mode == 3, 200);
+    if (mode == 4) { return at.first_core; }
+    if (mode == 5) { return at.last_core + (at.total - at.last_core) / 2; }
+    return at.total;
+}
+fn mode_round(u32 mode, u64 deny_at) void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes.result mut left = {};
+    defer ownership_raw_bytes.free_result(&left);
+    mode_input(&e, mode, &left);
+    ownership_raw_bytes_env.reset_budget(&e);
+    e.budget.deny_at = deny_at;
+    ownership_raw.request req = ownership_raw_bytes_env.request(&e, 200);
+    ownership_raw_bytes.result mut out = run(&e, &left.states[0], mode == 3, &req);
+    if (mode < 2) {
+        assert(ownership_api.successful(out.proof));
+        assert(out.states.len == (mode == 1 ? 2 : 1));
+        ownership_raw_join.free_result(&out);
+    } else {
+        // A refused join owns no state. Caller cleanup must not hide a kernel leak.
+        assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+        assert(e.budget.calls == deny_at);
+    }
+}
+fn teardown_probe(u32 mode) void {
+    u64 deny_at = mode_position(mode);
+    u64 mut warm = 0;
+    while (warm < 64) {
+        mode_round(mode, deny_at);
+        ownership_raw_bytes_cleanup_env.live_bytes();
+        warm += 1;
+    }
+    mode_round(mode, deny_at);
+    u64 before_live = ownership_raw_bytes_cleanup_env.live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_raw_bytes.U64_MAX;
+    u64 mut best_system = ownership_raw_bytes.U64_MAX;
+    u64 mut round = 0;
+    while (round < 256) {
+        mode_round(mode, deny_at);
+        u64 distance_live = heap.distance(before_live,
+            ownership_raw_bytes_cleanup_env.live_bytes());
+        u64 distance_system = heap.distance(before_system, heap.system_view());
+        if (round >= 240 && distance_live < best_live) { best_live = distance_live; }
+        if (round >= 240 && distance_system < best_system) { best_system = distance_system; }
+        round += 1;
+    }
+    if (best_live >= (heap.ADDRESS_IS_A_VIEW ? 2048 : 256) ||
+        best_system >= (heap.ADDRESS_IS_A_VIEW ? 1 : 256)) {
+        println("join allocator ", mode, " live ", best_live, " system ", best_system);
+    }
+    assert(best_live < (heap.ADDRESS_IS_A_VIEW ? 2048 : 256));
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+    println("join allocator mode ", mode, " released");
+}

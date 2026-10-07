@@ -1,0 +1,665 @@
+/// Joins and widens paired core, raw, and byte-ledger ownership states without new trust.
+// Each result owns its states. Neither input changes, and a refusal frees each tentative record.
+// It implements the raw-storage join of D17.17 within the finite domain of D17.18 (FIR 14.1).
+import ownership_api;
+import ownership_join;
+import ownership_places;
+import ownership_raw;
+import ownership_raw_bytes;
+import ownership_state;
+import types;
+
+u64 U64_MAX = 18446744073709551615;
+
+fn free_result(ownership_raw_bytes.result mut* out) void { ownership_raw_bytes.free_result(out); }
+
+fn spend(ownership_raw_bytes.work mut* current, u64 amount) bool {
+    return ownership_raw_bytes.spend(current, amount);
+}
+fn smaller(u64 a, u64 b) u64 { return a < b ? a : b; }
+
+// Gives the first known fragment that holds byte `at`, or U64_MAX for an unknown byte.
+fn holder(ownership_raw_bytes.work mut* current, ownership_raw_bytes.fragment@ parts, u64 at)
+    u64 {
+    u64 mut i = 0;
+    while (i < parts.len) {
+        if (!spend(current, 1)) { return U64_MAX; }
+        if (parts[i].known && parts[i].begin <= at && at < parts[i].end) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+// Gives the first fragment start after `at`, or `limit`. Agreement starts only where a fragment
+// starts, because two fragments agree at each byte of their overlap or at none.
+fn boundary(ownership_raw_bytes.work mut* current, ownership_raw_bytes.fragment@ parts, u64 at,
+    u64 limit) u64 {
+    u64 mut next = limit;
+    u64 mut i = 0;
+    while (i < parts.len) {
+        if (!spend(current, 1)) { return limit; }
+        if (parts[i].begin > at && parts[i].begin < next) { next = parts[i].begin; }
+        i += 1;
+    }
+    return next;
+}
+// Two fragments agree at a byte when it holds one original value, type, and byte position.
+fn agree(ownership_raw_bytes.work mut* current, ownership_raw_bytes.fragment left,
+    ownership_raw_bytes.fragment right, u64 at) bool {
+    return left.original_type == right.original_type &&
+        left.original_begin + (at - left.begin) == right.original_begin + (at - right.begin) &&
+        ownership_raw_bytes.same_value(current, left.value, right.value);
+}
+// Adds one agreeing piece. A piece that continues the last one extends it.
+fn keep_piece(ownership_raw_bytes.work mut* current, ownership_state.state mut* facts,
+    ownership_raw_bytes.fragment mut@ out, u64 mut* len, ownership_raw_bytes.fragment piece)
+    bool {
+    if (*len > 0) {
+        ownership_raw_bytes.fragment last = out[*len - 1];
+        if (last.end == piece.begin && last.known == piece.known &&
+            last.original_type == piece.original_type &&
+            (!piece.known || (last.original_begin + (last.end - last.begin) ==
+            piece.original_begin && ownership_raw_bytes.same_value(current, last.value,
+            piece.value)))) {
+            out[*len - 1].end = piece.end;
+            return ownership_api.successful(current->proof);
+        }
+    }
+    if (!ownership_api.successful(current->proof)) { return false; }
+    if (*len == out.len) {
+        return ownership_raw_bytes.stop(current, ownership_api.entity_id{}, false,
+            "joined byte fragments exceed their storage");
+    }
+    out[*len] = ownership_raw_bytes.copy_fragment(facts, piece);
+    *len += 1;
+    return spend(current, 1);
+}
+// Keeps each byte that both inputs prove with one original value. A snapshot keeps every byte
+// as a contiguous part, so a disagreeing byte becomes an unknown part.
+fn merge_parts(ownership_raw_bytes.work mut* current, ownership_state.state mut* facts,
+    ownership_raw_bytes.fragment@ left, ownership_raw_bytes.fragment@ right, u64 begin, u64 end,
+    bool contiguous, ownership_raw_bytes.fragment mut@ out, u64 mut* len) bool {
+    u64 mut cursor = begin;
+    while (cursor < end) {
+        if (!spend(current, 1)) { return false; }
+        u64 a = holder(current, left, cursor);
+        u64 b = holder(current, right, cursor);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        bool same = a != U64_MAX && b != U64_MAX && agree(current, left[a], right[b], cursor);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        u64 mut next = end;
+        ownership_raw_bytes.fragment mut piece = {};
+        if (same) {
+            next = smaller(smaller(left[a].end, right[b].end), end);
+            piece = ownership_raw_bytes.clipped(left[a], cursor, next);
+        } else {
+            next = smaller(boundary(current, left, cursor, end),
+                boundary(current, right, cursor, end));
+            piece.begin = cursor;
+            piece.end = next;
+        }
+        if ((same || contiguous) && !keep_piece(current, facts, out, len, piece)) {
+            return false;
+        }
+        cursor = next;
+    }
+    return ownership_api.successful(current->proof);
+}
+fn same_window(ownership_raw_bytes.work mut* current, ownership_raw_bytes.window left,
+    ownership_raw_bytes.window right) bool {
+    return left.ty == right.ty && left.alignment == right.alignment &&
+        left.correspondence == right.correspondence &&
+        ownership_raw_bytes.same_place(current, left.place, right.place);
+}
+// Gives the window of the other ledger with the same source and interval, or null. `kept` is false
+// when that window holds other stored facts: the join then keeps neither window.
+fn partner(ownership_raw_bytes.work mut* current, ownership_raw_bytes.ledger* other,
+    ownership_raw_bytes.window selected, bool mut* kept) ownership_raw_bytes.representation* {
+    *kept = true;
+    u64 found = ownership_raw_bytes.representation_index(current, other, selected);
+    if (found == U64_MAX) { return null; }
+    *kept = same_window(current, selected, other->representations[found].selected);
+    return &other->representations[found];
+}
+// Appends one joined window. A window of one input keeps no fragment.
+fn merge_representation(ownership_raw_bytes.work mut* current, ownership_raw_bytes.ledger mut* out,
+    ownership_raw_bytes.representation* left, ownership_raw_bytes.representation* right) bool {
+    ownership_raw_bytes.representation mut item = {};
+    item.selected = left->selected;
+    item.selected.place = ownership_state.copy_place(&out->facts, left->selected.place);
+    u64 capacity = right == null ? 0 : left->fragments_len + right->fragments_len;
+    item.fragments = new(ownership_raw_bytes.fragment, capacity);
+    u64 index = out->representations_len;
+    out->representations[index] = move(item);
+    out->representations_len += 1;
+    if (right == null) { return spend(current, 1); }
+    ownership_raw_bytes.representation mut* target = &out->representations[index];
+    return merge_parts(current, &out->facts, left->fragments[..left->fragments_len],
+        right->fragments[..right->fragments_len], left->selected.begin, left->selected.end,
+        false, target->fragments[..], &target->fragments_len);
+}
+// Appends one joined snapshot when both inputs read the same key and size.
+fn merge_snapshot(ownership_raw_bytes.work mut* current, ownership_raw_bytes.ledger mut* out,
+    ownership_raw_bytes.snapshot* left, ownership_raw_bytes.snapshot* right) bool {
+    u64 index = out->snapshots_len;
+    out->snapshots[index].key = left->key;
+    out->snapshots[index].bytes = left->bytes;
+    out->snapshots[index].facts = ownership_state.empty();
+    out->snapshots[index].fragments = new(ownership_raw_bytes.fragment,
+        left->fragments_len + right->fragments_len);
+    out->snapshots_len += 1;
+    ownership_raw_bytes.snapshot mut* target = &out->snapshots[index];
+    return merge_parts(current, &target->facts, left->fragments[..left->fragments_len],
+        right->fragments[..right->fragments_len], 0, left->bytes, true, target->fragments[..],
+        &target->fragments_len);
+}
+fn matched_snapshot(ownership_raw_bytes.work mut* current, ownership_raw_bytes.ledger* other,
+    ownership_raw_bytes.snapshot* item) u64 {
+    u64 found = ownership_raw_bytes.snapshot_index(current, other, item->key);
+    if (found == U64_MAX || other->snapshots[found].bytes != item->bytes) { return U64_MAX; }
+    return found;
+}
+// Keeps canonical empty facts that both inputs hold, equal windows and windows of one input, and
+// snapshots of both. Only bytes that both inputs prove keep their correspondence.
+fn merge_ledger(ownership_raw_bytes.work mut* current, ownership_raw_bytes.ledger* left,
+    ownership_raw_bytes.ledger* right, ownership_raw_bytes.ledger mut* out) bool {
+    out->facts = ownership_state.empty();
+    u64 mut i = 0;
+    while (i < left->facts.contents_len) {
+        u64 mut j = 0;
+        bool mut found = false;
+        while (j < right->facts.contents_len && !found) {
+            found = ownership_raw_bytes.same_value(current, left->facts.contents[i],
+                right->facts.contents[j]);
+            if (!ownership_api.successful(current->proof)) { return false; }
+            j += 1;
+        }
+        if (found) { ownership_state.append_contents(&out->facts, left->facts.contents[i]); }
+        i += 1;
+    }
+    u64 mut windows = 0;
+    i = 0;
+    while (i < left->representations_len) {
+        bool mut kept = true;
+        partner(current, right, left->representations[i].selected, &kept);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        if (kept) { windows += 1; }
+        i += 1;
+    }
+    i = 0;
+    while (i < right->representations_len) {
+        bool mut kept = true;
+        if (partner(current, left, right->representations[i].selected, &kept) == null) {
+            windows += 1;
+        }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    u64 mut reads = 0;
+    i = 0;
+    while (i < left->snapshots_len) {
+        u64 found = matched_snapshot(current, right, &left->snapshots[i]);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        if (found != U64_MAX) { reads += 1; }
+        i += 1;
+    }
+    out->representations = new(ownership_raw_bytes.representation, windows);
+    out->snapshots = new(ownership_raw_bytes.snapshot, reads);
+    i = 0;
+    while (i < left->representations_len) {
+        bool mut kept = true;
+        ownership_raw_bytes.representation* other = partner(current, right,
+            left->representations[i].selected, &kept);
+        if (!ownership_api.successful(current->proof) || (kept &&
+            !merge_representation(current, out, &left->representations[i], other))) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < right->representations_len) {
+        bool mut kept = true;
+        ownership_raw_bytes.representation* other = partner(current, left,
+            right->representations[i].selected, &kept);
+        if (!ownership_api.successful(current->proof) || (other == null &&
+            !merge_representation(current, out, &right->representations[i], null))) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < left->snapshots_len) {
+        u64 found = matched_snapshot(current, right, &left->snapshots[i]);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        if (found != U64_MAX &&
+            !merge_snapshot(current, out, &left->snapshots[i], &right->snapshots[found])) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn same_origin(ownership_raw_bytes.work mut* current, ownership_raw.context* left,
+    ownership_raw.origin x, ownership_raw.context* right, ownership_raw.origin y) bool {
+    if (!spend(current, 1)) { return false; }
+    if (!ownership_raw.same_key(x.allocation, y.allocation) || x.layout != y.layout ||
+        x.alignment != y.alignment || x.repeated != y.repeated ||
+        x.correspondence != y.correspondence || x.residual != y.residual ||
+        x.leaf_count != y.leaf_count ||
+        !ownership_raw_bytes.same_place(current, x.place, y.place) ||
+        !ownership_raw_bytes.same_expression(current, left, x.count, y.count) ||
+        !ownership_raw_bytes.same_expression(current, left, x.begin, y.begin) ||
+        !ownership_raw_bytes.same_expression(current, left, x.end, y.end)) { return false; }
+    u64 mut j = 0;
+    while (j < x.leaf_count) {
+        if (!spend(current, 1)) { return false; }
+        ownership_raw.storage_leaf a = left->leaves[x.first_leaf + j];
+        ownership_raw.storage_leaf b = right->leaves[y.first_leaf + j];
+        if (a.begin != b.begin || a.end != b.end || a.ty != b.ty || a.owning != b.owning ||
+            a.padding != b.padding || !ownership_raw_bytes.same_place(current, a.place,
+            b.place)) { return false; }
+        j += 1;
+    }
+    return true;
+}
+// An origin stays only when the other input holds an equal origin of the same source. One input
+// alone proves nothing about the window, layout, or count of the other path.
+fn held_origin(ownership_raw_bytes.work mut* current, ownership_raw.context* own_context,
+    ownership_raw.origin item, ownership_raw.context* other) bool {
+    u64 mut i = 0;
+    while (i < other->origins.len) {
+        if (!spend(current, 1)) { return false; }
+        if (ownership_raw.same_key(other->origins[i].source, item.source)) {
+            return same_origin(current, own_context, item, other, other->origins[i]);
+        }
+        i += 1;
+    }
+    return false;
+}
+fn copy_origin(ownership_raw.context* input, ownership_raw.origin item,
+    ownership_raw.context mut* out, u64 slot) void {
+    ownership_raw.origin mut copied = item;
+    copied.place = ownership_state.copy_place(&out->paths, item.place);
+    copied.count = ownership_raw.copy_expression(out, item.count);
+    copied.begin = ownership_raw.copy_expression(out, item.begin);
+    copied.end = ownership_raw.copy_expression(out, item.end);
+    copied.first_leaf = out->leaves_len;
+    u64 mut j = 0;
+    while (j < item.leaf_count) {
+        out->leaves[out->leaves_len] = input->leaves[item.first_leaf + j];
+        out->leaves[out->leaves_len].place = ownership_state.copy_place(&out->paths,
+            input->leaves[item.first_leaf + j].place);
+        out->leaves_len += 1;
+        j += 1;
+    }
+    out->origins[slot] = copied;
+}
+fn same_bound(ownership_raw.captured_bound a, ownership_raw.captured_bound b) bool {
+    return ownership_raw.same_key(a.version, b.version) &&
+        ownership_raw.same_number(a.lower, b.lower) && ownership_raw.same_number(a.upper, b.upper);
+}
+fn held_bound(ownership_raw_bytes.work mut* current, ownership_raw.context* other,
+    ownership_raw.captured_bound item) bool {
+    u64 mut i = 0;
+    while (i < other->bounds.len) {
+        if (!spend(current, 1)) { return false; }
+        if (same_bound(item, other->bounds[i])) { return true; }
+        i += 1;
+    }
+    return false;
+}
+fn held_relation(ownership_raw_bytes.work mut* current, ownership_raw.context* own_context,
+    ownership_raw.relation item, ownership_raw.context* other) bool {
+    u64 mut i = 0;
+    while (i < other->relations.len) {
+        if (ownership_raw_bytes.same_expression(current, own_context, item.left,
+            other->relations[i].left) && ownership_raw_bytes.same_expression(current,
+            own_context, item.right, other->relations[i].right)) { return true; }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    return false;
+}
+// Keeps an origin with its layout only when both inputs hold it equal. Raw access to another
+// source needs a new capture. Bounds and relations stay only when both inputs hold them.
+fn merge_context(ownership_raw_bytes.work mut* current, ownership_raw.context* left,
+    ownership_raw.context* right, ownership_raw.context mut* out) bool {
+    out->paths = ownership_state.empty();
+    out->proof = ownership_raw.complete();
+    u64 mut origins = 0;
+    u64 mut leaves = 0;
+    u64 mut i = 0;
+    while (i < left->origins.len) {
+        if (held_origin(current, left, left->origins[i], right)) {
+            origins += 1;
+            leaves += left->origins[i].leaf_count;
+        }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    u64 mut bounds = 0;
+    i = 0;
+    while (i < left->bounds.len) {
+        if (held_bound(current, right, left->bounds[i])) { bounds += 1; }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    u64 mut relations = 0;
+    i = 0;
+    while (i < left->relations.len) {
+        if (held_relation(current, left, left->relations[i], right)) { relations += 1; }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    out->origins = new(ownership_raw.origin, origins);
+    out->leaves = new(ownership_raw.storage_leaf, leaves);
+    out->bounds = new(ownership_raw.captured_bound, bounds);
+    out->relations = new(ownership_raw.relation, relations);
+    u64 mut slot = 0;
+    i = 0;
+    while (i < left->origins.len) {
+        if (held_origin(current, left, left->origins[i], right)) {
+            copy_origin(left, left->origins[i], out, slot);
+            slot += 1;
+        }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    slot = 0;
+    i = 0;
+    while (i < left->bounds.len) {
+        if (held_bound(current, right, left->bounds[i])) {
+            out->bounds[slot] = left->bounds[i];
+            slot += 1;
+        }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    slot = 0;
+    i = 0;
+    while (i < left->relations.len) {
+        if (held_relation(current, left, left->relations[i], right)) {
+            out->relations[slot].left = ownership_raw.copy_expression(out,
+                left->relations[i].left);
+            out->relations[slot].right = ownership_raw.copy_expression(out,
+                left->relations[i].right);
+            slot += 1;
+        }
+        if (!ownership_api.successful(current->proof)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+// A row at or below the held place, or a parent in the same storage, depends on its bytes.
+// A parent past a dereference lies in other storage. Other rows depend unless they are disjoint.
+fn depends(ownership_api.place_path row, ownership_api.place_path held) bool {
+    if (!ownership_raw.same_key(row.root, held.root)) { return false; }
+    if (ownership_state.has_residual(row) || ownership_state.has_residual(held)) { return true; }
+    if (ownership_places.begins(held, row)) {
+        u64 mut i = row.projections.len;
+        while (i < held.projections.len) {
+            if (held.projections[i].kind == ownership_api.projection_kind.dereference) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    return ownership_places.compare(row, held, true) != ownership_places.overlap.disjoint;
+}
+fn complete_at(ownership_raw_bytes.work mut* current, ownership_raw_bytes.ledger* saved,
+    ownership_raw_bytes.window selected) bool {
+    u64 found = ownership_raw_bytes.representation_index(current, saved, selected);
+    if (found == U64_MAX) { return false; }
+    ownership_api.contents_fact mut value = {};
+    types.node* mut original = null;
+    return ownership_raw_bytes.reconstruct(current, &saved->representations[found], &value,
+        &original);
+}
+// Adds the stored window place of a ledger, and the origin place of the window source, to `held`.
+fn held_places(ownership_raw_bytes.work mut* current, ownership_raw_bytes.state* input,
+    ownership_raw_bytes.window selected, ownership_api.place_path mut@ held, u64 mut* len) void {
+    u64 found = ownership_raw_bytes.representation_index(current, &input->bytes, selected);
+    if (found != U64_MAX) {
+        held[*len] = input->bytes.representations[found].selected.place;
+        *len += 1;
+    }
+    u64 mut i = 0;
+    while (i < input->raw.origins.len) {
+        if (!spend(current, 1)) { return; }
+        if (ownership_raw.same_key(input->raw.origins[i].source, selected.source)) {
+            held[*len] = input->raw.origins[i].place;
+            *len += 1;
+            return;
+        }
+        i += 1;
+    }
+}
+// Makes each core row unknown that depends on a held place. Canonical empty rows stay empty, as
+// in byte publication, because they keep checked obligation absence.
+fn forget_rows(ownership_raw_bytes.work mut* current, ownership_state.state mut* core,
+    ownership_api.place_path@ held) bool {
+    u64 mut row = 0;
+    while (row < core->contents_len) {
+        u64 mut i = 0;
+        while (i < held.len) {
+            u64 mut price = 1;
+            if (!ownership_raw_bytes.place_price(current, core->contents[row].place, &price) ||
+                !ownership_raw_bytes.place_price(current, held[i], &price) ||
+                !spend(current, price)) { return false; }
+            if (core->contents[row].kind != ownership_api.contents_kind.empty_owner &&
+                depends(core->contents[row].place, held[i])) {
+                core->contents[row].kind = ownership_api.contents_kind.unknown;
+            }
+            i += 1;
+        }
+        row += 1;
+    }
+    return true;
+}
+// Checks one window of an input. A correspondence that an input proved and the join loses makes
+// the rows of both stored places and both origin places unknown. That loss, and stored window
+// facts that differ, each add a lost R fact for the window source.
+fn account_window(ownership_raw_bytes.work mut* current, ownership_raw_bytes.state* left,
+    ownership_raw_bytes.state* right, ownership_raw_bytes.state mut* out,
+    ownership_raw_bytes.window selected) bool {
+    bool mut kept = true;
+    partner(current, &right->bytes, selected, &kept);
+    bool proved = complete_at(current, &left->bytes, selected) ||
+        complete_at(current, &right->bytes, selected);
+    bool joined = complete_at(current, &out->bytes, selected);
+    if (!ownership_api.successful(current->proof)) { return false; }
+    bool lost = proved && !joined;
+    if (!lost && kept) { return true; }
+    if (!spend(current, out->core->losses_len + 1)) { return false; }
+    ownership_join.remember_conflict(out->core, ownership_api.limit_category.r, selected.source,
+        current->selected->base.source_position);
+    if (!lost) { return true; }
+    ownership_api.place_path[4] mut held = {};
+    u64 mut len = 0;
+    held_places(current, left, selected, held[..], &len);
+    held_places(current, right, selected, held[..], &len);
+    return ownership_api.successful(current->proof) &&
+        forget_rows(current, out->core, held[..len]);
+}
+// Accounts each window of the left input and each window of the right input alone.
+fn account_windows(ownership_raw_bytes.work mut* current, ownership_raw_bytes.state* left,
+    ownership_raw_bytes.state* right, ownership_raw_bytes.state mut* out) bool {
+    u64 mut i = 0;
+    while (i < left->bytes.representations_len) {
+        if (!account_window(current, left, right, out, left->bytes.representations[i].selected)) {
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < right->bytes.representations_len) {
+        ownership_raw_bytes.window selected = right->bytes.representations[i].selected;
+        u64 found = ownership_raw_bytes.representation_index(current, &left->bytes, selected);
+        if (!ownership_api.successful(current->proof) ||
+            (found == U64_MAX && !account_window(current, left, right, out, selected))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+// Distinct complete versions in one window can stay as guarded alternatives. `source` gives the
+// window of the first distinct pair.
+fn distinct_versions(ownership_raw_bytes.work mut* current, ownership_raw_bytes.ledger* left,
+    ownership_raw_bytes.ledger* right, bool mut* distinct, ownership_api.entity_id mut* source)
+    bool {
+    *distinct = false;
+    u64 mut i = 0;
+    while (i < left->representations_len && !*distinct) {
+        u64 found = ownership_raw_bytes.representation_index(current, right,
+            left->representations[i].selected);
+        if (!ownership_api.successful(current->proof)) { return false; }
+        if (found != U64_MAX) {
+            ownership_api.contents_fact mut a = {};
+            ownership_api.contents_fact mut b = {};
+            types.node* mut a_type = null;
+            types.node* mut b_type = null;
+            bool both = ownership_raw_bytes.reconstruct(current, &left->representations[i], &a,
+                &a_type) && ownership_raw_bytes.reconstruct(current,
+                &right->representations[found], &b, &b_type);
+            if (!ownership_api.successful(current->proof)) { return false; }
+            if (both) {
+                bool same = a_type == b_type && ownership_raw_bytes.same_value(current, a, b);
+                if (!ownership_api.successful(current->proof)) { return false; }
+                *distinct = !same;
+                *source = left->representations[i].selected.source;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+// Frees each tentative state and keeps the refusal proof. The meter and the event stay.
+fn refuse(ownership_raw_bytes.result mut* out, ownership_api.proof_status proof) void {
+    ownership_raw_bytes.free_result(out);
+    out->proof = proof;
+}
+fn combine(ownership_raw_bytes.state* left, ownership_raw_bytes.state* right,
+    ownership_api.services* service, ownership_raw.request* supplied, bool widening)
+    ownership_raw_bytes.result {
+    ownership_raw_bytes.result mut out = {};
+    if (left->core == null || right->core == null) { return out; }
+    // A bottom input reaches no execution. A clone of a bottom state keeps bottom and no state.
+    if (left->core->proof.kind == ownership_api.proof_kind.bottom) {
+        return ownership_raw_bytes.clone(right, service, supplied);
+    }
+    if (right->core->proof.kind == ownership_api.proof_kind.bottom) {
+        return ownership_raw_bytes.clone(left, service, supplied);
+    }
+    ownership_raw.work_cursor mut cursor = {};
+    out.proof = ownership_raw.begin_work(left->core, service, supplied, &cursor);
+    if (ownership_api.successful(out.proof) && !ownership_api.successful(right->core->proof)) {
+        out.proof = right->core->proof;
+    }
+    ownership_raw_bytes.work mut current = ownership_raw_bytes.work{service, &cursor.selected,
+        out.proof, 0};
+    if (!ownership_api.successful(out.proof)) { return out; }
+    if (!ownership_api.successful(left->raw.proof) ||
+        !ownership_api.successful(right->raw.proof)) {
+        ownership_raw_bytes.stop(&current, ownership_api.entity_id{}, false,
+            "paired raw context proof remains unproved");
+        out.proof = current.proof;
+        return out;
+    }
+    u64 mut left_price = 0;
+    u64 mut right_price = 0;
+    bool mut distinct = false;
+    ownership_api.entity_id mut versions = {};
+    if (!ownership_raw_bytes.clone_price(&current, left, 0, 0, &left_price) ||
+        !ownership_raw_bytes.clone_price(&current, right, 0, 0, &right_price) ||
+        !ownership_raw_bytes.add_price(&current, &left_price, right_price) ||
+        !spend(&current, left_price) ||
+        (!widening && !distinct_versions(&current, &left->bytes, &right->bytes, &distinct,
+            &versions))) {
+        out.proof = current.proof;
+        return out;
+    }
+    ownership_raw.raw_event_route mut route = ownership_raw.raw_event_route{&cursor.selected,
+        *service};
+    ownership_api.services mut mapped = *service;
+    mapped.event_context = cast(&route, void mut*);
+    mapped.event = ownership_raw.cached_event;
+    ownership_api.operation_position op = cursor.selected.base.operation;
+    ownership_api.source_position at = cursor.selected.base.source_position;
+    // The result holds both cores. Its G content is the guarded units of each core plus the two
+    // alternatives (FIR 14.1 G). G is a precision bound: content above it merges the inputs. The
+    // content is at least alternative_units(2), so content within G also means that
+    // ownership_state.alternatives_within(G) admits the two alternatives.
+    u64 mut content = 0;
+    bool mut alternatives = false;
+    if (distinct) {
+        content = ownership_state.alternative_units(2);
+        u64 mut side = 0;
+        while (side < 2) {
+            ownership_state.region_measurement guarded = ownership_state.guard_units(
+                side == 0 ? left->core : right->core, &mapped, ownership_state.guard_candidate{},
+                ownership_api.work_kind.join, op, at);
+            if (!ownership_api.successful(guarded.proof)) {
+                out.proof = ownership_state.report_failure(&mapped, guarded.proof, op, at);
+                return out;
+            }
+            if (!ownership_raw_bytes.add_price(&current, &content, guarded.amount)) {
+                out.proof = current.proof;
+                return out;
+            }
+            side += 1;
+        }
+        alternatives = content <= cursor.selected.limits.g;
+    }
+    if (alternatives) {
+        // The content fits the request's G, so only a stricter meter bound refuses it here.
+        current.proof = ownership_raw.charge(service, &cursor.selected,
+            ownership_api.limit_category.g, content);
+        if (!ownership_api.successful(current.proof)) { out.proof = current.proof; return out; }
+        out.states = new(ownership_raw_bytes.state, 2);
+        out.states[0] = ownership_raw_bytes.copy_pair(left, 0, 0);
+        out.states[1] = ownership_raw_bytes.copy_pair(right, 0, 0);
+        out.proof = current.proof;
+        return out;
+    }
+    out.states = new(ownership_raw_bytes.state, 1);
+    ownership_raw_bytes.state mut* joined = &out.states[0];
+    joined->core = new(ownership_state.state);
+    *joined->core = widening ? ownership_join.widen(left->core, right->core, &mapped,
+        &cursor.selected.limits, op, at) : ownership_join.join(left->core, right->core, &mapped,
+        &cursor.selected.limits, op, at);
+    joined->raw.core = cast(joined->core, ownership_state.state*);
+    if (!ownership_api.successful(joined->core->proof)) {
+        refuse(&out, joined->core->proof);
+        return out;
+    }
+    // Distinct versions that G cannot hold as alternatives leave a lost G fact for their window.
+    if (distinct) {
+        if (!spend(&current, joined->core->losses_len + 1)) {
+            refuse(&out, current.proof);
+            return out;
+        }
+        ownership_join.remember_conflict(joined->core, ownership_api.limit_category.g, versions,
+            at);
+    }
+    if (!merge_context(&current, &left->raw, &right->raw, &joined->raw) ||
+        !merge_ledger(&current, &left->bytes, &right->bytes, &joined->bytes) ||
+        !account_windows(&current, left, right, joined) ||
+        !ownership_raw_bytes.require_paired(&current, joined,
+            ownership_raw_bytes.retained_edit{})) {
+        refuse(&out, current.proof);
+        return out;
+    }
+    out.proof = current.proof;
+    return out;
+}
+/// Joins two paired predecessor states. Distinct complete versions stay as guarded alternatives.
+fn join(ownership_raw_bytes.state* left, ownership_raw_bytes.state* right,
+    ownership_api.services* service, ownership_raw.request* supplied) ownership_raw_bytes.result {
+    return combine(left, right, service, supplied, false);
+}
+/// Widens two paired states into one. Lost correspondence keeps sources and obligations.
+fn widen(ownership_raw_bytes.state* left, ownership_raw_bytes.state* right,
+    ownership_api.services* service, ownership_raw.request* supplied) ownership_raw_bytes.result {
+    return combine(left, right, service, supplied, true);
+}
