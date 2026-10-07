@@ -1927,6 +1927,11 @@ fn destination_type(request* req, application mut* out, ownership_summary_model.
     return null;
 }
 
+// Each row that names the formal source takes the actual source. A row whose value borrows
+// the formal source gets its own copy of its borrows, with the new value version. The first
+// pass rewrites the sources, counts the borrows of the copied rows and pays for each copy.
+// One borrows array of that total then holds every copy, so the call allocates once. The
+// second pass copies each row into its own slice of that array.
 fn bind_fresh_source(application mut* out, ownership_summary_model.context* ctx,
     ownership_api.entity_id formal, ownership_api.entity_id actual_source,
     ownership_api.entity_id version) bool {
@@ -1941,8 +1946,12 @@ fn bind_fresh_source(application mut* out, ownership_summary_model.context* ctx,
         }
         i += 1;
     }
+    u64 rows = out->bound.model.effects.len;
+    bool mut@ own copied = new(bool, rows);
+    defer del(copied);
+    u64 mut total = 0;
     i = 0;
-    while (i < out->bound.model.effects.len) {
+    while (i < rows) {
         if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
         ownership_summary_model.effect_node mut* row = &out->bound.model.effects[i];
         if (ownership_summary_model.same(row->effect.source, formal)) {
@@ -1953,25 +1962,36 @@ fn bind_fresh_source(application mut* out, ownership_summary_model.context* ctx,
         }
         u64 count = row->value.borrows.len;
         u64 mut b = 0;
-        bool mut copied = false;
         while (b < count) {
             if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
             if (ownership_summary_model.same(row->value.borrows[b].source, formal)) {
-                copied = true;
+                copied[i] = true;
             }
             b += 1;
         }
-        if (copied) {
+        if (copied[i]) {
             if (!ownership_summary_model.work(ctx, &out->proof, count) ||
                 !ownership_summary_model.work(ctx, &out->proof, 2) ||
                 !ownership_summary_model.effect_charge(ctx, &out->proof, &out->bound.relations)) {
-        return false;
+                return false;
+            }
+            total += count;
+        }
+        i += 1;
     }
-            ownership_state.slice_block mut* own storage = new(ownership_state.slice_block);
-            storage->borrows = new(ownership_api.borrow_relation, count);
-            ownership_api.borrow_relation mut@ borrows = storage->borrows[..];
-            ownership_state.keep(&out->bound.model.metadata, move(storage));
-            b = 0;
+    if (total == 0) { return true; }
+    ownership_state.slice_block mut* own storage = new(ownership_state.slice_block);
+    storage->borrows = new(ownership_api.borrow_relation, total);
+    ownership_api.borrow_relation mut@ all = storage->borrows[..];
+    ownership_state.keep(&out->bound.model.metadata, move(storage));
+    u64 mut at = 0;
+    i = 0;
+    while (i < rows) {
+        if (copied[i]) {
+            ownership_summary_model.effect_node mut* row = &out->bound.model.effects[i];
+            u64 count = row->value.borrows.len;
+            ownership_api.borrow_relation mut@ borrows = all[at..at + count];
+            u64 mut b = 0;
             while (b < count) {
                 if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
                 borrows[b] = row->value.borrows[b];
@@ -1984,6 +2004,7 @@ fn bind_fresh_source(application mut* out, ownership_summary_model.context* ctx,
             }
             row->value.borrows = borrows[..];
             row->value.value_version = version;
+            at += count;
         }
         i += 1;
     }

@@ -923,9 +923,10 @@ came here.
   condition or a second choice of one parameter. The flow also stops a path at its first
   failure, so a later independent obligation on that path is not examined: the corpus file
   `fail/ownership/054` expects line 12, and local proof reports line 11 only.
-  One compiler body has such a shape: `bind_fresh_source` in `ownership_calls.ft` allocates
-  in a loop and stores views of the allocation. Its exact second pass fails 32 times with "old
-  borrow keeps a released site identity" (D17.16), so it stays in scope.
+  `bind_fresh_source` in `ownership_calls.ft` had such a shape: it allocated a borrows array
+  in a loop and stored views of each. Its exact second pass failed 32 times with "old borrow
+  keeps a released site identity" (D17.16). It now allocates one array outside every loop and
+  gives each row a slice, so its failures are call scope.
   `test/fort/ownership_source_local_review_test.ft` pins the probes of each shape.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
