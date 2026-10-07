@@ -1189,11 +1189,40 @@ came here.
   It keeps by-value slots separate from caller storage.
   It preserves known caller facts and compares substituted storage, not formal identity.
   It evaluates no body and applies no effect.
-  A bound frame keeps an unknown caller outcome and requires cleanup. (D17.18)
+  A bound frame keeps an unknown caller outcome and requires cleanup.
   Each owner charges E with the count of the relations that it retains now, not with an
   increment, so a clone of the same records adds no unit (`spec/fir.md` 14.1).
   Each record kind keeps strictly increasing keys, so a lookup is a binary search. A case check
   costs its length and the order count, not their product.
+  `ownership_summary_body.extract` derives linear effects from checked and verified FIR.
+  It separates by-value storage from the parameter's designated source.
+  A local whose address the body takes keeps no scalar fact, so a store through that address
+  leaves no stale index. A cast keeps an exact value only when its type holds the value (D17.17).
+  It keeps unsupported calls, projections, owning aggregates, and control flow incomplete.
+  A read with multiple projections stays incomplete until the producer tracks each loaded reference.
+  A projected address stays incomplete until the producer tracks its designated source.
+  An indirect parameter address does not designate the parameter slot.
+  `ownership_summary.infer` copies normal exits after defers and parameter boundary checks.
+  It publishes one proved return with ordered effects and caller requirements.
+  An intrinsic parameter escape remains a callee failure when a definite normal-return suffix
+  retains it.
+  A later projected clear keeps the current incomplete summary and supplies no invalid-use witness.
+  A conditional prefix supplies no unconditional witness unless its condition has a proved true
+  value.
+  Typed local reads require the original source window and actual type alignment.
+  Reference inspection does not prove a designated-storage read.
+  Inferred extent requirements guard private symbolic caller reads.
+  Their exported typed effect still checks the actual caller representation.
+  `ownership_calls.apply` applies the ordered case to a separate caller-state owner.
+  An extent requirement keeps its original formal source and substituted caller value separate.
+  Two values that share an allocation keep their separate access windows.
+  Foreign extent trust does not override known negative bounds or known allocation release.
+  Each fresh call allocation has a separate obligation. A zero length preserves that obligation.
+  Failure preserves the borrowed caller input and a possible return with cleanup.
+  The client supplies one meter for each computation: the summary solver of one body, or the
+  flow of one caller with its call applications. Its W bound is `ownership_limits.computation`
+  of that body's FIR size. The function E count continues from the body through each exit.
+  These modules do not select a new compiler driver. (D17.18)
 
 ## 7. The runtime and the standard library
 

@@ -1,0 +1,1037 @@
+/// Extracts linear ownership effects from available verified FIR bodies.
+import consts;
+import diag;
+import fir;
+import ownership_api;
+import ownership_flow;
+import ownership_graph;
+import ownership_state;
+import ownership_summary_model;
+import ownership_transfer;
+import types;
+
+u32 U32_MAX = 4294967295;
+u64 U64_MAX = 18446744073709551615;
+
+// Stable identities use the checked function key and its finite FIR local numbers.
+// The verified body, checked types, and filenames outlive this input and its results.
+struct body_input {
+    ownership_graph.body_input function;
+    ownership_flow.source_file_binding@ source_files;
+    ownership_api.services* services;
+    ownership_api.limit_table limits;
+    ownership_summary_model.coverage_status coverage;
+    bool correspondence_complete;
+}
+
+// Flow borrows these arrays. The program owns its entry and all nested request metadata.
+struct body_program {
+    ownership_state.state entry;
+    ownership_state.state metadata;
+    ownership_flow.step mut@ own steps;
+    ownership_transfer.event_binding mut@ own transfer_events;
+    ownership_flow.event_binding mut@ own events;
+    ownership_flow.parameter mut@ own parameters;
+    ownership_summary_model.symbolic_root mut@ own roots;
+    ownership_summary_model.requirement mut@ own requirements;
+    ownership_summary_model.effect_node mut@ own effects;
+    ownership_summary_model.provenance mut@ own provenance_records;
+    ownership_api.entity_id mut@ own origins;
+    ownership_api.scalar_fact mut@ own scalars;
+    // A local whose storage this body addresses. A store through that address can change
+    // it, so it keeps no scalar fact, no value edge and no capture in the whole body.
+    bool mut@ own addressed;
+    u64 steps_len;
+    u64 events_len;
+    u64 parameters_len;
+    u64 roots_len;
+    u64 requirements_len;
+    u64 effects_len;
+    u64 provenance_len;
+    ownership_api.proof_status proof;
+    ownership_summary_model.coverage_status coverage;
+    ownership_summary_model.context context;
+    // The roots, requirements, effects, exits, and published relations of this function,
+    // as charged to E.
+    u64 relations;
+    u32 next_key;
+    bool residual_effects;
+    bool held_inline_address;
+    bool definite_prefix;
+}
+
+fn free(body_program mut* out) void {
+    body_program mut owned = move(*out);
+    ownership_state.free(&owned.entry);
+    ownership_state.free(&owned.metadata);
+    del(owned.steps);
+    del(owned.transfer_events);
+    del(owned.events);
+    del(owned.parameters);
+    del(owned.roots);
+    del(owned.requirements);
+    del(owned.effects);
+    del(owned.provenance_records);
+    del(owned.origins);
+    del(owned.scalars);
+    del(owned.addressed);
+    *out = body_program{};
+}
+
+fn id(ownership_api.function_id function, ownership_api.entity_kind kind, u32 number)
+    ownership_api.entity_id {
+    return ownership_api.entity_id{function, kind, number};
+}
+
+fn slot(body_input* in, u32 local_at_point) ownership_api.place_path {
+    return ownership_api.place_path{.root = id(in->function.key,
+        ownership_api.entity_kind.slot, local_at_point)};
+}
+
+fn source(body_input* in, u32 local_at_point) ownership_api.entity_id {
+    return id(in->function.key, ownership_api.entity_kind.source, local_at_point + 1);
+}
+
+fn designated(body_input* in, u32 local_at_point) ownership_api.entity_id {
+    return id(in->function.key, ownership_api.entity_kind.source,
+        fir.local_count(in->function.body) + local_at_point + 1);
+}
+
+fn caller_slot(body_input* in, u32 local_at_point) ownership_api.place_path {
+    return slot(in, fir.local_count(in->function.body) + local_at_point + 1);
+}
+
+fn integer(i64 n) ownership_api.scalar_fact {
+    return ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = n};
+}
+
+fn position(body_input* in, u32 block, u32 gap, bool terminator)
+    ownership_api.operation_position {
+    return ownership_api.operation_position{in->function.key, block, gap, terminator};
+}
+
+fn location(body_input* in, body_program mut* out, diag.loc where) ownership_api.source_position {
+    ownership_api.source_position mut at = ownership_api.source_position{
+        .line = where.line, .col = where.col, .end_line = where.end_line, .end_col = where.end_col,
+        .filename_present = where.file.len > 0};
+    u64 mut i = 0;
+    while (i < in->source_files.len) {
+        if (!work(out, 1)) { return at; }
+        ownership_flow.source_file_binding row = in->source_files[i];
+        if (row.filename == where.file) { at.module = row.module; at.file = row.file; return at; }
+        i += 1;
+    }
+    at.filename_present = false;
+    return at;
+}
+
+fn work(body_program mut* out, u64 n) bool {
+    return ownership_summary_model.work(&out->context, &out->proof, n);
+}
+
+fn reject(body_program mut* out, ownership_api.incomplete_reason reason) void {
+    if (!ownership_api.successful(out->proof)) { return; }
+    out->proof = ownership_summary_model.fail(&out->context, reason, out->context.event);
+    out->residual_effects = true;
+}
+
+fn next(body_program mut* out, ownership_api.entity_kind kind) ownership_api.entity_id {
+    if (!work(out, 1) || out->next_key == U32_MAX) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return ownership_api.entity_id{};
+    }
+    out->next_key += 1;
+    return id(out->context.operation.function, kind, out->next_key);
+}
+
+fn reference(types.node* ty) bool {
+    return ty != null && (ty->kind == types.type_kind.k_ptr ||
+        ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_string);
+}
+
+fn direct(fir.place place_at) bool {
+    return place_at.base == fir.base_kind.bk_local && place_at.proj_len == 0;
+}
+
+fn empty(ownership_api.place_path place_at, bool owning) ownership_api.contents_fact {
+    return ownership_api.contents_fact{.place = place_at,
+        .kind = owning ? ownership_api.contents_kind.empty_owner :
+            ownership_api.contents_kind.scalar,
+        .span_length = integer(0), .owner_empty = owning};
+}
+
+fn extent(types.node* ty) u64 {
+    if (ty->kind == types.type_kind.k_string) { return 1; }
+    if (ty->elem == null || !types.type_size_fits(ty->elem) ||
+        ty->elem->kind == types.type_kind.k_void) { return 0; }
+    return types.type_sizeof(ty->elem);
+}
+
+fn pointee_alignment(types.node* ty) u64 {
+    if (ty->kind == types.type_kind.k_string) { return 1; }
+    if (ty->elem == null || ty->elem->kind == types.type_kind.k_void) { return 0; }
+    return types.type_alignof(ty->elem);
+}
+
+fn range(body_input* in, body_program mut* out, ownership_api.entity_id key, i64 length,
+    u64 size)
+    ownership_api.region {
+    if (length < 0 || size == 0 || cast(length, u64) > 9223372036854775807 / size) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return ownership_api.region{};
+    }
+    i64 bytes = cast(cast(length, u64) * size, i64);
+    return ownership_api.region{.key = id(in->function.key,
+        ownership_api.entity_kind.region, key.ordinal), .source = key, .offset = integer(0),
+        .access = ownership_api.byte_window{integer(0), integer(bytes), true},
+        .extent = integer(bytes), .alignment = size == 0 ? 1 : size};
+}
+
+fn value(body_input* in, body_program mut* out, ownership_api.place_path place_at,
+    ownership_api.entity_id key, u32 version, i64 length, u64 size, u64 align)
+    ownership_api.contents_fact {
+    ownership_api.borrow_relation[1] mut relations = {ownership_api.borrow_relation{
+        .key = id(in->function.key, ownership_api.entity_kind.relation, version),
+        .value_version = id(in->function.key, ownership_api.entity_kind.value, version),
+        .containing = place_at, .source = key, .range = range(in, out, key, length, size),
+        .representation_complete = true}};
+    relations[0].range.alignment = align;
+    ownership_api.contents_fact data = ownership_api.contents_fact{.place = place_at,
+        .kind = ownership_api.contents_kind.reference,
+        .value_version = relations[0].value_version, .borrows = relations[..],
+        .span_length = integer(length)};
+    if (!ownership_summary_model.contents_charge(&out->context, &out->proof, data)) {
+        return ownership_api.contents_fact{};
+    }
+    return ownership_state.copy_contents(&out->metadata, data);
+}
+
+fn root(body_program mut* out, ownership_summary_model.symbolic_root row) void {
+    if (!work(out, 1) || out->roots_len >= out->roots.len ||
+        !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations)) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    out->roots[out->roots_len] = row;
+    out->roots_len += 1;
+}
+
+fn seed(body_input* in, body_program mut* out) bool {
+    fir.func* f = in->function.body;
+    u32 count = fir.local_count(f);
+    u32 mut i = 0;
+    while (i < count) {
+        if (!work(out, 8)) { return false; }
+        fir.local* local_at_point = fir.local_at(f, i);
+        ownership_api.place_path place_at = slot(in, i);
+        ownership_api.entity_id storage = source(in, i);
+        root(out, ownership_summary_model.symbolic_root{
+            .key = id(in->function.key, ownership_api.entity_kind.template, i + 1),
+            .kind = i == 0 ? ownership_summary_model.root_kind.result :
+                ownership_summary_model.root_kind.by_value_slot,
+            .formal = local_at_point->kind == fir.local_kind.lk_param ? i : 0,
+                .slot = place_at.root,
+            .source = i == 0 ? ownership_api.entity_id{} : storage, .ty = local_at_point->ty,
+            .ownership = local_at_point->ty->is_own ? ownership_summary_model.owner_class.owning :
+                ownership_summary_model.owner_class.borrowed});
+        ownership_state.append_sources(&out->entry, ownership_api.source_fact{
+            .key = storage, .kind = ownership_api.source_kind.stack,
+            .validity = ownership_api.validity_kind.live});
+        ownership_api.contents_fact mut contents = empty(place_at, local_at_point->ty->is_own);
+        if (local_at_point->kind == fir.local_kind.lk_param) {
+            if ((fir.type_aggregate(local_at_point->ty) && fir.type_owning(local_at_point->ty)) ||
+                (reference(local_at_point->ty) && local_at_point->ty->is_own &&
+                    fir.type_owning(local_at_point->ty->elem))) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return false;
+            }
+            out->parameters[out->parameters_len] = ownership_flow.parameter{place_at.root, storage};
+            out->parameters_len += 1;
+            if (reference(local_at_point->ty)) {
+                ownership_api.entity_id pointed = designated(in, i);
+                out->origins[i] = pointed;
+                ownership_api.entity_id allocation = local_at_point->ty->is_own ?
+                    id(in->function.key, ownership_api.entity_kind.allocation, pointed.ordinal) :
+                    ownership_api.entity_id{};
+                root(out, ownership_summary_model.symbolic_root{
+                    .key = id(in->function.key, ownership_api.entity_kind.template, count + i + 1),
+                    .kind = ownership_summary_model.root_kind.caller_source, .formal = i,
+                    .slot = caller_slot(in, i).root, .source = pointed, .allocation = allocation,
+                    .ty = local_at_point->ty, .ownership = local_at_point->ty->is_own ?
+                        ownership_summary_model.owner_class.owning :
+                        ownership_summary_model.owner_class.borrowed});
+                ownership_state.append_sources(&out->entry, ownership_api.source_fact{
+                    .key = pointed, .kind = local_at_point->ty->is_own
+                        ? ownership_api.source_kind.heap :
+                        ownership_api.source_kind.symbolic_caller,
+                    .validity = ownership_api.validity_kind.live, .allocation = allocation});
+                u64 size = extent(local_at_point->ty);
+                if (size == 0 || size > 9223372036854775807) {
+                    reject(out, ownership_api.incomplete_reason.missing_correspondence);
+                    return false;
+                }
+                contents = value(in, out, place_at, pointed, i + 1, 1, size,
+                    pointee_alignment(local_at_point->ty));
+                if (local_at_point->ty->kind != types.type_kind.k_ptr) {
+                    contents.span_length = ownership_api.scalar_fact{
+                        .kind = ownership_api.fact_kind.symbolic,
+                        .symbol = id(in->function.key, ownership_api.entity_kind.value, i + 1)};
+                    if (local_at_point->ty->is_own) {
+                        reject(out, ownership_api.incomplete_reason.unknown_effect);
+                        return false;
+                    }
+                }
+                if (local_at_point->ty->is_own) {
+                    ownership_state.append_allocations(&out->entry, ownership_api.allocation_fact{
+                        .key = allocation, .site = allocation,
+                        .validity = ownership_api.validity_kind.live,
+                        .count = ownership_api.multiplicity{false, true, false}, .obligation = true,
+                        .owner = ownership_api.owner_location{.place = place_at},
+                        .logical_length = integer(1)});
+                }
+            } else if (fir.type_aggregate(local_at_point->ty)) {
+                contents.kind = ownership_api.contents_kind.aggregate;
+            }
+        }
+        ownership_state.append_contents(&out->entry, contents);
+        i += 1;
+    }
+    return ownership_api.successful(out->proof);
+}
+
+fn caller_source(body_program mut* out, ownership_api.entity_id pointed) bool {
+    bool mut caller = false;
+    u64 mut origin = 0;
+    while (origin < out->roots_len) {
+        if (!work(out, 1)) { return false; }
+        ownership_summary_model.symbolic_root candidate = out->roots[origin];
+        if (candidate.kind == ownership_summary_model.root_kind.caller_source &&
+            ownership_summary_model.same(candidate.source, pointed)) { caller = true; }
+        origin += 1;
+    }
+    return caller;
+}
+
+fn requirement(body_input* in, body_program mut* out, ownership_api.entity_id pointed,
+    ownership_api.place_path place_at, i64 bytes, ownership_summary_model.requirement_kind kind,
+    u64 align) void {
+    if (pointed.kind == ownership_api.entity_kind.none || !caller_source(out, pointed)) { return; }
+    if (!work(out, 1) || out->requirements_len >= out->requirements.len ||
+        !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations)) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    ownership_api.entity_id key = next(out, ownership_api.entity_kind.relation);
+    ownership_api.region mut needed = range(in, out, pointed, bytes, 1);
+    needed.alignment = align;
+    needed.key = id(in->function.key, ownership_api.entity_kind.region, key.ordinal);
+    out->requirements[out->requirements_len] = ownership_summary_model.requirement{
+        .key = key, .kind = kind, .path = place_at, .source = pointed, .range = needed,
+        .operation = out->context.operation};
+    out->requirements_len += 1;
+}
+
+fn emit(body_input* in, body_program mut* out, ownership_transfer.request mut req,
+    u32 block, u32 gap, u32 order, ownership_summary_model.payload_kind payload,
+    diag.loc at, diag.loc exit_at, u32 statement) void {
+    if (!work(out, 3) ||
+        !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations) ||
+        out->steps_len >= out->steps.len || out->effects_len >= out->effects.len ||
+        out->provenance_len >= out->provenance_records.len) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    u64 index = out->steps_len;
+    req.operation = position(in, block, gap, false);
+    req.source_position = location(in, out, at);
+    req.direct_source_proved = true;
+    req.direct_destination_proved = true;
+    req.event_map_complete_proved = true;
+    out->transfer_events[index] = ownership_transfer.event_binding{req.operation,
+        next(out, ownership_api.entity_kind.event)};
+    req.event_bindings = out->transfer_events[index..index + 1];
+    req.value = ownership_state.copy_contents(&out->metadata, req.value);
+    out->steps[index] = ownership_flow.step{.block = block, .gap = gap, .order = order,
+        .kind = ownership_flow.step_kind.local_effect, .operation = req.operation,
+        .source = req.source_position, .local = req};
+    ownership_api.entity_id effect_key = next(out, ownership_api.entity_kind.relation);
+    ownership_api.entity_id provenance_key = next(out, ownership_api.entity_kind.event);
+    ownership_api.effect_kind kind = payload == ownership_summary_model.payload_kind.release ?
+        ownership_api.effect_kind.release : payload == ownership_summary_model.payload_kind.move ?
+        ownership_api.effect_kind.transfer : payload ==
+            ownership_summary_model.payload_kind.storage_end
+                ? ownership_api.effect_kind.storage_end :
+        payload == ownership_summary_model.payload_kind.read ? ownership_api.effect_kind.read :
+            ownership_api.effect_kind.write;
+    ownership_api.deferred_occurrence mut deferred = ownership_api.deferred_occurrence{};
+    if (exit_at.file.len > 0) {
+        deferred.registration = ownership_api.declaration_id{in->function.key.declaration.module,
+            statement};
+        deferred.context = block;
+        deferred.exit_occurrence = gap;
+        deferred.exit_source = location(in, out, exit_at);
+    }
+    out->effects[out->effects_len] = ownership_summary_model.effect_node{
+        .effect = ownership_api.ordered_effect{effect_key, kind, req.operation,
+            req.destination, req.source_key, req.allocation.key,
+            ownership_api.entity_id{}}, .payload = payload, .operand = req.source,
+        .value = req.value, .range = req.value.borrows.len == 1 ?
+            req.value.borrows[0].range : ownership_api.region{},
+        .provenance = provenance_key, .deferred = deferred};
+    out->effects_len += 1;
+    out->provenance_records[out->provenance_len] = ownership_summary_model.provenance{
+        .key = provenance_key, .operation = req.operation, .source = req.source_position,
+        .deferred = deferred, .callee = in->function.key, .filename = at.file};
+    out->provenance_len += 1;
+    out->steps_len += 1;
+}
+
+fn basic(body_input* in, u32 src, u32 dst, ownership_transfer.action effect_action)
+    ownership_transfer.request {
+    return ownership_transfer.request{.kind = effect_action, .source = slot(in, src),
+        .destination = slot(in, dst), .source_key = source(in, src),
+        .destination_owns = fir.local_at(in->function.body, dst)->ty->is_own};
+}
+
+fn constant(body_input* in, body_program* out, fir.operand input_operand)
+    ownership_api.scalar_fact {
+    if (input_operand.kind == fir.operand_kind.ok_const &&
+        (input_operand.value.kind == fir.const_kind.ck_int
+            || input_operand.value.kind == fir.const_kind.ck_bool)) {
+        i64 mut n = 0;
+        if (consts.cv_to_i64(input_operand.value.value, &n)) { return integer(n); }
+    } else if (direct(input_operand.place) && cast(input_operand.place.local,
+        u64) < out->scalars.len) {
+        return out->scalars[input_operand.place.local];
+    }
+    return ownership_api.scalar_fact{};
+}
+
+// A cast keeps a scalar fact only when the destination type holds the value. A narrowing or
+// a sign change wraps, and a wrapped value proves no index or extent (D17.17). A cast to
+// another type keeps no symbolic value. The range test is the one that constant folding uses.
+fn cast_value(types.node* dst, types.node* src, ownership_api.scalar_fact value)
+    ownership_api.scalar_fact {
+    if (dst != null && src != null && types.type_equal(dst, src)) { return value; }
+    return value.kind == ownership_api.fact_kind.exact && dst != null && types.type_is_int(dst) &&
+        consts.int_fits(consts.cv_from_i64(value.value), dst->prim) ? value :
+        ownership_api.scalar_fact{};
+}
+
+fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block, u32 gap,
+    u32 order, diag.loc at, diag.loc exit_at, u32 statement) bool {
+    if (place_at.base != fir.base_kind.bk_local || cast(place_at.local, u64) >= out->origins.len) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return false;
+    }
+    ownership_transfer.request mut req = basic(in, place_at.local, place_at.local,
+        ownership_transfer.action.inspect);
+    ownership_api.region mut typed = ownership_api.region{};
+    if (reference(fir.local_at(in->function.body, place_at.local)->ty)) {
+        req.source_key = out->origins[place_at.local];
+        requirement(in, out, req.source_key, req.source, 0,
+            ownership_summary_model.requirement_kind.live_source, 1);
+        types.node* base = fir.local_at(in->function.body, place_at.local)->ty;
+        bool header = place_at.proj_len == 1 &&
+            (base->kind == types.type_kind.k_span || base->kind == types.type_kind.k_string) &&
+            fir.place_projection(in->function.body, place_at, 0).kind == fir.proj_kind.pj_field;
+        if (place_at.proj_len > 1 && !header) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return false;
+        }
+        if (place_at.proj_len > 0 && !header) {
+            u64 size = extent(base);
+            i64 mut elements = 1;
+            u32 mut p = 0;
+            while (p < place_at.proj_len) {
+                if (!work(out, 1)) { return false; }
+                fir.projection part = fir.place_projection(in->function.body, place_at, p);
+                if (part.kind == fir.proj_kind.pj_index) {
+                    if (cast(part.index, u64) >= out->scalars.len ||
+                        out->scalars[part.index].kind != ownership_api.fact_kind.exact ||
+                        out->scalars[part.index].value < 0 ||
+                        out->scalars[part.index].value == 9223372036854775807) {
+                        reject(out, ownership_api.incomplete_reason.missing_path);
+                        return false;
+                    }
+                    elements = out->scalars[part.index].value + 1;
+                } else if (part.kind != fir.proj_kind.pj_deref) {
+                    reject(out, ownership_api.incomplete_reason.unknown_effect);
+                    return false;
+                }
+                p += 1;
+            }
+            if (size == 0 || cast(elements, u64) > 9223372036854775807 / size) {
+                reject(out, ownership_api.incomplete_reason.missing_path);
+                return false;
+            }
+            i64 bytes = cast(cast(elements, u64) * size, i64);
+            u64 align = pointee_alignment(base);
+            bool caller = caller_source(out, req.source_key);
+            if (caller) {
+                requirement(in, out, req.source_key, req.source, bytes,
+                    ownership_summary_model.requirement_kind.extent, align);
+            } else if (!local_read(in, out, req.source_key, bytes, align, at)) { return false; }
+            // Caller extent requirements guard this symbolic body read.
+            // Application still uses the actual caller representation.
+            req.kind = caller ? ownership_transfer.action.inspect : ownership_transfer.action.use;
+            typed = range(in, out, req.source_key, bytes, 1);
+            typed.key = next(out, ownership_api.entity_kind.region);
+            typed.alignment = align;
+        }
+    }
+    emit(in, out, req, block, gap, order, ownership_summary_model.payload_kind.read,
+        at, exit_at, statement);
+    if (typed.key.kind != ownership_api.entity_kind.none &&
+        ownership_api.successful(out->proof)) {
+        out->effects[out->effects_len - 1].range = typed;
+    }
+    return ownership_api.successful(out->proof);
+}
+
+fn local_range(body_input* in, body_program mut* out, ownership_api.entity_id pointed)
+    ownership_api.region {
+    u64 mut i = 0;
+    while (i < out->roots_len) {
+        if (!work(out, 1)) { return ownership_api.region{}; }
+        ownership_summary_model.symbolic_root selected = out->roots[i];
+        if (selected.kind == ownership_summary_model.root_kind.by_value_slot &&
+            ownership_summary_model.same(selected.source, pointed)) {
+            if (selected.ty == null || !types.type_size_fits(selected.ty)) {
+                return ownership_api.region{};
+            }
+            ownership_api.region mut known = range(in, out, pointed, 1,
+                types.type_sizeof(selected.ty));
+            known.alignment = types.type_alignof(selected.ty);
+            return known;
+        }
+        if (selected.kind == ownership_summary_model.root_kind.allocation_template) {
+            u64 mut k = 0;
+            while (k < out->effects_len) {
+                if (!work(out, 1)) { return ownership_api.region{}; }
+                ownership_summary_model.effect_node node = out->effects[k];
+                if (node.payload == ownership_summary_model.payload_kind.allocation &&
+                    ownership_summary_model.same(node.effect.allocation, selected.allocation) &&
+                    node.value.borrows.len == 1 &&
+                    ownership_summary_model.same(node.value.borrows[0].source, pointed)) {
+                    return node.value.borrows[0].range;
+                }
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    return ownership_api.region{};
+}
+
+fn local_read(body_input* in, body_program mut* out, ownership_api.entity_id pointed,
+    i64 bytes, u64 align, diag.loc at) bool {
+    ownership_api.region known = local_range(in, out, pointed);
+    if (!ownership_api.successful(out->proof)) { return false; }
+    if (known.key.kind == ownership_api.entity_kind.none ||
+        known.extent.kind != ownership_api.fact_kind.exact ||
+        known.offset.kind != ownership_api.fact_kind.exact || known.offset.value != 0 ||
+        !known.access.arithmetic_proved || known.access.end.kind != ownership_api.fact_kind.exact ||
+        known.extent.value < 0 || known.access.end.value < 0 || bytes < 0 || align == 0) {
+        reject(out, ownership_api.incomplete_reason.missing_path);
+        return false;
+    }
+    if (known.extent.value < bytes || known.access.end.value < bytes) {
+        if (!out->definite_prefix) {
+            reject(out, ownership_api.incomplete_reason.missing_path);
+            return false;
+        }
+        ownership_api.proof_status mut proof = ownership_summary_model.complete();
+        proof.failed = true;
+        ownership_api.event_descriptor event = ownership_api.event_descriptor{
+            .key = out->context.event, .operation = out->context.operation,
+            .source = location(in, out, at), .kind = ownership_api.event_kind.invalid_use,
+            .evidence = ownership_api.evidence_kind.unconditional, .relation = pointed,
+            .text = "typed read exceeds its original storage window"};
+        ownership_api.event_request report = ownership_api.event_request{event, proof};
+        out->proof = ownership_api.record_event(in->services, &report).proof;
+        out->residual_effects = true;
+        return false;
+    }
+    if (known.alignment == 0 || known.alignment % align != 0) {
+        reject(out, ownership_api.incomplete_reason.missing_path);
+        return false;
+    }
+    return true;
+}
+
+fn escape_survives(body_input* in, body_program mut* out, fir.place to) bool {
+    if (!out->definite_prefix) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return false;
+    }
+    fir.func* f = in->function.body;
+    u32 mut block = out->context.operation.block;
+    u32 mut gap = out->context.operation.operation + 1;
+    while (block < fir.block_count(f)) {
+        if (!work(out, 1)) { return false; }
+        while (gap < fir.block_statement_count(f, block)) {
+            if (!work(out, 1)) { return false; }
+            fir.statement* later = fir.block_statement(f, block, gap);
+            if ((later->kind == fir.stmt_kind.st_assign || later->kind == fir.stmt_kind.st_del) &&
+                (!direct(later->place) || (direct(to) && later->place.local == to.local))) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return false;
+            }
+            if (later->kind == fir.stmt_kind.st_assign &&
+                later->value.kind == fir.rvalue_kind.rv_call) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return false;
+            }
+            if (later->kind != fir.stmt_kind.st_assign && later->kind != fir.stmt_kind.st_del &&
+                later->kind != fir.stmt_kind.st_live && later->kind != fir.stmt_kind.st_dead) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return false;
+            }
+            gap += 1;
+        }
+        fir.terminator term = fir.block_at(f, block)->term;
+        if (term.kind == fir.term_kind.tk_return) { return true; }
+        if (term.kind != fir.term_kind.tk_goto || term.target <= block) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return false;
+        }
+        block = term.target;
+        gap = 0;
+    }
+    reject(out, ownership_api.incomplete_reason.unknown_effect);
+    return false;
+}
+
+fn intrinsic(body_input* in, body_program mut* out, fir.place from, fir.place to,
+    diag.loc at) bool {
+    if (from.base != fir.base_kind.bk_local || from.local >= fir.local_count(in->function.body)) {
+        return false;
+    }
+    if (!work(out, cast(from.proj_len, u64)) || !work(out, cast(to.proj_len, u64))) {
+        return true;
+    }
+    if (fir.place_indirect(in->function.body, from)) { return false; }
+    fir.local* local_at_point = fir.local_at(in->function.body, from.local);
+    bool escapes = (direct(to) && to.local == 0) || to.base != fir.base_kind.bk_local ||
+        (to.proj_len > 0 && fir.place_indirect(in->function.body, to));
+    if (!escapes || local_at_point->kind != fir.local_kind.lk_param) { return false; }
+    if (!escape_survives(in, out, to)) { return true; }
+    ownership_api.proof_status mut proof = ownership_summary_model.complete();
+    proof.failed = true;
+    ownership_api.event_descriptor event = ownership_api.event_descriptor{
+        .key = out->context.event, .operation = out->context.operation,
+        .source = location(in, out, at), .kind = ownership_api.event_kind.invalid_use,
+        .evidence = ownership_api.evidence_kind.unconditional, .relation = source(in, from.local),
+        .text = "borrowed address outlives by-value parameter storage"};
+    ownership_api.event_request report = ownership_api.event_request{event, proof};
+    out->proof = ownership_api.record_event(in->services, &report).proof;
+    out->residual_effects = true;
+    return true;
+}
+
+fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap)
+    void {
+    fir.func* f = in->function.body;
+    fir.rvalue rv = stmt->value;
+    if (rv.kind == fir.rvalue_kind.rv_addr && intrinsic(in, out, rv.place, stmt->place,
+        stmt->loc)) { return; }
+    if (rv.kind == fir.rvalue_kind.rv_use) {
+        fir.operand input_operand = fir.rvalue_operand(f, rv, 0);
+        if (input_operand.kind != fir.operand_kind.ok_const && direct(input_operand.place)) {
+            u32 mut parameter = 1;
+            while (parameter < fir.local_count(f)) {
+                if (!work(out, 1)) { return; }
+                if (fir.local_at(f, parameter)->kind == fir.local_kind.lk_param &&
+                    ownership_summary_model.same(out->origins[input_operand.place.local],
+                        source(in, parameter)) && intrinsic(in, out,
+                    fir.place_local(parameter), stmt->place, stmt->loc)) { return; }
+                parameter += 1;
+            }
+        }
+    }
+    if (!direct(stmt->place)) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    u32 dst = stmt->place.local;
+    types.node* dst_ty = fir.local_at(f, dst)->ty;
+    ownership_transfer.request mut req = basic(in, dst, dst, ownership_transfer.action.assignment);
+    req.value = empty(slot(in, dst), dst_ty->is_own);
+    ownership_summary_model.payload_kind mut payload =
+        ownership_summary_model.payload_kind.replacement;
+    if (rv.kind == fir.rvalue_kind.rv_use || rv.kind == fir.rvalue_kind.rv_cast) {
+        fir.operand input_operand = fir.rvalue_operand(f, rv, 0);
+        out->scalars[dst] = out->addressed[dst] ? ownership_api.scalar_fact{} :
+            constant(in, out, input_operand);
+        if (rv.kind == fir.rvalue_kind.rv_cast) {
+            out->scalars[dst] = cast_value(dst_ty, fir.operand_type(f, input_operand),
+                out->scalars[dst]);
+        }
+        if (input_operand.kind != fir.operand_kind.ok_const && direct(input_operand.place)) {
+            u32 src = input_operand.place.local;
+            req = basic(in, src, dst, input_operand.kind == fir.operand_kind.ok_move ?
+                ownership_transfer.action.move_owner : ownership_transfer.action.copy);
+            payload = input_operand.kind == fir.operand_kind.ok_move ?
+                ownership_summary_model.payload_kind.move
+                    : ownership_summary_model.payload_kind.copy;
+            out->origins[dst] = out->origins[src];
+            if (reference(dst_ty)) {
+                requirement(in, out, out->origins[src], slot(in, src), 0,
+                    ownership_summary_model.requirement_kind.live_source, 1);
+            }
+            if (rv.kind == fir.rvalue_kind.rv_cast &&
+                (!types.type_cast_allowed(dst_ty, fir.operand_type(f, input_operand)) ||
+                types.type_cast_adds_own(dst_ty, fir.operand_type(f, input_operand)) ||
+                reference(dst_ty) != reference(fir.operand_type(f, input_operand)))) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return;
+            }
+        } else if (input_operand.kind != fir.operand_kind.ok_const) {
+            out->origins[dst] = ownership_api.entity_id{};
+            types.node* base = input_operand.place.base == fir.base_kind.bk_local ?
+                fir.local_at(f, input_operand.place.local)->ty : null;
+            bool header = base != null && (base->kind == types.type_kind.k_span ||
+                base->kind == types.type_kind.k_string) && input_operand.place.proj_len == 1 &&
+                fir.place_projection(f, input_operand.place, 0).kind == fir.proj_kind.pj_field;
+            if (header && fir.place_projection(f, input_operand.place, 0).field == 0) {
+                req = basic(in, input_operand.place.local, dst, ownership_transfer.action.copy);
+                payload = ownership_summary_model.payload_kind.copy;
+                out->origins[dst] = out->origins[input_operand.place.local];
+            } else if (!header) {
+                if (!add_read(in, out, input_operand.place, block, gap, 0, stmt->loc,
+                    stmt->exit_loc,
+                    stmt->stmt)) { return; }
+                if (reference(dst_ty) || fir.type_aggregate(dst_ty)) {
+                    reject(out, ownership_api.incomplete_reason.unknown_effect);
+                    return;
+                }
+            }
+        } else if (reference(dst_ty)) {
+            out->origins[dst] = ownership_api.entity_id{};
+            if (input_operand.value.kind != fir.const_kind.ck_null &&
+                input_operand.value.kind != fir.const_kind.ck_zero) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return;
+            }
+            req.value.kind = ownership_api.contents_kind.empty_owner;
+            req.value.owner_empty = true;
+        } else {
+            out->origins[dst] = ownership_api.entity_id{};
+        }
+    } else if (rv.kind == fir.rvalue_kind.rv_alloc) {
+        ownership_api.scalar_fact length = constant(in, out, fir.rvalue_operand(f, rv, 0));
+        if (rv.ty == null || !types.type_size_fits(rv.ty) || fir.type_owning(rv.ty)) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return;
+        }
+        u64 size = types.type_sizeof(rv.ty);
+        if (length.kind != ownership_api.fact_kind.exact || length.value < 0 || size == 0 ||
+            cast(length.value, u64) > 9223372036854775807 / size) {
+            reject(out, ownership_api.incomplete_reason.missing_correspondence);
+            return;
+        }
+        req.kind = ownership_transfer.action.allocation;
+        req.allocation = ownership_api.allocation_fact{
+            .key = next(out, ownership_api.entity_kind.allocation),
+            .validity = ownership_api.validity_kind.live,
+            .count = ownership_api.multiplicity{false, true, false}, .obligation = true,
+            .owner = ownership_api.owner_location{.place = slot(in, dst)},
+                .logical_length = length};
+        req.allocation.site = req.allocation.key;
+        req.fresh_source = ownership_api.source_fact{
+            .key = id(in->function.key, ownership_api.entity_kind.source,
+                req.allocation.key.ordinal),
+            .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live,
+            .allocation = req.allocation.key};
+        req.source_key = req.fresh_source.key;
+        req.value = value(in, out, slot(in, dst), req.fresh_source.key,
+            req.allocation.key.ordinal, length.value, size, types.type_alignof(rv.ty));
+        out->origins[dst] = req.source_key;
+        root(out, ownership_summary_model.symbolic_root{
+            .key = next(out, ownership_api.entity_kind.template),
+            .kind = ownership_summary_model.root_kind.allocation_template,
+            .allocation = req.allocation.key, .ty = dst_ty});
+        payload = ownership_summary_model.payload_kind.allocation;
+    } else if (rv.kind == fir.rvalue_kind.rv_aggregate &&
+        dst_ty->kind == types.type_kind.k_span && rv.ops_len == 2) {
+        fir.operand pointer = fir.rvalue_operand(f, rv, 0);
+        ownership_api.scalar_fact length = constant(in, out, fir.rvalue_operand(f, rv, 1));
+        if (pointer.kind != fir.operand_kind.ok_move || !direct(pointer.place) ||
+            length.kind != ownership_api.fact_kind.exact || length.value < 0) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return;
+        }
+        bool mut matched = false;
+        u64 mut effect = 0;
+        while (effect < out->effects_len) {
+            if (!work(out, 1)) { return; }
+            ownership_summary_model.effect_node allocation = out->effects[effect];
+            if (allocation.payload == ownership_summary_model.payload_kind.allocation &&
+                ownership_summary_model.same(allocation.effect.place.root, slot(in,
+                    pointer.place.local).root) &&
+                allocation.value.span_length.kind == ownership_api.fact_kind.exact &&
+                allocation.value.span_length.value == length.value) { matched = true; }
+            effect += 1;
+        }
+        if (!matched) { reject(out, ownership_api.incomplete_reason.unknown_effect); return; }
+        req = basic(in, pointer.place.local, dst, ownership_transfer.action.move_owner);
+        payload = ownership_summary_model.payload_kind.move;
+        out->origins[dst] = out->origins[pointer.place.local];
+    } else if (rv.kind == fir.rvalue_kind.rv_addr) {
+        if (!direct(rv.place)) {
+            if (rv.place.base == fir.base_kind.bk_local &&
+                fir.local_at(f, rv.place.local)->kind == fir.local_kind.lk_param &&
+                !fir.place_indirect(f, rv.place)) {
+                // Keep the escape origin private. This path supplies no range or address effect.
+                out->origins[dst] = source(in, rv.place.local);
+                out->held_inline_address = true;
+                return;
+            }
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return;
+        }
+        req.kind = ownership_transfer.action.address;
+        req.source = slot(in, rv.place.local);
+        req.source_key = source(in, rv.place.local);
+        req.source_correspondence_proved = true;
+        types.node* ty = fir.place_type(f, rv.place);
+        req.value = value(in, out, slot(in, dst), req.source_key,
+            next(out, ownership_api.entity_kind.value).ordinal, 1, types.type_sizeof(ty),
+            types.type_alignof(ty));
+        out->origins[dst] = req.source_key;
+    } else if (fir.rvalue_is_binary(rv.kind) || rv.kind == fir.rvalue_kind.rv_not ||
+        rv.kind == fir.rvalue_kind.rv_fneg) {
+        if (reference(dst_ty) || fir.type_aggregate(dst_ty)) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return;
+        }
+        u32 mut i = 0;
+        while (i < rv.ops_len) {
+            fir.operand input_operand = fir.rvalue_operand(f, rv, i);
+            if (input_operand.kind != fir.operand_kind.ok_const &&
+                !add_read(in, out, input_operand.place, block, gap, i, stmt->loc, stmt->exit_loc,
+                    stmt->stmt)) { return; }
+            i += 1;
+        }
+        out->scalars[dst] = ownership_api.scalar_fact{};
+        out->origins[dst] = ownership_api.entity_id{};
+    } else {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    if (fir.type_aggregate(dst_ty) && !reference(dst_ty)) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return;
+    }
+    emit(in, out, req, block, gap, rv.ops_len + 1, payload, stmt->loc, stmt->exit_loc, stmt->stmt);
+}
+
+fn add_terminal_events(body_input* in, body_program mut* out, u32 block) bool {
+    u32 locals = fir.local_count(in->function.body);
+    u32 mut i = 0;
+    while (i <= locals * 2 + 1) {
+        u32 mut k = 0;
+        while (k < 5) {
+            if (!work(out, 2) || out->events_len >= out->events.len) {
+                reject(out, ownership_api.incomplete_reason.invalid_input);
+                return false;
+            }
+            ownership_api.entity_id mut relation = i == 0 ? ownership_api.entity_id{} :
+                id(in->function.key, ownership_api.entity_kind.source, i);
+            out->events[out->events_len] = ownership_flow.event_binding{
+                position(in, block, fir.block_statement_count(in->function.body, block), true),
+                cast(k, ownership_api.event_kind), relation, next(out,
+                    ownership_api.entity_kind.event)};
+            out->events_len += 1;
+            if (i > 0) {
+                if (out->events_len >= out->events.len) { return false; }
+                relation.kind = ownership_api.entity_kind.allocation;
+                out->events[out->events_len] = ownership_flow.event_binding{
+                    position(in, block, fir.block_statement_count(in->function.body, block), true),
+                    cast(k, ownership_api.event_kind), relation,
+                    next(out, ownership_api.entity_kind.event)};
+                out->events_len += 1;
+            }
+            k += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn extract(body_input* in) body_program {
+    body_program mut out = body_program{};
+    out.proof = ownership_summary_model.complete();
+    out.definite_prefix = true;
+    out.residual_effects = true;
+    out.context = ownership_summary_model.context{in->services,
+        ownership_api.operation_position{.function = in->function.key},
+        ownership_api.source_position{}, id(in->function.key, ownership_api.entity_kind.event, 1),
+        ownership_api.source_position{}};
+    if (in->services == null || in->function.body == null || !in->function.verified ||
+        !in->correspondence_complete || !in->coverage.structural_valid ||
+        !in->coverage.supplied_complete || !ownership_api.valid_limits(&in->limits)) {
+        reject(&out, ownership_api.incomplete_reason.missing_correspondence);
+        return out;
+    }
+    fir.func* f = in->function.body;
+    u64 locals = cast(fir.local_count(f), u64);
+    u64 blocks = cast(fir.block_count(f), u64);
+    if (locals > (cast(U32_MAX, u64) - 2) / 2 || blocks == 0 ||
+        locals > types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id)) {
+        reject(&out, ownership_api.incomplete_reason.invalid_input);
+        return out;
+    }
+    out.addressed = new(bool, locals);
+    u64 mut count = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        if (!work(&out, 1)) { return out; }
+        u64 n = cast(fir.block_statement_count(f, b), u64);
+        if (n > U64_MAX - count) {
+            reject(&out, ownership_api.incomplete_reason.invalid_input);
+            return out;
+        }
+        count += n;
+        u32 mut gap = 0;
+        while (gap < fir.block_statement_count(f, b)) {
+            if (!work(&out, 1)) { return out; }
+            fir.statement* stmt = fir.block_statement(f, b, gap);
+            // An address of local storage marks its local. An address through a reference
+            // marks that reference, which has no scalar fact. A slice addresses an array,
+            // which has no scalar fact either.
+            if (stmt->kind == fir.stmt_kind.st_assign &&
+                stmt->value.kind == fir.rvalue_kind.rv_addr &&
+                stmt->value.place.base == fir.base_kind.bk_local &&
+                cast(stmt->value.place.local, u64) < locals) {
+                out.addressed[stmt->value.place.local] = true;
+            }
+            gap += 1;
+        }
+        b += 1;
+    }
+    if (count > (U64_MAX - locals - blocks - 1) / 4 ||
+        blocks > types.TYPE_MAX_SIZE / sizeof(ownership_flow.event_binding) / (locals * 20 + 25)) {
+        reject(&out, ownership_api.incomplete_reason.invalid_input);
+        return out;
+    }
+    u64 cap = count * 4 + locals + blocks + 1;
+    if (cap > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.effect_node) ||
+        cap + locals * 2 > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.symbolic_root) ||
+        cap > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.requirement) ||
+        cap > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.provenance) ||
+        locals > types.TYPE_MAX_SIZE / sizeof(ownership_api.scalar_fact) ||
+        locals > types.TYPE_MAX_SIZE / sizeof(ownership_flow.parameter) ||
+        cap > types.TYPE_MAX_SIZE / sizeof(ownership_flow.step) ||
+        cap > cast(U32_MAX, u64) / 8 || !work(&out, cap * 12 + locals * 4)) {
+        reject(&out, ownership_api.incomplete_reason.invalid_input);
+        return out;
+    }
+    out.steps = new(ownership_flow.step, cap);
+    out.transfer_events = new(ownership_transfer.event_binding, cap);
+    out.events = new(ownership_flow.event_binding, blocks * (locals * 20 + 25));
+    out.parameters = new(ownership_flow.parameter, locals);
+    out.roots = new(ownership_summary_model.symbolic_root, cap + locals * 2);
+    out.requirements = new(ownership_summary_model.requirement, cap);
+    out.effects = new(ownership_summary_model.effect_node, cap);
+    out.provenance_records = new(ownership_summary_model.provenance, cap);
+    out.origins = new(ownership_api.entity_id, locals);
+    out.scalars = new(ownership_api.scalar_fact, locals);
+    out.entry = ownership_state.empty();
+    out.metadata = ownership_state.empty();
+    out.next_key = cast(locals * 2 + 2, u32);
+    out.coverage = in->coverage;
+    out.coverage.actual_source_complete = false;
+    if (!seed(in, &out)) { return out; }
+    b = 0;
+    while (b < fir.block_count(f)) {
+        fir.block* current = fir.block_at(f, b);
+        if (!work(&out, 1) || !current->terminated) {
+            reject(&out, ownership_api.incomplete_reason.invalid_input);
+            return out;
+        }
+        u32 mut gap = 0;
+        while (gap < fir.block_statement_count(f, b)) {
+            fir.statement* stmt = fir.block_statement(f, b, gap);
+            out.context.operation = position(in, b, gap, false);
+            out.context.source = location(in, &out, stmt->loc);
+            out.context.event = next(&out, ownership_api.entity_kind.event);
+            if (stmt->loc.file.len > 0 && !out.context.source.filename_present) {
+                reject(&out, ownership_api.incomplete_reason.missing_correspondence);
+                return out;
+            }
+            if (stmt->kind == fir.stmt_kind.st_assign) { assign(in, &out, stmt, b, gap); }
+            else if (stmt->kind == fir.stmt_kind.st_del && direct(stmt->place)) {
+                ownership_transfer.request mut req = basic(in, stmt->place.local,
+                    stmt->place.local, ownership_transfer.action.release);
+                types.node* ty = fir.place_type(f, stmt->place);
+                req.source_key = out.origins[stmt->place.local];
+                req.leaves_empty_proved = reference(ty) && ty->elem != null &&
+                    !fir.type_owning(ty->elem) && !fir.type_aggregate(ty->elem);
+                emit(in, &out, req, b, gap, 0, ownership_summary_model.payload_kind.release,
+                    stmt->loc, stmt->exit_loc, stmt->stmt);
+            } else if (stmt->kind == fir.stmt_kind.st_dead) {
+                ownership_transfer.request mut req = basic(in, stmt->local, stmt->local,
+                    ownership_transfer.action.dead);
+                req.liveness_proved = true;
+                req.source_correspondence_proved = true;
+                emit(in, &out, req, b, gap, 0, ownership_summary_model.payload_kind.storage_end,
+                    stmt->loc, stmt->exit_loc, stmt->stmt);
+            } else if (stmt->kind != fir.stmt_kind.st_live) {
+                reject(&out, ownership_api.incomplete_reason.unknown_effect);
+            }
+            if (!ownership_api.successful(out.proof)) { return out; }
+            gap += 1;
+        }
+        out.context.operation = position(in, b, gap, true);
+        out.context.source = location(in, &out, current->term.loc);
+        if (current->term.kind != fir.term_kind.tk_return &&
+            current->term.kind != fir.term_kind.tk_goto &&
+            current->term.kind != fir.term_kind.tk_check &&
+            current->term.kind != fir.term_kind.tk_check_overwrite &&
+            current->term.kind != fir.term_kind.tk_fail &&
+            current->term.kind != fir.term_kind.tk_trap) {
+            reject(&out, ownership_api.incomplete_reason.unknown_effect);
+            return out;
+        }
+        if ((current->term.kind == fir.term_kind.tk_goto ||
+            current->term.kind == fir.term_kind.tk_check ||
+            current->term.kind == fir.term_kind.tk_check_overwrite) &&
+            current->term.target <= b) {
+            reject(&out, ownership_api.incomplete_reason.unknown_effect);
+            return out;
+        }
+        if (current->term.kind == fir.term_kind.tk_check) {
+            ownership_api.scalar_fact condition = constant(in, &out, current->term.cond);
+            if (condition.kind != ownership_api.fact_kind.exact || condition.value == 0) {
+                out.definite_prefix = false;
+            }
+        } else if (current->term.kind == fir.term_kind.tk_check_overwrite &&
+            (!direct(current->term.place) ||
+                out.origins[current->term.place.local].kind != ownership_api.entity_kind.none)) {
+            out.definite_prefix = false;
+        }
+        if (!add_terminal_events(in, &out, b)) { return out; }
+        if (current->term.kind == fir.term_kind.tk_return ||
+            current->term.kind == fir.term_kind.tk_fail ||
+            current->term.kind == fir.term_kind.tk_trap) { break; }
+        b = current->term.target;
+    }
+    if (out.held_inline_address) {
+        reject(&out, ownership_api.incomplete_reason.unknown_effect);
+        return out;
+    }
+    out.residual_effects = false;
+    return out;
+}
+
+fn flow(body_input* in, body_program* out) ownership_flow.program {
+    types.node* result = fir.local_at(in->function.body, 0)->ty;
+    return ownership_flow.program{.function = in->function.body, .identity = in->function.key,
+        .entry = &out->entry, .services = in->services, .limits = &in->limits,
+        .steps = out->steps[..out->steps_len], .parameters = out->parameters[..out->parameters_len],
+        .events = out->events[..out->events_len], .source_files = in->source_files,
+        .result_slot = reference(result) ? slot(in, 0).root : ownership_api.entity_id{},
+        .supplied_complete = !out->residual_effects, .verified_fir = in->function.verified};
+}

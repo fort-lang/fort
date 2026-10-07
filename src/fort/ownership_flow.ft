@@ -94,6 +94,11 @@ struct program {
     ownership_api.entity_id result_slot;
     bool supplied_complete;
     bool verified_fir;
+    // The optional observer copies the view. Its context outlives solve.
+    void mut* exit_context;
+    fn (void mut*, ownership_api.state_view*, ownership_api.outcome_fact,
+        ownership_api.operation_position, ownership_api.source_position)
+        ownership_api.proof_status exit_observer;
 }
 
 struct path {
@@ -1539,12 +1544,22 @@ fn process(program* in, analysis mut* out, fir_flow.bits mut* pending,
     fir.block* current = fir.block_at(in->function, block);
     if (!current->terminated) { note_failure(out, invalid_input(in)); return; }
     if (current->term.kind == fir.term_kind.tk_return) {
+        u64 failures = out->failures;
         parameter_return(in, out, p, block);
+        if (out->failures == failures) {
+            observe_exit(in, out, p, block, ownership_api.outcome_kind.function_return);
+        }
         return;
     }
     if (current->term.kind == fir.term_kind.tk_fail ||
-        current->term.kind == fir.term_kind.tk_trap ||
-        current->term.kind == fir.term_kind.tk_unreachable) { return; }
+        current->term.kind == fir.term_kind.tk_trap) {
+        observe_exit(in, out, p, block, ownership_api.outcome_kind.abort);
+        return;
+    }
+    if (current->term.kind == fir.term_kind.tk_unreachable) {
+        observe_exit(in, out, p, block, ownership_api.outcome_kind.unknown_fort);
+        return;
+    }
     u32 mut index = 0;
     u32 mut target = 0;
     while (fir.term_targets(in->function, &current->term, index, &target)) {
@@ -1562,6 +1577,19 @@ fn process(program* in, analysis mut* out, fir_flow.bits mut* pending,
         free_path(&outgoing);
         index += 1;
     }
+}
+
+// The callback copies required facts before process releases its working path.
+fn observe_exit(program* in, analysis mut* out, path* p, u32 block,
+    ownership_api.outcome_kind kind) void {
+    if (in->exit_observer == null) { return; }
+    ownership_api.state_view facts = ownership_state.view(&p->facts);
+    ownership_api.outcome_fact outcome = ownership_api.outcome_fact{.kind = kind,
+        .possible_caller_return = kind == ownership_api.outcome_kind.function_return ||
+            kind == ownership_api.outcome_kind.unknown_fort,
+        .cleanup_required = kind != ownership_api.outcome_kind.abort};
+    note_failure(out, in->exit_observer(in->exit_context, &facts, outcome,
+        return_position(in, block), return_source(in, block)));
 }
 
 /// Runs a canonical worklist. The caller frees the analysis and retains the program facts.
