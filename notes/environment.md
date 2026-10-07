@@ -293,6 +293,13 @@ without a rewrite.
   while `python3` in the guest read 4387308 bytes with no NUL and `llvm-as-18` accepted a copy.
   A program that writes a file for a second tool to read writes each run to a new path, or under
   the guest's own `/tmp`.
+  The git index of a worktree is one more such file. Just after host commits, the guest's
+  `git ls-files` in `tools/ownership_audit.py run` failed with `error: index uses ... extension,
+  which we do not understand` and `fatal: index file corrupt` (2026-10-07). The guest's git read
+  a copy of the same index bytes in its own `/tmp` with no error: 2158 entries. Before a guest
+  command that reads git, rebuild the index in the guest: `rm` the file that
+  `git rev-parse --git-path index` names, then `git reset -q`. Do this only when nothing is
+  staged: `git reset -q` unstages each staged change.
   `tools/mutate.py` writes each source in place (`open(path, "wb")`): a round first restores the
   source and then writes the mutant over it. Run in the guest, one round failed to build 3 times
   in a row with `unknown type name 'turn'` in `<built-in>`, and the build of the next round
