@@ -1030,9 +1030,12 @@ fn output_root(ownership_summary_model.summary_view* summary,
         ownership_summary_model.effect_node node = summary->effects[i];
         if (node.payload == ownership_summary_model.payload_kind.reference_load &&
             ownership_summary_model.same(node.operand.root, root)) { return true; }
-        // A store through the pointer writes the storage that it designates.
+        // A store through the pointer writes the storage that it designates. A whole move
+        // from the pointer takes that storage.
         if (node.payload != ownership_summary_model.payload_kind.read &&
             ownership_summary_model.same(node.effect.place.root, root)) { return true; }
+        if (node.payload == ownership_summary_model.payload_kind.move &&
+            ownership_summary_model.same(node.operand.root, root)) { return true; }
         i += 1;
     }
     return false;
@@ -1909,6 +1912,13 @@ fn destination_type(request* req, application mut* out, ownership_summary_model.
                 }
                 return null;
             }
+            // A leaf of the result or of a callee local has the type of its field.
+            if (path.projections.len != 0 &&
+                (row.kind == ownership_summary_model.root_kind.result ||
+                row.kind == ownership_summary_model.root_kind.by_value_slot)) {
+                ownership_api.place_path base = ownership_api.place_path{.root = path.root};
+                return selected_type(out, ctx, row.ty, path, base);
+            }
             if (path.projections.len != 0) { return null; }
             return row.ty;
         }
@@ -2044,7 +2054,12 @@ fn selected_transfer(request* req, application mut* out,
     types.node* destination) ownership_api.proof_status {
     bool projected = transfer->source.projections.len != 0 ||
         transfer->destination.projections.len != 0;
-    if (!projected) { return ownership_transfer.apply(&out->state, req->services, transfer); }
+    // An aggregate moves or copies leaf by leaf, so it needs the place service.
+    bool whole = destination != null && fir.type_aggregate(destination) &&
+        !types.type_is_reference(destination);
+    if (!projected && !whole) {
+        return ownership_transfer.apply(&out->state, req->services, transfer);
+    }
     if (transfer->kind == ownership_transfer.action.assignment &&
         transfer->destination.projections.len == 0) {
         ownership_api.projection@ none = {};

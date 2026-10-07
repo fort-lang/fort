@@ -1294,6 +1294,20 @@ came here.
   At each normal return, the last store into each caller storage path is a retained relation.
   A later store at that path, such as a null store, ends it. A retained source that was
   released or ended fails the body at its return with an invalid use.
+- **An aggregate result binds to the actual caller destination** (D17.15).
+  A body may build a flat struct literal, move a whole struct out of caller storage, or move a
+  holding local into `_0`. Each leaf effect goes into the summary. A literal written into `_0`
+  requires each owning destination leaf to be empty, and each caller checks that after the
+  operand effects. Flow models the owner and borrow leaves of a literal in private slots.
+  A holding local must reach `_0` on each returning path. A nested struct, an owning aggregate
+  parameter, and a returned aggregate parameter stay unsupported.
+  FIR can write a call result through a pointer local, as in `(*_k) = call`. Then the callee
+  result `_0` binds to the storage that `_k` designates. Callers replay aggregate effects with
+  `ownership_places`, which refuses a write over a live owner. A deferred refill of the
+  destination therefore fails the final result write (`spec/memory-model.md` P17).
+  At each normal return a borrowed result leaf must still be live, after deferred effects.
+  The extractor does not lower global places, so a test binds a result to caller storage with
+  a static source to model a global destination.
 - **A view loaded from an owner field ends when the same body releases that field** (D17.14).
   Flow models a caller owner field as a private empty slot, so its release does not end the
   loaded source. `ownership_summary.publish` checks the exit sequence instead. A later
