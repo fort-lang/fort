@@ -1078,13 +1078,17 @@ came here.
   (`spec/toolchain.md` 4.2). Otherwise it is incomplete proof. The witness walk starts at the
   entry and crosses no back edge and no fort call; an extern call returns (D17.13). It knows
   constants, exact integer arithmetic, comparisons, value-keeping casts, allocations, span
-  headers, slices, and the null left by a move or a `del`. A condition on a bool or integer
+  headers, slices and `slice_ptr` lengths, and the null left by a move or a `del`. A cast keeps
+  the entry value of a parameter when the new type holds each value of the parameter type.
+  A condition on a bool or integer
   parameter that no earlier condition fixed takes a value: the constant of the arm, or the
   constant of a relation or an integer next to it. The walk makes one choice at each
   condition, the target nearest to the operation, and never backtracks. A check that traps
   ends the path, except at the store of an overwrite and the access through an empty
   reference: there the trap is the event. Each block that the walk searches and each
   statement that it evaluates charges one W unit of the `local` ledger.
+  `ownership_source_local.witness_in` runs the same walk for another analysis, with a ledger of
+  its own (`_witness_in_test.ft`).
   `test/fort/ownership_source_local_walk_test.ft` and `_witness_test.ft` hold these rules.
   A second run without outside effects classifies the failures of a body that has no
   validated violation and no refusal. When it ends within its budget with no failure, each
