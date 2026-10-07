@@ -19,6 +19,12 @@ enum action {
     escape,
     // An effect outside local proof, such as an unknown fort call. Only slot owners keep facts.
     outside,
+    // A `live` marker of a local whose address the body takes: its stack source begins again.
+    stack_begin,
+    // A `dead` marker or a return ends the stack source of such a local.
+    stack_end,
+    // A store into one element of an actual array that a variable index selects (D17.15).
+    weak_store,
 }
 
 // The checked closure assigns one event key to each full operation position.
@@ -53,6 +59,15 @@ struct request {
     // An assignment stores a value that an effect outside local proof produced. The store
     // keeps the destination check. Later reads of the unknown contents need other facts.
     bool opaque_value;
+    // The source and destination may be reference leaves of private aggregate slots: a slot
+    // root with field and constant-index projections. No pointer names such a leaf.
+    bool leaf_places_proved;
+    // The elements of the actual array that a weak store can select, each a leaf place. The
+    // guard names the unknown selection. `destination` holds the array root.
+    ownership_api.place_path@ weak_places;
+    ownership_api.entity_id weak_guard;
+    // The weak store moves the contents of `source`: the source becomes an empty owner.
+    bool weak_moves;
     event_binding@ event_bindings;
 }
 
@@ -213,7 +228,51 @@ fn owner_count(ownership_state.state* s, ownership_api.place_path place) u64 {
 
 enum overlap_kind { none, possible, definite }
 
-// Local operations do not prove that two projections of one root are separate.
+// Whether every projection of `p` is a field or a constant element index: a leaf of private
+// slot storage. Such a path names one exact region of its root (D17.15).
+fn leaf_path(ownership_api.place_path p) bool {
+    if (p.residual) { return false; }
+    u64 mut i = 0;
+    while (i < p.projections.len) {
+        ownership_api.projection part = p.projections[i];
+        bool field = part.kind == ownership_api.projection_kind.field;
+        bool element = part.kind == ownership_api.projection_kind.fixed_index &&
+            part.index.kind == ownership_api.fact_kind.exact && part.index.value >= 0;
+        if (!field && !element) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+enum region_relation { disjoint, same, partial, possible }
+
+// Compares two places of private slots. Different roots are different slots. On one root,
+// different fields and different constant indices are disjoint, and a prefix overlaps the
+// paths below it. Any other projection, or a residual place, may overlap anything.
+fn relate(ownership_api.place_path a, ownership_api.place_path b) region_relation {
+    if (ownership_state.has_residual(a) || ownership_state.has_residual(b)) {
+        return region_relation.possible;
+    }
+    if (!same_entity(a.root, b.root)) { return region_relation.disjoint; }
+    if (!leaf_path(a) || !leaf_path(b)) { return region_relation.possible; }
+    u64 mut i = 0;
+    while (i < a.projections.len && i < b.projections.len) {
+        ownership_api.projection x = a.projections[i];
+        ownership_api.projection y = b.projections[i];
+        if (x.kind != y.kind) { return region_relation.possible; }
+        if (x.kind == ownership_api.projection_kind.field && x.field != y.field) {
+            return region_relation.disjoint;
+        }
+        if (x.kind == ownership_api.projection_kind.fixed_index &&
+            x.index.value != y.index.value) { return region_relation.disjoint; }
+        i += 1;
+    }
+    if (a.projections.len == b.projections.len) { return region_relation.same; }
+    return region_relation.partial;
+}
+
+// A whole slot overlaps only its own root. A leaf overlaps its own path and the paths that
+// begin with it. Distinct fields and constant indices of one root are separate (D17.15).
 fn owner_overlap(ownership_state.state* s, ownership_api.place_path place)
     overlap_kind {
     bool mut possible = false;
@@ -221,13 +280,12 @@ fn owner_overlap(ownership_state.state* s, ownership_api.place_path place)
     while (i < s->allocations_len) {
         if (s->allocations[i].obligation) {
             ownership_api.place_path owner = s->allocations[i].owner.place;
-            if (!ownership_state.has_residual(owner) && same_place(owner, place) &&
-                s->allocations[i].count.one && !s->allocations[i].count.zero &&
-                !s->allocations[i].count.many) {
+            region_relation relation = relate(owner, place);
+            if (relation == region_relation.same && s->allocations[i].count.one &&
+                !s->allocations[i].count.zero && !s->allocations[i].count.many) {
                 return overlap_kind.definite;
             }
-            if (ownership_state.has_residual(owner) ||
-                same_entity(owner.root, place.root)) { possible = true; }
+            if (relation != region_relation.disjoint) { possible = true; }
         }
         i += 1;
     }
@@ -241,8 +299,9 @@ fn other_owner_possible(ownership_state.state* s, ownership_api.place_path place
     while (i < s->allocations_len) {
         if (s->allocations[i].obligation &&
             !same_entity(s->allocations[i].key, selected) &&
-            (ownership_state.has_residual(s->allocations[i].owner.place) ||
-            same_entity(s->allocations[i].owner.place.root, place.root))) { return true; }
+            relate(s->allocations[i].owner.place, place) != region_relation.disjoint) {
+            return true;
+        }
         i += 1;
     }
     return false;
@@ -721,21 +780,25 @@ fn do_escape(ownership_state.state mut* s, ownership_api.services* svc,
     return write(s, svc, empty_value(req->source), req->source, req);
 }
 
-// A slot owner keeps its live allocation: only an operation on that slot can release it.
+// A slot owner keeps its live allocation: only an operation on that slot can release it. A
+// leaf of a private aggregate slot is such an owner too, because no pointer names the slot.
 fn slot_owned(ownership_api.allocation_fact a) bool {
     return a.obligation && a.validity == ownership_api.validity_kind.live &&
         !a.owner.detached && !ownership_state.has_residual(a.owner.place) &&
         a.owner.place.root.kind == ownership_api.entity_kind.slot &&
-        a.owner.place.projections.len == 0;
+        leaf_path(a.owner.place);
 }
 
-// Static and foreign sources keep their trust (D17.13). Other live facts become unknown.
+// Static and foreign sources keep their trust (D17.13). A stack source stays live: only a
+// storage end of this body ends it, and no callee ends the storage of its caller (D17.14).
+// Other live facts become unknown.
 fn do_outside(ownership_state.state mut* s) ownership_api.proof_status {
     u64 mut i = 0;
     while (i < s->sources_len) {
         ownership_api.source_fact source = s->sources[i];
         bool mut kept = source.kind == ownership_api.source_kind.static_storage ||
-            source.kind == ownership_api.source_kind.trusted_foreign;
+            source.kind == ownership_api.source_kind.trusted_foreign ||
+            source.kind == ownership_api.source_kind.stack;
         if (!kept && source.kind == ownership_api.source_kind.heap) {
             u64 a = ownership_state.allocation_index(s, source.allocation);
             kept = a != U64_MAX && slot_owned(s->allocations[a]);
@@ -758,6 +821,240 @@ fn do_outside(ownership_state.state mut* s) ownership_api.proof_status {
     return proof;
 }
 
+// Whether some contents row still holds a borrow of `key`.
+fn borrowed(ownership_state.state* s, ownership_api.entity_id key) bool {
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        u64 mut b = 0;
+        while (b < s->contents[i].borrows.len) {
+            if (same_entity(s->contents[i].borrows[b].source, key)) { return true; }
+            b += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn complete() ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+// A `live` marker begins the stack source of a local whose address the body takes. A new
+// instance after an end revives no earlier borrow (fir.md 14): each borrow of the ended
+// instance moves to the retired source `fresh_source.key`, which stays ended, and the source
+// key names the new instance. A join of a live and an ended instance has unknown validity; a
+// `live` marker follows the end of each earlier instance, so its borrows retire too.
+fn do_stack_begin(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    u64 source = source_index(s, req->source_key);
+    if (req->source_key.kind != ownership_api.entity_kind.source) {
+        return unproved(svc, req, req->source_key);
+    }
+    if (source == U64_MAX) {
+        ownership_api.mutation_result added = ownership_state.add_source(s, svc,
+            ownership_api.source_fact{.key = req->source_key,
+            .kind = ownership_api.source_kind.stack,
+            .validity = ownership_api.validity_kind.live}, req->operation, req->source_position);
+        return added.proof;
+    }
+    if (s->sources[source].kind != ownership_api.source_kind.stack ||
+        s->sources[source].validity == ownership_api.validity_kind.released) {
+        return unproved(svc, req, req->source_key);
+    }
+    if (s->sources[source].validity == ownership_api.validity_kind.live) { return complete(); }
+    ownership_state.charge_counts mut counts = ownership_state.charge_counts{};
+    counts.w = 1;
+    ownership_api.mutation_result paid = ownership_state.require_counts(s, svc, counts,
+        req->operation, req->source_position);
+    if (!paid.applied) { return paid.proof; }
+    if (borrowed(s, req->source_key)) {
+        ownership_api.entity_id retired = req->fresh_source.key;
+        u64 old = source_index(s, retired);
+        if (retired.kind != ownership_api.entity_kind.source ||
+            same_entity(retired, req->source_key) || (old != U64_MAX &&
+            (s->sources[old].kind != ownership_api.source_kind.stack ||
+            s->sources[old].validity != ownership_api.validity_kind.ended))) {
+            return failed(svc, req, ownership_api.event_kind.incomplete_proof,
+                ownership_api.incomplete_reason.missing_path, req->source_key,
+                "old borrow keeps an ended stack source");
+        }
+        if (old == U64_MAX) {
+            ownership_api.mutation_result added = ownership_state.add_source(s, svc,
+                ownership_api.source_fact{.key = retired,
+                .kind = ownership_api.source_kind.stack,
+                .validity = ownership_api.validity_kind.ended}, req->operation,
+                req->source_position);
+            if (!added.applied) { return added.proof; }
+        }
+        // One W unit for each contents row that the retirement reads.
+        ownership_state.unit_counter mut rows = ownership_state.unit_counter{svc,
+            ownership_api.work_kind.transfer, req->operation, req->source_position, complete()};
+        u64 mut i = 0;
+        while (i < s->contents_len) {
+            if (!ownership_state.unit_spend(&rows)) {
+                return ownership_state.report_failure(svc, rows.proof, req->operation,
+                    req->source_position);
+            }
+            retire_borrows(s, i, req->source_key, retired);
+            i += 1;
+        }
+    }
+    u64 begun = source_index(s, req->source_key);
+    s->sources[begun].validity = ownership_api.validity_kind.live;
+    return complete();
+}
+
+// Moves each borrow of `from` in contents row `i` to `to`.
+fn retire_borrows(ownership_state.state mut* s, u64 i, ownership_api.entity_id from,
+    ownership_api.entity_id to) void {
+    ownership_api.contents_fact row = s->contents[i];
+    bool mut found = false;
+    u64 mut b = 0;
+    while (b < row.borrows.len) {
+        if (same_entity(row.borrows[b].source, from)) { found = true; }
+        b += 1;
+    }
+    if (!found) { return; }
+    ownership_api.borrow_relation mut@ own moved = new(ownership_api.borrow_relation,
+        row.borrows.len);
+    defer del(moved);
+    b = 0;
+    while (b < row.borrows.len) {
+        moved[b] = row.borrows[b];
+        if (same_entity(moved[b].source, from)) { moved[b].source = to; }
+        b += 1;
+    }
+    s->contents[i].borrows = ownership_state.copy_borrows(s, moved[..]);
+}
+
+// A `dead` marker or a return ends a stack source. The storage is ended after it whatever its
+// validity was before, so an unknown validity (a join of a live and an ended instance) ends
+// too. Ending it again changes nothing.
+fn do_stack_end(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    u64 source = source_index(s, req->source_key);
+    if (source == U64_MAX || s->sources[source].kind != ownership_api.source_kind.stack ||
+        s->sources[source].validity == ownership_api.validity_kind.released) {
+        return unproved(svc, req, req->source_key);
+    }
+    if (s->sources[source].validity == ownership_api.validity_kind.ended) { return complete(); }
+    return ownership_state.end_source(s, svc, req->source_key, req->operation,
+        req->source_position).proof;
+}
+
+// A store through a variable index selects one element of the actual array, and the proof
+// does not know which (D17.15). Each element keeps its old contents and gains the new value as
+// an alternative under the step's guard. An owning element must be proved empty in each
+// element, since any of them can be the destination. A moved obligation then rests at the
+// array root, which covers every element: an element step overlaps it and cannot discharge
+// it, and other slots stay separate. The value is `value` when its kind is known, else the
+// contents of `source`.
+fn do_weak_store(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    if (req->weak_places.len == 0 || req->weak_guard.kind != ownership_api.entity_kind.guard) {
+        return unproved(svc, req, req->destination.root);
+    }
+    // The store reads its operand before it writes the element (D19.8 evaluation order).
+    ownership_api.contents_fact mut value = req->value;
+    if (req->opaque_value) {
+        value = ownership_api.contents_fact{.kind = ownership_api.contents_kind.unknown};
+    } else {
+        if (value.kind == ownership_api.contents_kind.unknown) {
+            u64 index = contents_index(s, req->source);
+            if (index == U64_MAX) { return unproved(svc, req, req->source.root); }
+            value = s->contents[index];
+        }
+        ownership_api.proof_status read = check_read(s, svc, req, value, false);
+        if (!ownership_api.successful(read)) { return read; }
+    }
+    u64 mut k = 0;
+    while (k < req->weak_places.len) {
+        ownership_api.place_path element = req->weak_places[k];
+        if (!leaf_path(element) || element.projections.len == 0 ||
+            !same_entity(element.root, req->destination.root)) {
+            return unproved(svc, req, req->destination.root);
+        }
+        // Each element keeps its old contents, so each needs a known contents fact. An
+        // owning element needs a proved empty owner in each of its alternatives.
+        u64 mut held = 0;
+        u64 mut i = 0;
+        while (i < s->contents_len) {
+            if (same_place(s->contents[i].place, element)) {
+                held += 1;
+                if (req->destination_owns && !empty_owner_proved(s->contents[i])) {
+                    return unproved(svc, req, req->destination.root);
+                }
+            }
+            i += 1;
+        }
+        if (held == 0 || (req->destination_owns &&
+            owner_overlap(s, element) != overlap_kind.none)) {
+            return unproved(svc, req, req->destination.root);
+        }
+        k += 1;
+    }
+    if (req->destination_owns && !value.owner_empty &&
+        value.kind != ownership_api.contents_kind.unknown) {
+        if (!req->weak_moves) {
+            return invalid(svc, req, ownership_api.event_kind.lost_ownership,
+                req->destination.root, "store would create a second owner");
+        }
+        u64 owner = owner_index(s, req->source);
+        if (owner_count(s, req->source) != 1 ||
+            !owner_reference_proved(s, value, s->allocations[owner]) ||
+            other_owner_possible(s, req->source, s->allocations[owner].key)) {
+            return unproved(svc, req, req->source.root);
+        }
+        ownership_api.owner_location mut after = ownership_api.owner_location{};
+        after.place = ownership_api.place_path{.root = req->destination.root};
+        ownership_api.mutation_result transferred = ownership_state.transfer_owner(s, svc,
+            s->allocations[owner].key, after, true, req->operation, req->source_position);
+        if (!transferred.applied) { return transferred.proof; }
+    }
+    if (req->weak_moves) {
+        ownership_api.proof_status emptied = write(s, svc, empty_value(req->source),
+            req->source, req);
+        if (!ownership_api.successful(emptied)) { return emptied; }
+    }
+    ownership_state.state mut scratch = ownership_state.empty();
+    defer ownership_state.free(&scratch);
+    k = 0;
+    while (k < req->weak_places.len) {
+        ownership_api.place_path[1] selection = {req->weak_places[k]};
+        ownership_api.contents_fact mut next = value;
+        ownership_api.borrow_relation mut@ own borrows =
+            new(ownership_api.borrow_relation, value.borrows.len);
+        u64 mut b = 0;
+        while (b < value.borrows.len) {
+            borrows[b] = value.borrows[b];
+            borrows[b].containing = rebased(&scratch, borrows[b].containing, value.place,
+                req->weak_places[k]);
+            b += 1;
+        }
+        next.borrows = borrows[..];
+        next.place = req->weak_places[k];
+        // An element that already holds this value keeps one row of it, so a loop that
+        // stores the same value again adds no alternative and the state stops changing.
+        bool mut held = false;
+        u64 mut i = 0;
+        while (i < s->contents_len && !held) {
+            held = ownership_state.same_contents(s->contents[i], next);
+            i += 1;
+        }
+        if (!held) {
+            ownership_api.mutation_result added = ownership_state.weak_contents(s, svc, next,
+                selection[..], req->weak_guard, req->operation, req->source_position);
+            if (!added.applied) {
+                del(borrows);
+                return added.proof;
+            }
+        }
+        del(borrows);
+        k += 1;
+    }
+    return complete();
+}
+
 /// Applies one effect. A failed effect leaves the input state unchanged.
 fn apply(ownership_state.state mut* s, ownership_api.services* svc,
     request* req) ownership_api.proof_status {
@@ -766,10 +1063,13 @@ fn apply(ownership_state.state mut* s, ownership_api.services* svc,
         return ownership_api.incomplete(ownership_api.incomplete_reason.missing_correspondence,
             req->operation, req->source_position);
     }
+    // Only a proved leaf of a private aggregate slot may carry projections.
+    bool projected = req->source.projections.len != 0 || req->destination.projections.len != 0;
     if (req->source.root.kind != ownership_api.entity_kind.slot ||
         req->destination.root.kind != ownership_api.entity_kind.slot ||
         !req->direct_source_proved || !req->direct_destination_proved ||
-        req->source.projections.len != 0 || req->destination.projections.len != 0 ||
+        (projected && (!req->leaf_places_proved || !leaf_path(req->source) ||
+        !leaf_path(req->destination))) ||
         ownership_state.has_residual(req->source) ||
         ownership_state.has_residual(req->destination)) {
         return unproved(svc, req, req->source.root);
@@ -796,6 +1096,9 @@ fn apply(ownership_state.state mut* s, ownership_api.services* svc,
     else if (req->kind == action.dead) { proof = do_dead(&next, &local, req); }
     else if (req->kind == action.escape) { proof = do_escape(&next, &local, req); }
     else if (req->kind == action.outside) { proof = do_outside(&next); }
+    else if (req->kind == action.stack_begin) { proof = do_stack_begin(&next, &local, req); }
+    else if (req->kind == action.stack_end) { proof = do_stack_end(&next, &local, req); }
+    else if (req->kind == action.weak_store) { proof = do_weak_store(&next, &local, req); }
     else {
         u64 index = contents_index(&next, req->source);
         if (index == U64_MAX) { proof = unproved(&local, req, req->source.root); }
