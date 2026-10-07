@@ -1,0 +1,552 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary G09.1
+//| boundary G09.2
+//| boundary G09.3
+//| boundary G11.3
+//| boundary G12.4
+//| boundary G13.1
+//| boundary G13.2
+//| boundary G13.3
+//| boundary G13.4
+//| direct-call guards ok
+/// Checks guarded call cases: branches on captured formals and mixed abort and return outcomes.
+import ownership_api;
+import ownership_call_bodies;
+import ownership_calls_env;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[2] NULLABLE = {
+    "fn callee(i32* p, bool choose) i32* { if (choose) { return p; } return null; }",
+    "fn caller(i32* p) i32 { i32* q = callee(p, true); if (q != null) { return *q; } return 0; }",
+};
+
+string[2] UNCHECKED = {
+    "fn callee(i32* p, bool choose) i32* { if (choose) { return p; } return null; }",
+    "fn caller(i32* p, bool choose) i32 { return *callee(p, choose); }",
+};
+
+// The same choice with the null return first.
+string[2] UNCHECKED_SWAPPED = {
+    "fn callee(i32* p, bool choose) i32* { if (choose) { return null; } return p; }",
+    "fn caller(i32* p, bool choose) i32 { return *callee(p, choose); }",
+};
+
+string[6] CHECKED = {
+    "fn callee(i32* p, bool choose) i32* { if (choose) { return p; } return null; }",
+    "fn caller(i32* p, bool choose) i32 {",
+    "    i32* q = callee(p, choose);",
+    "    if (q != null) { return *q; }",
+    "    return 0;",
+    "}",
+};
+
+string[2] MAYBE_ABORT = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); }",
+};
+
+string[2] RELEASES = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); del(p); }",
+};
+
+string[2] ALWAYS = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p) void { callee(true); }",
+};
+
+string[2] NEVER = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p) void { callee(false); }",
+};
+
+string[2] COPIED = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { bool f = fail; callee(f); }",
+};
+
+string[2] COMPUTED = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, i32 n) void { callee(n > 0); }",
+};
+
+string[2] CORRELATED = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); if (fail) { return; } del(p); }",
+};
+
+string[2] TWICE = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); callee(fail); del(p); }",
+};
+
+string[2] SAME_RESULT = {
+    "fn callee(i32* p, bool b) i32* { if (b) { return p; } return p; }",
+    "fn caller(i32* p, bool b) i32* { return callee(p, b); }",
+};
+
+string[6] BRANCH_LOAD = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "fn callee(owner_box mut* a, owner_box* b, bool read) i32 {",
+    "    del(a->item);",
+    "    if (read) { return *b->item; }",
+    "    return 0;",
+    "}",
+};
+
+string[2] MERGED = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); if (fail) { } else { del(p); } }",
+};
+
+string[3] WRAPPED = {
+    "fn inner(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn callee(bool fail) void { inner(fail); }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); }",
+};
+
+string[3] WRAPPED_RELEASE = {
+    "fn inner(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn callee(bool fail) void { inner(fail); }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(fail); del(p); }",
+};
+
+// `clear` stores false through its pointer. The caller value 1 of `fail` is then stale.
+string[3] STORED_BY_CALL = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn clear(bool mut* b) void { *b = false; }",
+    "fn caller(i32 mut* own p) void { bool mut fail = true; clear(&fail); callee(fail); }",
+};
+
+string[3] STORED_HERE = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p) void { bool mut fail = true; bool mut* q = &fail; *q = false;",
+    "    callee(fail); }",
+};
+
+// Only the return case of the call reaches the read of the released view.
+string[3] STORED_THEN_READ = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p) i32 { i32* v = p; del(p); bool mut fail = true;",
+    "    bool mut* q = &fail; *q = false; callee(fail); return *v; }",
+};
+
+// The branch proves `fail == 1`, and then `clear` stores false into the formal.
+string[4] STORED_FORMAL = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn clear(bool mut* b) void { *b = false; }",
+    "fn caller(i32 mut* own p, bool mut fail) i32 { if (fail) { clear(&fail); callee(fail);",
+    "    return 0; } del(p); return 1; }",
+};
+
+// The callee stores false into its own formal before it tests that formal.
+string[3] ADDRESSED_FORMAL = {
+    "fn callee(bool mut fail) void { bool mut* q = &fail; *q = false;",
+    "    if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p) void { callee(true); }",
+};
+
+// A cast to the same type keeps the captured formal value.
+string[2] CAST_FORMAL = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool fail) void { callee(cast(fail, bool)); del(p); }",
+};
+
+// The release path returns. The other path ends at the call unless the call can return.
+string[2] REFUTED = {
+    "fn callee(bool fail) void { if (fail) { panic(\"stop\"); } }",
+    "fn caller(i32 mut* own p, bool c) void { if (c) { del(p); return; } callee(false); }",
+};
+
+// A loop gives its header a back edge. The extractor splits no path, so it refuses the body.
+string[2] LOOP = {
+    "fn callee(i32 mut* own p, i32 n) void {",
+    "    i32 mut i = 0; while (i < n) { i += 1; } del(p); }",
+};
+
+fn bodies(ownership_call_bodies.bodies mut* b, string@ text, string@ names) void {
+    ownership_call_bodies.open(b, text, names);
+    ownership_call_bodies.infer_all(b);
+}
+
+// The atom of a one-atom guard: its tested formal and the value that it requires.
+fn guard_value(ownership_summary_model.summary* s, ownership_summary_model.case_record row)
+    ownership_api.predicate_atom {
+    u64 mut g = 0;
+    while (g < s->guards.len) {
+        if (ownership_summary_model.same(s->guards[g].key, row.guard)) {
+            assert(s->guards[g].positive.len == 1 && s->guards[g].negative.len == 0);
+            u64 mut k = 0;
+            while (k < s->predicates.len) {
+                if (ownership_summary_model.same(s->predicates[k].key,
+                    s->guards[g].positive[0])) { return s->predicates[k]; }
+                k += 1;
+            }
+        }
+        g += 1;
+    }
+    panic("ownership_calls_guards_test: no guard atom");
+}
+
+// The two cases of `if (fail) panic`: the abort needs fail == 1 and the return fail == 0.
+// Both test the captured value of formal local `local` of the body.
+fn split_on_formal(ownership_call_bodies.bodies* b, u64 index, u32 local) void {
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(ownership_api.successful(s->proof) && s->cases.len == 2);
+    assert(s->predicates.len == 2 && s->guards.len == 2);
+    ownership_api.entity_id formal = ownership_api.entity_id{b->inputs[index].function.key,
+        ownership_api.entity_kind.value, local + 1};
+    u64 mut i = 0;
+    while (i < 2) {
+        ownership_summary_model.case_record row = s->cases[i];
+        ownership_api.predicate_atom atom = guard_value(s, row);
+        assert(ownership_summary_model.same(atom.left, formal));
+        assert(atom.kind == ownership_api.predicate_kind.equality);
+        if (row.outcome.kind == ownership_api.outcome_kind.abort) {
+            assert(atom.lower.value == 1 && !row.outcome.possible_caller_return);
+        } else {
+            assert(row.outcome.kind == ownership_api.outcome_kind.function_return);
+            assert(atom.lower.value == 0 && row.outcome.possible_caller_return);
+        }
+        assert(ownership_summary_model.same(row.outcome.guard, row.guard));
+        i += 1;
+    }
+}
+
+fn lost(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(s->proof.failed && !ownership_api.successful(s->proof));
+    assert(ownership_call_bodies.saw(b, ownership_api.event_kind.lost_ownership));
+    assert(b->services.counts.last.operation.terminator);
+}
+
+// The null result and the view result are two guarded returns of the callee. With
+// `choose == true` only the view case runs, and the caller reads it after its null test.
+fn case_g09_2() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, NULLABLE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(callee->proof) && callee->cases.len == 2);
+    u64 mut viewing = 0;
+    u64 mut i = 0;
+    while (i < 2) {
+        ownership_summary_model.case_record row = callee->cases[i];
+        ownership_api.predicate_atom atom = guard_value(callee, row);
+        // Each case holds only the result write of its own branch.
+        assert(row.effects.len == 1);
+        if (atom.lower.value == 1) {
+            assert(row.results.len == 1);
+            viewing += 1;
+        } else { assert(row.results.len == 0); }
+        i += 1;
+    }
+    assert(viewing == 1 && b.services.counts.events == 0);
+    ownership_summary_model.summary* caller = ownership_call_bodies.summary(&b, 1);
+    assert(ownership_api.successful(caller->proof) && caller->cases.len == 2);
+    ownership_calls_env.boundary("G09.2", "", "none");
+}
+
+// A symbolic choice keeps both callee returns possible. The two results differ at one position,
+// so the caller cannot export one call result. It reads the result without a null test, and no
+// complete proof of that read exists. Flow joins the two normal cases before the read, so the
+// read finds the null case and the view case in either order. One case alone would give a
+// definite empty read or a valid read.
+fn unchecked_read(string@ text) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(!ownership_api.successful(s->proof) && s->cases.len == 0);
+    assert(b.services.counts.events == 1);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+    assert(!b.services.counts.last.operation.terminator);
+}
+
+fn case_g09_3() void {
+    unchecked_read(UNCHECKED[..]);
+    unchecked_read(UNCHECKED_SWAPPED[..]);
+    ownership_calls_env.boundary("G09.3", "", "incomplete_proof");
+}
+
+// The same symbolic choice with a null test. The joined continuation keeps both values, so
+// the summary stays incomplete. No path claims a definite error.
+fn case_g09_1() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, CHECKED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    ownership_calls_env.boundary("G09.1", "", "incomplete_proof");
+}
+
+// An unconditional caller of a body that may abort. The abort case needs no cleanup, but the
+// return case reaches the caller return with its owner (D17.18).
+fn case_g11_3() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, MAYBE_ABORT[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    split_on_formal(&b, 0, 1);
+    lost(&b, 1);
+    ownership_calls_env.boundary("G11.3", "", "lost_ownership");
+}
+
+// The wrapper composes the guarded cases of the inner body onto its own formal.
+fn case_g12_4() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"inner", "callee", "caller"};
+    bodies(&b, WRAPPED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    split_on_formal(&b, 0, 1);
+    split_on_formal(&b, 1, 1);
+    lost(&b, 2);
+    ownership_call_bodies.bodies mut released = ownership_call_bodies.bodies{};
+    bodies(&released, WRAPPED_RELEASE[..], names[..]);
+    defer ownership_call_bodies.close(&released);
+    split_on_formal(&released, 2, 2);
+    ownership_calls_env.boundary("G12.4", "", "lost_ownership");
+}
+
+// The return case releases the owner after the call. Both caller cases keep their guards.
+fn case_g13_1() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, RELEASES[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    split_on_formal(&b, 1, 2);
+    ownership_calls_env.boundary("G13.1", "", "none");
+}
+
+// `true` refutes the return case, so the caller only aborts and needs no cleanup. `false`
+// refutes the abort case, so the caller returns and loses its owner.
+fn case_g13_2() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, ALWAYS[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, 1);
+    assert(row.outcome.kind == ownership_api.outcome_kind.abort);
+    assert(row.guard.kind == ownership_api.entity_kind.none);
+    ownership_call_bodies.bodies mut never = ownership_call_bodies.bodies{};
+    bodies(&never, NEVER[..], names[..]);
+    defer ownership_call_bodies.close(&never);
+    lost(&never, 1);
+    ownership_calls_env.boundary("G13.2", "", "none");
+}
+
+// A local copy keeps the captured formal value, so the return case loses the owner.
+fn case_g13_3() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, COPIED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    lost(&b, 1);
+    ownership_calls_env.boundary("G13.3", "", "lost_ownership");
+}
+
+// A computed argument has no capture. No caller value decides the cases, so the call stays
+// unresolved. The caller keeps its owner and reports incomplete proof, not a lost owner.
+fn case_g13_4() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, COMPUTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&b, ownership_api.event_kind.lost_ownership));
+    ownership_calls_env.boundary("G13.4", "", "incomplete_proof");
+}
+
+// The return case of the call leaves `fail == 0` on the caller path. The later test of the
+// same formal then refutes its true edge, so only the release path returns. Without that atom
+// the early return would lose the owner.
+fn guard_correlation() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, CORRELATED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    split_on_formal(&b, 1, 2);
+}
+
+// After the first call the caller path holds `fail == 0`. That caller fact decides the guards
+// of the second call, so its abort case does not run again: two cases, not three.
+fn repeated_guard() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, TWICE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    split_on_formal(&b, 1, 2);
+}
+
+// Two normal cases reach one call result. Flow joins them, but one exported write cannot hold
+// two case values at one position, so the caller summary stays incomplete.
+fn joined_result() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, SAME_RESULT[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(callee->proof) && callee->cases.len == 2);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(b.services.counts.events == 0);
+}
+
+// The view of `b->item` is loaded only on the read branch. The other case does not use it, so
+// it needs no load of that root, and both cases publish.
+fn branch_load() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"callee"};
+    bodies(&b, BRANCH_LOAD[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(s->proof) && s->cases.len == 2);
+    u64 mut loads = 0;
+    u64 mut c = 0;
+    while (c < 2) {
+        u64 mut e = 0;
+        while (e < s->cases[c].effects.len) {
+            u64 mut k = 0;
+            while (k < s->effects.len) {
+                if (ownership_summary_model.same(s->effects[k].effect.key,
+                    s->cases[c].effects[e]) && s->effects[k].payload ==
+                    ownership_summary_model.payload_kind.reference_load) { loads += 1; }
+                k += 1;
+            }
+            e += 1;
+        }
+        c += 1;
+    }
+    assert(loads == 1);
+}
+
+// Two branches that meet again give one exit two paths. One case cannot hold either branch,
+// so the extractor refuses the merge and the summary stays incomplete.
+fn merged_branches() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, MERGED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+// A local whose address the body takes has no scalar fact, so no capture decides the guards of
+// the call. Without that rule the stale value 1 proves an abort that does not occur, and the
+// caller hides the lost owner or the read of a released view (D17.14).
+fn stored_scalar(string@ text, u64 count, u64 index) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"callee", "clear", "caller"};
+    string[2] pair = {"callee", "caller"};
+    bodies(&b, text, count == 3 ? names[..] : pair[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, index);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->residual_effects);
+}
+
+fn stored_scalars() void {
+    stored_scalar(STORED_BY_CALL[..], 3, 2);
+    stored_scalar(STORED_HERE[..], 2, 1);
+    stored_scalar(STORED_THEN_READ[..], 2, 1);
+    stored_scalar(STORED_FORMAL[..], 3, 2);
+}
+
+// An addressed formal has no symbol, so its branch gives no guard. Both callee cases stay
+// possible, and the caller that passes `true` reaches its return and loses its owner.
+fn addressed_formal() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, ADDRESSED_FORMAL[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(s->proof) && s->cases.len == 2);
+    assert(s->guards.len == 0 && s->predicates.len == 0);
+    assert(s->cases[0].guard.kind == ownership_api.entity_kind.none);
+    assert(s->cases[1].guard.kind == ownership_api.entity_kind.none);
+    lost(&b, 1);
+}
+
+// The same-type cast keeps the symbol of `fail`, so both caller cases keep their guards.
+fn cast_formal() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    bodies(&b, CAST_FORMAL[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    split_on_formal(&b, 1, 2);
+}
+
+// The test moves the return guard of the callee from `fail == 0` to `fail == 2`. Then no guard
+// holds for `false`, and no case of the summary covers the call. The call stays unresolved, so
+// the path keeps its return and its owner. It does not end at the call.
+fn refuted_cases() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(&b, REFUTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    split_on_formal(&b, 0, 1);
+    ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 0);
+    u64 mut k = 0;
+    while (k < callee->predicates.len) {
+        if (callee->predicates[k].lower.value == 0) {
+            callee->predicates[k].lower.value = 2;
+            callee->predicates[k].upper.value = 2;
+        }
+        k += 1;
+    }
+    ownership_call_bodies.infer(&b, 1);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(!ownership_api.successful(s->proof) && s->cases.len == 0);
+}
+
+// The refusal comes from extraction, before flow runs, so no event names the body.
+fn back_edge() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"callee"};
+    bodies(&b, LOOP[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 0);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(b.services.counts.events == 0);
+}
+
+fn main() i32 {
+    case_g09_1();
+    case_g09_2();
+    case_g09_3();
+    case_g11_3();
+    case_g12_4();
+    case_g13_1();
+    case_g13_2();
+    case_g13_3();
+    case_g13_4();
+    guard_correlation();
+    merged_branches();
+    repeated_guard();
+    joined_result();
+    branch_load();
+    stored_scalars();
+    addressed_formal();
+    cast_formal();
+    refuted_cases();
+    back_edge();
+    println("direct-call guards ok");
+    return 0;
+}

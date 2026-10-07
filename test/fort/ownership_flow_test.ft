@@ -597,6 +597,84 @@ fn direct_call_case(u32 variant) void {
     }
 }
 
+// Each exit keeps the value that its edge selected.
+struct value_probe {
+    u64 exits;
+    i64[2] values;
+    u32[2] blocks;
+}
+
+fn value_exit(void mut* opaque, ownership_api.state_view* facts,
+    ownership_api.outcome_fact outcome, ownership_api.operation_position at,
+    ownership_api.source_position where) ownership_api.proof_status {
+    value_probe mut* probe = cast(opaque, value_probe mut*);
+    assert(probe->exits < 2 && facts->predicates.len == 1);
+    assert(facts->predicates[0].kind == ownership_api.predicate_kind.equality);
+    assert(facts->predicates[0].lower.value == facts->predicates[0].upper.value);
+    probe->values[probe->exits] = facts->predicates[0].lower.value;
+    probe->blocks[probe->exits] = at.block;
+    probe->exits += 1;
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+// A switch edge selects one exact value of the condition version. Variant 0 knows nothing, so
+// both edges run. Variants 1 and 2 know the value at entry, so the other edge is not reached.
+fn value_edge_case(u32 variant) void {
+    fixture mut f = fixture{};
+    string[3] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 1; return; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.entity_id version = id(ownership_api.entity_kind.value, 7);
+    if (variant != 0) {
+        ownership_api.predicate_atom mut known = ownership_api.predicate_atom{};
+        known.kind = ownership_api.predicate_kind.equality;
+        known.left = version;
+        known.lower = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+            .value = variant == 1 ? 1 : 0};
+        known.upper = known.lower;
+        ownership_state.append_predicates(&entry, known);
+    }
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    // Variant 3 names a slot, not a value version, so the program is invalid input.
+    ownership_api.entity_id tested = variant == 3 ? id(ownership_api.entity_kind.slot, 7) : version;
+    ownership_flow.value_edge[2] edges = {
+        ownership_flow.value_edge{0, 0, tested, 1},
+        ownership_flow.value_edge{0, 1, tested, 0},
+    };
+    input.values = edges[..];
+    value_probe mut probe = value_probe{};
+    input.exit_context = cast(&probe, void mut*);
+    input.exit_observer = value_exit;
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    if (variant == 3) {
+        assert(result.failures == 1 && probe.exits == 0);
+        assert(result.first_failure.terminal.reason ==
+            ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    assert(result.failures == 0);
+    if (variant == 0) {
+        assert(result.normal_returns == 2 && probe.exits == 2);
+        assert(probe.values[0] != probe.values[1]);
+        u64 mut i = 0;
+        while (i < 2) {
+            assert(probe.values[i] == (probe.blocks[i] == 1 ? 1 : 0));
+            i += 1;
+        }
+    } else {
+        assert(result.normal_returns == 1 && probe.exits == 1);
+        assert(probe.blocks[0] == (variant == 1 ? 1 : 2));
+        assert(probe.values[0] == (variant == 1 ? 1 : 0));
+    }
+}
+
 fn defer_order(bool reverse) void {
     fixture mut f = fixture{};
     string[1] mut blocks = {"bb0: { del(move _2); dead(_2); _0 = const i32 0; return; }"};
@@ -2816,6 +2894,10 @@ fn main() i32 {
     direct_call_case(3);
     direct_call_case(4);
     direct_call_case(5);
+    value_edge_case(0);
+    value_edge_case(1);
+    value_edge_case(2);
+    value_edge_case(3);
     defer_order(false);
     defer_order(true);
     returned_view_after_defer();

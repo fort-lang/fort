@@ -3,6 +3,7 @@ import ast;
 import consts;
 import diag;
 import fir;
+import fir_flow;
 import ownership_api;
 import ownership_flow;
 import ownership_graph;
@@ -11,6 +12,7 @@ import ownership_places;
 import ownership_state;
 import ownership_summary_model;
 import ownership_transfer;
+import prim;
 import types;
 
 u32 U32_MAX = 4294967295;
@@ -44,6 +46,10 @@ struct call_site {
     ownership_api.entity_id event;
     u32 fresh_first;
     u32 fresh_count;
+    // The scalar value of each operand on the path of the call: exact, a captured formal
+    // value of this body, or unknown.
+    u64 args_first;
+    u32 args_len;
 }
 
 // Flow borrows these arrays. The program owns its entry and all nested request metadata.
@@ -65,6 +71,16 @@ struct body_program {
     bool mut@ own addressed;
     call_site mut@ own calls;
     u64 calls_len;
+    ownership_api.scalar_fact mut@ own call_args;
+    u64 call_args_len;
+    // The body is a forward tree. Each reached block keeps its one parent and the origins and
+    // scalars at its entry. A switch on a formal value adds one value edge per target.
+    u32 mut@ own parents;
+    bool mut@ own reached;
+    ownership_api.entity_id mut@ own entry_origins;
+    ownership_api.scalar_fact mut@ own entry_scalars;
+    ownership_flow.value_edge mut@ own values;
+    u64 values_len;
     u64 steps_len;
     u64 events_len;
     u64 parameters_len;
@@ -103,6 +119,12 @@ fn free(body_program mut* out) void {
     del(owned.scalars);
     del(owned.addressed);
     del(owned.calls);
+    del(owned.call_args);
+    del(owned.parents);
+    del(owned.reached);
+    del(owned.entry_origins);
+    del(owned.entry_scalars);
+    del(owned.values);
     *out = body_program{};
 }
 
@@ -317,6 +339,16 @@ fn seed(body_input* in, body_program mut* out) bool {
                 }
             } else if (fir.type_aggregate(local_at_point->ty)) {
                 contents.kind = ownership_api.contents_kind.aggregate;
+            } else {
+                // A scalar formal is a captured caller value. A call binds it as a capture.
+                // An addressed formal can change through its address, so it has no symbol.
+                contents.value_version = id(in->function.key, ownership_api.entity_kind.value,
+                    i + 1);
+                if (!out->addressed[i]) {
+                    out->scalars[i] = ownership_api.scalar_fact{
+                        .kind = ownership_api.fact_kind.symbolic,
+                        .symbol = contents.value_version};
+                }
             }
         }
         ownership_state.append_contents(&out->entry, contents);
@@ -536,11 +568,15 @@ fn basic(body_input* in, u32 src, u32 dst, ownership_transfer.action effect_acti
         .destination_owns = fir.local_at(in->function.body, dst)->ty->is_own};
 }
 
+// A bool constant is the exact value 1 or 0. `cv_to_i64` takes only an integer.
 fn constant(body_input* in, body_program* out, fir.operand input_operand)
     ownership_api.scalar_fact {
     if (input_operand.kind == fir.operand_kind.ok_const &&
-        (input_operand.value.kind == fir.const_kind.ck_int
-            || input_operand.value.kind == fir.const_kind.ck_bool)) {
+        input_operand.value.kind == fir.const_kind.ck_bool) {
+        return integer(consts.cv_eq(input_operand.value.value, consts.cv_from_bool(true)) ?
+            1 : 0);
+    } else if (input_operand.kind == fir.operand_kind.ok_const &&
+        input_operand.value.kind == fir.const_kind.ck_int) {
         i64 mut n = 0;
         if (consts.cv_to_i64(input_operand.value.value, &n)) { return integer(n); }
     } else if (direct(input_operand.place) && cast(input_operand.place.local,
@@ -1212,7 +1248,24 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
         t += 1;
     }
     if (!ownership_api.successful(out->proof)) { return; }
-    out->calls[out->calls_len] = call_site{block, gap, summary, event, first, templates};
+    if (cast(rv.ops_len, u64) > out->call_args.len - out->call_args_len) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    u64 args_first = out->call_args_len;
+    op = 0;
+    while (op < rv.ops_len) {
+        // An exact argument gets a fresh value key of this call, so a capture can name it.
+        ownership_api.scalar_fact mut argument = constant(in, out, fir.rvalue_operand(f, rv, op));
+        if (argument.kind == ownership_api.fact_kind.exact) {
+            argument.symbol = next(out, ownership_api.entity_kind.value);
+        }
+        out->call_args[out->call_args_len] = argument;
+        out->call_args_len += 1;
+        op += 1;
+    }
+    out->calls[out->calls_len] = call_site{block, gap, summary, event, first, templates,
+        args_first, rv.ops_len};
     out->calls_len += 1;
     ownership_api.operation_position at = position(in, block, gap, false);
     // Flow reports a refused charge or a missing handler at the call with these keys.
@@ -1528,6 +1581,71 @@ fn add_terminal_events(body_input* in, body_program mut* out, u32 block) bool {
     return true;
 }
 
+// A switch of two edges on a bool value. Any other switch stays unsupported.
+fn boolean_switch(body_program mut* out, fir.func* f, fir.terminator* term) bool {
+    if (term->kind != fir.term_kind.tk_switch || term->arms_len != 1 || !work(out, 1)) {
+        return false;
+    }
+    types.node* ty = fir.operand_type(f, term->cond);
+    return ty != null && ty->kind == types.type_kind.k_prim &&
+        ty->prim == prim.prim_kind.prim_bool;
+}
+
+fn restore_entry(body_program mut* out, u32 block, u64 locals) bool {
+    if (!work(out, locals * 2)) { return false; }
+    u64 base = cast(block, u64) * locals;
+    u64 mut i = 0;
+    while (i < locals) {
+        out->origins[i] = out->entry_origins[base + i];
+        out->scalars[i] = out->entry_scalars[base + i];
+        i += 1;
+    }
+    return true;
+}
+
+// Each target that flow can reach gets this block as its one parent. A back edge or a second
+// parent makes a path that this extractor does not split, so the body stays unsupported.
+// A switch on a captured formal value gives each edge the value that it selects.
+fn follow_targets(body_input* in, body_program mut* out, u32 block, fir.terminator* term,
+    u64 locals) bool {
+    fir.func* f = in->function.body;
+    ownership_api.scalar_fact tested = term->kind == fir.term_kind.tk_switch ?
+        constant(in, out, term->cond) : ownership_api.scalar_fact{};
+    i64 arm_value = term->kind == fir.term_kind.tk_switch &&
+        consts.cv_eq(fir.term_arm(f, term, 0).value, consts.cv_from_bool(true)) ? 1 : 0;
+    u32 mut index = 0;
+    u32 mut target = 0;
+    while (fir.term_targets(f, term, index, &target)) {
+        if (!work(out, locals * 2 + 2)) { return false; }
+        if (!fir_flow.reachable_target(f, term, index, &target)) {
+            index += 1;
+            continue;
+        }
+        if (target <= block || cast(target, u64) >= out->reached.len || out->reached[target]) {
+            reject(out, ownership_api.incomplete_reason.unknown_effect);
+            return false;
+        }
+        out->reached[target] = true;
+        out->parents[target] = block;
+        u64 base = cast(target, u64) * locals;
+        u64 mut i = 0;
+        while (i < locals) {
+            out->entry_origins[base + i] = out->origins[i];
+            out->entry_scalars[base + i] = out->scalars[i];
+            i += 1;
+        }
+        if (tested.kind == ownership_api.fact_kind.symbolic &&
+            tested.symbol.kind == ownership_api.entity_kind.value &&
+            out->values_len < out->values.len) {
+            out->values[out->values_len] = ownership_flow.value_edge{block, index,
+                tested.symbol, index == 0 ? arm_value : 1 - arm_value};
+            out->values_len += 1;
+        }
+        index += 1;
+    }
+    return true;
+}
+
 fn extract(body_input* in) body_program {
     body_program mut out = body_program{};
     out.proof = ownership_summary_model.complete();
@@ -1559,6 +1677,7 @@ fn extract(body_input* in) body_program {
     out.addressed = new(bool, locals);
     u64 mut count = 0;
     u64 mut extra = 0;
+    u64 mut operands = 0;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         if (!work(&out, 1)) { return out; }
@@ -1597,6 +1716,10 @@ fn extract(body_input* in) body_program {
                 }
             }
             u64 calls = call_capacity(in, &out, stmt);
+            if (stmt->kind == fir.stmt_kind.st_assign &&
+                stmt->value.kind == fir.rvalue_kind.rv_call) {
+                operands += cast(stmt->value.ops_len, u64);
+            }
             if (projections > (U64_MAX - extra) / 2 || calls > U64_MAX - extra - projections * 2) {
                 reject(&out, ownership_api.incomplete_reason.invalid_input);
                 return out;
@@ -1641,6 +1764,28 @@ fn extract(body_input* in) body_program {
     out.origins = new(ownership_api.entity_id, locals);
     out.scalars = new(ownership_api.scalar_fact, locals);
     out.calls = new(call_site, count);
+    if (operands > types.TYPE_MAX_SIZE / sizeof(ownership_api.scalar_fact)) {
+        reject(&out, ownership_api.incomplete_reason.invalid_input);
+        return out;
+    }
+    out.call_args = new(ownership_api.scalar_fact, operands);
+    if (locals != 0 && blocks > types.TYPE_MAX_SIZE / sizeof(ownership_api.scalar_fact) / locals ||
+        blocks > types.TYPE_MAX_SIZE / sizeof(ownership_flow.value_edge) / 2 ||
+        !work(&out, blocks * (locals * 2 + 4))) {
+        reject(&out, ownership_api.incomplete_reason.invalid_input);
+        return out;
+    }
+    out.parents = new(u32, blocks);
+    out.reached = new(bool, blocks);
+    out.entry_origins = new(ownership_api.entity_id, blocks * locals);
+    out.entry_scalars = new(ownership_api.scalar_fact, blocks * locals);
+    out.values = new(ownership_flow.value_edge, blocks * 2);
+    u64 mut parent = 0;
+    while (parent < blocks) {
+        out.parents[parent] = U32_MAX;
+        parent += 1;
+    }
+    out.reached[0] = true;
     out.entry = ownership_state.empty();
     out.metadata = ownership_state.empty();
     out.next_key = cast(locals * 2 + 2, u32);
@@ -1654,6 +1799,11 @@ fn extract(body_input* in) body_program {
             reject(&out, ownership_api.incomplete_reason.invalid_input);
             return out;
         }
+        if (!out.reached[b]) {
+            b += 1;
+            continue;
+        }
+        if (b > 0 && !restore_entry(&out, b, locals)) { return out; }
         u32 mut gap = 0;
         while (gap < fir.block_statement_count(f, b)) {
             fir.statement* stmt = fir.block_statement(f, b, gap);
@@ -1706,18 +1856,15 @@ fn extract(body_input* in) body_program {
             current->term.kind != fir.term_kind.tk_check &&
             current->term.kind != fir.term_kind.tk_check_overwrite &&
             current->term.kind != fir.term_kind.tk_fail &&
-            current->term.kind != fir.term_kind.tk_trap) {
+            current->term.kind != fir.term_kind.tk_trap &&
+            !boolean_switch(&out, f, &current->term)) {
             reject(&out, ownership_api.incomplete_reason.unknown_effect);
             return out;
         }
-        if ((current->term.kind == fir.term_kind.tk_goto ||
-            current->term.kind == fir.term_kind.tk_check ||
-            current->term.kind == fir.term_kind.tk_check_overwrite) &&
-            current->term.target <= b) {
-            reject(&out, ownership_api.incomplete_reason.unknown_effect);
-            return out;
-        }
-        if (current->term.kind == fir.term_kind.tk_check) {
+        if (!follow_targets(in, &out, b, &current->term, locals)) { return out; }
+        if (current->term.kind == fir.term_kind.tk_switch) {
+            out.definite_prefix = false;
+        } else if (current->term.kind == fir.term_kind.tk_check) {
             ownership_api.scalar_fact condition = constant(in, &out, current->term.cond);
             if (condition.kind != ownership_api.fact_kind.exact || condition.value == 0) {
                 out.definite_prefix = false;
@@ -1728,10 +1875,7 @@ fn extract(body_input* in) body_program {
             out.definite_prefix = false;
         }
         if (!add_terminal_events(in, &out, b)) { return out; }
-        if (current->term.kind == fir.term_kind.tk_return ||
-            current->term.kind == fir.term_kind.tk_fail ||
-            current->term.kind == fir.term_kind.tk_trap) { break; }
-        b = current->term.target;
+        b += 1;
     }
     if (out.held_inline_address) {
         reject(&out, ownership_api.incomplete_reason.unknown_effect);
@@ -1746,6 +1890,7 @@ fn flow(body_input* in, body_program* out) ownership_flow.program {
     return ownership_flow.program{.function = in->function.body, .identity = in->function.key,
         .entry = &out->entry, .services = in->services, .limits = &in->limits,
         .steps = out->steps[..out->steps_len], .parameters = out->parameters[..out->parameters_len],
+        .values = out->values[..out->values_len],
         .events = out->events[..out->events_len], .source_files = in->source_files,
         .result_slot = reference(result) ? slot(in, 0).root : ownership_api.entity_id{},
         .supplied_complete = !out->residual_effects, .verified_fir = in->function.verified};
