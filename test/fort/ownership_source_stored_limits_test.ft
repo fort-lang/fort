@@ -1,0 +1,302 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| loan limits ok
+//| event limits ok
+/// Holds the known limits of the stored run on programs of test/lang/run: each body has
+/// complete stored correspondence, incomplete stored proof and no violation in any row. A
+/// change in the flow that proves one of them changes this test. Each program keeps its file
+/// lines, so a line here is the line of that file; a directive line is empty.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+fn analyze(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(text, lines[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+// The stored row of main: in the stored scope, not proved, no violation in either row. The
+// local row leaves the body outside its scope or has the same limit.
+fn limited(ownership_source_env.env mut* e) ownership_source_local.context* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", "main");
+    ownership_source_local.context* c = &row->stored;
+    assert(c->solved && c->correspondence == ownership_source_local.status.complete);
+    assert(!ownership_api.successful(c->proof) && c->violations_len == 0);
+    assert(row->local.violations_len == 0);
+    return c;
+}
+
+// The flow refuses the loan that begins at `line`: the effect before it may keep an alias of
+// the collection that the flow cannot follow. The refusal is incomplete proof, not an event.
+fn loan_refused(ownership_source_env.env mut* e, u32 line) void {
+    ownership_source_local.context* c = limited(e);
+    ownership_api.terminal_failure t = c->proof.terminal;
+    if (t.reason != ownership_api.incomplete_reason.missing_correspondence ||
+        t.source.line != line || c->unvalidated != 0 || t.limit.present) {
+        eprintln("loan at ", line, ": reason ", cast(t.reason, u64), " at ", t.source.line);
+        assert(false);
+    }
+    // The local row has no loan proof: the gap range_loan at the same loop.
+    ownership_source.body* row = ownership_source_env.find(e, "main", "main");
+    assert(row->local.gap == ownership_source_local.missing.range_loan);
+    assert(row->local.gap_source.line == line);
+}
+
+// The flow meets one event at `line` and validates none.
+fn event_unwitnessed(ownership_source_env.env mut* e, u32 line) void {
+    ownership_source_local.context* c = limited(e);
+    assert(c->unvalidated == 1 && c->proof.terminal.source.line == line);
+}
+
+// A range loop over a string constant after print calls. A print call writes storage that
+// the flow cannot name, so it cannot prove that a later loan keeps its collection.
+fn range_for() void {
+    string[31] lines = {
+        "",
+        "",
+        "//| 6",
+        "//| 5 o",
+        "//| 1 2 3",
+        "//| 6",
+        "fn main() i32 {",
+        "    i32[3] a = {1, 2, 3};",
+        "    i32 mut sum = 0;",
+        "    for (i32 v : a) {",
+        "        sum += v;",
+        "    }",
+        "    println(sum);",
+        "    i32 mut count = 0;",
+        "    char mut last = 'a';",
+        "    for (char c : \"hello\") {",
+        "        count++;",
+        "        last = c;",
+        "    }",
+        "    println(count, \" \", last);",
+        "    for (i32 mut v : a) {",
+        "        v *= 2;",
+        "    }",
+        "    println(a[0], \" \", a[1], \" \", a[2]);",
+        "    i32 mut again = 0;",
+        "    for (i32 v : a) {",
+        "        again += v;",
+        "    }",
+        "    println(again);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    loan_refused(&e, 16);
+}
+
+// The same limit at a loop over an empty string constant.
+fn range_for_copies() void {
+    string[27] lines = {
+        "",
+        "",
+        "//| 6",
+        "//| 1 2 100",
+        "//| 3",
+        "//| 5",
+        "fn main() i32 {",
+        "    i32[3] mut a = {1, 2, 3};",
+        "    i32 mut sum = 0;",
+        "    for (i32 v : a) {",
+        "        a[2] = 100;",
+        "        sum += v;",
+        "    }",
+        "    println(sum);",
+        "    println(a[0], \" \", a[1], \" \", a[2]);",
+        "    i32 mut hops = 0;",
+        "    for (i32 v : a) {",
+        "        hops++;",
+        "    }",
+        "    println(hops);",
+        "    i32 mut empty = 5;",
+        "    for (char c : \"\") {",
+        "        empty = 0;",
+        "    }",
+        "    println(empty);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    loan_refused(&e, 22);
+}
+
+// A loop over a string view of a span owner, after extern reads and a print call.
+fn read_stdin() void {
+    string[32] lines = {
+        "",
+        "",
+        "//< hello",
+        "//< world",
+        "",
+        "//| hello",
+        "//| world",
+        "//| 12 2",
+        "extern fn read(i32 fd, u8 mut* buf, u64 n) i64;",
+        "",
+        "fn main() i32 {",
+        "    u8 mut@ own buf = new(u8, 64);",
+        "    defer del(buf);",
+        "    u64 mut total = 0;",
+        "    while (total < buf.len) {",
+        "        i64 n = read(0, &buf[total], buf.len - total);",
+        "        if (n <= 0) {",
+        "            break;",
+        "        }",
+        "        total += cast(n, u64);",
+        "    }",
+        "    string text = cast(buf[..total], string);",
+        "    print(text);",
+        "    i32 mut lines = 0;",
+        "    for (char c : text) {",
+        "        if (c == '\\n') {",
+        "            lines++;",
+        "        }",
+        "    }",
+        "    println(total, \" \", lines);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    loan_refused(&e, 25);
+}
+
+// A loop over a span owner of arrays, after print calls.
+fn multidim_new() void {
+    string[23] lines = {
+        "",
+        "",
+        "//| 3 4 0",
+        "//| 5 5",
+        "//| 10",
+        "fn main() i32 {",
+        "    i32 n = 3;",
+        "    i32[4] mut@ own g = new(i32[4], n);",
+        "    println(g.len, \" \", g[1].len, \" \", g[2][3]);",
+        "    g[1][2] = 5;",
+        "    i32[4] row = g[1];",
+        "    println(g[1][2], \" \", row[2]);",
+        "    i32 mut total = 0;",
+        "    for (i32[4] r : g) {",
+        "        for (i32 v : r) {",
+        "            total += v;",
+        "        }",
+        "    }",
+        "    total += 5;",
+        "    println(total);",
+        "    del(g);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    loan_refused(&e, 14);
+}
+
+// A loop over a span owner of floats, after print calls.
+fn float_span_writes() void {
+    string[25] lines = {
+        "",
+        "",
+        "//| 4 0.0 0.0",
+        "//| 0.5 1.5 2.5 3.5",
+        "//| 8.0",
+        "// A span of floats is allocated zeroed, written through and read back, and",
+        "// `del` releases it (D10.2, D6.9).",
+        "fn main() i32 {",
+        "    i64 count = 4;",
+        "    f64 mut@ own values = new(f64, count);",
+        "    println(values.len, \" \", values[0], \" \", values[3]);",
+        "    u64 mut i = 0;",
+        "    while (i < values.len) {",
+        "        values[i] = cast(i, f64) + 0.5;",
+        "        i += 1;",
+        "    }",
+        "    println(values[0], \" \", values[1], \" \", values[2], \" \", values[3]);",
+        "    f64 mut total = 0.0;",
+        "    for (f64 v : values) {",
+        "        total = total + v;",
+        "    }",
+        "    println(total);",
+        "    del(values);",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    loan_refused(&e, 19);
+}
+
+// The program overwrites a live owner and traps at run time. The flow meets the event, but
+// no witness path crosses the print call before it (A06), so it stays incomplete proof.
+fn overwrite_own_element() void {
+    string[18] lines = {
+        "",
+        "",
+        "",
+        "",
+        "//| 3",
+        "// The overwrite check reaches an owning element of an array (D17.7): the",
+        "// first assignment writes an empty span, the second would drop the",
+        "// allocation the element already holds. The position is the assignment that",
+        "// would drop it, column 15 here (toolchain.md 5.2).",
+        "fn main() i32 {",
+        "    i32 n = 3;",
+        "    i32 mut@ own[2] mut owners = {};",
+        "    owners[0] = new(i32, n);",
+        "    println(owners[0].len);",
+        "    owners[0] = new(i32, n);",
+        "    println(\"unreachable\");",
+        "    return 0;",
+        "}",
+    };
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    event_unwitnessed(&e, 15);
+}
+
+fn main() i32 {
+    range_for();
+    range_for_copies();
+    read_stdin();
+    multidim_new();
+    float_span_writes();
+    println("loan limits ok");
+    overwrite_own_element();
+    println("event limits ok");
+    return 0;
+}

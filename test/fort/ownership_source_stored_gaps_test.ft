@@ -1,0 +1,181 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| stack escapes ok
+//| unsupported shapes ok
+//| loan statements ok
+//| exclusion ok
+/// Tests the gaps of the stored run: a stack borrow that leaves tracked storage, the shapes
+/// that it cannot model, the loan statements that it cannot check, and the one count of a
+/// violation that the local run validates.
+import fir;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[26] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "struct view { u8@ bytes; u64 at; }",
+    "fn id(i32* p) i32* { return p; }",
+    "fn made() box { return box{null, 0}; }",
+    "fn wrap(i32 mut* p) box { return box{p, 0}; }",
+    "fn wrapped_escape(box mut* out) void { i32 mut x = 1; *out = wrap(&x); }",
+    "fn call_escape(i32* mut* out) void { i32 x = 1; *out = id(&x); }",
+    "fn copied_escape(i32* mut* out) void { i32 x = 1; i32* q = &x; i32* r = q; *out = r; }",
+    "fn field_escape(box mut* out) void { i32 mut x = 1; box b = box{&x, 0}; *out = b; }",
+    "fn view_escape(view mut* out) void { u8[4] mut buf = {}; out->bytes = buf[..]; }",
+    "fn scalar_through(box* out) i32 { i32 x = 1; i32* q = &x; return *q + out->n; }",
+    "fn heap_store(i32* mut* out, i32* p) void { *out = p; }",
+    "fn call_into() i32 { box b = made(); return b.n; }",
+    "fn returned() box { return box{null, 0}; }",
+    "fn dynamic_move(u64 i) void {",
+    "    i32 mut* own[2] mut a = {new(i32), new(i32)}; i32 mut* own t = move(a[i]);",
+    "    del(t); del(a[0]); del(a[1]);",
+    "}",
+    "fn dynamic_release(u64 i) void {",
+    "    i32 mut* own[2] mut a = {new(i32), new(i32)}; del(a[i]); del(a[0]); del(a[1]);",
+    "}",
+    "fn local_leak() void { i32 mut* own p = new(i32); }",
+    "fn both() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 0}; i32* q = p; del(p); return *b.p + *q;",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source.body* {
+    return ownership_source_env.find(e, "main", name);
+}
+
+fn gap(ownership_source_env.env mut* e, string name, ownership_source_local.missing why) void {
+    ownership_source.body* found = row(e, name);
+    if (found->stored.gap != why ||
+        found->stored.correspondence != ownership_source_local.status.incomplete) {
+        eprintln(name, ": gap ", cast(found->stored.gap, u64), ", expected ", cast(why, u64));
+        assert(false);
+    }
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name);
+    if (found->stored.correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(found->stored.proof)) {
+        eprintln(name, ": not proved, gap ", cast(found->stored.gap, u64));
+        assert(false);
+    }
+}
+
+// A borrow of local storage that reaches storage the run does not track can outlive the
+// local: the call result that may return it, a copy of it, a TA that holds it, and a slice
+// of a local array. A scalar read through a pointer carries no borrow, and a borrow of
+// another source is no stack borrow.
+fn stack_escapes(ownership_source_env.env mut* e) void {
+    // A call result written through a pointer may return the address of x.
+    gap(e, "wrapped_escape", ownership_source_local.missing.escape);
+    // A reference result of a fort call goes through a TL, whose unknown value is the first
+    // gap; the store of that TL then escapes too.
+    gap(e, "call_escape", ownership_source_local.missing.fort_call);
+    gap(e, "copied_escape", ownership_source_local.missing.escape);
+    gap(e, "field_escape", ownership_source_local.missing.escape);
+    gap(e, "view_escape", ownership_source_local.missing.escape);
+    proved(e, "scalar_through");
+    proved(e, "heap_store");
+    // The local run has no stack sources: an address of a local is an unknown source there.
+    assert(row(e, "copied_escape")->local.gap == ownership_source_local.missing.unknown_source);
+    // Each TL and leaf that holds the borrow is marked: x's address, q and r.
+    ownership_source.body* copied = row(e, "copied_escape");
+    u64 mut marked = 0;
+    u64 mut u = 0;
+    while (u < copied->stored.stack_units.len) {
+        if (copied->stored.stack_units[u]) { marked += 1; }
+        u += 1;
+    }
+    assert(marked == 3);
+    println("stack escapes ok");
+}
+
+fn unsupported_shapes(ownership_source_env.env mut* e) void {
+    // A fort call result into a TA has no leaf facts.
+    gap(e, "call_into", ownership_source_local.missing.fort_call);
+    // An aggregate result is caller storage that a pointer argument can alias (D17.15).
+    gap(e, "returned", ownership_source_local.missing.aggregate_result);
+    // A move or a release through a variable index selects an element that the run cannot
+    // name, so its path stops there with incomplete proof.
+    gap(e, "dynamic_move", ownership_source_local.missing.dynamic_element);
+    gap(e, "dynamic_release", ownership_source_local.missing.dynamic_element);
+    ownership_source.body* moved = row(e, "dynamic_move");
+    assert(!ownership_api.successful(moved->stored.proof) &&
+        moved->stored.violations_len == 0);
+    // The path stops at the move itself, not at a later use of its unknown result.
+    assert(moved->stored.proof.terminal.source.line == 16);
+    println("unsupported shapes ok");
+}
+
+// A loan region keeps the flow able to check the loan only with whole-local writes and
+// without fort calls. The checker rejects a fort call there (`fail/ownership/045`), so this
+// test builds the statements.
+fn loan_statements(ownership_source_env.env mut* e) void {
+    ownership_source.body* found = row(e, "scalar_through");
+    ownership_source_local.context* c = &found->stored;
+    fir.statement mut s = fir.statement{.kind = fir.stmt_kind.st_assign,
+        .place = fir.place_local(1)};
+    s.value = fir.rvalue{.kind = fir.rvalue_kind.rv_use};
+    assert(ownership_source_local.loan_checkable(c, &s));
+    s.value = fir.rvalue{.kind = fir.rvalue_kind.rv_call, .callee = fir.callee_kind.cl_fn};
+    assert(!ownership_source_local.loan_checkable(c, &s));
+    s.value.callee = fir.callee_kind.cl_value;
+    assert(!ownership_source_local.loan_checkable(c, &s));
+    s.value.callee = fir.callee_kind.cl_extern;
+    assert(ownership_source_local.loan_checkable(c, &s));
+    // A write through a projection or a release of one is no whole-local write.
+    s.value = fir.rvalue{.kind = fir.rvalue_kind.rv_use};
+    s.place.proj_len = 1;
+    assert(!ownership_source_local.loan_checkable(c, &s));
+    s.kind = fir.stmt_kind.st_del;
+    assert(!ownership_source_local.loan_checkable(c, &s));
+    s.place.proj_len = 0;
+    assert(ownership_source_local.loan_checkable(c, &s));
+    s.kind = fir.stmt_kind.st_dead;
+    assert(ownership_source_local.loan_checkable(c, &s));
+    println("loan statements ok");
+}
+
+// A violation that the local run validates counts once, in the local row. The stored run
+// keeps its own violation through the field, which comes first on its path.
+fn exclusion(ownership_source_env.env mut* e) void {
+    ownership_source.body* leak = row(e, "local_leak");
+    assert(leak->local.violations_len == 1 && leak->stored.violations_len == 0);
+    // The stored run stopped at that violation, so its own proof stays incomplete there.
+    assert(!ownership_api.successful(leak->stored.proof));
+    assert(leak->stored.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(leak->stored.proof.terminal.source.line ==
+        leak->local.violations[0].source.line);
+    ownership_source.body* both = row(e, "both");
+    assert(both->local.violations_len == 1 && both->local.violations[0].name == "q");
+    assert(both->stored.violations_len == 1);
+    assert(both->stored.violations[0].leaf != ownership_source_local.WHOLE);
+    println("exclusion ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    stack_escapes(&e);
+    unsupported_shapes(&e);
+    loan_statements(&e);
+    exclusion(&e);
+    return 0;
+}

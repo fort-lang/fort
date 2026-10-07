@@ -1,0 +1,182 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| legal programs ok
+//| known limits ok
+//| scope ok
+/// Probes the stored run for false hard errors on legal code: each legal body is proved,
+/// declared with incomplete proof, or outside the stored scope, and no row validates a
+/// violation. The known limits of this increment stay incomplete proof.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[56] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "struct pair { i32 mut* own a; i32 mut* own b; }",
+    "struct holder { i32 mut* own p; }",
+    "struct view { u8@ bytes; u64 at; }",
+    "fn take_box(box b) void { }",
+    "fn set(i32 mut* p) void { *p = 2; }",
+    "fn use(i32 v) i32 { return v; }",
+    "fn loop_stack(i32 n) i32 {",
+    "    i32 mut t = 0; i32 mut i = 0;",
+    "    while (i < n) { i32 x = i; i32* q = &x; t += *q; i += 1; }",
+    "    return t;",
+    "}",
+    "fn outer_stack(i32 n) i32 {",
+    "    i32 mut x = 0; i32 mut* q = &x; i32 mut i = 0;",
+    "    while (i < n) { set(q); i += 1; }",
+    "    return *q;",
+    "}",
+    "fn loop_field(i32 n) void {",
+    "    i32 mut* own p = new(i32); i32 mut i = 0;",
+    "    while (i < n) { box b = box{p, i}; *b.p = 1; i += 1; }",
+    "    del(p);",
+    "}",
+    "fn field_kept_across_loop(i32 n) i32 {",
+    "    box mut b = box{null, 0}; i32 mut t = 0; i32 mut i = 0;",
+    "    while (i < n) { i32 mut x = i; b.p = &x; t += *b.p; i += 1; }",
+    "    return t;",
+    "}",
+    "fn move_back() void {",
+    "    pair mut s = pair{new(i32), new(i32)}; i32 mut* own t = move(s.a); s.a = move(t);",
+    "    del(s.a); del(s.b);",
+    "}",
+    "fn holder_new() void { holder h = holder{new(i32)}; del(h.p); }",
+    "fn refill() void {",
+    "    pair mut s = pair{new(i32), new(i32)}; del(s.a); s.a = new(i32); del(s.a); del(s.b);",
+    "}",
+    "fn set_local() i32 { i32 mut x = 1; set(&x); return x; }",
+    "fn pass_local() void { i32 mut x = 1; box b = box{&x, 0}; take_box(b); }",
+    "fn get(box b) i32* { return b.p; }",
+    "fn param_address(i32 x) i32 { i32* q = &x; return *q; }",
+    "fn decimal(view v) bool {",
+    "    for (u8 c : v.bytes) { if (c < 48) { return false; } }",
+    "    return true;",
+    "}",
+    "fn conditional(bool c) void {",
+    "    i32 mut* own p = new(i32); box mut b = box{null, 0};",
+    "    if (c) { b.p = p; } if (b.p != null) { *b.p = 1; } del(p);",
+    "}",
+    "fn weak_loop(u64 n, i32* p, i32* q) i32 {",
+    "    i32*[4] mut a = {p, p, p, p}; u64 mut i = 0; while (i < n) { a[i % 4] = q; i += 1; }",
+    "    return *a[0];",
+    "}",
+    "fn weak_same(u64 n, i32* p) i32 {",
+    "    i32*[4] mut a = {p, p, p, p}; u64 mut i = 0; while (i < n) { a[i % 4] = p; i += 1; }",
+    "    return *a[0];",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+fn stored(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    // No row of a legal body validates a violation.
+    if (row->local.violations_len != 0 || row->stored.violations_len != 0) {
+        eprintln(name, ": a legal body has a violation");
+        assert(false);
+    }
+    return &row->stored;
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = stored(e, name);
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof)) {
+        eprintln(name, ": not proved, gap ", cast(c->gap, u64));
+        assert(false);
+    }
+}
+
+fn declared(ownership_source_env.env mut* e, string name) void {
+    ownership_source_local.context* c = stored(e, name);
+    if (c->correspondence != ownership_source_local.status.complete ||
+        ownership_api.successful(c->proof)) {
+        eprintln(name, ": not declared incomplete");
+        assert(false);
+    }
+}
+
+fn outside(ownership_source_env.env mut* e, string name, ownership_source_local.missing why)
+    void {
+    ownership_source_local.context* c = stored(e, name);
+    if (c->correspondence != ownership_source_local.status.incomplete || c->gap != why) {
+        eprintln(name, ": gap ", cast(c->gap, u64));
+        assert(false);
+    }
+}
+
+fn legal_programs(ownership_source_env.env mut* e) void {
+    // Each iteration begins the storage of x again; q ends with it.
+    proved(e, "loop_stack");
+    // An unknown call cannot end the caller's local x.
+    proved(e, "outer_stack");
+    proved(e, "loop_field");
+    // b.p keeps the borrow of the last x when the next x begins. The borrow retires to the
+    // ended instances, and the store of the new address replaces it before its use.
+    proved(e, "field_kept_across_loop");
+    proved(e, "move_back");
+    proved(e, "holder_new");
+    proved(e, "refill");
+    proved(e, "set_local");
+    proved(e, "pass_local");
+    // A returned leaf of a parameter borrows caller storage, which outlives the return.
+    proved(e, "get");
+    proved(e, "param_address");
+    // The loan of a parameter field: the flow proves that the loop keeps the collection.
+    proved(e, "decimal");
+    println("legal programs ok");
+}
+
+fn known_limits(ownership_source_env.env mut* e) void {
+    // The flow does not refine a null test of a leaf, so the path where b.p stays null
+    // reaches the use: incomplete proof, no violation (the local run has this limit for TLs).
+    declared(e, "conditional");
+    // A weak store keeps two values in each element, so a later read is unproved. A loop
+    // adds no further alternative, so the run converges within its budget.
+    declared(e, "weak_loop");
+    ownership_source.body* row = ownership_source_env.find(e, "main", "weak_loop");
+    assert(!row->stored.first_refusal.terminal.present);
+    // A weak store of the value that each element already holds adds nothing: proved.
+    proved(e, "weak_same");
+    println("known limits ok");
+}
+
+// The stored scope is not the local scope: a TA, a stack source or a loan leaves the local
+// row incomplete and can complete the stored row.
+fn scope(ownership_source_env.env mut* e) void {
+    string[6] names = {"loop_stack", "field_kept_across_loop", "move_back", "holder_new",
+        "set_local", "decimal"};
+    u64 mut i = 0;
+    while (i < names.len) {
+        ownership_source.body* row = ownership_source_env.find(e, "main", names[i]);
+        assert(row->local.correspondence == ownership_source_local.status.incomplete);
+        assert(row->stored.correspondence == ownership_source_local.status.complete);
+        i += 1;
+    }
+    println("scope ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    legal_programs(&e);
+    known_limits(&e);
+    scope(&e);
+    return 0;
+}

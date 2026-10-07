@@ -1,0 +1,289 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| copies ok
+//| constant global copies ok
+//| comparisons ok
+//| releases and slices ok
+//| constant globals ok
+//| controls ok
+//| slices ok
+//| pointer fields ok
+/// Tests the gap for each read of a reference value out of storage whose contents the run
+/// does not follow, in the local row and the stored row alike: a copy, an aggregate member, a
+/// return, a comparison, a cast to an integer, a release and a slice (D17.14: copying a
+/// dangling reference is an invalid use). It also holds a use through the reference that a
+/// constant global's address names: in an array, in a constant of a constant, and in another
+/// module. A line here is a line of SOURCE.
+import check_env;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[85] SOURCE = {
+    "import lib;",
+    "struct box { i32 mut* p; i32 n; }",
+    "i32 mut* mut GM = null;",
+    "i32 mut* mut GM2 = null;",
+    "i32 mut* mut* GP = &GM;",
+    "i32 mut* mut** GPP = &GP;",
+    "i32 mut* mut*[2] GAR = {&GM, &GM2};",
+    "box mut GB = box{null, 0};",
+    "box mut GB2 = box{null, 0};",
+    "u8@ mut GS = {};",
+    "string CS = \"abc\";",
+    "fn use_ref(i32* r) i32 { return *r; }",
+    "fn g2g() void { i32 mut* own p = new(i32); GM = p; del(p); GM2 = GM; }",
+    "fn gb2gb() void { i32 mut* own p = new(i32); GB.p = p; del(p); GB2 = GB; }",
+    "fn h2h() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* mut* own h1 = new(i32 mut*); i32 mut* mut* own h2 = new(i32 mut*);",
+    "    *h1 = p; del(p); *h2 = *h1; del(h1); del(h2);",
+    "}",
+    "fn caller2caller(i32 mut* mut* a, i32 mut* mut* b) void { *a = *b; }",
+    "fn caller_box(box mut* a, box* b) void { *a = *b; }",
+    "fn literal_g() void { i32 mut* own p = new(i32); GM = p; del(p); GB = box{GM, 0}; }",
+    "fn return_g() i32 mut* { i32 mut* own p = new(i32); GM = p; del(p); return GM; }",
+    "fn gp2h() void {",
+    "    i32 mut* own p = new(i32); GM = p; del(p);",
+    "    i32 mut* mut* own h = new(i32 mut*); *h = *GP; del(h);",
+    "}",
+    "fn gp2g() void { i32 mut* own p = new(i32); GM = p; del(p); GM2 = *GP; }",
+    "fn gp_literal() void { i32 mut* own p = new(i32); GM = p; del(p); GB = box{*GP, 0}; }",
+    "fn g_compare() i32 { i32 mut* own p = new(i32); GM = p; del(p); return GM == null ? 0 : 1; }",
+    "fn gp_compare() i32 {",
+    "    i32 mut* own p = new(i32); GM = p; del(p); return *GP == null ? 0 : 1;",
+    "}",
+    "fn g_integer() u64 { i32 mut* own p = new(i32); GM = p; del(p); return cast(GM, u64); }",
+    "fn heap_release() void {",
+    "    i32 mut* own p = new(i32); i32 mut* own mut* own h = new(i32 mut* own);",
+    "    *h = move(p); del(*h); del(h);",
+    "}",
+    "fn g_slice() u8 { u8 mut@ own s = new(u8, 4); GS = s; del(s); u8@ t = GS[0..1]; return 0; }",
+    "fn array_constant() i32 { i32 mut* own p = new(i32); GM = p; del(p); return **GAR[0]; }",
+    "fn constant_of_constant() i32 {",
+    "    i32 mut* own p = new(i32); GM = p; del(p); return ***GPP;",
+    "}",
+    "fn other_module() i32 { i32 mut* own p = new(i32); lib.LM = p; del(p); return **lib.LP; }",
+    "fn return_gp() i32 mut* { i32 mut* own p = new(i32); GM = p; del(p); return *GP; }",
+    "fn heap_static() void {",
+    "    i32 mut* mut* mut* own h = new(i32 mut* mut*); *h = GP; del(h);",
+    "}",
+    "fn constant_compare() i32 { return GP == null ? 0 : 1; }",
+    "fn constant_slice() u8 { string t = CS[1..]; return cast(t[0], u8); }",
+    "struct sv { u8@ s; u8@ t; i32 n; }",
+    "struct obox { i32 mut* own p; }",
+    "u8@ mut GS2 = {};",
+    "u8[4] mut GARR = {1, 2, 3, 4};",
+    "fn slice_to_global() void {",
+    "    u8 mut@ own s = new(u8, 4); GS = s; del(s); GS2 = GS[0..1];",
+    "}",
+    "fn slice_to_heap() void {",
+    "    u8 mut@ own s = new(u8, 4); sv mut* own h = new(sv); h->s = s; del(s);",
+    "    h->t = h->s[0..1]; del(h);",
+    "}",
+    "fn slice_to_caller(sv mut* out, sv* src) void { out->s = src->s[1..2]; }",
+    "fn slice_to_taken() i32 {",
+    "    u8 mut@ own s = new(u8, 4); GS = s; del(s);",
+    "    u8@ mut t = {}; u8@ mut* tp = &t; t = GS[0..1]; return 0;",
+    "}",
+    "fn slice_to_aggregate() i32 {",
+    "    u8 mut@ own s = new(u8, 4); GS = s; del(s); sv mut v = sv{}; v.s = GS[0..1];",
+    "    return v.n;",
+    "}",
+    "fn slice_of_parameter(u8@ s) void { GS2 = s[0..1]; }",
+    "fn slice_of_global_array() void { GS2 = GARR[0..2]; }",
+    "fn store_owner(obox mut* o) void { o->p = new(i32); }",
+    "struct msv { u8 mut@ s; i32 n; }",
+    "fn tl_ptr_store() void { u8 mut@ own s = new(u8, 4); u8 mut@ t = s; del(s); *t.ptr = 1; }",
+    "fn tl_ptr_load() u8 { u8 mut@ own s = new(u8, 4); u8 mut@ t = s; del(s); return *t.ptr; }",
+    "fn tl_ptr_store_ok() void { u8 mut@ own s = new(u8, 4); u8 mut@ t = s; *t.ptr = 1; del(s); }",
+    "fn tl_ptr_store_param(u8 mut@ t) void { *t.ptr = 1; }",
+    "fn ta_ptr_store_ok() void {",
+    "    u8 mut@ own s = new(u8, 4); msv b = msv{s, 0}; *b.s.ptr = 1; del(s);",
+    "}",
+    "fn ta_ptr_load() u8 {",
+    "    u8 mut@ own s = new(u8, 4); msv b = msv{s, 0}; u8 v = *b.s.ptr; del(s); return v;",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+string[2] LIB = {
+    "i32 mut* mut LM = null;",
+    "i32 mut* mut* LP = &LM;",
+};
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    assert(found->local.solved && found->stored.solved && found->stored.stored);
+    return found;
+}
+
+// The gap unknown_source at `line` and `col` in one run.
+fn gap_at(string name, string run, ownership_source_local.context* c, u32 line, u32 col)
+    void {
+    if (c->gap != ownership_source_local.missing.unknown_source ||
+        c->correspondence != ownership_source_local.status.incomplete ||
+        c->gap_source.line != line || c->gap_source.col != col) {
+        eprintln(name, " ", run, ": gap ", cast(c->gap, u64), " at ", c->gap_source.line, ":",
+            c->gap_source.col);
+        assert(false);
+    }
+    assert(c->violations_len == 0 && !ownership_api.successful(c->proof));
+}
+
+// The same gap in the local row and in the stored row.
+fn both(ownership_source_env.env mut* e, string name, u32 line, u32 col) void {
+    ownership_source.body* found = row(e, name);
+    gap_at(name, "local", &found->local, line, col);
+    gap_at(name, "stored", &found->stored, line, col);
+}
+
+fn proved_in(string name, string run, ownership_source_local.context* c) void {
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof) || c->violations_len != 0) {
+        eprintln(name, " ", run, ": not proved, gap ", cast(c->gap, u64), " at ",
+            c->gap_source.line, ":", c->gap_source.col);
+        assert(false);
+    }
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name);
+    proved_in(name, "local", &found->local);
+    proved_in(name, "stored", &found->stored);
+}
+
+// A copy of a reference out of the heap, a mutable global or caller storage into the same
+// kinds of storage, an aggregate member, and a return.
+fn copies(ownership_source_env.env mut* e) void {
+    both(e, "g2g", 13, 64);
+    both(e, "gb2gb", 14, 70);
+    both(e, "h2h", 18, 26);
+    both(e, "caller2caller", 20, 62);
+    both(e, "caller_box", 21, 47);
+    both(e, "literal_g", 22, 71);
+    both(e, "return_g", 23, 76);
+    println("copies ok");
+}
+
+// The same copies of the reference behind a constant global's address.
+fn constant_global_copies(ownership_source_env.env mut* e) void {
+    both(e, "gp2h", 26, 45);
+    both(e, "gp2g", 28, 65);
+    both(e, "gp_literal", 29, 72);
+    both(e, "return_gp", 45, 77);
+    println("constant global copies ok");
+}
+
+// A comparison with null and a cast to an integer read the reference value: semantic reads.
+fn comparisons(ownership_source_env.env mut* e) void {
+    both(e, "g_compare", 30, 75);
+    both(e, "gp_compare", 32, 59);
+    both(e, "g_integer", 34, 72);
+    println("comparisons ok");
+}
+
+// A release reads the owner that it releases; a slice of a mutable global span reads its
+// pointer.
+fn releases_and_slices(ownership_source_env.env mut* e) void {
+    both(e, "heap_release", 37, 19);
+    both(e, "g_slice", 39, 73);
+    println("releases and slices ok");
+}
+
+// A use through the reference that a constant global's address names, one or two
+// dereferences further, and in another module.
+fn constant_globals(ownership_source_env.env mut* e) void {
+    both(e, "array_constant", 40, 77);
+    both(e, "constant_of_constant", 42, 55);
+    both(e, "other_module", 44, 79);
+    println("constant globals ok");
+}
+
+// A constant global's own reference is static: a store of it into the heap, a comparison of
+// it, and a slice of a constant string are proved.
+fn controls(ownership_source_env.env mut* e) void {
+    proved(e, "heap_static");
+    proved(e, "constant_compare");
+    proved(e, "constant_slice");
+    proved(e, "use_ref");
+    println("controls ok");
+}
+
+// A slice of a span or a `string` reads its header: out of untracked storage it is the gap,
+// whatever storage it goes into (a global, the heap, caller storage, a taken local, a TA).
+// A slice of a TL, and a slice of a global array, which names global storage, are proved; so
+// is a store of a new owner into caller storage, whose overwrite check is no use (fir.md 14).
+fn slices(ownership_source_env.env mut* e) void {
+    both(e, "slice_to_global", 56, 57);
+    both(e, "slice_to_heap", 60, 16);
+    both(e, "slice_to_caller", 62, 64);
+    both(e, "slice_to_taken", 65, 45);
+    both(e, "slice_to_aggregate", 68, 74);
+    proved(e, "slice_of_parameter");
+    proved(e, "slice_of_global_array");
+    proved(e, "store_owner");
+    println("slices ok");
+}
+
+// The pointer field of a span TL is the TL's own reference (place_access, tracked_reference):
+// `*t.ptr` dereferences t, as a read and as a store. A dangling t gives "invalid use of 't'"
+// in the local row, which the stored row excludes; a live t is proved. The pointer field of a
+// TA leaf reaches its referent through a field after the leaf, which the leaf table does not
+// name: the gap, a store or a read.
+fn pointer_fields(ownership_source_env.env mut* e) void {
+    string[2] names = {"tl_ptr_store", "tl_ptr_load"};
+    for (string name : names) {
+        ownership_source.body* found = row(e, name);
+        assert(found->local.violations_len == 1 && found->local.violations[0].name == "t");
+        assert(found->stored.violations_len == 0 && !ownership_api.successful(found->stored.proof));
+        assert(found->stored.correspondence == ownership_source_local.status.complete);
+    }
+    proved(e, "tl_ptr_store_ok");
+    proved(e, "tl_ptr_store_param");
+    ownership_source.body* leaf = row(e, "ta_ptr_store_ok");
+    gap_at("ta_ptr_store_ok", "local", &leaf->local, 80, 61);
+    assert(leaf->stored.gap == ownership_source_local.missing.dynamic_element);
+    // A read through the pointer field of a TA leaf: the leaf is tracked, so the gap is the
+    // one of the leaf table (dynamic_element), not unknown_source.
+    ownership_source.body* load = row(e, "ta_ptr_load");
+    assert(load->stored.gap == ownership_source_local.missing.dynamic_element);
+    assert(load->local.gap == ownership_source_local.missing.unknown_source);
+    println("pointer fields ok");
+}
+
+fn text_of(strbuf.str_buf mut* out, string@ lines) string {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.str_buf mut lib = strbuf.create();
+    defer strbuf.free(&lib);
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    check_env.add(&e.checked, "lib.ft", text_of(&lib, LIB[..]));
+    assert(ownership_source_env.prepare(&e, text_of(&text, SOURCE[..])));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    copies(&e);
+    constant_global_copies(&e);
+    comparisons(&e);
+    releases_and_slices(&e);
+    constant_globals(&e);
+    controls(&e);
+    slices(&e);
+    pointer_fields(&e);
+    return 0;
+}

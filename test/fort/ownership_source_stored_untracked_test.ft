@@ -1,0 +1,220 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| reads ok
+//| places ok
+//| copies ok
+//| direct parts ok
+//| leaf bounds ok
+//| other bases ok
+/// Tests the stored-run gap for a use through a reference that the run cannot follow. A call
+/// that gets the address of a local can write any value into it, so the run does not know the
+/// contents of a taken local. An aggregate past the leaf bounds has no leaves either. A place
+/// that reads such a local to find its storage is the gap unknown_source (D17.14), at the
+/// operation that uses it. A part of such a local that holds no reference stays a plain value.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[66] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "struct view { u8@ bytes; u64 at; }",
+    "struct ops { fn (i32) i32 f; }",
+    "struct hold { ops* o; }",
+    "struct slot { i32 mut* own mut* p; }",
+    "fn fill(box mut* out, i32 mut* p) void { out->p = p; }",
+    "fn fill_view(view mut* out, u8@ s) void { out->bytes = s; }",
+    "fn fill_hold(hold mut* out, ops* o) void { out->o = o; }",
+    "fn fill_slot(slot mut* out, i32 mut* own mut* p) void { out->p = p; }",
+    "fn ret(i32 mut* p) i32 { box mut b = box{null, 0}; fill(&b, p); return *b.p; }",
+    "fn cond(i32 mut* p) i32 {",
+    "    box mut b = box{null, 0}; fill(&b, p); if (*b.p > 0) { return 1; } return 0;",
+    "}",
+    "fn sw(i32 mut* p) i32 {",
+    "    box mut b = box{null, 0}; fill(&b, p);",
+    "    switch (*b.p) { case 1: { return 2; } default: { return 3; } }",
+    "}",
+    "fn write(i32 mut* p) void { box mut b = box{null, 0}; fill(&b, p); *b.p = 3; }",
+    "fn addr(u8@ s) u8 {",
+    "    view mut v = view{}; fill_view(&v, s); u8* q = &v.bytes[0]; return *q;",
+    "}",
+    "fn index(u8@ s) u8 { view mut v = view{}; fill_view(&v, s); return v.bytes[0]; }",
+    "fn callee(ops* o) i32 {",
+    "    hold mut h = hold{null}; fill_hold(&h, o); return h.o->f(1);",
+    "}",
+    "fn release(i32 mut* own mut* q) void {",
+    "    slot mut s = slot{null}; fill_slot(&s, q); del(*s.p);",
+    "}",
+    "fn slice(u8@ s) u8 {",
+    "    view mut v = view{}; fill_view(&v, s); u8@ t = v.bytes[0..1]; return t[0];",
+    "}",
+    "fn copy(i32 mut* p) i32 {",
+    "    box mut b = box{null, 0}; fill(&b, p); i32* q = b.p; return *q;",
+    "}",
+    "fn length(u8@ s) u64 { view mut v = view{}; fill_view(&v, s); return v.bytes.len; }",
+    "fn scalar(i32 mut* p) i32 { box mut b = box{null, 7}; fill(&b, p); return b.n; }",
+    "fn taken_scalar() i32 { i32 mut x = 1; i32 mut* q = &x; *q = 2; return x; }",
+    "fn taken_parameter(box b, i32 mut* p) i32 {",
+    "    box mut c = b; fill(&c, p); return *c.p;",
+    "}",
+    "fn tracked(i32 mut* p) i32 { box b = box{p, 0}; return *b.p; }",
+    "fn at_bound(i32* p) i32 { i32*[256] mut a = {}; a[0] = p; return *a[0]; }",
+    "fn past_bound(i32* p) i32 { i32*[257] mut a = {}; a[0] = p; return *a[0]; }",
+    "fn past_bound_length() u64 { i32*[257] a = {}; return a.len; }",
+    "fn twice(i32 mut* p) i32 {",
+    "    box mut b = box{null, 0}; fill(&b, p);",
+    "    i32 x = b.n;",
+    "    return *b.p + *b.p;",
+    "}",
+    "fn later(i32 mut* p, bool c) i32 {",
+    "    box mut b = box{null, 0}; fill(&b, p); if (c) { return 0; } return *b.p;",
+    "}",
+    "i32 mut* mut GLOBAL = null;",
+    "fn global_read() i32 { return *GLOBAL; }",
+    "fn pointer_parameter(box* b) i32 { return *b->p; }",
+    "fn loop_use(i32 mut* p, u64 n) i32 {",
+    "    box mut b = box{null, 0}; fill(&b, p); i32 mut t = 0; u64 mut i = 0;",
+    "    while (i < n) { t += *b.p; i += 1; }",
+    "    return t;",
+    "}",
+    "fn branch_use(i32 mut* p, bool c) i32 {",
+    "    box mut b = box{null, 0}; fill(&b, p);",
+    "    if (c) { return *b.p; }",
+    "    return *b.p + 1;",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    assert(found->stored.solved && found->stored.stored);
+    return found;
+}
+
+// The gap unknown_source at line `line`, column `col` of SOURCE, so the stored row neither
+// proves the body nor reports a violation.
+fn unknown(ownership_source_env.env mut* e, string name, u32 line, u32 col) void {
+    ownership_source.body* found = row(e, name);
+    ownership_source_local.context* c = &found->stored;
+    if (c->gap != ownership_source_local.missing.unknown_source ||
+        c->correspondence != ownership_source_local.status.incomplete ||
+        c->gap_source.line != line || c->gap_source.col != col) {
+        eprintln(name, ": gap ", cast(c->gap, u64), " at ", c->gap_source.line, ":",
+            c->gap_source.col);
+        assert(false);
+    }
+    assert(c->violations_len == 0 && !ownership_api.successful(c->proof));
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name);
+    ownership_source_local.context* c = &found->stored;
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof)) {
+        eprintln(name, ": not proved, gap ", cast(c->gap, u64), " at ", c->gap_source.line,
+            ":", c->gap_source.col);
+        assert(false);
+    }
+}
+
+// A read through a field of a taken local: an operand of a copy, of a binary operation and
+// of a switch terminator.
+fn reads(ownership_source_env.env mut* e) void {
+    unknown(e, "ret", 10, 72);
+    unknown(e, "cond", 12, 53);
+    unknown(e, "sw", 16, 5);
+    // The parameter b is copied into c, and the call writes c through its address.
+    unknown(e, "taken_parameter", 39, 40);
+    println("reads ok");
+}
+
+// Each other place of a statement: the destination of a store, an index of a span field, the
+// callee of an indirect call, and the place of a release. An address through a span field
+// goes into a temporary, whose opaque value is the gap at the same statement.
+fn places(ownership_source_env.env mut* e) void {
+    unknown(e, "write", 18, 73);
+    unknown(e, "addr", 20, 52);
+    unknown(e, "index", 22, 75);
+    unknown(e, "callee", 24, 61);
+    unknown(e, "release", 27, 48);
+    println("places ok");
+}
+
+// A reference copied out of a taken local has an unknown source, so its use is the same gap
+// at the use: a plain copy and a slice of a span field.
+fn copies(ownership_source_env.env mut* e) void {
+    unknown(e, "copy", 33, 54);
+    unknown(e, "slice", 30, 59);
+    println("copies ok");
+}
+
+// A part that the place reaches without a load is a plain value: the length of a span field
+// and a scalar field. The address of a scalar local and a store through it hold no reference.
+fn direct_parts(ownership_source_env.env mut* e) void {
+    proved(e, "length");
+    proved(e, "scalar");
+    proved(e, "taken_scalar");
+    // An aggregate that no address names has leaves: the read through b.p is a step.
+    proved(e, "tracked");
+    // The first gap is the first use in the body; a scalar read before it is no gap.
+    unknown(e, "twice", 48, 17);
+    // A use on one path only is still the gap of the body.
+    unknown(e, "later", 51, 72);
+    println("direct parts ok");
+}
+
+// An array of 256 references has leaves, so the use through a[0] is a step and no gap. Its
+// 256 leaf slots make each state large, so the solver spends its W bound on the body:
+// incomplete, never an error. One more element puts the array past the leaf bounds, and a
+// use through it is the gap. Its length needs no load.
+fn leaf_bounds(ownership_source_env.env mut* e) void {
+    ownership_source.body* bound = row(e, "at_bound");
+    ownership_source_local.context* c = &bound->stored;
+    assert(c->gap == ownership_source_local.missing.none && c->leaves.leaves_len == 256);
+    assert(c->correspondence == ownership_source_local.status.complete);
+    assert(c->solver == ownership_source_local.status.incomplete && c->violations_len == 0);
+    assert(c->proof.terminal.limit.present);
+    assert(c->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(c->proof.terminal.limit.category == ownership_api.limit_category.w);
+    unknown(e, "past_bound", 43, 68);
+    proved(e, "past_bound_length");
+    println("leaf bounds ok");
+}
+
+// A mutable global and caller storage behind a pointer parameter hold references that the
+// run does not follow either: a use through one is the same gap. A use in a loop and a use
+// on two paths are the gap at the first use in FIR order.
+fn other_bases(ownership_source_env.env mut* e) void {
+    unknown(e, "global_read", 54, 31);
+    unknown(e, "pointer_parameter", 55, 43);
+    unknown(e, "loop_use", 58, 23);
+    // The branch block comes first in FIR order.
+    unknown(e, "branch_use", 63, 21);
+    println("other bases ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    reads(&e);
+    places(&e);
+    copies(&e);
+    direct_parts(&e);
+    leaf_bounds(&e);
+    other_bases(&e);
+    return 0;
+}

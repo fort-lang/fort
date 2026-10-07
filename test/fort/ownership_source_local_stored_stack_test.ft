@@ -1,0 +1,163 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| marked units ok
+//| unmarked units ok
+//| escapes ok
+//| kept borrows ok
+/// Tests the stack borrows of the stored run: which TLs and TA leaves can hold a borrow of
+/// local storage, and which stores of such a borrow leave the run (the gap `escape`).
+import fir;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[31] SOURCE = {
+    "extern fn foreign_keep(i32* p) void;",
+    "struct box { i32 mut* p; i32 n; }",
+    "struct holder { box inner; }",
+    "i32* mut SAVED = null;",
+    "fn id(i32* p) i32* { return p; }",
+    "fn copies() i32 { i32 x = 1; i32* a = &x; i32* b = a; i32* c = id(b); return *c; }",
+    "fn leaves() i32 {",
+    "    i32 mut x = 1; box b = box{&x, 0}; holder h = holder{b}; i32* q = h.inner.p;",
+    "    return *q;",
+    "}",
+    "fn views() i32 { i32[2] mut x = {1, 2}; i32@ s = x[..]; i32* q = &s[1]; return *q; }",
+    "fn heap() i32 { i32 mut* own p = new(i32); i32* q = p; i32 v = *q; del(p); return v; }",
+    "fn scalars(box* b) i32 { i32 x = b->n; i32* q = &x; return *q + b->n; }",
+    "fn to_global() void { i32 x = 1; SAVED = &x; }",
+    "fn to_taken() i32 {",
+    "    i32 x = 1; i32* mut q = null; i32* mut* qq = &q; q = &x; return 0;",
+    "}",
+    "fn to_heap(box mut* out) void { i32 mut x = 1; *out = box{&x, 0}; }",
+    "fn to_extern() void { i32 x = 1; foreign_keep(&x); }",
+    "fn to_call() void { i32 mut x = 1; box b = box{&x, 0}; take(b); }",
+    "fn take(box b) void { }",
+    "fn heap_to_heap(box mut* out, i32 mut* p) void { *out = box{p, 0}; }",
+    "fn static_to_global() void { SAVED = null; }",
+    "fn kept_in_field() i32 {",
+    "    box mut b = box{null, 0}; i32 mut x = 1; b.p = &x; i32 v = *b.p; b.p = null; return v;",
+    "}",
+    "fn kept_until_end() i32 {",
+    "    i32 mut x = 1; box b = box{&x, 0}; return *b.p;",
+    "}",
+    "fn root() i32 { return 0; }",
+    "fn unused() void { }",
+};
+
+fn stored(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    return &row->stored;
+}
+
+fn local(ownership_source_local.context* c, string name) u32 {
+    u32 mut n = 0;
+    while (n < fir.local_count(c->function)) {
+        if (fir.local_name(fir.local_at(c->function, n)) == name) { return n; }
+        n += 1;
+    }
+    panic("ownership_source_local_stored_stack_test: local is absent");
+}
+
+fn marked(ownership_source_local.context* c, string name) bool {
+    return c->stack_units[cast(local(c, name), u64)];
+}
+
+// The units of TA leaf `k` of local `name`.
+fn leaf_marked(ownership_source_local.context* c, string name, u64 k) bool {
+    u64 n = cast(local(c, name), u64);
+    u64 unit = cast(fir.local_count(c->function), u64) + c->leaves.first[n] + k;
+    return c->stack_units[unit];
+}
+
+fn count(ownership_source_local.context* c) u64 {
+    u64 mut total = 0;
+    u64 mut u = 0;
+    while (u < c->stack_units.len) {
+        if (c->stack_units[u]) { total += 1; }
+        u += 1;
+    }
+    return total;
+}
+
+fn marked_units(ownership_source_env.env mut* e) void {
+    // The address, its copy, and a call result that may return it.
+    ownership_source_local.context* c = stored(e, "copies");
+    assert(marked(c, "a") && marked(c, "b") && marked(c, "c"));
+    // A leaf, a nested leaf of a whole copy, and a TL loaded from it.
+    ownership_source_local.context* l = stored(e, "leaves");
+    assert(leaf_marked(l, "b", 0) && leaf_marked(l, "h", 0) && marked(l, "q"));
+    // A slice of a local array, and an address through it.
+    ownership_source_local.context* v = stored(e, "views");
+    assert(marked(v, "s") && marked(v, "q"));
+    println("marked units ok");
+}
+
+fn unmarked_units(ownership_source_env.env mut* e) void {
+    // A borrow of heap storage is no stack borrow.
+    ownership_source_local.context* h = stored(e, "heap");
+    assert(count(h) == 0);
+    // A scalar read through a pointer carries no borrow: only the address of x is marked.
+    ownership_source_local.context* s = stored(e, "scalars");
+    assert(marked(s, "q") && count(s) == 2);
+    // A body without an address marks nothing, and the search has no unit to mark.
+    assert(count(stored(e, "unused")) == 0);
+    println("unmarked units ok");
+}
+
+fn gap(ownership_source_env.env mut* e, string name, ownership_source_local.missing why) void {
+    ownership_source_local.context* c = stored(e, name);
+    if (c->gap != why) {
+        eprintln(name, ": gap ", cast(c->gap, u64), ", expected ", cast(why, u64));
+        assert(false);
+    }
+}
+
+fn escapes(ownership_source_env.env mut* e) void {
+    // Storage that the run does not track can outlive x: a global, a taken local, the heap.
+    gap(e, "to_global", ownership_source_local.missing.escape);
+    gap(e, "to_taken", ownership_source_local.missing.escape);
+    gap(e, "to_heap", ownership_source_local.missing.escape);
+    // A call argument is the callee's concern (calls and heap), as for any borrow; an extern
+    // keeps its D17.13 trust.
+    gap(e, "to_extern", ownership_source_local.missing.none);
+    gap(e, "to_call", ownership_source_local.missing.none);
+    // A borrow of other storage, or null, in untracked storage is no stack escape.
+    gap(e, "heap_to_heap", ownership_source_local.missing.none);
+    gap(e, "static_to_global", ownership_source_local.missing.none);
+    println("escapes ok");
+}
+
+fn kept_borrows(ownership_source_env.env mut* e) void {
+    // A field that keeps the address and clears it before the end, and one that keeps it to
+    // the end of the body: both are proved, since the borrow is used while x lives.
+    ownership_source.body* kept = ownership_source_env.find(e, "main", "kept_in_field");
+    assert(kept->stored.correspondence == ownership_source_local.status.complete);
+    ownership_source.body* last = ownership_source_env.find(e, "main", "kept_until_end");
+    assert(last->stored.correspondence == ownership_source_local.status.complete);
+    println("kept borrows ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    marked_units(&e);
+    unmarked_units(&e);
+    escapes(&e);
+    ownership_source.analyze(&e.source);
+    kept_borrows(&e);
+    return 0;
+}

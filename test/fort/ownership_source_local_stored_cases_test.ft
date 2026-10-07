@@ -1,0 +1,306 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| cases ok
+/// Holds the stored-row outcome of many small bodies in one table. Each line of EXPECT names
+/// a body and its outcome: `proved`, `declared` (complete correspondence, incomplete proof),
+/// `gap <missing>`, or `violated <kind> <line>` with the line of SOURCE. No body of the table
+/// has a violation in the local row unless its line says `local`.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.str;
+import std.strbuf;
+
+string[129] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "struct pair { i32 mut* own a; i32 mut* own b; }",
+    "struct holder { i32 mut* own p; }",
+    "struct view { u8@ bytes; u64 at; }",
+    "struct named { string name; u32 id; }",
+    "struct deep { box inner; box[2] more; }",
+    "fn take(box b) void { }",
+    "fn keep(i32* p) void { }",
+    "fn give(i32 mut* own p) void { del(p); }",
+    "fn copy_field() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 1}; i32 v = *b.p; del(p); return v;",
+    "}",
+    "fn copy_after() i32 { i32 mut* own p = new(i32); box b = box{p, 1}; del(p); return *b.p; }",
+    "fn write_after() void { i32 mut* own p = new(i32); box b = box{p, 1}; del(p); *b.p = 2; }",
+    "fn read_scalar() i32 { i32 mut* own p = new(i32); box b = box{p, 1}; del(p); return b.n; }",
+    "fn compare_after() bool {",
+    "    i32 mut* own p = new(i32); box b = box{p, 1}; del(p); return b.p == null;",
+    "}",
+    "fn compare_before() bool {",
+    "    i32 mut* own p = new(i32); box b = box{p, 1}; bool z = b.p == null; del(p); return z;",
+    "}",
+    "fn store_null() void {",
+    "    i32 mut* own p = new(i32); box mut b = box{p, 1}; del(p); b.p = null;",
+    "}",
+    "fn store_other(i32 mut* q) i32 {",
+    "    i32 mut* own p = new(i32); box mut b = box{p, 1}; del(p); b.p = q; return *b.p;",
+    "}",
+    "fn deep_use() i32 {",
+    "    i32 mut* own p = new(i32); deep d = deep{box{p, 1}, {box{p, 2}, box{p, 3}}}; del(p);",
+    "    return *d.more[1].p;",
+    "}",
+    "fn deep_scalar() i32 {",
+    "    i32 mut* own p = new(i32); deep d = deep{box{p, 1}, {box{p, 2}, box{p, 3}}}; del(p);",
+    "    return d.more[0].n;",
+    "}",
+    "fn owner_clean() void { holder h = holder{new(i32)}; del(h.p); }",
+    "fn owner_leak() void { holder h = holder{new(i32)}; }",
+    "fn owner_moved() void { holder mut h = holder{new(i32)}; give(move(h.p)); }",
+    "fn owner_twice() void { holder mut h = holder{new(i32)}; del(h.p); del(h.p); }",
+    "fn owner_swap() void {",
+    "    pair mut s = pair{new(i32), new(i32)}; i32 mut* own t = move(s.a); s.a = move(s.b);",
+    "    s.b = move(t); del(s.a); del(s.b);",
+    "}",
+    "fn owner_swap_leak() void {",
+    "    pair mut s = pair{new(i32), new(i32)}; i32 mut* own t = move(s.a); s.a = move(s.b);",
+    "    del(s.a);",
+    "}",
+    "fn owner_into_param(holder mut* out) void {",
+    "    holder mut h = holder{new(i32)}; out->p = move(h.p);",
+    "}",
+    "fn owner_return() i32 mut* own { holder mut h = holder{new(i32)}; return move(h.p); }",
+    "fn owner_return_leak() i32 mut* own {",
+    "    pair mut s = pair{new(i32), new(i32)}; i32 mut* own r = move(s.a); return move(r);",
+    "}",
+    "fn element_first() i32 {",
+    "    i32 mut* own p = new(i32); i32 mut* own q = new(i32); i32*[2] a = {p, q}; del(q);",
+    "    i32 v = *a[0]; del(p); return v;",
+    "}",
+    "fn element_second() i32 {",
+    "    i32 mut* own p = new(i32); i32 mut* own q = new(i32); i32*[2] a = {p, q}; del(q);",
+    "    i32 v = *a[1]; del(p); return v;",
+    "}",
+    "fn element_owned() void { i32 mut* own[2] a = {new(i32), new(i32)}; del(a[0]); del(a[1]); }",
+    "fn element_owned_leak() void { i32 mut* own[2] a = {new(i32), new(i32)}; del(a[0]); }",
+    "fn element_loop(i32* p) i32 {",
+    "    i32*[3] a = {p, p, p}; u64 mut i = 0; i32 mut t = 0; while (i < 3) { t += *a[i]; i += 1;",
+    "    } return t;",
+    "}",
+    "fn element_constant_loop(i32* p) i32 {",
+    "    i32*[2] mut a = {p, p}; a[0] = p; a[1] = p; return *a[0] + *a[1];",
+    "}",
+    "fn span_field_use(u8@ s) u8 { view v = view{s, 0}; return v.bytes[0]; }",
+    "fn span_field_slice(u8@ s) u8@ { view v = view{s, 0}; return v.bytes[1..]; }",
+    "fn span_field_owned() u8 {",
+    "    u8 mut@ own s = new(u8, 2); view v = view{s, 0}; u8 x = v.bytes[0]; del(s); return x;",
+    "}",
+    "fn span_field_late() u8 {",
+    "    u8 mut@ own s = new(u8, 2); view v = view{s, 0}; del(s); return v.bytes[0];",
+    "}",
+    "fn string_field() char { named n = named{\"abc\", 1}; return n.name[0]; }",
+    "fn string_field_call() char { named n = named{\"abc\", 1}; keep(null); return n.name[0]; }",
+    "fn param_leaf(box b) i32 { return *b.p; }",
+    "fn param_leaf_call(box b) i32 { keep(null); return *b.p; }",
+    "fn param_copy(box b) i32 { box c = b; return *c.p; }",
+    "fn param_pass(box b) void { take(b); }",
+    "fn param_return(box b) i32* { return b.p; }",
+    "fn stack_ok() i32 { i32 x = 1; i32* q = &x; return *q; }",
+    "fn stack_late() i32 { i32* mut q = null; { i32 x = 1; q = &x; } return *q; }",
+    "fn stack_returned() i32* { i32 x = 1; return &x; }",
+    "fn stack_param_returned(i32 x) i32* { return &x; }",
+    "fn stack_field_ok() i32 { i32 x = 1; box b = box{null, 0}; return x; }",
+    "fn stack_field_late() i32 {",
+    "    box mut b = box{null, 0}; { i32 mut x = 1; b.p = &x; } return *b.p;",
+    "}",
+    "fn stack_field_kept() i32 {",
+    "    box mut b = box{null, 0}; i32 mut x = 1; b.p = &x; take(b); return *b.p;",
+    "}",
+    "fn stack_loop(i32 n) i32 {",
+    "    i32 mut t = 0; i32 mut i = 0; while (i < n) { i32 x = i; i32* q = &x; t += *q; i += 1;",
+    "    } return t;",
+    "}",
+    "fn stack_loop_late(i32 n) i32 {",
+    "    i32* mut q = null; i32 mut i = 0; while (i < n) { i32 x = i; q = &x; i += 1;",
+    "    } return q == null ? 0 : 1;",
+    "}",
+    "fn stack_out(i32* mut* out) void { i32 x = 1; *out = &x; }",
+    "fn stack_array() u8 { u8[4] mut buf = {}; u8@ s = buf[..]; return s[0]; }",
+    "fn stack_array_late() u8 {",
+    "    u8@ mut s = {}; { u8[4] mut buf = {}; s = buf[..]; } return s[0];",
+    "}",
+    "fn loan_param(string s) u64 { u64 mut n = 0; for (char c : s) { n += 1; } return n; }",
+    "fn loan_field(view v) u64 { u64 mut n = 0; for (u8 c : v.bytes) { n += 1; } return n; }",
+    "fn loan_local() u64 {",
+    "    u8 mut@ own s = new(u8, 3); u64 mut n = 0; for (u8 c : s) { n += 1; } del(s); return n;",
+    "}",
+    "fn loan_projected(view v) u64 {",
+    "    box mut b = box{null, 0}; for (u8 c : v.bytes) { b.n += 1; } return 1;",
+    "}",
+    "fn weak_borrow(u64 i, i32* p, i32* q) i32 { i32*[2] mut a = {p, p}; a[i] = q; return *a[1]; }",
+    "fn weak_same(u64 i, i32* p) i32 { i32*[2] mut a = {p, p}; a[i] = p; return *a[1]; }",
+    "fn weak_owner_leak(u64 i) void { i32 mut* own[2] mut a = {null, null}; a[i] = new(i32); }",
+    "fn weak_read(u64 i, i32* p) i32 { i32*[2] a = {p, p}; return *a[i]; }",
+    "fn weak_release(u64 i) void {",
+    "    i32 mut* own[2] mut a = {new(i32), new(i32)}; del(a[i]); del(a[0]); del(a[1]);",
+    "}",
+    "fn call_result() i32 { box b = made(); return b.n; }",
+    "fn made() box { return box{null, 0}; }",
+    "fn local_only() void { i32 mut* own p = new(i32); }",
+    "fn root() i32 { return 0; }",
+};
+
+string[64] EXPECT = {
+    "take proved",
+    "keep proved",
+    "give gap own_parameter",
+    "copy_field proved",
+    "copy_after violated invalid_use 13",
+    "write_after violated invalid_use 14",
+    "read_scalar proved",
+    "compare_after violated invalid_use 17",
+    "compare_before proved",
+    "store_null proved",
+    "store_other proved",
+    "deep_use violated invalid_use 30",
+    "deep_scalar proved",
+    "owner_clean proved",
+    "owner_leak violated lost_ownership 37",
+    "owner_moved proved",
+    "owner_twice proved",
+    "owner_swap proved",
+    "owner_swap_leak violated lost_ownership 47",
+    "owner_into_param proved",
+    "owner_return proved",
+    "owner_return_leak violated lost_ownership 53",
+    "element_first proved",
+    "element_second violated invalid_use 61",
+    "element_owned proved",
+    "element_owned_leak violated lost_ownership 64",
+    "element_loop gap dynamic_element",
+    "element_constant_loop proved",
+    "span_field_use proved",
+    "span_field_slice proved",
+    "span_field_owned proved",
+    "span_field_late violated invalid_use 78",
+    "string_field proved",
+    "string_field_call proved",
+    "param_leaf proved",
+    "param_leaf_call gap call_dependent",
+    "param_copy proved",
+    "param_pass proved",
+    "param_return proved",
+    "stack_ok proved",
+    "stack_late violated invalid_use 88",
+    "stack_returned violated invalid_use 89",
+    "stack_param_returned violated invalid_use 90",
+    "stack_field_ok proved",
+    "stack_field_late violated invalid_use 93",
+    "stack_field_kept proved",
+    "stack_loop proved",
+    "stack_loop_late declared",
+    "stack_out gap escape",
+    "stack_array proved",
+    "stack_array_late violated invalid_use 109",
+    "loan_param proved",
+    "loan_field proved",
+    "loan_local proved",
+    "loan_projected gap range_loan",
+    "weak_borrow declared",
+    "weak_same proved",
+    "weak_owner_leak declared",
+    "weak_read gap dynamic_element",
+    "weak_release gap dynamic_element",
+    "call_result gap fort_call",
+    "made gap aggregate_result",
+    "local_only local",
+    "root proved",
+};
+
+fn missing_name(ownership_source_local.missing why) string {
+    switch (why) {
+    case ownership_source_local.missing.none: return "none";
+    case ownership_source_local.missing.fort_call: return "fort_call";
+    case ownership_source_local.missing.own_parameter: return "own_parameter";
+    case ownership_source_local.missing.escape: return "escape";
+    case ownership_source_local.missing.owner_load: return "owner_load";
+    case ownership_source_local.missing.foreign_owner: return "foreign_owner";
+    case ownership_source_local.missing.unknown_source: return "unknown_source";
+    case ownership_source_local.missing.owning_storage: return "owning_storage";
+    case ownership_source_local.missing.aggregate_result: return "aggregate_result";
+    case ownership_source_local.missing.range_loan: return "range_loan";
+    case ownership_source_local.missing.owned_leaves: return "owned_leaves";
+    case ownership_source_local.missing.call_dependent: return "call_dependent";
+    case ownership_source_local.missing.dynamic_element: return "dynamic_element";
+    }
+}
+
+fn kind_name(ownership_api.event_kind kind) string {
+    if (kind == ownership_api.event_kind.invalid_use) { return "invalid_use"; }
+    if (kind == ownership_api.event_kind.lost_ownership) { return "lost_ownership"; }
+    return "other";
+}
+
+// The outcome of one body in the form of EXPECT.
+fn outcome(ownership_source.body* row, strbuf.str_buf mut* out) void {
+    ownership_source_local.context* c = &row->stored;
+    strbuf.clear(out);
+    if (row->local.violations_len > 0) {
+        strbuf.append(out, "local");
+        return;
+    }
+    if (c->violations_len > 0) {
+        strbuf.append(out, "violated ");
+        strbuf.append(out, kind_name(c->violations[0].kind));
+        strbuf.push(out, ' ');
+        strbuf.append_u64(out, cast(c->violations[0].source.line, u64));
+        return;
+    }
+    if (c->correspondence != ownership_source_local.status.complete) {
+        strbuf.append(out, "gap ");
+        strbuf.append(out, missing_name(c->gap));
+        return;
+    }
+    strbuf.append(out, ownership_api.successful(c->proof) ? "proved" : "declared");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut wrong = 0;
+    i = 0;
+    while (i < EXPECT.len) {
+        string line = EXPECT[i];
+        i64 space = str.index_of(line, ' ');
+        assert(space > 0);
+        string name = line[..cast(space, u64)];
+        string wanted = line[cast(space, u64) + 1..];
+        ownership_source.body* row = ownership_source_env.find(&e, "main", name);
+        outcome(row, &got);
+        if (strbuf.view(&got) != wanted) {
+            eprintln("    \"", name, " ", strbuf.view(&got), "\",");
+            wrong += 1;
+        }
+        i += 1;
+    }
+    // Each body of SOURCE has one line in EXPECT.
+    u64 mut bodies = 0;
+    i = 0;
+    while (i < e.source.bodies.len) {
+        if (e.source.bodies[i].module->path == "main") { bodies += 1; }
+        i += 1;
+    }
+    assert(EXPECT.len == bodies);
+    assert(wrong == 0);
+    println("cases ok");
+    return 0;
+}

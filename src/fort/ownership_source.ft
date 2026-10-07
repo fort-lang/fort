@@ -43,6 +43,9 @@ struct body {
     fir.func function;
     ownership_source_live.context live;
     ownership_source_local.context local;
+    // The stored-borrow run: the local steps and the steps of TA leaves, stack sources and
+    // range loans (toolchain 1.1, `stored_borrows`).
+    ownership_source_local.context stored;
     ownership_source_raw.context raw;
     graph_route route;
     status graph_correspondence;
@@ -268,6 +271,8 @@ fn prepare(context mut* c, check.checker mut* ck, modules.module_set* set,
             row->source);
         ownership_source_local.prepare(&row->local, &row->function, row->key, row->source.file,
             row->module->file, row->source);
+        ownership_source_local.prepare_stored(&row->stored, &row->function, row->key,
+            row->source.file, row->module->file, row->source);
         ownership_source_raw.prepare(&row->raw, &row->function, row->key, row->source.file,
             row->module->file, row->source);
         i += 1;
@@ -369,6 +374,9 @@ fn analyze(context mut* c) void {
         }
         ownership_source_live.solve(&row->live);
         ownership_source_local.solve(&row->local);
+        ownership_source_local.solve(&row->stored);
+        // A violation that the local run validated counts once, in the local row.
+        ownership_source_local.exclude(&row->stored, &row->local);
         ownership_source_raw.solve(&row->raw);
         row->liveness_correspondence = ownership_api.successful(row->live.correspondence) ?
             status.complete : status.incomplete;
@@ -403,6 +411,7 @@ fn free(context mut* c) void {
         body mut* row = &c->bodies[i];
         ownership_source_live.free_state(&row->live);
         ownership_source_local.free(&row->local);
+        ownership_source_local.free(&row->stored);
         ownership_source_raw.free(&row->raw);
         fir.func_free(&row->function);
         strbuf.free(&row->verification_failure);

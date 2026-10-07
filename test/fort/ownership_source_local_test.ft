@@ -472,27 +472,27 @@ fn gaps_of_storage() void {
     assert(body(&e, "owned_leaves")->local.gap == ownership_source_local.missing.owned_leaves);
     assert(body(&e, "local_leaves")->local.gap == ownership_source_local.missing.owned_leaves);
     assert(body(&e, "loaded")->local.gap == ownership_source_local.missing.unknown_source);
-    assert(body(&e, "moved_out")->local.gap == ownership_source_local.missing.owner_load);
+    // A move and a release read the owner out of caller storage: the gap unknown_source.
+    assert(body(&e, "moved_out")->local.gap == ownership_source_local.missing.unknown_source);
     // A new allocation moves from its temporary into the field: the obligation escapes.
     ownership_source.body* stored = body(&e, "stored");
     in_scope(stored);
     assert(count(stored, ownership_transfer.action.allocation) == 1);
     assert(count(stored, ownership_transfer.action.escape) == 1);
     assert(body(&e, "loop_over")->local.gap == ownership_source_local.missing.range_loan);
-    // A release through a field is an outside effect, not a gap of its own.
+    // A release through a field is still an outside effect, with no barrier, and it reads
+    // the owner out of caller storage: the gap unknown_source, so no row proves it.
     ownership_source.body* released = body(&e, "released");
-    in_scope(released);
+    assert(released->local.gap == ownership_source_local.missing.unknown_source);
     assert(count(released, ownership_transfer.action.outside) == 1);
     assert(barriers(released) == 0);
     assert(count(released, ownership_transfer.action.use) == 1);
     ownership_source.body* reread = body(&e, "reread");
-    in_scope(reread);
+    assert(reread->local.gap == ownership_source_local.missing.unknown_source);
     ownership_source.analyze(&e.source);
-    complete(released);
+    assert(released->local.correspondence == ownership_source_local.status.incomplete);
     complete(stored);
-    // The release can end v's caller storage. Only the outside effect explains the failure.
     unproved(reread);
-    assert(reread->local.gap == ownership_source_local.missing.call_dependent);
     assert(reread->local.correspondence == ownership_source_local.status.incomplete);
 }
 

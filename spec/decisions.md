@@ -2354,7 +2354,10 @@ says ownership is "by convention", this section supersedes it.
   The proof covers dangling storage, lost ownership, invalid release, and invalid transfer.
   It separates place contents from source validity and allocation identity from owner-place
   identity.
-  Copies, casts, retained fields, elements, globals, and available fort calls preserve source
+  A copy of a reference value, alone or as a leaf of a whole aggregate copy, is a semantic use
+  of it, so copying a dangling reference is an invalid use.
+  A copy of a valid reference preserves its source relations.
+  Casts, retained fields, elements, globals, and available fort calls also preserve source
   relations.
   Taking an address, retaining a value, or reaching storage through an alias ends no proof
   obligation.
@@ -2386,6 +2389,9 @@ says ownership is "by convention", this section supersedes it.
   no longer adds `own` (D3.14), and `cast(move(x), ...)` ends the source binding (D17.5).
   Amended 2026-10-01 (T-272): The previous rule deferred leak and dangling-view proof and left
   escaped fort storage untracked.
+  Amended 2026-10-08: A copy of a reference value, alone or as a leaf of a whole aggregate copy,
+  is a semantic use, so copying a dangling reference is an invalid use. Before, the rule said
+  only that copies preserve source relations.
 
 ### D17.15 Place identity and aggregate storage
 - owner: `memory-model.md` (2.6), `fir.md` (5.5 and 9.6), `type-system.md` (8.5).

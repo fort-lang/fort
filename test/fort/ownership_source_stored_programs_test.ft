@@ -1,0 +1,306 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| field cases ok
+//| owner cases ok
+//| element cases ok
+//| inline escape cases ok
+//| source cases ok
+//| loan cases ok
+//| counts ok
+/// Holds the stored-run outcome of small programs: field and element uses after a release,
+/// owners in fields, inline escapes of local storage, invalid retained sources, and range
+/// loans, each with safe controls. A line here is a line of SOURCE.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_leaves;
+import ownership_source_local;
+import std.strbuf;
+
+string[95] SOURCE = {
+    "struct box { i32 mut* p; i32 n; }",
+    "struct view { u8@ bytes; u64 at; }",
+    "struct pair { i32 mut* own a; i32 mut* own b; }",
+    "struct outer { box inner; i32* other; }",
+    "struct holder { string name; }",
+    "fn take_box(box b) void { }",
+    "fn keep(i32* p) i32 { return 0; }",
+    "fn set(i32 mut* p) void { *p = 2; }",
+    "fn field_use() void {",
+    "    i32 mut* own p = new(i32);",
+    "    box b = box{p, 1};",
+    "    del(p);",
+    "    *b.p = 1;",
+    "}",
+    "fn field_read() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    box b = box{p, 1};",
+    "    i32 v = *b.p;",
+    "    del(p);",
+    "    return v;",
+    "}",
+    "fn field_nested() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    outer o = outer{box{p, 1}, null};",
+    "    del(p);",
+    "    return *o.inner.p;",
+    "}",
+    "fn field_copied() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 1}; box c = b; del(p);",
+    "    return *c.p;",
+    "}",
+    "fn field_loaded() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 1}; i32* q = b.p; del(p);",
+    "    return *q;",
+    "}",
+    "fn field_refilled() i32 {",
+    "    i32 mut* own p = new(i32); box mut b = box{p, 1}; del(p);",
+    "    i32 mut* own r = new(i32); b.p = r; i32 v = *b.p; del(r); return v;",
+    "}",
+    "fn field_moved_owner() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 1}; i32 mut* own r = move(p);",
+    "    i32 v = *b.p; del(r); return v;",
+    "}",
+    "fn span_field() u8 {",
+    "    u8 mut@ own s = new(u8, 4); view v = view{s, 0}; del(s);",
+    "    return v.bytes[0];",
+    "}",
+    "fn span_length(u64 n) u64 {",
+    "    u8 mut@ own s = new(u8, n); view v = view{s, 0}; del(s); return v.bytes.len;",
+    "}",
+    "fn owner_leak() void { pair s = pair{new(i32), new(i32)}; del(s.a); }",
+    "fn owner_overwrite() void {",
+    "    pair mut s = pair{new(i32), new(i32)}; s.a = new(i32); del(s.a); del(s.b);",
+    "}",
+    "fn owner_clean() void { pair s = pair{new(i32), new(i32)}; del(s.a); del(s.b); }",
+    "fn owner_moved_out() void {",
+    "    pair mut s = pair{new(i32), new(i32)}; i32 mut* own t = move(s.a); del(t); del(s.b);",
+    "}",
+    "fn element_use() i32 {",
+    "    i32 mut* own p = new(i32); i32 mut* own q = new(i32); i32*[2] a = {p, q}; del(p);",
+    "    i32 v = *a[1]; i32 w = *a[0]; del(q); return v + w;",
+    "}",
+    "fn element_other() i32 {",
+    "    i32 mut* own p = new(i32); i32 mut* own q = new(i32); i32*[2] a = {p, q}; del(p);",
+    "    i32 v = *a[1]; del(q); return v;",
+    "}",
+    "fn element_weak(u64 i) i32 {",
+    "    i32 mut* own p = new(i32); i32 mut* own q = new(i32); i32*[2] mut a = {p, q};",
+    "    a[i] = q; del(p); i32 v = *a[0]; del(q); return v;",
+    "}",
+    "fn element_weak_kept(u64 i) i32 {",
+    "    i32 mut* own p = new(i32); i32 mut* own q = new(i32); i32*[2] mut a = {p, q};",
+    "    a[i] = q; del(p); i32 v = *a[1]; del(q); return v;",
+    "}",
+    "fn element_dynamic(u64 i) i32 { i32 x = 1; i32*[2] a = {&x, &x}; return *a[i]; }",
+    "fn stack_block() i32 { i32* mut q = null; { i32 x = 1; q = &x; } return *q; }",
+    "fn stack_return() i32* { i32 x = 1; return &x; }",
+    "fn stack_field() i32 {",
+    "    box mut b = box{null, 0}; { i32 mut x = 1; b.p = &x; } return *b.p;",
+    "}",
+    "fn stack_loop(i32 n) i32 {",
+    "    i32 mut t = 0; i32 mut i = 0; while (i < n) { i32 x = i; i32* q = &x; t += *q; i += 1; }",
+    "    return t;",
+    "}",
+    "fn stack_out(i32* mut* out) void { i32 x = 1; *out = &x; }",
+    "fn stack_parameter(i32 x) i32* { return &x; }",
+    "fn dangling_arg() void { i32 mut* own p = new(i32); box b = box{p, 0}; del(p); take_box(b); }",
+    "fn static_field() char { holder h = holder{\"abc\"}; keep(null); return h.name[0]; }",
+    "fn caller_field(box b) i32 { return *b.p; }",
+    "fn caller_after_call(box b, i32 mut* p) i32 { set(p); return *b.p; }",
+    "fn loan_string(string s) u64 { u64 mut n = 0; for (char c : s) { n += 1; } return n; }",
+    "fn loan_field(view v) u64 { u64 mut n = 0; for (u8 c : v.bytes) { n += 1; } return n; }",
+    "fn loan_write(string s) u8 { view mut w = view{}; for (char c : s) { w.at += 1; } return 1; }",
+    "fn loan_through(view* v) u64 { u64 mut n = 0; for (u8 c : v->bytes) { n += 1; } return n; }",
+    "fn root() i32 { return 0; }",
+};
+
+// The number of programs in each class of the first criterion, counted as they are checked.
+struct counts {
+    u64 violated;
+    u64 proved;
+    u64 declared;
+    u64 outside;
+}
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    assert(found->stored.solved && found->stored.stored);
+    return found;
+}
+
+fn proved(ownership_source_env.env mut* e, counts mut* n, string name) void {
+    ownership_source.body* found = row(e, name);
+    ownership_source_local.context* c = &found->stored;
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof) || c->violations_len != 0) {
+        eprintln(name, ": not proved, gap ", cast(c->gap, u64), ", violations ",
+            c->violations_len);
+        assert(false);
+    }
+    n->proved += 1;
+}
+
+fn declared(ownership_source_env.env mut* e, counts mut* n, string name) void {
+    ownership_source.body* found = row(e, name);
+    ownership_source_local.context* c = &found->stored;
+    if (c->correspondence != ownership_source_local.status.complete ||
+        ownership_api.successful(c->proof) || c->violations_len != 0) {
+        eprintln(name, ": not declared incomplete, gap ", cast(c->gap, u64), ", proved ",
+            ownership_api.successful(c->proof), ", violations ", c->violations_len);
+        assert(false);
+    }
+    n->declared += 1;
+}
+
+fn outside(ownership_source_env.env mut* e, counts mut* n, string name,
+    ownership_source_local.missing why) void {
+    ownership_source.body* found = row(e, name);
+    if (found->stored.correspondence != ownership_source_local.status.incomplete ||
+        found->stored.gap != why) {
+        eprintln(name, ": gap ", cast(found->stored.gap, u64), ", expected ", cast(why, u64));
+        assert(false);
+    }
+    n->outside += 1;
+}
+
+// One validated violation of the stored row: its kind, the name that the message gives, and
+// its line. The local row validates no violation of this body.
+fn violated(ownership_source_env.env mut* e, counts mut* n, string name,
+    ownership_api.event_kind kind, string place, u32 line) void {
+    ownership_source.body* found = row(e, name);
+    ownership_source_local.context* c = &found->stored;
+    strbuf.str_buf mut shown = strbuf.create();
+    defer strbuf.free(&shown);
+    if (c->violations_len == 1) {
+        ownership_source_local.violation v = c->violations[0];
+        if (v.leaf != ownership_source_local.WHOLE && v.quoted) {
+            ownership_source_leaves.append_name(&c->leaves, c->function, v.leaf, &shown);
+        } else {
+            strbuf.append(&shown, v.name);
+        }
+        if (v.kind == kind && strbuf.view(&shown) == place && v.source.line == line &&
+            found->local.violations_len == 0) {
+            n->violated += 1;
+            return;
+        }
+        eprintln(name, ": ", strbuf.view(&shown), " at line ", v.source.line);
+    } else {
+        eprintln(name, ": ", c->violations_len, " violations");
+    }
+    assert(false);
+}
+
+fn field_cases(ownership_source_env.env mut* e, counts mut* n) void {
+    ownership_api.event_kind use = ownership_api.event_kind.invalid_use;
+    // A use through a field after the release of its source (field UAF, D17.14).
+    violated(e, n, "field_use", use, "b.p", 13);
+    proved(e, n, "field_read");
+    violated(e, n, "field_nested", use, "o.inner.p", 26);
+    // A whole copy and a TL load keep the source of the field.
+    violated(e, n, "field_copied", use, "c.p", 30);
+    violated(e, n, "field_loaded", use, "q", 34);
+    // A strong store refills the field; a move keeps the heap identity (D17.15).
+    proved(e, n, "field_refilled");
+    proved(e, n, "field_moved_owner");
+    // A span field: an element read is a use, its length read is none. The witness needs a
+    // constant length to pass the bounds check before the read.
+    violated(e, n, "span_field", use, "v.bytes", 46);
+    proved(e, n, "span_length");
+    println("field cases ok");
+}
+
+fn owner_cases(ownership_source_env.env mut* e, counts mut* n) void {
+    ownership_api.event_kind lost = ownership_api.event_kind.lost_ownership;
+    // Each owning field is its own owner at the scope end and at a store (D17.11).
+    violated(e, n, "owner_leak", lost, "s.b", 51);
+    violated(e, n, "owner_overwrite", lost, "s.a", 53);
+    proved(e, n, "owner_clean");
+    proved(e, n, "owner_moved_out");
+    println("owner cases ok");
+}
+
+fn element_cases(ownership_source_env.env mut* e, counts mut* n) void {
+    ownership_api.event_kind use = ownership_api.event_kind.invalid_use;
+    // A constant index is one exact element (element UAF).
+    violated(e, n, "element_use", use, "a[0]", 61);
+    proved(e, n, "element_other");
+    // A variable index stores into each element as an alternative, so a later read of an
+    // element with two values is incomplete, never a violation (D17.15 weak update). Element 1
+    // already holds the stored value, so it keeps one value and its read is proved.
+    declared(e, n, "element_weak");
+    proved(e, n, "element_weak_kept");
+    // A read through a variable index has no element to check.
+    outside(e, n, "element_dynamic", ownership_source_local.missing.dynamic_element);
+    println("element cases ok");
+}
+
+fn escape_cases(ownership_source_env.env mut* e, counts mut* n) void {
+    ownership_api.event_kind use = ownership_api.event_kind.invalid_use;
+    // A borrow of local storage outlives the storage (inline escape, D17.14).
+    violated(e, n, "stack_block", use, "q", 76);
+    violated(e, n, "stack_return", use, "the result", 77);
+    violated(e, n, "stack_field", use, "b.p", 79);
+    violated(e, n, "stack_parameter", use, "the result", 86);
+    // Each iteration begins the storage again; its borrow ends with it.
+    proved(e, n, "stack_loop");
+    // A borrow stored through a pointer leaves the run: it can outlive the local.
+    outside(e, n, "stack_out", ownership_source_local.missing.escape);
+    println("inline escape cases ok");
+}
+
+fn source_cases(ownership_source_env.env mut* e, counts mut* n) void {
+    // A whole copy of a TA reads each reference leaf: a dangling field is an invalid use, as
+    // a copy of a dangling TL is in the local run.
+    violated(e, n, "dangling_arg", ownership_api.event_kind.invalid_use, "b.p", 87);
+    // Static storage keeps its source across an unknown call.
+    proved(e, n, "static_field");
+    proved(e, n, "caller_field");
+    // An unknown call can end caller storage: call summaries own that obligation.
+    outside(e, n, "caller_after_call", ownership_source_local.missing.call_dependent);
+    println("source cases ok");
+}
+
+fn loan_cases(ownership_source_env.env mut* e, counts mut* n) void {
+    // The flow proves the loan of a whole local and of a TA leaf (D17.10).
+    proved(e, n, "loan_string");
+    proved(e, n, "loan_field");
+    // A projected write in the loop and a collection behind a pointer need alias facts. The
+    // checker rejects a fort call in the loop (`fail/ownership/045`), so no FIR has one.
+    outside(e, n, "loan_write", ownership_source_local.missing.range_loan);
+    outside(e, n, "loan_through", ownership_source_local.missing.range_loan);
+    println("loan cases ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    counts mut n = counts{};
+    field_cases(&e, &n);
+    owner_cases(&e, &n);
+    element_cases(&e, &n);
+    escape_cases(&e, &n);
+    source_cases(&e, &n);
+    loan_cases(&e, &n);
+    // 13 validated violations with 13 proved controls, 1 declared incomplete body, and 5
+    // bodies outside the stored scope.
+    if (n.violated != 13 || n.proved != 13 || n.declared != 1 || n.outside != 5) {
+        eprintln("counts: ", n.violated, " ", n.proved, " ", n.declared, " ", n.outside);
+        assert(false);
+    }
+    println("counts ok");
+    return 0;
+}
