@@ -10,6 +10,7 @@ import check_env;
 import fir;
 import modules;
 import ownership_api;
+import ownership_graph;
 import ownership_keys;
 import ownership_source;
 import ownership_source_env;
@@ -257,10 +258,60 @@ fn empty_closure_has_no_placeholder_bodies() void {
     assert(!e.source.accounting_complete);
 }
 
+// The graph body at index `i` is source row `i`.
+fn graph_body(ownership_source_env.env mut* e, string module, string name) u64 {
+    ownership_source.body mut* row = ownership_source_env.find(e, module, name);
+    u64 mut i = 0;
+    while (i < e->source.bodies.len) {
+        if (&e->source.bodies[i] == row) { return i; }
+        i += 1;
+    }
+    panic("ownership_source_test: missing row");
+}
+
+// A residual call gives no graph edge, so `root` and the body that the global holds stay in
+// two components that are not recursive. The call stays residual (D17.18).
+fn residual_call_has_no_edge() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "(fn () void) mut SLOT = hook;\n");
+    strbuf.append(&text, "fn root() void { SLOT(); }\n");
+    strbuf.append(&text, "fn hook() void { root(); }\n");
+    strbuf.append(&text, "fn plain() void { root(); }\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.analyze(&e.source);
+    ownership_graph.graph* g = &e.source.graph;
+    assert(e.source.graph_built && ownership_api.successful(g->proof));
+    u64 mut residual = 0;
+    u64 mut i = 0;
+    while (i < g->calls_len) {
+        if (g->calls[i].residual_fort) {
+            assert(cast(g->calls[i].body, u64) == graph_body(&e, "main", "root"));
+            assert(g->calls[i].fort_len == 0);
+            residual += 1;
+        }
+        i += 1;
+    }
+    assert(residual == 1);
+    u32 root = g->components[graph_body(&e, "main", "root")];
+    assert(root != g->components[graph_body(&e, "main", "hook")]);
+    assert(!ownership_graph.recursive_component(g, root));
+    u32 hook = g->components[graph_body(&e, "main", "hook")];
+    assert(!ownership_graph.recursive_component(g, hook));
+    u32 plain = g->components[graph_body(&e, "main", "plain")];
+    assert(plain != root && !ownership_graph.recursive_component(g, plain));
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "plain");
+    assert(row->graph_solver == ownership_source.status.complete);
+}
+
 fn main() i32 {
     selected_bodies_include_uncalled_imports_and_runtime();
     inactive_ancestors_do_not_require_nested_selection();
     both_target_configurations_select_only_their_bodies();
+    residual_call_has_no_edge();
     println("selection ok");
     declaration_keys_count_selected_nonbody_declarations();
     overlapping_closures_keep_context_keys_separate();

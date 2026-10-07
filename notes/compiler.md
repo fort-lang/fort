@@ -1382,6 +1382,22 @@ came here.
   call of a missing body, is an unresolved step with the same continuation. An extern
   call keeps the body unsupported with the reason `missing_ffi`. An indirect call without graph
   targets keeps it unsupported with `unknown_effect`.
+- **A residual fort target names no body** (D17.18).
+  A call with a residual fort target gets no graph edge for it. No argument or result flows
+  through it, and its destination keeps a residual target of its own.
+  The residual target set is not complete, so the graph does not list it. A foreign caller or
+  `dlsym` can name the symbol of any fort function (D9.6, D9.7). A cast through `void*` or `u64`
+  can compute an address that no statement names (D3.11, D3.14).
+  Each consumer treats such a call as an unresolved step that reads no summary.
+  `ownership_summary_body.call` gives it no target, `ownership_summary.unresolved_call` keeps its
+  continuation, `publish` gives `unknown_effect`, and `ownership_calls.child_query` refuses it.
+  Only `ownership_recursive` reads the components, so the edges fed nothing.
+  On `src/fort/main.ft` at b105e8d1, an edge to each body put 499 bodies into one recursive
+  component that needed 6.79 times its W bound. Without those edges the largest component has 34
+  members (FIR size 3832). The graph build W rose from 1205618 to 1262320: it keeps 16158 facts
+  against 35370, but its fixed point needs 13 sweeps against 11.
+  `test/fort/ownership_graph_test.ft` G16 to G19, `test/fort/ownership_indirect_test.ft` R14 and
+  the 4 rows of `tools/mutations/ownership_graph.json` hold this.
 - **A call of a function value applies the summary of each fort target** (D17.13, D17.18).
   `ownership_recursive.solve` gives each graph call one `call_targets` record and binds each
   explicit fort target to its published summary. Extraction finds the record of a call by a
