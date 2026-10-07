@@ -314,6 +314,16 @@ came here.
   A moved or released owning leaf has an empty-owner fact with exact zero length.
   A delegated aggregate failure keeps the mapped event key and its exhaustion data.
   The module changes a cloned state first. A failed later mutation leaves the input state unchanged.
+  A value transfer pays one W unit for each row that a scan reads and each row of its state copy,
+  before the work. A leaf of the plan pays one unit and one contents scan. The transfer charges
+  through `ownership_state.unit_spend`, as the content counts do, but at another unit: a content
+  count pays one unit for each 64 rows that it sorts (`rows_spend`), and a transfer scan pays one
+  unit for each row that it compares with a place. A W refusal in the transfer reports one work
+  failure through the mapped route, as a state mutator does. The removal passes keep the other
+  rows in their order in one pass each. The type walk reads no state and pays no W; the byte
+  kernel pays for the type before the transfer. `test/fort/ownership_places_test.ft` pins
+  `1 + 6C + 4A + S` W for C contents, A allocation and S source rows. That move has no reference
+  leaf, and no fact stands below its two places.
   Neither move rebases an inline address. Abstract temporary ownership ends on transfer even when
   LLVM omits generated source clearing. Normal return ends by-value parameter storage after defer,
   including parameter copies without dead markers. Symbolic caller sources have separate lifetimes.
@@ -428,6 +438,13 @@ came here.
   the core price times the allocations, 142620 W, and is now 4260. A zero write cost 167275 W
   and is now 12550. `test/fort/ownership_raw_bytes_work_test.ft` pins four states and checks
   that their costs add.
+  A semantic move pays its copy price once. The transfer of places pays for the rows it reads.
+  Before, the move paid the copy price times (leaves + 1 + contents + allocations) times 8: 477403
+  W over the populated owner state, and the bound (589824 W) with 128 more rows. Now it pays
+  24643, 41547 and 58451 W with 0, 128 and 256 more rows. Each row adds 132 units, and 96 of them
+  are the core price that the 4 rewritten representations pay. `ownership_state.measure_regions`
+  still counts regions by sorted insertion in each contents mutator, so allocations add a square
+  term there: 64 and 128 more allocations cost 51025 and 93402 W.
   Representation partitions use the full source key and a canonical half-open storage interval.
   Snapshot partitions use their ledger's snapshot key and a canonical half-open snapshot interval.
   These two namespaces remain distinct. Duplicate identities count once within one namespace.

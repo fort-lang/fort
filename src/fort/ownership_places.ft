@@ -42,6 +42,14 @@ struct owned_path {
     ownership_api.projection mut@ own parts;
 }
 
+// Pays the W of one transfer of places. One unit pays for one row that a scan of the state can
+// read, one leaf of the plan, or one row that a copy of the state writes (D17.18). The counter
+// holds the mapped services, the request's coordinates and the proof of the work.
+struct work {
+    ownership_state.unit_counter units;
+    request* req;
+}
+
 fn same_entity(ownership_api.entity_id a, ownership_api.entity_id b) bool {
     return ownership_keys.entity(a, b) == 0;
 }
@@ -244,6 +252,36 @@ fn complete() ownership_api.proof_status {
     return proof;
 }
 
+// Charges one unit at a time before the work it pays for, as the state mutators do. A refusal
+// reports one work failure through the mapped route and keeps its proof.
+fn spend(work mut* paid, u64 amount) bool {
+    if (!ownership_api.successful(paid->units.proof)) { return false; }
+    u64 mut i = 0;
+    while (i < amount) {
+        if (!ownership_state.unit_spend(&paid->units)) {
+            paid->units.proof = ownership_state.report_failure(paid->units.service,
+                paid->units.proof, paid->units.operation, paid->units.source);
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Counts the rows of the 11 vectors of a state. A copy of the state writes each row once.
+fn rows(ownership_state.state* s) u64 {
+    u64[11] lengths = {s->contents_len, s->sources_len, s->allocations_len, s->regions_len,
+        s->nodes_len, s->edges_len, s->shapes_len, s->predicates_len, s->guards_len,
+        s->correlations_len, s->losses_len};
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < lengths.len) {
+        total = ownership_state.plus_count(total, lengths[i]);
+        i += 1;
+    }
+    return total;
+}
+
 fn fact_index(ownership_state.state* s, ownership_api.place_path path) u64 {
     return ownership_transfer.contents_index(s, path);
 }
@@ -252,10 +290,16 @@ fn owner_index(ownership_state.state* s, ownership_api.place_path path) u64 {
     return ownership_transfer.owner_index(s, path);
 }
 
-fn source_leaves(ownership_state.state* s, leaf_plan* plan,
-    ownership_api.services* svc, request* req) ownership_api.proof_status {
+fn source_leaves(ownership_state.state* s, leaf_plan* plan, work mut* paid)
+    ownership_api.proof_status {
+    ownership_api.services* svc = paid->units.service;
+    request* req = paid->req;
     u64 mut i = 0;
     while (i < plan->len) {
+        // The leaf and the contents scan that finds its fact.
+        if (!spend(paid, ownership_state.plus_count(1, s->contents_len))) {
+            return paid->units.proof;
+        }
         leaf item = plan->items[i];
         u64 content = fact_index(s, item.path);
         if (content == U64_MAX || ownership_state.has_residual(item.path)) {
@@ -275,6 +319,9 @@ fn source_leaves(ownership_state.state* s, leaf_plan* plan,
             }
             u64 mut borrow = 0;
             while (borrow < value.borrows.len) {
+                if (!spend(paid, ownership_state.plus_count(1, s->sources_len))) {
+                    return paid->units.proof;
+                }
                 u64 source = ownership_transfer.source_index(s,
                     value.borrows[borrow].source);
                 if (!value.borrows[borrow].representation_complete ||
@@ -292,9 +339,13 @@ fn source_leaves(ownership_state.state* s, leaf_plan* plan,
                 borrow += 1;
             }
             if (item.ty->is_own) {
+                if (!spend(paid, s->allocations_len)) { return paid->units.proof; }
                 u64 count = ownership_transfer.owner_count(s, item.path);
                 if (count > 1) { return unproved(svc, req, item.path.root); }
                 if (count == 1) {
+                    // The owner scan, then the source scan of the owner's reference.
+                    if (!spend(paid, ownership_state.plus_count(s->allocations_len,
+                        s->sources_len))) { return paid->units.proof; }
                     u64 owner = owner_index(s, item.path);
                     if (owner == U64_MAX ||
                         !ownership_transfer.owner_reference_proved(s, value,
@@ -316,14 +367,17 @@ fn source_leaves(ownership_state.state* s, leaf_plan* plan,
     return complete();
 }
 
+// A W refusal also gives false. The caller reads the refusal from the proof of its work.
 fn owners_covered(ownership_state.state* s, leaf_plan* plan,
-    ownership_api.place_path root, bool aliases_substituted) bool {
+    ownership_api.place_path root, bool aliases_substituted, work mut* paid) bool {
     u64 mut i = 0;
     while (i < s->allocations_len) {
+        if (!spend(paid, 1)) { return false; }
         ownership_api.allocation_fact owner = s->allocations[i];
         if (owner.obligation && compare(owner.owner.place, root,
             aliases_substituted) != overlap.disjoint) {
             if (!begins(owner.owner.place, root)) { return false; }
+            if (!spend(paid, plan->len)) { return false; }
             bool mut found = false;
             u64 mut j = 0;
             while (j < plan->len) {
@@ -342,10 +396,12 @@ fn owners_covered(ownership_state.state* s, leaf_plan* plan,
     return true;
 }
 
-fn destination_clear(ownership_state.state* s, ownership_api.services* svc,
-    request* req) ownership_api.proof_status {
+fn destination_clear(ownership_state.state* s, work mut* paid) ownership_api.proof_status {
+    ownership_api.services* svc = paid->units.service;
+    request* req = paid->req;
     u64 mut i = 0;
     while (i < s->allocations_len) {
+        if (!spend(paid, 1)) { return paid->units.proof; }
         if (s->allocations[i].obligation) {
             ownership_api.place_path owner = s->allocations[i].owner.place;
             overlap region = compare(owner, req->base.destination,
@@ -368,36 +424,47 @@ fn destination_clear(ownership_state.state* s, ownership_api.services* svc,
     return complete();
 }
 
+// Keeps the other rows in their order in one pass over the contents.
 fn remove_contents(ownership_state.state mut* s, ownership_api.place_path root) void {
+    u64 mut kept = 0;
     u64 mut i = 0;
     while (i < s->contents_len) {
-        if (begins(s->contents[i].place, root)) {
-            u64 mut j = i + 1;
-            while (j < s->contents_len) {
-                s->contents[j - 1] = s->contents[j];
-                j += 1;
-            }
-            s->contents_len -= 1;
-        } else { i += 1; }
+        if (!begins(s->contents[i].place, root)) {
+            s->contents[kept] = s->contents[i];
+            kept += 1;
+        }
+        i += 1;
     }
+    s->contents_len = kept;
 }
 
+// Keeps the other rows in their order in one pass over the contents.
 fn invalidate_aggregate_ancestors(ownership_state.state mut* s,
     ownership_api.place_path root) void {
+    u64 mut kept = 0;
     u64 mut i = 0;
     while (i < s->contents_len) {
         ownership_api.contents_fact value = s->contents[i];
-        if (value.kind == ownership_api.contents_kind.aggregate &&
+        if (!(value.kind == ownership_api.contents_kind.aggregate &&
             value.place.projections.len < root.projections.len &&
-            begins(root, value.place)) {
-            u64 mut j = i + 1;
-            while (j < s->contents_len) {
-                s->contents[j - 1] = s->contents[j];
-                j += 1;
-            }
-            s->contents_len -= 1;
-        } else { i += 1; }
+            begins(root, value.place))) {
+            s->contents[kept] = value;
+            kept += 1;
+        }
+        i += 1;
     }
+    s->contents_len = kept;
+}
+
+// Removes the rows below a root, then the aggregate rows above it. Each pass reads the contents
+// once and pays one unit for each row before it reads them.
+fn clear_contents(ownership_state.state mut* next, ownership_api.place_path root,
+    work mut* paid) bool {
+    if (!spend(paid, next->contents_len)) { return false; }
+    remove_contents(next, root);
+    if (!spend(paid, next->contents_len)) { return false; }
+    invalidate_aggregate_ancestors(next, root);
+    return true;
 }
 
 fn owning_leaf(leaf_plan* plan, ownership_api.place_path path) bool {
@@ -455,11 +522,14 @@ fn transfer_value(ownership_state.state mut* s, ownership_api.services* svc,
         free_plan(&plan);
         return unproved(svc, req, req->base.source.root);
     }
-    ownership_api.proof_status mut proof = source_leaves(s, &plan, svc, req);
+    work mut paid = work{ownership_state.unit_counter{svc, ownership_api.work_kind.transfer,
+        req->base.operation, req->base.source_position, complete()}, req};
+    ownership_api.proof_status mut proof = source_leaves(s, &plan, &paid);
     if (!ownership_api.successful(proof)) { free_plan(&plan); return proof; }
     if (!owners_covered(s, &plan, req->base.source,
-        req->alias_substituted_proved)) {
+        req->alias_substituted_proved, &paid)) {
         free_plan(&plan);
+        if (!ownership_api.successful(paid.units.proof)) { return paid.units.proof; }
         return unproved(svc, req, req->base.source.root);
     }
     if (req->kind == action.copy_value &&
@@ -475,12 +545,18 @@ fn transfer_value(ownership_state.state mut* s, ownership_api.services* svc,
         free_plan(&plan);
         return unproved(svc, req, req->base.destination.root);
     }
-    proof = destination_clear(s, svc, req);
+    proof = destination_clear(s, &paid);
     if (!ownership_api.successful(proof)) { free_plan(&plan); return proof; }
+    if (!spend(&paid, rows(s))) { free_plan(&plan); return paid.units.proof; }
     ownership_state.state mut next = ownership_state.clone(s);
     if (req->kind == action.move_value) {
         u64 mut i = 0;
         while (i < next.allocations_len) {
+            if (!spend(&paid, 1)) {
+                ownership_state.free(&next);
+                free_plan(&plan);
+                return paid.units.proof;
+            }
             ownership_api.allocation_fact owner = next.allocations[i];
             if (owner.obligation && begins(owner.owner.place, req->base.source)) {
                 owned_path mut path = rebase(owner.owner.place, req->base.source,
@@ -501,16 +577,29 @@ fn transfer_value(ownership_state.state mut* s, ownership_api.services* svc,
             i += 1;
         }
     }
-    remove_contents(&next, req->base.destination);
-    invalidate_aggregate_ancestors(&next, req->base.destination);
-    if (req->kind == action.move_value && relation == overlap.disjoint) {
-        remove_contents(&next, req->base.source);
-        invalidate_aggregate_ancestors(&next, req->base.source);
+    bool clears_source = req->kind == action.move_value && relation == overlap.disjoint;
+    if (!clear_contents(&next, req->base.destination, &paid) ||
+        (clears_source && !clear_contents(&next, req->base.source, &paid))) {
+        ownership_state.free(&next);
+        free_plan(&plan);
+        return paid.units.proof;
     }
     u64 mut i = 0;
     while (i < s->contents_len) {
+        if (!spend(&paid, 1)) {
+            ownership_state.free(&next);
+            free_plan(&plan);
+            return paid.units.proof;
+        }
         ownership_api.contents_fact prior = s->contents[i];
         if (begins(prior.place, req->base.source)) {
+            // The borrows that copied rebases, then the leaf search of a cleared source.
+            if (!spend(&paid, ownership_state.plus_count(prior.borrows.len,
+                clears_source ? plan.len : 0))) {
+                ownership_state.free(&next);
+                free_plan(&plan);
+                return paid.units.proof;
+            }
             owned_path mut path = rebase(prior.place, req->base.source,
                 req->base.destination);
             ownership_api.contents_fact fact = copied(&next, prior, path.path,
@@ -524,7 +613,7 @@ fn transfer_value(ownership_state.state mut* s, ownership_api.services* svc,
                 free_plan(&plan);
                 return proof;
             }
-            if (req->kind == action.move_value && relation == overlap.disjoint) {
+            if (clears_source) {
                 added = ownership_state.add_contents(&next, svc,
                     zero_value(prior, owning_leaf(&plan, prior.place)),
                     req->base.operation, req->base.source_position);
