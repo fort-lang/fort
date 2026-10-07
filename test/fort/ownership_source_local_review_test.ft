@@ -1,0 +1,634 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| validated ok
+//| declared ok
+//| proved ok
+//| gaps ok
+//| scope ok
+//| limits ok
+//| refusals keep the scope ok
+/// Pins the local outcome of each program that a deep review used to probe the producer:
+/// legal programs give no violation, and each validated violation has a witness path.
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[396] REVIEWED = {
+    "fn fe1() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    del(p);",
+    "    if (p != null) { *p = 1; }",
+    "    return 0;",
+    "}",
+    "fn fe2() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    bool mut freed = false;",
+    "    del(p);",
+    "    freed = true;",
+    "    if (!freed) { *q = 1; }",
+    "    return 0;",
+    "}",
+    "fn fe3() i32 {",
+    "    u8 mut@ own buf = new(u8, 8);",
+    "    u8 mut@ view = buf;",
+    "    del(buf);",
+    "    u64 mut n = 0;",
+    "    u64 mut i = 0;",
+    "    while (i < n) { view[i] = 0; i += 1; }",
+    "    return 0;",
+    "}",
+    "fn fe4() i32 {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    buf[0] = 1;",
+    "    del(buf);",
+    "    if (buf.len > 0) { buf[0] = 2; }",
+    "    return 0;",
+    "}",
+    "fn g() void {}",
+    "fn cd1(i32* param) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    g();",
+    "    i32 x = *param;",
+    "    del(p);",
+    "    *q = 1;",
+    "    return x;",
+    "}",
+    "fn cd2(bool c, i32* param) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    if (c) { del(p); }",
+    "    *q = 1;",
+    "    del(p);",
+    "    g();",
+    "    return *param;",
+    "}",
+    "fn cd3(bool c) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    if (c) { del(p); }",
+    "    *q = 1;",
+    "    del(p);",
+    "    return 0;",
+    "}",
+    "fn brk(i32 n) void {",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own p = new(i32);",
+    "        if (i == 3) { break; }",
+    "        del(p);",
+    "        i += 1;",
+    "    }",
+    "}",
+    "fn ret_in_loop(i32 n) i32 {",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own p = new(i32);",
+    "        if (i == 3) { return 1; }",
+    "        del(p);",
+    "        i += 1;",
+    "    }",
+    "    return 0;",
+    "}",
+    "fn cont(i32 n) void {",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i += 1;",
+    "        i32 mut* own p = new(i32);",
+    "        if (i == 3) { continue; }",
+    "        del(p);",
+    "    }",
+    "}",
+    "fn swap_loop(i32 n) void {",
+    "    i32 mut* own mut a = new(i32);",
+    "    i32 mut* own mut b = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        b = move(a);",
+    "        a = move(b);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "}",
+    "fn swap_leak(i32 n) void {",
+    "    i32 mut* own mut a = new(i32);",
+    "    i32 mut* own mut b = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        b = move(a);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "}",
+    "fn defer_ok() void {",
+    "    i32 mut* own p = new(i32);",
+    "    defer del(p);",
+    "    *p = 2;",
+    "}",
+    "fn defer_cond(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (c) { defer del(p); *p = 1; }",
+    "}",
+    "fn span_uaf() void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u8 mut@ v = buf;",
+    "    del(buf);",
+    "    v[0] = 1;",
+    "}",
+    "fn ptr_uaf() void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u8 mut* v = buf.ptr;",
+    "    del(buf);",
+    "    *v = 1;",
+    "}",
+    "fn str_uaf() i32 {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    string own s = cast(move(buf), string own);",
+    "    string t = s;",
+    "    del(s);",
+    "    return cast(t[0], i32);",
+    "}",
+    "fn overwrite() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    p = new(i32);",
+    "    del(p);",
+    "}",
+    "fn moved_then_freed() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    i32 mut* own r = move(p);",
+    "    del(r);",
+    "    return *q;",
+    "}",
+    "fn moved_leak() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* own r = move(p);",
+    "    del(p);",
+    "}",
+    "fn switch_leak(i32 k) void {",
+    "    i32 mut* own p = new(i32);",
+    "    switch (k) {",
+    "    case 0: del(p);",
+    "    case 1: del(p);",
+    "    default: return;",
+    "    }",
+    "}",
+    "fn ret_view() i32* {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* q = p;",
+    "    defer del(p);",
+    "    return q;",
+    "}",
+    "fn corr(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (c) { del(p); }",
+    "}",
+    "fn loop_move_del(i32 n) void {",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own p = new(i32);",
+    "        i32 mut* own q = move(p);",
+    "        del(q);",
+    "        i += 1;",
+    "    }",
+    "}",
+    "fn loop_alloc_del(i32 n) void {",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own p = new(i32);",
+    "        *p = i;",
+    "        del(p);",
+    "        i += 1;",
+    "    }",
+    "}",
+    "fn loop_borrow(i32 n) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    *p = 0;",
+    "    i32 mut i = 0;",
+    "    i32 mut t = 0;",
+    "    while (i < n) {",
+    "        i32* q = p;",
+    "        t += *q;",
+    "        i += 1;",
+    "    }",
+    "    del(p);",
+    "    return t;",
+    "}",
+    "fn move_once_loop(i32 n) void {",
+    "    i32 mut* own mut a = new(i32);",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own t = move(a);",
+    "        a = move(t);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "}",
+    "extern fn strlen(char* s) u64;",
+    "fn nested_ret(i32 n) i32 {",
+    "    i32 mut* own a = new(i32);",
+    "    defer del(a);",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own b = new(i32);",
+    "        i32 mut j = 0;",
+    "        while (j < n) {",
+    "            if (j == 2) { return 1; }",
+    "            j += 1;",
+    "        }",
+    "        del(b);",
+    "        i += 1;",
+    "    }",
+    "    return 0;",
+    "}",
+    "fn alias_loop(i32 n) i32 {",
+    "    u8 mut@ own buf = new(u8, 8);",
+    "    u8 mut@ v = buf;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        if (i == 5) { del(buf); }",
+    "        i += 1;",
+    "    }",
+    "    v[0] = 1;",
+    "    del(buf);",
+    "    return 0;",
+    "}",
+    "fn reassign_borrow(i32 n) i32 {",
+    "    i32 mut* own a = new(i32);",
+    "    i32 mut* own b = new(i32);",
+    "    i32 mut* mut q = a;",
+    "    del(a);",
+    "    q = b;",
+    "    *q = 1;",
+    "    del(b);",
+    "    return 0;",
+    "}",
+    "fn extern_arg_after_free() u64 {",
+    "    u8 mut@ own buf = new(u8, 8);",
+    "    char* c = cast(buf.ptr, char*);",
+    "    del(buf);",
+    "    return strlen(c);",
+    "}",
+    "fn use_after_move_into_slot() i32 {",
+    "    i32 mut* own a = new(i32);",
+    "    i32 mut* own mut b = null;",
+    "    b = move(a);",
+    "    *a = 1;",
+    "    del(b);",
+    "    return 0;",
+    "}",
+    "fn leak_reassign_owner() void {",
+    "    i32 mut* own mut a = new(i32);",
+    "    i32 mut* own mut b = new(i32);",
+    "    b = move(a);",
+    "    del(b);",
+    "}",
+    "fn double_slot_dead() void {",
+    "    i32 mut* own a = new(i32);",
+    "    {",
+    "        i32 mut* own b = move(a);",
+    "        del(b);",
+    "    }",
+    "    *a = 2;",
+    "}",
+    "fn view_return_param(i32* p) i32* {",
+    "    return p;",
+    "}",
+    "fn void_cast_uaf() void {",
+    "    i32 mut* own a = new(i32);",
+    "    void* v = cast(a, void*);",
+    "    del(a);",
+    "    i32* back = cast(v, i32*);",
+    "    i32 x = *back;",
+    "}",
+    "fn null_test(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (p != null) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn site_key(i32 n) void {",
+    "    i32 mut* own mut prev = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own cur = new(i32);",
+    "        del(prev);",
+    "        prev = move(cur);",
+    "        i += 1;",
+    "    }",
+    "    del(prev);",
+    "}",
+    "fn zero_leak() void {",
+    "    u8 mut@ own s = new(u8, 0);",
+    "}",
+    "fn zero_ok() u64 {",
+    "    u8 mut@ own s = new(u8, 0);",
+    "    u64 n = s.len;",
+    "    del(s);",
+    "    return n;",
+    "}",
+    "fn sym_ok(u64 n) void {",
+    "    u8 mut@ own s = new(u8, n);",
+    "    u8 mut@ v = s;",
+    "    if (n > 0) { v[0] = 1; }",
+    "    del(s);",
+    "}",
+    "fn sym_zero_elem(u64 n) void {",
+    "    u8 mut@ own s = new(u8, n);",
+    "    del(s);",
+    "    u8 mut@ own t = new(u8, n);",
+    "    t[0] = 1;",
+    "    del(t);",
+    "}",
+    "fn str_ok() u64 {",
+    "    u8 mut@ own buf = new(u8, 3);",
+    "    string own s = cast(move(buf), string own);",
+    "    u64 n = s.len;",
+    "    del(s);",
+    "    return n;",
+    "}",
+    "fn voidp() void {",
+    "    i32 mut* own p = new(i32);",
+    "    void mut* own v = cast(move(p), void mut* own);",
+    "    del(v);",
+    "}",
+    "fn peek() i32 {",
+    "    i32* p = cast(cast(4096, u64), i32*);",
+    "    return *p;",
+    "}",
+    "fn peek_var(u64 a) i32 {",
+    "    i32* p = cast(a, i32*);",
+    "    return *p;",
+    "}",
+    "fn deferred(bool c) void {",
+    "    i32 mut* own a = new(i32);",
+    "    i32 mut* q = a;",
+    "    del(a);",
+    "    defer *q = 1;",
+    "    if (c) { *q = 2; return; }",
+    "}",
+    "struct box { i32 mut* p; }",
+    "fn through_field() void {",
+    "    i32 mut* own p = new(i32);",
+    "    box mut b = box{p};",
+    "    del(p);",
+    "    *b.p = 1;",
+    "}",
+    "fn through_taken_local() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* mut q = p;",
+    "    i32 mut* mut* qq = &q;",
+    "    del(p);",
+    "    **qq = 1;",
+    "}",
+    "fn hidden(i32* param, i32 n) i32 {",
+    "    i32 mut* own leak = new(i32);",
+    "    g();",
+    "    i32 x = *param;",
+    "    i32 mut* own mut a = new(i32);",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own t = move(a);",
+    "        a = move(t);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "    return x;",
+    "}",
+    "fn shown(i32 n) i32 {",
+    "    i32 mut* own leak = new(i32);",
+    "    g();",
+    "    i32 mut* own mut a = new(i32);",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own t = move(a);",
+    "        a = move(t);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "    return 0;",
+    "}",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < REVIEWED.len) {
+        strbuf.append(text, REVIEWED[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+fn row(ownership_source_env.env mut* e, string name, string correspondence, string proof)
+    ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    string got = ownership_report.analysis_status(found, ownership_report.LOCAL, 0);
+    string result = ownership_report.analysis_status(found, ownership_report.LOCAL, 2);
+    if (got != correspondence || result != proof) {
+        eprintln(name, ": correspondence ", got, ", proof ", result);
+        assert(false);
+    }
+    return found;
+}
+
+fn validated(ownership_source_env.env mut* e, string name, ownership_api.event_kind kind,
+    string slot, u32 line) void {
+    ownership_source.body* found = row(e, name, "complete", "violated");
+    assert(found->local.violations_len == 1);
+    ownership_source_local.violation v = found->local.violations[0];
+    if (v.kind != kind || v.name != slot || v.source.line != line || !v.quoted) {
+        eprintln(name, ": ", v.name, " at line ", v.source.line);
+        assert(false);
+    }
+}
+
+// A body in the declared scope whose proof is incomplete: scoped CI rejects it.
+fn declared(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name, "complete", "incomplete");
+    assert(found->local.violations_len == 0);
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    row(e, name, "complete", "complete");
+}
+
+fn outside(ownership_source_env.env mut* e, string name, ownership_source_local.missing why)
+    void {
+    ownership_source.body* found = row(e, name, "incomplete", "incomplete");
+    if (found->local.gap != why) {
+        eprintln(name, ": gap ", cast(found->local.gap, i32));
+        assert(false);
+    }
+}
+
+fn outcomes(ownership_source_env.env mut* e) void {
+    // A write through a view of a released span.
+    validated(e, "span_uaf", ownership_api.event_kind.invalid_use, "v", 121);
+    // A write through the pointer of a released span.
+    validated(e, "ptr_uaf", ownership_api.event_kind.invalid_use, "v", 127);
+    // A store over a live owner.
+    validated(e, "overwrite", ownership_api.event_kind.lost_ownership, "p", 138);
+    // A read of a view after its owner moved and the new owner released it.
+    validated(e, "moved_then_freed", ownership_api.event_kind.invalid_use, "q", 146);
+    // A del of the moved-from owner leaves the new owner live.
+    validated(e, "moved_leak", ownership_api.event_kind.lost_ownership, "r", 152);
+    // The default arm returns with a live owner.
+    validated(e, "switch_leak", ownership_api.event_kind.lost_ownership, "p", 158);
+    // A dangling pointer passed to an extern.
+    validated(e, "extern_arg_after_free", ownership_api.event_kind.invalid_use, "c", 256);
+    // A write through a moved-from owner.
+    validated(e, "use_after_move_into_slot", ownership_api.event_kind.invalid_use, "a", 262);
+    // A move over a live owner.
+    validated(e, "leak_reassign_owner", ownership_api.event_kind.lost_ownership, "b", 269);
+    // A write through an owner that an inner scope emptied.
+    validated(e, "double_slot_dead", ownership_api.event_kind.invalid_use, "a", 278);
+    // A cast copies a void view of a released allocation.
+    validated(e, "void_cast_uaf", ownership_api.event_kind.invalid_use, "v", 287);
+    // A zero-element allocation still has an obligation (D17.9).
+    validated(e, "zero_leak", ownership_api.event_kind.lost_ownership, "s", 309);
+    // The returned view outlives its source. The result is no source name.
+    ownership_source.body* view = row(e, "ret_view", "complete", "violated");
+    assert(view->local.violations_len == 1 && !view->local.violations[0].quoted);
+    assert(view->local.violations[0].name == "the result");
+    assert(view->local.violations[0].source.line == 165);
+    // Two writes through q: the deferred one on line 353 comes first in source order.
+    ownership_source.body* late = row(e, "deferred", "complete", "violated");
+    assert(late->local.violations_len == 2);
+    assert(late->local.violations[0].source.line == 353);
+    assert(late->local.violations[1].source.line == 354);
+    println("validated ok");
+    // The null test is false after del, so no path reaches the write (D17.9).
+    declared(e, "fe1");
+    // The flag is true, so no path reaches the write.
+    declared(e, "fe2");
+    // The loop over n = 0 never runs its body.
+    declared(e, "fe3");
+    // The length test is false after del, so no path reaches the write.
+    declared(e, "fe4");
+    // Only the path that released p fails the write.
+    declared(e, "cd3");
+    // The leak at break needs four iterations.
+    declared(e, "brk");
+    // The leak at the return needs four iterations.
+    declared(e, "ret_in_loop");
+    // The leak at continue needs three iterations.
+    declared(e, "cont");
+    // The leak needs a back edge.
+    declared(e, "swap_leak");
+    // Only the path that skips the block leaks.
+    declared(e, "defer_cond");
+    // The string cast gives no proved element.
+    declared(e, "str_uaf");
+    // Correlated tests of c: one represented path leaks.
+    declared(e, "corr");
+    // The leak at the inner return needs back edges.
+    declared(e, "nested_ret");
+    // The release on the sixth iteration needs back edges.
+    declared(e, "alias_loop");
+    // The null test does not refine the owner.
+    declared(e, "null_test");
+    // A loop reuses one allocation site key.
+    declared(e, "site_key");
+    println("declared ok");
+    // A deferred release at the exit.
+    proved(e, "defer_ok");
+    // A loop that moves and releases each allocation.
+    proved(e, "loop_move_del");
+    // A loop that releases each allocation.
+    proved(e, "loop_alloc_del");
+    // A loop that borrows a live owner.
+    proved(e, "loop_borrow");
+    // A view that moves to a live owner before its use.
+    proved(e, "reassign_borrow");
+    // A returned parameter view.
+    proved(e, "view_return_param");
+    // A zero-element allocation that the body releases.
+    proved(e, "zero_ok");
+    // A guarded write through a symbolic-length span.
+    proved(e, "sym_ok");
+    // Two symbolic allocations, each released.
+    proved(e, "sym_zero_elem");
+    // A string owner that the body releases.
+    proved(e, "str_ok");
+    // The write through the struct field is a stored-borrow use, outside local obligations.
+    proved(e, "through_field");
+    println("proved ok");
+    // A void owner hides its element type: del cannot prove that no owned leaf stays.
+    outside(e, "voidp", ownership_source_local.missing.owned_leaves);
+    // An integer cast to a reference names no proved source (D17.17).
+    outside(e, "peek", ownership_source_local.missing.unknown_source);
+    // A variable cast to a reference names no proved source.
+    outside(e, "peek_var", ownership_source_local.missing.unknown_source);
+    // An address of a local gives an unknown source.
+    outside(e, "through_taken_local", ownership_source_local.missing.unknown_source);
+    println("gaps ok");
+}
+
+// A failure that the second run repeats keeps the body in scope (the review's cd shapes).
+fn scope(ownership_source_env.env mut* e) void {
+    ownership_source.body* first = row(e, "cd1", "complete", "incomplete");
+    assert(first->local.classified && !first->local.classify_refusal.terminal.present);
+    ownership_source.body* second = row(e, "cd2", "complete", "incomplete");
+    assert(second->local.classified && !second->local.classify_refusal.terminal.present);
+    // With no call in the body, no second run is needed.
+    ownership_source.body* third = row(e, "cd3", "complete", "incomplete");
+    assert(!third->local.classified);
+    println("scope ok");
+}
+
+// The moves of a loop exhaust the transfer history E. The refusal keeps the body in scope
+// with an incomplete solver, at the move back into a.
+fn limits(ownership_source_env.env mut* e) void {
+    ownership_source.body* swap = ownership_source_env.find(e, "main", "swap_loop");
+    assert(swap->local.solver == ownership_source_local.status.incomplete);
+    assert(swap->local.correspondence == ownership_source_local.status.complete);
+    assert(swap->local.first_refusal.terminal.limit.category == ownership_api.limit_category.e);
+    assert(swap->local.first_refusal.terminal.source.line == 93);
+    ownership_source.body* once = ownership_source_env.find(e, "main", "move_once_loop");
+    assert(once->local.first_refusal.terminal.limit.category == ownership_api.limit_category.e);
+    assert(once->local.first_refusal.terminal.source.line == 208);
+    println("limits ok");
+}
+
+// A refusal explains no failure, so a body that refuses stays in the declared scope and CI
+// rejects it. `hidden` reads param after a call, which stops its first run before the loop.
+// The joined pass of the second run fails the leak of `leak`; the exact pass reaches the loop
+// and refuses E. `shown` refuses E in its first run, so no second run starts.
+fn refusals(ownership_source_env.env mut* e) void {
+    ownership_source.body* hidden = row(e, "hidden", "complete", "incomplete");
+    assert(hidden->local.classified && !hidden->local.first_refusal.terminal.present);
+    assert(hidden->local.classify_refusal.terminal.limit.category ==
+        ownership_api.limit_category.e);
+    assert(hidden->local.classify_refusal.terminal.source.line == 378);
+    assert(hidden->local.gap == ownership_source_local.missing.none);
+    assert(hidden->local.solver == ownership_source_local.status.incomplete);
+    ownership_source.body* shown = row(e, "shown", "complete", "incomplete");
+    assert(!shown->local.classified);
+    assert(shown->local.first_refusal.terminal.limit.category == ownership_api.limit_category.e);
+    assert(shown->local.first_refusal.terminal.source.line == 391);
+    println("refusals keep the scope ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut environment = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&environment, &text);
+    defer ownership_source_env.close(&environment);
+    outcomes(&environment);
+    scope(&environment);
+    limits(&environment);
+    refusals(&environment);
+    return 0;
+}

@@ -1,0 +1,163 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| addresses ok
+//| outcomes ok
+//| one pass ok
+/// Checks which FIR addresses name the storage of a local: such a local is no tracked slot,
+/// because a pointer can then change it. An address through a pointer names the referent.
+import fir;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[18] SOURCE = {
+    "struct pair { i32 a; i32 b; }",
+    "i32 COUNT = 4;",
+    "fn global() i32 { i32* g = &COUNT; return *g; }",
+    "fn twice(i32** pp) i32 { i32* p = *pp; return 1; }",
+    "fn derived(i32 mut@ s) i32 { i32 mut* e = &s[1]; i32 mut* f = e; return *f; }",
+    "fn fields() i32 { pair mut v = {}; i32 mut* f = &v.a; *f = 1; return v.a; }",
+    "fn through(pair mut* p) i32 { i32 mut* f = &p->a; *f = 1; return p->a; }",
+    "fn arrays() i32 { i32[2] mut a = {1, 2}; i32 mut* e = &a[1]; return *e; }",
+    "fn spans(i32 mut@ s) i32 { i32 mut* e = &s[0]; return *e; }",
+    "fn whole(i32 mut* p) i32 { i32 mut** pp = &p; return **pp; }",
+    "fn header(i32@ s) u64 { i32@* h = &s; return h->len; }",
+    "fn array_slice() i32 { i32[2] a = {1, 2}; i32@ s = a[..]; return s[0]; }",
+    "fn span_slice(i32@ s) i32 { i32@ t = s[0..1]; return t[0]; }",
+    "fn field_slice(pair* p) i32 { i32@ t = cast(p, i32*)[0..1]; return t[0]; }",
+    "fn plain(i32* p) i32 { i32* q = p; return *q; }",
+    "fn many(i32 x, i32* p) i32 { i32 y = 2; i32* a = &x; i32* b = &y; i32** c = &a; return *b; }",
+    "fn scalar() i32 { i32 mut x = 2; i32* q = &x; return *q; }",
+    "fn root() i32 { return 0; }",
+};
+
+fn local_named(ownership_source.body* row, string name) u32 {
+    u32 mut n = 0;
+    while (n < fir.local_count(&row->function)) {
+        if (fir.local_name(fir.local_at(&row->function, n)) == name) { return n; }
+        n += 1;
+    }
+    panic("ownership_source_local_address_test: local is absent");
+}
+
+fn taken(ownership_source_env.env mut* e, string body, string local) bool {
+    ownership_source.body* row = ownership_source_env.find(e, "main", body);
+    return row->local.taken[cast(local_named(row, local), u64)];
+}
+
+fn tracked(ownership_source_env.env mut* e, string body, string local) bool {
+    ownership_source.body* row = ownership_source_env.find(e, "main", body);
+    return row->local.tracked[cast(local_named(row, local), u64)];
+}
+
+fn addresses(ownership_source_env.env mut* e) void {
+    // A field address of a struct local names that local's storage.
+    assert(taken(e, "fields", "v"));
+    // A field address through a pointer names the referent, not the pointer slot.
+    assert(!taken(e, "through", "p"));
+    assert(tracked(e, "through", "p") && tracked(e, "through", "f"));
+    // An element address of a fixed array names the array. Of a span, the referent.
+    assert(taken(e, "arrays", "a"));
+    assert(!taken(e, "spans", "s"));
+    assert(tracked(e, "spans", "s") && tracked(e, "spans", "e"));
+    // The address of a pointer local names that local: the pointer is no tracked slot.
+    assert(taken(e, "whole", "p"));
+    assert(!tracked(e, "whole", "p"));
+    // The address of a span header names the header slot.
+    assert(taken(e, "header", "s"));
+    assert(!tracked(e, "header", "s"));
+    // A slice of a fixed array names the array. A slice of a span reads its header.
+    assert(taken(e, "array_slice", "a"));
+    assert(!taken(e, "span_slice", "s"));
+    assert(tracked(e, "span_slice", "t"));
+    // A plain copy takes no address.
+    assert(!taken(e, "plain", "p") && !taken(e, "plain", "q"));
+    assert(taken(e, "scalar", "x"));
+    // A global has no local storage to name.
+    assert(tracked(e, "global", "g"));
+    // A load through a pointer to a pointer takes no address.
+    assert(!taken(e, "twice", "pp") && tracked(e, "twice", "pp"));
+    // A copy of a derived pointer keeps both slots tracked.
+    assert(tracked(e, "derived", "e") && tracked(e, "derived", "f"));
+    println("addresses ok");
+}
+
+fn outcome(ownership_source_env.env mut* e, string name, string correspondence, string proof)
+    void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    string got_correspondence = ownership_report.analysis_status(row, ownership_report.LOCAL,
+        0);
+    string got_proof = ownership_report.analysis_status(row, ownership_report.LOCAL, 2);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln(name, ": correspondence ", got_correspondence, ", proof ", got_proof);
+        assert(false);
+    }
+}
+
+fn outcomes(ownership_source_env.env mut* e) void {
+    ownership_source.analyze(&e->source);
+    // A pointer into a local's storage has a source that no TL tracks.
+    outcome(e, "fields", "incomplete", "incomplete");
+    outcome(e, "arrays", "incomplete", "incomplete");
+    outcome(e, "whole", "incomplete", "incomplete");
+    outcome(e, "header", "incomplete", "incomplete");
+    outcome(e, "array_slice", "incomplete", "incomplete");
+    outcome(e, "scalar", "incomplete", "incomplete");
+    // A pointer derived through a TL keeps that TL's caller source.
+    outcome(e, "through", "complete", "complete");
+    outcome(e, "spans", "complete", "complete");
+    outcome(e, "span_slice", "complete", "complete");
+    outcome(e, "field_slice", "complete", "complete");
+    outcome(e, "plain", "complete", "complete");
+    // A global's address names static storage, which no local effect ends.
+    outcome(e, "global", "complete", "complete");
+    // The load of *pp has a source that no TL tracks, even when nothing reads it later.
+    outcome(e, "twice", "incomplete", "incomplete");
+    outcome(e, "derived", "complete", "complete");
+    ownership_source.body* fields = ownership_source_env.find(e, "main", "fields");
+    assert(fields->local.gap == ownership_source_local.missing.unknown_source);
+    assert(fields->local.gap_source.line == 6);
+    println("outcomes ok");
+}
+
+// One pass over the statements marks every local whose storage an address names, and no
+// other local.
+fn one_pass(ownership_source_env.env mut* e) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", "many");
+    assert(row->local.taken.len == cast(fir.local_count(&row->function), u64));
+    assert(taken(e, "many", "x") && taken(e, "many", "y") && taken(e, "many", "a"));
+    assert(!taken(e, "many", "p") && !taken(e, "many", "b") && !taken(e, "many", "c"));
+    u64 mut marked = 0;
+    u64 mut n = 0;
+    while (n < row->local.taken.len) {
+        if (row->local.taken[n]) { marked += 1; }
+        n += 1;
+    }
+    assert(marked == 3);
+    // A pointer local whose address no statement takes stays a tracked slot.
+    assert(tracked(e, "many", "b") && !tracked(e, "many", "a"));
+    println("one pass ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    addresses(&e);
+    outcomes(&e);
+    one_pass(&e);
+    return 0;
+}
